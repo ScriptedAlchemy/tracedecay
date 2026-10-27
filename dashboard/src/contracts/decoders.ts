@@ -8063,7 +8063,7 @@ export const ProximityAddressV1Schema: z.ZodObject<{
 
 export const ProximityCoverageV1Schema: z.ZodEnum<{ "complete": "complete"; "denied": "denied"; "partial": "partial"; "private": "private"; "stale": "stale"; "unavailable": "unavailable" }> = z.enum(["complete", "denied", "partial", "private", "stale", "unavailable"]);
 
-export const ProximityWarningClassV1Schema: z.ZodEnum<{ "incompatible_branch_worktree": "incompatible_branch_worktree"; "neighborhood": "neighborhood"; "overlapping_range": "overlapping_range"; "same_crate": "same_crate"; "same_file": "same_file"; "same_package": "same_package"; "same_symbol": "same_symbol"; "shared_caller": "shared_caller"; "shared_dependency": "shared_dependency"; "shared_test": "shared_test" }> = z.enum(["incompatible_branch_worktree", "neighborhood", "overlapping_range", "same_crate", "same_file", "same_package", "same_symbol", "shared_caller", "shared_dependency", "shared_test"]);
+export const ProximityWarningClassV1Schema: z.ZodEnum<{ "neighborhood": "neighborhood"; "overlapping_range": "overlapping_range"; "same_crate": "same_crate"; "same_file": "same_file"; "same_package": "same_package"; "same_symbol": "same_symbol"; "shared_caller": "shared_caller"; "shared_dependency": "shared_dependency"; "shared_test": "shared_test" }> = z.enum(["neighborhood", "overlapping_range", "same_crate", "same_file", "same_package", "same_symbol", "shared_caller", "shared_dependency", "shared_test"]);
 
 export const PublicCodeProjectSchema: z.ZodObject<{
   canonical_root: z.ZodType<string, unknown>;

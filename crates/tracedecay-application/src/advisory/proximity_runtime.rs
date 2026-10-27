@@ -21,8 +21,8 @@ use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationVal
 use tracedecay_domain::feedback::{
     FeedbackScopeV1, PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1, ProviderEvaluationStateV1,
     ProximityAddressV1, ProximityContributionIdV1, ProximityContributionV1, ProximityCoverageV1,
-    ProximityInclusionV1, ProximityObservationIdV1, ProximityRelationPathV1, ProximityRiskInputsV1,
-    ProximityTierV1, ProximityWarningClassV1,
+    ProximityInclusionV1, ProximityObservationIdV1, ProximityRelationPathV1,
+    ProximityWarningClassV1,
 };
 use tracedecay_domain::{
     CanonicalObservationEnvelopeV1, CodeGenerationId, ManifestDigest, RetrievalAnchorId, UtcMicros,
@@ -45,8 +45,9 @@ pub use authority::{
 
 const PROXIMITY_CONTRIBUTION_ID_DOMAIN_V1: &str =
     "tracedecay.advisory.proximity.contribution-id.v1";
-const PROXIMITY_CONFIGURATION_REVISION_DOMAIN_V1: &str =
-    "tracedecay.advisory.proximity.configuration-revision.v1";
+
+/// Preserves the published numeric setting's relationship-hint admission.
+const RELATIONSHIP_HINT_MAX_THRESHOLD_BASIS_POINTS_V1: u16 = 7_500;
 
 /// Exact Plan 20 threshold input for one evaluation. Revision and effective
 /// behavior digest are pinned together before provider evidence is read.
@@ -93,13 +94,16 @@ impl ProximityThresholdPinV1 {
             && self.configuration_digest.validate().is_ok()
             && self.value_basis_points <= 10_000
     }
+
+    const fn admits_relationship_hints(&self) -> bool {
+        self.value_basis_points <= RELATIONSHIP_HINT_MAX_THRESHOLD_BASIS_POINTS_V1
+    }
 }
 
 /// Authorized graph/query result tied to canonical session observations.
 ///
-/// Full envelopes are transient provider input. Plan 09 receives only opaque
-/// observation IDs, anchors, privacy-safe code shape, relation paths, risk
-/// inputs, freshness, coverage, and inclusion state.
+/// Full envelopes are transient provider input. Publication receives opaque
+/// observation IDs, anchors, code addresses, relation paths, and coverage.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CanonicalProximityEvidenceV1 {
@@ -108,9 +112,7 @@ pub struct CanonicalProximityEvidenceV1 {
     pub encounter: FeedbackProximityEncounterV1,
     pub address: ProximityAddressV1,
     pub relation_paths: Vec<ProximityRelationPathV1>,
-    pub risk_inputs: ProximityRiskInputsV1,
     pub warning_class: ProximityWarningClassV1,
-    pub raw_risk_basis_points: u16,
     pub observed_at: UtcMicros,
     pub expires_at: UtcMicros,
     pub coverage: ProximityCoverageV1,
@@ -126,8 +128,6 @@ impl CanonicalProximityEvidenceV1 {
             || self.encounter.expires_at != self.expires_at
             || self.address.validate().is_err()
             || self.address.scope != request.scope
-            || self.risk_inputs.validate().is_err()
-            || self.raw_risk_basis_points > 10_000
             || self.observed_at.0 >= self.expires_at.0
             || !matches!(
                 self.coverage,
@@ -544,23 +544,12 @@ fn build_proximity_contribution(
         .map(|observation| ProximityObservationIdV1::new(observation.stable_record_id().as_str()))
         .collect::<Result<Vec<_>, _>>()
         .ok()?;
-    let tier = if matches!(
-        evidence.warning_class,
-        ProximityWarningClassV1::SameFile
-            | ProximityWarningClassV1::OverlappingRange
-            | ProximityWarningClassV1::SameSymbol
-    ) {
-        ProximityTierV1::Immediate
-    } else {
-        ProximityTierV1::Configured
-    };
+    let exact = evidence.warning_class.is_exact_overlap();
     let inclusion = if evidence.expires_at.0 <= request.observed_at.0
         || evidence.coverage == ProximityCoverageV1::Stale
     {
         ProximityInclusionV1::Stale
-    } else if tier == ProximityTierV1::Immediate
-        || evidence.raw_risk_basis_points >= threshold.value_basis_points
-    {
+    } else if exact || threshold.admits_relationship_hints() {
         ProximityInclusionV1::Included
     } else {
         ProximityInclusionV1::BelowThreshold
@@ -580,26 +569,14 @@ fn build_proximity_contribution(
         evidence.warning_class,
         evidence.observed_at,
         evidence.expires_at,
-        tier,
-        (tier == ProximityTierV1::Configured).then_some((
+        if exact { "immediate" } else { "configured" },
+        (!exact).then_some((
             &threshold.configuration_revision,
             &threshold.configuration_digest,
         )),
     ))
     .ok()?;
     let suffix = sha256_hex_suffix(identity.as_str()).unwrap_or(identity.as_str());
-    let threshold_revision = if tier == ProximityTierV1::Configured {
-        Some(
-            canonical_sha256(&(
-                PROXIMITY_CONFIGURATION_REVISION_DOMAIN_V1,
-                &threshold.configuration_revision,
-                &threshold.configuration_digest,
-            ))
-            .ok()?,
-        )
-    } else {
-        None
-    };
     let contribution = ProximityContributionV1 {
         contribution_id: ProximityContributionIdV1::new(format!("contribution.proximity.{suffix}"))
             .ok()?,
@@ -608,13 +585,6 @@ fn build_proximity_contribution(
         retrieval_anchor_ids: evidence.retrieval_anchor_ids,
         address: Some(evidence.address),
         relation_paths: evidence.relation_paths,
-        risk_inputs: Some(evidence.risk_inputs),
-        tier,
-        threshold_value_basis_points: (tier == ProximityTierV1::Configured)
-            .then_some(threshold.value_basis_points),
-        // One digest binds both canonical revision and effective behavior.
-        threshold_revision,
-        raw_risk_basis_points: Some(evidence.raw_risk_basis_points),
         observed_at: evidence.observed_at,
         expires_at: evidence.expires_at,
         coverage,
@@ -642,12 +612,23 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use tracedecay_contracts::feedback::{
+        FeedbackProximityAccessKindV1, FeedbackProximityIntervalV1, FeedbackProximityParticipantV1,
+        FeedbackProximityRelationV1,
+    };
     use tracedecay_contracts::{
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
         RequestId, ResolvedScope,
     };
     use tracedecay_domain::configuration::{ConfigurationLayerIdV1, ConfigurationValueV1};
+    use tracedecay_domain::feedback::ProximityRelationPathKindV1;
     use tracedecay_domain::{ActorId, CommitId, ProjectId, RefId, RepositoryId, WorktreeId};
+    use tracedecay_domain::{
+        AgentInstanceId, CanonicalMessageRoleV1, CanonicalObservationEvidenceV1,
+        CanonicalObservationFactV1, CanonicalObservationRelationsV1, FileOccurrenceId,
+        ObservationId, ObservationOrderingDomainV1, ObservationSourceIdentityV1,
+        ObservationSourceRangeV1, ProviderId, SessionId, SourceSpan,
+    };
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
     use super::*;
@@ -833,6 +814,176 @@ mod tests {
             2,
             "a later cycle must use its newly authorized threshold pin"
         );
+    }
+
+    #[test]
+    fn relationship_hints_follow_the_legacy_threshold_mapping() {
+        let revision = ConfigurationRevisionId::new("configuration.proximity-policy").unwrap();
+        let digest = ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap();
+        for value in 0..=10_000_u16 {
+            let pin =
+                ProximityThresholdPinV1::new(revision.clone(), digest.clone(), value).expect("pin");
+            let legacy_hint_score = 7_500_u16;
+            assert_eq!(
+                pin.admits_relationship_hints(),
+                legacy_hint_score >= value,
+                "threshold {value}"
+            );
+        }
+    }
+
+    fn encounter_evidence(scope: &FeedbackScopeV1) -> CanonicalProximityEvidenceV1 {
+        let provider = ProviderId::new("provider.cursor").unwrap();
+        let address = ProximityAddressV1 {
+            scope: scope.clone(),
+            file: FileOccurrenceId::new("file.proximity").unwrap(),
+            span: Some(SourceSpan {
+                start_byte: 0,
+                end_byte: 5,
+            }),
+            symbol: None,
+        };
+        let observations = (1..=2)
+            .map(|ordinal| {
+                CanonicalObservationEnvelopeV1::new(
+                    provider.clone(),
+                    "message",
+                    ObservationId::new(format!("observation.proximity.{ordinal}")).unwrap(),
+                    CanonicalObservationRelationsV1::new(
+                        SessionId::new(format!("session.proximity.{ordinal}")).unwrap(),
+                    )
+                    .with_agent_id(
+                        ObservationId::new(format!("agent.proximity.{ordinal}")).unwrap(),
+                    ),
+                    vec![CanonicalObservationFactV1::Message {
+                        role: CanonicalMessageRoleV1::Assistant,
+                        content: serde_json::json!({ "text": "Editing shared code." }),
+                        model: None,
+                        timestamp: None,
+                    }],
+                    CanonicalObservationEvidenceV1::new(
+                        ObservationOrderingDomainV1::SqliteRowId,
+                        ObservationSourceRangeV1::new(ordinal, ordinal + 1).unwrap(),
+                    ),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let participants = observations
+            .iter()
+            .map(|observation| FeedbackProximityParticipantV1 {
+                source: ObservationSourceIdentityV1::for_provider(
+                    provider.clone(),
+                    observation.relations().session_id().clone(),
+                )
+                .unwrap(),
+                agent_id: AgentInstanceId::new(
+                    observation.relations().agent_id().unwrap().as_str(),
+                )
+                .unwrap(),
+                worktree_id: Some(scope.worktree_id.clone()),
+                worktree_root: "/workspace".to_owned(),
+                branch_ref: Some(RefId::new(scope.branch_ref.clone()).unwrap()),
+                head_revision: Some(scope.head_commit_id.clone()),
+                access: FeedbackProximityAccessKindV1::Write,
+                activity: FeedbackProximityIntervalV1 {
+                    start: UtcMicros(1),
+                    end: UtcMicros(3),
+                },
+                address: address.clone(),
+            })
+            .collect();
+        CanonicalProximityEvidenceV1 {
+            observations,
+            retrieval_anchor_ids: vec![RetrievalAnchorId::new("anchor.proximity").unwrap()],
+            encounter: FeedbackProximityEncounterV1 {
+                encounter_id: ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
+                scope: scope.clone(),
+                interval: FeedbackProximityIntervalV1 {
+                    start: UtcMicros(1),
+                    end: UtcMicros(3),
+                },
+                participants,
+                relation: FeedbackProximityRelationV1::OverlappingEdit {
+                    warning_class: ProximityWarningClassV1::SameFile,
+                },
+                observed_at: UtcMicros(1),
+                expires_at: UtcMicros(4),
+                coverage: ProximityCoverageV1::Complete,
+            },
+            address,
+            relation_paths: Vec::new(),
+            warning_class: ProximityWarningClassV1::SameFile,
+            observed_at: UtcMicros(1),
+            expires_at: UtcMicros(4),
+            coverage: ProximityCoverageV1::Complete,
+        }
+    }
+
+    #[test]
+    fn encounter_policy_preserves_exact_identity_and_hint_admission() {
+        let (scope, _) = scope_and_context();
+        let request = ProximityEvaluationRequestV1 {
+            scope: scope.clone(),
+            observed_at: UtcMicros(2),
+        };
+        let evidence = encounter_evidence(&scope);
+        let revision = ConfigurationRevisionId::new("configuration.proximity-policy").unwrap();
+        let digest = ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap();
+        let mut hint = evidence.clone();
+        hint.warning_class = ProximityWarningClassV1::SharedDependency;
+        hint.relation_paths.push(ProximityRelationPathV1 {
+            kind: ProximityRelationPathKindV1::TransitiveDependency,
+            retrieval_anchor_id: Some(hint.retrieval_anchor_ids[0].clone()),
+        });
+        let mut exact_identity = None;
+        for value in [0, 7_500, 7_501, 10_000] {
+            let pin =
+                ProximityThresholdPinV1::new(revision.clone(), digest.clone(), value).unwrap();
+            let exact = build_proximity_contribution(&request, &pin, evidence.clone()).unwrap();
+            assert_eq!(exact.inclusion, ProximityInclusionV1::Included);
+            assert_eq!(exact.address.as_ref(), Some(&evidence.address));
+            if let Some(identity) = &exact_identity {
+                assert_eq!(&exact.contribution_id, identity);
+            }
+            exact_identity = Some(exact.contribution_id);
+            let related = build_proximity_contribution(&request, &pin, hint.clone()).unwrap();
+            assert_eq!(
+                related.inclusion,
+                if value <= 7_500 {
+                    ProximityInclusionV1::Included
+                } else {
+                    ProximityInclusionV1::BelowThreshold
+                }
+            );
+            let findings = related
+                .advisory_findings(AdvisoryFindingValidityWindowV1 {
+                    valid_at: UtcMicros(2),
+                    expires_at: UtcMicros(3),
+                })
+                .unwrap()
+                .findings;
+            if value <= 7_500 {
+                assert_eq!(findings.len(), 1);
+                assert_eq!(
+                    findings[0]
+                        .diagnostic_projection
+                        .as_ref()
+                        .map(|projection| projection.safe_bounded_message.as_str()),
+                    Some("Concurrent agent activity is related to this code"),
+                );
+            } else {
+                assert!(findings.is_empty());
+            }
+        }
+        let pin = ProximityThresholdPinV1::new(revision, digest, 0).unwrap();
+        let stale_request = ProximityEvaluationRequestV1 {
+            observed_at: UtcMicros(4),
+            ..request
+        };
+        let stale = build_proximity_contribution(&stale_request, &pin, evidence).unwrap();
+        assert_eq!(stale.inclusion, ProximityInclusionV1::Stale);
+        assert_eq!(stale.coverage, ProximityCoverageV1::Stale);
     }
 
     #[tokio::test]
