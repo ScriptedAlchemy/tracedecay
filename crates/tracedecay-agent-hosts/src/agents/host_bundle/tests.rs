@@ -12,6 +12,44 @@ use super::doctor::doctor_artifact_state;
 use super::planner::plan_artifact_action;
 use super::*;
 
+#[cfg(windows)]
+#[test]
+fn publication_survives_a_transient_windows_reader() {
+    let temp = tempfile::tempdir().unwrap();
+    let destination = temp.path().join("artifact");
+    drop(tracedecay_private_fs::create_private_file(&destination).unwrap());
+    fs::write(&destination, b"before").unwrap();
+    let reader =
+        tracedecay_private_fs::windows::open_or_create_private_lock_file(&destination).unwrap();
+    let probe = temp.path().join("probe");
+    fs::write(&probe, b"probe").unwrap();
+    let error = fs::rename(&probe, &destination).unwrap_err();
+    assert!(matches!(error.raw_os_error(), Some(5 | 32)));
+    fs::remove_file(probe).unwrap();
+    let parent =
+        cap_std::fs::Dir::open_ambient_dir(temp.path(), cap_std::ambient_authority()).unwrap();
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            drop(reader);
+        });
+        super::writer::atomic_write_nofollow(&parent, "artifact", b"after", true).unwrap();
+    });
+    assert_eq!(fs::read(destination).unwrap(), b"after");
+    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+
+    let destination = temp.path().join("artifact");
+    let reader =
+        tracedecay_private_fs::windows::open_or_create_private_lock_file(&destination).unwrap();
+    assert!(matches!(
+        super::writer::atomic_write_nofollow(&parent, "artifact", b"denied", true),
+        Err(HostBundleError::StorageFailure(_))
+    ));
+    assert_eq!(fs::read(destination).unwrap(), b"after");
+    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+    drop(reader);
+}
+
 #[derive(Clone)]
 struct FirstPartyVerifier([u8; 32]);
 
