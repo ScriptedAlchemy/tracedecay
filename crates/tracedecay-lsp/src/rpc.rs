@@ -717,15 +717,16 @@ pub(crate) fn diagnostic_result_id(
     scope_digest: Option<&ManifestDigest>,
     root_ordinal: Option<usize>,
     generation: u64,
+    authority: &ManifestDigest,
     version: i64,
 ) -> String {
     match (scope_set_digest, scope_digest, root_ordinal) {
         (Some(scope_set), Some(scope), Some(root_ordinal)) => format!(
-            "scope-set={};scope={};root={root_ordinal};generation={generation};version={version}",
+            "scope-set={};scope={};root={root_ordinal};generation={generation};version={version};authority={authority}",
             scope_set.as_str(),
             scope.as_str()
         ),
-        _ => format!("generation:{generation}:version:{version}"),
+        _ => format!("generation:{generation}:version:{version}:authority:{authority}"),
     }
 }
 

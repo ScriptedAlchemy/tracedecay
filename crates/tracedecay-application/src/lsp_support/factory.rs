@@ -13,8 +13,9 @@ use tracedecay_lsp::{
     ContextProjectionChange, ContextProjectionOutcome, ContextProjectionPort,
     ContextProjectionRegistration, ContextProjectionRequest, DaemonLspProviderBundle,
     DaemonLspRuntimeSession, DiagnosticRefreshAdmission, DiagnosticSnapshotAdapter,
-    DiagnosticSnapshotOutcome, DiagnosticSnapshotPort, FeedbackCycleAdapter, FeedbackCyclePort,
-    FeedbackCycleRequest, FeedbackCycleResponse, FeedbackCycleRuntimePort, GatewayCapabilities,
+    DiagnosticSnapshotOutcome, DiagnosticSnapshotPort, DiagnosticSnapshotValidation,
+    FeedbackCycleAdapter, FeedbackCyclePort, FeedbackCycleRequest, FeedbackCycleResponse,
+    FeedbackCycleRuntimePort, GatewayCapabilities, GenerationDiagnostics,
     LspAnalyzerCancellationAuthority, LspRequestId, LspRuntimeFailure, LspRuntimeFuture,
     LspSemanticDocumentSnapshot, NativeIntegrationStatusPort, OverlaySnapshot,
     SemanticProviderOutcome, SemanticProviderPort, SemanticRequest, SemanticResponse,
@@ -484,6 +485,32 @@ impl DiagnosticSnapshotPort for FederatedDiagnostics {
             },
             |port| port.request_document_refresh(root, document_uri, overlay, source_generation),
         )
+    }
+
+    fn validate_document_snapshot(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        overlay: Option<&OverlaySnapshot>,
+        snapshot: &GenerationDiagnostics,
+    ) -> DiagnosticSnapshotValidation {
+        self.roots.get(root.uri()).map_or(
+            DiagnosticSnapshotValidation::Failed {
+                failure_class: "root-not-authorized".to_owned(),
+            },
+            |port| port.validate_document_snapshot(root, document_uri, overlay, snapshot),
+        )
+    }
+
+    fn retire_document_refresh(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        operation_id: &str,
+    ) -> bool {
+        self.roots
+            .get(root.uri())
+            .is_some_and(|port| port.retire_document_refresh(root, document_uri, operation_id))
     }
 
     fn supports_workspace_diagnostics(&self) -> bool {

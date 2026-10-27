@@ -76,6 +76,7 @@ pub const MAX_QUEUED_OUTBOUND_MESSAGES: usize = 64;
 pub(crate) const TRACEDECAY_NATIVE_DIAGNOSTICS_METHOD: &str = "tracedecay/nativeDiagnostics";
 
 mod context_controller;
+mod diagnostic_snapshots;
 mod diagnostics_controller;
 mod dynamic_diagnostics_controller;
 mod lifecycle_controller;
@@ -284,6 +285,8 @@ where
             .cloned()
             .collect::<Vec<_>>();
         self.clear_removed_workspace_root_state(&removed_roots);
+        self.clear_document_diagnostics();
+        self.diagnostics.published.clear();
         self.diagnostics.workspace_snapshots.clear();
         self.diagnostics.workspace_failures.clear();
         self.lifecycle.gateway.replace_workspace(workspace);
@@ -363,8 +366,7 @@ where
             .overlays
             .open(&root, uri.clone(), language_id, version, text)
             .map_err(|error| self.close_for_overlay_error(error))?;
-        self.diagnostics.workspace_snapshots.clear();
-        self.diagnostics.workspace_failures.clear();
+        self.invalidate_document(&uri, &root);
         // A close followed by a reopen starts a new document incarnation; LSP
         // versions need not remain monotone across that boundary. Remove any
         // queued/acknowledged publication ordering state before publishing the
@@ -402,7 +404,7 @@ where
         self.require_ready()?;
         let text_document = text_document(params)?;
         let uri = required_nonempty_string(text_document, "uri")?;
-        self.require_document_root(&uri)?;
+        let root = self.document_root(&uri)?;
         let version = required_i64(text_document, "version")?;
         let changes = params
             .get("contentChanges")
@@ -422,7 +424,7 @@ where
             .overlays
             .change(&uri, version, &changes)
             .map_err(|error| self.close_for_overlay_error(error))?;
-        self.invalidate_document(&uri);
+        self.invalidate_document(&uri, &root);
         self.diagnostics.native_upstream.remove(&uri);
         self.lifecycle
             .control
@@ -444,13 +446,13 @@ where
     ) -> Result<(), RpcFailure> {
         self.require_ready()?;
         let uri = required_nonempty_string(text_document(params)?, "uri")?;
-        self.require_document_root(&uri)?;
+        let root = self.document_root(&uri)?;
         let closed = self
             .lifecycle
             .overlays
             .close(&uri)
             .map_err(overlay_failure)?;
-        self.invalidate_document(&uri);
+        self.invalidate_document(&uri, &root);
         self.diagnostics.native_upstream.remove(&uri);
         self.lifecycle
             .control
@@ -472,8 +474,8 @@ where
     ) -> Result<(), RpcFailure> {
         self.require_ready()?;
         let uri = required_nonempty_string(text_document(params)?, "uri")?;
-        self.require_document_root(&uri)?;
-        self.invalidate_document(&uri);
+        let root = self.document_root(&uri)?;
+        self.invalidate_document(&uri, &root);
         if matches!(
             self.lifecycle.gateway.document_saved(uri.clone()),
             FeedbackCycleResponse::Accepted
@@ -490,7 +492,9 @@ where
         Ok(())
     }
 
-    fn invalidate_document(&mut self, uri: &str) {
+    fn invalidate_document(&mut self, uri: &str, root: &AdmittedRoot) {
+        self.invalidate_root_diagnostics(root);
+        self.invalidate_document_diagnostics(uri);
         self.diagnostics.workspace_snapshots.clear();
         self.diagnostics.workspace_failures.clear();
         self.discard_document_context(uri);

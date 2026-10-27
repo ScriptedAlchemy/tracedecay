@@ -22611,8 +22611,7 @@
         "neighborhood",
         "shared_caller",
         "shared_dependency",
-        "shared_test",
-        "incompatible_branch_worktree"
+        "shared_test"
       ],
       "type": "string"
     },

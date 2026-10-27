@@ -1179,6 +1179,8 @@ async fn project_retirement_cancels_and_awaits_an_inflight_projector() {
 
 struct PanicOnceProjector {
     panicked: AtomicBool,
+    retry_started: tokio::sync::Notify,
+    release_retry: tokio::sync::Notify,
 }
 
 impl SessionTemporalRefreshProjector for PanicOnceProjector {
@@ -1190,6 +1192,8 @@ impl SessionTemporalRefreshProjector for PanicOnceProjector {
         let should_panic = !self.panicked.swap(true, Ordering::AcqRel);
         Box::pin(async move {
             assert!(!should_panic, "injected refresh worker panic");
+            self.retry_started.notify_one();
+            self.release_retry.notified().await;
             Ok(empty_projection_effect(&recovery))
         })
     }
@@ -1202,11 +1206,14 @@ async fn worker_recovery_exposes_blocker_and_drains_backlog() {
         registered_test_database(&temp, "worker-recovery", HostAdmissionScope::Profile).await;
     let db = authority.database();
     let mut registry = SessionTemporalRefreshSchedulerRegistry::default();
+    let projector = Arc::new(PanicOnceProjector {
+        panicked: AtomicBool::new(false),
+        retry_started: tokio::sync::Notify::new(),
+        release_retry: tokio::sync::Notify::new(),
+    });
     configure_scheduler(
         &mut registry,
-        Arc::new(PanicOnceProjector {
-            panicked: AtomicBool::new(false),
-        }),
+        projector.clone(),
         SessionTemporalRefreshPolicy::default(),
     );
     let wake = authority.ensure_profile(&registry).await;
@@ -1215,17 +1222,34 @@ async fn worker_recovery_exposes_blocker_and_drains_backlog() {
         .await
         .unwrap();
     assert!(wake.wake());
-    let recovering = tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            let status = registry.profile_worker_status(db.db_path()).await;
-            if status.unavailable_reason == Some(SessionTemporalRefreshUnavailableReason::Stalled) {
-                break status;
-            }
-            tokio::task::yield_now().await;
-        }
+    // Hold the replacement in its first projection. Observing recovery must
+    // not depend on polling within the supervisor's 25 ms backoff window.
+    let restarted =
+        tokio::time::timeout(Duration::from_secs(1), projector.retry_started.notified()).await;
+    let recovering = registry.profile_worker_status(db.db_path()).await;
+    projector.release_retry.notify_one();
+    let drained = tokio::time::timeout(Duration::from_secs(1), async {
+        registry.wait_profile_idle(db.db_path()).await;
+        let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db);
+        let running = store.running_session_refreshes().await;
+        let recovered = registry.profile_worker_status(db.db_path()).await;
+        (running, recovered)
     })
-    .await
-    .expect("worker should expose its stalled pre-progress recovery");
+    .await;
+    let before_shutdown = registry.profile_worker_status(db.db_path()).await;
+    // Shut down lease-owning workers before evaluating the recovery assertions.
+    let stopped = tokio::time::timeout(
+        tracedecay_session_runtime::DAEMON_CLIENT_DRAIN_DEADLINE + Duration::from_secs(1),
+        registry.shutdown(),
+    )
+    .await;
+
+    stopped.expect("worker shutdown should settle before releasing its database fixture");
+    restarted.expect("the supervisor should restart the panicked worker");
+    assert_eq!(
+        recovering.unavailable_reason,
+        Some(SessionTemporalRefreshUnavailableReason::Stalled)
+    );
     assert_eq!(recovering.backlog, 1);
     assert_eq!(
         recovering.blocker,
@@ -1235,16 +1259,15 @@ async fn worker_recovery_exposes_blocker_and_drains_backlog() {
         recovering.retry_class,
         Some(SessionTemporalRefreshRetryClass::Projector)
     );
-    registry.wait_profile_idle(db.db_path()).await;
-    let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db);
-    assert!(store.running_session_refreshes().await.unwrap().is_empty());
-    let recovered = registry.profile_worker_status(db.db_path()).await;
+    let (running, recovered) = drained.unwrap_or_else(|error| {
+        panic!("restarted worker did not drain its backlog: {error}; {before_shutdown:?}");
+    });
+    assert!(running.unwrap().is_empty());
     assert!(recovered.is_available());
     assert_eq!(recovered.backlog, 0);
     assert_eq!(recovered.blocker, None);
     assert_eq!(recovered.retry_class, None);
     assert!(recovered.last_progress_at_unix_micros.is_some());
-    registry.shutdown().await;
 }
 
 struct PendingProjector;
