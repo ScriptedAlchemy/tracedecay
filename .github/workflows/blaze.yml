@@ -1,0 +1,307 @@
+name: Blaze
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: blaze-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+jobs:
+  workspace:
+    name: Blaze workspace (Linux x86_64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      RUSTUP_TOOLCHAIN: 1.99.0
+      BLAZE_REVISION: d44ef985e45e69661fb44696d61a18a251a39b08
+      BLAZE_TESTS: all
+      BLAZE_CACHE: ${{ github.workspace }}/target/blaze/store
+      NATIVE_BLAZE_BIN_DIR: ${{ github.workspace }}/target/blaze/tool/bin
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/blaze
+      CARGO_TERM_COLOR: always
+      # Bound concurrent cold rustc jobs; the launcher also disables spare warming.
+      CARGO_BUILD_JOBS: '2'
+      WORKSPACE_FEATURES: tracedecay/test-helpers,tracedecay/test-transport,tracedecay/search-eval,tracedecay-cli/test-transport,tracedecay-query/production
+    steps:
+      # Search-eval fixtures resolve historical source commits locally.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26'
+
+      - uses: ./.github/actions/setup-pnpm
+
+      - name: Install native build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential clang pkg-config libssl-dev
+          rustup toolchain install 1.99.0 --profile minimal \
+            --component rust-src --component rust-analyzer --component rustfmt --component clippy
+          rustc --version --verbose
+
+      - name: Resolve cache identity and persistent paths
+        id: cache-config
+        env:
+          CONFIG_HASH: ${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'Cargo.toml', 'crates/*/Cargo.toml', 'MODULE.bazel', '.bazelrc', 'scripts/bazel/blaze/**', '.github/workflows/blaze.yml', 'pnpm-lock.yaml') }}
+          LOCK_HASH: ${{ hashFiles('Cargo.lock') }}
+          BOOTSTRAP_HASH: ${{ hashFiles('scripts/bazel/blaze/repositories.bzl', 'MODULE.bazel', 'MODULE.bazel.lock', '.bazelversion', '.bazelrc', 'rust-toolchain.toml', '.github/workflows/blaze.yml') }}
+        run: |
+          set -euo pipefail
+          # runner.temp is unavailable in job-level env. Resolve it on the runner
+          # and persist these paths for subsequent build and cache steps.
+          export BLAZE_HOME="$RUNNER_TEMP/blaze-runtime"
+          export CARGO_HOME="$RUNNER_TEMP/blaze-cargo"
+          printf 'BLAZE_HOME=%s\nCARGO_HOME=%s\n' "$BLAZE_HOME" "$CARGO_HOME" >> "$GITHUB_ENV"
+          mkdir -p "$BLAZE_HOME" "$BLAZE_CACHE" "$CARGO_HOME"
+          chmod 700 "$BLAZE_HOME"
+          {
+            echo "prefix=blaze-1-${RUNNER_OS}-${RUNNER_ARCH}-rust-1.99.0-${BLAZE_REVISION}-perf-workspace-${CONFIG_HASH}"
+            echo "lock=${LOCK_HASH}"
+            echo "source=$(git rev-parse HEAD)-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            echo "tool-key=blaze-native-1-${RUNNER_OS}-${RUNNER_ARCH}-ubuntu-24.04-rust-1.99.0-${BLAZE_REVISION}-${BOOTSTRAP_HASH}"
+            echo 'store-paths<<PATHS'
+            echo "$BLAZE_CACHE/version"
+            echo "$BLAZE_CACHE/*.pack"
+            echo PATHS
+            echo 'artifact-paths<<PATHS'
+            echo 'target/blaze/perf'
+            echo 'target/blaze/ra-jit'
+            echo 'target/blaze/rust-analyzer'
+            echo '!target/blaze/**/*.log'
+            echo '!target/blaze/**/*.sock*'
+            echo '!target/blaze/**/tests-passed*'
+            echo '!target/blaze/**/tests-inputs*'
+            echo '!target/blaze/**/tests-records*'
+            echo '!target/blaze/**/tests-sandbox*'
+            echo '!target/blaze/**/nextest/**'
+            echo PATHS
+            echo 'acquisition-paths<<PATHS'
+            echo "$CARGO_HOME/registry/index"
+            echo "$CARGO_HOME/registry/cache"
+            echo "$CARGO_HOME/registry/src"
+            echo "$CARGO_HOME/git/db"
+            echo "$CARGO_HOME/git/checkouts"
+            echo PATHS
+          } >> "$GITHUB_OUTPUT"
+
+      # GitHub first searches this ref (refs/pull/N/merge on PRs), then its
+      # base/default branch. PR saves cannot be read by master or sibling PRs.
+      # The lock-specific prefix is preferred; source SHAs occur only in saves.
+      - name: Restore Blaze code store
+        id: store
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.cache-config.outputs.store-paths }}
+          key: ${{ steps.cache-config.outputs.prefix }}-store-${{ steps.cache-config.outputs.lock }}-${{ steps.cache-config.outputs.source }}
+          restore-keys: |
+            ${{ steps.cache-config.outputs.prefix }}-store-${{ steps.cache-config.outputs.lock }}-
+            ${{ steps.cache-config.outputs.prefix }}-store-
+
+      - name: Restore compiled workspace artifacts
+        id: artifacts
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.cache-config.outputs.artifact-paths }}
+          key: ${{ steps.cache-config.outputs.prefix }}-artifacts-${{ steps.cache-config.outputs.lock }}-${{ steps.cache-config.outputs.source }}
+          restore-keys: |
+            ${{ steps.cache-config.outputs.prefix }}-artifacts-${{ steps.cache-config.outputs.lock }}-
+            ${{ steps.cache-config.outputs.prefix }}-artifacts-
+
+      - name: Restore Cargo dependency acquisition
+        id: acquisition
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.cache-config.outputs.acquisition-paths }}
+          key: ${{ steps.cache-config.outputs.prefix }}-acquisition-${{ steps.cache-config.outputs.lock }}-${{ steps.cache-config.outputs.source }}
+          restore-keys: |
+            ${{ steps.cache-config.outputs.prefix }}-acquisition-${{ steps.cache-config.outputs.lock }}-
+            ${{ steps.cache-config.outputs.prefix }}-acquisition-
+
+      # No fleet credentials or remote executors. This action cache covers
+      # the launcher, not compilation performed inside repository rules.
+      # Disable automatic post-job saves on failed runs.
+      - uses: ./.github/actions/setup-bazel
+        id: bazel
+        with:
+          cache-key: ${{ steps.cache-config.outputs.prefix }}-launcher
+          cache-save: 'false'
+
+      # Executables produced by a repository rule are not Bazel action-cache
+      # entries. Reuse only this exact source/toolchain/bootstrap configuration.
+      - name: Restore pinned native Blaze binaries
+        id: tool
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.NATIVE_BLAZE_BIN_DIR }}
+          key: ${{ steps.cache-config.outputs.tool-key }}
+
+      - name: Provision pinned native Blaze binaries on cache miss
+        if: steps.tool.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          bazel build @blaze//:runtime
+          bazel cquery @blaze//:runtime --output=files > "$RUNNER_TEMP/blaze-runtime-files.txt"
+          BLAZE_EXECUTION_ROOT="$(bazel info execution_root)"
+          export BLAZE_EXECUTION_ROOT
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import shutil
+
+          expected = {'blaze', 'ra-jit', 'ra-jit-rustc', 'ra-jit-rustc-first'}
+          execution_root = Path(os.environ['BLAZE_EXECUTION_ROOT'])
+          listing = Path(os.environ['RUNNER_TEMP']) / 'blaze-runtime-files.txt'
+          declared = {}
+          for line in listing.read_text().splitlines():
+              artifact = Path(line)
+              if artifact.name not in expected or artifact.name in declared:
+                  raise SystemExit(f'Unexpected native runtime artifact: {line}')
+              source = artifact if artifact.is_absolute() else execution_root / artifact
+              declared[artifact.name] = source.resolve(strict=True)
+          if declared.keys() != expected:
+              raise SystemExit(f'Incomplete native runtime artifacts: {sorted(declared)}')
+          destination = Path(os.environ['NATIVE_BLAZE_BIN_DIR'])
+          destination.mkdir(parents=True, exist_ok=True)
+          for name, source in declared.items():
+              shutil.copy2(source, destination / name)
+          PY
+
+      - name: Validate the cached native tool layout
+        id: runtime
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          directory = Path(os.environ['NATIVE_BLAZE_BIN_DIR'])
+          expected = {'blaze', 'ra-jit', 'ra-jit-rustc', 'ra-jit-rustc-first'}
+          if {path.name for path in directory.iterdir()} != expected:
+              raise SystemExit(f'Unexpected native tool cache layout: {directory}')
+          for name in expected:
+              binary = directory / name
+              if binary.is_symlink() or not binary.is_file() or not os.access(binary, os.X_OK):
+                  raise SystemExit(f'Native tool cache entry is not a portable executable file: {binary}')
+          PY
+
+      - name: Build workspace binaries and host fixture with Blaze
+        id: build
+        run: |
+          bazel run --repo_env=TRACEDECAY_BLAZE_BIN_DIR="$NATIVE_BLAZE_BIN_DIR" \
+            //scripts/bazel/blaze:blaze -- build \
+            --workspace --bins --locked --profile perf --features "$WORKSPACE_FEATURES"
+          bazel run --repo_env=TRACEDECAY_BLAZE_BIN_DIR="$NATIVE_BLAZE_BIN_DIR" \
+            //scripts/bazel/blaze:blaze -- build \
+            --package tracedecay-cli --example tracedecay-host-cli-fixture \
+            --locked --profile perf --features "$WORKSPACE_FEATURES"
+
+      - name: Run the full workspace test selection with Blaze
+        id: test
+        run: |
+          bazel run --repo_env=TRACEDECAY_BLAZE_BIN_DIR="$NATIVE_BLAZE_BIN_DIR" \
+            //scripts/bazel/blaze:blaze -- test \
+            --workspace --locked --profile perf --no-fail-fast --features "$WORKSPACE_FEATURES"
+
+      - name: Report native engine and compiler fallback status
+        id: status
+        if: always() && steps.build.outcome != 'skipped'
+        run: |
+          set -euo pipefail
+          bazel run --repo_env=TRACEDECAY_BLAZE_BIN_DIR="$NATIVE_BLAZE_BIN_DIR" \
+            //scripts/bazel/blaze:blaze -- status 2>&1 | tee "$RUNNER_TEMP/blaze-status.txt"
+
+      - name: Stop the daemon before saving persistent artifacts
+        if: always() && steps.runtime.outcome == 'success'
+        run: >-
+          bazel run --repo_env=TRACEDECAY_BLAZE_BIN_DIR="$NATIVE_BLAZE_BIN_DIR"
+          //scripts/bazel/blaze:blaze -- stop
+
+      # All saves require successful build, tests, status, and shutdown. A
+      # restore never bypasses compilation or test execution, even on exact hits.
+      - name: Save validated pinned native Blaze binaries
+        id: save-tool
+        if: success() && steps.tool.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.NATIVE_BLAZE_BIN_DIR }}
+          key: ${{ steps.tool.outputs.cache-primary-key }}
+
+      - name: Save validated Blaze code store
+        id: save-store
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.cache-config.outputs.store-paths }}
+          key: ${{ steps.store.outputs.cache-primary-key }}
+
+      - name: Save validated compiled workspace artifacts
+        id: save-artifacts
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.cache-config.outputs.artifact-paths }}
+          key: ${{ steps.artifacts.outputs.cache-primary-key }}
+
+      - name: Save validated dependency acquisition
+        id: save-acquisition
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.cache-config.outputs.acquisition-paths }}
+          key: ${{ steps.acquisition.outputs.cache-primary-key }}
+
+      - name: Save validated Bazel launcher actions
+        id: save-launcher
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.bazel.outputs.disk-cache-path }}
+          key: ${{ steps.bazel.outputs.disk-cache-key }}-${{ github.sha }}
+
+      - name: Summarize cache reuse and workspace validation
+        if: always()
+        env:
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          TEST_OUTCOME: ${{ steps.test.outcome }}
+          TOOL_REQUESTED: ${{ steps.tool.outputs.cache-primary-key }}
+          TOOL_RESTORED: ${{ steps.tool.outputs.cache-matched-key }}
+          TOOL_SAVED: ${{ steps.save-tool.outcome }}
+          STORE_REQUESTED: ${{ steps.store.outputs.cache-primary-key }}
+          STORE_RESTORED: ${{ steps.store.outputs.cache-matched-key }}
+          STORE_SAVED: ${{ steps.save-store.outcome }}
+          ARTIFACTS_REQUESTED: ${{ steps.artifacts.outputs.cache-primary-key }}
+          ARTIFACTS_RESTORED: ${{ steps.artifacts.outputs.cache-matched-key }}
+          ARTIFACTS_SAVED: ${{ steps.save-artifacts.outcome }}
+          ACQUISITION_REQUESTED: ${{ steps.acquisition.outputs.cache-primary-key }}
+          ACQUISITION_RESTORED: ${{ steps.acquisition.outputs.cache-matched-key }}
+          ACQUISITION_SAVED: ${{ steps.save-acquisition.outcome }}
+          LAUNCHER_SAVED: ${{ steps.save-launcher.outcome }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write(f"Build: {os.environ['BUILD_OUTCOME']}; tests: {os.environ['TEST_OUTCOME']}.\n\n")
+              summary.write('Every restored cache still runs the workspace build and tests with `BLAZE_TESTS=all`.\n\n')
+              summary.write('| Cache | Requested save key | Restored key | Save step |\n| --- | --- | --- | --- |\n')
+              for name in ('TOOL', 'STORE', 'ARTIFACTS', 'ACQUISITION'):
+                  requested = os.environ[f'{name}_REQUESTED'] or '(not reached)'
+                  restored = os.environ[f'{name}_RESTORED'] or '(none)'
+                  saved = os.environ[f'{name}_SAVED']
+                  summary.write(f'| {name.lower()} | `{requested}` | `{restored}` | {saved} |\n')
+              summary.write(f"\nBazel launcher action cache save step: {os.environ['LAUNCHER_SAVED']}.\n")
+              summary.write('\nCaches save in the current GitHub ref after successful validation; master pushes prime master.\n\n')
+              summary.write('Compiler fallback is workspace validation, not proof that Blaze compiled a program. '
+                            'The command logs report fallback reasons; daemon status follows.\n\n')
+              status = Path(os.environ['RUNNER_TEMP']) / 'blaze-status.txt'
+              if status.is_file():
+                  summary.write('```text\n' + status.read_text() + '\n```\n')
+          PY
