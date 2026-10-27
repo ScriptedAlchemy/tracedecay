@@ -14,7 +14,6 @@
 //! is read from the successor.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::mem::size_of;
 use std::sync::Arc;
 
 use tracedecay_domain::{FileOccurrenceId, SanitizedCodeFileV1, SymbolOccurrenceId};
@@ -38,10 +37,10 @@ use super::models::{
 };
 use crate::chunks::{CodeIndexImportEvidenceV1, CodeIndexUnresolvedReferenceV1};
 use crate::lineage::LineageSymbolRecordV1;
-use crate::production::resident_bytes::{
-    btree_bytes, import_heap_bytes, snapshot_file_heap_bytes, symbol_heap_bytes,
-    unresolved_heap_bytes, vec_bytes,
-};
+
+mod accounting;
+
+use self::accounting::CarryBuildBytes;
 
 /// Why a successor scans its projection cold instead of carrying.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -71,7 +70,9 @@ pub(super) fn carry_interactive_catalog(
     cancellation: Arc<dyn GraphCancellation>,
     charge: &mut CatalogBuildChargeV1,
 ) -> Result<Result<InteractiveCatalog, CatalogCarryDeclineV1>, CodeGraphProjectionError> {
-    let Some(rows) = snapshot.layered_rows() else {
+    let Some(rows) =
+        snapshot.layered_rows_with_allocation_admission(&mut |bytes| charge.cover_read(bytes))?
+    else {
         return Ok(Err(CatalogCarryDeclineV1::ColdHead));
     };
     let parent_base = parent
@@ -81,8 +82,8 @@ pub(super) fn carry_interactive_catalog(
     if *parent_base != rows.base_generation {
         return Ok(Err(CatalogCarryDeclineV1::ForeignBase));
     }
-    let successor_bytes = usize::try_from(parent.retained_bytes()).unwrap_or(usize::MAX);
-    charge.cover(successor_bytes)?;
+    let mut bytes = CarryBuildBytes::new(parent, &rows);
+    charge.cover(bytes.held_bytes())?;
     let reads = RowReads {
         parent,
         snapshot,
@@ -96,12 +97,18 @@ pub(super) fn carry_interactive_catalog(
         parent_hidden_relations,
         parent_delta_relations,
     ) = match &parent.layer {
-        Some(layer) => (
-            &layer.hidden_entities[..],
-            layer.delta_entities.keys().cloned().collect::<Vec<_>>(),
-            &layer.hidden_relations[..],
-            layer.delta_relations.keys().cloned().collect::<Vec<_>>(),
-        ),
+        Some(layer) => {
+            let mut entities = Vec::with_capacity(layer.delta_entities.len());
+            entities.extend(layer.delta_entities.keys().cloned());
+            let mut relations = Vec::with_capacity(layer.delta_relations.len());
+            relations.extend(layer.delta_relations.keys().cloned());
+            (
+                &layer.hidden_entities[..],
+                entities,
+                &layer.hidden_relations[..],
+                relations,
+            )
+        }
         None => (&[][..], Vec::new(), &[][..], Vec::new()),
     };
     let entity_ids = merge_sorted([
@@ -123,21 +130,13 @@ pub(super) fn carry_interactive_catalog(
         let mut changed = Vec::new();
         for identity in entity_ids {
             check_cancelled(cancellation.as_ref())?;
-            let held = successor_bytes.saturating_add(
-                changed
-                    .iter()
-                    .flat_map(
-                        |(old, new): &(Option<EntityContent>, Option<EntityContent>)| [old, new],
-                    )
-                    .flatten()
-                    .map(EntityContent::allocation_bytes)
-                    .fold(0_usize, usize::saturating_add),
-            );
-            let (old, new) = reads.entity(&identity, held, charge)?;
+            let (old, new) = reads.entity(&identity, bytes.held_bytes(), charge)?;
+            charge.cover(bytes.record_entity(&identity, old.as_ref(), new.as_ref()))?;
             if let Some(new) = &new {
                 layer.record_entity(&identity, new);
             }
             if old != new {
+                bytes.reserve_buffer(&mut changed, charge)?;
                 changed.push((old, new));
             }
         }
@@ -148,55 +147,19 @@ pub(super) fn carry_interactive_catalog(
         let mut changed = Vec::new();
         for identity in relation_ids {
             check_cancelled(cancellation.as_ref())?;
-            let held = successor_bytes
-                .saturating_add(
-                    changed_entities
-                        .iter()
-                        .flat_map(|(old, new)| [old, new])
-                        .flatten()
-                        .map(EntityContent::allocation_bytes)
-                        .fold(0_usize, usize::saturating_add),
-                )
-                .saturating_add(
-                    changed
-                        .iter()
-                        .flat_map(
-                            |(old, new): &(Option<RelationContent>, Option<RelationContent>)| {
-                                [old, new]
-                            },
-                        )
-                        .flatten()
-                        .map(RelationContent::allocation_bytes)
-                        .fold(0_usize, usize::saturating_add),
-                );
-            let (old, new) = reads.relation(&identity, held, charge)?;
+            let (old, new) = reads.relation(&identity, bytes.held_bytes(), charge)?;
+            charge.cover(bytes.record_relation(&identity, old.as_ref(), new.as_ref()))?;
             if let Some(new) = &new {
                 layer.record_relation(&identity, new);
             }
             if old != new {
+                bytes.reserve_buffer(&mut changed, charge)?;
                 changed.push((old, new));
             }
         }
         changed
     };
 
-    let entity_bytes = changed_entities
-        .iter()
-        .flat_map(|(old, new)| [old, new])
-        .flatten()
-        .map(EntityContent::allocation_bytes)
-        .fold(0_usize, usize::saturating_add);
-    let relation_bytes = changed_relations
-        .iter()
-        .flat_map(|(old, new)| [old, new])
-        .flatten()
-        .map(RelationContent::allocation_bytes)
-        .fold(0_usize, usize::saturating_add);
-    charge.cover(
-        successor_bytes
-            .saturating_add(entity_bytes.saturating_mul(3))
-            .saturating_add(relation_bytes.saturating_mul(3)),
-    )?;
     {
         let _span = tracing::trace_span!("code_graph.catalog.carry.apply").entered();
         let mut carry = CatalogCarry::new(parent);
@@ -225,6 +188,11 @@ pub(super) fn carry_interactive_catalog(
             }
         }
         check_cancelled(cancellation.as_ref())?;
+        charge.cover(
+            bytes
+                .held_bytes()
+                .saturating_add(bytes.finish_bytes(&carry)?),
+        )?;
         carry
             .finish(
                 snapshot.generation().clone(),
@@ -236,7 +204,12 @@ pub(super) fn carry_interactive_catalog(
 }
 
 fn merge_sorted<T: Ord + Clone, const N: usize>(lists: [&[T]; N]) -> Vec<T> {
-    let mut merged: Vec<T> = lists.iter().flat_map(|list| list.iter().cloned()).collect();
+    let count = lists
+        .iter()
+        .map(|list| list.len())
+        .fold(0_usize, usize::saturating_add);
+    let mut merged = Vec::with_capacity(count);
+    merged.extend(lists.iter().flat_map(|list| list.iter().cloned()));
     merged.sort_unstable();
     merged.dedup();
     merged
@@ -281,73 +254,6 @@ enum EntityContent {
 }
 
 impl EntityContent {
-    fn allocation_bytes(&self) -> usize {
-        match self {
-            Self::File(file) => snapshot_file_heap_bytes(file)
-                .saturating_add(btree_bytes(
-                    1,
-                    size_of::<(FileOccurrenceId, Option<SanitizedCodeFileV1>)>(),
-                ))
-                .saturating_add(btree_bytes(
-                    1,
-                    size_of::<(String, Option<FileOccurrenceId>)>(),
-                ))
-                .saturating_add(file.logical_path.len())
-                .saturating_add(file.file_occurrence_id.as_str().len().saturating_mul(2)),
-            Self::Import { identity, import } => import_heap_bytes(import)
-                .saturating_add(identity.as_str().len())
-                .saturating_add(btree_bytes(
-                    1,
-                    size_of::<(GraphEntityId, CodeIndexImportEvidenceV1)>(),
-                )),
-            Self::Symbol {
-                identity,
-                occurrence,
-                row,
-            } => {
-                let mut bytes = identity
-                    .as_str()
-                    .len()
-                    .saturating_add(occurrence.as_str().len().saturating_mul(8))
-                    .saturating_add(size_of::<SymbolRow>())
-                    .saturating_add(row.metadata.as_ref().map_or(0, symbol_heap_bytes))
-                    .saturating_add(vec_bytes(
-                        &row.unresolved_calls,
-                        row.unresolved_calls.capacity(),
-                        unresolved_heap_bytes,
-                    ))
-                    .saturating_add(btree_bytes(
-                        1,
-                        size_of::<(SymbolOccurrenceId, Option<CatalogSymbol>)>(),
-                    ))
-                    .saturating_add(btree_bytes(3, size_of::<(String, ListEdit)>()))
-                    .saturating_add(btree_bytes(3, size_of::<SymbolOccurrenceId>()))
-                    .saturating_add(btree_bytes(3, size_of::<(String, i64)>()));
-                if let Some(binding) = &row.binding {
-                    bytes = bytes
-                        .saturating_add(binding.file.as_str().len())
-                        .saturating_add(binding.logical_path.as_ref().map_or(0, String::capacity))
-                        .saturating_add(binding.language_descriptor_revision.as_str().len())
-                        .saturating_add(
-                            binding
-                                .chunk
-                                .as_ref()
-                                .map_or(0, |chunk| chunk.as_str().len()),
-                        );
-                }
-                for call in &row.unresolved_calls {
-                    bytes = bytes
-                        .saturating_add(call.reference_name.len())
-                        .saturating_add(occurrence.as_str().len().saturating_mul(2))
-                        .saturating_add(btree_bytes(1, size_of::<(String, ListEdit)>()))
-                        .saturating_add(btree_bytes(2, size_of::<SymbolOccurrenceId>()));
-                }
-                bytes
-            }
-            Self::Other => 0,
-        }
-    }
-
     fn decode(
         entity: &GraphEntity,
         admit: &mut dyn FnMut(usize) -> Result<(), CodeGraphProjectionError>,
@@ -440,24 +346,6 @@ impl PartialEq for RelationContent {
 }
 
 impl RelationContent {
-    fn allocation_bytes(&self) -> usize {
-        match self {
-            Self::Edge(DeltaRelationV1::Edge { from, to, .. }) => from
-                .as_str()
-                .len()
-                .saturating_add(to.as_str().len())
-                .saturating_add(btree_bytes(
-                    2,
-                    size_of::<(SymbolOccurrenceId, (i64, i64))>(),
-                )),
-            Self::ImportLink { import, .. } => import.as_str().len().saturating_add(btree_bytes(
-                1,
-                size_of::<(GraphEntityId, Option<GraphRelation>)>(),
-            )),
-            _ => 0,
-        }
-    }
-
     fn decode(
         relation: GraphRelation,
         admit: &mut dyn FnMut(usize) -> Result<(), CodeGraphProjectionError>,
@@ -572,6 +460,11 @@ impl RowReads<'_> {
         held: usize,
         charge: &mut CatalogBuildChargeV1,
     ) -> Result<(Option<EntityContent>, Option<EntityContent>), CodeGraphProjectionError> {
+        let held = held
+            .saturating_add(self.projection.namespace.as_str().len())
+            .saturating_add(self.projection.projection.as_str().len())
+            .saturating_add(identity.as_str().len());
+        charge.cover(held)?;
         let reference = GraphEntityRef::new(self.projection.clone(), identity.clone());
         let read = |base: bool,
                     held: usize,
@@ -610,12 +503,17 @@ impl RowReads<'_> {
                 let recorded = layer.delta_entities.get(identity).ok_or_else(|| {
                     corrupt("catalog layer delta row without a recorded contribution")
                 })?;
+                charge.cover(held.saturating_add(accounting::recorded_entity_heap(
+                    self.parent,
+                    identity,
+                    recorded,
+                )?))?;
                 Some(EntityContent::recorded(self.parent, identity, recorded)?)
             }
             Source::Hidden => None,
             Source::Base => read(true, held, charge)?,
         };
-        let held = held.saturating_add(old.as_ref().map_or(0, EntityContent::allocation_bytes));
+        let held = held.saturating_add(old.as_ref().map_or(0, accounting::entity_heap));
         let new = match self.successor_entity_source(identity) {
             Source::Delta => read(false, held, charge)?,
             Source::Hidden => None,
@@ -634,6 +532,11 @@ impl RowReads<'_> {
         held: usize,
         charge: &mut CatalogBuildChargeV1,
     ) -> Result<(Option<RelationContent>, Option<RelationContent>), CodeGraphProjectionError> {
+        let held = held
+            .saturating_add(self.projection.namespace.as_str().len())
+            .saturating_add(self.projection.projection.as_str().len())
+            .saturating_add(identity.as_str().len());
+        charge.cover(held)?;
         let reference = GraphRelationRef::new(self.projection.clone(), identity.clone());
         let read = |base: bool,
                     held: usize,
@@ -672,12 +575,13 @@ impl RowReads<'_> {
                 let recorded = layer.delta_relations.get(identity).ok_or_else(|| {
                     corrupt("catalog layer delta row without a recorded contribution")
                 })?;
+                charge.cover(held.saturating_add(accounting::recorded_relation_heap(recorded)))?;
                 Some(RelationContent::recorded(recorded))
             }
             Source::Hidden => None,
             Source::Base => read(true, held, charge)?,
         };
-        let held = held.saturating_add(old.as_ref().map_or(0, RelationContent::allocation_bytes));
+        let held = held.saturating_add(old.as_ref().map_or(0, accounting::relation_heap));
         let new = match self.successor_relation_source(identity) {
             Source::Delta => read(false, held, charge)?,
             Source::Hidden => None,
@@ -1309,7 +1213,8 @@ impl<'a> CatalogCarry<'a> {
                 "code graph import entity left without its file link",
             ));
         }
-        let mut removed: Vec<&CodeIndexImportEvidenceV1> = self.imports_removed.values().collect();
+        let mut removed = Vec::with_capacity(self.imports_removed.len());
+        removed.extend(self.imports_removed.values());
         removed.sort_by(|left, right| canonical_import_order(left, right));
         let mut matched = 0_usize;
         let mut imports: Vec<CodeIndexImportEvidenceV1> =

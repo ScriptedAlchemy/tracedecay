@@ -1005,9 +1005,10 @@ impl SealedLayer {
     /// differently from it: the rows it hides and the delta's own.
     pub(crate) fn layered_rows(&self) -> GraphLayeredRowsV1 {
         fn sorted<T: Ord + Clone>(ids: &HashSet<T>) -> Vec<T> {
-            let mut ids: Vec<T> = ids.iter().cloned().collect();
-            ids.sort_unstable();
-            ids
+            let mut sorted = Vec::with_capacity(ids.len());
+            sorted.extend(ids.iter().cloned());
+            sorted.sort_unstable();
+            sorted
         }
         GraphLayeredRowsV1 {
             base_generation: self.base_identity.generation.clone(),
@@ -1016,6 +1017,23 @@ impl SealedLayer {
             hidden_relations: sorted(&self.hidden_relations),
             delta_relations: sorted(&self.delta_relations),
         }
+    }
+
+    pub(crate) fn layered_rows_allocation_bytes(&self) -> usize {
+        fn ids<T>(values: &HashSet<T>, len: impl Fn(&T) -> usize) -> usize {
+            values.iter().fold(
+                values.len().saturating_mul(std::mem::size_of::<T>()),
+                |bytes, id| bytes.saturating_add(len(id)),
+            )
+        }
+        self.base_identity
+            .generation
+            .as_str()
+            .len()
+            .saturating_add(ids(&self.hidden_entities, |id| id.as_str().len()))
+            .saturating_add(ids(&self.delta_entities, |id| id.as_str().len()))
+            .saturating_add(ids(&self.hidden_relations, |id| id.as_str().len()))
+            .saturating_add(ids(&self.delta_relations, |id| id.as_str().len()))
     }
 
     /// The base's own row for `identity`, whether or not this layer hides

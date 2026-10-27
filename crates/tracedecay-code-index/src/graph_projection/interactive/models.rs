@@ -333,7 +333,9 @@ impl<K: Ord, V> SortedMap<K, V> {
 
 impl<K, V> From<BTreeMap<K, V>> for SortedMap<K, V> {
     fn from(map: BTreeMap<K, V>) -> Self {
-        Self(map.into_iter().collect())
+        let mut entries = Vec::with_capacity(map.len());
+        entries.extend(map);
+        Self(entries.into_boxed_slice())
     }
 }
 
@@ -349,11 +351,9 @@ pub(super) fn frozen_ids(mut ids: Vec<SymbolOccurrenceId>) -> SymbolIds {
 }
 
 fn freeze_ids<K: Ord>(map: BTreeMap<K, Vec<SymbolOccurrenceId>>) -> SortedMap<K, SymbolIds> {
-    SortedMap(
-        map.into_iter()
-            .map(|(key, ids)| (key, frozen_ids(ids)))
-            .collect(),
-    )
+    let mut entries = Vec::with_capacity(map.len());
+    entries.extend(map.into_iter().map(|(key, ids)| (key, frozen_ids(ids))));
+    SortedMap(entries.into_boxed_slice())
 }
 
 /// What one delta entity contributes to the catalog, by the key the catalog
@@ -555,13 +555,15 @@ impl InteractiveCatalog {
 pub(super) fn rank_largest_files(
     symbols_by_logical_path: &SortedMap<String, u64>,
 ) -> Vec<CodeGraphFileSymbolCountV1> {
-    let mut largest_files: Vec<_> = symbols_by_logical_path
-        .iter()
-        .map(|(logical_path, symbols)| CodeGraphFileSymbolCountV1 {
-            logical_path: logical_path.clone(),
-            symbols: *symbols,
-        })
-        .collect();
+    let mut largest_files = Vec::with_capacity(symbols_by_logical_path.len());
+    largest_files.extend(
+        symbols_by_logical_path
+            .iter()
+            .map(|(logical_path, symbols)| CodeGraphFileSymbolCountV1 {
+                logical_path: logical_path.clone(),
+                symbols: *symbols,
+            }),
+    );
     largest_files.sort_by(|left, right| {
         right
             .symbols
@@ -1050,7 +1052,7 @@ impl InteractiveCatalog {
     }
 }
 
-fn binding_heap_bytes(binding: &CodeGraphSymbolBindingV1) -> usize {
+pub(super) fn binding_heap_bytes(binding: &CodeGraphSymbolBindingV1) -> usize {
     binding
         .file
         .as_str()

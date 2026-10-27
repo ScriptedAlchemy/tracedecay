@@ -80,7 +80,12 @@ pub(super) fn build_interactive_catalog(
     cancellation: Arc<dyn GraphCancellation>,
     charge: &mut CatalogBuildChargeV1,
 ) -> Result<InteractiveCatalog, CodeGraphProjectionError> {
-    let mut scan = CatalogScan::new(snapshot.generation().clone(), snapshot.layered_rows());
+    let generation_bytes = snapshot.generation().as_str().len();
+    charge.cover(generation_bytes)?;
+    let rows = snapshot.layered_rows_with_allocation_admission(&mut |bytes| {
+        charge.cover_read(generation_bytes.saturating_add(bytes))
+    })?;
+    let mut scan = CatalogScan::new(snapshot.generation().clone(), rows);
     // Every entity is recorded before the first relation, so each relation
     // resolves against complete files, symbols, and imports as it streams
     // past instead of being held until the scan ends.
@@ -387,6 +392,7 @@ pub(super) fn edge_endpoints(
 
 impl CatalogScan {
     fn new(generation: GraphGenerationId, rows: Option<GraphLayeredRowsV1>) -> Self {
+        let heap = generation.as_str().len();
         Self {
             generation,
             layer: rows.map(LayerScan::new),
@@ -395,7 +401,7 @@ impl CatalogScan {
             degrees: SymbolDegreeCounts::default(),
             dependency_edge_counts: BTreeMap::new(),
             dependency_edges: 0,
-            heap: 0,
+            heap,
             scanned_entities: 0,
             scanned_relations: 0,
         }
@@ -430,7 +436,7 @@ impl CatalogScan {
             .saturating_add(
                 self.imports_by_entity
                     .len()
-                    .saturating_mul(size_of::<CodeIndexImportEvidenceV1>()),
+                    .saturating_mul(2 * size_of::<CodeIndexImportEvidenceV1>()),
             )
             .saturating_add(
                 self.dependency_edge_counts
@@ -670,11 +676,12 @@ impl CatalogScan {
             (symbol.outgoing, symbol.incoming) = self.degrees.take(&symbol_entity_id(occurrence)?);
         }
         self.degrees.require_drained()?;
-        let mut imports: Vec<_> = self
-            .imports_by_entity
-            .into_values()
-            .map(|(import, _)| import)
-            .collect();
+        let mut imports = Vec::with_capacity(self.imports_by_entity.len());
+        imports.extend(
+            self.imports_by_entity
+                .into_values()
+                .map(|(import, _)| import),
+        );
         imports.sort_by(canonical_import_order);
         Ok(self.catalog.finish(
             self.generation,

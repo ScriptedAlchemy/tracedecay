@@ -493,6 +493,21 @@ impl VerifiedGraphSnapshot {
         Some(reads.layer.layered_rows())
     }
 
+    /// Admits the owned identity lists before cloning the layer's metadata.
+    pub fn layered_rows_with_allocation_admission(
+        &self,
+        admit: &mut dyn FnMut(usize) -> Result<(), GraphDbError>,
+    ) -> Result<Option<crate::GraphLayeredRowsV1>, GraphDbError> {
+        let Some(sealed) = self.sealed_head() else {
+            return Ok(None);
+        };
+        let Some(reads) = sealed.layered_reads() else {
+            return Ok(None);
+        };
+        admit(reads.layer.layered_rows_allocation_bytes())?;
+        Ok(Some(reads.layer.layered_rows()))
+    }
+
     /// The row the sealed base this head layers over holds for `reference`,
     /// whether or not the head hides or shadows it. `Ok(None)` when the head
     /// is cold or the base never held the row.
