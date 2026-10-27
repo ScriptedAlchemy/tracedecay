@@ -110,20 +110,55 @@ fn source_relative_use_path(node: TsNode<'_>) -> bool {
 }
 
 pub(super) fn has_outer_attributes(node: TsNode<'_>) -> bool {
-    let mut previous = node.prev_named_sibling();
-    while let Some(sibling) = previous {
-        match sibling.kind() {
-            "attribute_item" => return true,
-            "line_comment" | "block_comment" => {
-                if sibling.child_by_field_name("outer").is_some() {
-                    return true;
-                }
-                previous = sibling.prev_named_sibling();
-            }
-            _ => return false,
-        }
-    }
-    false
+    outer_attributes(node).next().is_some()
+}
+
+/// Built-in lint attributes leave an existing destination binding available.
+/// Source relocation still rejects every attached attribute so its scope and
+/// ownership cannot silently change. Unknown attributes may transform imports.
+pub(super) fn destination_import_is_unconditional(node: TsNode<'_>, src: &[u8]) -> bool {
+    outer_attributes(node).all(|attribute| is_lint_attribute(attribute, src))
+}
+
+fn outer_attributes(node: TsNode<'_>) -> impl Iterator<Item = TsNode<'_>> {
+    std::iter::successors(node.prev_named_sibling(), |node| node.prev_named_sibling())
+        .take_while(|node| {
+            matches!(
+                node.kind(),
+                "attribute_item" | "line_comment" | "block_comment"
+            )
+        })
+        .filter(|node| {
+            node.kind() == "attribute_item" || node.child_by_field_name("outer").is_some()
+        })
+}
+
+fn is_lint_attribute(node: TsNode<'_>, src: &[u8]) -> bool {
+    let Some(attribute) = node
+        .named_children(&mut node.walk())
+        .find(|child| child.kind() == "attribute")
+    else {
+        return false;
+    };
+    let Some(path) = attribute
+        .named_children(&mut attribute.walk())
+        .find(|child| !matches!(child.kind(), "line_comment" | "block_comment"))
+    else {
+        return false;
+    };
+    path.kind() == "identifier"
+        && matches!(
+            path.utf8_text(src),
+            Ok("allow" | "expect" | "warn" | "deny" | "forbid")
+        )
+        && attribute
+            .child_by_field_name("arguments")
+            .is_some_and(|arguments| {
+                arguments.kind() == "token_tree"
+                    && arguments
+                        .child(0)
+                        .is_some_and(|delimiter| delimiter.kind() == "(")
+            })
 }
 
 /// Tree-sitter path: collect every `use_declaration` node (top-level and inside

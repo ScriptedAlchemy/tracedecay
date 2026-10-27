@@ -12,7 +12,7 @@ use tree_sitter::Tree;
 
 use crate::edits::{MAX_PREVIEW_DIFF_LINES, PREVIEW_DIFF_CONTEXT, bounded_region_diff};
 
-use super::use_parsing::{has_outer_attributes, use_bindings};
+use super::use_parsing::{destination_import_is_unconditional, use_bindings};
 
 /// Removes `lines[start..=end]` and collapses the blank-line separator the
 /// removed item left behind so the source stays tidy.
@@ -190,13 +190,13 @@ pub(super) fn dedup_preserve(
                 destination_syntax_error("cannot identify a complete destination import")
             })?;
         has_wildcard |= bindings.wildcard;
-        let has_attributes = has_outer_attributes(node);
+        let unconditional = destination_import_is_unconditional(node, dest_original.as_bytes());
         for leaf in bindings.leaves {
-            if has_attributes {
-                attributed.insert(leaf.binding);
-            } else {
+            if unconditional {
                 bound_names.insert(leaf.binding.clone());
                 existing.insert(leaf);
+            } else {
+                attributed.insert(leaf.binding);
             }
         }
     }

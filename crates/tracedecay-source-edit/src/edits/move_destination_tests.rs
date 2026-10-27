@@ -286,6 +286,33 @@ async fn move_symbol_reuses_equivalent_destination_imports() {
 }
 
 #[tokio::test]
+async fn move_symbol_reuses_lint_attributed_destination_imports() {
+    for (destination_import, source_import, binding) in [
+        (
+            "#[allow(unused_imports)]\nuse crate::model::Widget;\n",
+            "use crate::model::Widget;",
+            "Widget",
+        ),
+        (
+            "#[warn(\n    unsafe_code,\n)]\n// Keep the lint policy and public alias.\n#[deny(non_snake_case)]\npub use crate::{model::{Widget as Alias}};\n",
+            "use crate::model::Widget as Alias;",
+            "Alias",
+        ),
+    ] {
+        move_with_destination_dependency(
+            destination_import,
+            "pub fn marker() {}\n",
+            "\n",
+            true,
+            source_import,
+            binding,
+            None,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn move_symbol_preserves_destination_item_bindings() {
     let import = "use crate::relocated::Widget as\n    Alias;";
     move_with_destination_dependency(
@@ -372,6 +399,18 @@ async fn move_symbol_refuses_unsupported_destination_before_preview_or_apply() {
         ),
         (
             "#[cfg(all())]\nuse crate::model::\n    Widget;\npub fn marker() {}\n",
+            true,
+        ),
+        (
+            "#[cfg_attr(all(), cfg(any()))]\n#[allow(unused_imports)]\nuse crate::model::Widget;\npub fn marker() {}\n",
+            true,
+        ),
+        (
+            "#[custom::allow(unused_imports)]\n#[allow(unused_imports)]\nuse crate::model::Widget;\npub fn marker() {}\n",
+            true,
+        ),
+        (
+            "#[transform]\n#[deny(unsafe_code)]\nuse crate::model::Widget;\npub fn marker() {}\n",
             true,
         ),
         ("use std::fmt::Error as Widget;\npub fn marker() {}\n", true),
