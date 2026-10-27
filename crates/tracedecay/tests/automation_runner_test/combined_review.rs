@@ -183,7 +183,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     assert_eq!(reflector.status, AutomationRunStatus::Succeeded);
     assert_eq!(
         reflector.prompt_version.as_deref(),
-        Some("combined_review:v3")
+        Some("combined_review:v4")
     );
     assert_eq!(reflector.accepted_count, 0);
 
@@ -193,7 +193,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     assert_eq!(skill.task_key.as_deref(), Some("skill_writer"));
     assert_eq!(skill.trigger, AutomationTrigger::Scheduler);
     assert_eq!(skill.status, AutomationRunStatus::Succeeded);
-    assert_eq!(skill.prompt_version.as_deref(), Some("combined_review:v3"));
+    assert_eq!(skill.prompt_version.as_deref(), Some("combined_review:v4"));
     assert_eq!(skill.accepted_count, 0);
 
     // Both halves share the combined request's input hash and correlate
@@ -453,6 +453,168 @@ async fn combined_review_commits_atomic_terminal_effects() {
             .iter()
             .all(|record| record.status == AutomationRunStatus::Succeeded)
     );
+}
+
+#[tokio::test]
+async fn fact_proposal_repair_preserves_valid_siblings_and_commits_canonical_memory() {
+    let valid = json!({
+        "content": "TraceDecay records durable repository conventions from cited user messages",
+        "category": "project",
+        "trust": "\u{2003}HiGh\u{3000}",
+        "source_span": {"store_id": 1},
+        "reason": "The cited user message establishes this repository convention"
+    });
+    let malformed = json!({
+        "content": "Cache expiry must be explicit at service boundaries",
+        "category": "project",
+        "trust": 0.72,
+        "source_span": {"store_id": "1"},
+        "reason": "The cited user message establishes this cache policy"
+    });
+    let mut repaired = malformed.clone();
+    repaired["source_span"]["store_id"] = json!(1.0);
+
+    for task in [
+        AgentTaskKind::SessionReflector,
+        AgentTaskKind::CombinedReview,
+    ] {
+        let temp = tempdir().unwrap();
+        let profile_root = temp.path().join("profile");
+        let cg = init_project(temp.path()).await;
+        seed_project_session_activity(&cg).await;
+        let config = scheduler_config(Some(3600), None);
+        let responses = [malformed.clone(), repaired.clone()]
+            .into_iter()
+            .map(|second| {
+                let mut output = if task == AgentTaskKind::CombinedReview {
+                    combined_no_skill_needed_output()
+                } else {
+                    json!({"facts": []})
+                };
+                output["facts"] = json!([valid, second]);
+                output
+            })
+            .collect();
+        let backend = SequentialJsonBackend::new(responses);
+        let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
+        let run = match task {
+            AgentTaskKind::SessionReflector => run_session_reflector(
+                &cg,
+                &config,
+                &run_control,
+                &backend,
+                SessionReflectorAutomationOptions {
+                    trigger: AutomationTrigger::ManualCli,
+                    provider: "cursor".to_owned(),
+                    query: "durable session reflection".to_owned(),
+                    evidence_limit: 5,
+                    ..SessionReflectorAutomationOptions::default()
+                },
+            )
+            .await
+            .unwrap(),
+            AgentTaskKind::CombinedReview => {
+                let dispatch = run_combined_review(
+                    &cg,
+                    &config,
+                    &run_control,
+                    &backend,
+                    combined_options(&profile_root),
+                )
+                .await
+                .unwrap();
+                let CombinedReviewDispatch::Ran(run) = dispatch else {
+                    panic!("repaired fact items must complete combined review: {dispatch:?}");
+                };
+                assert_eq!(
+                    run.skill_writer.ledger_record.status,
+                    AutomationRunStatus::Succeeded
+                );
+                assert_eq!(run.skill_writer.ledger_record.accepted_count, 0);
+                run.session_reflector
+            }
+            _ => unreachable!("only fact-producing tasks are exercised"),
+        };
+
+        assert_eq!(backend.calls(), 2, "{task:?}: exactly one item repair turn");
+        assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
+        assert_eq!(run.ledger_record.backend_attempt_count, 2);
+        assert_eq!(run.ledger_record.accepted_count, 2);
+        assert_eq!(run.ledger_record.rejected_count, 0);
+        assert_eq!(run.report["receipt"]["repair_attempted"], true);
+        assert_eq!(run.report["receipt"]["applied_count"], 2);
+        assert_eq!(run.report["receipt"]["quarantined_count"], 0);
+        let repairs = run.report["validation_repairs"].as_array().unwrap();
+        assert_eq!(repairs.len(), 1);
+        assert_eq!(repairs[0]["attempt"], 1);
+        let error_key = if task == AgentTaskKind::CombinedReview {
+            "fact_errors"
+        } else {
+            "errors"
+        };
+        let errors = repairs[0][error_key].as_array().unwrap();
+        assert_eq!(
+            errors.len(),
+            1,
+            "the valid sibling must survive initial validation"
+        );
+        assert_eq!(errors[0]["item"], malformed);
+        assert_eq!(errors[0]["validation"]["status"], "quarantined");
+        assert_eq!(
+            errors[0]["reason"],
+            "fact proposal does not match the response contract"
+        );
+
+        let memory = tracedecay_session_memory::memory::MemoryApplication::new(
+            project_memory_owner(&cg),
+            tracedecay_session_memory::fact_store::DatabaseFactStore::new(cg.db()),
+        )
+        .unwrap();
+        let receipts = list_automatic_fact_receipts(
+            &memory,
+            Some(AutomaticFactState::Applied),
+            10,
+            run_control.read_control(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            receipts.len(),
+            2,
+            "{task:?}: both legitimate facts must commit"
+        );
+        for (proposal, canonical_trust) in [(&valid, json!("high")), (&repaired, json!(0.72))] {
+            let receipt = receipts
+                .iter()
+                .find(|receipt| receipt.item.as_ref().unwrap()["content"] == proposal["content"])
+                .expect("each accepted item has an automatic memory receipt");
+            assert_eq!(receipt.run_id, run.run_id);
+            let item = receipt.item.as_ref().unwrap();
+            assert_eq!(item["source_span"], json!({"store_id": 1}));
+            assert_eq!(item["tags"], json!([]));
+            assert_eq!(item["entities"], json!([]));
+            assert_eq!(item["trust"], canonical_trust);
+            serde_json::from_value::<
+                tracedecay_contracts::retained_surfaces::MemoryAutomationFactEvidenceItemV1,
+            >(item.clone())
+            .expect("persisted evidence must retain the canonical public grammar");
+            let stored = memory
+                .find_exact_fact_by_content(
+                    proposal["content"].as_str().unwrap(),
+                    run_control.read_control(),
+                )
+                .await
+                .unwrap()
+                .expect("the committed fact must be readable through canonical memory");
+            let tracedecay_store::ProjectMemoryFactProjectionV1::Available(stored) = stored else {
+                panic!("the committed fact must have an available payload");
+            };
+            assert_eq!(
+                receipt.applied_fact_id.as_deref(),
+                Some(stored.fact_id().as_str())
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -833,7 +995,7 @@ async fn combined_review_records_failures_for_both_tasks_when_an_array_is_missin
     for record in &records {
         assert_eq!(record.status, AutomationRunStatus::Failed);
         assert_eq!(record.trigger, AutomationTrigger::Scheduler);
-        assert_eq!(record.prompt_version.as_deref(), Some("combined_review:v3"));
+        assert_eq!(record.prompt_version.as_deref(), Some("combined_review:v4"));
         assert!(record.error.as_deref().is_some_and(|error| {
             error.contains("combined review output must include a skills array")
         }));

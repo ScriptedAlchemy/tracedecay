@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tracedecay_contracts::automation::session_fact_proposal_schema;
 pub use tracedecay_contracts::automation::{AgentTaskFailureClass, AgentTaskKind};
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::errors::{ProjectOpenFailureKind, TraceDecayError};
@@ -167,9 +168,9 @@ pub fn task_key(task: AgentTaskKind) -> &'static str {
 pub fn prompt_version(task: AgentTaskKind) -> &'static str {
     match task {
         AgentTaskKind::MemoryCurator => "memory_curator:v2",
-        AgentTaskKind::SessionReflector => "session_reflector:v2",
+        AgentTaskKind::SessionReflector => "session_reflector:v3",
         AgentTaskKind::SkillWriter => "skill_writer:v4",
-        AgentTaskKind::CombinedReview => "combined_review:v3",
+        AgentTaskKind::CombinedReview => "combined_review:v4",
         AgentTaskKind::UserJob => "user_job:v2",
     }
 }
@@ -177,14 +178,24 @@ pub fn prompt_version(task: AgentTaskKind) -> &'static str {
 fn response_schema(task: AgentTaskKind) -> Value {
     match task {
         AgentTaskKind::MemoryCurator => json_schema_for_array_properties(&["ops"]),
-        AgentTaskKind::SessionReflector => json_schema_for_array_properties(&["facts"]),
+        AgentTaskKind::SessionReflector => serde_json::json!({
+            "type": "object",
+            "required": ["facts"],
+            "properties": {
+                "facts": {
+                    "type": "array",
+                    "items": session_fact_proposal_schema()
+                }
+            },
+            "additionalProperties": true
+        }),
         AgentTaskKind::SkillWriter => skill_writer_response_schema(),
         AgentTaskKind::CombinedReview => {
             let mut schema = response_schema(AgentTaskKind::SkillWriter);
             schema["required"] = serde_json::json!(["facts", "skills", "outcome", "decision"]);
             schema["properties"]["facts"] = serde_json::json!({
                 "type": "array",
-                "items": session_fact_schema()
+                "items": session_fact_proposal_schema()
             });
             schema
         }
@@ -193,60 +204,6 @@ fn response_schema(task: AgentTaskKind) -> Value {
             "additionalProperties": true
         }),
     }
-}
-
-fn session_fact_schema() -> Value {
-    serde_json::json!({
-        "type": "object",
-        "required": ["content", "category", "tags", "entities", "trust", "source_span", "reason"],
-        "properties": {
-            "content": { "type": "string" },
-            "category": {
-                "type": "string",
-                "enum": ["general", "user_pref", "project", "tool", "decision", "code_area"]
-            },
-            "tags": {
-                "type": "array",
-                "items": { "type": "string" }
-            },
-            "entities": {
-                "type": "array",
-                "items": { "type": "string" }
-            },
-            "trust": { "type": "number" },
-            "source_span": {
-                "anyOf": [
-                    {
-                        "type": "object",
-                        "required": ["session_id", "message_id"],
-                        "properties": {
-                            "session_id": { "type": "string" },
-                            "message_id": { "type": "string" }
-                        },
-                        "additionalProperties": false
-                    },
-                    {
-                        "type": "object",
-                        "required": ["store_id"],
-                        "properties": {
-                            "store_id": { "type": "string" }
-                        },
-                        "additionalProperties": false
-                    },
-                    {
-                        "type": "object",
-                        "required": ["node_id"],
-                        "properties": {
-                            "node_id": { "type": "string" }
-                        },
-                        "additionalProperties": false
-                    }
-                ]
-            },
-            "reason": { "type": "string" }
-        },
-        "additionalProperties": false
-    })
 }
 
 fn skill_writer_response_schema() -> Value {
@@ -796,6 +753,41 @@ fn strip_optional_json_fence(text: &str) -> Result<&str> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fact_envelopes_preserve_malformed_items_for_runtime_repair() {
+        let facts = serde_json::json!([
+            {
+                "content": "Preserve a valid sibling",
+                "category": "project",
+                "trust": 0.8,
+                "source_span": {"store_id": 7},
+                "reason": "The bounded evidence supports this fact"
+            },
+            {"content": "Malformed items still need individual repair evidence"}
+        ]);
+        for task in [
+            AgentTaskKind::SessionReflector,
+            AgentTaskKind::CombinedReview,
+        ] {
+            let contract = agent_task_contract(task);
+            let mut output = serde_json::json!({"facts": facts});
+            if task == AgentTaskKind::CombinedReview {
+                output["skills"] = serde_json::json!([]);
+                output["outcome"] = serde_json::json!("no_skill_needed");
+                output["decision"] = serde_json::json!({
+                    "reason": "The review only proposed facts",
+                    "remedy": "no_action"
+                });
+            }
+            let decoded = extract_response_json_object(&output.to_string(), &contract).unwrap();
+            assert_eq!(decoded["facts"], facts);
+            assert_eq!(
+                contract.response_schema["properties"]["facts"]["items"],
+                session_fact_proposal_schema()
+            );
+        }
+    }
 
     #[test]
     fn every_failure_class_round_trips_through_its_typed_state() {
