@@ -76,7 +76,7 @@ pub(super) fn project_input_schema(schema: &mut Value) {
 pub(super) fn add_request_property(
     schema: &mut Value,
     name: &str,
-    property: Value,
+    property: &Value,
 ) -> DiscoveryResult<()> {
     let object = schema.as_object_mut().ok_or_else(|| {
         crate::McpCatalogError::Initialization(
@@ -101,7 +101,7 @@ pub(super) fn add_request_property(
                         .iter()
                         .any(|key| branch.get(*key).is_some())
                 {
-                    add_request_property(branch, name, property.clone())?;
+                    add_request_property(branch, name, property)?;
                 }
             }
         }

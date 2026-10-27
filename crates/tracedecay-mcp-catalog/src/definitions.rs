@@ -460,7 +460,7 @@ fn add_registered_project_selector_properties(
         add_request_property(
             &mut definition.input_schema,
             "project_selector",
-            project_selector_object(
+            &project_selector_object(
                 "Optional registered project selector. Omit to use the active project.",
             ),
         )?;
@@ -515,7 +515,7 @@ fn add_format_property(definitions: &mut [ToolDefinition]) -> Result<(), McpCata
         add_request_property(
             &mut definition.input_schema,
             "format",
-            json!({
+            &json!({
                 "type": "string",
                 "enum": ["markdown", "json"],
                 "default": "markdown",
