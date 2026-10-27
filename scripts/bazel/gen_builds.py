@@ -177,6 +177,11 @@ BUILD_SCRIPT_ENV = {
 # their `__test` build, which carries the test run's features as Cargo's would.
 RUNTIME_BINARIES = (
     (
+        "TRACEDECAY_TEST_TYPESCRIPT_COMPILER",
+        "//dashboard:typescript_compiler",
+        r'var_os\("TRACEDECAY_TEST_TYPESCRIPT_COMPILER"\)',
+    ),
+    (
         "TRACEDECAY_TYPESCRIPT_SDK_DIST",
         "//sdks/typescript:dist",
         r'var_os\("TRACEDECAY_TYPESCRIPT_SDK_DIST"\)',
@@ -1084,6 +1089,9 @@ def main():
             # PowerShell executes the generated command as a script. Invoke
             # the formatter per file there to stay below Windows' argv limit.
             powershell = (
+                # Bazel strips PATHEXT. PowerShell otherwise treats .exe paths
+                # as documents and leaves LASTEXITCODE unset instead of waiting.
+                "$$env:PATHEXT += ';.EXE'; "
                 f"foreach ($$source in ('$(locations :{sources})' -split ' ')) {{ "
                 f'& "$(RUSTFMT)" {args} $$source; '
                 'if ($$LASTEXITCODE -ne 0) { exit $$LASTEXITCODE } }; '

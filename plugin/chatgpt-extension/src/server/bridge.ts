@@ -13,11 +13,12 @@ import type {
   OperationApplicationCodeSymbolSearchResult,
   OperationApplicationImpactResult,
   OperationApplicationNodeResult,
+  OperationApplicationProjectListResult,
   OperationApplicationSearchResult,
   OperationApplicationStatusResult,
   PublicCodeProject,
 } from "@tracedecay/sdk";
-import type { DaemonState, Failure, ProjectRef } from "../shared/view.js";
+import type { DaemonState, Failure, ProjectListing, ProjectRef } from "../shared/view.js";
 import { httpBaseUrl, probeDaemon, readDaemonAuthority, type AuthorityLookup, type DaemonAuthorityRecord } from "./authority.js";
 import { RegistryClient } from "./registry-client.js";
 import { classifyCode, DaemonFailure, ServeSession, toFailure } from "./serve-client.js";
@@ -118,11 +119,18 @@ export class DaemonBridge {
     });
   }
 
-  async listProjects(signal?: AbortSignal): Promise<readonly ProjectRef[]> {
+  async listProjects(signal?: AbortSignal): Promise<ProjectListing> {
     await this.#requireAuthority();
     const client = this.#registryClient();
     const listed = await this.#runSdk(() => client.projectList({ limit: 10 }, signal));
-    return listed.projects.map(projectRef);
+    return projectListing(listed);
+  }
+
+  async searchProjects(query: string, signal?: AbortSignal): Promise<ProjectListing> {
+    await this.#requireAuthority();
+    const client = this.#registryClient();
+    const listed = await this.#runSdk(() => client.projectSearch({ query, limit: 10 }, signal));
+    return projectListing(listed);
   }
 
   async resolveProject(projectId: string, signal?: AbortSignal): Promise<ProjectRef> {
@@ -392,5 +400,14 @@ export function projectRef(project: PublicCodeProject): ProjectRef {
     project_root: project.project_root,
     head_branch: project.head_branch ?? null,
     default_branch: project.default_branch ?? null,
+  };
+}
+
+function projectListing(listed: OperationApplicationProjectListResult): ProjectListing {
+  return {
+    projects: listed.projects.map(projectRef),
+    limit: listed.limit,
+    truncated: listed.truncated,
+    summary: listed.summary,
   };
 }

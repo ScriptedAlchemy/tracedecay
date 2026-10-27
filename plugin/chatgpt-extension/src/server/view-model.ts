@@ -19,6 +19,7 @@ import type {
   GraphEdge,
   GraphNode,
   ImpactReport,
+  ProjectListing,
   ProjectRef,
   Provenance,
   Relation,
@@ -49,17 +50,26 @@ async function section<T>(load: () => Promise<Section<T>>): Promise<Section<T>> 
   }
 }
 
-export async function projectsView(bridge: DaemonBridge, signal?: AbortSignal): Promise<ViewState> {
-  const projects = await section<readonly ProjectRef[]>(async () => {
-    const listed = await bridge.listProjects(signal);
-    return listed.length === 0
-      ? { state: "empty", message: "No projects are registered in this TraceDecay profile. Run `tracedecay init` in a repository first." }
+export async function projectsView(bridge: DaemonBridge, signal?: AbortSignal, query = ""): Promise<ViewState> {
+  signal?.throwIfAborted();
+  const normalizedQuery = query.trim();
+  const projects = await section<ProjectListing>(async () => {
+    const listed = normalizedQuery === "" ? await bridge.listProjects(signal) : await bridge.searchProjects(normalizedQuery, signal);
+    return listed.projects.length === 0
+      ? {
+          state: "empty",
+          message: normalizedQuery === ""
+            ? "No projects are registered in this TraceDecay profile. Run `tracedecay init` in a repository first."
+            : `No registered projects match "${normalizedQuery}". Try a project path, alias, id, or default branch.`,
+        }
       : { state: "ready", data: listed };
   });
+  signal?.throwIfAborted();
   // Read after the registry call: `tracedecay serve` may have brought the
   // daemon back, and the banner must describe the daemon that answered.
   const daemon = await bridge.daemonState();
-  return { page: "projects", daemon, projects };
+  signal?.throwIfAborted();
+  return { page: "projects", daemon, query: normalizedQuery, projects };
 }
 
 export async function failureView(bridge: DaemonBridge, projectId: string, error: unknown): Promise<ViewState> {
@@ -433,7 +443,7 @@ export function viewText(view: ViewState): string {
   switch (view.page) {
     case "projects":
       return view.projects.state === "ready"
-        ? `Recent TraceDecay projects: ${view.projects.data.map((project) => `${project.label} (${project.project_id})`).join(", ")}`
+        ? `${view.query === "" ? "Recent TraceDecay projects" : `TraceDecay projects matching "${view.query}"`}: ${view.projects.data.projects.map((project) => `${project.label} (${project.project_id})`).join(", ")}${view.projects.data.truncated ? ` (showing up to ${view.projects.data.limit}; more ${view.query === "" ? "projects are available — search to find them" : "matches are available — refine the query"})` : ""}`
         : view.projects.state === "empty"
           ? view.projects.message
           : `TraceDecay projects unavailable (${view.projects.failure.kind}): ${view.projects.failure.message}`;

@@ -172,7 +172,7 @@ impl Database {
         &self,
     ) -> std::pin::Pin<
         Box<
-            dyn std::future::Future<Output = Result<asupersync::sync::OwnedMutexGuard<()>>>
+            dyn std::future::Future<Output = Result<asupersync::sync::OwnedSemaphorePermit>>
                 + Send
                 + '_,
         >,
@@ -181,12 +181,16 @@ impl Database {
             let cx = crate::native_runtime::cx().ok_or_else(|| TraceDecayError::Config {
                 message: "database writer admission requires an Asupersync context".to_owned(),
             })?;
-            asupersync::sync::OwnedMutexGuard::lock(std::sync::Arc::clone(&self.inner.writer), &cx)
-                .await
-                .map_err(|error| TraceDecayError::Database {
-                    message: format!("database writer admission failed: {error}"),
-                    operation: "acquire database writer lane".to_owned(),
-                })
+            asupersync::sync::OwnedSemaphorePermit::acquire(
+                std::sync::Arc::clone(&self.inner.writer),
+                &cx,
+                1,
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("database writer admission failed: {error}"),
+                operation: "acquire database writer lane".to_owned(),
+            })
         })
     }
 

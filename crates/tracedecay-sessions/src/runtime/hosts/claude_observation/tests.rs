@@ -725,8 +725,9 @@ async fn protected_source_identity_reuses_cursor_across_admission_handoff() {
         .expect("reopened protected source cursor");
     assert!(cursor.byte_offset() > 0);
     let durable = serde_json::to_string(cursor.source()).unwrap();
+    let relative = PathBuf::from("project-scope").join(format!("{raw_session_id}.jsonl"));
     let path_key = tracedecay_capture::claude::observation_path_source_id(
-        format!("project-scope/{raw_session_id}.jsonl").as_bytes(),
+        &tracedecay_runtime_core::os_str_bytes::native_os_str_bytes(relative.as_os_str()),
     );
     assert_eq!(identity.source_id, path_key);
     assert_eq!(

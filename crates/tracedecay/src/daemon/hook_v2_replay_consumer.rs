@@ -95,9 +95,8 @@ struct PendingWorkRedriveState {
     terminal: bool,
 }
 
-static PENDING_WORK_REDRIVE_GATE: std::sync::OnceLock<
-    std::sync::Mutex<PendingWorkRedriveGate>,
-> = std::sync::OnceLock::new();
+static PENDING_WORK_REDRIVE_GATE: std::sync::OnceLock<std::sync::Mutex<PendingWorkRedriveGate>> =
+    std::sync::OnceLock::new();
 
 fn pending_work_redrive_gate() -> &'static std::sync::Mutex<PendingWorkRedriveGate> {
     PENDING_WORK_REDRIVE_GATE
@@ -393,8 +392,9 @@ async fn redrive_pending_work(
                     );
                 }
             } else {
-                state.next_eligible_micros =
-                    now.0.saturating_add(pending_work_redrive_backoff(state.attempts));
+                state.next_eligible_micros = now
+                    .0
+                    .saturating_add(pending_work_redrive_backoff(state.attempts));
             }
         } else {
             let mut gate = pending_work_redrive_gate()

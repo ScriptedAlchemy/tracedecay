@@ -1,5 +1,7 @@
 use std::ffi::OsStr;
 use std::path::Path;
+#[cfg(windows)]
+use std::path::PathBuf;
 
 use tracedecay_capture::claude::{
     encode_cursor_key, encode_source_id, observation_path_source_id, observation_source_id,
@@ -13,6 +15,10 @@ pub(super) fn claude_source_id(path: &Path) -> Option<String> {
 
 pub(super) fn claude_observation_path_source_id(projects_dir: &Path, path: &Path) -> String {
     let relative = path.strip_prefix(projects_dir).unwrap_or(path);
+    // Windows discovery uses native separators; caller spellings must name
+    // the same source without changing the discovered path's durable bytes.
+    #[cfg(windows)]
+    let relative = relative.components().collect::<PathBuf>();
     observation_path_source_id(&tracedecay_runtime_core::os_str_bytes::native_os_str_bytes(
         relative.as_os_str(),
     ))

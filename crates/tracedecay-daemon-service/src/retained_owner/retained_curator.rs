@@ -7,7 +7,6 @@ use std::sync::Arc;
 use crate::DaemonInvocationService;
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 use tracedecay_automation_runtime::automation::backend::CodexAppServerBackend;
-use tracedecay_automation_runtime::automation::config::from_configuration_snapshot;
 use tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger;
 use tracedecay_automation_runtime::automation::runner::{
     MemoryCuratorAutomationOptions, run_memory_curator_with_backend_for_retained_settlement,
@@ -49,11 +48,12 @@ pub async fn execute_retained_memory_curator(
                 "the automation configuration could not be loaded: {error}"
             ))
         })?;
-    let mut config = from_configuration_snapshot(pinned.snapshot()).map_err(|error| {
+    let admitted = pinned.admitted_automation().map_err(|error| {
         RetainedSurfaceExecutionErrorV1::unavailable(format!(
             "the automation configuration snapshot is invalid: {error}"
         ))
     })?;
+    let mut config = (**admitted).clone();
     let min_confidence = f64::from(request.min_confidence_millionths) / 1_000_000.0;
     config.timeout_secs = config.timeout_secs.min(MEMORY_CURATOR_REQUEST_TIMEOUT_SECS);
     let backend = CodexAppServerBackend::from_automation_config(

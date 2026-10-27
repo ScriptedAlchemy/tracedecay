@@ -186,6 +186,27 @@ fn non_utf8_paths_that_render_identically_have_distinct_cursor_keys() {
     assert_ne!(first_identity.source_id, second_identity.source_id);
 }
 
+#[cfg(windows)]
+#[test]
+fn observation_source_identity_preserves_native_bytes_across_separator_spellings() {
+    let root = Path::new(r"C:\profiles\.claude\projects");
+    let native = root.join("account").join("session.jsonl");
+    let alternate = PathBuf::from(native.to_str().unwrap().replace('\\', "/"));
+    let identity = identify_claude_source(root, &native).unwrap();
+    assert_eq!(
+        identify_claude_source(root, &alternate).unwrap().source_id,
+        identity.source_id
+    );
+    assert_eq!(
+        identity.source_id,
+        tracedecay_capture::claude::observation_path_source_id(
+            &tracedecay_runtime_core::os_str_bytes::native_os_str_bytes(
+                Path::new(r"account\session.jsonl").as_os_str()
+            )
+        )
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn observation_source_ids_are_private_and_follow_the_projects_relative_path() {

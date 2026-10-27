@@ -2288,7 +2288,7 @@
           "type": "string"
         },
         "schedule": {
-          "description": "Parsed with [`parse_schedule`]: `manual`, `interval`, `hourly`,\n`daily`, `weekly`, `every <duration>`, or a 5-field cron expression\nevaluated against the wall clock (UTC).",
+          "description": "Parsed with [`resolve_schedule`]: `manual`, `interval`, `hourly`,\n`daily`, `weekly`, `every <duration>`, or a 5-field cron expression\nevaluated against the wall clock (UTC).",
           "type": [
             "string",
             "null"
