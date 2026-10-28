@@ -645,6 +645,12 @@ async fn project_graph_publications_are_isolated_by_project_shard() {
 #[tokio::test]
 async fn exact_shard_retirement_leaves_sibling_live_and_remounts_fresh() {
     let fixture = ContractFixture::new("exact-shard-retirement").await;
+    let session_sync =
+        Arc::new(tracedecay_session_runtime::session_sync::DaemonSessionSyncService::default());
+    fixture
+        .registry
+        .install_session_sync_service(&session_sync)
+        .expect("install session sync lifecycle authority");
     let first_id = project_id("retire-first");
     let second_id = project_id("retire-second");
     let (first_database, first_sessions) = fixture.mount_project(&first_id).await;

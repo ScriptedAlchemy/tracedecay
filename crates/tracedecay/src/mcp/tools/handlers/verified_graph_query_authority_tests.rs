@@ -261,7 +261,7 @@ async fn commit_context_reads_source_without_query_authority() {
         assert!(summary.freshness.is_none());
         let coverage = summary.source_coverage.expect("source coverage");
         assert!(coverage.complete);
-        assert!(coverage.gaps.is_empty());
+        assert_eq!(coverage.gaps, Vec::new());
         assert_eq!(coverage.consistency, consistency);
         assert_eq!(summary.changed_files.len(), 1);
         assert_eq!(summary.changed_files[0].file, "src/lib.rs");
