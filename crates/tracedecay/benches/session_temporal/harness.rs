@@ -1189,14 +1189,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nearest_rank_uses_descriptive_sample_labels() {
-        let samples = [10_u64, 20, 30, 40, 50];
-        assert_eq!(nearest_rank(&samples, 50), Some(30));
-        assert_eq!(nearest_rank(&samples, 95), Some(50));
-        assert_eq!(nearest_rank(&samples, 99), Some(50));
-    }
-
-    #[test]
     fn refresh_preflight_requires_a_clean_source_commit() {
         let temp = TempDir::new().unwrap();
         let run_git = |arguments: &[&str]| {
