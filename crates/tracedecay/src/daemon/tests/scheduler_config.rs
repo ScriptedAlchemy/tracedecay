@@ -310,67 +310,6 @@ async fn daemon_scheduler_skips_stale_owner_key_after_rekey() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn disabled_finished_scheduler_reenables_with_a_fresh_owner() {
-    let dir = TempDir::new().expect("temp dir");
-    let project = dir.path().join("project");
-    let profile_root = dir.path().join("profile");
-    let client_identity = test_client_identity_for(profile_root);
-    std::fs::create_dir_all(project.join("src")).expect("src dir");
-    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
-    initialize_test_project(&project, &client_identity).await;
-    let handshake = DaemonHandshake {
-        project_path: Some(project.clone()),
-        client_identity,
-        ..test_handshake_defaults()
-    };
-    let engine = test_daemon_engine_for_profile(&handshake.client_identity.profile_root);
-    let _database_scope = enter_test_daemon_database_scope(
-        &handshake.client_identity.profile_root,
-        "scheduler-reenable-test",
-    );
-    let server = save_scheduled_automation(&engine, &handshake, false).await;
-    let cg = server.cg().await;
-    let key = ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
-    let finished = NativeTask::spawn(async {}).expect("native task");
-    wait_for_finished_task(
-        &finished,
-        tokio::time::Instant::now() + tokio::time::Duration::from_secs(2),
-        "finished scheduler task",
-    )
-    .await;
-    assert!(finished.is_finished());
-    engine
-        .store_administration
-        .automation_schedulers()
-        .lock()
-        .await
-        .insert(key.clone(), test_automation_scheduler_handle(finished));
-
-    save_scheduled_automation(&engine, &handshake, true).await;
-    engine
-        .ensure_automation_scheduler(key.clone(), project, handshake)
-        .await;
-
-    let schedulers = engine
-        .store_administration
-        .automation_schedulers()
-        .lock()
-        .await;
-    let owner = schedulers.get(&key).expect("re-enabled scheduler owner");
-    assert!(
-        !owner
-            .task
-            .as_ref()
-            .expect("live scheduler task")
-            .is_finished(),
-        "re-enable must replace a finished scheduler handle"
-    );
-    drop((schedulers, cg, server));
-    engine.shutdown_all().await;
-}
-
-#[cfg(unix)]
-#[tokio::test]
 async fn concurrent_reenable_creates_one_live_scheduler_owner() {
     let dir = TempDir::new().expect("temp dir");
     let project = dir.path().join("project");

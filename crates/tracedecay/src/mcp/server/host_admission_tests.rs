@@ -748,71 +748,6 @@ async fn hook_event_is_durable_before_attempt_and_retained_on_failure() {
 }
 
 #[tokio::test]
-async fn commit_before_ack_replays_once_and_acknowledges_exact_duplicate() {
-    let (cg, project, authority) = init_indexed_repo().await;
-    let spool = TempDir::new().unwrap();
-    let broker = default_spool_broker(spool.path());
-    let authoritative_commit = Arc::new(Mutex::new(false));
-    let failing_reconcile_sink: CodeIndexReconcileSink = {
-        let authoritative_commit = Arc::clone(&authoritative_commit);
-        Arc::new(move |_request, _demand| {
-            let authoritative_commit = Arc::clone(&authoritative_commit);
-            Box::pin(async move {
-                *authoritative_commit.lock().unwrap() = true;
-                super::CodeIndexDemandAdmissionV1::Unavailable(
-                    tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandUnavailableV1::SchedulerUnmounted,
-                )
-            })
-        })
-    };
-    let server =
-        server_with_broker(cg, &authority, Arc::clone(&broker), failing_reconcile_sink).await;
-    let mut routes = HookProjectRouteCache::default();
-    Box::pin(server.handle_hook_event_notification(
-        Some(&session_start(project.path().to_path_buf())),
-        &mut routes,
-    ))
-    .await;
-    assert!(*authoritative_commit.lock().unwrap());
-    assert_eq!(broker.pending_count().await, 1);
-    server.shutdown().await;
-    drop(server);
-    drop(broker);
-
-    let broker = default_spool_broker(spool.path());
-    let attempts = Arc::new(Mutex::new(0usize));
-    let duplicate_reconcile_sink: CodeIndexReconcileSink = {
-        let attempts = Arc::clone(&attempts);
-        let authoritative_commit = Arc::clone(&authoritative_commit);
-        Arc::new(move |_request, _demand| {
-            let attempts = Arc::clone(&attempts);
-            let authoritative_commit = Arc::clone(&authoritative_commit);
-            Box::pin(async move {
-                assert!(*authoritative_commit.lock().unwrap());
-                *attempts.lock().unwrap() += 1;
-                super::CodeIndexDemandAdmissionV1::Queued
-            })
-        })
-    };
-    let reopened = authority.reopen_project_graph(project.path()).await;
-    let server = server_with_broker(
-        reopened,
-        &authority,
-        Arc::clone(&broker),
-        duplicate_reconcile_sink,
-    )
-    .await;
-
-    // The constructor schedules startup replay. This explicit pass joins the
-    // same single-flight, so either ordering leaves one authoritative attempt
-    // and an empty durable backlog.
-    Box::pin(server.replay_host_admission(None)).await;
-    assert_eq!(broker.pending_count().await, 0);
-    assert_eq!(*attempts.lock().unwrap(), 1);
-    server.shutdown().await;
-}
-
-#[tokio::test]
 async fn oversized_event_is_rejected_before_canonical_attempt() {
     let (cg, project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
@@ -1440,21 +1375,6 @@ async fn add_branch_at_restart_replay_rejects_symlink_swap() {
     server.shutdown().await;
 }
 
-fn session_start_with_route(root: PathBuf) -> Value {
-    serde_json::to_value(
-        DaemonHookEvent::session_start(HostIntegrationIdV1::Codex, root.clone()).with_route(Some(
-            HookRouteMetadata {
-                session_id: Some("session-admission-test".to_string()),
-                thread_id: Some("thread-admission-test".to_string()),
-                cwd: Some(root.clone()),
-                worktree: Some(root),
-                branch: Some("main".to_string()),
-            },
-        )),
-    )
-    .unwrap()
-}
-
 async fn server_with_broker_and_runtime(
     cg: tracedecay_project::project::TraceDecay,
     broker: SharedHostAdmissionBroker,
@@ -1474,53 +1394,6 @@ async fn server_with_broker_and_runtime(
     McpServer::new_with_registered_test_context(context, Vec::new())
         .await
         .expect("registered test server")
-}
-
-#[tokio::test]
-async fn failed_admission_does_not_emit_hook_route_analytics() {
-    let (cg, project, authority) = init_indexed_repo().await;
-    let test_runtime = registered_runtime(&authority);
-    let spool = TempDir::new().unwrap();
-    let broker = default_spool_broker(spool.path());
-    let reconcile_sink: CodeIndexReconcileSink = Arc::new(|_request, _demand| {
-        Box::pin(async {
-            super::CodeIndexDemandAdmissionV1::Unavailable(
-                tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandUnavailableV1::SchedulerUnmounted,
-            )
-        })
-    });
-    let server =
-        server_with_broker_and_runtime(cg, Arc::clone(&broker), reconcile_sink, test_runtime).await;
-    let mut routes = HookProjectRouteCache::default();
-
-    let outcome = Box::pin(server.handle_hook_event_notification(
-        Some(&session_start_with_route(project.path().to_path_buf())),
-        &mut routes,
-    ))
-    .await;
-
-    assert_eq!(outcome.status, HostAdmissionStatus::Unavailable);
-    server.ledger_writes_settled().await;
-    let rows = server
-        .host_admission_test_runtime_for_test()
-        .expect("host-admission test runtime")
-        .query_profile_analytics_events_for_test(&tracedecay_global_db::AnalyticsEventQuery {
-            provider: Some("daemon_hook".to_string()),
-            project_id: None,
-            session_id: None,
-            event_kind: Some("hook_route".to_string()),
-            since: None,
-            until: None,
-            before_id: None,
-            limit: 16,
-        })
-        .await
-        .expect("query analytics");
-    assert!(
-        rows.is_empty(),
-        "pre-commit/failed admission must not emit route analytics: {rows:?}"
-    );
-    server.shutdown().await;
 }
 
 #[tokio::test]

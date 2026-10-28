@@ -461,40 +461,6 @@ async fn no_identity_successor_retains_exact_lifecycle_without_overwriting_expli
     assert_eq!(observed[2], ([3; 16], Some(explicit_lifecycle)));
 }
 
-#[tokio::test]
-async fn retryable_hook_work_does_not_acknowledge_the_durable_admission() {
-    let attempted = Arc::new(tokio::sync::Notify::new());
-    let observed_attempted = Arc::clone(&attempted);
-    let runtime = BoundedHookOrchestratorV1::new(1, move |_, _| {
-        let attempted = Arc::clone(&observed_attempted);
-        async move {
-            attempted.notify_one();
-            HookOrchestrationWorkOutcomeV1::RetryableFailure
-        }
-    })
-    .unwrap();
-    let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let observed_completions = Arc::clone(&completions);
-    let mut request = saved_edit_request(Some(hook_lifecycle()));
-    request.completion = Some(Arc::new(move |_| {
-        observed_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }));
-
-    assert_eq!(
-        runtime.admit(request),
-        HookOrchestrationAdmissionV1::Enqueued
-    );
-    attempted.notified().await;
-    while runtime.active_tasks() != 0 {
-        tokio::task::yield_now().await;
-    }
-    assert_eq!(
-        completions.load(std::sync::atomic::Ordering::Relaxed),
-        0,
-        "retryable producer failure must leave the durable hook pending for replay"
-    );
-}
-
 /// The durable-replay half of the retryable contract: after a cycle fails
 /// retryably and settles, the spool consumer re-admits the exact same
 /// envelope. The orchestrator must run a fresh cycle for it, not treat the

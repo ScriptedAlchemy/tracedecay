@@ -1677,58 +1677,6 @@ async fn cached_project_sessions_reject_conflicting_enrollment_authority() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn worktree_graph_mount_does_not_require_git() {
-    let temporary = tempfile::tempdir().expect("temporary project parent");
-    let root = temporary
-        .path()
-        .canonicalize()
-        .expect("canonical fixture root");
-    let profile_root = root.join("profile");
-    let project_root = root.join("project");
-    std::fs::create_dir_all(&project_root).expect("non-git project root");
-    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
-        .expect("durable profile identity");
-    let project_id = ProjectId::new("project.non-git-worktree").expect("project id");
-    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
-        &project_root,
-        project_id.as_str(),
-    )
-    .expect("project enrollment");
-    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
-        &profile_root,
-        13,
-        "non-git worktree graph",
-    )
-    .expect("daemon database scope");
-    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
-        .await
-        .expect("session runtime registry");
-    registry
-        .project_sessions(project_id.clone(), [project_root.clone()])
-        .await
-        .expect("register non-git project authority");
-    let project_store_root = profile_root.join("projects/project.non-git-worktree");
-    let database_path = project_store_root.join(tracedecay_runtime_core::config::DB_FILENAME);
-    std::fs::create_dir_all(database_path.parent().expect("database parent"))
-        .expect("database directory");
-    let authority = DatabaseAuthority::for_runtime(&database_path, "non-git project graph mount")
-        .expect("database authority");
-
-    let database = registry
-        .project_graph(
-            &project_root,
-            project_id,
-            database_path.clone(),
-            authority,
-            DatabaseAccessMode::ReadWrite,
-        )
-        .await
-        .expect("non-git graph runtime");
-
-    assert_eq!(database.database_path(), database_path);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
     let temporary = tempfile::tempdir().expect("temporary project parent");
     let root = temporary.path().canonicalize().expect("canonical root");

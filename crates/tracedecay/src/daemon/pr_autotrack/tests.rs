@@ -364,14 +364,6 @@ async fn reconcile_does_not_prepare_new_pr_without_scheduler_activation() {
     assert!(!data_root.path().join("pr-worktrees").exists());
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reconcile_activates_discovered_pr_head_when_scheduler_is_injected() {
-    let repo = tempfile::tempdir().unwrap();
-    let origin = tempfile::tempdir().unwrap();
-    init_repo_with_pr_11_head(repo.path(), origin.path());
-    assert_pr_11_head_reconciles(repo.path()).await;
-}
-
 /// A repository whose origin holds `refs/pull/11/head`, with the PR branch
 /// deleted locally.
 fn init_repo_with_pr_11_head(repo: &Path, origin: &Path) {

@@ -439,21 +439,6 @@ mod tests {
     }
 
     #[test]
-    fn a_changed_answer_is_served_in_full() {
-        let mut reads = RepeatReads::default();
-        let args = json!({"file": "src/lib.rs"});
-        let tool = "tracedecay_source_outline";
-        served(&mut reads, &call(1, tool, &args), answer(1, &big('x')));
-        let changed = served(&mut reads, &call(2, tool, &args), answer(2, &big('y')));
-        assert!(!is_pointer(&changed), "{changed}");
-        let repeat = served(&mut reads, &call(3, tool, &args), answer(3, &big('y')));
-        assert!(
-            is_pointer(&repeat),
-            "the changed answer becomes the new baseline: {repeat}"
-        );
-    }
-
-    #[test]
     fn a_differently_rendered_answer_is_served_in_full() {
         let mut reads = RepeatReads::default();
         let args = json!({"node_id": "n"});

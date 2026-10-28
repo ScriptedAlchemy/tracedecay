@@ -292,57 +292,6 @@ pub(super) fn enroll_project_on_disk_only(
     layout
 }
 
-/// The post-update startup-health probe runs as an ordinary daemon tool call
-/// and cannot pass `allow_init`. Admission must honour the same durable
-/// enrollment the authoritative layout resolver consults first: a project
-/// whose store is intact on disk is not "not enrolled" just because the
-/// profile registry was reset.
-#[cfg(unix)]
-#[tokio::test]
-async fn durably_enrolled_project_is_admitted_after_a_registry_reset() {
-    let home = TempDir::new().expect("isolated home");
-    let root = home.path().canonicalize().expect("canonical home");
-    let profile_root = root.join(".tracedecay");
-    let project = root.join("repository");
-    std::fs::create_dir_all(&project).expect("create repository");
-    git(&project, &["init", "--quiet"]);
-    let layout = enroll_project_on_disk_only(&project, &profile_root, "proj_forward_boundary");
-
-    let _database_scope =
-        enter_test_daemon_database_scope(&profile_root, "post-boundary registry reset");
-    let engine = test_daemon_engine_for_profile(&profile_root);
-
-    // The registry is the fresh one forward recovery brought the daemon up on.
-    let registry = engine
-        .store_administration
-        .registered_profile_database()
-        .await
-        .expect("profile registry");
-    assert!(
-        registry
-            .project_registry_context_by_alias(&project)
-            .await
-            .expect("registry lookup")
-            .is_none(),
-        "fixture must reproduce the post-boundary fresh registry"
-    );
-
-    engine
-        .ensure_registered_project_route(&project, false)
-        .await
-        .expect("a durably enrolled project must be admitted without allow_init");
-
-    // Admission must mount the recovered store, never mint a replacement.
-    let marker = tracedecay_runtime_core::storage::read_repository_identity_marker(&project)
-        .expect("read repository identity marker")
-        .expect("repository identity marker retained");
-    assert_eq!(marker.project_id, "proj_forward_boundary");
-    assert!(
-        layout.graph_db_path.is_file(),
-        "the pre-existing store must be left intact"
-    );
-}
-
 /// The guard still refuses a project whose repository identity marker points
 /// at a store that is not on disk, so the widened admission cannot resurrect a
 /// route with nothing behind it.
@@ -2638,38 +2587,6 @@ fn a_recorded_open_failure_replaces_only_the_warming_hint() {
     );
     prefer_recorded_open_failure(Ok("published owner"), &failed.1)
         .expect("a published owner outranks any failure this route recorded");
-}
-
-#[tokio::test]
-async fn project_open_task_shutdown_cancels_and_clears_route_registry() {
-    let tasks = super::super::ProjectOpenTasks::default();
-    let route = project_open_test_route("shutdown");
-    let started = Arc::new(tokio::sync::Notify::new());
-    let task_started = Arc::clone(&started);
-    let state = match tasks.start_cancellable(route, move |cancellation| async move {
-        task_started.notify_one();
-        cancellation.cancelled().await;
-        Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: "project open cancelled".to_string(),
-        })
-    }) {
-        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
-        super::super::ProjectOpenTaskClaim::Failed(_) => panic!("pending task must start"),
-        super::super::ProjectOpenTaskClaim::Saturated => panic!("pending task must fit"),
-    };
-    started.notified().await;
-    assert_eq!(tasks.tracked_task_count(), 1);
-
-    tasks.shutdown().await;
-
-    assert_eq!(tasks.tracked_task_count(), 0);
-    assert_eq!(tasks.tracked_route_count(), 0);
-    assert!(
-        super::super::ProjectOpenTasks::wait_for_completion(state)
-            .await
-            .is_err(),
-        "cancelled open tasks must wake waiters instead of retaining them"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

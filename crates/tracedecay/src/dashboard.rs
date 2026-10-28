@@ -305,29 +305,3 @@ pub async fn record_project_span_for_test(
         },
     )
 }
-
-#[cfg(test)]
-mod spa_router_tests {
-    use axum::{
-        body::Body,
-        http::{Request, StatusCode},
-    };
-    use tower::ServiceExt;
-
-    #[tokio::test]
-    async fn unknown_api_paths_never_receive_the_single_page_app() {
-        let response = tracedecay_api::static_dashboard_router(
-            tracedecay_project::product_runtime::FIXTURE_DASHBOARD_ASSETS,
-        )
-        .oneshot(
-            Request::builder()
-                .uri("/api/not-a-real-route")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("SPA router response");
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-}

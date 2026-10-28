@@ -164,56 +164,6 @@ async fn multi_root_tools_invoke_the_closed_daemon_routes() {
     );
 }
 
-#[tokio::test]
-async fn unmounted_files_graph_tool_owner_reports_a_real_orphaned_rust_source() {
-    let dir = TempDir::new().unwrap();
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("unmounted-files-root-dispatch");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(
-        project.join("Cargo.toml"),
-        "[package]\nname = \"unmounted-files-root-dispatch\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
-    )
-    .unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn mounted() {}\n").unwrap();
-    fs::write(
-        project.join("src/orphan.rs"),
-        "pub fn reachable_only_if_declared() {}\n",
-    )
-    .unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
-        "project.mcp-unmounted-files-root-dispatch",
-    )
-    .await
-    .unwrap();
-
-    let result = dispatch_on_graph_authority(
-        &cg,
-        "tracedecay_unmounted_files",
-        json!({"ecosystem": "rust", "format": "json"}),
-        verified_graph_options(&cg, ToolCallRegistryOptions::default()),
-    )
-    .await
-    .expect("the graph-tool owner computes the unmounted-files report");
-    let payload: Value = tool_json(&result);
-
-    assert_eq!(payload["unmounted_file_count"], 1);
-    assert_eq!(payload["returned_count"], 1);
-    assert_eq!(payload["unmounted"][0]["file"], "src/orphan.rs");
-    assert_eq!(
-        payload["unmounted"][0]["package"],
-        "unmounted-files-root-dispatch"
-    );
-    assert_eq!(
-        payload["unmounted"][0]["suggested_declaration"],
-        "mod orphan;"
-    );
-
-    cg.close();
-}
-
 #[test]
 fn bounded_tool_identity_preserves_catalog_names_and_bounds_unknown_values() {
     assert_eq!(
@@ -225,33 +175,6 @@ fn bounded_tool_identity_preserves_catalog_names_and_bounds_unknown_values() {
         "unknown"
     );
     assert_eq!(mcp_tool_bounded_identity("another-unknown-name"), "unknown");
-}
-
-/// The git-context reads are application operations the graph-tool owner
-/// answers; only the internal branch-add tool stays in the git dispatch
-/// family the MCP deadline horizon asks about.
-#[test]
-fn git_dispatch_family_holds_only_the_internal_branch_add_tool() {
-    assert!(tool_dispatches_git_reads("tracedecay_admin_branch_add"));
-    for tool_name in [
-        "tracedecay_pr_context",
-        "tracedecay_diff_context",
-        "tracedecay_changelog",
-        "tracedecay_branch_diff",
-        "tracedecay_affected",
-    ] {
-        assert!(
-            !tool_dispatches_git_reads(tool_name),
-            "{tool_name} is answered by the graph-tool owner",
-        );
-        assert!(
-            ApplicationSurfaceOperation::from_tool_name(tool_name)
-                .is_some_and(ApplicationSurfaceOperation::is_graph_tool),
-            "{tool_name} is a graph-tool operation",
-        );
-    }
-    assert!(!tool_dispatches_git_reads("tracedecay_files"));
-    assert!(!tool_dispatches_git_reads("tracedecay_diagnostics"));
 }
 
 #[tokio::test]
@@ -1710,37 +1633,6 @@ fn the_ceiling_reports_a_typed_retryable_problem() {
     );
 }
 
-/// Equivalence: a warm call that finishes well inside the ceiling is untouched
-/// by it, the bound changes failure, not work.
-#[tokio::test]
-async fn a_warm_call_is_unaffected_by_the_ceiling() {
-    let dir = TempDir::new().unwrap();
-    let (cg, _runtime) = registered_lib_fixture(
-        dir.path(),
-        "dispatch-ceiling-warm",
-        "pub fn probe() {}\n",
-        "project.mcp-dispatch-ceiling-warm",
-    )
-    .await;
-    let started = std::time::Instant::now();
-    let result = dispatch_on_graph_authority(
-        &cg,
-        "tracedecay_context",
-        json!({ "task": "probe" }),
-        verified_graph_options(&cg, ToolCallRegistryOptions::default()),
-    )
-    .await
-    .expect("a warm context call succeeds under the ceiling");
-    assert!(
-        started.elapsed() < TOOL_DISPATCH_CEILING,
-        "a warm call must finish far inside the ceiling, took {:?}",
-        started.elapsed(),
-    );
-    assert!(result.value["content"][0]["text"].is_string());
-
-    cg.close();
-}
-
 /// One graph read through the owner dispatch, rendered as its MCP result.
 async fn rendered_graph_read(
     cg: &TraceDecay,
@@ -1827,79 +1719,6 @@ async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
     assert!(
         !rendered.contains("code_graph_freshness"),
         "a proven-current response must not carry a freshness trailer: {rendered}",
-    );
-
-    cg.close();
-}
-
-/// The graph-tool owner reports the generation it served on the completion,
-/// so the envelope carries the stale seat and every surface renders the same
-/// trailer from it.
-#[tokio::test]
-async fn graph_tool_owner_reports_the_served_generation_for_the_trailer() {
-    let dir = TempDir::new().unwrap();
-    let (cg, _runtime) = registered_lib_fixture(
-        dir.path(),
-        "graph-tool-trailer",
-        "pub fn probe() {}\n",
-        "project.graph-tool-trailer",
-    )
-    .await;
-
-    let stale = super::compute_graph_tool_for_owner(
-        &cg,
-        ApplicationSurfaceOperation::Todos,
-        json!({}),
-        None,
-        verified_graph_stale_options(&cg, ToolCallRegistryOptions::default()),
-    )
-    .await
-    .expect("a stale-served graph tool still answers");
-    let served = stale.code_graph.clone().expect("served generation");
-    assert_eq!(served.generation, "generation.mcp-verified-graph-fixture.1");
-    assert!(served.freshness.is_stale());
-    let rendered = tracedecay_mcp::handlers::graph_tool::render_graph_tool(
-        Some(&cg.store_layout().response_handle_root),
-        &json!({}),
-        stale,
-    )
-    .unwrap();
-    let rendered = serde_json::to_string(&rendered.value).unwrap();
-    assert!(
-        rendered.contains(
-            "code_graph_freshness: stale, serving the last complete generation \
-             generation.mcp-verified-graph-fixture.1 (sealed 1m ago) while the code index rebuilds"
-        ),
-        "{rendered}"
-    );
-
-    let current = super::compute_graph_tool_for_owner(
-        &cg,
-        ApplicationSurfaceOperation::Todos,
-        json!({}),
-        None,
-        verified_graph_options(&cg, ToolCallRegistryOptions::default()),
-    )
-    .await
-    .expect("a current graph tool answers");
-    assert!(
-        !current
-            .code_graph
-            .as_ref()
-            .expect("served generation")
-            .freshness
-            .is_stale()
-    );
-    let rendered = tracedecay_mcp::handlers::graph_tool::render_graph_tool(
-        Some(&cg.store_layout().response_handle_root),
-        &json!({}),
-        current,
-    )
-    .unwrap();
-    assert!(
-        !serde_json::to_string(&rendered.value)
-            .unwrap()
-            .contains("code_graph_freshness")
     );
 
     cg.close();

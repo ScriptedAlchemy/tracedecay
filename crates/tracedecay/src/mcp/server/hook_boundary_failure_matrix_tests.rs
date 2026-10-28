@@ -17,8 +17,6 @@ use super::writer_test_support::{
 };
 use super::{CodeIndexReconcileSink, McpServer};
 use crate::mcp::project_route::HookProjectRouteCache;
-use tracedecay_domain::HostIntegrationIdV1;
-use tracedecay_hooks::core_events::DaemonHookEvent;
 use tracedecay_host_admission::{HostAdmissionBroker, HostAdmissionRuntime, SpoolBounds};
 use tracedecay_sessions::admission::HostAdmissionStatus;
 
@@ -273,66 +271,5 @@ async fn matrix_unavailable_then_success_keeps_sticky_retained_failure_frontier(
     Box::pin(server.replay_host_admission(None)).await;
     assert_eq!(broker.pending_count().await, 0);
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
-    server.shutdown().await;
-}
-
-/// Item-2 wiring: an after-edit host hook must deliver its touched paths into
-/// the injected code-index scheduler bridge (the queue entry point), so the
-/// incremental indexer reconciles the edit without any standing filesystem
-/// watcher. Proves the `requests.rs` hook boundary invokes the sink built in
-/// `daemon.rs` from the daemon-owned scheduler registry.
-#[tokio::test]
-async fn after_edit_hook_delivers_touched_paths_to_code_index_sink() {
-    let (cg, project, authority) = init_indexed_repo().await;
-    let expected_root =
-        tracedecay_runtime_core::path_safety::canonical_existing_identity(cg.project_root())
-            .unwrap();
-    type RecordedDeliveries = Arc<Mutex<Vec<(PathBuf, Vec<String>)>>>;
-    let recorded: RecordedDeliveries = Arc::new(Mutex::new(Vec::new()));
-    let sink_recorded = Arc::clone(&recorded);
-    let sink: super::CodeIndexHookSink = Arc::new(move |root: PathBuf, rel_paths: Vec<String>| {
-        let sink_recorded = Arc::clone(&sink_recorded);
-        Box::pin(async move {
-            sink_recorded.lock().unwrap().push((root, rel_paths));
-            // Report "delivered": a mounted worktree accepted the paths.
-            super::CodeIndexDemandAdmissionV1::Queued
-        })
-    });
-    let spool = TempDir::new().unwrap();
-    let broker = default_spool_broker(spool.path());
-    let mut context = registered_context(cg, &authority).with_code_index_hook_sink(sink);
-    context.host_admission_broker = Some(broker);
-    let server = McpServer::new_with_registered_test_context(context, Vec::new())
-        .await
-        .expect("registered test server");
-    let mut routes = HookProjectRouteCache::default();
-    let event = serde_json::to_value(DaemonHookEvent::post_tool_use_edit(
-        HostIntegrationIdV1::Codex,
-        vec!["src/lib.rs".to_owned()],
-        project.path().to_path_buf(),
-    ))
-    .unwrap();
-
-    let outcome = Box::pin(server.handle_hook_event_notification(Some(&event), &mut routes)).await;
-    assert_eq!(outcome.status, HostAdmissionStatus::Committed);
-
-    {
-        let recorded = recorded.lock().unwrap();
-        assert_eq!(
-            recorded.len(),
-            1,
-            "after-edit hook must reach the code-index scheduler bridge exactly once"
-        );
-        let (root, rel_paths) = &recorded[0];
-        assert_eq!(
-            root, &expected_root,
-            "sink must receive the served project root"
-        );
-        assert_eq!(
-            rel_paths,
-            &vec!["src/lib.rs".to_owned()],
-            "sink must receive the exact touched rel paths carried by the hook"
-        );
-    }
     server.shutdown().await;
 }

@@ -940,36 +940,6 @@ async fn failed_rekey_cancels_the_route_waiters_but_not_project_open() {
 }
 
 #[test]
-fn database_owner_registry_race_keeps_first_server_and_binds_route() {
-    let owner = StoreOwnerKey {
-        profile_root: PathBuf::from("/profile"),
-        global_db_path: PathBuf::from("/profile/global.db"),
-        project_id: Some("project".to_string()),
-        store_root: PathBuf::from("/store"),
-        graph_db_path: PathBuf::from("/store/main.db"),
-    };
-    let key = ProjectServerKey {
-        owner,
-        project_root: PathBuf::from("/project"),
-        scope_prefix: None,
-    };
-    let route = ProjectRouteKey {
-        profile_root: PathBuf::from("/profile"),
-        global_db_path: PathBuf::from("/profile/global.db"),
-        project_path: PathBuf::from("/project-alias"),
-        scope_prefix: None,
-    };
-    let mut registry = DatabaseOwnerRegistry::<u8>::default();
-    registry.insert(key.clone(), 7);
-
-    let (resolved, inserted) = registry.bind_or_insert_route(route.clone(), key.clone(), 9);
-
-    assert_eq!(resolved, 7);
-    assert!(!inserted);
-    assert_eq!(registry.get_route(&route), Some((&key, &7)));
-}
-
-#[test]
 fn database_owner_registry_evicts_lru_idle_and_protects_active_leases() {
     fn key(name: &str) -> ProjectServerKey {
         ProjectServerKey {

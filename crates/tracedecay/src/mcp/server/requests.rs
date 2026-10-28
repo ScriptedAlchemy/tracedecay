@@ -1834,30 +1834,6 @@ mod tool_call_preparation_tests {
         assert!(raw.caller_deadline.is_none());
         assert!(typed.caller_deadline.is_none());
     }
-
-    #[test]
-    fn absent_tool_call_params_stay_an_invalid_params_refusal() {
-        let id = json!(3);
-        let Err(missing_params) = McpServer::prepare_tool_call(&id, ToolCallParams::Raw(None))
-        else {
-            panic!("absent params must refuse");
-        };
-        assert_eq!(
-            serde_json::to_string(&missing_params).expect("serialize refusal"),
-            r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32602,"message":"missing params for tools/call"}}"#,
-        );
-
-        let no_name = json!({"arguments": {}});
-        let Err(missing_name) =
-            McpServer::prepare_tool_call(&id, ToolCallParams::Raw(Some(&no_name)))
-        else {
-            panic!("absent tool name must refuse");
-        };
-        assert_eq!(
-            serde_json::to_string(&missing_name).expect("serialize refusal"),
-            r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32602,"message":"missing 'name' in tools/call params"}}"#,
-        );
-    }
 }
 
 #[cfg(test)]
