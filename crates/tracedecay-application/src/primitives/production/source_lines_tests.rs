@@ -61,6 +61,7 @@ impl Fixture {
         let root = directory.path().join("repo");
         std::fs::create_dir(&root).expect("repository root");
         git(&root, &["init", "-b", "main"]);
+        git(&root, &["config", "--local", "core.autocrlf", "false"]);
         let scope = ResolvedScope::new(
             ProjectId::new("project.source-lines").unwrap(),
             RepositoryId::new("repository.source-lines").unwrap(),
