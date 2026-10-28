@@ -245,7 +245,7 @@ async fn pr_context_default_brief_orients_from_exact_commits_through_mcp() {
     let body = call_json(
         &fixture,
         "tracedecay_source_body",
-        json!({"node_id":node_id}),
+        json!({"node_id": node_id, "format": "json"}),
     )
     .await;
     let body: Value = serde_json::from_str(&body).unwrap();
