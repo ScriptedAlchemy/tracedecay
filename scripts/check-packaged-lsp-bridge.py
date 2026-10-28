@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import json
 import os
-import socket
 import subprocess
 import sys
 import time
@@ -70,23 +69,30 @@ def daemon_environment(
 
 def wait_for_daemon(
     daemon: subprocess.Popen[bytes],
-    socket_path: Path,
+    binary: Path,
+    project: Path,
+    environment: dict[str, str],
 ) -> None:
     deadline = time.monotonic() + TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if daemon.poll() is not None:
             fail(f"packaged daemon exited before bridge startup with {daemon.returncode}")
-        if socket_path.exists():
-            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            client.settimeout(0.25)
-            try:
-                client.connect(str(socket_path))
-            except OSError:
-                pass
-            else:
-                return
-            finally:
-                client.close()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            status = subprocess.run(
+                [binary, "daemon", "status"],
+                cwd=project,
+                env=environment,
+                capture_output=True,
+                timeout=remaining,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            break
+        if status.returncode == 0:
+            return
         time.sleep(0.05)
     fail("packaged daemon endpoint did not become ready")
 
@@ -128,7 +134,7 @@ def main() -> None:
                 stderr=daemon_stderr,
                 preexec_fn=dies_with_this_process(),
             )
-            wait_for_daemon(daemon, socket_path)
+            wait_for_daemon(daemon, binary, project, environment)
             initialized = subprocess.run(
                 [binary, "init", project],
                 cwd=project,
