@@ -52,7 +52,10 @@ Changing a worker's advertised capacity requires measurement on that host;
 repository settings cannot safely infer its available CPU or RAM.
 
 Use `rbe-linux` on Linux x86_64 clients, or `rbe-macos` on Apple Silicon macOS
-clients. These configurations attach `OSFamily` and `cpu_arch` execution
+clients. Windows x86_64 clients use `rbe-windows` with MSVC 14.44.35207
+mapped to `V:` and Windows SDK 10.0.26100.0 installed on both client and worker.
+CI offloads Windows Rust compilation/linking while running build scripts and
+tests on its hosted runner. These configurations attach `OSFamily` and `cpu_arch` execution
 properties and matching Bazel constraints to the host platform. The scheduler
 must match those properties exactly; Linux and macOS binaries require their
 respective execution hosts. Set `--jobs` in the local configuration when the

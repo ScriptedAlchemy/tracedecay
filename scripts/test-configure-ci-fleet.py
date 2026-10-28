@@ -61,6 +61,26 @@ class ConfigureCiFleetTest(unittest.TestCase):
         self.assertIn("build --strategy=TestRunner=dynamic,local", strategies)
         self.assertEqual(self.output.read_text(), "enabled=true\n")
 
+    def test_windows_executor_offloads_compilation_and_keeps_native_tests_local(self) -> None:
+        self.endpoint.listen()
+        self.assertTrue(self.configure(runner_os="Windows"))
+        options = self.options()
+        self.assertEqual(options["--config"], "rbe-windows")
+        self.assertEqual(options["--jobs"], "16")
+        self.assertEqual(options["--spawn_strategy"], "local")
+        self.assertNotIn("--dynamic_local_strategy", options)
+        self.assertIn("build --strategy=Rustc=remote", self.rc.read_text())
+        self.assertIn("build --strategy=TestRunner=local", self.rc.read_text())
+        self.assertEqual(self.output.read_text(), "enabled=true\n")
+
+    def test_unsupported_windows_architecture_does_not_contact_executor(self) -> None:
+        self.endpoint.listen()
+        self.endpoint.setblocking(False)
+        self.assertFalse(self.configure(runner_os="Windows", arch="ARM64"))
+        self.assertEqual(self.options(), {})
+        with self.assertRaises(BlockingIOError):
+            self.endpoint.accept()
+
     def test_offline_executor_clears_previous_fleet_selection(self) -> None:
         self.rc.write_text("build --remote_executor=grpc://old-executor:50051\n")
         self.assertFalse(self.configure())
