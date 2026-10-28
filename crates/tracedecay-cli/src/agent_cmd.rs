@@ -1389,6 +1389,7 @@ mod tests {
         lifecycle_invocation_confirms_plan,
         reinstall_agent_integrations_with_persisted_dashboard_policies,
     };
+    #[cfg(unix)]
     use tracedecay_agent_hosts::agents::host_bundle::{
         CompetingHostExtensionClaimV1, HostBundleError, HostComponentSetExecutionRequestV1,
         HostComponentSetLifecyclePreviewV1, HostComponentSetRegistrationV1, HostComponentSetV1,
@@ -1796,6 +1797,7 @@ mod tests {
         assert_ne!(std::fs::read(deployed).unwrap(), b"pre-receipt");
     }
 
+    #[cfg(unix)]
     struct VerifyFailureRegistration {
         inner: CatalogHostComponentRegistrationAuthority,
         stale_export_path: PathBuf,
@@ -1803,6 +1805,7 @@ mod tests {
         verify_failure_injected: bool,
     }
 
+    #[cfg(unix)]
     impl HostComponentSetRegistrationV1 for VerifyFailureRegistration {
         fn current_revision(
             &self,

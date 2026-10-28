@@ -828,16 +828,25 @@ pub fn copy_fixture_tree(src: &Path, dest: &Path) -> io::Result<()> {
         if entry.file_type()?.is_dir() {
             copy_fixture_tree(&from, &to)?;
         } else {
-            fs::copy(&from, &to)?;
-            let mut permissions = fs::metadata(&to)?.permissions();
-            #[cfg(unix)]
+            #[cfg(windows)]
             {
-                use std::os::unix::fs::PermissionsExt;
-                permissions.set_mode(permissions.mode() | 0o200);
+                // File copies retain Bazel's read-only attribute on Windows.
+                // Copy contents into scratch without inheriting that attribute.
+                io::copy(&mut fs::File::open(&from)?, &mut fs::File::create(&to)?)?;
             }
-            #[cfg(not(unix))]
-            permissions.set_readonly(false);
-            fs::set_permissions(&to, permissions)?;
+            #[cfg(not(windows))]
+            {
+                fs::copy(&from, &to)?;
+                let mut permissions = fs::metadata(&to)?.permissions();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    permissions.set_mode(permissions.mode() | 0o200);
+                }
+                #[cfg(not(unix))]
+                permissions.set_readonly(false);
+                fs::set_permissions(&to, permissions)?;
+            }
         }
     }
     Ok(())
@@ -851,6 +860,8 @@ fn readonly_fixture_copies_can_be_overlaid_and_edited() {
     let input = source.join("nested/input.rs");
     fs::write(&input, "original").unwrap();
     let mut permissions = fs::metadata(&input).unwrap().permissions();
+    #[cfg(windows)]
+    let original_permissions = permissions.clone();
     permissions.set_readonly(true);
     fs::set_permissions(&input, permissions).unwrap();
     #[cfg(unix)]
@@ -888,9 +899,7 @@ fn readonly_fixture_copies_can_be_overlaid_and_edited() {
     }
     #[cfg(windows)]
     {
-        let mut permissions = fs::metadata(&input).unwrap().permissions();
-        permissions.set_readonly(false);
-        fs::set_permissions(&input, permissions).unwrap();
+        fs::set_permissions(&input, original_permissions).unwrap();
     }
 }
 

@@ -1761,6 +1761,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
+    #[cfg(unix)]
     use crate::retention::footprint::census_profile_footprint;
     use tracedecay_runtime_core::db::engine::TestConnection;
 

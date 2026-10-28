@@ -14,11 +14,16 @@
 //! Apple-sign; this runs only for the installed file after its archive
 //! checksum has matched.
 
+#[cfg(unix)]
 use std::fs::File;
+#[cfg(unix)]
 use std::io::Read;
+#[cfg(unix)]
 use std::path::Path;
+#[cfg(unix)]
 use std::process::Command;
 
+#[cfg(unix)]
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// Bundle id shared with the install script and the macOS link wrapper.
@@ -33,6 +38,7 @@ pub(crate) enum MacosSignaturePlan {
 }
 
 /// `codesign -r` value. One argument: the `=` marks inline requirement text.
+#[cfg(unix)]
 fn stable_requirement_argument() -> String {
     format!("-r=designated => identifier \"{STABLE_SIGNING_IDENTIFIER}\"")
 }
@@ -88,10 +94,12 @@ pub(crate) fn is_macho_header(header: &[u8]) -> bool {
 ///
 /// `enabled` is split from `cfg!` so this body stays reachable on every host
 /// the crate is type-checked on. Production passes `cfg!(target_os = "macos")`.
+#[cfg(unix)]
 pub(crate) fn stabilize_installed_executable(path: &Path) -> Result<()> {
     apply_stable_adhoc_signature(path, cfg!(target_os = "macos"))
 }
 
+#[cfg(unix)]
 fn apply_stable_adhoc_signature(path: &Path, enabled: bool) -> Result<()> {
     if !enabled {
         return Ok(());
@@ -134,6 +142,7 @@ fn apply_stable_adhoc_signature(path: &Path, enabled: bool) -> Result<()> {
     })
 }
 
+#[cfg(unix)]
 fn read_header(path: &Path) -> Result<[u8; 4]> {
     let mut file = File::open(path).map_err(|error| TraceDecayError::Config {
         message: format!(
@@ -156,6 +165,7 @@ fn read_header(path: &Path) -> Result<[u8; 4]> {
     Ok(header)
 }
 
+#[cfg(unix)]
 fn codesign_report(path: &Path) -> Result<String> {
     let output = Command::new("codesign")
         .args(["-d", "--verbose=2", "-r-"])

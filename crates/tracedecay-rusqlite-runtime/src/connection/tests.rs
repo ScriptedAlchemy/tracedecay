@@ -5,9 +5,11 @@ use tempfile::NamedTempFile;
 use tracedecay_store::WAL_SOFT_LIMIT_BYTES;
 
 use super::{
-    ConnectionMode, Durability, OpenedDatabaseFile, OpenedDatabaseFileError, VerifiedReaderError,
-    open, open_immutable_reader, open_verified_reader, open_writer, with_progress_cancellation,
+    ConnectionMode, Durability, OpenedDatabaseFile, OpenedDatabaseFileError, open,
+    open_immutable_reader, open_writer, with_progress_cancellation,
 };
+#[cfg(unix)]
+use super::{VerifiedReaderError, open_verified_reader};
 
 fn database() -> NamedTempFile {
     let file = NamedTempFile::new().expect("temporary database");

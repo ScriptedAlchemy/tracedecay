@@ -549,6 +549,8 @@ fn assert_layered_over(
     #[cfg(unix)] base_container: (u64, u64),
 ) {
     let (directory, receipt) = receipt_for(profile, generation);
+    #[cfg(not(unix))]
+    let _ = directory;
     assert_eq!(receipt["form"], "layered");
     assert_eq!(receipt["base"]["generation"], base);
     #[cfg(unix)]

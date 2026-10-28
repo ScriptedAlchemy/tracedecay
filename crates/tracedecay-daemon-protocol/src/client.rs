@@ -1184,10 +1184,12 @@ mod controlled_invocation_tests;
 #[cfg(test)]
 mod tests {
     use super::DaemonInvocationError;
-    use tracedecay_contracts::{
-        ApplicationProblemKind, CancellationContext, CancellationStage, Deadline, now_micros,
-    };
+    use tracedecay_contracts::{ApplicationProblemKind, CancellationStage};
+    #[cfg(unix)]
+    use tracedecay_contracts::{CancellationContext, Deadline, now_micros};
+    #[cfg(unix)]
     use tracedecay_domain::UtcMicros;
+    #[cfg(unix)]
     use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
     #[test]

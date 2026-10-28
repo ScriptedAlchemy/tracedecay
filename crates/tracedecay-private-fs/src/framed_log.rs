@@ -800,20 +800,6 @@ mod tests {
         fs::set_permissions(path, permissions).expect("deny staging writes");
     }
 
-    fn restore_writes(path: &Path) {
-        let mut permissions = fs::metadata(path)
-            .expect("published metadata")
-            .permissions();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            permissions.set_mode(0o600);
-        }
-        #[cfg(not(unix))]
-        permissions.set_readonly(false);
-        let _ = fs::set_permissions(path, permissions);
-    }
-
     #[test]
     fn prepared_creation_preserves_a_destination_created_before_publication() {
         let root = tempfile::tempdir().expect("publish fixture root");
@@ -837,12 +823,14 @@ mod tests {
     fn a_prepared_publish_survives_a_staging_file_that_denies_writes() {
         let root = tempfile::tempdir().expect("publish fixture root");
         let destination = root.path().join("config.json");
+        let mut original_permissions = None;
 
         atomic_write_prepared(
             &destination,
             "fixture",
             b"published",
             |temporary| {
+                original_permissions = Some(fs::metadata(temporary)?.permissions());
                 deny_writes(temporary);
                 Ok(())
             },
@@ -860,7 +848,11 @@ mod tests {
             .filter_map(Result::ok)
             .filter(|entry| entry.path() != destination)
             .count();
-        restore_writes(&destination);
+        fs::set_permissions(
+            &destination,
+            original_permissions.expect("prepared permissions"),
+        )
+        .expect("restore prepared permissions");
         assert_eq!(leftovers, 0, "the staging file is consumed by the rename");
     }
 }

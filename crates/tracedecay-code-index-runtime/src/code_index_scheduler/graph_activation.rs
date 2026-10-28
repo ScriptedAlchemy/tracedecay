@@ -184,7 +184,7 @@ pub fn set_injected_resident_memory_refusal(worktree_id: &WorktreeId, refused: b
     );
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub fn set_injected_publication_deadline(worktree_id: &WorktreeId, exceeded: bool) {
     set_injected_flag(
         &mut injected_faults().publication_deadlines,

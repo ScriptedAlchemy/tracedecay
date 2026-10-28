@@ -6,13 +6,16 @@
 //! changes it. A TypeScript project with its own compiler gets that producer
 //! automatically at admission.
 
+#[cfg(unix)]
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
+#[cfg(unix)]
+use crate::support::wait_for_current_graph;
 use crate::support::{
     extract_real_server_text, handle_real_server_tool_call, handle_real_server_tool_call_raw,
-    production_composition_fixture, wait_for_current_graph,
+    production_composition_fixture,
 };
 
 const JSON_RPC_ID_ONE_DIGEST: &str = "6b86b273ff34fce19d6b804eff5a3f57";
@@ -560,6 +563,7 @@ async fn typescript_producer_still_running_is_pending_with_typed_detail() {
 
 /// Polls the read until the producer has published for the current
 /// generation; the pending state is the only one worth waiting through.
+#[cfg(unix)]
 async fn await_published_diagnostics(
     server: &tracedecay::mcp::McpServer,
     arguments: Value,
@@ -582,6 +586,7 @@ async fn await_published_diagnostics(
     panic!("the TypeScript producer did not publish within the polling budget: {last}");
 }
 
+#[cfg(unix)]
 fn published_records(result: &Value) -> Vec<Value> {
     let payload: Value = serde_json::from_str(extract_real_server_text(result))
         .unwrap_or_else(|error| panic!("diagnostics evidence must be JSON: {error}\n{result}"));

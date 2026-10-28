@@ -44,6 +44,7 @@ use tracedecay_automation_runtime::automation::run_ledger::{
 };
 #[cfg(unix)]
 use tracedecay_project::project::TraceDecay;
+#[cfg(unix)]
 use tracedecay_project::project::TraceDecayOpenOptions;
 use tracedecay_runtime_core::storage::default_profile_sharded_layout;
 #[cfg(unix)]

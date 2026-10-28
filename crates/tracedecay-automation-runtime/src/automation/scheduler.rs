@@ -947,7 +947,7 @@ fn process_state(pid: u32) -> ProcessState {
     }
     #[cfg(windows)]
     {
-        return windows_process_state(pid);
+        windows_process_state(pid)
     }
     #[cfg(not(any(unix, windows)))]
     ProcessState::Unknown
@@ -990,7 +990,7 @@ fn windows_process_state(pid: u32) -> ProcessState {
     let mut exit_code = 0_u32;
     // SAFETY: `process` is a live owned handle and `exit_code` is writable for
     // the duration of the call. `CloseHandle` consumes no Rust-owned memory.
-    let read = unsafe { get_exit_code_process(process, &mut exit_code) };
+    let read = unsafe { get_exit_code_process(process, &raw mut exit_code) };
     let _ = unsafe { close_handle(process) };
     if read == 0 {
         ProcessState::Unknown
@@ -2091,7 +2091,7 @@ evidence about it",
             );
         }
         #[cfg(not(unix))]
-        drop(stable_inode);
+        let _ = stable_inode;
     }
 
     #[tokio::test]

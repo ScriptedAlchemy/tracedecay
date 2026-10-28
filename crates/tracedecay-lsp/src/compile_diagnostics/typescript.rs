@@ -364,6 +364,7 @@ src/b.ts(2,2): warning TS6133: Second.
         );
     }
 
+    #[cfg(unix)]
     fn block<T>(future: impl Future<Output = T>) -> T {
         native_runtime::block_on(future).expect("native runtime")
     }

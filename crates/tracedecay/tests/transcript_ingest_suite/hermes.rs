@@ -26,6 +26,7 @@ use tracedecay_sessions::runtime::{
     SessionProvider, SessionRecord, with_transcript_source_profile,
 };
 
+#[cfg(unix)]
 use crate::common::{
     canonical_existing_path, spawn_tracedecay_daemon, tracedecay_command_with_home,
 };

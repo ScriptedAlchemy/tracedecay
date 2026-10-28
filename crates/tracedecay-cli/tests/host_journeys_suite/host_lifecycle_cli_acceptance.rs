@@ -3,7 +3,9 @@ use std::fs;
 use std::io::Write;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
 use sha2::{Digest, Sha256};
