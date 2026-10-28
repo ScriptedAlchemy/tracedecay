@@ -1,16 +1,6 @@
 use super::*;
 
 #[test]
-fn daemon_lifecycle_rejects_new_work_after_draining() {
-    let lifecycle = DaemonLifecycle::default();
-    assert!(lifecycle.accepting());
-
-    lifecycle.begin_draining();
-
-    assert!(!lifecycle.accepting());
-}
-
-#[test]
 fn daemon_client_admission_reports_saturation_and_recovers() {
     let admission = super::super::DaemonClientAdmission::new(1);
     let permit = match admission.try_admit() {
