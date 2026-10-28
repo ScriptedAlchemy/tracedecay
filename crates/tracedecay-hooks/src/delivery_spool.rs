@@ -931,7 +931,10 @@ mod tests {
         pending.sort_by_key(|receipt| receipt.receipt_id);
         expected.sort_by_key(|receipt| receipt.receipt_id);
         assert_eq!(pending, expected);
-        let receipt_ids = expected.iter().map(|receipt| receipt.receipt_id).collect::<Vec<_>>();
+        let receipt_ids = expected
+            .iter()
+            .map(|receipt| receipt.receipt_id)
+            .collect::<Vec<_>>();
         assert_eq!(owner.acknowledge_many(&receipt_ids), Ok(WRITERS));
         assert_eq!(
             HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO)
