@@ -120,6 +120,11 @@ fn tools_that_declare_the_session_stores_wait_for_registered_publication() {
         ),
         (
             "tracedecay_pr_context",
+            json!({"base_ref": "main", "view": "brief"}),
+            ProjectServerRequirement::Core,
+        ),
+        (
+            "tracedecay_pr_context",
             json!({"base_ref": "main", "view": "symbols"}),
             ProjectServerRequirement::RegisteredHostIngest,
         ),

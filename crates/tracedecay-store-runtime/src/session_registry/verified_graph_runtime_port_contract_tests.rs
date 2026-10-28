@@ -671,6 +671,12 @@ async fn exact_shard_retirement_leaves_sibling_live_and_remounts_fresh() {
     reconcile_through_database(&second_database, &second_manifest, key("retire-second"))
         .expect("sibling reconciliation remains live");
 
+    drop(first_sessions);
+    fixture
+        .registry
+        .retire_project_session_relation_graph(&first_id)
+        .await
+        .expect("retire the session owner bound to the first project memory graph");
     fixture
         .registry
         .retire_project_memory_graph(&first_id)
@@ -680,13 +686,21 @@ async fn exact_shard_retirement_leaves_sibling_live_and_remounts_fresh() {
         .registry
         .drop_project_runtime_caches(&first_id)
         .await;
-    drop(first_sessions);
-    let remounted = fixture
-        .registry
-        .project_memory(first_id.clone(), fixture.project_roots(&first_id))
-        .await
-        .expect("same project remounts with a fresh lifecycle");
-    drop(await_mounted_graph_operation(&remounted).await);
+    let (remounted, remounted_sessions) = fixture.mount_project(&first_id).await;
+    let remounted_graph = remounted
+        .memory_graph_runtime()
+        .expect("remounted memory graph proxy");
+    assert!(
+        !remounted_graph.shares_runtime_with(&first_proxy),
+        "remount must create a fresh memory graph lifecycle"
+    );
+    assert!(
+        remounted_sessions
+            .project_graph_runtime()
+            .expect("remount binds the fresh graph to its session owner")
+            .shares_runtime_with(&remounted_graph),
+        "remounted sessions must bind the exact fresh memory graph"
+    );
     reconcile_through_database(&remounted, &first_manifest, key("retire-first-remounted"))
         .expect("remounted reconciliation lifecycle is fresh");
 }

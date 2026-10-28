@@ -253,17 +253,13 @@ where
             ));
             graph_cost = Some(graph.read_cost());
         }
-        // Graph enrichment is optional: a parked or unmounted graph (the core
-        // owner serves briefs without one) leaves Git and source evidence.
+        // Transient graph availability leaves the completed local evidence.
+        // Missing query authority or request controls remain terminal.
         Err(error)
             if graph_enrichment_is_transient(&error)
                 || matches!(
                     error.project_route_context(),
-                    Some((
-                        "code-graph-parked" | "verified-code-graph-read-unavailable",
-                        _,
-                        _
-                    ))
+                    Some(("code-graph-parked", _, _))
                 ) =>
         {
             brief.graph_analysis = unavailable(&error.to_string());
