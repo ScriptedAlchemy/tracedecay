@@ -397,7 +397,6 @@ fn raw_strict_resume_mints_a_new_generation_when_a_file_identity_returns() {
     assert_ne!(replaced.file_identity, original.file_identity);
     assert_ne!(replaced.new_cursor.file_id, original.new_cursor.file_id);
     assert_eq!(replaced.start_offset, 0);
-    assert!(replaced.replacement_generation);
 
     std::fs::rename(&path, &replacement).unwrap();
     std::fs::rename(&moved, &path).unwrap();
@@ -405,6 +404,7 @@ fn raw_strict_resume_mints_a_new_generation_when_a_file_identity_returns() {
     assert_eq!(restored.file_identity, original.file_identity);
     assert_ne!(restored.new_cursor.file_id, original.new_cursor.file_id);
     assert_ne!(restored.new_cursor.file_id, replaced.new_cursor.file_id);
+    assert!(replaced.replacement_generation);
     assert_eq!(restored.start_offset, 0);
     assert!(restored.replacement_generation);
     assert_eq!(restored.frames.len(), 2);
