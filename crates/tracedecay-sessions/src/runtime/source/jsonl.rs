@@ -1310,7 +1310,11 @@ impl<'a> PreparedJsonlScan<'a> {
                         mtime,
                     ),
                 )
-            } else if file_identity == resume_state.file_identity {
+            } else {
+                // A physical identity can return after another file replaces
+                // it (including inode reuse). Chain every rewrite from the
+                // committed generation so an old observation namespace cannot
+                // become current again merely because its file id returned.
                 (
                     0,
                     rewritten_jsonl_generation(
@@ -1329,8 +1333,6 @@ impl<'a> PreparedJsonlScan<'a> {
                         mtime,
                     ),
                 )
-            } else {
-                (0, file_identity)
             }
         } else if should_resume_jsonl(previous, file_size, mtime, file_identity) {
             // Carry the stored generation forward: a replacement marker minted
@@ -1383,9 +1385,8 @@ impl<'a> PreparedJsonlScan<'a> {
         }
         after_generation_capture();
         // A generation that is not the file's own identity was minted for a
-        // rewrite, so it stays flagged for every batch it covers. The rewind
-        // clause also covers the first batch after a file was replaced
-        // by a different identity, whose generation is that new identity.
+        // rewrite, so it stays flagged for every batch it covers. Rewinding a
+        // previously consumed file also marks the first replacement batch.
         let replacement = file_id != file_identity || (seek_to == 0 && previous.position > 0);
         io.change = if replacement {
             JsonlChangeKind::Rewritten

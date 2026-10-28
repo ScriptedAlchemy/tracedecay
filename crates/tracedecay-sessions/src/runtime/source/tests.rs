@@ -367,6 +367,54 @@ fn raw_strict_scan_mints_a_distinct_generation_for_each_rewrite() {
 }
 
 #[test]
+fn raw_strict_resume_mints_a_new_generation_when_a_file_identity_returns() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("returning-file.jsonl");
+    let moved = dir.path().join("moved-file.jsonl");
+    let replacement = dir.path().join("replacement.jsonl");
+    std::fs::write(&path, "{\"head\":1}\n{\"value\":1}\n").unwrap();
+    std::fs::write(&replacement, "{\"head\":1}\n{\"value\":2}\n").unwrap();
+    let scan = |previous: Option<&super::jsonl::RawNewJsonl>| {
+        try_stream_new_jsonl_raw_strict_with_resume(
+            &path,
+            previous.map_or_else(StoredCursor::default, |scan| scan.new_cursor),
+            None,
+            MAX_JSONL_RECORD_BYTES,
+            previous.map(|scan| JsonlResumeState {
+                generation: scan.new_cursor.file_id,
+                file_identity: scan.file_identity,
+                fingerprint: scan.frames.last().unwrap().resume_fingerprint,
+            }),
+        )
+        .unwrap()
+    };
+    let original = scan(None);
+    // Move the live files instead of relying on the allocator to reuse an
+    // inode: the original native identity deterministically returns later.
+    std::fs::rename(&path, &moved).unwrap();
+    std::fs::rename(&replacement, &path).unwrap();
+    let replaced = scan(Some(&original));
+    assert_ne!(replaced.file_identity, original.file_identity);
+    assert_ne!(replaced.new_cursor.file_id, original.new_cursor.file_id);
+    assert_eq!(replaced.start_offset, 0);
+    assert!(replaced.replacement_generation);
+
+    std::fs::rename(&path, &replacement).unwrap();
+    std::fs::rename(&moved, &path).unwrap();
+    let restored = scan(Some(&replaced));
+    assert_eq!(restored.file_identity, original.file_identity);
+    assert_ne!(restored.new_cursor.file_id, original.new_cursor.file_id);
+    assert_ne!(restored.new_cursor.file_id, replaced.new_cursor.file_id);
+    assert_eq!(restored.start_offset, 0);
+    assert!(restored.replacement_generation);
+    assert_eq!(restored.frames.len(), 2);
+
+    let idle = scan(Some(&restored));
+    assert_eq!(idle.new_cursor, restored.new_cursor);
+    assert!(idle.frames.is_empty());
+}
+
+#[test]
 fn raw_strict_resume_checkpoint_detects_same_inode_middle_rewrite() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("same-inode-middle.jsonl");
