@@ -33,14 +33,12 @@ type ProjectOwnerAwaitFutureV1<'a, T> = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<Option<(T, VecDeque<String>)>>> + Send + 'a>,
 >;
 
-#[cfg(unix)]
 type BrokerConnectionPhaseFutureV1<'a, T> =
-    std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send + 'a>>;
+    std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
-#[cfg(unix)]
 #[inline(never)]
 fn boxed_broker_connection_phase<'a, T>(
-    future: impl std::future::Future<Output = Result<T>> + Send + 'a,
+    future: impl std::future::Future<Output = T> + Send + 'a,
 ) -> BrokerConnectionPhaseFutureV1<'a, T>
 where
     T: Send + 'a,
@@ -2304,23 +2302,9 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     else {
         return Ok(());
     };
-    let Some(setup_activity) =
-        Box::pin(dispatch.serve_doctor(&mut transport, &handshake, &first_request, setup_activity))
-            .await?
-    else {
-        return Ok(());
-    };
-    let Some((setup_activity, initialize_route)) = Box::pin(dispatch.prepare_initialize_route(
-        &mut transport,
-        &mut handshake,
-        &first_request,
-        setup_activity,
-    ))
-    .await?
-    else {
-        return Ok(());
-    };
-    let Some(setup_activity) = Box::pin(dispatch.serve_branch_request(
+    // Erase each phase at its existing heap boundary, as the Unix route does.
+    // Box::pin alone carries every nested future type into the tracing wrapper.
+    let Some(setup_activity) = boxed_broker_connection_phase(dispatch.serve_doctor(
         &mut transport,
         &handshake,
         &first_request,
@@ -2330,12 +2314,37 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     else {
         return Ok(());
     };
-    if let Some(result) =
-        Box::pin(dispatch.serve_invocation(&mut transport, &handshake, &first_request)).await
+    let Some((setup_activity, initialize_route)) =
+        boxed_broker_connection_phase(dispatch.prepare_initialize_route(
+            &mut transport,
+            &mut handshake,
+            &first_request,
+            setup_activity,
+        ))
+        .await?
+    else {
+        return Ok(());
+    };
+    let Some(setup_activity) = boxed_broker_connection_phase(dispatch.serve_branch_request(
+        &mut transport,
+        &handshake,
+        &first_request,
+        setup_activity,
+    ))
+    .await?
+    else {
+        return Ok(());
+    };
+    if let Some(result) = boxed_broker_connection_phase(dispatch.serve_invocation(
+        &mut transport,
+        &handshake,
+        &first_request,
+    ))
+    .await
     {
         return result;
     }
-    let Some(setup_activity) = Box::pin(dispatch.serve_bootstrap_request(
+    let Some(setup_activity) = boxed_broker_connection_phase(dispatch.serve_bootstrap_request(
         &mut transport,
         &handshake,
         &first_request,
@@ -2346,7 +2355,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     else {
         return Ok(());
     };
-    let Some(setup_activity) = Box::pin(dispatch.admit_file_edit(
+    let Some(setup_activity) = boxed_broker_connection_phase(dispatch.admit_file_edit(
         &mut transport,
         &handshake,
         &first_request,
@@ -2356,7 +2365,7 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     else {
         return Ok(());
     };
-    Box::pin(dispatch.serve_routed_request(
+    boxed_broker_connection_phase(dispatch.serve_routed_request(
         transport,
         handshake,
         first_request,
