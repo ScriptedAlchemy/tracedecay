@@ -624,4 +624,15 @@ mod tests {
         assert!(parse_gh_pr_list(json, 2).expect("partial list").partial);
         assert!(!parse_gh_pr_list(json, 3).expect("complete list").partial);
     }
+
+    #[test]
+    fn dashboard_managed_summary_reader_is_empty_without_state() {
+        let data_root = tempfile::tempdir().expect("temp data root");
+        assert_eq!(
+            managed_summary(data_root.path())
+                .expect("read empty managed summary")
+                .len(),
+            0
+        );
+    }
 }
