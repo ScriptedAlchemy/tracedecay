@@ -166,7 +166,7 @@ jobs:
         with:
           cache-key: release-${{ matrix.target }}
           tailscale-client-id: >-
-            ${{ (matrix.name == 'x86_64-linux' || matrix.name == 'aarch64-macos')
+            ${{ (matrix.name == 'x86_64-linux' || matrix.name == 'aarch64-macos' || matrix.name == 'x86_64-windows')
                 && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
                     || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
           cache-save: ${{ matrix.inventory_only != true }}
