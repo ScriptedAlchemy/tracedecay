@@ -186,19 +186,15 @@ codegen-units = 1
 [profile.dev.package."*"]
 debug = 0
 
+# CI and PR builds compile unoptimized: most workspace code is composition
+# and DTO glue that spends its compile time in LLVM for no test-speed gain.
+# Only the crates below, whose suites have runtime budgets, are optimized.
+# Release builds (`--config=release`, `--config=dist`) ignore this profile.
 [profile.perf]
 inherits = "dev"
-opt-level = 1
+opt-level = 0
 debug-assertions = true
 overflow-checks = true
-
-# Serde/DTO glue spends most compilation time in LLVM and does not benefit
-# from the kernel optimization used by the generation-scale suites.
-[profile.perf.package.tracedecay-daemon-protocol]
-opt-level = 0
-
-[profile.perf.package.tracedecay-contracts]
-opt-level = 0
 
 # A cold tokenizer loads its embedded vocabulary and compiles BPE regexes.
 # At opt-level 0 that startup alone exceeds the proposal journey's budget.
