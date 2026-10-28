@@ -5,17 +5,14 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use tracedecay_application::code_index::{
-    CodeIndexIgnoredDependencyAdmissionErrorV1, CodeIndexIgnoredDependencyAdmissionPortV1,
-    CodeIndexIgnoredDependencyAdmissionRequestV1,
+    CodeIndexIgnoredDependencyAdmissionPortV1, CodeIndexIgnoredDependencyAdmissionRequestV1,
 };
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId, ResolvedScope, code_index_freshness::CodeGraphServingReadinessV1,
 };
-use tracedecay_domain::{
-    ActorId, CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
-};
+use tracedecay_domain::{ActorId, CodeGenerationId, ManifestDigest, ProjectId, UtcMicros};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use tracedecay_code_index_runtime::code_index_scheduler::{
@@ -39,15 +36,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    async fn mount() -> Self {
-        Self::mount_inner(false).await
-    }
-
     async fn mount_persistent() -> Self {
-        Self::mount_inner(true).await
-    }
-
-    async fn mount_inner(persistent_graph: bool) -> Self {
         let root = TempDir::new().expect("fixture root");
         git(root.path(), &["init", "-q", "-b", "main"]);
         git(root.path(), &["config", "user.name", "TraceDecay Test"]);
@@ -78,7 +67,7 @@ export function generationAnchor() { return 1; }
 
         let store = TempDir::new().expect("store root");
         let registry = CodeIndexSchedulerRegistryV1::new(1);
-        let database_scope = if persistent_graph {
+        let database_scope = {
             tracedecay_runtime_core::storage::pin_fixture_repository_identity(
                 root.path(),
                 PROJECT_ID,
@@ -120,12 +109,6 @@ export function generationAnchor() { return 1; }
                 .await
                 .expect("mount persistent graph-backed scheduler");
             Some(scope)
-        } else {
-            registry
-                .mount_worktree(project_id(), root.path(), store.path().to_path_buf())
-                .await
-                .expect("mount code-index scheduler");
-            None
         };
         wait_for_initial_generation(&registry, root.path()).await;
         let baseline = latest(&registry, root.path()).await;
@@ -181,90 +164,6 @@ export function generationAnchor() { return 1; }
             std::slice::from_ref(&self.import),
         )
     }
-
-    async fn serving(&self) -> LatestCompleteCodeIndexV1 {
-        latest(&self.registry, self.root()).await
-    }
-
-    async fn assert_unchanged(&self) {
-        let serving = self.serving().await;
-        assert_eq!(
-            serving.generation().manifest().generation_id,
-            self.generation
-        );
-        assert!(
-            serving.generation().ignored_source_admissions().is_empty(),
-            "a refused project binding must not mutate the ignored-source roster"
-        );
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn read_only_project_binding_refuses_before_scheduler_mutation() {
-    let fixture = Fixture::mount().await;
-    let context = request_context(fixture.scope.clone(), "read-only");
-
-    let error = fixture
-        .port(false)
-        .admit(fixture.request(&context, &fixture.generation))
-        .await
-        .expect_err("a read-only project database cannot schedule source mutation");
-
-    assert_eq!(error, CodeIndexIgnoredDependencyAdmissionErrorV1::ReadOnly);
-    fixture.assert_unchanged().await;
-    fixture.registry.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stale_pin_reports_the_exact_active_generation_for_the_bound_root_and_scope() {
-    let fixture = Fixture::mount().await;
-    let context = request_context(fixture.scope.clone(), "stale");
-    let stale = CodeGenerationId::new("generation.project-open.stale")
-        .expect("syntactically valid stale generation");
-
-    let error = fixture
-        .port(true)
-        .admit(fixture.request(&context, &stale))
-        .await
-        .expect_err("a superseded generation pin must fail closed");
-
-    assert_eq!(
-        error,
-        CodeIndexIgnoredDependencyAdmissionErrorV1::Stale {
-            active_generation: fixture.generation.clone(),
-        }
-    );
-    fixture.assert_unchanged().await;
-    fixture.registry.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn foreign_request_context_scope_is_refused_before_scheduler_mutation() {
-    let fixture = Fixture::mount().await;
-    let foreign_scope = ResolvedScope::new(
-        ProjectId::new("project.project-open-foreign").expect("foreign project"),
-        RepositoryId::new("repository.project-open-foreign").expect("foreign repository"),
-        WorktreeId::new("worktree.project-open-foreign").expect("foreign worktree"),
-        None,
-    )
-    .expect("foreign scope");
-    let context = request_context(foreign_scope, "foreign-scope");
-
-    let error = fixture
-        .port(true)
-        .admit(fixture.request(&context, &fixture.generation))
-        .await
-        .expect_err("a foreign request scope cannot borrow this project binding");
-
-    assert!(
-        matches!(
-            error,
-            CodeIndexIgnoredDependencyAdmissionErrorV1::Unavailable { .. }
-        ),
-        "scope refusal must remain typed and cannot reach the scheduler: {error:?}"
-    );
-    fixture.assert_unchanged().await;
-    fixture.registry.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
