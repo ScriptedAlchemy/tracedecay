@@ -103,7 +103,8 @@ and tests the supported feature graph directly; source-package publication
 requires a separate product decision with a real consumer.
 
 The `shipped-cli` CI job also exercises MCP stdio and the LSP initialize
-handshake against its production binary in isolated temporary profiles.
+handshake against its production binary in isolated temporary profiles. It
+runs on master pushes and the release PR, not on ordinary PRs.
 Archive and MCPB verification stays attached to the exact release assets;
 SDK conformance stays attached to the npm tarball.
 
