@@ -314,3 +314,103 @@ mod handshake_refusal_tests {
         assert_eq!(DaemonHandshakeRefusal::from_line("not json"), None);
     }
 }
+
+#[cfg(test)]
+mod decoding_tests {
+    use super::{DaemonHandshake, MovedStoreAdoption};
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    /// Old clients omit the adoption field entirely; the daemon must default it
+    /// to `Never` so a mixed-version pair can never remap a moved store.
+    #[test]
+    fn daemon_handshake_defaults_missing_moved_store_adoption_to_never() {
+        let handshake = DaemonHandshake {
+            project_path: Some(PathBuf::from("/work/repo")),
+            scope_prefix: None,
+            timings: false,
+            allow_init: false,
+            allow_initialize_root_routing: false,
+            client_identity: crate::DaemonClientIdentity {
+                profile_root: PathBuf::from("/profiles/client"),
+                global_db_path: PathBuf::from("/profiles/client/global.db"),
+            },
+            client_version: "0.1.0-test".to_owned(),
+            client_instance_id: "client.handshake-test".to_owned(),
+            tool_list_changed_capable: false,
+            catalog_version: String::new(),
+            moved_store_adoption: MovedStoreAdoption::Never,
+        };
+        let encoded = serde_json::json!({
+            "project_path": "/work/repo",
+            "scope_prefix": null,
+            "timings": false,
+            "allow_init": false,
+            "client_identity": handshake.client_identity,
+            "client_version": handshake.client_version,
+            "client_instance_id": handshake.client_instance_id,
+        })
+        .to_string();
+
+        let decoded = DaemonHandshake::from_line(&encoded).expect("legacy handshake should decode");
+        assert_eq!(decoded.moved_store_adoption, MovedStoreAdoption::Never);
+    }
+
+    #[test]
+    fn daemon_handshake_requires_client_identity() {
+        let encoded = serde_json::json!({
+            "project_path": "/work/repo",
+            "scope_prefix": null,
+            "timings": false,
+            "allow_init": false
+        })
+        .to_string();
+
+        let Err(error) = DaemonHandshake::from_line(&encoded) else {
+            panic!("a handshake without client identity must be refused");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("missing field `client_identity`"),
+            "unexpected refusal: {error}"
+        );
+    }
+
+    /// Handshake metadata is negotiated over a live daemon connection. Absent
+    /// capability claims must resolve to their fail-closed defaults.
+    #[test]
+    fn handshake_defaults_optional_metadata_when_fields_are_absent() {
+        let encoded = json!({
+            "project_path": "/work/repo",
+            "scope_prefix": null,
+            "timings": false,
+            "allow_init": false,
+            "client_identity": {
+                "profile_root": "/profiles/client",
+                "global_db_path": "/profiles/client/global.db"
+            }
+        })
+        .to_string();
+
+        let decoded =
+            DaemonHandshake::from_line(&encoded).expect("handshake with absent optional metadata");
+
+        assert!(!decoded.allow_initialize_root_routing);
+        assert_eq!(decoded.client_version, "");
+        assert_eq!(decoded.client_instance_id, "");
+        assert!(!decoded.tool_list_changed_capable);
+        assert_eq!(decoded.catalog_version, "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn client_version_skew_flags_only_real_mismatches() {
+        assert_eq!(crate::client_version_skew("1.2.3", "1.2.3"), None);
+        assert_eq!(crate::client_version_skew("", "1.2.3"), None);
+        assert_eq!(
+            crate::client_version_skew("1.3.0", "1.2.3"),
+            Some("1.3.0".to_string())
+        );
+    }
+}

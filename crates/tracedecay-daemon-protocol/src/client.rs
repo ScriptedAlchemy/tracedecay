@@ -1464,3 +1464,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, unix))]
+mod lsp_tests;
