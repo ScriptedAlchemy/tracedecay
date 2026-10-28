@@ -2006,8 +2006,7 @@ impl PortableBrokerDispatch<'_> {
             let (initialized_project_server_ready, admission_refusal) =
                 self.cached_initialize_readiness(handshake, request).await?;
             if !initialized_project_server_ready
-                && let Some(mut response) =
-                    daemon_bootstrap_response(request, initialize_route)
+                && let Some(mut response) = daemon_bootstrap_response(request, initialize_route)
             {
                 let project_open_error = match admission_refusal {
                     Some(refusal) => initialize_project_open_error(refusal),

@@ -297,10 +297,30 @@ fn a_failed_receipt_drain_is_reported_on_status_and_clears_when_the_spool_drains
     // the failure clears.
     std::fs::remove_file(&corrupt).unwrap();
     capture_stop(&home, &project, "after-repair");
-    let drained = json!({ "status": "drained" });
+    let repair_started = Instant::now();
+    // Status describes the last sweep, which may precede this receipt's publication.
+    assert!(
+        receipt_drain_latency(&receipts, PROMPT_DRAIN).is_some(),
+        "the receipt published after repair must drain within {PROMPT_DRAIN:?}"
+    );
+    // The stop's receipt settles, but its producer work still awaits this
+    // fixture's unmounted hook orchestrator.
+    let recovered = json!({
+        "status": "waiting",
+        "waiting": [{
+            "host": "cursor_desktop",
+            "spool": "pending_work",
+            "cause": "1 pending producer work obligation(s) remain unresolved; the first awaits the project's hook orchestrator",
+        }],
+    });
     assert_eq!(
-        await_hook_replay_status(&home, &project, &drained, PROMPT_DRAIN),
-        drained
+        await_hook_replay_status(
+            &home,
+            &project,
+            &recovered,
+            PROMPT_DRAIN.saturating_sub(repair_started.elapsed()),
+        ),
+        recovered
     );
     assert_eq!(published_receipts(&receipts), Vec::<PathBuf>::new());
 }
