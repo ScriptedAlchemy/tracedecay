@@ -665,11 +665,21 @@ fn await_published_code_index(home: &Path, project: &Path) {
         .stdin(Stdio::null())
         .output()
         .expect("run status");
-    assert!(
-        output.status.success(),
-        "status failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    if !output.status.success() {
+        let current = run_application_tool(
+            home,
+            project,
+            ApplicationSurfaceOperation::Status,
+            &serde_json::json!({ "format": "json" }),
+        );
+        panic!(
+            "status wait failed for {}: {}\ncurrent status:\n{}\nstatus stderr:\n{}",
+            project.display(),
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&current.stdout),
+            String::from_utf8_lossy(&current.stderr)
+        );
+    }
     let status: Value = serde_json::from_slice(&output.stdout).expect("status JSON");
     assert_eq!(
         status["wait"],
