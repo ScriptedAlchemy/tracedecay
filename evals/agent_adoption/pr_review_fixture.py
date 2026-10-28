@@ -43,8 +43,13 @@ def git(root: Path, *args: str) -> str:
 
 
 def build(destination: Path) -> dict[str, str]:
+    # copyfile drops the source mode: Bazel runfiles are read-only, and this
+    # scratch project is edited below.
     shutil.copytree(Path(__file__).with_name("fixture_pr_review"), destination,
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+                    copy_function=shutil.copyfile)
+    for directory, _, _ in os.walk(destination):
+        os.chmod(directory, 0o755)
     git(destination, "init", "-q", "--initial-branch=main")
     git(destination, "add", ".")
     git(destination, "commit", "-qm", "feat(shop): add stock reservation and receipt helpers")

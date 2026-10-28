@@ -473,11 +473,35 @@ fn delivery_receipts_drain_promptly_after_the_last_append_and_after_a_restart() 
         receipt_drain_latency(&receipts, PROMPT_DRAIN).is_some(),
         "an acknowledged exact output retry must replay its durable settlement"
     );
-    let drained = json!({ "status": "drained" });
-    assert_eq!(
-        await_hook_replay_status(&home, &project, &drained, PROMPT_DRAIN),
-        drained
-    );
+    // Receipts and records drain. Admitted edits' producer work waits for the
+    // hook orchestrator, which mounts only once a code-index generation is
+    // complete: before then the sweep reports waiting, afterwards it drains.
+    // Which one a run sees, and how many edits are owed, depends on timing, so
+    // either outcome passes and only the shape of the waiting entries is
+    // asserted.
+    let settled = |status: &serde_json::Value| {
+        status["status"] == "drained"
+            || (status["status"] == "waiting"
+                && status["waiting"].as_array().is_some_and(|entries| {
+                    !entries.is_empty()
+                        && entries.iter().all(|entry| {
+                            entry["host"] == "cursor_desktop"
+                                && entry["spool"] == "pending_work"
+                                && entry["cause"].as_str().is_some_and(|cause| {
+                                    cause.ends_with("awaits the project's hook orchestrator")
+                                })
+                        })
+                }))
+    };
+    let started = Instant::now();
+    let status = loop {
+        let status = hook_replay_status(&home, &project);
+        if settled(&status) || started.elapsed() >= PROMPT_DRAIN {
+            break status;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(settled(&status), "{status}");
 }
 
 /// One Claude `PostToolUse` Write of `src/lib.rs` in `checkout`, as the host

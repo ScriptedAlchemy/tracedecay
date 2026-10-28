@@ -166,6 +166,12 @@ pub(crate) fn admitted_scope(_root: &Path) -> Option<ResolvedScope> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use tracedecay_query::search_quality::{
+        DirectEvaluationStatusV1, QUERY_BASELINE_PROFILE, packaged,
+    };
+
     /// The packaged evaluator carries its own workload, corpus, and Git
     /// authority, so `compare` needs nothing from the checkout it runs in.
     #[test]
@@ -186,5 +192,93 @@ mod tests {
                 ("query-fallback", "validation")
             ]
         );
+    }
+
+    #[test]
+    fn source_and_packaged_evaluations_preserve_corpus_and_fallback_receipts() {
+        let assets = super::materialize().expect("materialized evaluator fixture");
+        assert!(crate::root_admitted_corpus_scope(assets.root()).is_none());
+        assert!(
+            tracedecay_runtime_core::storage::write_repository_identity_marker(
+                assets.root(),
+                "project.search-eval-source-fixture",
+            )
+            .expect("enroll the temporary evaluator repository")
+        );
+        let scope = crate::root_admitted_corpus_scope(assets.root())
+            .expect("source evaluation admits the fixture's authoritative identity");
+        assert_eq!(
+            scope.project_id.as_str(),
+            "project.search-eval-source-fixture"
+        );
+
+        let profiles = vec![QUERY_BASELINE_PROFILE.to_owned()];
+        let source = crate::compare_direct(
+            assets.root(),
+            Some(&assets.workload_path()),
+            Some(&profiles),
+            crate::root_admitted_corpus_scope,
+        )
+        .expect("source-backed evaluator execution");
+        let packaged =
+            crate::compare_default_direct(Some(&profiles)).expect("packaged evaluator execution");
+
+        assert_eq!(source.workload_digest, packaged::WORKLOAD_SHA256);
+        assert_eq!(source.workload_digest, packaged.workload_digest);
+        assert_eq!(source.corpus_digest, packaged.corpus_digest);
+        assert_eq!(source.execution_contract, packaged.execution_contract);
+        assert_eq!(
+            source.profile_material_digests,
+            packaged.profile_material_digests
+        );
+
+        let workload = assets.workload();
+        let expected_receipts = workload
+            .expected_query_fallback_digests
+            .iter()
+            .collect::<BTreeMap<_, _>>();
+        for report in [&source, &packaged] {
+            assert_eq!(report.command, "compare");
+            assert_eq!(report.status, DirectEvaluationStatusV1::Fail);
+            assert_eq!(
+                report.fixture_source_repository_commit,
+                workload.source_repository_commit
+            );
+            assert_eq!(
+                report.fixture_source_repository_tree,
+                workload.source_repository_tree
+            );
+            assert!(
+                report
+                    .profiles
+                    .iter()
+                    .any(|profile| profile.failed_queries > 0)
+            );
+            assert_eq!(report.profiles.len(), expected_receipts.len());
+            for profile in &report.profiles {
+                assert_eq!(profile.profile_id, QUERY_BASELINE_PROFILE);
+                assert!(profile.fallback_stable);
+                assert!(profile.fallback_matches_expected);
+            }
+
+            let observed_receipts = report
+                .raw_outputs
+                .iter()
+                .map(|output| {
+                    assert_eq!(output.profile_id, QUERY_BASELINE_PROFILE);
+                    assert_eq!(output.workload_digest, report.workload_digest);
+                    assert_eq!(output.corpus_digest, report.corpus_digest);
+                    assert!(output.query_fallback_matches_expected);
+                    assert_eq!(output.fallback_digest, output.query_fallback_digest);
+                    assert_eq!(
+                        output.query_fallback_digest,
+                        output.expected_query_fallback_digest
+                    );
+                    (&output.partition, &output.query_fallback_digest)
+                })
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(observed_receipts.len(), report.raw_outputs.len());
+            assert_eq!(observed_receipts, expected_receipts);
+        }
     }
 }

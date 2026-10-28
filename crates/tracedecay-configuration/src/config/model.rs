@@ -132,10 +132,6 @@ pub struct SyncConfig {
     pub session_start_stale_threshold_secs: u64,
     /// Daemon backstop scheduler interval (minutes); 0 disables it.
     pub backstop_interval_mins: u64,
-    /// Diff-scoped syncs above this many changed files escalate to a full sync.
-    pub full_sync_escalation_files: usize,
-    /// Daemon-wide cap on concurrent syncs.
-    pub max_concurrent_syncs: usize,
     /// Grace period before a dead tracked-branch store is GC'd (days).
     pub branch_gc_days: u64,
     /// Auto-initialise never-indexed repos on first contact.
@@ -173,8 +169,6 @@ impl Default for SyncConfig {
             session_start_sync: true,
             session_start_stale_threshold_secs: 600,
             backstop_interval_mins: 15,
-            full_sync_escalation_files: 500,
-            max_concurrent_syncs: 2,
             branch_gc_days: 14,
             auto_init: true,
             auto_track_pr_branches: false,

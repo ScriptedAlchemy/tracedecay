@@ -856,3 +856,4 @@ fn evidence_for(plan: &ProtectedChangePlan) -> ScopeRevalidationEvidenceV1 {
 mod control;
 mod persistence;
 mod receipt_writer;
+mod retired_sync;

@@ -155,50 +155,13 @@ fn project_selector_object(description: &str) -> Value {
     })
 }
 
-/// Computes the call budget based on project size.
-pub fn explore_call_budget(total_nodes: u64) -> u8 {
-    match total_nodes {
-        0..=5_000 => 3,
-        5_001..=20_000 => 4,
-        20_001..=80_000 => 5,
-        80_001..=250_000 => 7,
-        _ => 10,
-    }
-}
-
-/// The `tracedecay_context` description for surfaces that have no project
-/// graph to size, such as `tracedecay tool context --help`.
+/// The static `tracedecay_context` description. Tool descriptions are cached by
+/// hosts for a whole session, so they carry no runtime state; live state
+/// belongs in each response's `freshness:` and `indexing:` lines.
 const CONTEXT_DESCRIPTION: &str = "Build an AI-ready context for a task description. Returns \
      relevant symbols, relationships, up to three untracked project memory matches when \
      available, and optionally code snippets. Use it for broad questions that need \
      relationship synthesis across the code graph.";
-
-/// Generates the `tracedecay_context` description with a dynamic call budget.
-pub fn context_description(node_count: u64, budget: u8) -> String {
-    format!(
-        "{CONTEXT_DESCRIPTION} This project ({node_count} nodes) allows {budget} broad \
-         context calls."
-    )
-}
-
-/// Returns tool definitions with a dynamic call budget for `tracedecay_context`.
-pub fn get_tool_definitions_with_budget(
-    node_count: u64,
-    budget: u8,
-) -> Result<Vec<ToolDefinition>, McpCatalogError> {
-    let mut defs = get_tool_definitions()?;
-    apply_context_budget(&mut defs, node_count, budget);
-    Ok(defs)
-}
-
-fn apply_context_budget(defs: &mut [ToolDefinition], node_count: u64, budget: u8) {
-    // Replace the context tool's description with the budgeted version
-    for def in defs {
-        if def.name == "tracedecay_context" {
-            def.description = context_description(node_count, budget);
-        }
-    }
-}
 
 pub fn project_catalog_discovery_scope() -> BTreeSet<ScopeDimension> {
     [
@@ -216,14 +179,6 @@ pub fn project_catalog_discovery_scope() -> BTreeSet<ScopeDimension> {
     ]
     .into_iter()
     .collect()
-}
-
-/// The `tracedecay_context` description while the project graph is still warming.
-pub fn context_warming_description(budget: u8) -> String {
-    format!(
-        "{CONTEXT_DESCRIPTION} The graph is still warming, and {budget} broad context calls \
-         are available."
-    )
 }
 
 /// Returns the list of all tool definitions exposed by this MCP server.
@@ -279,11 +234,9 @@ fn build_search_cli_definition() -> Result<ToolDefinition, McpCatalogError> {
 /// Borrow the registry, assembled once per process.
 ///
 /// Every input is static for the life of the process: the application catalog
-/// is a `LazyLock` snapshot. Nothing session-scoped is frozen here, the
-/// per-session passes (the context description budget and the
-/// profile/capability filtering in
-/// `get_catalog_filtered_tool_definitions_with_budget`) all run on a clone,
-/// after the cache.
+/// is a `LazyLock` snapshot. Descriptions carry no runtime state, and the
+/// per-session profile/capability filtering in
+/// `get_catalog_filtered_tool_definitions` runs on a clone, after the cache.
 pub fn get_tool_definitions_ref() -> Result<&'static [ToolDefinition], McpCatalogError> {
     // The error type is not `Clone`, and a failure here is a deterministic
     // catalog/schema defect rather than a transient condition, so the cache

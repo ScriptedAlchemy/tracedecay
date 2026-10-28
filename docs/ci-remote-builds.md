@@ -11,10 +11,18 @@ private NativeLink coordinator through the official Tailscale action. GitHub
 supplies checkout, analysis, local compilation, test execution, artifacts, and
 check reporting; Ubuntu-main and
 Omarchy supply additional Linux compilation and test capacity. The Mac worker
-serves macOS actions; this CI integration does not send Linux actions to it. Windows, ARM Linux,
-and macOS CI retain their existing hosted execution. The Mac currently has a
+serves macOS actions; this CI integration does not send Linux actions to it. ARM Linux and macOS CI retain their existing hosted execution. The Mac currently has a
 newer Xcode/SDK than the macos-26 image; matching OS and CPU alone does not make
 native compilation compatible.
+
+Windows x86_64 CI enrolls through the same restricted identity and sends
+`Rustc` actions, including native linking, to the Windows MINI worker. Build
+scripts and tests remain on GitHub's Windows runner. Both machines expose
+MSVC 14.44.35207 through a `V:` drive mapping to the existing Visual Studio installation;
+Bazel selects Windows SDK 10.0.26100.0. This avoids machine-specific Enterprise
+versus BuildTools paths without copying the toolchain. The setup fails if the
+pinned compiler is missing or `V:` is already occupied. The Windows execution
+platform matches `OSFamily=windows` and `cpu_arch=x86_64`.
 
 Rustc actions, including asupersync, prefer remote execution. Large Rust
 compilations do not race a second copy on the smaller hosted runner.
@@ -26,9 +34,8 @@ actual memory use. The shared action cache remains enabled. Tests carry Node,
 Rust Analyzer, and their compiler tools as declared runfiles.
 Each remote test reserves four worker CPU units and the Rust harness uses four
 threads. The local branch reserves the hosted runner CPU budget so suites do not
-compete with one another for local cores. Remote infrastructure failures allow
-sandboxed local fallback. Bazel's fallback flag applies to the CI command,
-including asupersync and other remote actions. Actual compiler errors, failed
+compete with one another for local cores. Once the fleet is selected, remote compilation does not fall back to the hosted
+runner. Linux/macOS dynamic tests retain their scheduled local branch. Actual compiler errors, failed
 tests, and remote action execution timeouts still fail the build. BuildBuddy events
 upload asynchronously, so a reporting outage does not fail a successful build.
 A terminated runner can leave an incomplete report.
@@ -74,7 +81,7 @@ Do not enable write tokens for fork PRs.
 The CI tag may reach only Ubuntu-main TCP 50051 (cache/execution), 1985
 (BuildBuddy events), and 443 (build reports). It receives no SSH or worker
 registration access. The coordinator host firewall must allow Tailscale
-clients on 50051 while keeping 50061 restricted to the three fixed workers.
+clients on 50051 while keeping 50061 restricted to the enrolled fixed workers, including MINI.
 Tailscale grants enforce the tag restriction; host iptables cannot match tags.
 The action registers ephemeral nodes and logs them out during job cleanup.
 

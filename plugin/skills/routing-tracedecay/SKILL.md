@@ -60,3 +60,4 @@ availability and path policy. Raw staged blob IDs are not commit selectors.
 
 **Report:** the answer supported by the returned evidence, plus its freshness
 line when it is not `fresh` and any coverage needed to qualify the conclusion.
+Do not chain calls the evidence did not call for.

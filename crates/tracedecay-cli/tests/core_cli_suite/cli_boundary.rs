@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use tracedecay_mcp::get_tool_definitions_with_budget;
+use tracedecay_mcp::get_tool_definitions;
 
 use crate::common::apply_isolated_profile_env;
 
@@ -30,10 +30,10 @@ fn shipped_binary_stops_quietly_when_a_pipeline_reader_exits() {
     );
 }
 
-/// Help runs without a project graph, so it describes the tool without a
-/// node count or call budget it cannot compute.
+/// Help and `tools/list` share one static description, so help cannot drift
+/// from what hosts see.
 #[test]
-fn context_help_describes_the_tool_without_a_project_size() {
+fn context_help_describes_the_tool_with_the_advertised_description() {
     let home = tempfile::tempdir().expect("isolated home");
     let output = sandboxed_command(crate::tracedecay_exe(), home.path())
         .args(["tool", "context", "--help"])
@@ -43,16 +43,12 @@ fn context_help_describes_the_tool_without_a_project_size() {
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let description = stdout.lines().nth(2).expect("description line");
-    let sized = get_tool_definitions_with_budget(6_000, 5)
-        .expect("budgeted definitions")
+    let advertised = get_tool_definitions()
+        .expect("definitions")
         .into_iter()
         .find(|definition| definition.name == "tracedecay_context")
         .expect("context definition")
         .description;
-    assert_eq!(
-        sized,
-        format!("{description} This project (6000 nodes) allows 5 broad context calls."),
-        "{stdout}"
-    );
+    assert_eq!(advertised, description, "{stdout}");
     assert!(!description.contains("nodes"), "{stdout}");
 }

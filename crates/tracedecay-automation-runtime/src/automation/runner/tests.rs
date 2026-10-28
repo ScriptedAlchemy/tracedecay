@@ -1,7 +1,10 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use serde_json::json;
+use serde_json::{Value, json};
+use tracedecay_automation::backend::{
+    AgentTaskKind, agent_task_contract, extract_response_json_object,
+};
 use tracedecay_contracts::retained_surfaces::MemoryAutomationFactEvidenceItemV1;
 use tracedecay_domain::{
     FactOwnerV1, RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalCoverageCountsV1,
@@ -969,6 +972,222 @@ async fn proposal_validation_canonicalizes_public_evidence_before_commit() {
         assert_eq!(item["reason"], "bounded evidence");
         serde_json::from_value::<MemoryAutomationFactEvidenceItemV1>(item)
             .expect("accepted evidence must decode through the public terminal type");
+    }
+}
+
+#[tokio::test]
+async fn fact_response_envelopes_preserve_valid_siblings_and_quarantine_invalid_items() {
+    let valid = json!({
+        "content": "Bounded session evidence supports a durable project convention",
+        "category": "project",
+        "trust": " HIGH ",
+        "source_span": {"store_id": 7},
+        "reason": "The cited user message establishes this convention"
+    });
+    let mut proposals = vec![valid.clone()];
+    for (label, field, value) in [
+        ("null tags", "tags", Value::Null),
+        ("null entities", "entities", Value::Null),
+        (
+            "string store identity",
+            "source_span",
+            json!({"store_id": "7"}),
+        ),
+        (
+            "extra source field",
+            "source_span",
+            json!({"store_id": 7, "unknown": true}),
+        ),
+        (
+            "mixed source identities",
+            "source_span",
+            json!({"store_id": 7, "session_id": "session", "message_id": "message"}),
+        ),
+        ("extra proposal field", "unknown", json!(true)),
+    ] {
+        let mut proposal = valid.clone();
+        proposal["content"] = json!(format!("A proposal with {label} must not become memory"));
+        proposal[field] = value;
+        proposals.push(proposal);
+    }
+    let evidence = json!({
+        "hits": [{
+            "kind": "raw_message",
+            "session_id": "session",
+            "message_id": "message",
+            "store_id": 7
+        }]
+    });
+    let evidence_hash = canonical_evidence_hash(&evidence).expect("canonical evidence hash");
+
+    for task in [
+        AgentTaskKind::SessionReflector,
+        AgentTaskKind::CombinedReview,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("memory.db");
+        crate::register_test_schema_installer();
+        let authority =
+            DatabaseAuthority::acquire_test(&path, "fact response envelope fixture").unwrap();
+        let (database, _) =
+            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+                .await
+                .unwrap();
+        let memory =
+            MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database))
+                .unwrap();
+        let run_control = AutomationRunControl::from_interrupted(Arc::new(|| false));
+        let contract = agent_task_contract(task);
+        let mut response = json!({"facts": proposals});
+        if task == AgentTaskKind::CombinedReview {
+            response["skills"] = json!([]);
+            response["outcome"] = json!("no_skill_needed");
+            response["decision"] = json!({
+                "reason": "This evidence warrants a fact without a reusable skill",
+                "remedy": "no_action"
+            });
+        }
+        let decoded = extract_response_json_object(&response.to_string(), &contract)
+            .expect("a malformed fact must reach per-item validation through either envelope");
+        let decoded_proposals = decoded["facts"].as_array().expect("facts array");
+        assert_eq!(decoded_proposals, &proposals);
+        let (accepted, quarantined) =
+            validate_session_fact_candidates(&memory, &run_control, decoded_proposals, &evidence)
+                .await
+                .unwrap();
+        assert_eq!(accepted.len(), 1, "{task:?}: {quarantined:?}");
+        assert_eq!(quarantined.len(), proposals.len() - 1, "{task:?}");
+        for (rejection, proposal) in quarantined.iter().zip(&proposals[1..]) {
+            assert_eq!(&rejection["item"], proposal, "{task:?}");
+            assert_eq!(rejection["validation"]["status"], "quarantined");
+            assert!(
+                rejection["reason"]
+                    .as_str()
+                    .is_some_and(|reason| !reason.is_empty())
+            );
+        }
+        let canonical_item = &accepted[0]["item"];
+        assert_eq!(canonical_item["content"], valid["content"]);
+        assert_eq!(canonical_item["tags"], json!([]));
+        assert_eq!(canonical_item["entities"], json!([]));
+        assert_eq!(canonical_item["trust"], "high");
+        assert_eq!(canonical_item["source_span"], json!({"store_id": 7}));
+        serde_json::from_value::<MemoryAutomationFactEvidenceItemV1>(canonical_item.clone())
+            .expect("accepted evidence retains the public receipt grammar");
+
+        let applied = record_session_automatic_facts(
+            &memory,
+            &run_control,
+            &format!("fact-envelope-{}", contract.task_key),
+            Some(&evidence_hash),
+            &accepted,
+        )
+        .await
+        .unwrap();
+        assert!(applied.retry_error.is_none());
+        assert_eq!(applied.receipts.len(), 1);
+        assert_eq!(applied.receipts[0].state, AutomaticFactState::Applied);
+        assert_eq!(applied.receipts[0].item.as_ref(), Some(canonical_item));
+        let stored = memory
+            .find_exact_fact_by_content(
+                valid["content"].as_str().unwrap(),
+                run_control.read_control(),
+            )
+            .await
+            .unwrap()
+            .expect("the valid sibling reaches canonical memory");
+        let tracedecay_store::ProjectMemoryFactProjectionV1::Available(stored) = stored else {
+            panic!("the committed sibling must have an available payload");
+        };
+        assert_eq!(
+            applied.receipts[0].applied_fact_id.as_deref(),
+            Some(stored.fact_id().as_str())
+        );
+        for proposal in &proposals[1..] {
+            assert!(
+                memory
+                    .find_exact_fact_by_content(
+                        proposal["content"].as_str().unwrap(),
+                        run_control.read_control(),
+                    )
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{task:?}: a quarantined sibling must not become memory"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn fact_response_envelopes_preserve_unicode_content_and_evidence_limits() {
+    let valid = json!({
+        "content": "界".repeat(1_000),
+        "category": "project",
+        "tags": ["工具"],
+        "entities": ["TraceDecay"],
+        "trust": 0.8,
+        "source_span": {"session_id": "session", "message_id": "message"},
+        "reason": "é".repeat(2_048)
+    });
+    let mut proposals = vec![valid.clone()];
+    for (field, value) in [
+        ("content", json!("界".repeat(1_001))),
+        (
+            "content",
+            json!("A durable fact\u{0000}with a control character"),
+        ),
+        ("reason", json!("é".repeat(2_049))),
+    ] {
+        let mut proposal = valid.clone();
+        proposal[field] = value;
+        proposals.push(proposal);
+    }
+    let evidence = json!({
+        "hits": [{"kind": "raw_message", "session_id": "session", "message_id": "message"}]
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("memory.db");
+    crate::register_test_schema_installer();
+    let authority =
+        DatabaseAuthority::acquire_test(&path, "fact Unicode boundary fixture").unwrap();
+    let (database, _) =
+        Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+            .await
+            .unwrap();
+    let memory =
+        MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database)).unwrap();
+    let run_control = AutomationRunControl::from_interrupted(Arc::new(|| false));
+    for task in [
+        AgentTaskKind::SessionReflector,
+        AgentTaskKind::CombinedReview,
+    ] {
+        let mut response = json!({"facts": proposals});
+        if task == AgentTaskKind::CombinedReview {
+            response["skills"] = json!([]);
+            response["outcome"] = json!("no_skill_needed");
+            response["decision"] = json!({
+                "reason": "This evidence warrants no reusable skill",
+                "remedy": "no_action"
+            });
+        }
+        let decoded =
+            extract_response_json_object(&response.to_string(), &agent_task_contract(task))
+                .expect("fact validation remains item-specific");
+        let (accepted, quarantined) = validate_session_fact_candidates(
+            &memory,
+            &run_control,
+            decoded["facts"].as_array().unwrap(),
+            &evidence,
+        )
+        .await
+        .unwrap();
+        assert_eq!(accepted.len(), 1, "{task:?}: {quarantined:?}");
+        assert_eq!(accepted[0]["item"], valid);
+        assert_eq!(quarantined.len(), proposals.len() - 1, "{task:?}");
+        for (rejection, proposal) in quarantined.iter().zip(&proposals[1..]) {
+            assert_eq!(&rejection["item"], proposal, "{task:?}");
+        }
     }
 }
 

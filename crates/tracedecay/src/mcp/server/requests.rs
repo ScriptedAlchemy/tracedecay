@@ -672,7 +672,6 @@ impl McpServer {
 
     #[tracing::instrument(name = "mcp.server.tools_list", level = "trace", skip_all)]
     pub(crate) fn handle_tools_list(&self, id: Value) -> JsonRpcResponse {
-        let budget = explore_call_budget(0);
         let profile_id = match tracedecay_tool_catalog::ProfileId::new(
             tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID,
         ) {
@@ -698,8 +697,6 @@ impl McpServer {
         let match_result = {
             let _span = tracing::trace_span!("mcp.server.tools_list.compose").entered();
             tracedecay_mcp::tools::catalog_discovery::catalog_discovery_tools_list_payload(
-                None,
-                budget,
                 &profile_id,
                 &authority,
                 &project_catalog_discovery_scope(),

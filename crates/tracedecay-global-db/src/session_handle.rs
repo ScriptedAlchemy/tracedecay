@@ -15,7 +15,8 @@ use tracedecay_runtime_core::db::engine::{
 };
 use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimeWeakProxyV1;
 use tracedecay_sessions::runtime::{
-    SessionExec, SessionQuery, SessionRegisteredDb, SessionWriteTxn,
+    SessionExec, SessionQuery, SessionRegisteredDb, SessionTranscriptProgressProofs,
+    SessionWriteTxn,
 };
 use tracedecay_store::{StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
@@ -151,6 +152,10 @@ impl SessionRegisteredDb for RegisteredGlobalDb {
 
     fn db_path(&self) -> &Path {
         RegisteredGlobalDb::db_path(self)
+    }
+
+    fn transcript_progress_proofs(&self) -> &SessionTranscriptProgressProofs {
+        &self.transcript_progress_proofs
     }
 
     fn registered_binding(&self) -> &StoreRuntimeBindingV1 {

@@ -370,52 +370,22 @@ fn search_cli_definition_matches_the_advertised_contract() {
     );
 }
 
-/// Caching the registry must not freeze anything session-scoped into it.
-///
-/// The per-session passes mutate the vector they are handed, so every caller
-/// has to receive an independent clone. If the cache handed out shared state,
-/// one session's context budget would be visible to the next.
+/// Hosts cache `tools/list` for a session, so no description may embed state
+/// that changes while it runs; that state belongs in response headers.
 #[test]
-fn per_session_budget_does_not_leak_through_the_cached_registry() {
-    fn context_description(definitions: &[ToolDefinition]) -> String {
-        definitions
-            .iter()
-            .find(|definition| definition.name == "tracedecay_context")
-            .map(|definition| definition.description.clone())
-            .expect("tracedecay_context is advertised")
+fn context_description_carries_no_runtime_state() {
+    let definitions = get_tool_definitions().expect("tool definitions");
+    let description = &definitions
+        .iter()
+        .find(|definition| definition.name == "tracedecay_context")
+        .expect("tracedecay_context is advertised")
+        .description;
+    for stale in ["warming", "broad context calls", "nodes"] {
+        assert!(
+            !description.contains(stale),
+            "context description must be static, found {stale:?}: {description}"
+        );
     }
-
-    let small = get_tool_definitions_with_budget(11, 2).expect("tool definitions");
-    let small_description = context_description(&small);
-    assert!(
-        small_description.contains("2 broad context calls"),
-        "budget must reach the context description: {small_description}"
-    );
-
-    let large = get_tool_definitions_with_budget(999_999, 9).expect("tool definitions");
-    let large_description = context_description(&large);
-    assert!(
-        large_description.contains("9 broad context calls"),
-        "budget must reach the context description: {large_description}"
-    );
-
-    assert_ne!(
-        small_description, large_description,
-        "two sessions with different budgets must not share one description"
-    );
-    assert_eq!(
-        context_description(&small),
-        small_description,
-        "the earlier session's definitions must not be rewritten by a later one"
-    );
-
-    // A third, unbudgeted read must still see the neutral registry.
-    let neutral = get_tool_definitions().expect("tool definitions");
-    let neutral_description = context_description(&neutral);
-    assert!(
-        !neutral_description.contains("9 broad context calls"),
-        "an unbudgeted caller inherited another session's budget: {neutral_description}"
-    );
 }
 
 #[test]

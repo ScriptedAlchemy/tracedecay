@@ -62,7 +62,8 @@ pub use compile_diagnostics::tsconfig::{
     typescript_projects,
 };
 pub use compile_diagnostics::typescript::{
-    TYPESCRIPT_INSTALL_COMMAND, run_compiler as run_typescript_compiler,
+    TYPESCRIPT_INSTALL_COMMAND, TypeScriptCompilerAdmission,
+    run_compiler as run_typescript_compiler,
 };
 pub use context::{
     CanonicalContextProjectionAuthority, ContextCoverage, ContextExpansionEnvelope,

@@ -1821,92 +1821,152 @@ async fn cancellation_during_refusal_coverage_preserves_the_uncovered_cursor() {
 
 #[tokio::test]
 async fn a_refusal_memo_cannot_authorize_uncovered_bytes_or_hide_an_in_place_rewrite() {
-    let (_temp, path, len) = rollout_fixture();
-    let spy = SeamSpyAdmission::default();
-    let contents = std::fs::read(&path).unwrap();
-    let header_end = contents.iter().position(|byte| *byte == b'\n').unwrap() + 1;
-    let initial = try_admit_codex_jsonl_observations_for_profile_with_admission(
-        &path,
-        None,
-        &[],
-        &spy,
-        Some(header_end as u64),
-    )
-    .await
-    .unwrap();
-    assert_eq!(initial.frames_persisted, 1);
-    let committed = stored_cursor(&spy).await.unwrap();
-    let (page, _) = super::shared_jsonl_page(&path, StoredCursor::default(), None, None, false)
+    // Legacy offsets never authorize a floor, even when they happen to name
+    // the current generation and prefix. Only committed coverage may skip it.
+    for checkpoint in ["matching", "different", "unknown", "unfingerprinted"] {
+        let (_temp, path, len) = rollout_fixture();
+        let spy = SeamSpyAdmission::default();
+        let contents = std::fs::read(&path).unwrap();
+        let header_end = contents.iter().position(|byte| *byte == b'\n').unwrap() + 1;
+        let initial = try_admit_codex_jsonl_observations_for_profile_with_admission(
+            &path,
+            None,
+            &[],
+            &spy,
+            Some(header_end as u64),
+        )
         .await
         .unwrap();
-    let source = crate::runtime::hosts::codex::codex_observation_source_v2(SESSION_ID).unwrap();
-    let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay-refusal-memo-v1");
-    hasher.update(b"codex");
-    hasher.update(source.session_id().as_str().as_bytes());
-    hasher.update(source.source_key().as_str().as_bytes());
-    let key = format!(
-        "host-memo://codex/refused/v1/{}",
-        hex::encode(&hasher.finalize()[..8])
-    );
-    let foreign = ParseOffset {
-        byte_offset: len,
-        mtime: page.frames.last().unwrap().resume_fingerprint,
-        file_id: committed.generation().generation_id(),
-    };
-    spy.advance_parse_offset(&ObservationScopeV1::Profile, &key, foreign)
+        assert_eq!(initial.frames_persisted, 1);
+        let committed = stored_cursor(&spy).await.unwrap();
+        assert_eq!(committed.position(), header_end as u64);
+        assert!(committed.resume_fingerprint().is_some());
+        let (page, _) = super::shared_jsonl_page(&path, StoredCursor::default(), None, None, false)
+            .await
+            .unwrap();
+        let source = crate::runtime::hosts::codex::codex_observation_source_v2(SESSION_ID).unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(b"tracedecay-refusal-memo-v1");
+        hasher.update(b"codex");
+        hasher.update(source.session_id().as_str().as_bytes());
+        hasher.update(source.source_key().as_str().as_bytes());
+        let key = format!(
+            "host-memo://codex/refused/v1/{}",
+            hex::encode(&hasher.finalize()[..8])
+        );
+        let generation = committed.generation().generation_id();
+        let foreign = ParseOffset {
+            byte_offset: len,
+            mtime: if checkpoint == "unfingerprinted" {
+                0
+            } else {
+                page.frames.last().unwrap().resume_fingerprint
+            },
+            file_id: match checkpoint {
+                "different" => generation.wrapping_add(1).max(1),
+                "unknown" => 0,
+                _ => generation,
+            },
+        };
+        spy.advance_parse_offset(&ObservationScopeV1::Profile, &key, foreign)
+            .await
+            .unwrap();
+        assert_eq!(stored_cursor(&spy).await, Some(committed.clone()));
+
+        let appended = format!(
+            "{}\n",
+            json!({
+                "timestamp": "2026-01-01T00:00:02.000Z",
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "later valid message"}
+            })
+        );
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(appended.as_bytes())
+            .unwrap();
+        let resumed = try_admit_codex_jsonl_observations_for_profile_with_admission(
+            &path,
+            None,
+            &[],
+            &spy,
+            None,
+        )
         .await
         .unwrap();
+        assert_eq!(
+            resumed.frames_persisted, 2,
+            "both uncovered messages must persist with a {checkpoint} legacy checkpoint"
+        );
+        assert_eq!(spy.inner.observations().len(), 3);
+        let advanced = stored_cursor(&spy).await.unwrap();
+        assert_eq!(advanced.position(), len + appended.len() as u64);
+        assert_eq!(advanced.generation(), committed.generation());
+        assert_ne!(
+            advanced.resume_fingerprint(),
+            committed.resume_fingerprint()
+        );
+        assert_eq!(
+            spy.get_parse_offset(&ObservationScopeV1::Profile, &key)
+                .await
+                .unwrap(),
+            Some(foreign),
+            "foreign parse-offset state must remain untouched"
+        );
 
-    let appended = format!(
-        "{}\n",
-        json!({
-            "timestamp": "2026-01-01T00:00:02.000Z",
-            "type": "event_msg",
-            "payload": {"type": "user_message", "message": "later valid message"}
-        })
-    );
-    std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap()
-        .write_all(appended.as_bytes())
+        let captures = spy.capture_count();
+        let replay = try_admit_codex_jsonl_observations_for_profile_with_admission(
+            &path,
+            None,
+            &[],
+            &spy,
+            None,
+        )
+        .await
         .unwrap();
-    let resumed =
-        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
-            .await
-            .unwrap();
-    assert_eq!(
-        resumed.frames_persisted, 2,
-        "both uncovered messages must persist"
-    );
-    assert_eq!(spy.inner.observations().len(), 3);
-    assert_eq!(
-        spy.get_parse_offset(&ObservationScopeV1::Profile, &key)
-            .await
-            .unwrap(),
-        Some(foreign),
-        "foreign parse-offset state must remain untouched"
-    );
+        assert_eq!(replay.bytes_consumed, 0);
+        assert_eq!(replay.frames_persisted, 0);
+        assert_eq!(spy.capture_count(), captures);
+        assert_eq!(
+            stored_cursor(&spy).await,
+            Some(advanced.clone()),
+            "replay must not regress the committed frontier or replace its fingerprint"
+        );
 
-    let edited = std::fs::read_to_string(&path)
-        .unwrap()
-        .replace("seam contract message", "edit contract message");
-    std::fs::write(&path, edited).unwrap();
-    let rewritten =
-        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
-            .await
-            .unwrap();
-    assert!(
-        rewritten.frames_persisted > 0,
-        "rewritten uncovered bytes must be re-admitted"
-    );
-    assert_eq!(
-        spy.get_parse_offset(&ObservationScopeV1::Profile, &key)
-            .await
-            .unwrap(),
-        Some(foreign)
-    );
+        let edited = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("seam contract message", "edit contract message");
+        assert_eq!(edited.len() as u64, advanced.position());
+        std::fs::write(&path, edited).unwrap();
+        let rewritten = try_admit_codex_jsonl_observations_for_profile_with_admission(
+            &path,
+            None,
+            &[],
+            &spy,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            rewritten.frames_persisted > 0,
+            "rewritten bytes must be re-admitted with a {checkpoint} legacy checkpoint"
+        );
+        let replacement = stored_cursor(&spy).await.unwrap();
+        assert_eq!(replacement.position(), advanced.position());
+        assert_ne!(replacement.generation(), advanced.generation());
+        assert_ne!(
+            replacement.resume_fingerprint(),
+            advanced.resume_fingerprint()
+        );
+        assert_eq!(
+            spy.get_parse_offset(&ObservationScopeV1::Profile, &key)
+                .await
+                .unwrap(),
+            Some(foreign)
+        );
+    }
 }
 
 #[tokio::test]

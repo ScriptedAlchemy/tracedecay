@@ -1,18 +1,36 @@
 use std::path::Path;
+#[cfg(unix)]
+use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+#[cfg(unix)]
+use tracedecay_domain::{ObservationScopeV1, ObservationSourceIdentityV1, ProjectId, SessionId};
 use tracedecay_global_db::RegisteredGlobalDb;
+#[cfg(unix)]
+use tracedecay_global_db::SessionIngestHealth;
 use tracedecay_global_db::{AnalyticsEventInsert, AnalyticsEventQuery};
 use tracedecay_lcm::LcmStorageKind;
+#[cfg(unix)]
+use tracedecay_private_fs::RewriteWitness;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
+#[cfg(unix)]
+use tracedecay_session_runtime::session_sync::DaemonSessionSyncService;
 use tracedecay_sessions::admission::HostAdmissionScope;
+#[cfg(unix)]
+use tracedecay_sessions::observation::ObservationCancellation;
+#[cfg(unix)]
+use tracedecay_sessions::runtime::hosts::claude::{ClaudeSource, identify_claude_source};
+#[cfg(unix)]
+use tracedecay_sessions::runtime::hosts::claude_observation::ingest_source_with_observations_with_admission;
 use tracedecay_sessions::runtime::store_port::TranscriptIngestStore;
 use tracedecay_sessions::runtime::{
     SessionMessageRecord, SessionMessageSearchResult, SessionRecord, SessionSearchFilters,
     SessionSearchScope, SessionSearchTimeRange,
 };
 use tracedecay_store::TranscriptStoreError;
+#[cfg(unix)]
+use tracing_subscriber::layer::SubscriberExt;
 
 use crate::common::{global_message as sample_message, global_session as sample_session};
 
@@ -1608,6 +1626,196 @@ async fn session_ingest_health_measures_backlog_against_admitted_source_cursors(
     assert_eq!(other_provider.tracked_transcripts, 0);
 }
 
+#[cfg(unix)]
+#[derive(Clone, Default)]
+struct IngestHealthPrefixCapture(Arc<Mutex<Vec<u64>>>);
+
+#[cfg(unix)]
+#[derive(Default)]
+struct PrefixBytesHashed(Option<u64>);
+
+#[cfg(unix)]
+impl tracing::field::Visit for PrefixBytesHashed {
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        if field.name() == "prefix_bytes_hashed" {
+            self.0 = Some(value);
+        }
+    }
+
+    fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+}
+
+#[cfg(unix)]
+impl<S> tracing_subscriber::Layer<S> for IngestHealthPrefixCapture
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_record(
+        &self,
+        id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        context: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let span = context.span(id).expect("recorded ingest health span");
+        if span.metadata().name() == "global_db.registered_sessions.ingest_health" {
+            let mut bytes = PrefixBytesHashed::default();
+            values.record(&mut bytes);
+            if let Some(bytes) = bytes.0 {
+                self.0.lock().unwrap().push(bytes);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn measured_claude_ingest_health(db: &RegisteredGlobalDb) -> (SessionIngestHealth, u64) {
+    let capture = IngestHealthPrefixCapture::default();
+    let _guard = tracedecay_runtime_core::logging::set_tracing_capture(
+        tracing_subscriber::registry().with(capture.clone()),
+    );
+    let health = db
+        .session_ingest_health_for_provider(Some("claude"))
+        .await
+        .expect("registered Claude ingest health");
+    let bytes = capture.0.lock().unwrap();
+    assert_eq!(bytes.len(), 1, "one prefix byte count per health read");
+    (health, bytes[0])
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn session_ingest_health_revalidates_prefix_after_project_retirement() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let project = tmp.path().join("project");
+    let transcript_dir = home.join(".claude/projects/-backlog");
+    std::fs::create_dir_all(&transcript_dir).unwrap();
+    let transcript = transcript_dir.join("backlog-session.jsonl");
+    let first = claude_transcript_record(&project, "backlog-1", "admitted prompt");
+    std::fs::write(&transcript, &first).unwrap();
+
+    let profile_owner = open_isolated_db(&tmp).await;
+    let registry = profile_owner.session_registry_for_test();
+    let session_sync = Arc::new(DaemonSessionSyncService::default());
+    registry
+        .install_session_sync_service(&session_sync)
+        .expect("install session sync lifecycle authority");
+    let project_id = ProjectId::new("project.backlog-retirement").unwrap();
+    let db = profile_owner
+        .sibling_project(&project, project_id.clone())
+        .await
+        .expect("mount project sessions");
+    ingest_source_with_observations_with_admission(
+        &ClaudeSource::with_home(&home),
+        &project,
+        ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        },
+        &db.facade(),
+        None,
+        ObservationCancellation::default(),
+    )
+    .await
+    .expect("ingest project-scoped Claude history");
+
+    let identity = identify_claude_source(&home.join(".claude/projects"), &transcript)
+        .expect("canonical Claude source identity");
+    let source = ObservationSourceIdentityV1::for_source(
+        SessionId::new(identity.session_id).unwrap(),
+        SessionId::new(identity.source_id).unwrap(),
+    )
+    .unwrap();
+    let cursor = db
+        .project_observation_source_cursor_for_test(&source)
+        .await
+        .expect("read admitted cursor")
+        .expect("project ingestion committed a cursor");
+    assert_eq!(cursor.byte_offset(), first.len() as u64);
+
+    let appended = claude_transcript_record(&project, "backlog-2", "pending prompt");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap();
+    std::io::Write::write_all(&mut file, appended.as_bytes()).unwrap();
+    drop(file);
+    while !RewriteWitness::NATIVE
+        .vouches_for_unchanged_bytes(&std::fs::metadata(&transcript).unwrap())
+    {
+        tokio::task::yield_now().await;
+    }
+
+    let (database_path, shard_id, locator, cold) = {
+        let registered = db.registered_database(HostAdmissionScope::Project).unwrap();
+        let (cold, cold_bytes) = measured_claude_ingest_health(registered).await;
+        assert_eq!(cold.tracked_transcripts, 1);
+        assert_eq!(cold.pending_transcripts, 1);
+        assert_eq!(cold.pending_bytes, appended.len() as u64);
+        assert_eq!(cold.max_transcript_pending_bytes, appended.len() as u64);
+        assert!(
+            cold_bytes > 0,
+            "the first health read must verify the prefix"
+        );
+
+        let sibling_lease = registry
+            .mounted_project_sessions(&project_id)
+            .await
+            .expect("independent lease from the same project owner");
+        let (warm, warm_bytes) = measured_claude_ingest_health(&sibling_lease).await;
+        assert_eq!(warm, cold);
+        assert_eq!(warm_bytes, 0, "live owner leases share the settled proof");
+        (
+            registered.db_path().to_path_buf(),
+            registered.binding().shard_id.clone(),
+            registered.verified_locator().clone(),
+            cold,
+        )
+    };
+    drop(db);
+    registry
+        .retire_project_session_relation_graph(&project_id)
+        .await
+        .expect("retire project sessions after every project lease drops");
+    assert!(
+        registry
+            .mounted_project_sessions(&project_id)
+            .await
+            .is_none(),
+        "retirement removes the project session route"
+    );
+
+    let remounted = profile_owner
+        .sibling_project(&project, project_id.clone())
+        .await
+        .expect("remount the same project without ingesting again");
+    assert_eq!(
+        remounted
+            .project_observation_source_cursor_for_test(&source)
+            .await
+            .expect("read remounted cursor"),
+        Some(cursor),
+        "retirement preserves admitted progress"
+    );
+    let registered = remounted
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    assert_eq!(registered.db_path(), database_path.as_path());
+    assert_eq!(registered.binding().shard_id, shard_id);
+    assert_eq!(registered.verified_locator(), &locator);
+    let (remounted_cold, remounted_cold_bytes) = measured_claude_ingest_health(registered).await;
+    assert_eq!(remounted_cold, cold, "remount preserves the exact backlog");
+    assert!(
+        remounted_cold_bytes > 0,
+        "the first read after retirement must revalidate the unchanged prefix"
+    );
+    let (remounted_warm, remounted_warm_bytes) = measured_claude_ingest_health(registered).await;
+    assert_eq!(remounted_warm, cold);
+    assert_eq!(
+        remounted_warm_bytes, 0,
+        "the new owner retains its own proof"
+    );
+}
+
 struct IngestedClaudeBacklog {
     db: HostAdmissionTestRuntimeV1,
     home: std::path::PathBuf,
@@ -1668,6 +1876,119 @@ async fn session_ingest_health_detects_same_length_later_record_rewrite() {
         health.pending_bytes,
         (fixture.first.len() + fixture.second.len()) as u64
     );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn session_ingest_health_preserves_warm_proofs_after_retirement_refusal() {
+    let fixture = IngestedClaudeBacklog::new().await;
+    let registry = fixture.db.session_registry_for_test();
+    let session_sync = Arc::new(DaemonSessionSyncService::default());
+    registry
+        .install_session_sync_service(&session_sync)
+        .unwrap();
+    let project_id = ProjectId::new("project.backlog-refusal").unwrap();
+    let project = fixture
+        .db
+        .sibling_project(&fixture.project, project_id.clone())
+        .await
+        .unwrap();
+    ingest_source_with_observations_with_admission(
+        &ClaudeSource::with_home(&fixture.home),
+        &fixture.project,
+        ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        },
+        &project.facade(),
+        None,
+        ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+    while !RewriteWitness::NATIVE
+        .vouches_for_unchanged_bytes(&std::fs::metadata(&fixture.transcript).unwrap())
+    {
+        tokio::task::yield_now().await;
+    }
+    let registered = project
+        .registered_database(HostAdmissionScope::Project)
+        .unwrap();
+    let binding = registered.binding().clone();
+    let (cold, bytes) = measured_claude_ingest_health(registered).await;
+    assert_eq!(cold.tracked_transcripts, 1);
+    assert_eq!(cold.pending_bytes, 0);
+    assert!(bytes > 0);
+    assert_eq!(
+        measured_claude_ingest_health(registered).await,
+        (cold.clone(), 0)
+    );
+
+    let error = registry
+        .retire_project_session_relation_graph(&project_id)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        tracedecay_domain::errors::TraceDecayError::Database { operation, message }
+            if operation == "reserve project session Store retirement" && message.contains("ClientLeases")
+    ));
+    let restored = registry
+        .mounted_project_sessions(&project_id)
+        .await
+        .unwrap();
+    assert_eq!(restored.binding(), &binding);
+    assert_eq!(
+        measured_claude_ingest_health(&restored).await,
+        (cold.clone(), 0)
+    );
+    assert_eq!(measured_claude_ingest_health(registered).await, (cold, 0));
+    drop((project, restored));
+    registry
+        .retire_project_session_relation_graph(&project_id)
+        .await
+        .unwrap();
+    assert!(
+        registry
+            .mounted_project_sessions(&project_id)
+            .await
+            .is_none()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn session_ingest_health_failed_walk_publishes_no_prefix_proofs() {
+    let fixture = IngestedClaudeBacklog::new().await;
+    let unreadable = fixture.home.join("zz-unreadable.jsonl");
+    std::fs::create_dir(&unreadable).unwrap();
+    let mut session = sample_session("claude", "unreadable", "project-unreadable");
+    session.transcript_path = Some(unreadable.to_str().unwrap().to_owned());
+    assert!(fixture.db.upsert_session(&session).await);
+    while !RewriteWitness::NATIVE
+        .vouches_for_unchanged_bytes(&std::fs::metadata(&fixture.transcript).unwrap())
+    {
+        tokio::task::yield_now().await;
+    }
+    let registered = fixture
+        .db
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    assert!(
+        registered
+            .session_ingest_health_for_provider(Some("claude"))
+            .await
+            .is_err()
+    );
+    session.transcript_path = None;
+    assert!(fixture.db.upsert_session(&session).await);
+    let (cold, bytes) = measured_claude_ingest_health(registered).await;
+    assert_eq!(cold.tracked_transcripts, 1);
+    assert_eq!(cold.pending_bytes, 0);
+    assert!(
+        bytes > 0,
+        "a failed walk must not publish its verified prefixes"
+    );
+    assert_eq!(measured_claude_ingest_health(registered).await, (cold, 0));
 }
 
 #[tokio::test]

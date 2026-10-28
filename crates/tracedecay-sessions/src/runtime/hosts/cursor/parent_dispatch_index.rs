@@ -354,15 +354,11 @@ impl ParentDispatchIndex {
             self.forget(scan.parent_path);
             return (None, receipt);
         };
-        // The digest covers only `[0, verified_cursor)`. A model parsed from
-        // the unterminated tail past it is trustworthy only while the native
-        // revision did not move during the scan and, when that revision is
-        // still inside the coarse timestamp quantum, the tail bytes still
-        // match. A same-length rewrite in that quantum leaves the revision
-        // unchanged, so the tail itself is the witness.
+        // The prefix digest excludes the tail. Its timestamp can settle after
+        // a same-quantum rewrite, so only matching tail bytes authorize reuse.
         if final_revision != scan.revision {
             delta.transient_model = None;
-        } else if delta.transient_model.is_some() && !parent_revision_settled(&final_revision) {
+        } else if delta.transient_model.is_some() {
             match tail_witness_matches(&mut delta.file, delta.verified_cursor, delta.tail_witness) {
                 Ok(true) => {}
                 Ok(false) => delta.transient_model = None,
@@ -1289,6 +1285,7 @@ mod tests {
         .unwrap();
         drop(file);
 
+        crate::runtime::source::spin_until_jsonl_change_settled(&layout.candidate_two);
         let (model, first) = lookup(&layout, "partial-agent");
         assert_eq!(model.as_deref(), Some("partial-model"));
         assert_eq!(first.bytes_parsed, complete_len);
@@ -1315,6 +1312,7 @@ mod tests {
         assert_eq!(parsed.transient_model.as_deref(), Some("model-a"));
 
         fs::write(&layout.candidate_two, format!("{complete}\n{partial_b}")).unwrap();
+        crate::runtime::source::spin_until_jsonl_change_settled(&layout.candidate_two);
         let (model, _receipt) = index.commit_scanned_delta(parsed, commit);
         assert!(
             model.is_none(),

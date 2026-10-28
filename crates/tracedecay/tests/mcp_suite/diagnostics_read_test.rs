@@ -490,20 +490,31 @@ async fn typescript_file_no_tsconfig_owns_names_the_searched_paths() {
 #[tokio::test]
 async fn typescript_producer_still_running_is_pending_with_typed_detail() {
     use crate::common::fixture::{
-        TYPESCRIPT_FIXTURE_TSC_RELEASE, TypeScriptFixtureCompiler,
+        TYPESCRIPT_FIXTURE_TSC_INVOCATIONS, TYPESCRIPT_FIXTURE_TSC_RELEASE,
+        TypeScriptFixtureCompiler, typescript_fixture_build_info,
         write_typescript_diagnostics_fixture,
     };
-    use crate::support::production_composition_fixture_with_sources;
+    use crate::support::{commit_worktree, seeded_composition, test_temp_dir};
 
-    let fixture = production_composition_fixture_with_sources(|project| {
-        write_typescript_diagnostics_fixture(project, TypeScriptFixtureCompiler::Held);
-    })
-    .await;
-    let server = fixture
-        .harness
-        .server(&fixture.project_root)
+    crate::common::register_process_product_runtime();
+    crate::common::register_process_runtime_ports();
+    let isolation = test_temp_dir();
+    let project_root = isolation.path().join("project");
+    write_typescript_diagnostics_fixture(&project_root, TypeScriptFixtureCompiler::Held);
+    commit_worktree(&project_root, "held TypeScript producer fixture");
+    // This opener mounts the production owners without waiting for lexical
+    // readiness. The held compiler shares their CPU admission, so requiring
+    // the index to finish before releasing it can make the test wait on itself.
+    let harness = Box::pin(seeded_composition::open_for_session_retrieval(
+        isolation.path(),
+        [project_root.clone()],
+    ))
+    .await
+    .expect("production composition with a held compiler");
+    let server = harness
+        .server(&project_root)
         .expect("production project server");
-    wait_for_current_graph(&server).await;
+    let canonical_root = project_root.canonicalize().expect("canonical project root");
 
     let arguments = json!({"scope": "file", "path": "src/index.ts", "maximum_diagnostics": 10});
     let mut pending = Value::Null;
@@ -513,13 +524,26 @@ async fn typescript_producer_still_running_is_pending_with_typed_detail() {
                 .await;
         let code = &result["structuredContent"]["problem"]["code"];
         if code == "application.diagnostics.pending" {
-            pending = result;
-            break;
+            let invocations = match std::fs::read_to_string(
+                project_root.join(TYPESCRIPT_FIXTURE_TSC_INVOCATIONS),
+            ) {
+                Ok(invocations) => invocations,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(error) => panic!("read fixture compiler invocations: {error}"),
+            };
+            if invocations.lines().any(|invocation| {
+                typescript_fixture_build_info(invocation, &canonical_root, "tsconfig.json")
+                    .is_some()
+            }) {
+                pending = result;
+                break;
+            }
+        } else {
+            assert_eq!(
+                code, "application.diagnostics.stale",
+                "a held producer can only be stale or pending: {result}"
+            );
         }
-        assert_eq!(
-            code, "application.diagnostics.stale",
-            "a held producer can only be stale or pending: {result}"
-        );
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     let problem = &pending["structuredContent"]["problem"];
@@ -550,12 +574,15 @@ async fn typescript_producer_still_running_is_pending_with_typed_detail() {
         "{pending}"
     );
 
-    std::fs::write(
-        fixture.project_root.join(TYPESCRIPT_FIXTURE_TSC_RELEASE),
-        "",
-    )
-    .expect("release the held compiler");
-    fixture.harness.shutdown().await;
+    std::fs::write(project_root.join(TYPESCRIPT_FIXTURE_TSC_RELEASE), "")
+        .expect("release the held compiler");
+    wait_for_current_graph(&server).await;
+    let published = await_published_diagnostics(&server, arguments).await;
+    let records = published_records(&published);
+    assert_eq!(records.len(), 1, "{published}");
+    assert_eq!(records[0]["logical_path"], "src/index.ts", "{published}");
+    assert_eq!(records[0]["diagnostic"]["code"], "TS4023", "{published}");
+    harness.shutdown().await;
 }
 
 /// Polls the read until the producer has published for the current

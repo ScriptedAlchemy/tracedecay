@@ -1398,27 +1398,9 @@ fn serve_broker_socket_client_inner(
                         } else {
                             (false, None)
                         };
-                        let project_node_count =
-                            if matches!(classify_mcp_method(&request.method), McpMethod::ToolsList)
-                            {
-                                if handshake.project_path.is_some() {
-                                    cached_project_node_count(
-                                        &engine.store_administration,
-                                        &handshake,
-                                    )
-                                    .await
-                                } else {
-                                    Some(0)
-                                }
-                            } else {
-                                None
-                            };
                         if !initialized_project_server_ready
-                            && let Some(mut response) = daemon_bootstrap_response(
-                                request,
-                                initialize_route.as_ref(),
-                                project_node_count,
-                            )
+                            && let Some(mut response) =
+                                daemon_bootstrap_response(request, initialize_route.as_ref())
                         {
                             let project_open_error = match admission_refusal {
                                 Some(refusal) => initialize_project_open_error(refusal),
@@ -1467,25 +1449,8 @@ fn serve_broker_socket_client_inner(
                                 ))
                                 .await;
                             }
-                            // Keep catalog-refresh bookkeeping consistent with the regular MCP
-                            // server path. Only a warming `tools/list` (no published node count)
-                            // or an initialize answered while a project graph is still opening
-                            // is provisional. `project_node_count` is computed only for
-                            // `tools/list`, so treating every `None` as provisional also
-                            // skipped projectless initialize (must mark current) and
-                            // `notifications/initialized` (must emit a pending refresh).
-                            let catalog_is_provisional = match classify_mcp_method(&request.method)
-                            {
-                                McpMethod::ToolsList => project_node_count.is_none(),
-                                McpMethod::Initialize => handshake.project_path.is_some(),
-                                _ => false,
-                            };
                             if let Some(key) = engine
-                                .claim_catalog_refresh(
-                                    &handshake,
-                                    first_request.parsed(),
-                                    catalog_is_provisional,
-                                )
+                                .claim_catalog_refresh(&handshake, first_request.parsed())
                                 .await
                                 && let Err(error) =
                                     write_tool_list_changed_notification(&mut transport).await
@@ -1584,7 +1549,7 @@ fn serve_broker_socket_client_inner(
                 // The stdio proxy creates one daemon connection per request. The request
                 // was peeked above so initialize-root routing happens before project open.
                 if let Some(key) = engine
-                    .claim_catalog_refresh(&handshake, first_request.parsed(), false)
+                    .claim_catalog_refresh(&handshake, first_request.parsed())
                     .await
                     && let Err(error) = write_tool_list_changed_notification(&mut transport).await
                 {
@@ -1986,19 +1951,9 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
             } else {
                 (false, None)
             };
-        let project_node_count =
-            if matches!(classify_mcp_method(&request.method), McpMethod::ToolsList) {
-                if handshake.project_path.is_some() {
-                    cached_project_node_count(&store_administration, &handshake).await
-                } else {
-                    Some(0)
-                }
-            } else {
-                None
-            };
         if !initialized_project_server_ready
             && let Some(mut response) =
-                daemon_bootstrap_response(request, initialize_route.as_ref(), project_node_count)
+                daemon_bootstrap_response(request, initialize_route.as_ref())
         {
             let project_open_error = match admission_refusal {
                 Some(refusal) => initialize_project_open_error(refusal),
