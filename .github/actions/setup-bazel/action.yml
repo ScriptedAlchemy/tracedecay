@@ -138,7 +138,7 @@ runs:
         $compiler = Join-Path $vc 'Tools\MSVC\14.44.35207\bin\Hostx64\x64\cl.exe'
         if (-not (Test-Path $compiler)) { throw 'Fleet requires MSVC 14.44.35207' }
         if (Test-Path 'V:\') { throw 'Fleet toolchain drive V: is already in use' }
-        subst V: $vc
+        subst V: $vs
         if ($LASTEXITCODE -ne 0) { throw 'Cannot map the fleet compiler drive' }
         (Get-Item $compiler).VersionInfo | Select-Object FileVersion, ProductVersion | Format-List
 

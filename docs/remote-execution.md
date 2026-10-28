@@ -53,7 +53,7 @@ repository settings cannot safely infer its available CPU or RAM.
 
 Use `rbe-linux` on Linux x86_64 clients, or `rbe-macos` on Apple Silicon macOS
 clients. Windows x86_64 clients use `rbe-windows` with MSVC 14.44.35207
-mapped to `V:` and Windows SDK 10.0.26100.0 installed on both client and worker.
+mapped to `V:/VC` and Windows SDK 10.0.26100.0 installed on both client and worker.
 CI offloads Windows Rust compilation/linking while running build scripts and
 tests on its hosted runner. These configurations attach `OSFamily` and `cpu_arch` execution
 properties and matching Bazel constraints to the host platform. The scheduler
@@ -70,7 +70,20 @@ on the client's system compiler. Its writable compiler cache is
 `/tmp/zig-cache`. The macOS configuration retains the native Apple toolchain
 and SDK; macOS workers must provide the same Xcode and SDK installation as the
 client. Worker system tools used by build scripts, such as `sh`, CMake, Perl,
-and Git, must also be installed. Rust tests carry pinned Node, Rust Analyzer,
+and Git, must also be installed.
+
+A Windows worker must run NativeLink natively; WSL cannot execute MSVC actions.
+Use a service account without administrator privileges and keep its binary and
+configuration read-only to that account. Its CAS and action directories must be
+writable, including the parent of `work_directory`: NativeLink deletes and
+recreates that directory at startup, so permissions granted only to the old
+child directory are lost. Enable Windows long paths and unprivileged symbolic
+link creation for Bazel input trees. Map the existing VC installation with
+`subst V: <Visual-Studio-directory>` in the worker's service session; mapping it only in an
+interactive session does not make the drive available to the service. The
+worker initiates its scheduler and CAS connections through Tailscale and needs
+no public listener.
+Rust tests carry pinned Node, Rust Analyzer,
 compiler libraries, and Rust sources in their declared runfiles. Test launchers
 create private home and tool-state directories under `TEST_TMPDIR`; they do
 not use the initiating machine's home or rustup installation. Remote Rust tests

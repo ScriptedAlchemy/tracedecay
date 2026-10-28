@@ -141,8 +141,8 @@ build:rbe-macos --platforms=//scripts/bazel/platforms:macos_aarch64
 
 build:rbe-windows --host_platform=//scripts/bazel/platforms:windows_x86_64
 build:rbe-windows --platforms=//scripts/bazel/platforms:windows_x86_64
-# Both hosts map their installed VC directory to V: without copying it.
-build:rbe-windows --repo_env=BAZEL_VC=V:/
+# Both hosts map their installed Visual Studio directory to V: without copying it.
+build:rbe-windows --repo_env=BAZEL_VC=V:/VC
 build:rbe-windows --repo_env=BAZEL_VC_FULL_VERSION=14.44.35207
 build:rbe-windows --repo_env=BAZEL_WINSDK_FULL_VERSION=10.0.26100.0
 

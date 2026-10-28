@@ -18,7 +18,7 @@ native compilation compatible.
 Windows x86_64 CI enrolls through the same restricted identity and sends
 `Rustc` actions, including native linking, to the Windows MINI worker. Build
 scripts and tests remain on GitHub's Windows runner. Both machines expose
-MSVC 14.44.35207 through a `V:` drive mapping to the existing VC installation;
+MSVC 14.44.35207 through a `V:` drive mapping to the existing Visual Studio installation;
 Bazel selects Windows SDK 10.0.26100.0. This avoids machine-specific Enterprise
 versus BuildTools paths without copying the toolchain. The setup fails if the
 pinned compiler is missing or `V:` is already occupied. The Windows execution
