@@ -29,26 +29,36 @@
 //! forks would mean fetching untrusted `refs/pull/N/head` from arbitrary
 //! repositories; that is deliberately out of scope.
 
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(any(unix, test))]
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::Path;
+#[cfg(any(unix, test))]
 use std::sync::Arc;
 
+#[cfg(any(unix, test))]
 use tracedecay_application::pr_tracking::{
-    DiscoveredPr, ManagedPr, ManualBranchActivation, ManualBranchActivationError,
-    ManualBranchArtifactOwnershipV1, ManualBranchArtifactsV1, ManualBranchLifecycleLeaseV1,
-    PrAutotrackState, PrCommandControlV1 as PrCommandControl, PrDiscovery, ReconcileReport,
-    cleanup_owned_worktree, cleanup_owned_worktree_off_runtime, cleanup_pr_worktree_off_runtime,
-    default_pr_command_control, discover_open_prs_with_control, load_state,
-    manual_branch_artifact_ownership_off_runtime, manual_branch_artifacts_match_off_runtime,
-    manual_branch_source_owns_artifacts, pr_label, pr_tracking_ref, prepare_manual_branch_worktree,
-    prepare_pr_worktree, resolve_branch_head, save_state,
+    DiscoveredPr, ManagedPr, ManualBranchActivation, PrAutotrackState,
+    PrCommandControlV1 as PrCommandControl, PrDiscovery, ReconcileReport,
+    cleanup_owned_worktree_off_runtime, cleanup_pr_worktree_off_runtime,
+    discover_open_prs_with_control, load_state, manual_branch_artifacts_match_off_runtime,
+    pr_label, pr_tracking_ref, prepare_manual_branch_worktree, prepare_pr_worktree,
+    resolve_branch_head, save_state,
+};
+use tracedecay_application::pr_tracking::{
+    ManualBranchActivationError, ManualBranchArtifactOwnershipV1, ManualBranchArtifactsV1,
+    ManualBranchLifecycleLeaseV1, cleanup_owned_worktree, default_pr_command_control,
+    manual_branch_artifact_ownership_off_runtime, manual_branch_source_owns_artifacts,
 };
 #[cfg(test)]
 use tracedecay_application::pr_tracking::{acquire_manual_branch_lifecycle, managed_summary};
+#[cfg(any(unix, test))]
 use tracedecay_domain::ProjectId;
+#[cfg(any(unix, test))]
 use tracedecay_domain::errors::TraceDecayError;
 
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+#[cfg(any(unix, test))]
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
@@ -57,6 +67,7 @@ fn scheduler_unavailable(detail: &str) -> String {
     format!("{CODE_INDEX_SCHEDULER_UNAVAILABLE}: {detail}")
 }
 
+#[cfg(any(unix, test))]
 async fn git_authority_available(repo_root: &Path) -> bool {
     let repo = repo_root.to_path_buf();
     tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
@@ -67,13 +78,18 @@ async fn git_authority_available(repo_root: &Path) -> bool {
     .unwrap_or(false)
 }
 
+#[cfg(any(unix, test))]
 use super::branch_admin::StoreAdministration;
 
+#[cfg(any(unix, test))]
 mod runtime;
+#[cfg(unix)]
 pub(crate) use runtime::PrAutotrackTask;
+#[cfg(any(unix, test))]
 pub(super) use runtime::spawn_with_administration;
 
 #[derive(Clone, Copy)]
+#[cfg(any(unix, test))]
 struct PrStoreAdministration<'a> {
     schedulers: Option<&'a CodeIndexSchedulerRegistryV1>,
     graph: Option<&'a Arc<tracedecay_project::project::TraceDecay>>,
@@ -81,7 +97,9 @@ struct PrStoreAdministration<'a> {
     stores: Option<&'a StoreAdministration>,
 }
 
+#[cfg(any(unix, test))]
 impl<'a> PrStoreAdministration<'a> {
+    #[cfg(any(unix, test))]
     fn with_control(
         stores: &'a StoreAdministration,
         schedulers: &'a CodeIndexSchedulerRegistryV1,
@@ -123,6 +141,7 @@ impl<'a> PrStoreAdministration<'a> {
 
 /// Maximum number of *new* PR branches tracked per poll cycle, so a repo with
 /// 100 open PRs ramps up gradually instead of forking 100 syncs at once.
+#[cfg(any(unix, test))]
 const MAX_NEW_TRACKS_PER_CYCLE: usize = 10;
 
 // Lifecycle reconciliation
@@ -131,6 +150,7 @@ const MAX_NEW_TRACKS_PER_CYCLE: usize = 10;
 /// and PR number. Every skip path (persistence failure, track failure, fork,
 /// reconciled-state persistence failure) funnels through here so the field set
 /// and ordering stay identical across them.
+#[cfg(any(unix, test))]
 fn log_pr_skip(repo_root: &Path, branch_label: Option<&str>, pr: Option<u64>, reason: &str) {
     let mut fields = vec![
         ("project", repo_root.display().to_string()),
@@ -177,6 +197,7 @@ pub(crate) async fn activate_manual_branch_head(
 }
 
 #[tracing::instrument(name = "daemon.pr_autotrack.activate", level = "trace", skip_all)]
+#[cfg(unix)]
 pub(in crate::daemon) async fn activate_manual_branch_head_with_lifecycle(
     stores: &StoreAdministration,
     repo_root: &Path,
@@ -216,6 +237,7 @@ pub(in crate::daemon) async fn activate_manual_branch_head_with_lifecycle(
     clippy::too_many_lines,
     reason = "Activation holds the lifecycle lease across resolve-checkout-index so a lease change aborts before any durable branch state is published."
 )]
+#[cfg(any(unix, test))]
 async fn activate_manual_branch_with_administration(
     repo_root: &Path,
     data_root: &Path,
@@ -382,6 +404,7 @@ async fn activate_manual_branch_with_administration(
     }
 }
 
+#[cfg(any(unix, test))]
 async fn cleanup_failed_manual_track(
     repo_root: &Path,
     worktree: &Path,
@@ -425,6 +448,7 @@ async fn cleanup_failed_manual_track(
     level = "trace",
     skip_all
 )]
+#[cfg(any(unix, test))]
 pub(crate) async fn cleanup_manual_branch_activation(
     repo_root: &Path,
     data_root: &Path,
@@ -573,6 +597,7 @@ pub(crate) async fn retire_worktree_mount(
     clippy::too_many_lines,
     reason = "Closed-PR removals run only on a complete discovery; a partial listing never untracks still-open PRs."
 )]
+#[cfg(any(unix, test))]
 async fn reconcile_project_with_administration(
     repo_root: &Path,
     data_root: &Path,
@@ -781,6 +806,7 @@ async fn reconcile_project_with_administration(
 /// worktree on the injected code-index scheduler. Refuses before Git mutation
 /// when the scheduler, retained graph, or Git worktree authority is missing.
 #[tracing::instrument(name = "daemon.pr_autotrack.track", level = "trace", skip_all)]
+#[cfg(any(unix, test))]
 async fn track_pr(
     repo_root: &Path,
     data_root: &Path,
@@ -882,6 +908,7 @@ async fn track_pr(
     level = "trace",
     skip_all
 )]
+#[cfg(any(unix, test))]
 async fn activate_linked_worktree(
     stores: Option<&StoreAdministration>,
     schedulers: &CodeIndexSchedulerRegistryV1,
@@ -956,6 +983,7 @@ async fn activate_linked_worktree(
 /// Retires the scheduler mount for a managed PR worktree. Git artifacts stay
 /// intact until [`untrack_pr`] or sweep cleanup runs after this returns Ok.
 #[tracing::instrument(name = "daemon.pr_autotrack.remove_store", level = "trace", skip_all)]
+#[cfg(any(unix, test))]
 async fn remove_pr_store(
     _repo_root: &Path,
     data_root: &Path,
@@ -981,6 +1009,7 @@ async fn remove_pr_store(
     Ok(())
 }
 
+#[cfg(any(unix, test))]
 fn pr_number_from_label(label: &str) -> Option<u64> {
     label
         .strip_prefix("tracedecay/autotrack/pr/")
@@ -989,6 +1018,7 @@ fn pr_number_from_label(label: &str) -> Option<u64> {
 
 /// Rolls back a failed branch add without deleting owned Git artifacts until
 /// the scheduler proves the corresponding worktree mount is gone.
+#[cfg(any(unix, test))]
 async fn cleanup_failed_track(
     repo_root: &Path,
     data_root: &Path,
@@ -1023,6 +1053,7 @@ async fn cleanup_failed_track(
 /// tracking branch, and its ref. The Git artifacts are released only after the
 /// coordinator reports that the store is gone (or was already absent).
 #[tracing::instrument(name = "daemon.pr_autotrack.untrack", level = "trace", skip_all)]
+#[cfg(any(unix, test))]
 async fn untrack_pr(
     repo_root: &Path,
     data_root: &Path,
@@ -1063,6 +1094,7 @@ async fn untrack_pr(
 /// Only called for a *complete* discovery (never when `partial`), so an open PR
 /// that merely fell outside a truncated listing is never swept.
 #[tracing::instrument(name = "daemon.pr_autotrack.sweep", level = "trace", skip_all)]
+#[cfg(any(unix, test))]
 async fn sweep_orphan_pr_worktrees(
     repo_root: &Path,
     data_root: &Path,

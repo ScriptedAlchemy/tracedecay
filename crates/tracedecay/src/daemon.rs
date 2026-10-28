@@ -430,6 +430,8 @@ mod project_open_admission;
 #[cfg(test)]
 use project_open_admission::project_open_retry_backoff;
 #[cfg(unix)]
+use project_open_admission::store_owner_key_from_paths;
+#[cfg(unix)]
 use project_open_admission::{
     MaintenanceRekeyOutcome, MaintenanceTransitionGate, MaintenanceTransitionGates,
     MaintenanceTransitionKey,
@@ -438,7 +440,6 @@ use project_open_admission::{
     ProjectOpenFailure, ProjectOpenGate, ProjectOpenGates, ProjectOpenTaskClaim,
     ProjectOpenTaskState, ProjectOpenTasks, ProjectRouteKey, ProjectServerKey,
     ProjectServerPublication, ProjectServerRequirement, project_server_requirement,
-    store_owner_key_from_paths,
 };
 pub(crate) use tracedecay_session_runtime::StoreOwnerKey;
 mod project_open_handshake;
@@ -452,12 +453,12 @@ mod project_open_orchestration;
 mod project_routing;
 mod project_server_lifecycle;
 #[cfg(unix)]
+use project_open_orchestration::durable_enrollment_resolves_existing_store;
+use project_open_orchestration::ensure_registered_project_route;
+#[cfg(unix)]
 use project_open_orchestration::{
     await_claimed_project_open, spawn_lifecycle_automation_scheduler_activation,
     start_lifecycle_project_open,
-};
-use project_open_orchestration::{
-    durable_enrollment_resolves_existing_store, ensure_registered_project_route,
 };
 #[cfg(any(not(unix), test))]
 use project_open_orchestration::{
@@ -469,14 +470,16 @@ use project_open_orchestration::{
 #[cfg(any(not(unix), test, feature = "test-transport"))]
 use project_routing::portable_database_owner_reconciler;
 #[cfg(unix)]
-use project_routing::{CatalogRefreshClientKey, maintenance_transition_gate};
 use project_routing::{
-    bind_authenticated_profile_identity, cached_or_bind_ready_project_server,
-    ensure_checkout_topology_before_admission, prefer_recorded_open_failure,
-    project_open_cancellation_checkpoint, project_open_cancellation_error,
-    project_open_capacity_gate, project_open_gate, project_open_task_capacity_error,
-    project_open_tasks, project_route_for_handshake, project_server_capacity_error,
-    project_server_retirement_blocked_error, project_warming_error, resolved_project_server_key,
+    CatalogRefreshClientKey, cached_or_bind_ready_project_server, maintenance_transition_gate,
+    resolved_project_server_key,
+};
+use project_routing::{
+    bind_authenticated_profile_identity, ensure_checkout_topology_before_admission,
+    prefer_recorded_open_failure, project_open_cancellation_checkpoint,
+    project_open_cancellation_error, project_open_capacity_gate, project_open_gate,
+    project_open_task_capacity_error, project_open_tasks, project_route_for_handshake,
+    project_server_capacity_error, project_server_retirement_blocked_error, project_warming_error,
 };
 #[cfg(test)]
 use project_server_lifecycle::replay_user_profile_host_admission_for_identity;

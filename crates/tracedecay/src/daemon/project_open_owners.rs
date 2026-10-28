@@ -43,6 +43,7 @@ use tracedecay_session_runtime::session_retrieval::DaemonSessionLookupPrimitiveV
 use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 mod advisory_runtime;
+#[cfg(unix)]
 mod automation_effect_recovery;
 #[cfg(test)]
 #[path = "project_open_owners/code_index_reads/ignored_dependency_admission_tests.rs"]
@@ -53,6 +54,7 @@ mod query_authority_upgrade;
 
 pub(crate) use advisory_runtime::ProjectOpenDependentOwnerState;
 pub(super) use advisory_runtime::register_project_open_dependent_owners;
+#[cfg(unix)]
 pub(crate) use automation_effect_recovery::reconcile_project_open_automation_effects;
 
 use primitive_runtime::open_and_register_project_primitive_runtime;

@@ -1601,7 +1601,7 @@ mod tests {
             assert!(matches!(error.raw_os_error(), Some(5 | 32)), "{error}");
             super::record_lost_store_files(&sampling, &registry);
             assert!(database_path.is_file());
-            assert!(lost(&registry).is_empty());
+            assert_eq!(lost(&registry), Vec::<String>::new());
         }
         #[cfg(not(windows))]
         {

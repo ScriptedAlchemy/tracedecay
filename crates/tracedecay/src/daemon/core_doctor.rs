@@ -18,7 +18,7 @@ mod schema;
 
 use schema::{DoctorGraphSchemaState, doctor_graph_schema_state};
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "core_doctor_truthful_tests.rs"]
 mod truthful_tests;
 
@@ -730,8 +730,11 @@ where
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod doctor_runtime_route_tests {
     use std::path::{Path, PathBuf};
+    #[cfg(unix)]
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    #[cfg(unix)]
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use rusqlite::Connection;
 

@@ -987,17 +987,17 @@ impl ProductionProjectCompositionHarnessV1 {
     /// answers with the same typed refusal elsewhere), so the harness mirrors
     /// that boundary instead of reaching the unix-only administration path.
     #[cfg(not(unix))]
-    pub async fn track_worktree_branch(
+    pub fn track_worktree_branch(
         &self,
         _project_root: impl AsRef<Path>,
         _worktree_root: impl AsRef<Path>,
         _branch: &str,
-    ) -> Result<tracedecay_runtime_core::branch::BranchAddOutcome> {
-        Err(TraceDecayError::project_route(
+    ) -> std::future::Ready<Result<tracedecay_runtime_core::branch::BranchAddOutcome>> {
+        std::future::ready(Err(TraceDecayError::project_route(
             "code_index_scheduler_unavailable",
             true,
             "code-index scheduler authority is unavailable for branch activation",
-        ))
+        )))
     }
 
     #[cfg(unix)]
@@ -1459,6 +1459,7 @@ mod code_index_activation_test {
     use std::sync::Arc;
 
     use tempfile::TempDir;
+    #[cfg(unix)]
     use tracedecay_runtime_core::cancellation::CancellationToken;
 
     use super::*;

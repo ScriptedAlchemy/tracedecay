@@ -42,6 +42,7 @@ use session_database_admission::{join_independent_session_opens, log_session_dat
 pub(super) struct ProductionProjectComposition {
     #[cfg(unix)]
     pub(super) key: ProjectServerKey,
+    #[cfg(any(unix, test, feature = "test-transport"))]
     pub(super) canonical_project_path: PathBuf,
     pub(super) server: Arc<crate::mcp::McpServer>,
     #[cfg(unix)]
@@ -484,9 +485,12 @@ pub(super) async fn production_project_server(
             return Err(error);
         }
     };
+    #[cfg(not(unix))]
+    let _ = inserted;
     Ok(ProductionProjectComposition {
         #[cfg(unix)]
         key: opened.key,
+        #[cfg(any(unix, test, feature = "test-transport"))]
         canonical_project_path: canonical_project_path.to_path_buf(),
         server: resolved,
         #[cfg(unix)]
@@ -1992,7 +1996,7 @@ async fn cached_route_server(
 /// The composition returned by every cache hit. `inserted` is always false:
 /// reusing a published server never publishes a route.
 fn cached_project_composition(
-    canonical_project_path: &Path,
+    _canonical_project_path: &Path,
     key: ProjectServerKey,
     server: Arc<crate::mcp::McpServer>,
 ) -> ProductionProjectComposition {
@@ -2001,7 +2005,8 @@ fn cached_project_composition(
     ProductionProjectComposition {
         #[cfg(unix)]
         key,
-        canonical_project_path: canonical_project_path.to_path_buf(),
+        #[cfg(any(unix, test, feature = "test-transport"))]
+        canonical_project_path: _canonical_project_path.to_path_buf(),
         server,
         #[cfg(unix)]
         inserted: false,

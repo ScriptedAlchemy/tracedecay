@@ -89,6 +89,7 @@ impl DaemonInvocationState {
         }
     }
 
+    #[cfg(unix)]
     pub(super) fn invocation_service(&self) -> DaemonInvocationService {
         self.service.clone()
     }
