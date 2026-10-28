@@ -119,10 +119,16 @@ crate.annotation(
 # asupersync's blocking pool uses the runtime's thread_stack_size (16 MiB in
 # the CLI) instead of the standard library's 2 MiB. The scheduler fixes this
 # annotation used to carry (asupersync#83 and #84) are in the pinned revision.
+# The default-HTTP-client patch type-erases the client slot in Cx so proving
+# Send for a Cx-capturing future no longer walks rustls's types and overflows
+# the trait solver (asupersync#86).
 crate.annotation(
     crate = "asupersync",
     patch_args = ["-p1"],
-    patches = ["//scripts:bazel/patches/asupersync-blocking-pool-stack.patch"],
+    patches = [
+        "//scripts:bazel/patches/asupersync-blocking-pool-stack.patch",
+        "//scripts:bazel/patches/asupersync-default-http-client-erasure.patch",
+    ],
     version = "0.6.0",
 )
 
