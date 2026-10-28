@@ -257,9 +257,9 @@ fn async_worker_threads(command: Option<&Commands>) -> usize {
     if is_one_shot_daemon_client(command) {
         return 1;
     }
-    // At least two, even on a one-CPU host: the reactor handoff patch
-    // (asupersync-scheduler.patch) promotes a parked follower only when
-    // the runtime has two or more parkers (`count < 2` returns early), so on
+    // At least two, even on a one-CPU host: asupersync's reactor handoff
+    // (asupersync#83) promotes a parked follower only when the runtime has
+    // two or more parkers (`count < 2` returns early), so on
     // one worker a long poll in `daemon run` or `serve` holds every socket
     // wake and timer until it returns.
     std::thread::available_parallelism()
