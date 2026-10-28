@@ -6,30 +6,45 @@
     "claude",
     "codex"
   ],
-  "fixture": "main",
-  "status": "deferred",
-  "prompt": "Summarize these changes like you're writing the pull request description.",
+  "fixture": "pr-review",
+  "status": "active",
+  "prompt": "Review the current branch against main for a concrete behavioral regression, including any unchanged caller, and assess whether the moved module introduces another regression. Read the relevant test assertions, but do not execute tests or modify files. Return only a JSON object with these string-valued keys: contract_symbol (unqualified function name), before_annotation and after_annotation (return annotations exactly as source), unchanged_consumer (unqualified function name), consumer_file (repository-relative path), shortage_before and shortage_after (rejected or accepted by order placement), regression_test (unqualified test method name), test_relation (test -> consumer -> changed function, using unqualified names), test_evidence (source_only or executed), move_from and move_to (repository-relative module paths), and move_behavior (unchanged or regressed). Use null for any fact you cannot establish.",
   "expected_tools": {
     "required_first": [
-      "tracedecay_pr_context",
-      "tracedecay_diff_context",
-      "tracedecay_context"
+      "tracedecay_pr_context"
     ],
     "acceptable": [
-      "tracedecay_commit_context",
-      "tracedecay_changelog"
+      "tracedecay_source_lines",
+      "tracedecay_source_body",
+      "tracedecay_callers",
+      "tracedecay_test_map"
     ]
   },
   "outcome": {
-    "kind": "ungraded",
-    "reason": "deferred scenario: no verifiable ground truth until its fixture gap is closed"
+    "kind": "answer",
+    "answer": {
+      "json_equals": {
+        "contract_symbol": "reserve_stock",
+        "before_annotation": "None",
+        "after_annotation": "bool",
+        "unchanged_consumer": "place_order",
+        "consumer_file": "shop/orders.py",
+        "shortage_before": "rejected",
+        "shortage_after": "accepted",
+        "regression_test": "test_rejects_unavailable_order",
+        "test_relation": "test_rejects_unavailable_order -> place_order -> reserve_stock",
+        "test_evidence": "source_only",
+        "move_from": "shop/receipts.py",
+        "move_to": "shop/receipt_format.py",
+        "move_behavior": "unchanged"
+      }
+    }
   },
-  "max_tool_calls": 6,
-  "requires_fixture": "git-history",
-  "notes": "DEFERRED: needs real uncommitted/branch changes on top of seeded history for tracedecay_pr_context to have anything to summarize.",
+  "max_tool_calls": 10,
   "expected_skill": "reviewing-changes",
   "allowed_skills": [
     "reviewing-changes"
   ],
-  "max_tracedecay_calls": 6
+  "max_tracedecay_calls": 6,
+  "notes": "Real main-to-feature Git comparison with an unchanged consumer/test and a mechanically moved module. Correctness uses exact source and behavioral facts independently of tools; a native-only correct answer passes equally. Offline tests execute the baseline and changed fixture to verify the planted regression and negative case. Live token savings remain unmeasured until repeated same-model native/product runs."
 }

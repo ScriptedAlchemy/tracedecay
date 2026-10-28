@@ -125,10 +125,11 @@ where
                 continue;
             }
             if matches_test_file(&dep, custom_glob, &inline_tests) {
-                test_distances.insert(dep, depth + 1);
-            } else {
-                next_frontier.push(dep);
+                test_distances.insert(dep.clone(), depth + 1);
             }
+            // A production module can contain inline tests and still connect
+            // the change to integration tests or other dependent modules.
+            next_frontier.push(dep);
         }
         frontier = next_frontier;
     }
@@ -289,16 +290,15 @@ mod tests {
                 }
                 if tracedecay_code_index::is_test_file(dependent) {
                     affected.insert(dependent.clone());
-                } else {
-                    queue.push_back((dependent.clone(), depth + 1));
                 }
+                queue.push_back((dependent.clone(), depth + 1));
             }
         }
         affected
     }
 
     #[tokio::test]
-    async fn affected_traversal_batches_one_database_read_per_frontier() {
+    async fn affected_traversal_groups_frontiers_without_revisiting_files() {
         let source = fake_affected_test_dependents(false);
         let traversal = collect_affected_test_files(
             &source,
@@ -314,12 +314,68 @@ mod tests {
             *source.frontiers.lock().unwrap(),
             vec![
                 vec!["src/root.rs".to_string()],
-                vec!["src/a.rs".to_string(), "src/b.rs".to_string()],
-                vec!["src/leaf.rs".to_string()],
+                vec![
+                    "src/a.rs".to_string(),
+                    "src/b.rs".to_string(),
+                    "tests/direct_test.rs".to_string(),
+                ],
+                vec!["src/leaf.rs".to_string(), "tests/near_test.rs".to_string()],
+                vec!["tests/transitive_test.rs".to_string()],
             ]
         );
-        assert_eq!(source.frontiers.lock().unwrap().len(), 3);
+        assert_eq!(source.frontiers.lock().unwrap().len(), 4);
         assert_eq!(traversal.test_distances.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn affected_traversal_follows_inline_test_modules_with_depth_and_cycle_bounds() {
+        let source = FakeAffectedTestDependents {
+            dependents: HashMap::from([
+                ("src/core.rs".to_owned(), vec!["src/service.rs".to_owned()]),
+                (
+                    "src/service.rs".to_owned(),
+                    vec!["src/core.rs".to_owned(), "tests/support.rs".to_owned()],
+                ),
+                (
+                    "tests/support.rs".to_owned(),
+                    vec![
+                        "src/service.rs".to_owned(),
+                        "tests/integration.rs".to_owned(),
+                    ],
+                ),
+                (
+                    "tests/integration.rs".to_owned(),
+                    vec!["tests/support.rs".to_owned()],
+                ),
+            ]),
+            frontiers: std::sync::Mutex::new(Vec::new()),
+        };
+        let files = ["src/core.rs".to_owned()];
+        let inline_tests = HashSet::from(["src/service.rs".to_owned()]);
+        let shallow = collect_affected_test_files(&source, &files, 1, None, &inline_tests)
+            .await
+            .unwrap();
+        assert_eq!(
+            shallow.test_distances,
+            HashMap::from([("src/service.rs".to_owned(), 1)]),
+        );
+
+        source.frontiers.lock().unwrap().clear();
+        let traversal = collect_affected_test_files(&source, &files, 8, None, &inline_tests)
+            .await
+            .unwrap();
+        assert_eq!(
+            traversal.test_distances,
+            HashMap::from([
+                ("src/service.rs".to_owned(), 1),
+                ("tests/support.rs".to_owned(), 2),
+                ("tests/integration.rs".to_owned(), 3),
+            ]),
+        );
+        let frontiers = source.frontiers.lock().unwrap();
+        let visited = frontiers.iter().flatten().collect::<Vec<_>>();
+        assert_eq!(visited.len(), 4);
+        assert_eq!(visited.into_iter().collect::<HashSet<_>>().len(), 4);
     }
 
     #[tokio::test]

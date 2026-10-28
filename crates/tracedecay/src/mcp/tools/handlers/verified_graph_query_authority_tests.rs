@@ -49,7 +49,8 @@ fn graph_handlers_that_await_query() -> &'static [&'static str] {
         // `tracedecay_changelog` is git-first and never awaits the query
         // future; its typed coverage is asserted by
         // `changelog_reports_absent_query_port_as_typed_coverage`.
-        "tracedecay_commit_context",
+        // `tracedecay_commit_context` reads exact sources from Git and never
+        // awaits the query future either.
         "tracedecay_health",
         "tracedecay_test_map",
         "tracedecay_test_risk",

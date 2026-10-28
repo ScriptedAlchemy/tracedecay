@@ -142,13 +142,32 @@ pub fn render_tool_cli_help(def: &ToolDefinition) -> String {
     let _ = writeln!(out, "{}", def.description);
     let _ = writeln!(out);
 
-    let props = def
-        .input_schema
+    if let Some(alternatives) = request_object_alternatives(&def.input_schema) {
+        let _ = writeln!(
+            out,
+            "Choose one complete request shape; do not combine their parameters."
+        );
+        let _ = writeln!(out);
+        for (index, schema) in alternatives.iter().enumerate() {
+            let _ = writeln!(out, "Request shape {}:", index + 1);
+            if let Some(description) = schema.get("description").and_then(Value::as_str) {
+                let _ = writeln!(out, "{description}");
+            }
+            render_tool_cli_parameters(short, schema, &mut out);
+        }
+    } else {
+        render_tool_cli_parameters(short, &def.input_schema, &mut out);
+    }
+    let _ = writeln!(out, "{RESERVED_FLAGS_FOOTER}");
+    out
+}
+
+fn render_tool_cli_parameters(short: &str, schema: &Value, out: &mut String) {
+    let props = schema
         .get("properties")
         .and_then(Value::as_object)
         .filter(|props| !props.is_empty());
-    let required: Vec<&str> = def
-        .input_schema
+    let required: Vec<&str> = schema
         .get("required")
         .and_then(Value::as_array)
         .map_or_default(|arr| arr.iter().filter_map(Value::as_str).collect());
@@ -160,7 +179,7 @@ pub fn render_tool_cli_help(def: &ToolDefinition) -> String {
             out,
             "Usage: tracedecay tool {short} [--json] [--project <path>]"
         );
-        return out;
+        return;
     };
 
     let mut usage_params = String::new();
@@ -177,8 +196,8 @@ pub fn render_tool_cli_help(def: &ToolDefinition) -> String {
     let mut entries: Vec<(&String, &Value)> = props.iter().collect();
     entries.sort_by_key(|(k, _)| (*k).clone());
     let mut has_non_scalar = false;
-    for (key, schema) in &entries {
-        let resolved = resolve_property_schema(&def.input_schema, schema);
+    for (key, property) in &entries {
+        let resolved = resolve_property_schema(schema, property);
         let ty = schema_type(resolved);
         if matches!(ty, "array" | "object") {
             has_non_scalar = true;
@@ -188,7 +207,7 @@ pub fn render_tool_cli_help(def: &ToolDefinition) -> String {
         } else {
             "optional"
         };
-        let mut desc = schema
+        let mut desc = property
             .get("description")
             .and_then(Value::as_str)
             .or_else(|| resolved.get("description").and_then(Value::as_str))
@@ -217,17 +236,69 @@ pub fn render_tool_cli_help(def: &ToolDefinition) -> String {
     if has_non_scalar {
         let _ = writeln!(out, "Example (whole MCP arguments object via stdin):");
         let _ = writeln!(out, "  tracedecay tool {short} --args - <<'JSON'");
-        let _ = writeln!(
-            out,
-            "  {}",
-            example_args_object(&def.input_schema, props, &required)
-        );
+        let _ = writeln!(out, "  {}", example_args_object(schema, props, &required));
         let _ = writeln!(out, "  JSON");
         let _ = writeln!(out);
     }
+}
 
-    let _ = writeln!(out, "{RESERVED_FLAGS_FOOTER}");
-    out
+/// Object alternatives at the request root, for CLI flags and help. Each view
+/// retains the root's transport properties, definitions and required keys;
+/// payload properties are never promoted into the request. This is a view of
+/// the published schema, not a replacement for canonical request validation.
+pub fn request_object_alternatives(root: &Value) -> Option<Vec<Value>> {
+    let root_object = root.as_object()?;
+    let alternatives = root_object
+        .get("anyOf")
+        .or_else(|| root_object.get("oneOf"))?
+        .as_array()?;
+    if alternatives.is_empty()
+        || (root_object.contains_key("anyOf") && root_object.contains_key("oneOf"))
+    {
+        return None;
+    }
+    alternatives
+        .iter()
+        .map(|alternative| {
+            let alternative = resolve_property_schema(root, alternative).as_object()?;
+            if alternative.get("type").and_then(Value::as_str) != Some("object") {
+                return None;
+            }
+            let mut schema = root_object.clone();
+            schema.remove("anyOf");
+            schema.remove("oneOf");
+            for (key, value) in alternative {
+                match key.as_str() {
+                    "properties" | "$defs" => {
+                        let mut merged = schema
+                            .get(key)
+                            .and_then(Value::as_object)
+                            .cloned()
+                            .unwrap_or_default();
+                        merged.extend(value.as_object()?.clone());
+                        schema.insert(key.clone(), Value::Object(merged));
+                    }
+                    "required" => {
+                        let mut required = schema
+                            .get(key)
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default();
+                        for key in value.as_array()? {
+                            if !required.contains(key) {
+                                required.push(key.clone());
+                            }
+                        }
+                        schema.insert("required".to_owned(), Value::Array(required));
+                    }
+                    _ => {
+                        schema.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+            Some(Value::Object(schema))
+        })
+        .collect()
 }
 
 /// The reserved-flag footnote shared by per-tool help; the tool list and the
@@ -617,6 +688,115 @@ mod tests {
         assert!(parsed["meta"].is_object(), "{example}");
         assert!(parsed["scope"].is_object(), "{example}");
         assert!(parsed["selector"].is_object(), "{example}");
+    }
+
+    #[test]
+    fn source_lines_cli_views_keep_both_complete_request_shapes() {
+        let definition = tracedecay_mcp_catalog::get_tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.name == "tracedecay_source_lines")
+            .expect("source lines is advertised");
+        let indexed = json!({
+            "file": "file.source-lines",
+            "span": {"start_byte": 0, "end_byte": 10},
+            "meta": {
+                "temporal": {"kind": "current"},
+                "page": {"page_size": 1, "cursor": null},
+                "projection": "evidence", "order": "source_position"
+            }
+        });
+        let revision = json!({
+            "revision": "a".repeat(40), "file": "src/name with  spaces.rs",
+            "start_line": 1, "end_line": 10
+        });
+        for keyword in ["anyOf", "oneOf"] {
+            let mut schema = definition.input_schema.clone();
+            if keyword == "oneOf" {
+                let alternatives = schema.as_object_mut().unwrap().remove("anyOf").unwrap();
+                schema["oneOf"] = alternatives;
+            }
+            let alternatives = request_object_alternatives(&schema).expect("root object union");
+            assert_eq!(alternatives.len(), 2);
+            for request in [&indexed, &revision] {
+                let selected = alternatives
+                    .iter()
+                    .filter(|alternative| {
+                        let properties = alternative["properties"].as_object().unwrap();
+                        request
+                            .as_object()
+                            .unwrap()
+                            .keys()
+                            .all(|key| properties.contains_key(key))
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(selected.len(), 1, "each selector has one complete CLI view");
+                let selected = selected[0];
+                assert_eq!(selected["additionalProperties"], false);
+                for field in selected["required"].as_array().unwrap() {
+                    assert!(request.get(field.as_str().unwrap()).is_some());
+                }
+                for (transport, property) in schema["properties"].as_object().unwrap() {
+                    assert_eq!(selected["properties"].get(transport), Some(property));
+                }
+                assert!(selected["properties"].get("format").is_some());
+                assert!(selected["properties"].get("project_selector").is_none());
+                assert!(selected["properties"].get("start_byte").is_none());
+                assert!(selected["properties"].get("projection").is_none());
+                let decoded: tracedecay_contracts::retrieval::SourceLinesRequest =
+                    serde_json::from_value(request.clone()).expect("canonical selector");
+                decoded.validate().expect("valid canonical selector");
+            }
+        }
+        let mut mixed = revision;
+        mixed["span"] = indexed["span"].clone();
+        mixed["meta"] = indexed["meta"].clone();
+        assert!(
+            serde_json::from_value::<tracedecay_contracts::retrieval::SourceLinesRequest>(mixed)
+                .is_err()
+        );
+
+        let help = render_tool_cli_help(&definition);
+        for flag in [
+            "--file",
+            "--span",
+            "--meta",
+            "--revision",
+            "--start-line",
+            "--end-line",
+        ] {
+            assert!(help.contains(flag), "help must expose {flag}");
+        }
+        assert!(
+            !help.contains("--start-byte"),
+            "nested fields are not CLI flags"
+        );
+        let examples = help
+            .lines()
+            .filter(|line| line.trim_start().starts_with('{'))
+            .map(|line| serde_json::from_str::<Value>(line.trim()).unwrap())
+            .collect::<Vec<_>>();
+        // Object-valued indexed fields need a JSON example. The historical
+        // selector is scalar-only and is fully described by its usage line.
+        assert_eq!(examples.len(), 1);
+        assert!(examples[0].get("span").is_some());
+        assert!(examples[0].get("meta").is_some());
+        assert!(examples[0].get("revision").is_none());
+        let usages = help
+            .lines()
+            .filter(|line| line.starts_with("Usage: "))
+            .collect::<Vec<_>>();
+        assert_eq!(usages.len(), 2);
+        assert!(usages.iter().any(|line| {
+            ["--file", "--span", "--meta"]
+                .iter()
+                .all(|flag| line.contains(*flag))
+        }));
+        assert!(usages.iter().any(|line| {
+            ["--file", "--revision", "--start-line", "--end-line"]
+                .iter()
+                .all(|flag| line.contains(*flag))
+        }));
     }
 
     /// The rename help must name every key the daemon requires in the accepted

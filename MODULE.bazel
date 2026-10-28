@@ -41,7 +41,7 @@ bazel_dep(name = "hermetic_cc_toolchain", version = "4.3.0")
 zig = use_extension("@hermetic_cc_toolchain//toolchain:ext.bzl", "toolchains")
 use_repo(zig, "zig_sdk")
 
-RUST_VERSION = "1.99.0"
+RUST_VERSION = "1.99.1"
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
@@ -118,24 +118,13 @@ crate.annotation(
     version = "2.18.2",
 )
 
-# One long poll must not delay the rest of the runtime. Two upstream fixes:
-# Dicklesworthstone/asupersync#83, a reactor leader that leaves epoll to run a
-# task promotes no parked follower, so the poll delays every socket wake and
-# shared timer; Dicklesworthstone/asupersync#84, a task woken by the executing
-# task waits in that worker's unstealable LIFO slot for the whole poll while
-# other workers idle. One patch file holds both because crate_universe applies
-# an annotation's patches in sorted label order. Delete this annotation and the
-# patch once the pinned or published asupersync contains both fixes.
-# The blocking-pool stack patch touches other files, so its order does not
-# matter: it gives pool threads the runtime's thread_stack_size (16 MiB in the
-# CLI) instead of the standard library's 2 MiB.
+# asupersync's blocking pool uses the runtime's thread_stack_size (16 MiB in
+# the CLI) instead of the standard library's 2 MiB. The scheduler fixes this
+# annotation used to carry (asupersync#83 and #84) are in the pinned revision.
 crate.annotation(
     crate = "asupersync",
     patch_args = ["-p1"],
-    patches = [
-        "//scripts:bazel/patches/asupersync-blocking-pool-stack.patch",
-        "//scripts:bazel/patches/asupersync-scheduler.patch",
-    ],
+    patches = ["//scripts:bazel/patches/asupersync-blocking-pool-stack.patch"],
     version = "0.6.0",
 )
 

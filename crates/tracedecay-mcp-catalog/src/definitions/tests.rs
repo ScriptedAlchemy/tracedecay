@@ -3,6 +3,84 @@ use tracedecay_contracts::retained_surfaces::RetainedSurfaceRequestV1;
 use tracedecay_daemon_protocol::ApplicationSurfaceRequest;
 
 #[test]
+fn source_lines_advertises_complete_selectors_with_supported_transport_controls() {
+    use tracedecay_contracts::retrieval::{
+        PageRequest, ResultProjection, RetrievalOrder, RetrievalRequestMeta,
+    };
+
+    let definition = get_tool_definitions()
+        .unwrap()
+        .into_iter()
+        .find(|definition| definition.name == "tracedecay_source_lines")
+        .unwrap();
+    let schema = &definition.input_schema;
+    assert_eq!(schema["type"], "object");
+    let branches = schema["anyOf"].as_array().expect("two source selectors");
+    assert_eq!(branches.len(), 2);
+    let root_properties = schema["properties"].as_object().unwrap();
+    assert!(root_properties.contains_key("format"));
+    assert!(!root_properties.contains_key("project_selector"));
+    for branch in branches {
+        assert_eq!(branch["additionalProperties"], false);
+        for (name, property) in root_properties {
+            assert_eq!(branch["properties"][name], *property);
+        }
+    }
+
+    let indexed = json!({
+        "file": "file.source",
+        "span": {"start_byte": 0, "end_byte": 10},
+        "meta": RetrievalRequestMeta::current(
+            PageRequest::first(10).unwrap(), ResultProjection::Evidence, RetrievalOrder::SourcePosition,
+        ),
+    });
+    let historical = json!({
+        "revision": "a".repeat(40), "file": "src/lib.rs", "start_line": 1, "end_line": 10,
+    });
+    for selector in [indexed.clone(), historical.clone()] {
+        for format in [None, Some("json"), Some("markdown")] {
+            let mut arguments = selector.clone();
+            if let Some(format) = format {
+                arguments["format"] = json!(format);
+            }
+            let adapted = tracedecay_daemon_protocol::adapt_application_tool_request(
+                "tracedecay_source_lines",
+                arguments,
+            )
+            .unwrap();
+            assert!(
+                tracedecay_daemon_protocol::parse_application_surface_request(
+                    ApplicationSurfaceOperation::SourceLines,
+                    adapted.request,
+                )
+                .unwrap()
+                .matches(ApplicationSurfaceOperation::SourceLines)
+            );
+        }
+    }
+    let mut mixed = historical.clone();
+    mixed["span"] = indexed["span"].clone();
+    let mut unsupported_project = historical.clone();
+    unsupported_project["project_selector"] = json!({"project_id":"project.other"});
+    for invalid in [mixed, unsupported_project] {
+        let adapted = tracedecay_daemon_protocol::adapt_application_tool_request(
+            "tracedecay_source_lines",
+            invalid,
+        );
+        assert!(
+            adapted
+                .and_then(
+                    |adapted| tracedecay_daemon_protocol::parse_application_surface_request(
+                        ApplicationSurfaceOperation::SourceLines,
+                        adapted.request,
+                    )
+                )
+                .is_err()
+        );
+    }
+}
+
+#[test]
 fn work_and_workflow_advertise_every_executable_request_schema() {
     let definitions = get_tool_definitions().expect("tool definitions");
     for (family, registry) in [
@@ -292,52 +370,22 @@ fn search_cli_definition_matches_the_advertised_contract() {
     );
 }
 
-/// Caching the registry must not freeze anything session-scoped into it.
-///
-/// The per-session passes mutate the vector they are handed, so every caller
-/// has to receive an independent clone. If the cache handed out shared state,
-/// one session's context budget would be visible to the next.
+/// Hosts cache `tools/list` for a session, so no description may embed state
+/// that changes while it runs; that state belongs in response headers.
 #[test]
-fn per_session_budget_does_not_leak_through_the_cached_registry() {
-    fn context_description(definitions: &[ToolDefinition]) -> String {
-        definitions
-            .iter()
-            .find(|definition| definition.name == "tracedecay_context")
-            .map(|definition| definition.description.clone())
-            .expect("tracedecay_context is advertised")
+fn context_description_carries_no_runtime_state() {
+    let definitions = get_tool_definitions().expect("tool definitions");
+    let description = &definitions
+        .iter()
+        .find(|definition| definition.name == "tracedecay_context")
+        .expect("tracedecay_context is advertised")
+        .description;
+    for stale in ["warming", "broad context calls", "nodes"] {
+        assert!(
+            !description.contains(stale),
+            "context description must be static, found {stale:?}: {description}"
+        );
     }
-
-    let small = get_tool_definitions_with_budget(11, 2).expect("tool definitions");
-    let small_description = context_description(&small);
-    assert!(
-        small_description.contains("2 broad context calls"),
-        "budget must reach the context description: {small_description}"
-    );
-
-    let large = get_tool_definitions_with_budget(999_999, 9).expect("tool definitions");
-    let large_description = context_description(&large);
-    assert!(
-        large_description.contains("9 broad context calls"),
-        "budget must reach the context description: {large_description}"
-    );
-
-    assert_ne!(
-        small_description, large_description,
-        "two sessions with different budgets must not share one description"
-    );
-    assert_eq!(
-        context_description(&small),
-        small_description,
-        "the earlier session's definitions must not be rewritten by a later one"
-    );
-
-    // A third, unbudgeted read must still see the neutral registry.
-    let neutral = get_tool_definitions().expect("tool definitions");
-    let neutral_description = context_description(&neutral);
-    assert!(
-        !neutral_description.contains("9 broad context calls"),
-        "an unbudgeted caller inherited another session's budget: {neutral_description}"
-    );
 }
 
 #[test]

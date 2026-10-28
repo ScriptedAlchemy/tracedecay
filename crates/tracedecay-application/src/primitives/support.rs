@@ -83,10 +83,10 @@ pub(crate) async fn collect_affected_test_files(
                 continue;
             }
             if is_test(&dependent) {
-                test_distances.insert(dependent, depth + 1);
-            } else {
-                next.push(dependent);
+                test_distances.insert(dependent.clone(), depth + 1);
             }
+            // Inline tests do not make a production module a dependency leaf.
+            next.push(dependent);
         }
         frontier = next;
     }

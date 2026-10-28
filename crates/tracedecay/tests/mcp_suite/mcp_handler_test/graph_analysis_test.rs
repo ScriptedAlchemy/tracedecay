@@ -767,7 +767,7 @@ async fn pr_context_no_git_returns_structured_git_error() {
     let result = handle_tool_call(
         &cg,
         "tracedecay_pr_context",
-        json!({"base_ref": "HEAD~1", "head_ref": "HEAD"}),
+        json!({"base_ref": "HEAD~1", "head_ref": "HEAD", "view": "symbols"}),
         None,
     )
     .await
@@ -1099,22 +1099,15 @@ async fn commit_context_clean_worktree_returns_json() {
 
     let output = commit_context_json(&result.value);
     assert_eq!(result.value.get("isError"), None);
-    assert_eq!(
-        output,
-        json!({
-            "freshness": {"state": "fresh"},
-            "changed_files": [],
-            "symbols_by_role": {},
-            "suggested_category": null,
-            "recent_commits": ["init"],
-            "summary": "No changes detected.",
-        })
-    );
+    assert_commit_comparison(&output, project, "head_to_worktree");
+    assert_eq!(output["changed_files"], json!([]));
+    assert_eq!(output["symbols_by_role"], json!({}));
+    assert_eq!(output["suggested_category"], Value::Null);
+    assert_eq!(output["recent_commits"], json!(["init"]));
+    assert_eq!(output["summary"], "No HEAD-to-working-tree changes.");
 }
 
-/// Staged source and test files are what an agent sees when drafting a
-/// commit: file roles, the symbols in those files, and the category that
-/// follows from those roles.
+/// Changed declarations include removed before-side source as well as additions.
 #[tokio::test]
 async fn commit_context_staged_source_and_test_reports_symbols() {
     let dir = test_temp_dir();
@@ -1153,37 +1146,34 @@ async fn commit_context_staged_source_and_test_reports_symbols() {
     close_test_graph(host).await;
 
     assert_eq!(result.value.get("isError"), None);
-    assert_eq!(
-        commit_context_json(&result.value),
-        json!({
-            "freshness": {"state": "fresh"},
-            "changed_files": [
-                {"file": "src/lib.rs", "role": "source", "symbols": 1},
-                {"file": "tests/invoice_test.rs", "role": "test", "symbols": 1}
-            ],
-            "symbols_by_role": {
-                "source": [{
-                    "name": "billed_total",
-                    "kind": "function",
-                    "file": "src/lib.rs",
-                    "line": 0
-                }],
-                "test": [{
-                    "name": "covers_billed_total",
-                    "kind": "function",
-                    "file": "tests/invoice_test.rs",
-                    "line": 0
-                }]
-            },
-            "suggested_category": "feature/fix (source + tests)",
-            "recent_commits": ["seed context"],
-            "summary": "2 file(s) changed, 2 symbol(s) affected",
-        })
-    );
+    let output = commit_context_json(&result.value);
+    assert_commit_comparison(&output, project, "head_to_worktree");
+    assert_eq!(output["changed_files"].as_array().unwrap().len(), 2);
+    assert_eq!(output["source_coverage"]["complete"], true);
+    for (role, added, removed) in [
+        ("source", "billed_total", "baseline"),
+        ("test", "covers_billed_total", "baseline_check"),
+    ] {
+        let symbols = output["symbols_by_role"][role].as_array().unwrap();
+        assert_eq!(symbols.len(), 2, "{output}");
+        assert!(
+            symbols.iter().any(|symbol| symbol["name"] == added
+                && symbol["change"] == "added"
+                && symbol["source_side"] == "after"),
+            "{output}"
+        );
+        assert!(
+            symbols.iter().any(|symbol| symbol["name"] == removed
+                && symbol["change"] == "removed"
+                && symbol["source_side"] == "before"),
+            "{output}"
+        );
+    }
+    assert_eq!(output["suggested_category"], "feature/fix (source + tests)");
+    assert_eq!(output["recent_commits"], json!(["seed context"]));
 }
 
-/// Config and docs changes are not source work. Config files collapse to one
-/// summary entry instead of one symbol per key.
+/// Unsupported config and docs retain file roles and explicit source gaps.
 #[tokio::test]
 async fn commit_context_config_and_docs_report_chore() {
     let dir = test_temp_dir();
@@ -1215,26 +1205,22 @@ async fn commit_context_config_and_docs_report_chore() {
     close_test_graph(host).await;
 
     assert_eq!(result.value.get("isError"), None);
-    assert_eq!(
-        commit_context_json(&result.value),
-        json!({
-            "freshness": {"state": "fresh"},
-            "changed_files": [
-                {"file": "billing.cfg", "role": "config", "symbols": 0},
-                {"file": "notes.txt", "role": "docs", "symbols": 0}
-            ],
-            "symbols_by_role": {
-                "config": [{
-                    "file": "billing.cfg",
-                    "kind": "config_summary",
-                    "config_keys": 0
-                }]
-            },
-            "suggested_category": "chore/docs/config",
-            "recent_commits": ["seed context"],
-            "summary": "2 file(s) changed, 1 symbol(s) affected",
-        })
-    );
+    let output = commit_context_json(&result.value);
+    assert_commit_comparison(&output, project, "head_to_worktree");
+    assert_eq!(output["changed_files"].as_array().unwrap().len(), 2);
+    assert_eq!(output["changed_files"][0]["role"], "config");
+    assert_eq!(output["changed_files"][1]["role"], "docs");
+    assert_eq!(output["source_coverage"]["complete"], false);
+    let gaps = output["source_coverage"]["gaps"].as_array().unwrap();
+    for path in ["billing.cfg", "notes.txt"] {
+        assert!(
+            gaps.iter()
+                .any(|gap| gap["file"] == path && gap["reason"].is_string()),
+            "{output}"
+        );
+    }
+    assert_eq!(output["suggested_category"], "chore/docs/config");
+    assert_eq!(output["recent_commits"], json!(["seed context"]));
 }
 
 /// `staged_only` is the difference between "what will this commit contain"
@@ -1262,6 +1248,13 @@ async fn commit_context_staged_only_excludes_unstaged_file() {
     );
     git_run(project, &["add", "src/lib.rs"]);
 
+    // The staged comparison must keep index content even when the worktree advances.
+    write_project_file(
+        project,
+        "src/lib.rs",
+        "pub fn worktree_total() -> i64 { 2 }\n",
+    );
+
     let host = init_test_project(project).await;
     let staged = handle_tool_call(
         &host,
@@ -1282,47 +1275,36 @@ async fn commit_context_staged_only_excludes_unstaged_file() {
     close_test_graph(host).await;
 
     assert_eq!(staged.value.get("isError"), None);
-    assert_eq!(
-        commit_context_json(&staged.value),
-        json!({
-            "freshness": {"state": "fresh"},
-            "changed_files": [
-                {"file": "src/lib.rs", "role": "source", "symbols": 1}
-            ],
-            "symbols_by_role": {
-                "source": [{
-                    "name": "staged_total",
-                    "kind": "function",
-                    "file": "src/lib.rs",
-                    "line": 0
-                }]
-            },
-            "suggested_category": "feature/fix/refactor",
-            "recent_commits": ["seed context"],
-            "summary": "1 file(s) changed, 1 symbol(s) affected",
-        })
+    let staged = commit_context_json(&staged.value);
+    assert_commit_comparison(&staged, project, "staged");
+    assert_eq!(staged["changed_files"].as_array().unwrap().len(), 1);
+    assert_eq!(staged["changed_files"][0]["file"], "src/lib.rs");
+    let staged_symbols = staged["symbols_by_role"]["source"].as_array().unwrap();
+    assert!(
+        staged_symbols
+            .iter()
+            .any(|symbol| symbol["name"] == "staged_total" && symbol["change"] == "added")
     );
+    assert!(
+        !staged_symbols
+            .iter()
+            .any(|symbol| symbol["name"] == "worktree_total")
+    );
+
     assert_eq!(everything.value.get("isError"), None);
-    assert_eq!(
-        commit_context_json(&everything.value),
-        json!({
-            "freshness": {"state": "fresh"},
-            "changed_files": [
-                {"file": "notes.txt", "role": "docs", "symbols": 0},
-                {"file": "src/lib.rs", "role": "source", "symbols": 1}
-            ],
-            "symbols_by_role": {
-                "source": [{
-                    "name": "staged_total",
-                    "kind": "function",
-                    "file": "src/lib.rs",
-                    "line": 0
-                }]
-            },
-            "suggested_category": "feature/fix/refactor",
-            "recent_commits": ["seed context"],
-            "summary": "2 file(s) changed, 1 symbol(s) affected",
-        })
+    let everything = commit_context_json(&everything.value);
+    assert_commit_comparison(&everything, project, "head_to_worktree");
+    assert_eq!(everything["changed_files"].as_array().unwrap().len(), 2);
+    let worktree_symbols = everything["symbols_by_role"]["source"].as_array().unwrap();
+    assert!(
+        worktree_symbols
+            .iter()
+            .any(|symbol| symbol["name"] == "worktree_total" && symbol["change"] == "added")
+    );
+    assert!(
+        !worktree_symbols
+            .iter()
+            .any(|symbol| symbol["name"] == "staged_total")
     );
 }
 
@@ -1363,32 +1345,24 @@ async fn commit_context_reports_an_edit_inside_the_index_mtime_second() {
     close_test_graph(host).await;
 
     assert_eq!(result.value.get("isError"), None);
-    assert_eq!(
-        commit_context_json(&result.value),
-        json!({
-            "freshness": {"state": "fresh"},
-            "changed_files": [
-                {"file": "src/lib.rs", "role": "source", "symbols": 1}
-            ],
-            "symbols_by_role": {
-                "source": [{
-                    "name": "clean",
-                    "kind": "function",
-                    "file": "src/lib.rs",
-                    "line": 0
-                }]
-            },
-            "suggested_category": "feature/fix/refactor",
-            "recent_commits": ["seed context"],
-            "summary": "1 file(s) changed, 1 symbol(s) affected",
-        })
+    let output = commit_context_json(&result.value);
+    assert_commit_comparison(&output, project, "head_to_worktree");
+    assert_eq!(output["changed_files"].as_array().unwrap().len(), 1);
+    assert_eq!(output["changed_files"][0]["file"], "src/lib.rs");
+    assert_eq!(output["changed_files"][0]["symbols"], 0);
+    assert!(
+        output["symbols_by_role"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|symbols| symbols.as_array().unwrap().is_empty()),
+        "{output}"
     );
 }
 
-/// A repository whose HEAD does not name a commit cannot describe a commit.
-/// The tool reports that as a git status failure, not an empty success.
+/// An unborn HEAD compares the initial source against an empty tree.
 #[tokio::test]
-async fn commit_context_unborn_head_is_git_status_error() {
+async fn commit_context_unborn_head_describes_initial_source() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
     let project = project_root.as_path();
@@ -1410,17 +1384,61 @@ async fn commit_context_unborn_head_is_git_status_error() {
     .unwrap();
     close_test_graph(host).await;
 
-    assert_eq!(result.value.get("isError"), Some(&json!(true)));
+    assert_eq!(result.value.get("isError"), None);
+    let output = commit_context_json(&result.value);
+    assert_eq!(output["comparison"]["kind"], "head_to_worktree");
+    assert!(output["comparison"]["head"].is_null());
+    assert_eq!(output["changed_files"].as_array().unwrap().len(), 1);
+    assert!(output["changed_files"][0]["comparison"]["before_blob"].is_null());
     assert_eq!(
-        commit_context_json(&result.value),
-        json!({
-            "error": {
-                "kind": "git",
-                "operation": "status",
-                "message": "cannot peel HEAD to commit: Branch 'refs/heads/unborn' does not have any commits",
-            }
-        })
+        output["changed_files"][0]["comparison"]["after_blob"],
+        git_context_output(project, &["hash-object", "src/lib.rs"])
     );
+    assert!(
+        output["symbols_by_role"]["source"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|symbol| symbol["name"] == "baseline" && symbol["change"] == "added")
+    );
+}
+
+fn git_context_output(project: &Path, args: &[&str]) -> String {
+    let output =
+        std::process::Command::new(tracedecay_runtime_core::git::try_git_program().unwrap())
+            .args(args)
+            .current_dir(project)
+            .output()
+            .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+fn assert_commit_comparison(output: &Value, project: &Path, kind: &str) {
+    assert!(output.get("freshness").is_none(), "{output}");
+    assert_eq!(output["comparison"]["kind"], kind, "{output}");
+    assert_eq!(
+        output["comparison"]["head"],
+        git_context_output(project, &["rev-parse", "HEAD"])
+    );
+    for file in output["changed_files"].as_array().unwrap() {
+        let path = file["file"].as_str().unwrap();
+        assert_eq!(
+            file["comparison"]["before_blob"],
+            git_context_output(project, &["rev-parse", &format!("HEAD:{path}")]),
+            "{file}"
+        );
+        let after = if kind == "staged" {
+            git_context_output(project, &["rev-parse", &format!(":{path}")])
+        } else {
+            git_context_output(project, &["hash-object", path])
+        };
+        assert_eq!(file["comparison"]["after_blob"], after, "{file}");
+    }
 }
 
 const BILLING_MANIFEST: &str =
@@ -3462,7 +3480,7 @@ async fn pr_context_collapses_cargo_toml_keys() {
     let result = handle_tool_call(
         &cg,
         "tracedecay_pr_context",
-        json!({"base_ref": "base", "head_ref": "HEAD"}),
+        json!({"base_ref": "base", "head_ref": "HEAD", "view": "symbols"}),
         None,
     )
     .await
@@ -3517,7 +3535,8 @@ fn git_with_pinned_dates(dir: &Path, args: &[&str], date: Option<&str>) {
     );
 }
 
-async fn pr_context_json(host: &impl AnalysisToolHost, arguments: Value) -> Value {
+async fn pr_context_json(host: &impl AnalysisToolHost, mut arguments: Value) -> Value {
+    arguments["view"] = json!("symbols");
     let result = handle_tool_call(host, "tracedecay_pr_context", arguments, None)
         .await
         .unwrap_or_else(|error| {
@@ -3661,11 +3680,11 @@ async fn pr_context_reports_the_pinned_feature_summary() {
         "next_cursor": null,
         "status": "complete",
         "symbols_added": [
-            {"file": "tests/greet.rs", "kind": "annotation_usage", "line": 0, "name": "test"},
-            {"file": "tests/greet.rs", "kind": "function", "line": 1, "name": "greet_says_hello"}
+            {"file": "tests/greet.rs", "kind": "annotation_usage", "line": 1, "name": "test"},
+            {"file": "tests/greet.rs", "kind": "function", "line": 2, "name": "greet_says_hello"}
         ],
         "symbols_modified": [
-            {"file": "src/lib.rs", "kind": "function", "line": 2, "name": "greet"}
+            {"file": "src/lib.rs", "kind": "function", "line": 3, "name": "greet"}
         ],
         "symbols_removed": [],
         "symbols_added_count": 2,
@@ -3736,7 +3755,7 @@ async fn pr_context_reports_the_pinned_feature_summary() {
     let cursor = handle_tool_call(
         &host,
         "tracedecay_pr_context",
-        json!({"format": "json", "base_ref": "master", "head_ref": "feature", "cursor": 1}),
+        json!({"format": "json", "base_ref": "master", "head_ref": "feature", "cursor": 1, "view": "symbols"}),
         None,
     )
     .await;
@@ -4705,16 +4724,16 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
     assert_eq!(
         diff_symbol_facts(&changed["modified_symbols"]),
         vec![
-            json!({"name": "checks_tier_c", "kind": "function", "file": "src/tier_c.rs", "line": 5}),
-            json!({"name": "test", "kind": "annotation_usage", "file": "src/tier_c.rs", "line": 4}),
-            json!({"name": "tier_c", "kind": "function", "file": "src/tier_c.rs", "line": 0}),
+            json!({"name": "checks_tier_c", "kind": "function", "file": "src/tier_c.rs", "line": 6}),
+            json!({"name": "test", "kind": "annotation_usage", "file": "src/tier_c.rs", "line": 5}),
+            json!({"name": "tier_c", "kind": "function", "file": "src/tier_c.rs", "line": 1}),
         ],
         "modified symbols: {changed}"
     );
     assert_eq!(changed["impacted_symbols_count"], json!(1));
     assert_eq!(
         diff_symbol_facts(&changed["impacted_symbols"]),
-        vec![json!({"name": "tier_b", "kind": "function", "file": "src/tier_b.rs", "line": 2}),],
+        vec![json!({"name": "tier_b", "kind": "function", "file": "src/tier_b.rs", "line": 3}),],
         "direct callers of tier_c: {changed}"
     );
     assert_eq!(
@@ -4737,8 +4756,8 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
     assert_eq!(
         diff_symbol_facts(&wider["impacted_symbols"]),
         vec![
-            json!({"name": "tier_a", "kind": "function", "file": "src/tier_a.rs", "line": 2}),
-            json!({"name": "tier_b", "kind": "function", "file": "src/tier_b.rs", "line": 2}),
+            json!({"name": "tier_a", "kind": "function", "file": "src/tier_a.rs", "line": 3}),
+            json!({"name": "tier_b", "kind": "function", "file": "src/tier_b.rs", "line": 3}),
         ],
         "depth 2 also reaches tier_a, which only calls tier_b: {wider}"
     );
@@ -4760,14 +4779,14 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
     assert_eq!(
         diff_symbol_facts(&duplicated["modified_symbols"]),
         vec![
-            json!({"name": "checks_tier_c", "kind": "function", "file": "src/tier_c.rs", "line": 5}),
-            json!({"name": "test", "kind": "annotation_usage", "file": "src/tier_c.rs", "line": 4}),
-            json!({"name": "tier_c", "kind": "function", "file": "src/tier_c.rs", "line": 0}),
+            json!({"name": "checks_tier_c", "kind": "function", "file": "src/tier_c.rs", "line": 6}),
+            json!({"name": "test", "kind": "annotation_usage", "file": "src/tier_c.rs", "line": 5}),
+            json!({"name": "tier_c", "kind": "function", "file": "src/tier_c.rs", "line": 1}),
         ]
     );
     assert_eq!(
         diff_symbol_facts(&duplicated["impacted_symbols"]),
-        vec![json!({"name": "tier_b", "kind": "function", "file": "src/tier_b.rs", "line": 2}),]
+        vec![json!({"name": "tier_b", "kind": "function", "file": "src/tier_b.rs", "line": 3}),]
     );
 
     // A path this generation never published carries no symbols, so the
@@ -4784,6 +4803,7 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
     assert_eq!(
         extract_json(&absent.value),
         json!({
+            "comparison": {"kind": "proposed_files"},
             "freshness": {"state": "fresh"},
             "changed_files": ["src/not_in_repo.rs"],
             "modified_symbols": [],
@@ -4808,6 +4828,7 @@ async fn diff_context_reports_changed_symbols_callers_and_refuses_invalid_input(
     assert_eq!(
         extract_json(&empty_files.value),
         json!({
+            "comparison": {"kind": "proposed_files"},
             "freshness": {"state": "fresh"},
             "changed_files": [],
             "modified_symbols": [],

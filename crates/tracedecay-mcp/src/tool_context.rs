@@ -30,6 +30,24 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// The daemon's admitted delivery reader, queried for the exact compared head.
+/// PR tools share the same provider/store authority as the delivery dashboard.
+/// The boolean explicitly requests a GitHub refresh; false reads currently
+/// authorized retained evidence without waiting for the refresh owner.
+pub type PrContextDeliveryReader = Arc<
+    dyn Fn(
+            tracedecay_domain::CommitId,
+            bool,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = tracedecay_application::delivery::ProjectDeliveryReadOutcomeV1,
+                    > + Send,
+            >,
+        > + Send
+        + Sync,
+>;
+
 use tracedecay_configuration::ProjectConfigurationRuntime;
 use tracedecay_contracts::code_index_freshness::{
     CodeIndexFreshnessPayloadV1, CodeIndexFreshnessReader,
@@ -394,6 +412,7 @@ pub struct McpRequestAuthoritiesV1<'a> {
     pub freshness: Option<&'a CodeIndexFreshnessReader>,
     pub generation_census: Option<&'a GenerationCensusSnapshot>,
     pub doctor_report: McpDoctorReportV1<'a>,
+    pub pr_context_delivery: Option<&'a PrContextDeliveryReader>,
 }
 
 /// Everything the composition root admits for one MCP tool call.
@@ -431,6 +450,11 @@ pub struct McpToolContext<'a> {
 }
 
 impl<'a> McpToolContext<'a> {
+    #[must_use]
+    pub fn pr_context_delivery(&self) -> Option<&'a PrContextDeliveryReader> {
+        self.request.pr_context_delivery
+    }
+
     /// Validates one admitted binding and freezes it for the call.
     ///
     /// The root must be absolute, the admitted scope self-consistent, and every

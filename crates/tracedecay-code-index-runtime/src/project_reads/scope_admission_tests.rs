@@ -17,7 +17,7 @@ use tracedecay_contracts::{
     RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, RefId, UtcMicros, WorktreeId};
-use tracedecay_graph_query::{CodeGraphReadError, CodeGraphReadRequest};
+use tracedecay_graph_query::{CodeGraphOpenPolicy, CodeGraphReadError, CodeGraphReadRequest};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::project_code_graph_projection_read_port;
@@ -267,14 +267,48 @@ async fn a_different_worktree_is_still_denied_the_retained_graph_read() {
     );
     let context = request_context(fixture.foreign_worktree_scope(), "foreign-worktree");
 
-    let error = port
-        .open(CodeGraphReadRequest::from_context(&context, UtcMicros(1)))
-        .await
-        .expect_err("a different worktree identity cannot borrow this route's graph");
-    assert!(
-        matches!(error, CodeGraphReadError::Denied),
-        "foreign checkout refusal must stay a typed denial: {error:?}"
-    );
+    for policy in [
+        CodeGraphOpenPolicy::AwaitRewarm,
+        CodeGraphOpenPolicy::ResidentOnly,
+    ] {
+        let error = port
+            .open(
+                CodeGraphReadRequest::from_context(&context, UtcMicros(1)).with_open_policy(policy),
+            )
+            .await
+            .expect_err("a different worktree identity cannot borrow this route's graph");
+        assert!(
+            matches!(error, CodeGraphReadError::Denied),
+            "foreign checkout refusal must stay a typed denial: {error:?}"
+        );
+        let cancelled = request_context(fixture.retained_scope.clone(), "cancelled")
+            .with_cancellation(
+                CancellationContext::cancelled(
+                    "cancellation.code-graph-scope-cancelled",
+                    UtcMicros(1),
+                )
+                .expect("cancelled context"),
+            );
+        assert_eq!(
+            port.open(
+                CodeGraphReadRequest::from_context(&cancelled, UtcMicros(1))
+                    .with_open_policy(policy)
+            )
+            .await
+            .expect_err("cancelled admission"),
+            CodeGraphReadError::Cancelled
+        );
+        let expired = request_context(fixture.retained_scope.clone(), "expired")
+            .with_deadline(Deadline::new(UtcMicros(1)).expect("expired deadline"));
+        assert_eq!(
+            port.open(
+                CodeGraphReadRequest::from_context(&expired, UtcMicros(1)).with_open_policy(policy)
+            )
+            .await
+            .expect_err("expired admission"),
+            CodeGraphReadError::TimedOut
+        );
+    }
 
     fixture.registry.shutdown().await;
 }

@@ -9,7 +9,7 @@ use tracedecay_mcp::server::{
     request_protocol_version, speaks_2026_07_28, stamp_2026_07_28_result,
 };
 
-fn bootstrap_tools_list_payload(node_count: Option<u64>, budget: u8) -> Result<serde_json::Value> {
+fn bootstrap_tools_list_payload() -> Result<serde_json::Value> {
     let profile_id = tracedecay_tool_catalog::ProfileId::new(
         tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID,
     )
@@ -21,8 +21,6 @@ fn bootstrap_tools_list_payload(node_count: Option<u64>, budget: u8) -> Result<s
             message: format!("MCP bootstrap catalog authority is unavailable: {error}"),
         })?;
     catalog_discovery_tools_list_payload(
-        node_count,
-        budget,
         &profile_id,
         &authority,
         &project_catalog_discovery_scope(),
@@ -32,13 +30,9 @@ fn bootstrap_tools_list_payload(node_count: Option<u64>, budget: u8) -> Result<s
     })
 }
 
-#[tracing::instrument(name = "daemon.bootstrap.warming_catalog", level = "trace", skip_all)]
-fn warming_bootstrap_tools_list_payload() -> Result<serde_json::Value> {
-    bootstrap_tools_list_payload(None, explore_call_budget(0))
-}
-
+#[tracing::instrument(name = "daemon.bootstrap.prewarm_catalog", level = "trace", skip_all)]
 pub(super) fn prewarm_daemon_bootstrap_catalog() -> Result<()> {
-    warming_bootstrap_tools_list_payload().map(|_| ())
+    bootstrap_tools_list_payload().map(|_| ())
 }
 
 #[tracing::instrument(name = "daemon.bootstrap.initialize_route", level = "trace", skip_all)]
@@ -138,7 +132,6 @@ pub(super) async fn attach_reset_required_stores(
 pub(super) fn daemon_bootstrap_response(
     request: &JsonRpcRequest,
     route: Option<&InitializeRouteMetadata>,
-    project_node_count: Option<u64>,
 ) -> Option<Option<JsonRpcResponse>> {
     match classify_mcp_method(&request.method) {
         McpMethod::Initialize => Some(request.id.clone().map(|id| {
@@ -166,11 +159,9 @@ pub(super) fn daemon_bootstrap_response(
                 .map(|id| JsonRpcResponse::success(id, json!({}))),
         ),
         McpMethod::ToolsList => Some(request.id.clone().map(|id| {
-            let budget =
-                project_node_count.map_or_else(|| explore_call_budget(0), explore_call_budget);
             let payload = {
                 let _span = tracing::trace_span!("daemon.bootstrap.catalog").entered();
-                bootstrap_tools_list_payload(project_node_count, budget)
+                bootstrap_tools_list_payload()
             };
             match payload {
                 Ok(mut payload) => {
@@ -189,48 +180,4 @@ pub(super) fn daemon_bootstrap_response(
         })),
         _ => None,
     }
-}
-
-#[tracing::instrument(
-    name = "daemon.bootstrap.project_node_count",
-    level = "trace",
-    skip_all
-)]
-pub(super) async fn cached_project_node_count(
-    store_administration: &StoreAdministration,
-    handshake: &DaemonHandshake,
-) -> Option<u64> {
-    cached_project_node_count_inner(store_administration, handshake).await
-}
-
-fn cached_project_node_count_inner<'a>(
-    store_administration: &'a StoreAdministration,
-    handshake: &'a DaemonHandshake,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<u64>> + Send + 'a>> {
-    // Erase the deeply nested future before it reaches the measured wrapper
-    // so every profiling feature can compute its layout.
-    Box::pin(async move {
-        let project_path = handshake.project_path.as_ref()?;
-        let canonical_project_path =
-            tracedecay_runtime_core::path_safety::canonical_root_identity(project_path);
-        let route = ProjectRouteKey::from_handshake(&canonical_project_path, handshake).ok()?;
-        let _server = {
-            let servers = store_administration.project_servers().lock().await;
-            servers
-                .get_route(&route)
-                .map(|(_, server)| Arc::clone(server))
-        }?;
-        ensure_registered_project_route(
-            store_administration,
-            &canonical_project_path,
-            handshake.allow_init,
-        )
-        .await
-        .ok()?;
-        // Bootstrap routing does not receive the daemon invocation state's
-        // retained code-index scheduler. A mounted project alone cannot prove a
-        // current generation or node count, so catalog discovery stays in its
-        // explicit warming state instead of reading the retired SQLite graph.
-        None
-    })
 }

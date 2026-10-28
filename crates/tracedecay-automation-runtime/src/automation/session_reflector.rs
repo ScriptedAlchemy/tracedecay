@@ -3,7 +3,11 @@ use std::future::Future;
 use std::pin::Pin;
 
 use serde_json::{Value, json};
-use tracedecay_domain::{Confidence, FactCategoryV1, PayloadAccessState};
+use tracedecay_contracts::automation::{
+    SessionFactProposal, SessionFactSourceSpan, SessionFactTrust,
+};
+use tracedecay_contracts::retained_surfaces::MemoryAutomationFactEvidenceTrustBucketV1;
+use tracedecay_domain::{Confidence, PayloadAccessState};
 use tracedecay_session_memory::memory::{
     MemoryApplicationError, ProjectMemoryFactAddRequest, memory_application_error,
 };
@@ -144,34 +148,17 @@ impl EvidenceCitationSet {
         }
     }
 
-    fn contains(&self, source_span: &Value) -> bool {
-        let Some(span) = source_span.as_object() else {
-            return false;
-        };
-        let raw_store = span.get("store_id").and_then(value_as_i64);
-        let raw_message = (
-            span.get("session_id").and_then(Value::as_str),
-            span.get("message_id").and_then(Value::as_str),
-        );
-        let summary_node = span.get("node_id").and_then(Value::as_str);
-        let complete_raw_message = raw_message.0.is_some() == raw_message.1.is_some();
-        if !complete_raw_message
-            || usize::from(raw_store.is_some())
-                + usize::from(raw_message.0.is_some())
-                + usize::from(summary_node.is_some())
-                != 1
-        {
-            return false;
+    fn contains(&self, source_span: &SessionFactSourceSpan) -> bool {
+        match source_span {
+            SessionFactSourceSpan::RawMessage {
+                session_id,
+                message_id,
+            } => self
+                .raw_messages
+                .contains(&(session_id.clone(), message_id.clone())),
+            SessionFactSourceSpan::RawStore { store_id } => self.raw_store_ids.contains(store_id),
+            SessionFactSourceSpan::SummaryNode { node_id } => self.summary_nodes.contains(node_id),
         }
-        raw_store.is_some_and(|store_id| self.raw_store_ids.contains(&store_id))
-            || raw_message
-                .0
-                .zip(raw_message.1)
-                .is_some_and(|(session_id, message_id)| {
-                    self.raw_messages
-                        .contains(&(session_id.to_string(), message_id.to_string()))
-                })
-            || summary_node.is_some_and(|node_id| self.summary_nodes.contains(node_id))
     }
 }
 
@@ -181,32 +168,16 @@ async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
     proposal: &Value,
     citations: &EvidenceCitationSet,
 ) -> Result<FactCandidateValidation> {
-    let Some(object) = proposal.as_object() else {
-        return Ok(quarantined_fact(proposal, "item must be a JSON object"));
+    let candidate = match serde_json::from_value::<SessionFactProposal>(proposal.clone()) {
+        Ok(candidate) => candidate,
+        Err(_) => {
+            return Ok(quarantined_fact(
+                proposal,
+                "fact proposal does not match the response contract",
+            ));
+        }
     };
-    const ALLOWED_FACT_FIELDS: &[&str] = &[
-        "content",
-        "category",
-        "tags",
-        "entities",
-        "trust",
-        "reason",
-        "source_span",
-    ];
-    if object
-        .keys()
-        .any(|field| !ALLOWED_FACT_FIELDS.contains(&field.as_str()))
-    {
-        return Ok(quarantined_fact(
-            proposal,
-            "fact proposal contains an unsupported field",
-        ));
-    }
-    let Some(content) = object
-        .get("content")
-        .and_then(Value::as_str)
-        .and_then(normalized_non_empty)
-    else {
+    let Some(content) = normalized_non_empty(&candidate.content) else {
         return Ok(quarantined_fact(proposal, "content is required"));
     };
     if content.chars().count() > 1_000 {
@@ -221,39 +192,21 @@ async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
             "content contains a control character",
         ));
     }
-    let Some(category) = object
-        .get("category")
-        .and_then(Value::as_str)
-        .and_then(session_fact_category)
-    else {
-        return Ok(quarantined_fact(proposal, "valid category is required"));
-    };
-    let Some(tags) = string_array_field(object.get("tags")) else {
+    let category = candidate.category;
+    let Some(tags) = normalized_fact_terms(&candidate.tags) else {
         return Ok(quarantined_fact(
             proposal,
-            "tags must be an array of strings",
+            "tags exceed the public evidence contract",
         ));
     };
-    let Some(entities) = string_array_field(object.get("entities")) else {
+    let Some(entities) = normalized_fact_terms(&candidate.entities) else {
         return Ok(quarantined_fact(
             proposal,
-            "entities must be an array of strings",
+            "entities exceed the public evidence contract",
         ));
     };
-    let Some(trust) = object.get("trust") else {
-        return Ok(quarantined_fact(proposal, "trust is required"));
-    };
-    let Some(trust) = candidate_trust_value(trust) else {
-        return Ok(quarantined_fact(
-            proposal,
-            "trust must be a number between 0 and 1, or one of low, medium, high",
-        ));
-    };
-    let Some(reason) = object
-        .get("reason")
-        .and_then(Value::as_str)
-        .and_then(normalized_non_empty)
-    else {
+    let trust = candidate_trust_score(&candidate.trust);
+    let Some(reason) = normalized_non_empty(&candidate.reason) else {
         return Ok(quarantined_fact(proposal, "reason is required"));
     };
     if reason.len() > 4_096 || reason.chars().any(char::is_control) {
@@ -262,34 +215,16 @@ async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
             "reason exceeds the public evidence contract",
         ));
     }
-    let Some(source_span) = object.get("source_span") else {
-        return Ok(quarantined_fact(proposal, "source_span is required"));
+    let source_span = &candidate.source_span;
+    let valid_source_identity = match source_span {
+        SessionFactSourceSpan::RawMessage {
+            session_id,
+            message_id,
+        } => public_evidence_text(session_id, 4_096) && public_evidence_text(message_id, 4_096),
+        SessionFactSourceSpan::RawStore { .. } => true,
+        SessionFactSourceSpan::SummaryNode { node_id } => public_evidence_text(node_id, 4_096),
     };
-    let Some(source_span_object) = source_span.as_object() else {
-        return Ok(quarantined_fact(proposal, "source_span must be an object"));
-    };
-    const ALLOWED_SOURCE_SPAN_FIELDS: &[&str] =
-        &["session_id", "message_id", "store_id", "node_id"];
-    if source_span_object
-        .keys()
-        .any(|field| !ALLOWED_SOURCE_SPAN_FIELDS.contains(&field.as_str()))
-    {
-        return Ok(quarantined_fact(
-            proposal,
-            "source_span contains an unsupported field",
-        ));
-    }
-    if source_span_object.values().any(Value::is_null) {
-        return Ok(quarantined_fact(
-            proposal,
-            "source_span optional identities must be omitted instead of null",
-        ));
-    }
-    if source_span_object.values().any(|value| {
-        value
-            .as_str()
-            .is_some_and(|text| !public_evidence_text(text, 4_096))
-    }) {
+    if !valid_source_identity {
         return Ok(quarantined_fact(
             proposal,
             "source_span contains an invalid public evidence identity",
@@ -407,7 +342,7 @@ async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
         "category": category,
         "tags": tags.clone(),
         "entities": entities.clone(),
-        "trust": canonical_evidence_trust(object.get("trust"), trust.as_f64()),
+        "trust": canonical_evidence_trust(&candidate.trust, trust.as_f64()),
         "source_span": source_span,
         "reason": reason.clone(),
     });
@@ -442,44 +377,27 @@ async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
     })))
 }
 
-fn session_fact_category(category: &str) -> Option<FactCategoryV1> {
-    match category {
-        "general" => Some(FactCategoryV1::General),
-        "user_pref" => Some(FactCategoryV1::UserPref),
-        "project" => Some(FactCategoryV1::Project),
-        "tool" => Some(FactCategoryV1::Tool),
-        "decision" => Some(FactCategoryV1::Decision),
-        "code_area" => Some(FactCategoryV1::CodeArea),
-        _ => None,
+/// Trust syntax is decoded by the proposal contract. Bucket policy remains
+/// with the memory authority, including the existing automatic-apply scores.
+fn candidate_trust_score(value: &SessionFactTrust) -> f64 {
+    match value {
+        SessionFactTrust::Numeric(trust) => *trust,
+        SessionFactTrust::Bucket(MemoryAutomationFactEvidenceTrustBucketV1::Low) => {
+            LOW_TRUST_REPRESENTATIVE
+        }
+        SessionFactTrust::Bucket(MemoryAutomationFactEvidenceTrustBucketV1::Medium) => {
+            DEFAULT_TRUST
+        }
+        SessionFactTrust::Bucket(MemoryAutomationFactEvidenceTrustBucketV1::High) => {
+            HIGH_TRUST_REPRESENTATIVE
+        }
     }
 }
 
-/// Accepts numeric trust in `[0, 1]` plus the `low`/`medium`/`high` bucket
-/// labels models frequently emit despite the numeric prompt instruction.
-/// Buckets map to the representative scores in
-/// [`tracedecay_session_memory::memory::trust`], so they cannot drift out of their
-/// documented ranges.
-///
-/// Deliberate decision: the prompt forbids string labels, but they are
-/// accepted defensively rather than rejecting an otherwise valid fact. Note
-/// that the "high" representative can clear automatic-apply thresholds.
-/// This is intentional.
-fn candidate_trust_value(value: &Value) -> Option<f64> {
-    if let Some(trust) = value.as_f64() {
-        return (0.0..=1.0).contains(&trust).then_some(trust);
-    }
-    match value.as_str()?.trim().to_ascii_lowercase().as_str() {
-        "low" => Some(LOW_TRUST_REPRESENTATIVE),
-        "medium" => Some(DEFAULT_TRUST),
-        "high" => Some(HIGH_TRUST_REPRESENTATIVE),
-        _ => None,
-    }
-}
-
-fn canonical_evidence_trust(value: Option<&Value>, trust: f64) -> Value {
-    match value.and_then(Value::as_str) {
-        Some(bucket) => Value::String(bucket.trim().to_ascii_lowercase()),
-        None => json!(trust),
+fn canonical_evidence_trust(value: &SessionFactTrust, trust: f64) -> Value {
+    match value {
+        SessionFactTrust::Numeric(_) => json!(trust),
+        SessionFactTrust::Bucket(bucket) => json!(bucket),
     }
 }
 
@@ -494,17 +412,13 @@ fn value_as_i64(value: &Value) -> Option<i64> {
         .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
 }
 
-fn string_array_field(value: Option<&Value>) -> Option<Vec<String>> {
-    let Some(value) = value else {
-        return Some(Vec::new());
-    };
-    let array = value.as_array()?;
-    if array.len() > 20 {
+fn normalized_fact_terms(terms: &[String]) -> Option<Vec<String>> {
+    if terms.len() > 20 {
         return None;
     }
     let mut values = Vec::new();
-    for item in array {
-        let value = item.as_str().and_then(normalized_non_empty)?;
+    for term in terms {
+        let value = normalized_non_empty(term)?;
         if value.len() > 4_096 || value.chars().any(char::is_control) {
             return None;
         }

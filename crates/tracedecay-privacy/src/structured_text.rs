@@ -41,12 +41,15 @@ use super::detector_kernel::{NormalizedSensitiveKey, SensitiveKeyPolicy};
 use super::length_prefixed_sha256_hex;
 use super::rules::{CredentialPatternSet, CredentialScanBatchV1};
 use super::structured::{
-    ParsedStructuredTextV1, StructuredSanitizationError, StructuredSanitizationLimits,
-    StructuredTextFieldV1, StructuredTextFormatV1, StructuredTextParseFailureV1,
-    parse_structured_text, sanitize_structured_payload, validate_structured_text_limits,
+    MAX_STRUCTURED_TEXT_BYTES, ParsedStructuredTextV1, StructuredSanitizationError,
+    StructuredSanitizationLimits, StructuredTextFieldV1, StructuredTextFormatV1,
+    StructuredTextParseFailureV1, parse_structured_text, sanitize_structured_payload,
+    validate_structured_text_limits,
 };
 
-pub const CODE_SOURCE_SANITIZER_VERSION_V1: &str = "privacy.code-source.v1";
+// Retained generations must not reuse content admitted before key and BOM
+// inspection. The receipt shape and identity domain remain V1.
+pub const CODE_SOURCE_SANITIZER_VERSION_V1: &str = "privacy.code-source.v1.structured-keys.1";
 const CODE_SOURCE_RECEIPT_DOMAIN_V1: &[u8] = b"tracedecay.privacy.code-source.receipt.v1\0";
 pub const LCM_PAYLOAD_SANITIZER_VERSION_V1: &str = "privacy.lcm-payload.v1";
 const LCM_PAYLOAD_RECEIPT_DOMAIN_V1: &[u8] = b"tracedecay.privacy.lcm-payload.receipt.v1\0";
@@ -171,7 +174,16 @@ pub(crate) fn sanitize_structured_text(
     raw: &str,
 ) -> Result<StructuredTextSanitizationV1, DetectionError> {
     let patterns = credential_patterns()?;
-    let sanitized = sanitize_structured_text_with(raw, patterns)?;
+    if raw.len() > MAX_STRUCTURED_TEXT_BYTES {
+        return Err(DetectionError::ScanLimitExceeded);
+    }
+    // Parsing, span discovery, and rewrite verification must use the same
+    // coordinates. Restore the BOM only after those operations finish.
+    let document = raw.strip_prefix('\u{feff}').unwrap_or(raw);
+    let mut sanitized = sanitize_structured_text_with(document, patterns)?;
+    if document.len() != raw.len() {
+        sanitized.sanitized_text.insert(0, '\u{feff}');
+    }
     patterns
         .checked(sanitized)
         .map_err(|_| DetectionError::Initialization)
@@ -202,7 +214,13 @@ fn sanitize_structured_text_with(
         tree_candidates(raw, &parsed, &policy, patterns, &mut quarantine_findings)
     } else {
         (
-            line_candidates(raw, &parsed.fields, &policy, patterns),
+            line_candidates(
+                raw,
+                &parsed.fields,
+                &policy,
+                patterns,
+                &mut quarantine_findings,
+            ),
             RedactedKeys::default(),
         )
     };
@@ -406,9 +424,18 @@ fn line_candidates(
     fields: &[StructuredTextFieldV1],
     policy: &ConfiguredSensitiveKeyPolicy<'_>,
     patterns: &CredentialPatternSet,
+    quarantine_findings: &mut Vec<SanitizationFindingV1>,
 ) -> Vec<SensitiveCandidate> {
     let mut candidates = Vec::new();
     for field in fields {
+        let mut key_evidence = field.key.clone();
+        redact_text(
+            &mut key_evidence,
+            "$",
+            patterns,
+            quarantine_findings,
+            SanitizationActionV1::Quarantined,
+        );
         if field.value_span.start >= field.value_span.end
             || field.value_span.end > raw.len()
             || !raw.is_char_boundary(field.value_span.start)
@@ -1174,9 +1201,9 @@ pub fn sanitize_code_source_bytes(
 /// detector change must invalidate a completed-rescan watermark.
 pub fn lcm_payload_detector_revision() -> &'static str {
     // Advance this input when detector semantics change independently of the
-    // rule documents. Restored strict entropy must recheck previously exempt
-    // compound tokens without changing the receipt contract.
-    const ALGORITHM_REVISION: &[u8] = b"strict-entropy.1";
+    // rule documents. Key and BOM inspection must recheck payloads admitted
+    // by the prior implementation without changing the receipt contract.
+    const ALGORITHM_REVISION: &[u8] = b"strict-entropy.1+structured-keys.1";
     static REVISION: OnceLock<String> = OnceLock::new();
     REVISION.get_or_init(|| {
         let [catalogue, supplement] = super::rules::rule_document_bytes();
@@ -1262,7 +1289,7 @@ fn detect_lcm_payload(raw: &str) -> Result<(String, Vec<SanitizationFindingV1>),
     if raw.len() > MAX_LCM_PAYLOAD_BYTES_V1 {
         return Err(DetectionError::ScanLimitExceeded);
     }
-    let trimmed = raw.trim_start();
+    let trimmed = raw.strip_prefix('\u{feff}').unwrap_or(raw).trim_start();
     let json_container = trimmed.starts_with('{')
         || trimmed
             .strip_prefix('[')

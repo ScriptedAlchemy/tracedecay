@@ -567,7 +567,10 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
             },
             {
                 "content": "",
-                "category": "project"
+                "category": "project",
+                "trust": 0.7,
+                "source_span": {"session_id": "session-reflect-1", "message_id": "session-reflect-1-message-001"},
+                "reason": "empty content is invalid"
             },
             {
                 "content": "Bucket trust labels emitted by backends map onto calibrated numeric scores",
@@ -663,18 +666,26 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
             .any(|value| value["reason"] == json!(reason))
     };
     assert!(has_quarantine_reason("content is required"));
-    assert!(has_quarantine_reason("source_span is required"));
     assert!(has_quarantine_reason(
         "source_span must cite a bounded session reflection evidence hit"
     ));
-    assert!(has_quarantine_reason("trust is required"));
-    assert!(has_quarantine_reason(
-        "trust must be a number between 0 and 1, or one of low, medium, high"
-    ));
-    assert!(has_quarantine_reason("reason is required"));
-    assert!(has_quarantine_reason(
-        "fact proposal contains an unsupported field"
-    ));
+    for content in [
+        "Uncited session reflection facts must not be accepted",
+        "Session reflection facts require calibrated trust",
+        "Session reflection facts require a rationale",
+        "Session reflector uses trust rather than confidence",
+        "Unknown trust labels must not be accepted",
+    ] {
+        let rejected = quarantined
+            .iter()
+            .find(|value| value["item"]["content"] == content)
+            .expect("each malformed proposal must retain an item-specific quarantine");
+        assert_eq!(
+            rejected["reason"],
+            "fact proposal does not match the response contract"
+        );
+        assert_eq!(rejected["validation"]["status"], "quarantined");
+    }
     assert_eq!(
         run.report["accepted_facts"][2]["add_fact_request"]["trust"],
         json!(0.85)

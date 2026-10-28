@@ -299,7 +299,7 @@ pub(super) fn build_session_reflector_prompt(evidence: &Value) -> String {
         "\n",
         "Proposing nothing is a real option when the session ran smoothly and revealed nothing durable, but do not reach for it as a default.\n",
         "\n",
-        "Response contract: Return only JSON with a facts array. Each fact must include content, category, tags, entities, trust, source_span, and reason; use empty arrays when there are no tags or entities. Category must be one of general, user_pref, project, tool, decision, or code_area. Use trust, not confidence; trust must be a JSON number from 0.0 to 1.0. Do not use string labels like high, medium, or low. source_span must cite one bounded evidence hit by session_id plus message_id for raw messages, by store_id for raw messages, or by node_id for summaries. Do not include secrets or ephemeral status.\n",
+        "Response contract: Return only JSON matching the supplied response_schema, with proposals in its facts array. That schema defines each fact's fields, types, and source-reference alternatives. Prefer numeric trust scores; supported legacy trust labels are normalized at the response boundary. Cite only a bounded evidence hit supplied here. Do not include secrets or ephemeral status.\n",
     );
     format!(
         "{POLICY}{}",

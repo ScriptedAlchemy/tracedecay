@@ -928,6 +928,7 @@ pub(crate) fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                 "tracedecay_pr_context",
                 "pr_context",
                 json!({
+                    "view": "symbols",
                     "base_ref": "HEAD~1",
                     "head_ref": "HEAD",
                     "maximum_symbols": 64,

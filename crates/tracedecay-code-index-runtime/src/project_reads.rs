@@ -13,7 +13,9 @@ use tracedecay_code_index::graph_projection::{
     CodeGraphProjectionStore, InteractiveCatalogReaderLeaseV1,
 };
 use tracedecay_contracts::{Deadline, ResolvedScope, now_micros};
-use tracedecay_graph_query::{CodeGraphReadError, CodeGraphReadRequest, VerifiedCodeGraphRead};
+use tracedecay_graph_query::{
+    CodeGraphOpenPolicy, CodeGraphReadError, CodeGraphReadRequest, VerifiedCodeGraphRead,
+};
 use tracedecay_query::retrieval::RetrievalPortError;
 use tracedecay_runtime_core::native_runtime;
 
@@ -355,7 +357,16 @@ impl tracedecay_graph_query::CodeGraphProjectionReadPort for ProjectCodeGraphPro
                 }
             }?;
             refuse_projection_wait(&request)?;
-            let catalog_retain = await_rewarm(&projection.store, &request).await?;
+            let catalog_retain = match request.open_policy {
+                CodeGraphOpenPolicy::AwaitRewarm => {
+                    await_rewarm(&projection.store, &request).await?
+                }
+                CodeGraphOpenPolicy::ResidentOnly => projection
+                    .store
+                    .try_retain_resident_for(request.readiness)
+                    .map_err(tracedecay_graph_query::map_projection_error)?,
+            };
+            refuse_projection_wait(&request)?;
             VerifiedCodeGraphRead::new(
                 self.authority.scope.clone(),
                 projection.store,

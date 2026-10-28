@@ -1,11 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value as JsonValue;
 
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{ObservationOrderingDomainV1, ObservationSourceCursorV1};
+use tracedecay_private_fs::RewriteWitness;
 use tracedecay_runtime_core::db::engine::{Error as EngineError, FromValue, Row, Value};
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_store::{SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord, SessionRecord};
@@ -20,7 +22,11 @@ use tracedecay_lcm::retrieval_content::{
 
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess};
 use super::super::shared::{durable_project_path_key, path_identity_key};
-use super::super::source::{HostProviderCoverage, jsonl_prefix_digest};
+use super::super::source::{
+    HostProviderCoverage, JsonlFileChangeToken, JsonlNativeFileIdentity,
+    jsonl_change_token_settled, jsonl_file_change_token_under, jsonl_native_file_identity,
+    jsonl_prefix_digest,
+};
 use super::search::{
     SESSION_MESSAGE_SEARCH_MAX_FETCH, downrank_inventory_messages,
     interleave_workflow_search_results, session_fts_query,
@@ -118,7 +124,7 @@ struct AdmittedSource {
     other_ordering: bool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TranscriptProgress {
     /// No cursor proves the file's consumed prefix: never ingested, or
     /// rewritten since its cursor was committed.
@@ -129,13 +135,91 @@ enum TranscriptProgress {
     NotByteOrdered,
 }
 
+/// One transcript version: a later stat that matches it in full, under a
+/// settled change token, proves the bytes are the ones a verdict was read from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TranscriptVersion {
+    native_identity: JsonlNativeFileIdentity,
+    size: u64,
+    change: JsonlFileChangeToken,
+}
+
+/// The prefix verdict last proven for one transcript, with the version and
+/// committed checkpoints it was proven against.
+#[derive(Clone)]
+struct ProvenTranscriptProgress {
+    version: TranscriptVersion,
+    checkpoints: Vec<(u64, u64)>,
+    progress: TranscriptProgress,
+}
+
+/// Verdicts of one store's previous health walk, keyed by transcript path.
+type TranscriptProgressMemo = HashMap<String, ProvenTranscriptProgress>;
+
+/// Prefix proofs shared by the leases of one registered store publication.
+/// Disposal releases the proofs; reversible retirement keeps the same state.
+#[derive(Default)]
+pub struct SessionTranscriptProgressProofs {
+    partitions: Mutex<HashMap<Option<String>, Arc<TranscriptProgressMemo>>>,
+}
+
+impl SessionTranscriptProgressProofs {
+    fn snapshot(
+        &self,
+        provider: &Option<String>,
+    ) -> Result<Arc<TranscriptProgressMemo>, TraceDecayError> {
+        Ok(self
+            .partitions
+            .lock()
+            .map_err(|_| {
+                session_db_operation_message(
+                    "snapshot session transcript progress proofs",
+                    "session transcript progress proofs lock poisoned",
+                )
+            })?
+            .get(provider)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    fn replace(
+        &self,
+        provider: Option<String>,
+        memo: TranscriptProgressMemo,
+    ) -> Result<(), TraceDecayError> {
+        self.partitions
+            .lock()
+            .map_err(|_| {
+                session_db_operation_message(
+                    "replace session transcript progress proofs",
+                    "session transcript progress proofs lock poisoned",
+                )
+            })?
+            .insert(provider, Arc::new(memo));
+        Ok(())
+    }
+}
+
+struct TranscriptProgressRead {
+    metadata: std::fs::Metadata,
+    progress: TranscriptProgress,
+    /// What a later walk may reuse; `None` when no prefix was verified or the
+    /// change token cannot yet prove a later stat saw the same bytes.
+    proven: Option<ProvenTranscriptProgress>,
+    prefix_bytes_hashed: u64,
+}
+
 /// Resolves progress through the same committed prefix digest ingest resumes
 /// from. A physical replacement can retain its prefix, while an in-place rewrite
 /// can change it without changing the file identity or length.
+///
+/// A `previous` verdict proven for the same version and checkpoints is reused
+/// without reading the prefix again.
 fn transcript_progress(
     path: &Path,
     sources: &[AdmittedSource],
-) -> std::io::Result<Option<(std::fs::Metadata, TranscriptProgress)>> {
+    previous: Option<&ProvenTranscriptProgress>,
+) -> std::io::Result<Option<TranscriptProgressRead>> {
     let mut cursors = sources
         .iter()
         .flat_map(|source| source.file_bytes.iter())
@@ -164,32 +248,71 @@ fn transcript_progress(
             "transcript path is not a regular file",
         ));
     }
-    let progress = if let Some(file) = file.as_mut() {
-        let mut progress = TranscriptProgress::Unadmitted;
-        for cursor in cursors {
-            let Some((_, fingerprint)) = cursor.file_identity().zip(cursor.resume_fingerprint())
-            else {
-                continue;
-            };
-            let offset = cursor.byte_offset();
-            if offset > metadata.len() {
-                continue;
-            }
-            let (digest, _) = jsonl_prefix_digest(file, offset)?;
-            if digest.fingerprint(offset) == fingerprint {
-                // Descending offsets make the first valid checkpoint the
-                // maximum; smaller candidates need no further prefix reads.
-                progress = TranscriptProgress::AdmittedThrough(offset);
-                break;
-            }
-        }
-        progress
-    } else if sources.iter().any(|source| source.other_ordering) {
-        TranscriptProgress::NotByteOrdered
-    } else {
-        TranscriptProgress::Unadmitted
+    let Some(file) = file.as_mut() else {
+        let progress = if sources.iter().any(|source| source.other_ordering) {
+            TranscriptProgress::NotByteOrdered
+        } else {
+            TranscriptProgress::Unadmitted
+        };
+        return Ok(Some(TranscriptProgressRead {
+            metadata,
+            progress,
+            proven: None,
+            prefix_bytes_hashed: 0,
+        }));
     };
-    Ok(Some((metadata, progress)))
+    let checkpoints = cursors
+        .iter()
+        .filter_map(|cursor| {
+            cursor
+                .file_identity()
+                .and(cursor.resume_fingerprint())
+                .map(|fingerprint| (cursor.byte_offset(), fingerprint))
+        })
+        .collect::<Vec<_>>();
+    let version = jsonl_native_file_identity(file, &metadata)
+        .map(|native_identity| TranscriptVersion {
+            native_identity,
+            size: metadata.len(),
+            change: jsonl_file_change_token_under(&metadata, RewriteWitness::NATIVE),
+        })
+        .filter(|version| jsonl_change_token_settled(version.change));
+    if let (Some(version), Some(previous)) = (version, previous)
+        && previous.version == version
+        && previous.checkpoints == checkpoints
+    {
+        return Ok(Some(TranscriptProgressRead {
+            metadata,
+            progress: previous.progress,
+            proven: Some(previous.clone()),
+            prefix_bytes_hashed: 0,
+        }));
+    }
+    let mut progress = TranscriptProgress::Unadmitted;
+    let mut prefix_bytes_hashed = 0_u64;
+    for &(offset, fingerprint) in &checkpoints {
+        if offset > metadata.len() {
+            continue;
+        }
+        let (digest, hashed) = jsonl_prefix_digest(file, offset)?;
+        prefix_bytes_hashed = prefix_bytes_hashed.saturating_add(hashed);
+        if digest.fingerprint(offset) == fingerprint {
+            // Descending offsets make the first valid checkpoint the
+            // maximum; smaller candidates need no further prefix reads.
+            progress = TranscriptProgress::AdmittedThrough(offset);
+            break;
+        }
+    }
+    Ok(Some(TranscriptProgressRead {
+        metadata,
+        progress,
+        proven: version.map(|version| ProvenTranscriptProgress {
+            version,
+            checkpoints,
+            progress,
+        }),
+        prefix_bytes_hashed,
+    }))
 }
 
 fn modified_unix_seconds(metadata: &std::fs::Metadata) -> Option<i64> {
@@ -210,7 +333,8 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
     #[tracing::instrument(
         name = "global_db.registered_sessions.ingest_health",
         level = "trace",
-        skip_all
+        skip_all,
+        fields(prefix_bytes_hashed = tracing::field::Empty)
     )]
     pub async fn session_ingest_health_for_provider(
         &self,
@@ -335,6 +459,13 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
         }
         drop(coverage_rows);
         let admitted = self.admitted_transcript_sources(provider).await?;
+        let provider_partition = provider.map(str::to_owned);
+        let proofs = self.transcript_progress_proofs();
+        let previous_memo = proofs
+            .snapshot(&provider_partition)
+            .map_err(|error| error.to_string())?;
+        let mut next_memo = TranscriptProgressMemo::new();
+        let mut prefix_bytes_hashed = 0_u64;
         let mut after_path = String::new();
         loop {
             let mut rows = reader
@@ -393,51 +524,78 @@ impl<D: SessionRegisteredDb + Sync> SessionStoreAccess<'_, D> {
                 .collect::<Vec<_>>();
             // Prefix checks can read historical transcripts in full. One
             // owned page leaves the async worker and holds no database lease.
-            health = native_runtime::spawn_owned_blocking(move || {
-                for (path, sources) in page {
-                    // Opaque non-Unicode locations cannot be resolved from
-                    // this display field; missing files remain untracked.
-                    let Some((metadata, progress)) = ({
-                        let _span =
-                            tracing::trace_span!("global_db.registered_sessions.ingest_stat")
-                                .entered();
-                        transcript_progress(Path::new(&path), &sources).map_err(|error| {
-                            format!("failed to read transcript ingest progress for {path}: {error}")
-                        })?
-                    }) else {
-                        continue;
-                    };
-                    health.tracked_transcripts = health.tracked_transcripts.saturating_add(1);
-                    let pending = match progress {
-                        TranscriptProgress::Unadmitted => metadata.len(),
-                        TranscriptProgress::AdmittedThrough(offset) => {
-                            metadata.len().saturating_sub(offset)
+            let page_memo = Arc::clone(&previous_memo);
+            let (page_health, page_proven, page_hashed) =
+                native_runtime::spawn_owned_blocking(move || {
+                    let mut proven_page = Vec::new();
+                    let mut hashed_page = 0_u64;
+                    for (path, sources) in page {
+                        // Opaque non-Unicode locations cannot be resolved from
+                        // this display field; missing files remain untracked.
+                        let Some(read) = ({
+                            let _span =
+                                tracing::trace_span!("global_db.registered_sessions.ingest_stat")
+                                    .entered();
+                            transcript_progress(Path::new(&path), &sources, page_memo.get(&path))
+                            .map_err(|error| {
+                                format!(
+                                    "failed to read transcript ingest progress for {path}: {error}"
+                                )
+                            })?
+                        }) else {
+                            continue;
+                        };
+                        hashed_page = hashed_page.saturating_add(read.prefix_bytes_hashed);
+                        let TranscriptProgressRead {
+                            metadata,
+                            progress,
+                            proven,
+                            ..
+                        } = read;
+                        if let Some(proven) = proven {
+                            proven_page.push((path, proven));
                         }
-                        TranscriptProgress::NotByteOrdered => 0,
-                    };
-                    if pending > 0 {
-                        health.pending_transcripts = health.pending_transcripts.saturating_add(1);
-                        health.pending_bytes = health.pending_bytes.saturating_add(pending);
-                        health.max_transcript_pending_bytes =
-                            health.max_transcript_pending_bytes.max(pending);
-                    } else if matches!(progress, TranscriptProgress::AdmittedThrough(_))
-                        && let Some(modified) = modified_unix_seconds(&metadata)
-                    {
-                        health.last_ingest_unix = Some(
-                            health
-                                .last_ingest_unix
-                                .map_or(modified, |previous| previous.max(modified)),
-                        );
+                        health.tracked_transcripts = health.tracked_transcripts.saturating_add(1);
+                        let pending = match progress {
+                            TranscriptProgress::Unadmitted => metadata.len(),
+                            TranscriptProgress::AdmittedThrough(offset) => {
+                                metadata.len().saturating_sub(offset)
+                            }
+                            TranscriptProgress::NotByteOrdered => 0,
+                        };
+                        if pending > 0 {
+                            health.pending_transcripts =
+                                health.pending_transcripts.saturating_add(1);
+                            health.pending_bytes = health.pending_bytes.saturating_add(pending);
+                            health.max_transcript_pending_bytes =
+                                health.max_transcript_pending_bytes.max(pending);
+                        } else if matches!(progress, TranscriptProgress::AdmittedThrough(_))
+                            && let Some(modified) = modified_unix_seconds(&metadata)
+                        {
+                            health.last_ingest_unix = Some(
+                                health
+                                    .last_ingest_unix
+                                    .map_or(modified, |previous| previous.max(modified)),
+                            );
+                        }
                     }
-                }
-                Ok::<_, String>(health)
-            })
-            .await
-            .map_err(|error| format!("session ingest health filesystem task failed: {error}"))??;
+                    Ok::<_, String>((health, proven_page, hashed_page))
+                })
+                .await
+                .map_err(|error| {
+                    format!("session ingest health filesystem task failed: {error}")
+                })??;
+            health = page_health;
+            next_memo.extend(page_proven);
+            prefix_bytes_hashed = prefix_bytes_hashed.saturating_add(page_hashed);
             if page_len < SESSION_INGEST_HEALTH_PAGE_SIZE as usize {
                 break;
             }
         }
+        tracing::Span::current().record("prefix_bytes_hashed", prefix_bytes_hashed);
+        proofs
+            .replace(provider_partition, next_memo)
+            .map_err(|error| error.to_string())?;
         Ok(health)
     }
 
@@ -1516,5 +1674,181 @@ mod identity_tests {
             count, 3,
             "both path forms and only the byte-exact opaque key match"
         );
+    }
+}
+
+#[cfg(test)]
+mod transcript_progress_tests {
+    use std::sync::{Arc, Barrier};
+
+    use tracedecay_domain::errors::TraceDecayError;
+    use tracedecay_domain::{
+        ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
+        ObservationSourceGenerationV1, ObservationSourceIdentityV1, SessionId,
+    };
+
+    use super::super::super::source::{jsonl_prefix_digest, spin_until_jsonl_change_settled};
+    use super::{
+        AdmittedSource, SessionTranscriptProgressProofs, TranscriptProgress,
+        TranscriptProgressMemo, transcript_progress,
+    };
+
+    fn admitted_through(path: &std::path::Path, offset: u64) -> AdmittedSource {
+        let mut file = std::fs::File::open(path).unwrap();
+        let (digest, _) = jsonl_prefix_digest(&mut file, offset).unwrap();
+        let cursor = ObservationSourceCursorV1::for_ordering(
+            ObservationSourceIdentityV1::new(SessionId::new("memo-session").unwrap()).unwrap(),
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(1).unwrap(),
+            ObservationOrderingDomainV1::FileBytes,
+            offset,
+        )
+        .unwrap()
+        .with_resume_checkpoint(1, digest.fingerprint(offset));
+        AdmittedSource {
+            file_bytes: vec![cursor],
+            other_ordering: false,
+        }
+    }
+
+    #[test]
+    fn unchanged_transcript_reuses_its_proven_prefix_until_its_bytes_change() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let line = format!("{{\"text\":\"{}\"}}\n", "a".repeat(4000));
+        std::fs::write(&path, line.repeat(16)).unwrap();
+        let length = std::fs::metadata(&path).unwrap().len();
+        let sources = [admitted_through(&path, length)];
+        assert!(
+            spin_until_jsonl_change_settled(&path),
+            "this host has no rewrite witness, so no verdict can be reused"
+        );
+
+        let first = transcript_progress(&path, &sources, None).unwrap().unwrap();
+        assert_eq!(first.progress, TranscriptProgress::AdmittedThrough(length));
+        assert_eq!(first.prefix_bytes_hashed, length);
+        let proven = first.proven.expect("a settled verdict is reusable");
+
+        let repeat = transcript_progress(&path, &sources, Some(&proven))
+            .unwrap()
+            .unwrap();
+        assert_eq!(repeat.progress, TranscriptProgress::AdmittedThrough(length));
+        assert_eq!(
+            repeat.prefix_bytes_hashed, 0,
+            "an unchanged transcript is not read again"
+        );
+
+        let changed_checkpoint = [admitted_through(&path, length / 2)];
+        let changed = transcript_progress(&path, &changed_checkpoint, Some(&proven))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            changed.progress,
+            TranscriptProgress::AdmittedThrough(length / 2)
+        );
+        assert_eq!(changed.prefix_bytes_hashed, length / 2);
+
+        // Same length, same inode, different bytes inside the admitted prefix.
+        std::fs::write(&path, line.replace('a', "b").repeat(16)).unwrap();
+        let rewritten = transcript_progress(&path, &sources, Some(&proven))
+            .unwrap()
+            .unwrap();
+        assert_eq!(rewritten.progress, TranscriptProgress::Unadmitted);
+        assert_eq!(rewritten.prefix_bytes_hashed, length);
+    }
+
+    #[test]
+    fn progress_proof_partitions_replace_independently_with_immutable_snapshots() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        std::fs::write(&path, b"first\nsecond\n").unwrap();
+        assert!(spin_until_jsonl_change_settled(&path));
+        let proofs = SessionTranscriptProgressProofs::default();
+        let barrier = Barrier::new(2);
+        let key = path.to_str().unwrap().to_owned();
+        std::thread::scope(|threads| {
+            for (provider, offset) in [(None, 6), (Some("claude".to_owned()), 13)] {
+                let proofs = &proofs;
+                let barrier = &barrier;
+                let path = &path;
+                let key = &key;
+                threads.spawn(move || {
+                    let previous = proofs.snapshot(&provider).unwrap();
+                    assert!(previous.is_empty());
+                    barrier.wait();
+                    let read = transcript_progress(
+                        path,
+                        &[admitted_through(path, offset)],
+                        previous.get(key),
+                    )
+                    .unwrap()
+                    .unwrap();
+                    assert_eq!(read.prefix_bytes_hashed, offset);
+                    proofs
+                        .replace(
+                            provider,
+                            TranscriptProgressMemo::from([(key.clone(), read.proven.unwrap())]),
+                        )
+                        .unwrap();
+                });
+            }
+        });
+        for (provider, offset) in [(None, 6), (Some("claude".to_owned()), 13)] {
+            let snapshot = proofs.snapshot(&provider).unwrap();
+            let warm = transcript_progress(
+                &path,
+                &[admitted_through(&path, offset)],
+                snapshot.get(&key),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(warm.progress, TranscriptProgress::AdmittedThrough(offset));
+            assert_eq!(warm.prefix_bytes_hashed, 0);
+        }
+        let previous = proofs.snapshot(&None).unwrap();
+        proofs.replace(None, TranscriptProgressMemo::new()).unwrap();
+        assert!(proofs.snapshot(&None).unwrap().is_empty());
+        assert!(previous.contains_key(&key));
+        assert!(
+            proofs
+                .snapshot(&Some("claude".to_owned()))
+                .unwrap()
+                .contains_key(&key)
+        );
+
+        let owner = Arc::new(proofs);
+        let weak = Arc::downgrade(&owner);
+        drop(owner);
+        assert!(
+            weak.upgrade().is_none(),
+            "page snapshots retain no owner state"
+        );
+        assert!(previous.contains_key(&key));
+    }
+
+    #[test]
+    fn poisoned_progress_proofs_refuse_snapshot_and_replacement() {
+        let proofs = SessionTranscriptProgressProofs::default();
+        std::thread::scope(|threads| {
+            assert!(
+                threads
+                    .spawn(|| {
+                        let _guard = proofs.partitions.lock().unwrap();
+                        panic!("poison transcript progress proof state");
+                    })
+                    .join()
+                    .is_err()
+            );
+        });
+        assert!(matches!(
+            proofs.snapshot(&None),
+            Err(TraceDecayError::Database { operation, .. })
+                if operation == "snapshot session transcript progress proofs"
+        ));
+        assert!(matches!(
+            proofs.replace(None, TranscriptProgressMemo::new()),
+            Err(TraceDecayError::Database { operation, .. })
+                if operation == "replace session transcript progress proofs"
+        ));
     }
 }

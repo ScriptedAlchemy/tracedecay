@@ -32,7 +32,10 @@ mod workflow;
 
 use application::*;
 pub use application_schema::mcp_input_schema;
-use application_schema::{canonical_application_request_schema, project_input_schema};
+use application_schema::{
+    RequestPropertyMerge, add_request_property, canonical_application_request_schema,
+    project_input_schema,
+};
 use handwritten::{HANDWRITTEN_TOOLS, HandwrittenTool, ToolSchema};
 pub use work::work_tool_name;
 pub use workflow::workflow_tool_name;
@@ -137,23 +140,6 @@ fn time_filter_schema(description: &str) -> Value {
     })
 }
 
-/// Copies `project_selector` into each tool schema.
-///
-/// A `$ref` would shrink `tools/list`, and a host would still send the same
-/// `project_selector.project_id` object. Hosts that do not resolve `$ref`
-/// would drop the field from the schema they show the agent, so the copy
-/// stays inline.
-fn with_project_selector_properties(mut properties: Value) -> Value {
-    if let Some(target) = properties.as_object_mut() {
-        target.entry("project_selector").or_insert_with(|| {
-            project_selector_object(
-                "Optional registered project selector. Omit to use the active project.",
-            )
-        });
-    }
-    properties
-}
-
 fn project_selector_object(description: &str) -> Value {
     json!({
         "type": "object",
@@ -169,50 +155,13 @@ fn project_selector_object(description: &str) -> Value {
     })
 }
 
-/// Computes the call budget based on project size.
-pub fn explore_call_budget(total_nodes: u64) -> u8 {
-    match total_nodes {
-        0..=5_000 => 3,
-        5_001..=20_000 => 4,
-        20_001..=80_000 => 5,
-        80_001..=250_000 => 7,
-        _ => 10,
-    }
-}
-
-/// The `tracedecay_context` description for surfaces that have no project
-/// graph to size, such as `tracedecay tool context --help`.
+/// The static `tracedecay_context` description. Tool descriptions are cached by
+/// hosts for a whole session, so they carry no runtime state; live state
+/// belongs in each response's `freshness:` and `indexing:` lines.
 const CONTEXT_DESCRIPTION: &str = "Build an AI-ready context for a task description. Returns \
      relevant symbols, relationships, up to three untracked project memory matches when \
      available, and optionally code snippets. Use it for broad questions that need \
      relationship synthesis across the code graph.";
-
-/// Generates the `tracedecay_context` description with a dynamic call budget.
-pub fn context_description(node_count: u64, budget: u8) -> String {
-    format!(
-        "{CONTEXT_DESCRIPTION} This project ({node_count} nodes) allows {budget} broad \
-         context calls."
-    )
-}
-
-/// Returns tool definitions with a dynamic call budget for `tracedecay_context`.
-pub fn get_tool_definitions_with_budget(
-    node_count: u64,
-    budget: u8,
-) -> Result<Vec<ToolDefinition>, McpCatalogError> {
-    let mut defs = get_tool_definitions()?;
-    apply_context_budget(&mut defs, node_count, budget);
-    Ok(defs)
-}
-
-fn apply_context_budget(defs: &mut [ToolDefinition], node_count: u64, budget: u8) {
-    // Replace the context tool's description with the budgeted version
-    for def in defs {
-        if def.name == "tracedecay_context" {
-            def.description = context_description(node_count, budget);
-        }
-    }
-}
 
 pub fn project_catalog_discovery_scope() -> BTreeSet<ScopeDimension> {
     [
@@ -230,14 +179,6 @@ pub fn project_catalog_discovery_scope() -> BTreeSet<ScopeDimension> {
     ]
     .into_iter()
     .collect()
-}
-
-/// The `tracedecay_context` description while the project graph is still warming.
-pub fn context_warming_description(budget: u8) -> String {
-    format!(
-        "{CONTEXT_DESCRIPTION} The graph is still warming, and {budget} broad context calls \
-         are available."
-    )
 }
 
 /// Returns the list of all tool definitions exposed by this MCP server.
@@ -293,11 +234,9 @@ fn build_search_cli_definition() -> Result<ToolDefinition, McpCatalogError> {
 /// Borrow the registry, assembled once per process.
 ///
 /// Every input is static for the life of the process: the application catalog
-/// is a `LazyLock` snapshot. Nothing session-scoped is frozen here, the
-/// per-session passes (the context description budget and the
-/// profile/capability filtering in
-/// `get_catalog_filtered_tool_definitions_with_budget`) all run on a clone,
-/// after the cache.
+/// is a `LazyLock` snapshot. Descriptions carry no runtime state, and the
+/// per-session profile/capability filtering in
+/// `get_catalog_filtered_tool_definitions` runs on a clone, after the cache.
 pub fn get_tool_definitions_ref() -> Result<&'static [ToolDefinition], McpCatalogError> {
     // The error type is not `Clone`, and a failure here is a deterministic
     // catalog/schema defect rather than a transient condition, so the cache
@@ -346,7 +285,7 @@ fn build_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogError> {
     for definition in &mut definitions {
         project_input_schema(&mut definition.input_schema);
     }
-    add_registered_project_selector_properties(&mut definitions);
+    add_registered_project_selector_properties(&mut definitions)?;
     add_lcm_storage_scope_property(&mut definitions);
     add_format_property(&mut definitions)?;
     mark_always_loaded(&mut definitions)?;
@@ -466,15 +405,22 @@ fn matching_tool_definitions_mut<'a>(
         .filter(move |definition| tool_names.contains(&definition.name.as_str()))
 }
 
-fn add_registered_project_selector_properties(definitions: &mut [ToolDefinition]) {
+fn add_registered_project_selector_properties(
+    definitions: &mut [ToolDefinition],
+) -> Result<(), McpCatalogError> {
     for definition in
         matching_tool_definitions_mut(definitions, &registered_project_reader_tool_names())
     {
-        let Some(properties) = definition.input_schema.get_mut("properties") else {
-            continue;
-        };
-        *properties = with_project_selector_properties(std::mem::take(properties));
+        add_request_property(
+            &mut definition.input_schema,
+            "project_selector",
+            &project_selector_object(
+                "Optional registered project selector. Omit to use the active project.",
+            ),
+            RequestPropertyMerge::KeepExisting,
+        )?;
     }
+    Ok(())
 }
 
 /// Every public application operation accepts the `format` presentation flag.
@@ -519,36 +465,19 @@ pub fn tool_defaults_to_markdown(tool_name: &str) -> bool {
 
 fn add_format_property(definitions: &mut [ToolDefinition]) -> Result<(), McpCatalogError> {
     for definition in matching_tool_definitions_mut(definitions, format_capable_tool_names()) {
-        let Some(schema) = definition.input_schema.as_object_mut() else {
-            // Reachable on every tools/list and dispatch admission check, so a
-            // malformed definition must surface as the builders' typed error
-            // rather than a production panic.
-            return Err(McpCatalogError::Initialization(format!(
-                "{} must define an object schema",
-                definition.name
-            )));
-        };
-        let properties = schema
-            .entry("properties")
-            .or_insert_with(|| json!({}))
-            .as_object_mut()
-            .ok_or_else(|| {
-                McpCatalogError::Initialization(format!(
-                    "{} must define object properties",
-                    definition.name
-                ))
-            })?;
         // Repeated once per format-capable tool in every `tools/list`, so the
         // wording stays short.
-        properties.insert(
-            "format".to_string(),
-            json!({
+        add_request_property(
+            &mut definition.input_schema,
+            "format",
+            &json!({
                 "type": "string",
                 "enum": ["markdown", "json"],
                 "default": "markdown",
                 "description": "Output format. Default 'markdown' (compact, LLM-optimized; no tables). 'json' for machine-readable output."
             }),
-        );
+            RequestPropertyMerge::Replace,
+        )?;
     }
     Ok(())
 }

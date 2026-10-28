@@ -6,7 +6,9 @@ use serde_json::{Map, Value};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::text::edit_distance_within;
 use tracedecay_mcp::tool_errors::TOOL_ARGUMENTS_INVALID;
-use tracedecay_mcp::{ToolDefinition, resolve_property_schema, short_tool_name};
+use tracedecay_mcp::{
+    ToolDefinition, request_object_alternatives, resolve_property_schema, short_tool_name,
+};
 
 /// The caller's flags or `--args` payload do not form a valid request; the
 /// same call can only succeed once corrected.
@@ -138,6 +140,43 @@ pub(super) fn parse_invocation_with_stdin(
     args: &[String],
     mut read_stdin: impl FnMut() -> Result<String>,
 ) -> Result<ParsedInvocation> {
+    if let Some(alternatives) = request_object_alternatives(&def.input_schema) {
+        // Try complete object shapes, retaining their own required keys and
+        // unknown-field checks. Reading stdin is single-shot across attempts.
+        let mut input = None;
+        let mut read_once = || {
+            if let Some(input) = &input {
+                return Ok(String::clone(input));
+            }
+            let value = read_stdin()?;
+            input = Some(value.clone());
+            Ok(value)
+        };
+        let mut failures = Vec::new();
+        for input_schema in alternatives {
+            let alternative = ToolDefinition {
+                input_schema,
+                ..def.clone()
+            };
+            match parse_object_invocation_with_stdin(&alternative, args, &mut read_once) {
+                Ok(parsed) => return Ok(parsed),
+                Err(error) => failures.push(error.to_string()),
+            }
+        }
+        return Err(invalid_arguments(format!(
+            "arguments for `{}` must match one complete request shape: {}",
+            short_tool_name(&def.name),
+            failures.join("; ")
+        )));
+    }
+    parse_object_invocation_with_stdin(def, args, read_stdin)
+}
+
+fn parse_object_invocation_with_stdin(
+    def: &ToolDefinition,
+    args: &[String],
+    mut read_stdin: impl FnMut() -> Result<String>,
+) -> Result<ParsedInvocation> {
     let schema_properties = def
         .input_schema
         .get("properties")
@@ -178,7 +217,9 @@ pub(super) fn parse_invocation_with_stdin(
             }
             flag if flag.starts_with("--") => {
                 let key = flag.trim_start_matches('-').replace('-', "_");
-                let prop_schema = schema_properties.get(&key);
+                let prop_schema = schema_properties
+                    .get(&key)
+                    .map(|schema| resolve_property_schema(&def.input_schema, schema));
                 let is_boolean = prop_schema.and_then(schema_primary_type) == Some("boolean");
                 // A boolean flag's value is optional: `--helpful` alone means
                 // `true`. The following token is its value only when the token
@@ -287,6 +328,15 @@ fn validate_tool_args(def: &ToolDefinition, args: &Map<String, Value>) -> Result
         // Optional typed fields arrive as `anyOf: [$ref, null]`; resolve to
         // the referenced schema so enum and type checks see the real contract.
         let schema = resolve_property_schema(&def.input_schema, declared);
+
+        if let Some(expected) = schema.get("const")
+            && value != expected
+        {
+            return Err(invalid_arguments(format!(
+                "--{} must be {expected} for this request shape, got {value}",
+                key.replace('_', "-")
+            )));
+        }
 
         if value.is_null() && !required.contains(key) {
             continue;
@@ -558,7 +608,11 @@ fn bind_positionals(
             break;
         };
         let resolved = resolve_at_file(&value, read_stdin)?;
-        let coerced = coerce_value(req, Some(prop), &resolved)?;
+        let coerced = coerce_value(
+            req,
+            Some(resolve_property_schema(&def.input_schema, prop)),
+            &resolved,
+        )?;
         collected.insert(req.clone(), coerced);
     }
     let leftover: Vec<String> = positional_iter.collect();
@@ -713,6 +767,7 @@ pub(super) fn finalize_arrays(def: &ToolDefinition, map: &mut Map<String, Value>
         return;
     };
     for (key, schema) in props {
+        let schema = resolve_property_schema(&def.input_schema, schema);
         let is_array = schema_primary_type(schema) == Some("array");
         if !is_array {
             continue;

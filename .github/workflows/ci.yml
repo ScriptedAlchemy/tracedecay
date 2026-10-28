@@ -564,6 +564,9 @@ jobs:
         run: test "${{ needs.linux-test.result }}" = "success"
 
   windows-test:
+    permissions:
+      contents: read
+      id-token: write
     # Branch protection requires this check name.
     name: Test Windows
     if: >-
@@ -594,6 +597,10 @@ jobs:
           # The previous PDB-producing cache restored an 11 GiB archive.
           # Start a new generation for the changed compile/link configuration.
           cache-key: ci-windows-test-v2
+          tailscale-client-id: >-
+            ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+                && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
+                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
 
       - name: Build and type-check the Windows workspace
         if: ${{ github.event_name != 'workflow_dispatch' }}
@@ -602,7 +609,7 @@ jobs:
         # Bazel still materializes runfiles required by build-time tools.
         # Four concurrent Rust actions exhausted the hosted runner's commit
         # limit while mapping asupersync metadata (Windows error 1455).
-        run: bazel build --config=ci-windows --jobs=2 --nobuild_runfile_links //...
+        run: bazel build --config=ci-windows --jobs=${{ steps.bazel.outputs.fleet-enabled == 'true' && '16' || '2' }} --nobuild_runfile_links //...
 
       - name: Build and test native targets
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_os }}
@@ -625,7 +632,7 @@ jobs:
               *) echo "Expected a Bazel target pattern: $target" >&2; exit 1 ;;
             esac
           done
-          bazel test --config=ci-windows --jobs=2 --test_output=all "${targets[@]}"
+          bazel test --config=ci-windows --jobs=${{ steps.bazel.outputs.fleet-enabled == 'true' && '16' || '2' }} --test_output=all "${targets[@]}"
 
       - name: Upload failed test diagnostics
         if: failure()

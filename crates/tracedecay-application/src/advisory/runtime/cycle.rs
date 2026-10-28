@@ -170,44 +170,45 @@ where
                         ));
                     }
                 };
-                // Retain the allowlisted pull-request identity read beside a
-                // usable review refresh so Delivery can serve PR title, state,
-                // and diff shape. It contributes no advisory findings and a
-                // rate-limited or denied review refresh never spends a second
-                // provider read.
+                // Retain the PR identity, review votes, and conversation beside
+                // usable inline-review evidence. These reads contribute no
+                // advisory findings; unavailable provider reads stop enrichment.
                 if matches!(
                     provider_request.operation,
                     GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads
                         | GitHubReviewReadOperationV1::RestListPullRequestReviewComments
-                ) && matches!(
-                    outcome,
-                    GitHubReviewRefreshOutcomeV1::Stored(_) | GitHubReviewRefreshOutcomeV1::Stale
-                ) {
-                    let identity_request = GitHubReviewReadRequestV1 {
-                        operation: GitHubReviewReadOperationV1::RestGetPullRequest,
-                        scope: provider_request.scope.clone(),
-                        pull_request_id: provider_request.pull_request_id.clone(),
-                    };
-                    match await_provider(&mut control, github.refresh(context, &identity_request))
-                        .await
-                    {
-                        Ok(
-                            GitHubReviewRefreshOutcomeV1::Stored(_)
-                            | GitHubReviewRefreshOutcomeV1::Stale,
-                        ) => {}
-                        Ok(identity_outcome) => {
-                            tracing::warn!(
-                                event = "github_pull_request_identity_refresh_not_stored",
-                                outcome = ?identity_outcome,
-                                "the pull-request identity read was not retained; Delivery keeps serving without a PR identity"
-                            );
-                        }
-                        Err(interruption) => {
-                            return Ok(self.finish_interruption(
-                                &request.feedback.input,
-                                interruption,
-                                contributions,
-                            ));
+                ) && outcome.has_usable_observation()
+                {
+                    for operation in [
+                        GitHubReviewReadOperationV1::RestGetPullRequest,
+                        GitHubReviewReadOperationV1::RestListPullRequestReviews,
+                        GitHubReviewReadOperationV1::RestListPullRequestConversationComments,
+                    ] {
+                        let detail_request = GitHubReviewReadRequestV1 {
+                            operation,
+                            scope: provider_request.scope.clone(),
+                            pull_request_id: provider_request.pull_request_id.clone(),
+                        };
+                        match await_provider(&mut control, github.refresh(context, &detail_request))
+                            .await
+                        {
+                            Ok(detail_outcome) if detail_outcome.has_usable_observation() => {}
+                            Ok(detail_outcome) => {
+                                tracing::warn!(
+                                    event = "github_pull_request_detail_refresh_not_stored",
+                                    operation = ?operation,
+                                    outcome = ?detail_outcome,
+                                    "pull-request enrichment was not retained; serving the available evidence"
+                                );
+                                break;
+                            }
+                            Err(interruption) => {
+                                return Ok(self.finish_interruption(
+                                    &request.feedback.input,
+                                    interruption,
+                                    contributions,
+                                ));
+                            }
                         }
                     }
                 }

@@ -23,10 +23,11 @@ use crate::graph_projection::builder::ProductionCodeGraphInputs;
 use crate::graph_projection::schema::SYMBOL_LABEL;
 use crate::graph_projection::warm_clock::WarmOwner;
 use crate::graph_projection::{
-    CODE_GRAPH_PROJECTOR_REVISION, CodeGraphCatalogReleaseV1, CodeGraphProjectionError,
-    CodeGraphProjectionStore, CodeGraphReadCostMeter, CodeGraphReadinessRequirement,
-    CodeGraphServingWarmthV1, CodeGraphSymbolSummaryV1, build_code_graph_manifest_inputs_checked,
-    code_graph_projection_identity, current_generation_entity, has_label,
+    CODE_GRAPH_PROJECTOR_REVISION, CodeGraphCatalogReleaseV1, CodeGraphEngineReleaseV1,
+    CodeGraphProjectionError, CodeGraphProjectionStore, CodeGraphReadCostMeter,
+    CodeGraphReadinessRequirement, CodeGraphServingWarmthV1, CodeGraphSymbolSummaryV1,
+    build_code_graph_manifest_inputs_checked, code_graph_projection_identity,
+    current_generation_entity, has_label,
 };
 use crate::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 mod imports;
@@ -1291,6 +1292,101 @@ fn a_release_answers_busy_while_a_reader_holds_the_catalog() {
         store.release_interactive_catalog(),
         CodeGraphCatalogReleaseV1::Released { .. }
     ));
+}
+
+#[test]
+fn resident_admission_skips_cold_and_released_data_without_rewarming() {
+    let store = store_for(production_manifest());
+    assert!(matches!(
+        store.try_retain_resident_for(CodeGraphReadinessRequirement::Catalog),
+        Err(CodeGraphProjectionError::Unavailable(_))
+    ));
+    assert!(!store.warm_clock.engine_rewarming());
+    assert_eq!(store.interactive_catalog_scan_builds(), 0);
+
+    store.warm_serving_engine().expect("canonical engine warm");
+    assert!(matches!(
+        store.try_retain_resident_for(CodeGraphReadinessRequirement::Catalog),
+        Err(CodeGraphProjectionError::Unavailable(_))
+    ));
+    let engine = store
+        .try_retain_resident_for(CodeGraphReadinessRequirement::Engine)
+        .expect("resident engine does not require the catalog");
+    assert_eq!(
+        store.release_serving_engine().unwrap(),
+        CodeGraphEngineReleaseV1::Busy
+    );
+    drop(engine);
+
+    store
+        .warm_interactive_catalog_with_cancellation(None, request())
+        .expect("canonical catalog warm");
+    let catalog = store
+        .try_retain_resident_for(CodeGraphReadinessRequirement::Catalog)
+        .expect("resident catalog is usable");
+    let admitted = reader(&store);
+    assert!(
+        !admitted
+            .symbols_page(None, 10, request())
+            .unwrap()
+            .symbols
+            .is_empty()
+    );
+    assert_eq!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::Busy
+    );
+    assert_eq!(
+        store.release_serving_engine().unwrap(),
+        CodeGraphEngineReleaseV1::Busy
+    );
+    drop(admitted);
+    drop(catalog);
+    assert!(matches!(
+        store.release_interactive_catalog(),
+        CodeGraphCatalogReleaseV1::Released { .. }
+    ));
+    let scans = store.interactive_catalog_scan_builds();
+    let build = store.interactive_catalog.build.lock().unwrap();
+    assert!(matches!(
+        store.try_retain_resident_for(CodeGraphReadinessRequirement::Catalog),
+        Err(CodeGraphProjectionError::Unavailable(_))
+    ));
+    assert!(matches!(
+        *store.interactive_catalog.state.read().unwrap(),
+        super::InteractiveCatalogState::Released
+    ));
+    assert_eq!(store.interactive_catalog_scan_builds(), scans);
+    drop(build);
+    let engine = store
+        .try_retain_resident_for(CodeGraphReadinessRequirement::Engine)
+        .expect("the released catalog does not prevent engine-only reads");
+    drop(engine);
+    assert!(!store.warm_clock.engine_rewarming());
+    assert_eq!(store.interactive_catalog_scan_builds(), scans);
+}
+
+#[test]
+fn resident_admission_preserves_catalog_failures_and_never_joins_a_transition() {
+    let store = store_for(production_manifest());
+    store.warm_serving_engine().expect("canonical engine warm");
+    let failure = CodeGraphProjectionError::Corrupt("catalog fixture failure".to_owned());
+    *store.interactive_catalog.state.write().unwrap() =
+        super::InteractiveCatalogState::Failed(failure.clone());
+    assert_eq!(
+        store
+            .try_retain_resident_for(CodeGraphReadinessRequirement::Catalog)
+            .unwrap_err(),
+        failure
+    );
+    let transition = store.serving_engine.lock().unwrap();
+    assert!(matches!(
+        store.try_retain_resident_for(CodeGraphReadinessRequirement::Engine),
+        Err(CodeGraphProjectionError::Unavailable(_))
+    ));
+    drop(transition);
+    assert!(!store.warm_clock.engine_rewarming());
+    assert_eq!(store.interactive_catalog_scan_builds(), 0);
 }
 
 #[test]

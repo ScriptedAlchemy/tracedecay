@@ -96,6 +96,42 @@ paths, so do **not** commit run artifacts.
 | `LEARNED_SKILL_WORKFLOW` | unset | run only that workflow's held-out scenarios, once per variant, on `full` |
 | `LEARNED_SKILL_VARIANTS` | `none generated manual` | learned-skill variants to compare |
 
+## PR comparison journey
+
+`git_pr_summary` is active and independently graded. Its dedicated Python
+fixture has two actual Git revisions: `main` raises on insufficient stock,
+while the feature branch returns a boolean that an unchanged order consumer
+ignores. An unchanged test asserts rejection. The same branch moves a receipt
+formatter without changing its bytes and preserves its public import, giving
+false-positive findings a negative case.
+
+The neutral prompt asks for exact source facts and the unchanged test and its call relationship;
+it does not prescribe a tool. The existing complete-JSON grader checks the
+contract, consumer, observed behavior, static test relationship, and preserved
+move. A correct answer using only native reads receives the same outcome as a
+correct product-assisted answer. Tool choice remains a separate routing measure.
+The offline self-test creates real Git commits, executes the baseline and head
+assertions to establish the planted failure, confirms the move stays functional,
+and rejects wrong consumer, behavior, test-execution, and move conclusions.
+The live prompt requests source review only, so an agent must not claim it ran
+those tests. These offline checks establish the fixture and grader; they do
+not measure model accuracy or token savings.
+
+For comparable live trials, hold the host/model, prompt, binary, and repetition
+count constant across the existing native and product conditions:
+
+```sh
+TRACEDECAY_AGENT_EVALS=1 HOSTS=claude CLAUDE_MODELS=sonnet \
+  SCENARIOS=git_pr_summary CHANNELS="native bare full" REPS=3 \
+  evals/agent_adoption/run.sh
+```
+
+This explicit live opt-in remains necessary. The ordinary report keeps task
+correctness, observed tokens, cost, elapsed time, and tool attempts separate.
+Fixture setup time is reported separately; compared base/head commits are
+recorded in run metadata. These conditions compare the current implementation
+with native reads and channel ablations, not with a previous TraceDecay release.
+
 ## Product-effectiveness baseline
 
 The opt-in `baseline_*` cohort adds three neutral, independently graded tasks:

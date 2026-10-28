@@ -51,8 +51,79 @@ pub(super) fn project_input_schema(schema: &mut Value) {
     if let Some(root) = schema.as_object_mut() {
         root.remove("$schema");
         root.remove("title");
+        // Untagged object selectors have no redundant root type in schemars.
+        // MCP requires an object input schema; every alternative already does.
+        if !root.contains_key("type")
+            && ["anyOf", "oneOf"].iter().any(|keyword| {
+                root.get(*keyword)
+                    .and_then(Value::as_array)
+                    .is_some_and(|branches| {
+                        !branches.is_empty()
+                            && branches
+                                .iter()
+                                .all(|branch| branch.get("type") == Some(&json!("object")))
+                    })
+            })
+        {
+            root.insert("type".to_owned(), json!("object"));
+        }
     }
     summarize_descriptions(schema);
+}
+
+/// How a transport control meets a property the tool schema already declares.
+#[derive(Clone, Copy)]
+pub(super) enum RequestPropertyMerge {
+    /// A tool's own declaration wins (for example a tailored selector).
+    KeepExisting,
+    /// The shared control replaces it, so every tool advertises one schema.
+    Replace,
+}
+
+/// Transport controls belong to the request object and every closed inline
+/// alternative for that same object. Nested payload schemas are left intact.
+pub(super) fn add_request_property(
+    schema: &mut Value,
+    name: &str,
+    property: &Value,
+    merge: RequestPropertyMerge,
+) -> DiscoveryResult<()> {
+    let object = schema.as_object_mut().ok_or_else(|| {
+        crate::McpCatalogError::Initialization(
+            "MCP request must define an object schema".to_owned(),
+        )
+    })?;
+    let properties = object.entry("properties").or_insert_with(|| json!({}));
+    let properties = properties.as_object_mut().ok_or_else(|| {
+        crate::McpCatalogError::Initialization(
+            "MCP request must define object properties".to_owned(),
+        )
+    })?;
+    match merge {
+        RequestPropertyMerge::KeepExisting => {
+            properties
+                .entry(name.to_owned())
+                .or_insert_with(|| property.clone());
+        }
+        RequestPropertyMerge::Replace => {
+            properties.insert(name.to_owned(), property.clone());
+        }
+    }
+    for keyword in ["anyOf", "oneOf", "allOf"] {
+        if let Some(branches) = object.get_mut(keyword).and_then(Value::as_array_mut) {
+            for branch in branches {
+                if branch.get("type") == Some(&json!("object"))
+                    || branch.get("properties").is_some()
+                    || ["anyOf", "oneOf", "allOf"]
+                        .iter()
+                        .any(|key| branch.get(*key).is_some())
+                {
+                    add_request_property(branch, name, property, merge)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn summarize_descriptions(value: &mut Value) {

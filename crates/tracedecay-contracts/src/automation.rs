@@ -2,10 +2,14 @@
 //! run ledger rows, managed-skill packages with their usage summaries, and
 //! the Hermes skill inventory.
 
+mod fact_proposal;
 mod hermes;
 mod managed_skills;
 mod run_ledger;
 
+pub use fact_proposal::{
+    SessionFactProposal, SessionFactSourceSpan, SessionFactTrust, session_fact_proposal_schema,
+};
 pub use hermes::{
     HermesPendingSkillWrite, HermesSkillBridgeContracts, HermesSkillBridgeSnapshot,
     HermesSkillSummary,

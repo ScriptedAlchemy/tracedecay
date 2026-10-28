@@ -84,7 +84,8 @@ pub use tool_call_deadline::{
 pub use tool_call_invoker::ToolCallInvoker;
 pub use tool_context::{
     AdmittedCodeIndex, McpAdmittedProjectV1, McpDoctorReportV1, McpProjectIdentityV1,
-    McpRequestAuthoritiesV1, McpToolBinding, McpToolContext, RequestControls,
+    McpRequestAuthoritiesV1, McpToolBinding, McpToolContext, PrContextDeliveryReader,
+    RequestControls,
 };
 #[cfg(test)]
 pub(crate) use tool_errors::structured_hook_error_data;
@@ -94,15 +95,14 @@ pub use tool_errors::{
     tool_error_response, tool_result_has_semantic_error,
 };
 pub use tools::{
-    RESERVED_FLAGS_FOOTER, ToolResult, render_tool_cli_help, resolve_property_schema,
-    short_tool_name,
+    RESERVED_FLAGS_FOOTER, ToolResult, render_tool_cli_help, request_object_alternatives,
+    resolve_property_schema, short_tool_name,
 };
 pub use tracedecay_mcp_catalog::{
     ALWAYS_LOAD_META, MAX_RESPONSE_CHARS, McpCatalogError, ToolCategory, ToolDefinition,
-    cli_tool_definition, context_description, context_warming_description, explore_call_budget,
-    format_capable_tool_names, get_tool_definitions, get_tool_definitions_ref,
-    get_tool_definitions_with_budget, mcp_input_schema, project_catalog_discovery_scope,
-    registered_project_reader_tool_names, tool_defaults_to_markdown,
+    cli_tool_definition, format_capable_tool_names, get_tool_definitions, get_tool_definitions_ref,
+    mcp_input_schema, project_catalog_discovery_scope, registered_project_reader_tool_names,
+    tool_defaults_to_markdown,
 };
 pub use workflow::{
     LibtestReport, MAX_TEST_TIMEOUT_SECS, RunAffectedArgs, TestProfile, TestRunControl,
