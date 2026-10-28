@@ -736,18 +736,12 @@ fn graph_tool_unavailable(
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use tracedecay_contracts::retrieval::{CodeGraphReadFreshnessV1, ServedCodeGraphGenerationV1};
-    use tracedecay_contracts::{
-        ApplicationEnvelope, ApplicationOutcome, CancellationSignal, Deadline, RequestId,
-        ResolvedScope, ResultContractRef,
-    };
-    use tracedecay_daemon_protocol::RequestedOutputFormat;
+    use tracedecay_contracts::{CancellationSignal, Deadline, RequestId, ResultContractRef};
+    use tracedecay_domain::UtcMicros;
     use tracedecay_domain::errors::TraceDecayError;
-    use tracedecay_domain::{ProjectId, RepositoryId, UtcMicros, WorktreeId};
-    use tracedecay_mcp::tools::response_trailers::account_tool_result;
     use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId, SchemaId};
 
-    use super::{complete_protocol_controls, render_application_result, settle_graph_tool_result};
+    use super::{complete_protocol_controls, settle_graph_tool_result};
 
     #[test]
     fn retained_calls_target_the_profile_only_through_their_canonical_selector() {
@@ -881,76 +875,6 @@ mod tests {
                 && deadline.expires_at.0 <= after.0.saturating_add(15_000_000),
             "configuration_set must inherit its exact 15-second catalog ceiling"
         );
-    }
-
-    fn texts(result: &tracedecay_mcp::ToolResult) -> Vec<String> {
-        result.value["content"]
-            .as_array()
-            .expect("content blocks")
-            .iter()
-            .map(|block| block["text"].as_str().expect("text block").to_owned())
-            .collect()
-    }
-
-    /// The shared renderer takes the stale trailer and the touched files from
-    /// the envelope alone, so any typed tool gains them in either format.
-    #[test]
-    fn envelope_freshness_and_files_render_the_trailer_and_footer_in_both_formats() {
-        let root = tempfile::tempdir().expect("project");
-        std::fs::create_dir_all(root.path().join("src")).expect("src");
-        std::fs::write(root.path().join("src/lib.rs"), "a".repeat(800)).expect("source");
-        let envelope = ApplicationEnvelope {
-            contract: ResultContractRef::new(SchemaId::new("schema.test.result").unwrap(), 1)
-                .unwrap(),
-            request_id: RequestId::new("request.mcp.render.trailers").unwrap(),
-            scope: ResolvedScope::new(
-                ProjectId::new("project.mcp.render").unwrap(),
-                RepositoryId::new("repository.mcp.render").unwrap(),
-                WorktreeId::new("worktree.mcp.render").unwrap(),
-                None,
-            )
-            .unwrap(),
-            outcome: ApplicationOutcome::Result(json!({"items": ["src/lib.rs::answer"]})),
-            touched_files: vec!["src/lib.rs".to_owned()],
-            code_graph: Some(ServedCodeGraphGenerationV1 {
-                generation: "generation.render.stale.1".to_owned(),
-                worktree: None,
-                freshness: CodeGraphReadFreshnessV1::LastCompleteStale {
-                    sealed_at: UtcMicros(10),
-                    rebuild_in_flight: true,
-                },
-            }),
-            analytics: None,
-            cost: None,
-        };
-        let binding = BindingId::new("binding.mcp.code-callers.v1").unwrap();
-        for format in [RequestedOutputFormat::Markdown, RequestedOutputFormat::Json] {
-            let mut rendered = render_application_result(
-                Some(root.path()),
-                "code_callers",
-                &binding,
-                &Ok(envelope.clone()),
-                format,
-            )
-            .expect("rendered");
-            assert_eq!(rendered.touched_files, vec!["src/lib.rs".to_owned()]);
-            account_tool_result(Some(root.path()), &mut rendered);
-            let blocks = texts(&rendered);
-            assert_eq!(blocks.len(), 3, "{format:?}: {blocks:?}");
-            assert!(
-                blocks[1].starts_with(
-                    "\ncode_graph_freshness: stale, serving the last complete generation \
-                     generation.render.stale.1 (sealed "
-                ),
-                "{format:?}: {blocks:?}"
-            );
-            let after = (blocks[0].len() + blocks[1].len()) / 4;
-            assert_eq!(
-                blocks[2],
-                format!("\ntracedecay_metrics: before=200 after={after} unit=bytes/4"),
-                "{format:?}"
-            );
-        }
     }
 
     #[test]

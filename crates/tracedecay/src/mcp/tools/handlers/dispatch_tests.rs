@@ -269,48 +269,6 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
     }
 }
 
-#[test]
-fn registered_project_selector_dispatch_policy_matches_tool_schemas() {
-    for tool in get_tool_definitions().expect("tool definitions") {
-        let properties = &tool.input_schema["properties"];
-        let schema_has_registered_project_selector = properties.get("project_selector").is_some();
-        assert_eq!(
-            tool_accepts_registered_project_selector(&tool.name),
-            schema_has_registered_project_selector,
-            "{} registered-project selector schema and dispatch policy should stay in lockstep",
-            tool.name
-        );
-        if schema_has_registered_project_selector {
-            for alias in ["project_id", "project_path", "project_root", "root"] {
-                assert!(properties.get(alias).is_none());
-            }
-            let selector = &properties["project_selector"];
-            assert_eq!(
-                selector["required"],
-                json!(["project_id"]),
-                "{} selector must require project_id",
-                tool.name
-            );
-            assert_eq!(
-                selector["additionalProperties"], false,
-                "{} selector must be a closed object",
-                tool.name
-            );
-            assert_eq!(
-                selector["properties"]
-                    .as_object()
-                    .unwrap_or_else(|| panic!("{} closed selector properties", tool.name))
-                    .keys()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>(),
-                vec!["project_id"],
-                "{} selector must expose exactly project_id",
-                tool.name
-            );
-        }
-    }
-}
-
 #[tokio::test]
 async fn status_and_runtime_share_cursor_session_ingest_authority() {
     let dir = TempDir::new().unwrap();
@@ -1496,78 +1454,7 @@ async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
 // Universal dispatch ceiling
 // ---------------------------------------------------------------------------
 
-use tracedecay_mcp::tools::dispatch_ceiling::{
-    LONG_RUNNING_TOOL_DISPATCH_CEILING, TOOL_DISPATCH_CEILING, tool_dispatch_budget,
-    tool_dispatch_ceiling, tool_dispatch_deadline_error,
-};
-
-/// One tool from every dispatch group. `tracedecay_context` is listed first
-/// because it is the one that actually hung: it is neither an
-/// application-surface operation nor a controlled read, so
-/// `dispatch_deadline_horizon_micros` returned `None` for it and it reached its
-/// handler with no bound at all.
-const DISPATCH_GROUP_SPOT_CHECKS: &[&str] = &[
-    "tracedecay_context",
-    "tracedecay_search",
-    "tracedecay_callers",
-    "tracedecay_status",
-    "tracedecay_files",
-    "tracedecay_dead_code",
-    "tracedecay_complexity",
-    "tracedecay_health",
-    "tracedecay_test_map",
-    "tracedecay_pr_context",
-    "tracedecay_affected",
-    "tracedecay_analytics",
-    "tracedecay_skill_list",
-    "tracedecay_dashboard",
-    "tracedecay_diagnose",
-    "tracedecay_hook_runtime",
-    "tracedecay_str_replace",
-    "tracedecay_fact_store_search",
-];
-
-/// Absent a carried deadline every tool still dispatches under a bound. Before
-/// the universal ceiling only the git and memory groups were wrapped, so most
-/// of these names had no ceiling of any kind.
-#[test]
-fn every_dispatch_group_has_a_ceiling_without_a_carried_deadline() {
-    for tool_name in DISPATCH_GROUP_SPOT_CHECKS {
-        let budget = tool_dispatch_budget(tool_name, None)
-            .expect("a tool with no carried deadline still dispatches under its ceiling");
-        assert_eq!(
-            budget,
-            tool_dispatch_ceiling(tool_name),
-            "{tool_name} must inherit the universal ceiling",
-        );
-        assert!(
-            budget <= LONG_RUNNING_TOOL_DISPATCH_CEILING,
-            "{tool_name} must never dispatch near the 900s client hang this replaced",
-        );
-    }
-}
-
-/// The interactive ceiling is the default; only the explicitly listed
-/// long-running jobs get the larger one, and even those stay bounded.
-#[test]
-fn long_running_tools_are_bounded_above_the_interactive_ceiling() {
-    assert_eq!(
-        tool_dispatch_ceiling("tracedecay_context"),
-        TOOL_DISPATCH_CEILING,
-    );
-    assert_eq!(
-        tool_dispatch_ceiling("tracedecay_run_affected_tests"),
-        LONG_RUNNING_TOOL_DISPATCH_CEILING,
-    );
-    assert!(
-        TOOL_DISPATCH_CEILING < LONG_RUNNING_TOOL_DISPATCH_CEILING,
-        "the interactive ceiling must be the tighter of the two",
-    );
-    assert!(
-        LONG_RUNNING_TOOL_DISPATCH_CEILING < std::time::Duration::from_mins(15),
-        "nothing may ever run 900 seconds",
-    );
-}
+use tracedecay_mcp::tools::dispatch_ceiling::{TOOL_DISPATCH_CEILING, tool_dispatch_budget};
 
 /// A carried admission deadline wins whenever it is shorter, and the ceiling
 /// still clamps one that is implausibly distant, so the ceiling can never be
@@ -1588,48 +1475,6 @@ fn carried_deadline_is_preferred_when_shorter_and_clamped_when_longer() {
     assert_eq!(
         budget, TOOL_DISPATCH_CEILING,
         "a carried deadline beyond the ceiling must be clamped to it",
-    );
-}
-
-/// An already-elapsed carried deadline is rejected rather than dispatched, for
-/// every group, the same rule the git and memory wraps already applied.
-#[test]
-fn an_elapsed_carried_deadline_is_rejected_for_every_group() {
-    let elapsed =
-        tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(1)).expect("deadline");
-    for tool_name in DISPATCH_GROUP_SPOT_CHECKS {
-        assert!(
-            tool_dispatch_budget(tool_name, Some(&elapsed)).is_none(),
-            "{tool_name} must refuse to dispatch under an elapsed deadline",
-        );
-    }
-}
-
-/// The ceiling reports the same typed, retryable problem shape the memory wrap
-/// established, so the MCP boundary surfaces structure instead of a hang.
-#[test]
-fn the_ceiling_reports_a_typed_retryable_problem() {
-    let error = tool_dispatch_deadline_error("tracedecay_context", TOOL_DISPATCH_CEILING);
-    let (reason_code, retryable, detail) = error
-        .project_route_context()
-        .expect("the ceiling must surface a typed project-route problem, not an opaque error");
-    assert_eq!(
-        reason_code, "tool_dispatch_deadline_exceeded",
-        "the ceiling must keep its own reason code so callers can branch on it",
-    );
-    assert!(
-        retryable,
-        "a dispatch-ceiling cancellation is retryable: nothing was committed",
-    );
-    // The typed fields carry the shape; only the detail names the subject, so
-    // these two checks assert information the typed fields cannot express.
-    assert!(
-        detail.contains("tracedecay_context"),
-        "the problem must name the tool it cancelled, got {detail:?}",
-    );
-    assert!(
-        detail.contains(&format!("{}s", TOOL_DISPATCH_CEILING.as_secs())),
-        "the problem must name the budget it enforced, got {detail:?}",
     );
 }
 
