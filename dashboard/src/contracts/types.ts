@@ -1464,7 +1464,7 @@ export type DeliveryGitHubQuarantinedCommentV1 = {
 
 export type DeliveryGitHubQuarantineReasonV1 = "body_out_of_bounds" | "privacy_sanitizer";
 
-export type DeliveryGitHubReadOperationV1 = "pull_request" | "review_comments" | "review_threads" | "reviews";
+export type DeliveryGitHubReadOperationV1 = "conversation_comments" | "pull_request" | "review_comments" | "review_threads" | "reviews";
 
 export type DeliveryGitStatusV1 = {
   changed_paths: Array<string>;

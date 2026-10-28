@@ -669,6 +669,41 @@ impl CodeGraphProjectionStore {
         self.await_rewarm_for(budget, CodeGraphReadinessRequirement::Catalog)
     }
 
+    /// Retain only data already resident at admission. Optional enrichment
+    /// must not start or join a re-warm, or contend with an engine transition.
+    pub fn try_retain_resident_for(
+        &self,
+        requirement: CodeGraphReadinessRequirement,
+    ) -> Result<Arc<InteractiveCatalogReaderLeaseV1>, CodeGraphProjectionError> {
+        let retain = {
+            let slot = self.serving_engine.try_lock().map_err(|error| {
+                CodeGraphProjectionError::Unavailable(match error {
+                    std::sync::TryLockError::WouldBlock => {
+                        "code graph engine residency is changing".to_owned()
+                    }
+                    std::sync::TryLockError::Poisoned(_) => {
+                        "code graph engine residency lock is poisoned".to_owned()
+                    }
+                })
+            })?;
+            if slot.is_none() {
+                return Err(CodeGraphProjectionError::Unavailable(
+                    "code graph engine is not resident".to_owned(),
+                ));
+            }
+            InteractiveCatalogReaderLeaseV1::admit(
+                &self.interactive_catalog,
+                requirement == CodeGraphReadinessRequirement::Catalog,
+            )
+        };
+        // Drop the engine slot lock before a refusal can drop the lease: the
+        // final lease may run the canonical park-release callback.
+        if requirement == CodeGraphReadinessRequirement::Catalog {
+            self.interactive_catalog.require_resident()?;
+        }
+        Ok(retain)
+    }
+
     /// Every read holds the engine, and Catalog reads the catalog, before
     /// waiting, so a park release cannot close what the wait saw resident
     /// before the reader opens on it.

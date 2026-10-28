@@ -8,8 +8,11 @@ use std::collections::HashSet;
 
 use tracedecay_code_extraction::ts_provider::parse_extractor_source;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tree_sitter::Tree;
 
 use crate::edits::{MAX_PREVIEW_DIFF_LINES, PREVIEW_DIFF_CONTEXT, bounded_region_diff};
+
+use super::use_parsing::{destination_import_is_unconditional, use_bindings};
 
 /// Removes `lines[start..=end]` and collapses the blank-line separator the
 /// removed item left behind so the source stays tidy.
@@ -100,16 +103,21 @@ fn destination_syntax_error(message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::project_route("source-edit-destination-syntax-unsupported", false, message)
 }
 
-fn rust_import_offset(source: &str) -> Result<usize> {
+fn parse_rust_destination(source: &str) -> Result<Tree> {
     let tree = parse_extractor_source("rust", "Rust", source).map_err(|error| {
         destination_syntax_error(format!("cannot parse Rust destination: {error}"))
     })?;
-    let root = tree.root_node();
-    if root.has_error() {
+    if tree.root_node().has_error() {
         return Err(destination_syntax_error(
             "Rust destination contains incomplete or unsupported syntax",
         ));
     }
+    Ok(tree)
+}
+
+fn rust_import_offset(source: &str) -> Result<usize> {
+    let tree = parse_rust_destination(source)?;
+    let root = tree.root_node();
     let mut offset = None;
     let mut seen_item = false;
     let mut pending_outer = false;
@@ -146,39 +154,138 @@ fn rust_import_offset(source: &str) -> Result<usize> {
     Ok(offset.unwrap_or(source.len()))
 }
 
-/// Drops imports already present verbatim in the destination and de-duplicates
-/// within the batch, preserving order.
+/// Drops matching unconditional module imports and de-duplicates within the
+/// batch. Text in comments or nested scopes cannot supply a module binding.
+/// Without name resolution, declared names and unknown wildcard bindings
+/// conservatively prevent insertion that could change existing uses.
 pub(super) fn dedup_preserve(
     imports: &[String],
     dest_original: &str,
     dest_module: Option<&str>,
-) -> Vec<String> {
-    let mut seen: HashSet<String> = HashSet::new();
+) -> Result<Vec<String>> {
+    if imports.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tree = parse_rust_destination(dest_original)?;
+    let mut existing = HashSet::new();
+    let mut bound_names = HashSet::new();
+    let mut declared_names = HashSet::new();
+    let mut attributed = HashSet::new();
+    let mut has_wildcard = false;
+    for node in tree.root_node().named_children(&mut tree.walk()) {
+        if node.kind() != "use_declaration" {
+            if let Some(name) = node
+                .child_by_field_name("alias")
+                .or_else(|| node.child_by_field_name("name"))
+                .and_then(|name| name.utf8_text(dest_original.as_bytes()).ok())
+            {
+                declared_names.insert(name.to_owned());
+            }
+            continue;
+        }
+        let bindings = node
+            .child_by_field_name("argument")
+            .and_then(|argument| use_bindings(argument, dest_original.as_bytes()))
+            .ok_or_else(|| {
+                destination_syntax_error("cannot identify a complete destination import")
+            })?;
+        has_wildcard |= bindings.wildcard;
+        let unconditional = destination_import_is_unconditional(node, dest_original.as_bytes());
+        for leaf in bindings.leaves {
+            if unconditional {
+                bound_names.insert(leaf.binding.clone());
+                existing.insert(leaf);
+            } else {
+                attributed.insert(leaf.binding);
+            }
+        }
+    }
+    let import_source = imports.join("\n");
+    let import_tree = parse_rust_destination(&import_source)?;
+    let mut cursor = import_tree.walk();
+    let mut declarations = import_tree
+        .root_node()
+        .named_children(&mut cursor)
+        .filter(|node| node.kind() == "use_declaration");
     let mut out = Vec::new();
     for imp in imports {
-        let trimmed = imp.trim();
-        if dest_original.lines().any(|l| l.trim() == trimmed) {
+        let declaration = declarations.next().ok_or_else(|| {
+            destination_syntax_error("cannot identify an automatic dependency import")
+        })?;
+        let bindings = declaration
+            .child_by_field_name("argument")
+            .and_then(|argument| use_bindings(argument, import_source.as_bytes()))
+            .ok_or_else(|| {
+                destination_syntax_error("cannot identify an automatic dependency binding")
+            })?;
+        let [leaf] = bindings.leaves.as_slice() else {
+            return Err(destination_syntax_error(
+                "automatic dependency import must provide exactly one named binding",
+            ));
+        };
+        if bindings.wildcard
+            || bindings.anonymous
+            || declaration.utf8_text(import_source.as_bytes()).ok() != Some(imp.trim())
+        {
+            return Err(destination_syntax_error(
+                "automatic dependency import must be one complete named declaration",
+            ));
+        }
+        if existing.contains(leaf) {
             continue;
+        }
+        if attributed.contains(&leaf.binding) {
+            // A conditional import may or may not bind the name. Neither
+            // dropping the dependency nor adding an unconditional duplicate
+            // is safe without resolving that configuration.
+            return Err(destination_syntax_error(format!(
+                "automatic import conflicts with an attributed destination binding: {}",
+                leaf.binding
+            )));
+        }
+        if bound_names.contains(&leaf.binding) {
+            return Err(destination_syntax_error(format!(
+                "automatic import conflicts with a different destination binding: {}",
+                leaf.binding
+            )));
         }
         // An import of an item the destination module itself declares
         // (`use crate::SweepType;` inserted into `src/lib.rs`) would be a
         // self-import: the name is already in scope at the destination.
         if let Some(dest_module) = dest_module
-            && let Some(rest) = trimmed
-                .strip_prefix("use ")
-                .and_then(|rest| rest.strip_suffix(';'))
-            && rest
+            && let Some(path) = &leaf.canonical_path
+            && path
                 .strip_prefix(dest_module)
                 .and_then(|tail| tail.strip_prefix("::"))
-                .is_some_and(|leaf| !leaf.contains("::"))
+                .is_some_and(|name| !name.contains("::") && name == leaf.binding)
         {
             continue;
         }
-        if seen.insert(trimmed.to_string()) {
-            out.push(imp.clone());
+        if declared_names.contains(&leaf.binding) {
+            return Err(destination_syntax_error(format!(
+                "automatic import overlaps a destination item name: {}",
+                leaf.binding
+            )));
         }
+        if has_wildcard {
+            // An explicit binding can silently replace a name supplied by a
+            // glob. Without resolving it, the existing uses cannot be proven
+            // to retain their meaning. Anonymous aliases do not bind names.
+            return Err(destination_syntax_error(format!(
+                "automatic import may shadow a destination wildcard binding: {}",
+                leaf.binding
+            )));
+        }
+        bound_names.insert(leaf.binding.clone());
+        existing.insert(leaf.clone());
+        out.push(imp.clone());
     }
-    out
+    if declarations.next().is_some() {
+        return Err(destination_syntax_error(
+            "automatic dependency import contains extra declarations",
+        ));
+    }
+    Ok(out)
 }
 
 /// Removes each orphaned single-leaf `use` line (only the moved symbol needed
@@ -380,7 +487,8 @@ mod tests {
             ],
             "use c::D;\n",
             None,
-        );
+        )
+        .unwrap();
         assert_eq!(out, vec!["use a::B;".to_string()]);
     }
 
@@ -402,7 +510,8 @@ mod tests {
             ],
             "pub struct SweepType { pub value: i32 }\n",
             Some("crate"),
-        );
+        )
+        .unwrap();
         assert_eq!(out, vec!["use crate::nested::Other;".to_string()]);
     }
 }

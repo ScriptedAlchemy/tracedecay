@@ -34,6 +34,219 @@ fn search_flags_bind_query_from_the_one_tool_schema() {
     assert_eq!(parsed.tool_args, json!({ "query": "findable_symbol" }));
 }
 
+fn source_lines_selectors() -> [Value; 2] {
+    [
+        json!({
+            "file": "file.source-lines",
+            "span": {"start_byte": 0, "end_byte": 10},
+            "meta": {
+                "temporal": {"kind": "current"},
+                "page": {"page_size": 1, "cursor": null},
+                "projection": "evidence", "order": "source_position"
+            }
+        }),
+        json!({
+            "revision": "a".repeat(40), "file": "src/name with  spaces.rs",
+            "start_line": 1, "end_line": 10
+        }),
+    ]
+}
+
+#[test]
+fn source_lines_flags_parse_both_selectors_with_transport_format() {
+    let definition = def("source_lines");
+    for mut request in source_lines_selectors() {
+        request["format"] = json!("json");
+        let arguments = request
+            .as_object()
+            .unwrap()
+            .iter()
+            .flat_map(|(key, value)| {
+                [
+                    format!("--{}", key.replace('_', "-")),
+                    value
+                        .as_str()
+                        .map_or_else(|| value.to_string(), str::to_owned),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let parsed = parse_invocation(&definition, &arguments).expect("complete source selector");
+        assert_eq!(parsed.tool_args, request);
+    }
+}
+
+#[test]
+fn source_lines_whole_payload_dry_runs_read_stdin_once_across_alternatives() {
+    let definition = def("source_lines");
+    for request in source_lines_selectors() {
+        let mut reads = 0;
+        let parsed = parse_invocation_with_stdin(
+            &definition,
+            &["--args".to_owned(), "-".to_owned(), "--dry-run".to_owned()],
+            || {
+                reads += 1;
+                Ok(request.to_string())
+            },
+        )
+        .expect("either complete selector supports dry-run");
+        assert_eq!(parsed.tool_args, request);
+        assert!(parsed.dry_run);
+        assert_eq!(reads, 1);
+    }
+}
+
+#[test]
+fn source_lines_dry_runs_refuse_mixed_and_incomplete_selectors() {
+    let definition = def("source_lines");
+    let [indexed, revision] = source_lines_selectors();
+    let mut mixed = revision.clone();
+    mixed["span"] = indexed["span"].clone();
+    mixed["meta"] = indexed["meta"].clone();
+    let mut incomplete = revision;
+    incomplete.as_object_mut().unwrap().remove("end_line");
+    let mut unsupported_selector = source_lines_selectors()[1].clone();
+    unsupported_selector["project_selector"] = json!({"project_id": "project.source-lines"});
+    for request in [mixed, incomplete, unsupported_selector] {
+        let error = parse_invocation(
+            &definition,
+            &[
+                "--args".to_owned(),
+                request.to_string(),
+                "--dry-run".to_owned(),
+            ],
+        )
+        .expect_err("no complete request shape matches");
+        assert!(error.to_string().contains("one complete request shape"));
+    }
+}
+
+#[test]
+fn one_of_object_requests_use_each_branchs_argument_types_and_required_fields() {
+    let mut definition = def("source_lines");
+    let alternatives = definition
+        .input_schema
+        .as_object_mut()
+        .unwrap()
+        .remove("anyOf")
+        .expect("source selector alternatives");
+    definition.input_schema["oneOf"] = alternatives;
+    let revision = source_lines_selectors()[1].clone();
+    let parsed = parse_invocation(
+        &definition,
+        &[
+            "--revision".to_owned(),
+            "a".repeat(40),
+            "--file".to_owned(),
+            "src/name with  spaces.rs".to_owned(),
+            "--start-line".to_owned(),
+            "1".to_owned(),
+            "--end-line".to_owned(),
+            "10".to_owned(),
+        ],
+    )
+    .expect("closed oneOf object selector");
+    assert_eq!(parsed.tool_args, revision);
+    assert!(
+        parse_invocation(
+            &definition,
+            &[
+                "--file".to_owned(),
+                "src/lib.rs".to_owned(),
+                "--dry-run".to_owned()
+            ]
+        )
+        .is_err()
+    );
+}
+
+fn source_edit_reconciliation_request(fields: Value) -> Value {
+    let mut request = json!({
+        "original_operation": "use-case.application.source-edit.str-replace",
+        "effect_id": "effect.source-edit.retained",
+        "idempotency_key": "source-edit.original",
+        "attempt_idempotency_key": "source-edit.reconciliation",
+        "input_digest": format!("sha256:{}", "a".repeat(64)),
+        "confirm": fields["disposition"] != "inspect",
+    });
+    request
+        .as_object_mut()
+        .unwrap()
+        .extend(fields.as_object().unwrap().clone());
+    request
+}
+
+#[test]
+fn reconciliation_flags_select_the_complete_discriminated_request_shape() {
+    let definition = def("source_edit_reconcile");
+    let digest = format!("sha256:{}", "b".repeat(64));
+    for fields in [
+        json!({"disposition": "inspect"}),
+        json!({"disposition": "confirm_unchanged"}),
+        json!({"disposition": "confirm_committed", "committed_state": digest}),
+        json!({"disposition": "acknowledge_partial", "observed_state": digest}),
+    ] {
+        let request = source_edit_reconciliation_request(fields);
+        let mut arguments = request
+            .as_object()
+            .unwrap()
+            .iter()
+            .flat_map(|(key, value)| {
+                [
+                    format!("--{}", key.replace('_', "-")),
+                    value
+                        .as_str()
+                        .map_or_else(|| value.to_string(), str::to_owned),
+                ]
+            })
+            .collect::<Vec<_>>();
+        arguments.push("--dry-run".to_owned());
+        let parsed = parse_invocation(&definition, &arguments).expect("complete variant");
+        assert!(parsed.dry_run);
+        assert_eq!(parsed.tool_args, request);
+        tracedecay_daemon_protocol::parse_source_edit_arguments(
+            tracedecay_tool_catalog::ApplicationSurfaceOperation::SourceEditReconcile,
+            &parsed.tool_args,
+        )
+        .expect("canonical dispatcher accepts the selector and caller attestation");
+        let decoded: tracedecay_contracts::source_edit::SourceEditReconcileSurfaceRequestV1 =
+            serde_json::from_value(parsed.tool_args).expect("canonical request");
+        assert_eq!(serde_json::to_value(decoded).unwrap(), request);
+    }
+}
+
+#[test]
+fn reconciliation_dry_runs_reject_missing_and_wrong_variant_fields() {
+    let definition = def("source_edit_reconcile");
+    let digest = format!("sha256:{}", "b".repeat(64));
+    for fields in [
+        json!({"disposition": "confirm_committed"}),
+        json!({"disposition": "acknowledge_partial"}),
+        json!({"disposition": "inspect", "committed_state": digest}),
+        json!({"disposition": "confirm_unchanged", "observed_state": digest}),
+        json!({"disposition": "unknown"}),
+        json!({"disposition": "confirm_unchanged", "confirm": false}),
+    ] {
+        let request = source_edit_reconciliation_request(fields);
+        assert!(
+            tracedecay_daemon_protocol::parse_source_edit_arguments(
+                tracedecay_tool_catalog::ApplicationSurfaceOperation::SourceEditReconcile,
+                &request,
+            )
+            .is_err()
+        );
+        let error = parse_invocation(
+            &definition,
+            &[
+                "--args".to_owned(),
+                request.to_string(),
+                "--dry-run".to_owned(),
+            ],
+        )
+        .expect_err("the discriminator must match the branch being validated");
+        assert!(error.to_string().contains("one complete request shape"));
+    }
+}
+
 #[test]
 fn canonicalizes_prefix_and_dashes() {
     assert_eq!(

@@ -342,9 +342,13 @@ mkdir -p "$tmpdir/install"
 printf '#!/usr/bin/env bash\nprintf "tracedecay old\\n"\n' >"$tmpdir/install/tracedecay"
 chmod 0755 "$tmpdir/install/tracedecay"
 old_size=$(wc -c <"$tmpdir/install/tracedecay" | tr -d ' ')
+case "$(uname -s)" in
+  Darwin) stat_args=(-f '%Lp %z') ;;
+  *) stat_args=(-c '%a %s') ;;
+esac
 (
   while [[ ! -e $tmpdir/stop-sampling ]]; do
-    stat -c '%a %s' "$tmpdir/install/tracedecay" 2>/dev/null || echo missing
+    stat "${stat_args[@]}" "$tmpdir/install/tracedecay" 2>/dev/null || echo missing
   done
 ) >"$tmpdir/replace-samples" &
 sampler=$!

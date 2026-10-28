@@ -10,8 +10,9 @@ use serde_json::{Value, json};
 use tracedecay_application::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
-    AdminCliSurfaceRequestV1, DerivesResultV1, ImpactResultV1, NodeResultV1,
-    PrimitiveSearchFreshnessV1, RenamePreviewPrimitiveOutcomeV1, RetrieveResultV1, StatusResultV1,
+    AdminCliSurfaceRequestV1, DerivesResultV1, ImpactResultV1, NodeResultV1, PrContextResultV1,
+    PrContextSurfaceRequestV1, PrContextViewV1, PrimitiveSearchFreshnessV1,
+    RenamePreviewPrimitiveOutcomeV1, RetrieveResultV1, StatusResultV1,
 };
 use tracedecay_contracts::retrieval::{CallableCodeOperationKind, callable_code_operation};
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -25,7 +26,7 @@ use crate::handlers::ast_grep::{compute_ast_grep_search, render_ast_grep_search}
 use crate::handlers::git::{
     compute_affected, compute_branch_diff, compute_branch_list, compute_branch_search,
     compute_changelog, compute_commit_context, compute_diff_context, compute_pr_context,
-    git_tool_failure_message,
+    git_tool_failure_message, render_pr_context_brief,
 };
 use crate::handlers::graph::{
     compute_by_qualified_name, compute_context, compute_derives, compute_find_exact_symbol,
@@ -76,6 +77,13 @@ pub fn graph_tool_owner_stores(
         ApplicationSurfaceOperation::HookRuntime => {
             decode_hook_runtime_request(&action).map(|request| request.owner_stores())
         }
+        ApplicationSurfaceOperation::PrContext => decode_primitive_request::<
+            PrContextSurfaceRequestV1,
+        >(&action, operation.mcp_tool_name())
+        .map(|request| match request.view {
+            PrContextViewV1::Brief => OwnerStoresV1::ProjectGraph,
+            PrContextViewV1::Symbols => OwnerStoresV1::ProjectSessions,
+        }),
         _ => return OwnerStoresV1::ProjectSessions,
     };
     declared.unwrap_or(OwnerStoresV1::ProjectSessions)
@@ -202,11 +210,16 @@ pub async fn compute_graph_tool(
             compute_diff_context(ctx, open(read("file_dependents")?), args).await
         }
         ApplicationSurfaceOperation::Changelog => compute_changelog(ctx, args).await,
-        ApplicationSurfaceOperation::CommitContext => {
-            compute_commit_context(ctx, open(read("file_dependents")?), args).await
-        }
+        ApplicationSurfaceOperation::CommitContext => compute_commit_context(ctx, args).await,
         ApplicationSurfaceOperation::PrContext => {
-            compute_pr_context(ctx, open(read("file_dependents")?), args).await
+            let request: PrContextSurfaceRequestV1 =
+                decode_primitive_request(&args, "tracedecay_pr_context")?;
+            let operation = read("file_dependents")?;
+            let operation = match request.view {
+                PrContextViewV1::Brief => operation.resident_only(),
+                PrContextViewV1::Symbols => operation,
+            };
+            compute_pr_context(ctx, open(operation), args).await
         }
         ApplicationSurfaceOperation::BranchSearch => compute_branch_search(ctx, args).await,
         ApplicationSurfaceOperation::BranchDiff => compute_branch_diff(ctx, args).await,
@@ -340,6 +353,11 @@ pub fn render_graph_tool(
     };
     let mut rendered = match &result {
         GraphToolResultV1::Context(context) => render_context(response_handle_root, args, context)?,
+        GraphToolResultV1::PrContext(PrContextResultV1::Brief(brief)) => {
+            rendered_tool_result(response_handle_root, args, &body()?, Vec::new(), || {
+                render_pr_context_brief(brief)
+            })
+        }
         GraphToolResultV1::Node(NodeResultV1::NotFound(not_found)) => {
             not_found_tool_result(not_found)?
         }

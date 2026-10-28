@@ -24,10 +24,7 @@
       "customType": "regex",
       "managerFilePatterns": ["/^MODULE\\.bazel$/"],
       "matchStrings": [
-        "versions\\s*=\\s*\\[\\s*\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\"",
-        "rustfmt_version\\s*=\\s*\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\"",
-        "rust_analyzer_version\\s*=\\s*\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\"",
-        "rust_analyzer_(?<currentValue>\\d+\\.\\d+\\.\\d+)_tools"
+        "RUST_VERSION\\s*=\\s*\"(?<currentValue>\\d+\\.\\d+\\.\\d+)\""
       ],
       "depNameTemplate": "rust",
       "datasourceTemplate": "rust-version",

@@ -3390,7 +3390,7 @@ export const DeliveryGitHubQuarantinedCommentV1Schema: z.ZodObject<{
 
 export const DeliveryGitHubQuarantineReasonV1Schema: z.ZodEnum<{ "body_out_of_bounds": "body_out_of_bounds"; "privacy_sanitizer": "privacy_sanitizer" }> = z.enum(["body_out_of_bounds", "privacy_sanitizer"]);
 
-export const DeliveryGitHubReadOperationV1Schema: z.ZodEnum<{ "pull_request": "pull_request"; "review_comments": "review_comments"; "review_threads": "review_threads"; "reviews": "reviews" }> = z.enum(["pull_request", "review_comments", "review_threads", "reviews"]);
+export const DeliveryGitHubReadOperationV1Schema: z.ZodEnum<{ "conversation_comments": "conversation_comments"; "pull_request": "pull_request"; "review_comments": "review_comments"; "review_threads": "review_threads"; "reviews": "reviews" }> = z.enum(["conversation_comments", "pull_request", "review_comments", "review_threads", "reviews"]);
 
 export const DeliveryGitStatusV1Schema: z.ZodObject<{
   changed_paths: z.ZodType<Array<string>, unknown>;

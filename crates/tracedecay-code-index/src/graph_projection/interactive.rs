@@ -287,6 +287,27 @@ impl InteractiveCatalogCache {
             > 0
     }
 
+    /// Inspect residency without starting a scan or waiting for a transition.
+    pub(super) fn require_resident(&self) -> Result<(), CodeGraphProjectionError> {
+        match self.state.try_read() {
+            Ok(state) => match &*state {
+                InteractiveCatalogState::Ready(_) => Ok(()),
+                InteractiveCatalogState::Failed(error) => Err(error.clone()),
+                InteractiveCatalogState::Cold
+                | InteractiveCatalogState::Released
+                | InteractiveCatalogState::Warming { .. } => {
+                    Err(CodeGraphProjectionError::Unavailable(
+                        "code graph interactive catalog is not resident".to_owned(),
+                    ))
+                }
+            },
+            Err(TryLockError::WouldBlock) => Err(CodeGraphProjectionError::Unavailable(
+                "code graph interactive catalog residency is changing".to_owned(),
+            )),
+            Err(TryLockError::Poisoned(_)) => Err(catalog_lock_poisoned()),
+        }
+    }
+
     pub(super) fn residency(&self) -> CatalogResidency {
         let Ok(state) = self.state.read() else {
             return CatalogResidency::Unreleased;

@@ -26,8 +26,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::{map_code_graph_read_runtime_error, map_projection_error};
 
 use crate::edits::{
-    EditSymbolV1, LeadingKind, classify_leading_line, edit_success_message,
-    edit_symbol_from_summary, resolve_symbol_for_edit, splice_lines,
+    EditSymbolV1, edit_success_message, edit_symbol_from_summary, is_inner_doc_line,
+    resolve_symbol_for_edit, splice_lines,
 };
 
 use fs_guards::{
@@ -130,8 +130,7 @@ pub(crate) async fn move_symbol(
     // module, not the following item. Advance past it so the source keeps its
     // module doc and the destination doesn't receive a stray `//!` mid-file
     // (a hard E0753).
-    while start < end_inclusive && classify_leading_line(src_lines[start]) == LeadingKind::InnerDoc
-    {
+    while start < end_inclusive && is_inner_doc_line(src_lines[start]) {
         start += 1;
     }
     let moved_text = src_lines[start..=end_inclusive].join("\n");
@@ -214,7 +213,7 @@ pub(crate) async fn move_symbol(
         &analysis.auto_imports,
         &dest_original,
         dest_module.as_deref(),
-    );
+    )?;
     let dest_modified =
         build_dest_content(&dest_rel, &dest_original, &applied_imports, &moved_text)?;
 
@@ -487,7 +486,7 @@ async fn analyze_dependencies(
         if matched.is_empty() {
             continue;
         }
-        if stmt.leaves.len() == 1 && !stmt.glob {
+        if stmt.leaves.len() == 1 && !stmt.has_unnamed_dependencies {
             if let Some(import) = portable_dependency_import(&stmt) {
                 out.auto_imports.push(import);
             } else {
@@ -535,7 +534,7 @@ async fn analyze_dependencies(
                 file: dest_rel.to_string(),
                 line: None,
                 detail: format!(
-                    "moved body uses {names:?} from a grouped/glob import in {source_rel}"
+                    "moved body uses {names:?} from a grouped or unnamed import in {source_rel}"
                 ),
                 suggestion: Some(format!(
                     "add an import for {names:?} at the destination (from `{}`)",

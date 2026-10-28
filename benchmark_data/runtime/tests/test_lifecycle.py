@@ -44,6 +44,38 @@ def dashboard_command(mode: str, port: int, *extra: str) -> list[str]:
 
 
 class ProcessGroupCountTests(unittest.TestCase):
+    @unittest.skipUnless(Path("/proc/self/stat").exists(), "requires procfs")
+    def test_census_ignores_a_process_reaped_after_its_stat_file_opens(self) -> None:
+        command = [sys.executable, "-c", "import time; time.sleep(60)"]
+        live = subprocess.Popen(command, start_new_session=True)
+        disappearing = subprocess.Popen(command, start_new_session=True)
+        disappearing_stat = Path(f"/proc/{disappearing.pid}/stat")
+        read_text = Path.read_text
+        observed_exit = False
+
+        def read_after_exit(path, *args, **kwargs):
+            nonlocal observed_exit
+            if path == disappearing_stat:
+                # Keep a real procfs descriptor open while its task exits.
+                # Linux returns ESRCH on read, rather than ENOENT on open.
+                with path.open(encoding="utf-8") as stream:
+                    disappearing.terminate()
+                    disappearing.wait(timeout=5)
+                    observed_exit = True
+                    return stream.read()
+            return read_text(path, *args, **kwargs)
+
+        try:
+            with mock.patch.object(lifecycle.Path, "read_text", read_after_exit):
+                count = lifecycle.process_group_process_count(live.pid)
+            self.assertTrue(observed_exit, "the census must encounter the exiting task")
+            self.assertEqual(count, 1, "the live owned group remains observable")
+        finally:
+            for process in (live, disappearing):
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=5)
+
     def test_late_census_failure_cleans_up_host_and_descendants(self) -> None:
         real_popen = subprocess.Popen
         for phase in ("timeout", "normal_exit"):

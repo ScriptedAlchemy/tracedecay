@@ -1,5 +1,5 @@
 [toolchain]
 # Pinned stable compiler; MODULE.bazel and renovate.json track the same version.
-channel = "1.99.0"
+channel = "1.99.1"
 # LSP acceptance negotiates capabilities with the pinned upstream analyzer.
 components = ["clippy", "rustfmt", "rust-analyzer", "rust-src"]

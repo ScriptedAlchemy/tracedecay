@@ -102,12 +102,22 @@ impl From<GraphQueryError> for TraceDecayError {
     }
 }
 
+/// Whether an optional read may start or await the graph's existing re-warm.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CodeGraphOpenPolicy {
+    #[default]
+    AwaitRewarm,
+    /// Use only already resident data; never start or await a re-warm.
+    ResidentOnly,
+}
+
 #[derive(Clone)]
 pub struct CodeGraphReadRequest<'a> {
     pub context: &'a RequestContext,
     pub observed_at: UtcMicros,
     pub cancellation: Arc<dyn GraphCancellation>,
     pub readiness: CodeGraphReadinessRequirement,
+    pub open_policy: CodeGraphOpenPolicy,
     pub deadline: Option<Deadline>,
     pub live_cancellation: Option<&'a CancellationSignal>,
 }
@@ -123,6 +133,7 @@ impl<'a> CodeGraphReadRequest<'a> {
             observed_at,
             cancellation,
             readiness: CodeGraphReadinessRequirement::Catalog,
+            open_policy: CodeGraphOpenPolicy::AwaitRewarm,
             deadline: None,
             live_cancellation: None,
         }
@@ -130,6 +141,11 @@ impl<'a> CodeGraphReadRequest<'a> {
 
     pub fn with_readiness(mut self, readiness: CodeGraphReadinessRequirement) -> Self {
         self.readiness = readiness;
+        self
+    }
+
+    pub fn with_open_policy(mut self, policy: CodeGraphOpenPolicy) -> Self {
+        self.open_policy = policy;
         self
     }
 

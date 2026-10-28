@@ -18,8 +18,8 @@ mod test_support;
 
 pub(crate) use ast_grep::ast_grep_rewrite;
 pub(crate) use preview::{
-    LeadingKind, MAX_PREVIEW_DIFF_LINES, PREVIEW_DIFF_CONTEXT, bounded_region_diff,
-    classify_leading_line, edit_success_message,
+    MAX_PREVIEW_DIFF_LINES, PREVIEW_DIFF_CONTEXT, bounded_region_diff, edit_success_message,
+    is_inner_doc_line,
 };
 pub(crate) use primitives::{
     insert_at, insert_at_symbol, multi_str_replace, replace_symbol, splice_lines, str_replace,

@@ -66,6 +66,7 @@ mod managed_test_scope;
 #[path = "production/managed_test_scope_tests.rs"]
 mod managed_test_scope_tests;
 mod retrieval_ports;
+mod source_lines;
 mod symbol_graph_snapshot;
 mod test_primitive;
 #[cfg(test)]
@@ -74,7 +75,8 @@ mod unavailable_evidence_tests;
 pub use affected_tests::TraceDecayAffectedTestsPortV1;
 pub use extended_primitive::TraceDecayExtendedPrimitivePortV1;
 use managed_test_scope::ProductionManagedTestRunCurrentScope;
-pub use retrieval_ports::{TraceDecayHealthPortV1, TraceDecaySourceLinesPortV1};
+pub use retrieval_ports::TraceDecayHealthPortV1;
+pub use source_lines::TraceDecaySourceLinesPortV1;
 pub use symbol_graph_snapshot::ProjectSymbolGraphCursorSnapshotAuthority;
 pub use test_primitive::TraceDecayTestPrimitivePortV1;
 
@@ -1006,7 +1008,8 @@ pub async fn open_production_primitive_runtime(
         Arc::new(TraceDecaySourceLinesPortV1::new(
             Arc::clone(&source_runtime),
             Arc::clone(&diagnostic_identity),
-        )),
+            scope.clone(),
+        )?),
         Arc::new(TraceDecayHealthPortV1::new(Arc::clone(&source_runtime))),
         extended,
         scope,

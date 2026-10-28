@@ -16,7 +16,6 @@ use tracedecay_domain::configuration::{
     SYNC_AUTO_INIT_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY,
     SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY, SYNC_BRANCH_GC_DAYS_SETTING_KEY,
-    SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY, SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
     SYNC_READ_COOLDOWN_SECS_SETTING_KEY, SYNC_READ_REFRESH_SETTING_KEY,
     SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY, SYNC_SESSION_START_SYNC_SETTING_KEY,
     SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
@@ -28,6 +27,7 @@ use tracedecay_domain::configuration::{
     WORK_TOPOLOGY_POLICY_SETTING_KEY, WorkExpertiseConsentV1, safe_work_topology_policy_v1,
 };
 use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
+use tracedecay_domain::source_path_policy::GENERATED_DIR_SEGMENTS;
 use tracedecay_domain::{DomainError, validate_index_path_patterns};
 
 /// Canonical default for configured-tier proximity warnings.
@@ -494,8 +494,6 @@ struct SyncDefaults {
     session_start_sync: bool,
     session_start_stale_threshold_secs: u64,
     backstop_interval_mins: u64,
-    full_sync_escalation_files: usize,
-    max_concurrent_syncs: usize,
     branch_gc_days: u64,
     auto_init: bool,
     auto_track_pr_branches: bool,
@@ -515,8 +513,6 @@ impl Default for SyncDefaults {
             session_start_sync: true,
             session_start_stale_threshold_secs: 600,
             backstop_interval_mins: 15,
-            full_sync_escalation_files: 500,
-            max_concurrent_syncs: 2,
             branch_gc_days: 14,
             auto_init: true,
             auto_track_pr_branches: false,
@@ -532,7 +528,7 @@ impl Default for ProjectDefaults {
             ".tracedecay/**".to_string(),
             "**/*.min.*".to_string(),
         ];
-        for segment in tracedecay_runtime_core::config::GENERATED_DIR_SEGMENTS {
+        for segment in GENERATED_DIR_SEGMENTS {
             exclude.push(format!("{segment}/**"));
             exclude.push(format!("**/{segment}/**"));
         }
@@ -649,18 +645,6 @@ fn register_project_settings(
         (
             SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
             ConfigurationValueV1::Unsigned(sync.backstop_interval_mins),
-            SettingSensitivityV1::Public,
-            RestartRequirementV1::DaemonRestart,
-        ),
-        (
-            SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
-            ConfigurationValueV1::Unsigned(sync.full_sync_escalation_files as u64),
-            SettingSensitivityV1::Public,
-            RestartRequirementV1::DaemonRestart,
-        ),
-        (
-            SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
-            ConfigurationValueV1::Unsigned(sync.max_concurrent_syncs as u64),
             SettingSensitivityV1::Public,
             RestartRequirementV1::DaemonRestart,
         ),

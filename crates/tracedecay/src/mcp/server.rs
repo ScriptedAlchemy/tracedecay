@@ -49,10 +49,7 @@ use tracedecay_sessions::runtime::git_correlation::{
 use tracedecay_domain::HostIntegrationIdV1;
 use tracedecay_mcp::hook_events::{self, HookEventPlan};
 use tracedecay_mcp::tools::catalog_discovery::default_catalog_discovery_authority;
-use tracedecay_mcp::{
-    ErrorCode, JsonRpcRequest, JsonRpcResponse, explore_call_budget,
-    project_catalog_discovery_scope,
-};
+use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, project_catalog_discovery_scope};
 use tracedecay_session_memory::session::SessionRefreshServicePort;
 
 mod connection;

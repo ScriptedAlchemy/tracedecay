@@ -17,6 +17,7 @@ use tracedecay_runtime_core::{
     },
     shard_runtime::{VerifiedGraphRuntimePortV1, VerifiedGraphRuntimeWeakProxyV1},
 };
+use tracedecay_sessions::runtime::SessionTranscriptProgressProofs;
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardScopeV1, VerifiedStoreLocatorV1};
 
 mod delivery_settlement;
@@ -80,6 +81,7 @@ pub struct RegisteredGlobalDbOwnerV1 {
     database: DatabaseOwnerV1,
     project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
     session_relation_graph: Arc<SessionRelationGraphStateV1>,
+    transcript_progress_proofs: Arc<SessionTranscriptProgressProofs>,
     refused_authority: Option<RefusedAuthorityV1>,
 }
 
@@ -93,6 +95,7 @@ pub struct RegisteredGlobalDbWeakLeaseIssuerV1 {
     database: DatabaseOwnerWeakLeaseIssuerV1,
     project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
     session_relation_graph: Weak<SessionRelationGraphStateV1>,
+    transcript_progress_proofs: Weak<SessionTranscriptProgressProofs>,
     refused_authority: Option<RefusedAuthorityV1>,
 }
 
@@ -141,6 +144,7 @@ impl RegisteredGlobalDbOwnerV1 {
             database,
             project_graph: Arc::new(OnceLock::new()),
             session_relation_graph: Arc::new(RwLock::new(None)),
+            transcript_progress_proofs: Arc::new(SessionTranscriptProgressProofs::default()),
             refused_authority,
         })
     }
@@ -183,6 +187,7 @@ impl RegisteredGlobalDbOwnerV1 {
                 database,
                 project_graph: Arc::new(OnceLock::new()),
                 session_relation_graph: Arc::new(RwLock::new(None)),
+                transcript_progress_proofs: Arc::new(SessionTranscriptProgressProofs::default()),
                 refused_authority,
             },
             convergence,
@@ -208,6 +213,7 @@ impl RegisteredGlobalDbOwnerV1 {
                 self.database.issue_lease()?,
                 Arc::clone(&self.project_graph),
                 Arc::clone(&self.session_relation_graph),
+                Arc::clone(&self.transcript_progress_proofs),
                 self.refused_authority,
             ),
         ))
@@ -227,6 +233,7 @@ impl RegisteredGlobalDbOwnerV1 {
                 self.database.issue_read_only_lease()?,
                 Arc::clone(&self.project_graph),
                 Arc::clone(&self.session_relation_graph),
+                Arc::clone(&self.transcript_progress_proofs),
                 self.refused_authority,
             ),
         ))
@@ -240,6 +247,7 @@ impl RegisteredGlobalDbOwnerV1 {
             database: self.database.weak_lease_issuer(),
             project_graph: Arc::clone(&self.project_graph),
             session_relation_graph: Arc::downgrade(&self.session_relation_graph),
+            transcript_progress_proofs: Arc::downgrade(&self.transcript_progress_proofs),
             refused_authority: self.refused_authority,
         }
     }
@@ -284,11 +292,16 @@ impl RegisteredGlobalDbWeakLeaseIssuerV1 {
             .session_relation_graph
             .upgrade()
             .ok_or(DatabaseOwnerWeakLeaseIssuerErrorV1::Unavailable)?;
+        let transcript_progress_proofs = self
+            .transcript_progress_proofs
+            .upgrade()
+            .ok_or(DatabaseOwnerWeakLeaseIssuerErrorV1::Unavailable)?;
         Ok(RegisteredGlobalDbLeaseV1::from_database(
             RegisteredGlobalDb::from_database_with_project_graph(
                 self.database.issue_lease()?,
                 Arc::clone(&self.project_graph),
                 session_relation_graph,
+                transcript_progress_proofs,
                 self.refused_authority,
             ),
         ))
@@ -357,6 +370,7 @@ pub struct RegisteredGlobalDb {
     database: Database,
     project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
     session_relation_graph: Arc<SessionRelationGraphStateV1>,
+    pub(crate) transcript_progress_proofs: Arc<SessionTranscriptProgressProofs>,
     refused_authority: Option<RefusedAuthorityV1>,
 }
 
@@ -371,11 +385,13 @@ const _: fn(&RegisteredGlobalDb) = |value| {
         database,
         project_graph,
         session_relation_graph,
+        transcript_progress_proofs,
         refused_authority,
     } = value;
     assert_send_sync(database);
     assert_send_sync(project_graph);
     assert_send_sync(session_relation_graph);
+    assert_send_sync(transcript_progress_proofs);
     assert_send_sync(refused_authority);
 };
 
@@ -416,6 +432,7 @@ impl RegisteredGlobalDb {
             database,
             Arc::new(OnceLock::new()),
             Arc::new(RwLock::new(None)),
+            Arc::new(SessionTranscriptProgressProofs::default()),
             None,
         )
     }
@@ -424,12 +441,14 @@ impl RegisteredGlobalDb {
         database: Database,
         project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
         session_relation_graph: Arc<SessionRelationGraphStateV1>,
+        transcript_progress_proofs: Arc<SessionTranscriptProgressProofs>,
         refused_authority: Option<RefusedAuthorityV1>,
     ) -> Self {
         Self {
             database,
             project_graph,
             session_relation_graph,
+            transcript_progress_proofs,
             refused_authority,
         }
     }
@@ -1050,13 +1069,14 @@ mod tests {
         VerifiedGraphSnapshot,
     };
     use tracedecay_runtime_core::db::{
-        Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
-        TestRuntimeProfileIdentityV1,
+        Database, DatabaseAuthority, DatabaseOwnerWeakLeaseIssuerErrorV1, TestDatabaseRuntimeMode,
+        TestDatabaseRuntimeScope, TestRuntimeProfileIdentityV1,
     };
     use tracedecay_runtime_core::shard_runtime::VerifiedGraphRuntimePortV1;
     use tracedecay_runtime_core::shard_runtime::registry::{
         StoreRuntimeRetirementBlocker, StoreRuntimeRetirementOutcome, StoreRuntimeRetirementResult,
     };
+    use tracedecay_sessions::runtime::SessionRegisteredDb;
     use tracedecay_store::{FactReadControl, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
     use super::RegisteredGlobalDb;
@@ -1219,6 +1239,59 @@ mod tests {
             .expect("each command receives a fresh guarded lease");
         assert!(first.shares_client_with(&first_clone));
         assert!(!first.shares_client_with(&second));
+    }
+
+    #[asupersync::test]
+    async fn transcript_progress_proofs_follow_owner_and_issued_client_lifetimes() {
+        let fixture = crate::tests::harness::RegisteredGlobalDbRetirementHarnessV1::open(
+            "transcript-progress-proof-lifetimes",
+        )
+        .await;
+        let (map_lease, owner, _retirement, _directory, _scope) = fixture.into_parts();
+        let issuer = owner.weak_lease_issuer();
+        let weak_proofs = Arc::downgrade(&owner.transcript_progress_proofs);
+        let writer = owner.issue_lease().unwrap();
+        let reader = owner.issue_read_only_lease().unwrap();
+        let weak_issued = issuer.issue_lease().unwrap();
+        for lease in [&map_lease, &writer, &reader, &weak_issued] {
+            assert!(std::ptr::eq(
+                lease.as_ref().transcript_progress_proofs(),
+                owner.transcript_progress_proofs.as_ref(),
+            ));
+        }
+        assert!(!writer.shares_client_with(&reader));
+        assert!(!writer.shares_client_with(&weak_issued));
+
+        let temporary =
+            RegisteredGlobalDb::from_owned_database(owner.database.issue_lease().unwrap());
+        let temporary_proofs = Arc::downgrade(&temporary.transcript_progress_proofs);
+        assert!(!Arc::ptr_eq(
+            &temporary.transcript_progress_proofs,
+            &owner.transcript_progress_proofs,
+        ));
+        drop(temporary);
+        assert!(temporary_proofs.upgrade().is_none());
+
+        drop((map_lease, writer, weak_issued));
+        assert!(weak_proofs.upgrade().is_some());
+        drop(owner);
+        assert!(
+            weak_proofs.upgrade().is_some(),
+            "a live reader retains its proofs"
+        );
+        assert!(matches!(
+            issuer.issue_lease(),
+            Err(DatabaseOwnerWeakLeaseIssuerErrorV1::Unavailable)
+        ));
+        drop(reader);
+        assert!(
+            weak_proofs.upgrade().is_none(),
+            "weak issuers retain no proofs"
+        );
+        assert!(matches!(
+            issuer.issue_lease(),
+            Err(DatabaseOwnerWeakLeaseIssuerErrorV1::Unavailable)
+        ));
     }
 
     #[asupersync::test]
