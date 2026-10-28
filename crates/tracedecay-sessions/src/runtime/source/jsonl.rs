@@ -850,12 +850,15 @@ fn next_replacement_jsonl_generation(file_identity: u64, previous_generation: u6
     replacement_jsonl_generation(file_identity, counter)
 }
 
-/// `content_fingerprint` is the whole-extent snapshot for a rescan from zero,
-/// or the retained prefix's resume fingerprint for a proportional resume.
+/// `rewrite_fingerprint` is the whole-extent snapshot for a same-identity
+/// rescan, or the retained prefix's fingerprint for a proportional resume.
+/// A different file identity already proves replacement, so that case uses
+/// the predecessor's committed prefix fingerprint without reading the new
+/// extent. Chaining from its generation prevents an old namespace returning.
 fn rewritten_jsonl_generation(
     previous: JsonlResumeState,
     file_identity: u64,
-    content_fingerprint: u64,
+    rewrite_fingerprint: u64,
     file_size: u64,
     mtime: u64,
 ) -> u64 {
@@ -863,7 +866,7 @@ fn rewritten_jsonl_generation(
     hasher.update(b"tracedecay-jsonl-rewrite-generation-v1");
     hasher.update(previous.generation.to_le_bytes());
     hasher.update(file_identity.to_le_bytes());
-    hasher.update(content_fingerprint.to_le_bytes());
+    hasher.update(rewrite_fingerprint.to_le_bytes());
     hasher.update(file_size.to_le_bytes());
     hasher.update(mtime.to_le_bytes());
     digest_prefix_u64(hasher.finalize()).max(1)
@@ -1315,20 +1318,26 @@ impl<'a> PreparedJsonlScan<'a> {
                 // it (including inode reuse). Chain every rewrite from the
                 // committed generation so an old observation namespace cannot
                 // become current again merely because its file id returned.
+                let rewrite_fingerprint = if file_identity == resume_state.file_identity {
+                    memoized_jsonl_snapshot_fingerprint(
+                        &mut snapshot_fingerprint,
+                        &mut io.snapshot_hash_bytes,
+                        &mut file,
+                        file_size,
+                    )
+                    .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?
+                } else {
+                    // The changed identity proves replacement. Reuse the
+                    // committed boundary evidence so minting its generation
+                    // does not read past this scan's admitted page.
+                    resume_state.fingerprint
+                };
                 (
                     0,
                     rewritten_jsonl_generation(
                         resume_state,
                         file_identity,
-                        memoized_jsonl_snapshot_fingerprint(
-                            &mut snapshot_fingerprint,
-                            &mut io.snapshot_hash_bytes,
-                            &mut file,
-                            file_size,
-                        )
-                        .map_err(|error| {
-                            TranscriptIngestError::scan_io("fingerprint", path, error)
-                        })?,
+                        rewrite_fingerprint,
                         file_size,
                         mtime,
                     ),
