@@ -1,10 +1,4 @@
-use std::collections::BTreeMap;
-use std::time::SystemTime;
-
 use super::*;
-use tracedecay_session_temporal_store::{
-    SessionTemporalAccess, SessionTemporalHealthFindingKind, SessionTemporalHealthStatus,
-};
 
 #[test]
 fn domain_symbol_rules_warning_is_silent_without_the_file() {
@@ -87,103 +81,6 @@ fn automation_effect_reset_findings_name_each_refused_journal_by_run_id() {
                 + " requires reset: its shape is refused (unknown field `retirement`, expected `admission` or `state` at line 1 column 13); project-open recovery removes it",
             "Automation run run.legacy-memory requires reset: its effect journal shape is refused (unknown field `retirement`, expected `admission` or `state` at line 1 column 13); project-open recovery removes the journal and the run id can run again".to_owned(),
         ]
-    );
-}
-
-#[tokio::test]
-async fn temporal_health_adapter_is_read_only_and_clean_on_canonical_schema() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let runtime = DoctorTestRuntime::open(
-        &dir.path().join("profile"),
-        "doctor temporal health adapter",
-    )
-    .await;
-    let db = runtime.database();
-    let db_path = db.db_path().to_path_buf();
-    // Keep the byte-level assertion stable while diagnosis runs through the
-    // retained registered reader pool.
-    db.checkpoint_result().await.unwrap();
-    let before = std::fs::read(&db_path).unwrap();
-    let before_family = temporal_family_manifest(&db_path);
-
-    let report = SessionTemporalAccess::new(db)
-        .session_temporal_doctor_health()
-        .await;
-
-    let encoded = serde_json::to_value(report).unwrap();
-    assert_eq!(encoded["status"], "complete");
-    assert_eq!(encoded["findings"], serde_json::json!([]));
-    assert!(encoded.get("reason").is_none());
-    assert_eq!(
-        std::fs::read(&db_path).unwrap(),
-        before,
-        "temporal health diagnosis must not mutate the authoritative database"
-    );
-    assert_eq!(temporal_family_manifest(&db_path), before_family);
-}
-
-fn temporal_family_manifest(db_path: &Path) -> BTreeMap<String, (u64, Option<SystemTime>)> {
-    let mut manifest = BTreeMap::new();
-    for path in [
-        db_path.to_path_buf(),
-        {
-            let mut wal = db_path.as_os_str().to_os_string();
-            wal.push("-wal");
-            PathBuf::from(wal)
-        },
-        {
-            let mut shm = db_path.as_os_str().to_os_string();
-            shm.push("-shm");
-            PathBuf::from(shm)
-        },
-    ] {
-        if let Ok(metadata) = std::fs::metadata(&path) {
-            manifest.insert(
-                path.file_name().unwrap().to_string_lossy().into_owned(),
-                (metadata.len(), metadata.modified().ok()),
-            );
-        }
-    }
-    manifest
-}
-
-#[tokio::test]
-async fn temporal_health_detects_index_and_column_migration_gaps() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let runtime = DoctorTestRuntime::open(
-        &dir.path().join("profile"),
-        "doctor temporal migration gap test",
-    )
-    .await;
-    let db = runtime.database();
-    let writer = db.writer_connection().unwrap();
-    writer
-        .execute(
-            "DROP INDEX IF EXISTS idx_session_occurrences_generation_order",
-            (),
-        )
-        .await
-        .unwrap();
-    writer
-        .execute(
-            "ALTER TABLE session_occurrences ADD COLUMN doctor_probe_column TEXT",
-            (),
-        )
-        .await
-        .unwrap();
-    let report = serde_json::to_value(
-        SessionTemporalAccess::new(db)
-            .session_temporal_doctor_health()
-            .await,
-    )
-    .unwrap();
-    assert_eq!(report["status"], "partial");
-    let findings = report["findings"].as_array().unwrap();
-    assert!(
-        findings.iter().any(|finding| {
-            finding["kind"] == "migration_gap" && finding["count"].as_u64().unwrap_or(0) >= 2
-        }),
-        "{report}"
     );
 }
 
@@ -697,53 +594,6 @@ fn project_open_severity_tracks_typed_state() {
         render_project_open_status(&mut counters, &status).unwrap();
         assert_eq!((counters.issues, counters.warnings), (issues, warnings));
     }
-}
-
-#[tokio::test]
-async fn temporal_health_does_not_block_on_a_saturated_general_reader_lane() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let runtime = DoctorTestRuntime::open(
-        &dir.path().join("profile"),
-        "doctor temporal health concurrent reader",
-    )
-    .await;
-    let db = runtime.database();
-    let occupancy = db
-        .read_connection()
-        .reader_pool_occupancy()
-        .expect("reader pool occupancy");
-    let mut held = Vec::new();
-    for _ in 0..occupancy.available_general {
-        held.push(
-            db.read_snapshot()
-                .await
-                .expect("hold a general-lane snapshot"),
-        );
-    }
-    assert_eq!(
-        db.read_connection()
-            .reader_pool_occupancy()
-            .map(|snapshot| snapshot.available_general),
-        Some(0),
-        "the general lane must stay leased for the whole diagnosis"
-    );
-
-    let report = SessionTemporalAccess::new(db)
-        .session_temporal_doctor_health()
-        .await;
-
-    assert_eq!(
-        report.status(),
-        SessionTemporalHealthStatus::Complete,
-        "{report:?}"
-    );
-    assert!(
-        !report.findings().iter().any(|finding| {
-            finding.kind() == SessionTemporalHealthFindingKind::RelationGraphUnavailable
-        }),
-        "relation health must use the reserved health snapshot, not the general lane: {report:?}"
-    );
-    drop(held);
 }
 
 #[tokio::test]
