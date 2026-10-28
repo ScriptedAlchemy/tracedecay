@@ -50,8 +50,8 @@ use super::{
     with_untouched_fillers,
 };
 use crate::code_index_scheduler::{
-    CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
-    SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
+    CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1,
+    CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
 };
 use tracedecay_code_index::production::{
     CodeGraphBuildBoundV1, CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1,
@@ -1097,6 +1097,55 @@ fn failed_and_crashed_evidence_pack_temporaries_are_removed() {
     assert!(
         sibling_segment_path.exists(),
         "restart must not remove another worktree scope's segment in flight"
+    );
+}
+
+#[test]
+fn concurrent_publication_during_sealing_rebases_without_a_source_epoch_change() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let source_store = TempDir::new().expect("source store");
+    let mut source = scheduler(
+        &fixture,
+        source_store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(source.reconcile_now().expect("source publication"));
+    let generation = source.latest_complete().expect("source generation").generation;
+    let expected_generation = generation.manifest().generation_id.clone();
+    let target_store = TempDir::new().expect("target store");
+    let mut target = scheduler(
+        &fixture,
+        target_store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let epoch = target.epoch.load(std::sync::atomic::Ordering::Acquire);
+    let installed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = Arc::clone(&installed);
+    let competing = target.publication.clone();
+    target.publication = target
+        .publication
+        .clone()
+        .with_seal_segment_observer_for_test(Arc::new(move || {
+            if !observed.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                publish_generation(&mut competing.clone(), &generation, None)
+                    .expect("concurrent publication wins the empty slot");
+            }
+        }));
+
+    let outcome = target
+        .reconcile_now()
+        .expect("a moved publication must reconcile against the new incumbent");
+    assert!(installed.load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(target.epoch.load(std::sync::atomic::Ordering::Acquire), epoch);
+    assert!(matches!(outcome, CodeIndexReconcileOutcomeV1::Noop(_)));
+    assert_eq!(
+        target
+            .latest_complete()
+            .expect("concurrent generation remains readable")
+            .generation
+            .manifest()
+            .generation_id,
+        expected_generation
     );
 }
 

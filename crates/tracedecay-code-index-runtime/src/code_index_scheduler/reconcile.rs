@@ -3175,10 +3175,16 @@ impl CodeIndexWorktreeSchedulerV1 {
                 Err(CodeIndexSchedulerErrorV1::Production(
                     CodeIndexProductionErrorV1::Interrupted(
                         tracedecay_code_index::production::CodeIndexInterruptionV1::Cancelled,
+                    )
+                    | CodeIndexProductionErrorV1::Publication(
+                        CodeIndexPublicationStoreErrorV1::CompareAndSwap,
                     ),
                 )) if retry < MAX_SUPERSEDED_RECONCILE_RETRIES
                     && !self.shutting_down.load(Ordering::Acquire) =>
                 {
+                    // Another publisher can move the incumbent without changing
+                    // this owner's source epoch. A fresh capture rebases its CAS
+                    // within the existing supersession bound.
                     stop_if_resident_memory(&control)?;
                     std::thread::sleep(SUPERSEDED_RECONCILE_RETRY_BACKOFF);
                     continue;
