@@ -28,8 +28,7 @@ use tracedecay_domain::configuration::{
     LcmSummarizerExecutablesV1, SYNC_AUTO_INIT_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
     SYNC_AUTO_WATCH_SETTING_KEY, SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
-    SYNC_BRANCH_GC_DAYS_SETTING_KEY, SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
-    SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY, SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
+    SYNC_BRANCH_GC_DAYS_SETTING_KEY, SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
     SYNC_READ_REFRESH_SETTING_KEY, SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY,
     SYNC_SESSION_START_SYNC_SETTING_KEY, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
     SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
@@ -313,11 +312,6 @@ fn runtime_config_from_snapshot(
                 snapshot,
                 SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
             )?,
-            full_sync_escalation_files: required_usize(
-                snapshot,
-                SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
-            )?,
-            max_concurrent_syncs: required_usize(snapshot, SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY)?,
             branch_gc_days: required_unsigned(snapshot, SYNC_BRANCH_GC_DAYS_SETTING_KEY)?,
             auto_init: required_bool(snapshot, SYNC_AUTO_INIT_SETTING_KEY)?,
             auto_track_pr_branches: required_bool(
@@ -488,7 +482,9 @@ mod tests {
     use tracedecay_domain::configuration::{
         AUTOMATION_SETTINGS_SETTING_KEY, ConfigurationLayerIdV1, ConfigurationRevisionId,
         ConfigurationSnapshotV1, ConfigurationValueV1, INDEX_EXCLUDE_SETTING_KEY,
-        INDEX_MAX_FILE_SIZE_SETTING_KEY, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SettingKey,
+        INDEX_MAX_FILE_SIZE_SETTING_KEY, SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
+        SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+        SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey,
     };
     use tracedecay_domain::errors::TraceDecayError;
 
@@ -574,6 +570,47 @@ mod tests {
             message.contains(SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY) && message.contains("missing"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn pin_decodes_supported_sync_settings_without_retired_keys() {
+        let complete = resolved(BTreeMap::from([
+            (
+                SettingKey::new(SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY).unwrap(),
+                ConfigurationValueV1::Boolean(true),
+            ),
+            (
+                SettingKey::new(SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY).unwrap(),
+                ConfigurationValueV1::Unsigned(750),
+            ),
+            (
+                SettingKey::new(SYNC_WATCH_MAX_PROJECTS_SETTING_KEY).unwrap(),
+                ConfigurationValueV1::Unsigned(12),
+            ),
+            (
+                SettingKey::new(SYNC_READ_COOLDOWN_SECS_SETTING_KEY).unwrap(),
+                ConfigurationValueV1::Unsigned(45),
+            ),
+        ]));
+        let mut values = complete.effective_values;
+        let mut provenance = complete.provenance;
+        for raw_key in [
+            "sync.full_sync_escalation_files.v1",
+            "sync.max_concurrent_syncs.v1",
+        ] {
+            let key = SettingKey::new(raw_key).unwrap();
+            values.remove(&key);
+            provenance.remove(&key);
+        }
+        let snapshot = ConfigurationSnapshotV1::new(values, provenance).unwrap();
+
+        let pinned = PinnedRuntimeConfiguration::new(target(), revision(), snapshot).unwrap();
+
+        assert!(pinned.config().sync.watch_linked_worktrees);
+        assert_eq!(pinned.config().sync.watch_debounce_ms, 750);
+        assert_eq!(pinned.config().sync.watch_max_projects, 12);
+        assert_eq!(pinned.config().sync.read_cooldown_secs, 45);
+        assert!(pinned.config().sync.read_refresh);
     }
 
     #[test]

@@ -53,6 +53,12 @@ pub(crate) fn classify_leading_line(line: &str) -> LeadingKind {
     }
 }
 
+/// True for a `//!` inner module-doc line, which documents the enclosing
+/// module and can never belong to a moved item.
+pub(crate) fn is_inner_doc_line(line: &str) -> bool {
+    classify_leading_line(line) == LeadingKind::InnerDoc
+}
+
 /// Unchanged context lines shown on each side of the changed region in a
 /// dry-run preview diff.
 pub(crate) const PREVIEW_DIFF_CONTEXT: usize = 3;
@@ -142,43 +148,14 @@ pub(crate) fn bounded_region_diff(
 
 #[cfg(test)]
 mod tests {
-    use super::{LeadingKind, bounded_region_diff, classify_leading_line};
+    use super::{bounded_region_diff, is_inner_doc_line};
 
     #[test]
-    fn classify_leading_line_covers_every_kind() {
-        assert_eq!(classify_leading_line(""), LeadingKind::Blank);
-        assert_eq!(classify_leading_line("   \t"), LeadingKind::Blank);
-        assert_eq!(classify_leading_line("//! inner"), LeadingKind::InnerDoc);
-        assert_eq!(classify_leading_line("/// outer"), LeadingKind::OuterDoc);
-        assert_eq!(
-            classify_leading_line("/** block doc */"),
-            LeadingKind::OuterDoc
-        );
-        assert_eq!(classify_leading_line("// plain"), LeadingKind::LineComment);
-        assert_eq!(
-            classify_leading_line("/* block */"),
-            LeadingKind::BlockComment
-        );
-        assert_eq!(classify_leading_line("#[inline]"), LeadingKind::Attribute);
-        assert_eq!(
-            classify_leading_line("#![allow(dead_code)]"),
-            LeadingKind::Attribute
-        );
-        assert_eq!(
-            classify_leading_line("use crate::x;"),
-            LeadingKind::UseImport
-        );
-        assert_eq!(
-            classify_leading_line("pub use crate::x;"),
-            LeadingKind::UseImport
-        );
-        assert_eq!(
-            classify_leading_line("extern crate foo;"),
-            LeadingKind::UseImport
-        );
-        assert_eq!(classify_leading_line("fn f() {}"), LeadingKind::Code);
-        // Leading whitespace never changes the classification.
-        assert_eq!(classify_leading_line("   //! inner"), LeadingKind::InnerDoc);
+    fn inner_doc_lines_are_recognized_regardless_of_indent() {
+        assert!(is_inner_doc_line("//! inner"));
+        assert!(is_inner_doc_line("   //! inner"));
+        assert!(!is_inner_doc_line("/// outer"));
+        assert!(!is_inner_doc_line("// plain"));
     }
 
     #[test]

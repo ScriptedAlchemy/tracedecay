@@ -1446,9 +1446,11 @@ mod tests {
     fn unbounded_snapshot_captures_a_listing_beyond_the_default_read_limit() {
         let (directory, _assembler, _runner) = repository_fixture();
         let blob = git_value(directory.path(), &["rev-parse", "HEAD:packet.txt"]);
-        let segment = "d".repeat(240);
+        // Keep full fixture paths within macOS PATH_MAX while the complete
+        // listing still exceeds the default read limit.
+        let segment = "d".repeat(180);
         let mut index_info = String::new();
-        for entry in 0..18_000 {
+        for entry in 0..24_000 {
             std::fmt::Write::write_fmt(
                 &mut index_info,
                 format_args!("100644 {blob}\t{segment}/{segment}/{segment}/{segment}/{entry}\n"),

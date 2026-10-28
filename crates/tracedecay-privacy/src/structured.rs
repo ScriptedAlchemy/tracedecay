@@ -117,7 +117,8 @@ pub(crate) fn sanitize_structured_payload(
     }
     let text =
         std::str::from_utf8(raw).map_err(|_| StructuredSanitizationError::InvalidEncoding)?;
-    match parse_json_value(text, limits.depth, limits.items) {
+    let document = text.strip_prefix('\u{feff}').unwrap_or(text);
+    match parse_json_value(document, limits.depth, limits.items) {
         Ok(value) => sanitize_parsed(value, limits),
         Err(JsonPreflightFailureV1::Malformed) => sanitize_malformed(text, limits),
         // The preflight refuses before `Value` materializes, so it is the only

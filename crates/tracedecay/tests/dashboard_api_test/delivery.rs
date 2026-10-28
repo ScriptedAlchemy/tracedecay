@@ -263,6 +263,10 @@ fn delivery_http_admission_pull_request(
         identity: Some(ProjectDeliveryPullRequestIdentityV1 {
             number: 42,
             title: format!("Pull request {id}"),
+            description: None,
+            observed_base_commit_id: CommitId::new("commit.delivery-http-admission.base").unwrap(),
+            observed_head_commit_id: CommitId::new(retained_head).unwrap(),
+            observed_at: UtcMicros(20),
             state: ProjectDeliveryPullRequestStateV1::Open,
             draft: false,
             additions: 4,
@@ -270,6 +274,7 @@ fn delivery_http_admission_pull_request(
             changed_files: 1,
         }),
         operations: vec![ProjectDeliveryPullRequestOperationV1 {
+            last_partial_collection: None,
             operation: GitHubReviewReadOperationV1::RestGetPullRequest,
             latest_attempt: Some(ProjectDeliveryGitHubOperationSnapshotV1 {
                 provider_base_commit_id: CommitId::new("commit.delivery-http-admission.base")
@@ -280,6 +285,8 @@ fn delivery_http_admission_pull_request(
                 outcome: GitHubReviewIngressProviderOutcomeV1::Complete,
                 coverage: GitHubReviewCoverageV1::Complete,
                 quarantined: Vec::new(),
+                conversation: Vec::new(),
+                reviews: Vec::new(),
                 fetched_at: UtcMicros(20),
                 checkpoint: GitHubReviewReadCheckpointV1 {
                     etag: None,

@@ -17,6 +17,7 @@
     "commit_id": "986f25cca6d2e703e889fb57326696b0d92c965f",
     "user": {
       "id": 199175422,
+      "login": "chatgpt-codex-connector[bot]",
       "node_id": "BOT_kgDOC98s_g",
       "type": "Bot",
       "site_admin": false

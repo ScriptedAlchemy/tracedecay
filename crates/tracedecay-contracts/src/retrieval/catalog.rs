@@ -309,7 +309,10 @@ const PRIMITIVE_READ_SPECS: &[PrimitiveReadSpec] = &[
     primitive_spec("qualified_name"),
     primitive_spec("call_chain"),
     primitive_spec("file_dependents"),
-    primitive_spec("source_lines"),
+    PrimitiveReadSpec {
+        paginated: false,
+        ..primitive_spec("source_lines")
+    },
     primitive_spec("source_body"),
     primitive_spec("source_outline"),
     primitive_spec("module_api"),
@@ -468,7 +471,7 @@ fn primitive_read_description(operation: &str) -> &'static str {
             "Find files containing callers of symbols in one project-relative file. Use callers when you need the dependent symbols and call edges instead of file paths."
         }
         "source_lines" => {
-            "Read an exact byte span from the current indexed file and return a stable source anchor. Supply the file occurrence ID and span from code_exact_occurrence; use source_body when you already have a symbol node ID."
+            "Read an indexed file occurrence and byte span, or exact historical lines using a full commit OID, repository-relative file, start_line, and end_line. Historical reads return whole lines and next_line when bounded; retain the revision and file when continuing. Use source_body for a current symbol node ID."
         }
         "source_body" => {
             "Read the current source body and line range for a symbol node ID returned by code_symbol_search, qualified_name, or another graph read. Use source_lines for an exact occurrence span."

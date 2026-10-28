@@ -343,8 +343,9 @@ identities. Removed Hermes install flags (`--profile`, `--all-profiles`, and
 
 When changing generated Hermes plugin or context-engine behavior, start with
 TraceDecay's read-only analysis tools before rebuilding or reinstalling
-anything: use `tracedecay_diff_context` to inspect modified symbols,
-dependencies, and affected tests; use `tracedecay_complexity`,
+anything: use `tracedecay_diff_context` to inspect indexed symbols,
+possible dependents, and test candidates for the files you specify; read the
+actual patch to determine which declarations changed. Use `tracedecay_complexity`,
 `tracedecay_dead_code`, and `tracedecay_coupling` for
 focused quality checks; `tracedecay_test_risk` for
 untested hot spots; `tracedecay_diagnostics` for structured compiler/type
@@ -926,6 +927,12 @@ tracedecay tool affected --args '{"files":["src/main.rs","src/db/connection.rs"]
 
 This performs a breadth-first search from the changed files through import/dependency edges to find test files that directly or transitively depend on those files.
 
+The result is a structural candidate selection, ranked by file-dependency
+distance within the requested depth. It does not run tests or establish runtime
+coverage. `tracedecay_affected_tests` is a different read: it projects a completed
+feedback cycle's selection using that cycle's `request_handle`. Use
+`tracedecay_test_map` with `node_id` when the question concerns one known symbol.
+
 ### Piping from git
 
 This is especially useful in CI pipelines. `--args -` reads the arguments
@@ -962,10 +969,12 @@ When running as an MCP server, tracedecay exposes typed operations that AI agent
 
 | Tool | What it does |
 |------|-------------|
-| `tracedecay_context` | Given a task description, returns relevant symbols, relationships, and code snippets. This is the go-to starting point for any coding task. |
-| `tracedecay_grep` | Search indexed code content by literal string or regex, with each hit annotated by its enclosing symbol. |
+| `tracedecay_context` | Find relevant symbols, relationships, and optional snippets for a broad task whose entrypoints are unknown. Start PR review with `pr_context`; use direct lookup when the file or symbol is already known. |
+| `tracedecay_grep` | Search UTF-8 working-tree content by literal string or regex, with enclosing-symbol enrichment when available. |
 | `tracedecay_search` | Find symbols by name. Supports filtering by kind (function, class, method, etc.). |
-| `tracedecay_node` | Get full details for a specific symbol: source code, location, complexity metrics, and relationships. |
+| `tracedecay_node` | Read one symbol's metadata, location, available complexity metrics, and estimated expansion cost. |
+| `tracedecay_signature` | Read a known symbol's signature and documentation without its body. |
+| `tracedecay_source_body` | Read the current indexed source body using a returned `node_id`. |
 | `tracedecay_files` | List indexed files, optionally filtered by directory or glob pattern. |
 | `tracedecay_status` | Index statistics: file counts, symbol counts, language distribution, and tokens saved. |
 
@@ -975,16 +984,16 @@ When running as an MCP server, tracedecay exposes typed operations that AI agent
 |------|-------------|
 | `tracedecay_callers` | Find what calls a given function or method. Configurable traversal depth. |
 | `tracedecay_callees` | Find what a function or method calls. |
-| `tracedecay_impact` | Trace the full blast radius of changing a symbol, everything that could be affected. |
-| `tracedecay_affected` | Find test files affected by source file changes. |
-| `tracedecay_similar` | Find symbols with similar names (useful for naming patterns or related code). |
+| `tracedecay_impact` | Trace indexed dependents of one node within `max_depth` (default 3, at most 10) and graph limits. Inspect completeness and freshness before interpreting the result. |
+| `tracedecay_affected` | Select candidate test files for a supplied file manifest, ranked by dependency distance. |
+| `tracedecay_similar` | Find token-verified exact or rename-normalized shared implementations for a symbol or source range. |
 | `tracedecay_rename_preview` | Preview all references to a symbol before renaming it. |
 
 ### Code quality analysis
 
 | Tool | What it does |
 |------|-------------|
-| `tracedecay_dead_code` | Find unreachable symbols, functions with no callers. |
+| `tracedecay_dead_code` | Find symbols with no indexed incoming edges as candidates for an unused-code review; external and unresolved callers may be absent from the graph. |
 | `tracedecay_unmounted_files` | Find source files no build root reaches, indexed as healthy symbols, yet no compiler, bundler, or test runner ever loads them. Reports one section per ecosystem with its own verdict and blind spots. |
 | `tracedecay_circular` | Detect circular file dependencies. |
 | `tracedecay_recursion` | Detect recursive and mutually-recursive call cycles. |
@@ -1034,11 +1043,116 @@ Marked functions are excluded from `tracedecay_test_risk` attribution calculatio
 
 | Tool | What it does |
 |------|-------------|
-| `tracedecay_diff_context` | Semantic context for changed files: modified symbols, dependencies, and affected tests. |
-| `tracedecay_changelog` | Semantic diff between two git refs, which symbols were added, removed, or modified. |
-| `tracedecay_commit_context` | Semantic summary of uncommitted changes, useful for drafting commit messages. |
-| `tracedecay_pr_context` | Semantic diff between git refs for pull request descriptions. |
+| `tracedecay_diff_context` | Prospective context for supplied files: all indexed declarations, possible consumers, and test candidates. `comparison.kind` is `proposed_files`; declarations may be unchanged. |
+| `tracedecay_changelog` | Compare two refs directly: changed files and added, removed, or modified symbols from exact indexed generations. If symbol generations are unavailable, returns the file inventory with partial symbol coverage. |
+| `tracedecay_commit_context` | Changed declarations, file roles, source identities/coverage, and recent commit style. `staged_only: true` reads immutable staged index blobs; the default compares HEAD with captured worktree bytes, including untracked files. |
+| `tracedecay_pr_context` | Compact PR briefing: description, status, discussion, retained CI, changed areas, code entry points, nearby consumers, and quality evidence. Reads retained hosted evidence by default; `refresh_github: true` explicitly refreshes a configured matching GitHub PR. `view: "symbols"` returns the paginated symbol report. |
+| `tracedecay_git_diff` | Read bounded structured file and hunk metadata for working-tree, staged, or exact commit-range changes. Hunk bodies are not returned. |
+| `tracedecay_branch_diff` | Compare indexed snapshots of two exact local branch tips. This compares the tips directly; PR context uses their merge base. |
 | `tracedecay_test_map` | Source-to-test mapping at the symbol level, with uncovered symbol detection. Finds test callers up to depth 3, so a listed test may be a direct caller or a transitive one, see [Reading the test_risk / test_map coverage signal](./TEST-MAP-INTERPRETATION.md) for the direct-vs-closure distinction. |
+
+For raw patch text, use shell `git diff -- path/to/file` for index-to-worktree changes
+or `git diff --cached -- path/to/file` for staged changes. For a direct commit
+comparison, use `git diff <base-oid> <head-oid> -- path/to/file`. To match a PR
+briefing's comparison, use its `merge_base` and `head_oid` as the two commits.
+
+#### Orienting on a pull request
+
+Call `pr_context` before loading a large diff. The default `view: "brief"`
+answers what the PR is about, what its discussion and observed checks say,
+which areas changed, and where to begin reading the source:
+
+```sh
+tracedecay tool pr_context --args '{"base_ref":"origin/master","head_ref":"HEAD","budget_tokens":4000}'
+```
+
+The default reads retained authorized GitHub evidence without waiting on a
+provider refresh. Set `refresh_github: true` when current description, review
+votes, conversation, or inline discussion is needed. This refreshes the
+configured matching PR within the caller's deadline; a limited provider read
+leaves an explicitly marked retained fallback. CI remains retained: the call
+does not refresh or enumerate all required checks. `refresh_github` applies to
+the brief view.
+
+The comparison uses the merge base and immutable Git revisions. For a stacked
+PR, pass its parent branch as `base_ref`. When `base_ref` is absent, a uniquely
+selected hosted PR's observed base is preferred; otherwise the repository
+default branch is used. Set `pull_request` to a PR number when multiple retained
+PRs match the head. This selects from the checkout's PR evidence after any
+configured refresh; it does not fetch an arbitrary PR by number.
+
+Read the ranked `entry_points` using each entry's revision and source span.
+When an exact-head resident graph match supplies a `node_id`, pass it directly
+to `source_body`, `impact`, or `test_map` without repeating symbol discovery.
+Optional graph enrichment does not warm a missing graph. Read deleted or
+non-head code through the historical `source_lines` selector below. Discussion
+locations and CI annotations can prioritize these reads.
+
+Expand only the comments, checks, or consumers relevant to the task. Use supplied
+discussion URLs for provider context. A retained `body_anchor` is a provenance
+identity, not a `tracedecay_retrieve` response-cache handle. `feedback_expand`
+requires a server-minted finding expansion handle. Use `view: "symbols"` with
+`maximum_symbols` and the returned `cursor` when exact symbol enumeration helps.
+
+Hosted sources report their own state and observation time. A matching commit
+does not make a retained observation live; an old-head check or resolved thread
+remains historical context. Empty or unexpanded discussion does not mean there
+are no comments, and the retained check inventory does not enumerate required
+checks. Source and graph gaps are explicit, while local change analysis still
+works without a mounted GitHub source. `budget_tokens` sizes the briefing and
+reports omission counts and `over_budget`; it is an approximate serialized-output
+budget, not a hard bound that makes every returned section exhaustive.
+
+#### Staged and working-tree context
+
+`commit_context` reports actual declaration changes independently of graph
+readiness. `comparison` identifies the selected edge, and each file's
+`comparison` carries its change kind, rename origin, and available before/after
+blob IDs. Symbols record their change kind and source side; their lines are
+one-based. Source coverage reports unavailable, excluded, opaque, or
+unsupported files instead of inventing an empty successful analysis.
+
+With `staged_only: true`, HEAD is pinned and declarations come from the exact
+selected index blobs. Later worktree or index edits do not substitute different
+source for that selection. By default, the tool compares pinned HEAD with the
+working tree, including untracked files. This is the net result: stage an edit
+and then restore that file's worktree bytes to HEAD, and the default reports
+`No HEAD-to-working-tree changes.` while the staged request still reports the
+edit. An unborn HEAD is compared with the empty tree. Working-tree reads are
+checked per file; they are not an atomic snapshot of the whole checkout.
+
+For prospective planning, use `diff_context` with a file list. Its indexed
+symbol inventory can include unchanged declarations. `git_diff` supplies bounded
+structured hunk metadata; its `working_tree` scope is index-to-worktree, while
+`staged` is HEAD-to-index. Use `git diff --cached` for staged patch text; a blob
+ID returned by commit context is not a historical commit selector.
+
+#### Expanding exact historical source
+
+Use the existing `source_lines` tool to read the revision and location returned
+by a PR entrypoint:
+
+```json
+{"revision":"0123456789abcdef0123456789abcdef01234567","file":"src/lib.rs","start_line":12,"end_line":40}
+```
+
+Replace `revision` with the actual full lowercase commit OID (SHA-1 or SHA-256).
+`file` is a canonical repository-relative path; lines are one-based and the end
+line is inclusive. This selector reads the committed Git blob, so dirty
+worktree contents do not replace historical source. The existing indexed
+`source_lines` selector continues to use a canonical file occurrence and source
+span; `source_body` reads a known indexed `node_id`.
+
+The result identifies the exact revision, blob, and returned lines. If it
+returns `next_line`, continue at that line with the same revision, file, and
+original end line. Pages preserve whole lines, including UTF-8 and line
+endings; a single line larger than the byte allowance is reported as a bounded
+read limitation rather than silently split. Configured source exclusions apply
+to historical and briefing reads. Historical source uses the same admitted
+source-service lifecycle, availability, disclosure policy, cancellation, and
+deadline as other source reads; it does not bypass unavailable primitive
+authority. Symlink blobs contain their target text, without following that
+target; submodule entries are not source blobs.
 
 ### Porting tools
 

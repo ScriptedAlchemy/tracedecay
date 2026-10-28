@@ -28,13 +28,14 @@ pub enum OwnerStoreDeclarationV1 {
 impl ApplicationSurfaceOperation {
     pub const fn owner_stores(self) -> OwnerStoreDeclarationV1 {
         match self {
-            // A managed test run is recorded in the project session store,
-            // and a PR context page continues through a cursor that store
-            // authenticates.
-            Self::RunAffectedTests | Self::PrContext => {
+            // A managed test run is recorded in the project session store.
+            Self::RunAffectedTests => {
                 OwnerStoreDeclarationV1::Every(OwnerStoresV1::ProjectSessions)
             }
-            Self::AdminCli | Self::HookRuntime => OwnerStoreDeclarationV1::PerAction,
+            // Briefs use the core owner; symbol pages require its cursor store.
+            Self::PrContext | Self::AdminCli | Self::HookRuntime => {
+                OwnerStoreDeclarationV1::PerAction
+            }
             _ => OwnerStoreDeclarationV1::Every(OwnerStoresV1::ProjectGraph),
         }
     }

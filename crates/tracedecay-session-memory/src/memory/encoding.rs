@@ -375,10 +375,15 @@ mod tests {
                 "01126c766c9a8c83f1c51f791be3c8492cfbaacdada83d4bd143a9c0bf3fc51c",
             ],
         );
-        assert_eq!(
-            bits_digest(&similarities),
-            "29466a342b496755893a2ede39286af2a84d6216fa2a47e93852fec9b0eb05bd",
-        );
+        // Invalid arithmetic produces positive NaNs on AArch64 and negative
+        // NaNs on x86_64. Coefficient bits above are identical on both; keep
+        // exact native similarity bits, including finite values and signed zero.
+        let similarity_digest = if cfg!(target_arch = "aarch64") {
+            "d18ac773b2f338c5c3ef866ddef3470c5dfce55906fa36451bd4779d0ad8e91c"
+        } else {
+            "29466a342b496755893a2ede39286af2a84d6216fa2a47e93852fec9b0eb05bd"
+        };
+        assert_eq!(bits_digest(&similarities), similarity_digest);
     }
 
     #[test]

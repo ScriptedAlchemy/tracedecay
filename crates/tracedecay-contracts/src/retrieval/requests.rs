@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    CodeGenerationId, CursorBindingBuilderV1, FileOccurrenceId, GenerationDiagnosticV1,
+    CodeGenerationId, CursorBindingBuilderV1, FileOccurrenceId, GenerationDiagnosticV1, GitOidV1,
     ManifestDigest, RetrievalAnchorId, SessionId, SourceSpan, SymbolOccurrenceId, TemporalModeV1,
     TestAttributionEvidenceClassV1, UtcMicros,
 };
@@ -110,13 +110,62 @@ impl RetrievalRequestMeta {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SourceLinesRequest {
-    /// Canonical file occurrence from `code_exact_occurrence` at
-    /// `items[].occurrence.file`; a logical path is not a file occurrence identity.
-    pub file: FileOccurrenceId,
-    pub span: SourceSpan,
-    pub meta: RetrievalRequestMeta,
+#[serde(untagged, deny_unknown_fields)]
+pub enum SourceLinesRequest {
+    /// Read an exact byte span from the current indexed file occurrence.
+    Indexed {
+        /// Canonical file occurrence from `code_exact_occurrence` at
+        /// `items[].occurrence.file`; a logical path is not a file occurrence identity.
+        file: FileOccurrenceId,
+        span: SourceSpan,
+        meta: RetrievalRequestMeta,
+    },
+    /// Read a bounded range of whole lines from an immutable Git revision.
+    Revision {
+        /// Full lowercase commit OID; mutable names and abbreviations are refused.
+        revision: GitOidV1,
+        /// Canonical repository-relative path in that revision.
+        file: String,
+        /// One-based first line, inclusive.
+        start_line: u32,
+        /// One-based last line, inclusive. Large ranges are clipped with `next_line`.
+        end_line: u32,
+    },
+}
+
+impl SourceLinesRequest {
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        match self {
+            Self::Indexed { file, span, meta } => {
+                file.validate()?;
+                span.validate()?;
+                super::validate_current_temporal_meta(meta, "source lines temporal mode")?;
+                if meta.page.cursor.is_some() {
+                    return Err(ApplicationContractError::Inconsistent {
+                        field: "source lines cursor",
+                    });
+                }
+            }
+            Self::Revision {
+                revision,
+                file,
+                start_line,
+                end_line,
+            } => {
+                revision.validate()?;
+                if file.len() > super::source_read::MAX_SOURCE_READ_PATH_BYTES
+                    || !crate::is_canonical_repository_relative_path(file)
+                    || *start_line == 0
+                    || end_line < start_line
+                {
+                    return Err(ApplicationContractError::InvalidRange {
+                        field: "historical source line selector",
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -127,13 +176,28 @@ pub struct SourceReference {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SourceLinesResult {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub file: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub body: Option<String>,
-    pub references: Vec<SourceReference>,
+#[serde(untagged, deny_unknown_fields)]
+pub enum SourceLinesResult {
+    Indexed {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        references: Vec<SourceReference>,
+    },
+    Revision {
+        file: String,
+        revision: GitOidV1,
+        blob_oid: GitOidV1,
+        start_line: u32,
+        end_line: u32,
+        span: SourceSpan,
+        body: String,
+        /// First unread line within the requested range. Keep the original
+        /// revision, file, and requested end line when continuing.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        next_line: Option<u32>,
+    },
 }
 
 /// Reference-only graph impact returned by the Plan-05 query kernel. The

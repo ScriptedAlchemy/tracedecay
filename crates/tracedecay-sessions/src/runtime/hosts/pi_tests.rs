@@ -107,14 +107,14 @@ fn record<'a>(
         .unwrap_or_else(|| panic!("no record {stable}"))
 }
 
-#[test]
-fn discovery_summary_reports_changes_and_recovery_without_repeating_unchanged_failures() {
+#[tokio::test]
+async fn discovery_summary_reports_changes_and_recovery_without_repeating_unchanged_failures() {
     let first = Layout::new();
     let second = Layout::new();
     first.write_malformed_files(24);
     second.write_malformed_files(25);
-    let report = |layout: &Layout| {
-        layout
+    async fn report(layout: &Layout) -> PiDiscoveryReport {
+        let (mut discovery, mut budget) = layout
             .source()
             .discover(
                 &layout.project,
@@ -128,10 +128,20 @@ fn discovery_summary_reports_changes_and_recovery_without_repeating_unchanged_fa
                 ),
                 None,
             )
-            .unwrap()
-            .0
-    };
-    let first_report = report(&first);
+            .unwrap();
+        // Each report has fresh admission state so this test exercises the
+        // log gate independently from durable path convergence.
+        super::reconcile_invalid_headers(
+            &MemoryHostAdmission::default(),
+            &ObservationScopeV1::Profile,
+            &mut discovery,
+            &mut budget,
+        )
+        .await
+        .unwrap();
+        discovery
+    }
+    let first_report = report(&first).await;
     assert_eq!(first_report.failure_count, 24);
     assert_eq!(first_report.failures.len(), MAX_DISCOVERY_FAILURE_EVIDENCE);
     let summary_count = |layout: &Layout, discovery: &PiDiscoveryReport| {
@@ -158,6 +168,8 @@ fn discovery_summary_reports_changes_and_recovery_without_repeating_unchanged_fa
         },
         failures: Vec::new(),
         failure_count: 0,
+        invalid_headers: Vec::new(),
+        quarantined_headers: 0,
         scan_complete: false,
         reached_end: false,
     };
@@ -167,10 +179,8 @@ fn discovery_summary_reports_changes_and_recovery_without_repeating_unchanged_fa
         0,
         "an interrupted empty scan must not clear the admitted summary"
     );
-    // The rewrite touches every file, so the sub-second stamp invalidates
-    // the quarantine and all 25 files re-fail: a changed file is retried.
     first.write_malformed_files(25);
-    let changed = report(&first);
+    let changed = report(&first).await;
     assert_eq!(changed.failure_count, 25);
     assert_eq!(
         summary_count(&first, &changed),
@@ -178,7 +188,7 @@ fn discovery_summary_reports_changes_and_recovery_without_repeating_unchanged_fa
         "changed totals are logged"
     );
     assert_eq!(
-        summary_count(&second, &report(&second)),
+        summary_count(&second, &report(&second).await),
         1,
         "another sessions root is logged independently"
     );
@@ -190,17 +200,19 @@ fn discovery_summary_reports_changes_and_recovery_without_repeating_unchanged_fa
         )
         .unwrap();
     }
-    let fully_reported = report(&first);
-    // All remaining files are unchanged and quarantined: no failures.
+    let fully_reported = report(&first).await;
     assert_eq!(
-        fully_reported.failure_count, 0,
-        "quarantined files stop counting against discovery"
+        fully_reported.failure_count,
+        MAX_DISCOVERY_FAILURE_EVIDENCE as u64
     );
-    assert_eq!(fully_reported.failures.len(), 0);
+    assert_eq!(
+        fully_reported.failures.len(),
+        MAX_DISCOVERY_FAILURE_EVIDENCE
+    );
     assert_eq!(summary_count(&first, &fully_reported), 0);
     first.write_malformed_files(25);
     assert_eq!(
-        summary_count(&first, &report(&first)),
+        summary_count(&first, &report(&first).await),
         1,
         "full failure evidence clears the previous summary"
     );
@@ -213,11 +225,11 @@ fn discovery_summary_reports_changes_and_recovery_without_repeating_unchanged_fa
         .unwrap();
     }
     first.write_fixture();
-    let recovered = report(&first);
+    let recovered = report(&first).await;
     assert_eq!(recovered.failure_count, 0);
     assert_eq!(summary_count(&first, &recovered), 0);
     first.write_malformed_files(25);
-    let recurred = report(&first);
+    let recurred = report(&first).await;
     assert_eq!(
         summary_count(&first, &recurred),
         1,
@@ -252,15 +264,19 @@ async fn repeated_discovery_summary_keeps_malformed_sources_and_coverage_refused
         second_outcome.discovery_failures, 0,
         "unchanged malformed files are not re-failed"
     );
-    assert!(!second_outcome.deferred, "a clean pass is not deferred");
+    assert!(
+        second_outcome.deferred,
+        "quarantined sources retain partial coverage"
+    );
     assert!(admission.observations().is_empty());
     let coverage = admission
         .get_parse_offset(&ObservationScopeV1::Profile, "host-coverage://pi/v1")
         .await
         .unwrap();
-    assert!(
-        coverage.is_some(),
-        "coverage for the malformed source is retained after quarantine"
+    assert_eq!(
+        coverage.unwrap().file_id,
+        2,
+        "quarantined malformed sources must not become complete coverage"
     );
 }
 
@@ -618,16 +634,26 @@ fn system_prompt_replay_is_not_projected_as_conversation() {
     );
 }
 
-/// A fresh `SourceSweep` models a daemon restart: the in-process source
-/// ledger starts empty, so only the durable completion memo can keep a
-/// converged, unchanged session file out of admission.
+/// A fresh provider run uses the durable completion decision or the canonical
+/// JSONL coverage cursor without admitting unchanged records again.
 #[tokio::test]
 async fn converged_session_file_is_not_re_admitted_by_a_fresh_sweep() {
     let layout = Layout::new();
-    layout.write_fixture();
+    let path = layout.write_fixture();
+    let settled = crate::runtime::source::spin_until_jsonl_change_settled(&path);
     let admission = MemoryHostAdmission::default();
     let first = capture(&layout, &admission).await;
     assert!(!first.deferred);
+    if settled {
+        let witness = super::observe_file_witness(&path).await.unwrap();
+        assert_eq!(
+            super::PathMemo::read(&admission, &ObservationScopeV1::Profile, &path)
+                .await
+                .unwrap()
+                .disposition(witness),
+            Some(super::Disposition::Complete),
+        );
+    }
     let first_counts = admission.capture_call_counts();
     let second = capture(&layout, &admission).await;
     assert!(!second.deferred);
@@ -638,8 +664,8 @@ async fn converged_session_file_is_not_re_admitted_by_a_fresh_sweep() {
     );
 }
 
-/// An unchanged malformed file is quarantined durably after its first
-/// failure; later sweeps (fresh or not) neither re-read it nor count it.
+/// Discovery checks each header's current content, but an unchanged durable
+/// refusal is not reported again by a fresh provider run.
 #[tokio::test]
 async fn malformed_session_header_is_not_re_failed_by_a_fresh_sweep() {
     let layout = Layout::new();
@@ -656,4 +682,523 @@ async fn malformed_session_header_is_not_re_failed_by_a_fresh_sweep() {
         second.discovery_failures, 0,
         "an unchanged malformed file must be quarantined after its first failure"
     );
+    assert!(
+        second.deferred,
+        "quarantine does not authorize complete coverage"
+    );
+    let path = layout
+        .session_dir()
+        .join("2026-09-25T16-00-00-000Z_invalid-0.jsonl");
+    let super::HeaderRead::Invalid { witness, .. } = super::read_session_header(&path).unwrap()
+    else {
+        panic!("fixture must retain its invalid header");
+    };
+    assert_eq!(
+        super::PathMemo::read(&admission, &ObservationScopeV1::Profile, &path)
+            .await
+            .unwrap()
+            .disposition(Some(witness)),
+        Some(super::Disposition::InvalidHeader),
+        "the refusal lives in the durable admission authority",
+    );
+}
+
+#[tokio::test]
+async fn same_length_rewrite_with_restored_mtime_starts_a_new_generation() {
+    let layout = Layout::new();
+    let path = layout.write_fixture();
+    crate::runtime::source::spin_until_jsonl_change_settled(&path);
+    let admission = MemoryHostAdmission::default();
+    assert!(!capture(&layout, &admission).await.deferred);
+    let original = std::fs::metadata(&path).unwrap();
+    let original_mtime = filetime::FileTime::from_last_modification_time(&original);
+    let original_generation = admission.observations()[0]
+        .observation()
+        .identity()
+        .generation();
+    let before = std::fs::read_to_string(&path).unwrap();
+    let edited = before
+        .replace(
+            "Fix the flaky billing retry test",
+            "Fix the flaky billing retry case",
+        )
+        .replace("\"id\":\"c2d3e4f5\"", "\"id\":\"c2d3e4f6\"");
+    assert_ne!(before, edited);
+    assert_eq!(before.len(), edited.len());
+    std::fs::write(&path, edited).unwrap();
+    filetime::set_file_mtime(&path, original_mtime).unwrap();
+    crate::runtime::source::spin_until_jsonl_change_settled(&path);
+    let rewritten = std::fs::metadata(&path).unwrap();
+    assert_eq!(rewritten.len(), original.len());
+    assert_eq!(
+        filetime::FileTime::from_last_modification_time(&rewritten),
+        original_mtime,
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        std::os::unix::fs::MetadataExt::ino(&rewritten),
+        std::os::unix::fs::MetadataExt::ino(&original),
+    );
+
+    assert!(!capture(&layout, &admission).await.deferred);
+    let observations = admission.observations();
+    let changed = observations
+        .iter()
+        .find(|stored| {
+            stored
+                .observation()
+                .payload()
+                .to_string()
+                .contains("Fix the flaky billing retry case")
+        })
+        .expect("the canonical prefix witness must discover the rewritten record");
+    assert_ne!(
+        changed.observation().identity().generation(),
+        original_generation,
+    );
+    assert_eq!(observations.len(), 10, "only the changed record is new");
+    let calls = admission.capture_call_counts();
+    assert!(!capture(&layout, &admission).await.deferred);
+    assert_eq!(admission.capture_call_counts(), calls);
+}
+
+#[tokio::test]
+async fn quarantine_replacement_accepts_older_mtime_and_preserves_a_concurrent_winner() {
+    let layout = Layout::new();
+    layout.write_malformed_files(1);
+    let path = layout
+        .session_dir()
+        .join("2026-09-25T16-00-00-000Z_invalid-0.jsonl");
+    let admission = MemoryHostAdmission::default();
+    let scope = ObservationScopeV1::Profile;
+    assert_eq!(capture(&layout, &admission).await.discovery_failures, 1);
+    let stale = super::PathMemo::read(&admission, &scope, &path)
+        .await
+        .unwrap();
+    let super::HeaderRead::Invalid { witness: old, .. } =
+        super::read_session_header(&path).unwrap()
+    else {
+        panic!("fixture must have an invalid header");
+    };
+    let original_mtime =
+        filetime::FileTime::from_last_modification_time(&std::fs::metadata(&path).unwrap());
+    std::fs::write(&path, "{\"not\":\"a changed invalid header\"}\n").unwrap();
+    let earlier = filetime::FileTime::from_unix_time(original_mtime.unix_seconds() - 60, 0);
+    filetime::set_file_mtime(&path, earlier).unwrap();
+    let super::HeaderRead::Invalid { witness: new, .. } =
+        super::read_session_header(&path).unwrap()
+    else {
+        panic!("replacement must have an invalid header");
+    };
+    assert_ne!(old, new);
+    let changed = capture(&layout, &admission).await;
+    assert_eq!(changed.discovery_failures, 1);
+    assert!(changed.deferred);
+    assert!(
+        !stale
+            .record(&admission, &scope, old, super::Disposition::Complete)
+            .await
+            .unwrap(),
+        "an older in-flight decision cannot overwrite the newer quarantine",
+    );
+    let current = super::PathMemo::read(&admission, &scope, &path)
+        .await
+        .unwrap();
+    assert_eq!(current.disposition(Some(old)), None);
+    assert_eq!(
+        current.disposition(Some(new)),
+        Some(super::Disposition::InvalidHeader)
+    );
+    let retry = capture(&layout, &admission).await;
+    assert_eq!(
+        retry.discovery_failures, 0,
+        "the new refusal converges durably"
+    );
+    assert!(retry.deferred);
+}
+
+#[tokio::test]
+async fn queued_session_rewritten_into_another_project_is_rechecked_before_admission() {
+    let layout = Layout::new();
+    let path = layout.write_fixture();
+    let admission = MemoryHostAdmission::default();
+    let scope = ObservationScopeV1::Profile;
+    let queued = capture_pi_observations(
+        &admission,
+        &layout.source(),
+        &layout.project,
+        scope.clone(),
+        Some(0),
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+    assert!(queued.deferred);
+    assert!(admission.observations().is_empty());
+    assert_eq!(
+        admission
+            .discovery_paths_after(&scope, super::PROVIDER, 0, 10)
+            .await
+            .unwrap()[0]
+            .path,
+        path,
+    );
+    let foreign = layout._temp.path().join("foreign-project");
+    std::fs::create_dir_all(&foreign).unwrap();
+    let foreign_json = serde_json::to_string(&foreign).unwrap();
+    std::fs::write(&path, FIXTURE.replace("\"<PROJECT_ROOT>\"", &foreign_json)).unwrap();
+
+    capture(&layout, &admission).await;
+    assert!(
+        admission.observations().is_empty(),
+        "the durable queue must not carry the previous header's scope authority",
+    );
+    capture_pi_observations(
+        &admission,
+        &layout.source(),
+        &foreign,
+        scope,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(admission.observations().len(), 9);
+}
+
+#[tokio::test]
+async fn admission_rechecks_the_scanned_header_before_fresh_or_resumed_capture() {
+    for resumed in [false, true] {
+        let layout = Layout::new();
+        let path = layout.session_dir().join(FIXTURE_NAME);
+        let foreign = layout._temp.path().join("foreign");
+        std::fs::create_dir_all(&foreign).unwrap();
+        let header = |cwd: &Path| {
+            format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"{SESSION_ID}\",\"padding\":\"{}\",\"cwd\":{},\"timestamp\":\"2026-09-25T16:00:00.000Z\"}}\n",
+                "x".repeat(2048),
+                serde_json::to_string(cwd).unwrap(),
+            )
+        };
+        let accepted_header = header(&layout.project);
+        let foreign_header = header(&foreign);
+        assert_ne!(accepted_header, foreign_header);
+        assert_eq!(
+            &accepted_header.as_bytes()[..1024],
+            &foreign_header.as_bytes()[..1024],
+            "the changed cwd is beyond the native identity window",
+        );
+        let (_, body) = FIXTURE.split_once('\n').unwrap();
+        let foreign_transcript = format!("{foreign_header}{body}");
+        let admission = MemoryHostAdmission::default();
+        let scope = ObservationScopeV1::Profile;
+        if resumed {
+            std::fs::write(&path, &foreign_transcript).unwrap();
+            capture_pi_observations(
+                &admission,
+                &layout.source(),
+                &foreign,
+                scope.clone(),
+                None,
+                &ObservationCancellation::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(admission.observations().len(), 9);
+        }
+        std::fs::write(&path, format!("{accepted_header}{body}")).unwrap();
+        let super::HeaderRead::Header { header, witness } =
+            super::read_session_header(&path).unwrap()
+        else {
+            panic!("the accepted header must be valid");
+        };
+        assert!(
+            layout
+                .source()
+                .matcher(&layout.project)
+                .accepts(Some(Path::new(&header.cwd)))
+        );
+
+        // The path changes after the host accepted its scope but before the
+        // canonical scanner opens it. On resume, the foreign prefix already
+        // has a cursor, so only the appended record is in the admission page.
+        let appended = json!({
+            "type": "message", "id": "b8c9d0e1", "parentId": null,
+            "timestamp": "2026-09-25T16:00:06.000Z",
+            "message": {"role": "user", "content": "foreign appended text", "timestamp": 1_790_352_006_000_u64},
+        });
+        std::fs::write(&path, format!("{foreign_transcript}{appended}\n")).unwrap();
+        let before_count = admission.observations().len();
+        let before_calls = admission.capture_call_counts();
+        let source = admission
+            .observations()
+            .first()
+            .map(|stored| stored.observation().source().clone());
+        let before_cursor = match &source {
+            Some(source) => admission.get_source_cursor(source, &scope).await.unwrap(),
+            None => None,
+        };
+        let memo_key = format!("host-memo://pi/file/v1/{}", super::source_digest(&path));
+        let before_memo = admission
+            .read_session_backfill_state(&scope, &memo_key)
+            .await
+            .unwrap();
+        let stale = super::admit_session_file(
+            &admission,
+            &path,
+            &header,
+            witness,
+            &scope,
+            None,
+            &ObservationCancellation::default(),
+        )
+        .await;
+        assert!(matches!(
+            stale,
+            Err(crate::runtime::source::TranscriptIngestError::ScanGenerationChanged { .. })
+        ));
+        assert_eq!(admission.observations().len(), before_count);
+        assert_eq!(admission.capture_call_counts(), before_calls);
+        if let Some(source) = &source {
+            assert_eq!(
+                admission.get_source_cursor(source, &scope).await.unwrap(),
+                before_cursor
+            );
+        } else {
+            assert!(admission.non_durable_advances().is_empty());
+        }
+        assert_eq!(
+            admission
+                .read_session_backfill_state(&scope, &memo_key)
+                .await
+                .unwrap(),
+            before_memo
+        );
+
+        let recovered = capture_pi_observations(
+            &admission,
+            &layout.source(),
+            &foreign,
+            scope,
+            None,
+            &ObservationCancellation::default(),
+        )
+        .await
+        .unwrap();
+        assert!(!recovered.deferred);
+        assert_eq!(admission.observations().len(), 10);
+
+        // A complete resumed page has no new frames, but still carries the
+        // canonical prefix's header proof; it cannot accept the stale header.
+        let eof_calls = admission.capture_call_counts();
+        assert!(matches!(
+            super::admit_session_file(
+                &admission,
+                &path,
+                &header,
+                witness,
+                &ObservationScopeV1::Profile,
+                None,
+                &ObservationCancellation::default(),
+            )
+            .await,
+            Err(crate::runtime::source::TranscriptIngestError::ScanGenerationChanged { .. })
+        ));
+        let super::HeaderRead::Header { header, witness } =
+            super::read_session_header(&path).unwrap()
+        else {
+            panic!("the recovered header must be valid");
+        };
+        let eof = super::admit_session_file(
+            &admission,
+            &path,
+            &header,
+            witness,
+            &ObservationScopeV1::Profile,
+            None,
+            &ObservationCancellation::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(eof.bytes_consumed, 0);
+        assert!(!eof.source_deferred);
+        assert_eq!(admission.capture_call_counts(), eof_calls);
+    }
+}
+
+#[tokio::test]
+async fn unavailable_queued_header_remains_retryable_without_a_quarantine_memo() {
+    let layout = Layout::new();
+    let path = layout.write_fixture();
+    let admission = MemoryHostAdmission::default();
+    capture_pi_observations(
+        &admission,
+        &layout.source(),
+        &layout.project,
+        ObservationScopeV1::Profile,
+        Some(0),
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let unavailable = capture(&layout, &admission).await;
+    assert!(unavailable.deferred);
+    assert_eq!(unavailable.discovery_failures, 1);
+    assert!(admission.observations().is_empty());
+    let key = format!("host-memo://pi/file/v1/{}", super::source_digest(&path));
+    assert_eq!(
+        admission
+            .read_session_backfill_state(&ObservationScopeV1::Profile, &key)
+            .await
+            .unwrap(),
+        None,
+    );
+    std::fs::remove_dir(&path).unwrap();
+    layout.write_fixture();
+    assert!(!capture(&layout, &admission).await.deferred);
+    assert_eq!(admission.observations().len(), 9);
+}
+
+#[tokio::test]
+async fn an_incomplete_rewritten_header_refuses_before_any_admission_mutation() {
+    let layout = Layout::new();
+    let path = layout.session_dir().join(FIXTURE_NAME);
+    let header_bytes = format!(
+        "{{\"type\":\"session\",\"version\":3,\"id\":\"{SESSION_ID}\",\"padding\":\"{}\",\"cwd\":{},\"timestamp\":\"2026-09-25T16:00:00.000Z\"}}\n",
+        "x".repeat(2048),
+        serde_json::to_string(&layout.project).unwrap(),
+    );
+    let (_, body) = FIXTURE.split_once('\n').unwrap();
+    let original = format!("{header_bytes}{body}");
+    std::fs::write(&path, &original).unwrap();
+    let admission = MemoryHostAdmission::default();
+    let scope = ObservationScopeV1::Profile;
+    assert!(!capture(&layout, &admission).await.deferred);
+    assert_eq!(admission.observations().len(), 9);
+    let source = admission.observations()[0].observation().source().clone();
+    let before_cursor = admission
+        .get_source_cursor(&source, &scope)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(before_cursor.position() > header_bytes.len() as u64);
+    let before_calls = admission.capture_call_counts();
+    let before_coverage = admission.non_durable_advances().len();
+    let memo_key = format!("host-memo://pi/file/v1/{}", super::source_digest(&path));
+    let before_memo = admission
+        .read_session_backfill_state(&scope, &memo_key)
+        .await
+        .unwrap();
+    let super::HeaderRead::Header { header, witness } = super::read_session_header(&path).unwrap()
+    else {
+        panic!("the original header must be valid");
+    };
+    let before_identity = crate::runtime::source::jsonl_file_identity(&path).unwrap();
+    // Keep the native identity's first 1024 bytes, while truncating the first
+    // complete header after the separate scope read. The durable source still
+    // has a nonzero cursor, but its replacement page cannot prove a header.
+    std::fs::write(&path, &header_bytes.as_bytes()[..1500]).unwrap();
+    assert_eq!(
+        crate::runtime::source::jsonl_file_identity(&path).unwrap(),
+        before_identity
+    );
+    let refused = super::admit_session_file(
+        &admission,
+        &path,
+        &header,
+        witness,
+        &scope,
+        Some(1),
+        &ObservationCancellation::default(),
+    )
+    .await;
+    assert!(matches!(
+        refused,
+        Err(crate::runtime::source::TranscriptIngestError::ScanGenerationChanged { .. })
+    ));
+    assert_eq!(admission.observations().len(), 9);
+    assert_eq!(admission.capture_call_counts(), before_calls);
+    assert_eq!(admission.non_durable_advances().len(), before_coverage);
+    assert_eq!(
+        admission.get_source_cursor(&source, &scope).await.unwrap(),
+        Some(before_cursor)
+    );
+    assert_eq!(
+        admission
+            .read_session_backfill_state(&scope, &memo_key)
+            .await
+            .unwrap(),
+        before_memo
+    );
+
+    std::fs::write(&path, original).unwrap();
+    assert!(!capture(&layout, &admission).await.deferred);
+    assert_eq!(admission.observations().len(), 9);
+}
+
+#[tokio::test]
+async fn interrupted_invalid_header_reconciliation_preserves_partial_discovery() {
+    for cancelled in [false, true] {
+        let layout = Layout::new();
+        layout.write_malformed_files(1);
+        let (mut discovery, _) = layout
+            .source()
+            .discover(
+                &layout.project,
+                TranscriptDiscoveryBounds::from_discovered_units(MAX_DISCOVERY_CANDIDATES),
+                None,
+                HostScanBudget::new(
+                    MAX_DISCOVERY_INPUT_BYTES,
+                    MAX_DISCOVERY_UNITS,
+                    std::time::Instant::now() + HOST_SCAN_WINDOW,
+                    ObservationCancellation::default(),
+                ),
+                None,
+            )
+            .unwrap();
+        assert!(discovery.scan_complete);
+        assert_eq!(discovery.invalid_headers.len(), 1);
+        let path = discovery.invalid_headers[0].path.clone();
+        let witness = discovery.invalid_headers[0].witness;
+        let cancellation = ObservationCancellation::default();
+        let deadline = if cancelled {
+            cancellation.cancel();
+            std::time::Instant::now() + HOST_SCAN_WINDOW
+        } else {
+            std::time::Instant::now()
+        };
+        let mut budget = HostScanBudget::new(
+            MAX_DISCOVERY_INPUT_BYTES,
+            MAX_DISCOVERY_UNITS,
+            deadline,
+            cancellation,
+        );
+        let admission = MemoryHostAdmission::default();
+        super::reconcile_invalid_headers(
+            &admission,
+            &ObservationScopeV1::Profile,
+            &mut discovery,
+            &mut budget,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !discovery.scan_complete,
+            "the frontier must remain uncommitted"
+        );
+        assert!(budget.evidence().is_deferred());
+        assert_eq!(discovery.failure_count, 0);
+        assert_eq!(
+            super::PathMemo::read(&admission, &ObservationScopeV1::Profile, &path)
+                .await
+                .unwrap()
+                .disposition(Some(witness)),
+            None,
+            "interrupted discovery must not publish an unexamined refusal",
+        );
+        assert_eq!(capture(&layout, &admission).await.discovery_failures, 1);
+        assert_eq!(capture(&layout, &admission).await.discovery_failures, 0);
+    }
 }

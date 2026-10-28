@@ -14,7 +14,7 @@ use tracedecay_code_index::graph_projection::CodeGraphReadinessRequirement;
 use tracedecay_contracts::ApplicationOperation;
 use tracedecay_contracts::retrieval::catalog::primitive_read_operation;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_graph_query::VerifiedGraphQuery;
+use tracedecay_graph_query::{CodeGraphOpenPolicy, VerifiedGraphQuery};
 
 /// One verified-graph read a handler asks the funnel to open: the catalog
 /// operation it is admitted under and the residency its answer needs.
@@ -22,6 +22,7 @@ use tracedecay_graph_query::VerifiedGraphQuery;
 pub struct VerifiedGraphRead {
     pub operation: ApplicationOperation,
     pub readiness: CodeGraphReadinessRequirement,
+    pub open_policy: CodeGraphOpenPolicy,
 }
 
 impl VerifiedGraphRead {
@@ -31,6 +32,7 @@ impl VerifiedGraphRead {
         Self {
             operation,
             readiness: CodeGraphReadinessRequirement::Catalog,
+            open_policy: CodeGraphOpenPolicy::AwaitRewarm,
         }
     }
 
@@ -40,6 +42,16 @@ impl VerifiedGraphRead {
     pub fn engine_only(self) -> Self {
         Self {
             readiness: CodeGraphReadinessRequirement::Engine,
+            ..self
+        }
+    }
+
+    /// Optional enrichment uses only resident graph data and never starts or
+    /// waits for a released engine or catalog to warm again.
+    #[must_use]
+    pub fn resident_only(self) -> Self {
+        Self {
+            open_policy: CodeGraphOpenPolicy::ResidentOnly,
             ..self
         }
     }

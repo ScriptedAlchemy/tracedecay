@@ -824,10 +824,10 @@ impl AgentTaskBackend for MalformedTextBackend {
         let (task_key, prompt_version, required_property) = match self.task {
             AgentTaskKind::MemoryCurator => ("memory_curator", "memory_curator:v2", "ops"),
             AgentTaskKind::SessionReflector => {
-                ("session_reflector", "session_reflector:v2", "facts")
+                ("session_reflector", "session_reflector:v3", "facts")
             }
             AgentTaskKind::SkillWriter => ("skill_writer", "skill_writer:v4", "skills"),
-            AgentTaskKind::CombinedReview => ("combined_review", "combined_review:v3", "facts"),
+            AgentTaskKind::CombinedReview => ("combined_review", "combined_review:v4", "facts"),
             AgentTaskKind::UserJob => unreachable!("user jobs are not strict-JSON tasks"),
         };
         assert_request_contract(request, task_key, prompt_version, required_property);
@@ -872,7 +872,7 @@ impl AgentTaskBackend for SessionJsonBackend {
         assert_request_contract(
             request,
             "session_reflector",
-            "session_reflector:v2",
+            "session_reflector:v3",
             "facts",
         );
         if call_index == 0 {
@@ -934,7 +934,7 @@ impl AgentTaskBackend for CombinedJsonBackend {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, AgentTaskKind::CombinedReview);
         assert_eq!(request.contract.task_key, "combined_review");
-        assert_eq!(request.contract.prompt_version, "combined_review:v3");
+        assert_eq!(request.contract.prompt_version, "combined_review:v4");
         assert!(request.contract.strict_json);
         assert_eq!(
             request.contract.response_schema["required"],
@@ -994,7 +994,7 @@ impl AgentTaskBackend for InspectSessionEvidenceBackend {
         assert_request_contract(
             request,
             "session_reflector",
-            "session_reflector:v2",
+            "session_reflector:v3",
             "facts",
         );
         let evidence = &request.context["session_reflection_evidence"];
@@ -1074,7 +1074,7 @@ impl AgentTaskBackend for SessionReplayEvidenceBackend {
         assert_request_contract(
             request,
             "session_reflector",
-            "session_reflector:v2",
+            "session_reflector:v3",
             "facts",
         );
         let evidence = &request.context["session_reflection_evidence"];
@@ -1376,9 +1376,9 @@ pub(crate) fn test_task_key(task: AgentTaskKind) -> &'static str {
 pub(crate) fn test_prompt_version(task: AgentTaskKind) -> &'static str {
     match task {
         AgentTaskKind::MemoryCurator => "memory_curator:v2",
-        AgentTaskKind::SessionReflector => "session_reflector:v2",
+        AgentTaskKind::SessionReflector => "session_reflector:v3",
         AgentTaskKind::SkillWriter => "skill_writer:v4",
-        AgentTaskKind::CombinedReview => "combined_review:v3",
+        AgentTaskKind::CombinedReview => "combined_review:v4",
         AgentTaskKind::UserJob => "user_job:v2",
     }
 }

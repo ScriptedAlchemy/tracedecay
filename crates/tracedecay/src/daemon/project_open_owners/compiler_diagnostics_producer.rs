@@ -49,10 +49,14 @@ pub(super) fn spawn_typescript_diagnostics_producer(
         log_producer_event(&project_root, "code_index_disabled");
         return false;
     }
+    let Some(admission) = invocation.compiler_admission.get().cloned() else {
+        log_producer_event(&project_root, "compiler_admission_unavailable");
+        return false;
+    };
     // Reopen can retain the primitive runtime while the prior server's
     // compiler task is still retiring. Fence it before this task can yield
     // in discovery; scheduling order must not choose the current producer.
-    let mut state = TypeScriptProducerStateV1::new(status);
+    let mut state = TypeScriptProducerStateV1::new(status, admission);
     owner.spawn_background_task(tracing::Instrument::instrument(
         async move {
             let Some(projects) = discover_projects(&project_root).await else {

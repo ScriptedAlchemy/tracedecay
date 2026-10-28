@@ -14,6 +14,8 @@ pub(crate) struct RestPullRequestV1 {
     pub(crate) id: u64,
     pub(crate) number: u64,
     pub(crate) title: String,
+    #[serde(default)]
+    pub(crate) body: Option<String>,
     pub(crate) state: String,
     pub(crate) draft: bool,
     pub(crate) merged: bool,
@@ -35,6 +37,14 @@ pub(crate) struct RestReviewV1 {
     pub(crate) node_id: Option<String>,
     pub(crate) state: Option<String>,
     pub(crate) commit_id: Option<String>,
+    #[serde(default)]
+    pub(crate) user: Option<RestConversationUserV1>,
+    #[serde(default)]
+    pub(crate) body: Option<String>,
+    #[serde(default)]
+    pub(crate) submitted_at: Option<String>,
+    #[serde(default)]
+    pub(crate) html_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -61,6 +71,24 @@ pub(crate) struct RestReviewCommentV1 {
     pub(crate) line: Option<u64>,
     pub(crate) original_line: Option<u64>,
     pub(crate) user: Option<RestUserV1>,
+    pub(crate) body: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct RestConversationUserV1 {
+    pub(crate) login: String,
+    #[serde(rename = "type")]
+    pub(crate) kind: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct RestConversationCommentV1 {
+    pub(crate) id: u64,
+    pub(crate) html_url: String,
+    pub(crate) author_association: Option<String>,
+    pub(crate) created_at: String,
+    pub(crate) updated_at: String,
+    pub(crate) user: Option<RestConversationUserV1>,
     pub(crate) body: Option<String>,
 }
 

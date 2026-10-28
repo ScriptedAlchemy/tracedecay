@@ -52,7 +52,7 @@ fn current_node<'a>(
 ) -> Result<&'a Node> {
     let mut matches = artifact.result.nodes.iter().filter(|node| {
         node.name == symbol.name
-            && node.start_line == symbol.line
+            && super::graph::user_line(node.start_line) == symbol.line
             && node.kind.as_str() == symbol.kind
     });
     match (matches.next(), matches.next()) {
@@ -326,14 +326,14 @@ mod tests {
                 name: "target".to_owned(),
                 kind: "function".to_owned(),
                 file: "lib.rs".to_owned(),
-                line: 0,
+                line: 1,
             };
             let caller = GitContextSymbolV1 {
                 id: "caller".to_owned(),
                 name: "caller".to_owned(),
                 kind: "function".to_owned(),
                 file: "caller.rs".to_owned(),
-                line: 0,
+                line: 1,
             };
             let symbols = [target, caller];
             let error = signature_edits(

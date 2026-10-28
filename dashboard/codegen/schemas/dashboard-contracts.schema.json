@@ -8670,7 +8670,8 @@
         "pull_request",
         "reviews",
         "review_comments",
-        "review_threads"
+        "review_threads",
+        "conversation_comments"
       ],
       "type": "string"
     },

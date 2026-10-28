@@ -506,6 +506,230 @@ fn lcm_json_credential_bearing_keys_quarantine_instead_of_faulting_the_receipt()
     );
 }
 
+fn assert_public_credential_key_protection(raw: &str, credential_key: &str) {
+    assert_eq!(raw_sweep(PLACEHOLDER), PLACEHOLDER);
+    assert!(raw_sweep(raw).contains(PLACEHOLDER));
+    assert!(!raw_sweep(credential_key).contains(credential_key));
+    assert!(
+        sanitize_structured_text(raw)
+            .expect("valid structured document is scanned")
+            .format()
+            .is_some(),
+        "a leading BOM must not bypass structural parsing"
+    );
+
+    let assert_safe_output = |text: &str| {
+        assert!(!text.contains(credential_key), "credential key was exposed");
+        assert!(!text.contains(PLACEHOLDER), "the key's value was exposed");
+        assert!(text.contains("us-east"), "unrelated field was discarded");
+    };
+    let assert_safe_evidence = |evidence: &str| {
+        assert!(!evidence.contains(credential_key));
+        assert!(!evidence.contains(PLACEHOLDER));
+    };
+    let assert_key_refusal = |error: DetectionError| {
+        assert_eq!(error, DetectionError::CredentialKeyQuarantine);
+        assert_safe_evidence(&error.to_string());
+    };
+
+    match sanitize_code_source_bytes(raw.as_bytes(), CodeSourceShapeV1::StructuredData) {
+        Ok(sanitized) => {
+            let (bytes, receipt) = sanitized.into_parts();
+            let text = String::from_utf8(bytes).expect("sanitized UTF-8");
+            assert_safe_output(&text);
+            assert_safe_evidence(&serde_json::to_string(&receipt).expect("source receipt"));
+            let replayed =
+                sanitize_code_source_bytes(text.as_bytes(), CodeSourceShapeV1::StructuredData)
+                    .expect("redacted source remains usable");
+            assert_eq!(replayed.sanitized_bytes(), text.as_bytes());
+        }
+        Err(error) => assert_key_refusal(error),
+    }
+
+    match sanitize_lcm_payload_text(raw) {
+        Ok(sanitized) => {
+            let (text, receipt, findings) = sanitized.into_parts();
+            assert_safe_output(&text);
+            assert_safe_evidence(
+                &serde_json::to_string(&(receipt, findings)).expect("LCM evidence"),
+            );
+            let replayed = sanitize_lcm_payload_text(&text).expect("redacted LCM stays usable");
+            assert_eq!(replayed.sanitized_text(), text);
+        }
+        Err(error) => assert_key_refusal(error),
+    }
+
+    if let Some(text) = sanitize_provider_metadata_text(raw) {
+        assert_safe_output(&text);
+        assert_eq!(
+            sanitize_provider_metadata_text(&text).as_deref(),
+            Some(text.as_str()),
+            "redacted metadata must be a fixed point"
+        );
+    }
+}
+
+#[test]
+fn yaml_credential_keys_protect_plain_descendants_through_public_sanitizers() {
+    let credential_key = ["sk", "-test-", "1234567890abcdef"].concat();
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let entropy_key: String = (0..48)
+        .map(|index| char::from(ALPHABET[(index * 17) % ALPHABET.len()]))
+        .collect();
+    for (key, raw) in [
+        // This also has valid HTTP-header syntax; that route must protect keys.
+        (
+            credential_key.as_str(),
+            format!("{credential_key}: {PLACEHOLDER}\nregion: us-east\n"),
+        ),
+        (
+            entropy_key.as_str(),
+            format!("{entropy_key}: {PLACEHOLDER}\nregion: us-east\n"),
+        ),
+        (
+            credential_key.as_str(),
+            format!(
+                "provider:\n  {credential_key}:\n    accounts:\n      - {PLACEHOLDER}\nregion: us-east\n"
+            ),
+        ),
+    ] {
+        assert_public_credential_key_protection(&raw, key);
+    }
+}
+
+#[test]
+fn empty_credential_key_fields_still_require_key_quarantine() {
+    let credential_key = ["sk", "-test-", "1234567890abcdef"].concat();
+    let raw = format!("{credential_key}:\nregion: us-east\n");
+
+    assert_eq!(
+        sanitize_code_source_bytes(raw.as_bytes(), CodeSourceShapeV1::StructuredData)
+            .map(|_| ())
+            .expect_err("empty value does not make its credential key safe"),
+        DetectionError::CredentialKeyQuarantine
+    );
+    assert_eq!(
+        sanitize_lcm_payload_text(&raw).expect_err("LCM withholds credential key"),
+        DetectionError::CredentialKeyQuarantine
+    );
+    assert!(sanitize_provider_metadata_text(&raw).is_none());
+}
+
+#[test]
+fn bom_credential_keys_protect_plain_descendants_in_json_and_toml() {
+    let credential_key = ["sk", "-test-", "1234567890abcdef"].concat();
+    for raw in [
+        format!(
+            "\u{feff}{{\"{credential_key}\":{{\"accounts\":[\"{PLACEHOLDER}\"]}},\"region\":\"us-east\"}}"
+        ),
+        format!(
+            "\u{feff}region = \"us-east\"\n[{credential_key}]\naccounts = [\"{PLACEHOLDER}\"]\n"
+        ),
+    ] {
+        assert_public_credential_key_protection(&raw, &credential_key);
+    }
+}
+
+#[test]
+fn bom_sensitive_fields_keep_exact_source_offsets_and_neighbors() {
+    for (format, raw, expected) in [
+        (
+            StructuredTextFormatV1::Json,
+            format!(
+                "\u{feff}{{\"note\":\"café\", \"vault_passphrase\":\"{PLACEHOLDER}\", \"region\":\"us-east\"}}\n"
+            ),
+            "\u{feff}{\"note\":\"café\", \"vault_passphrase\":\"TraceDecay-redacted-sensitive-field\", \"region\":\"us-east\"}\n",
+        ),
+        (
+            StructuredTextFormatV1::Toml,
+            format!(
+                "\u{feff}# café\n[vault]\nregion = \"us-east\"\nvault_passphrase = \"{PLACEHOLDER}\" # rotate\n"
+            ),
+            "\u{feff}# café\n[vault]\nregion = \"us-east\"\nvault_passphrase = \"TraceDecay-redacted-sensitive-field\" # rotate\n",
+        ),
+    ] {
+        assert_detected_only_by_parsing(&raw, format, expected);
+        let source = sanitize_code_source_bytes(raw.as_bytes(), CodeSourceShapeV1::StructuredData)
+            .expect("BOM source sanitizes");
+        assert_eq!(source.sanitized_bytes(), expected.as_bytes());
+        assert_eq!(
+            sanitize_provider_metadata_text(&raw).as_deref(),
+            Some(expected)
+        );
+        let lcm = sanitize_lcm_payload_text(&raw).expect("BOM payload sanitizes");
+        assert!(!lcm.sanitized_text().contains(PLACEHOLDER));
+        assert!(lcm.sanitized_text().contains("us-east"));
+    }
+}
+
+#[test]
+fn bom_ordinary_structured_documents_preserve_nonsecret_content() {
+    for raw in [
+        "\u{feff}{\"note\":\"café\", \"region\":\"us-east\"}\n",
+        "\u{feff}# café\n[service]\nregion = \"us-east\"\n",
+        "region: us-east\ncomponent: worker\n",
+    ] {
+        let source = sanitize_code_source_bytes(raw.as_bytes(), CodeSourceShapeV1::StructuredData)
+            .expect("ordinary source sanitizes");
+        assert_eq!(source.sanitized_bytes(), raw.as_bytes());
+        assert_eq!(sanitize_provider_metadata_text(raw).as_deref(), Some(raw));
+        let lcm = sanitize_lcm_payload_text(raw).expect("ordinary LCM payload sanitizes");
+        assert!(lcm.sanitized_text().contains("us-east"));
+        assert!(lcm.findings().is_empty());
+    }
+}
+
+#[test]
+fn bom_malformed_structured_documents_cannot_fall_back_to_raw_scanning() {
+    for raw in [
+        format!("\u{feff}{{\"vault_passphrase\":\"{PLACEHOLDER}\",\"broken\":["),
+        format!("\u{feff}[vault]\nvault_passphrase = \"{PLACEHOLDER}\"\nbroken = [\n"),
+        format!(
+            "\u{feff}{{\"vault_passphrase\":\"{PLACEHOLDER}\",\"vault_passphrase\":\"safe-replacement\"}}"
+        ),
+    ] {
+        assert!(raw_sweep(&raw).contains(PLACEHOLDER));
+        assert_eq!(
+            sanitize_code_source_bytes(raw.as_bytes(), CodeSourceShapeV1::StructuredData)
+                .map(|_| ())
+                .expect_err("malformed BOM source is withheld"),
+            DetectionError::StructuredQuarantine
+        );
+        assert_eq!(
+            sanitize_lcm_payload_text(&raw).expect_err("malformed BOM payload is withheld"),
+            DetectionError::StructuredQuarantine
+        );
+        assert!(sanitize_provider_metadata_text(&raw).is_none());
+    }
+}
+
+#[test]
+fn bom_lcm_json_keeps_its_existing_budget_and_original_input_receipt() {
+    // JSON payloads already have a larger LCM allowance than general structured
+    // text. A BOM must not send valid JSON through the smaller text route.
+    let raw = format!(
+        "{{\"text\":\"{}\",\"region\":\"us-east\"}}",
+        "a".repeat(1_048_576)
+    );
+    let with_bom = format!("\u{feff}{raw}");
+    let (plain_text, plain_receipt, plain_findings) = sanitize_lcm_payload_text(&raw)
+        .expect("JSON fits the existing LCM payload allowance")
+        .into_parts();
+    let (bom_text, bom_receipt, bom_findings) = sanitize_lcm_payload_text(&with_bom)
+        .expect("BOM does not change the JSON allowance")
+        .into_parts();
+
+    assert_eq!(bom_text, plain_text);
+    assert_eq!(bom_findings, plain_findings);
+    assert!(bom_findings.is_empty());
+    assert_eq!(bom_receipt.payload(), plain_receipt.payload());
+    assert_ne!(
+        bom_receipt.receipt(),
+        plain_receipt.receipt(),
+        "receipt identity must retain the original input's BOM bytes"
+    );
+}
+
 #[test]
 fn prose_opening_with_a_bracketed_annotation_line_is_not_toml_quarantine() {
     // LCM compaction emits scaffold messages such as

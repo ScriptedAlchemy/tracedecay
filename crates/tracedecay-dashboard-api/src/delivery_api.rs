@@ -515,6 +515,7 @@ pub enum DeliveryGitHubReadOperationV1 {
     Reviews,
     ReviewComments,
     ReviewThreads,
+    ConversationComments,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
@@ -2163,6 +2164,9 @@ fn map_github_operation(operation: GitHubReviewReadOperationV1) -> DeliveryGitHu
         GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads => {
             DeliveryGitHubReadOperationV1::ReviewThreads
         }
+        GitHubReviewReadOperationV1::RestListPullRequestConversationComments => {
+            DeliveryGitHubReadOperationV1::ConversationComments
+        }
     }
 }
 
@@ -2427,6 +2431,10 @@ mod tests {
             map_pull_request(pull_request(Some(ProjectDeliveryPullRequestIdentityV1 {
                 number: 741,
                 title: "Fix kv docs".to_owned(),
+                description: None,
+                observed_base_commit_id: CommitId::new("commit.delivery.base").unwrap(),
+                observed_head_commit_id: CommitId::new("commit.delivery.head").unwrap(),
+                observed_at: tracedecay_domain::UtcMicros(1),
                 state: ProjectDeliveryPullRequestStateV1::Open,
                 draft: false,
                 additions: 1,

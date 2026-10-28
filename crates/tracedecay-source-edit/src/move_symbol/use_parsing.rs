@@ -10,9 +10,20 @@ use std::collections::HashSet;
 use tree_sitter::{Node as TsNode, Parser};
 
 /// A single binding brought into scope by a `use` statement.
+#[derive(Clone, Eq, Hash, PartialEq)]
 pub(super) struct UseLeaf {
     /// The name as referenced in code (the alias when `as` is present).
     pub(super) binding: String,
+    /// The syntax-derived path, independent of grouping, whitespace and
+    /// comments. An unverified fallback never supplies a path identity.
+    pub(super) canonical_path: Option<String>,
+}
+
+#[derive(Default)]
+pub(super) struct UseBindings {
+    pub(super) wildcard: bool,
+    pub(super) anonymous: bool,
+    pub(super) leaves: Vec<UseLeaf>,
 }
 
 /// A parsed `use` statement from a source file.
@@ -27,8 +38,9 @@ pub(super) struct UseStatement {
     pub(super) removable: bool,
     /// 1-based line of the statement.
     pub(super) line: u32,
-    /// Whether the statement is a glob import (`use a::*;`).
-    pub(super) glob: bool,
+    /// A glob or anonymous (`as _`) import cannot be attributed to one named
+    /// dependency, so moving a named leaf must not relocate the whole import.
+    pub(super) has_unnamed_dependencies: bool,
     pub(super) leaves: Vec<UseLeaf>,
 }
 
@@ -97,21 +109,56 @@ fn source_relative_use_path(node: TsNode<'_>) -> bool {
     }
 }
 
-fn has_outer_attributes(node: TsNode<'_>) -> bool {
-    let mut previous = node.prev_named_sibling();
-    while let Some(sibling) = previous {
-        match sibling.kind() {
-            "attribute_item" => return true,
-            "line_comment" | "block_comment" => {
-                if sibling.child_by_field_name("outer").is_some() {
-                    return true;
-                }
-                previous = sibling.prev_named_sibling();
-            }
-            _ => return false,
-        }
-    }
-    false
+pub(super) fn has_outer_attributes(node: TsNode<'_>) -> bool {
+    outer_attributes(node).next().is_some()
+}
+
+/// Built-in lint attributes leave an existing destination binding available.
+/// Source relocation still rejects every attached attribute so its scope and
+/// ownership cannot silently change. Unknown attributes may transform imports.
+pub(super) fn destination_import_is_unconditional(node: TsNode<'_>, src: &[u8]) -> bool {
+    outer_attributes(node).all(|attribute| is_lint_attribute(attribute, src))
+}
+
+fn outer_attributes(node: TsNode<'_>) -> impl Iterator<Item = TsNode<'_>> {
+    std::iter::successors(node.prev_named_sibling(), |node| node.prev_named_sibling())
+        .take_while(|node| {
+            matches!(
+                node.kind(),
+                "attribute_item" | "line_comment" | "block_comment"
+            )
+        })
+        .filter(|node| {
+            node.kind() == "attribute_item" || node.child_by_field_name("outer").is_some()
+        })
+}
+
+fn is_lint_attribute(node: TsNode<'_>, src: &[u8]) -> bool {
+    let Some(attribute) = node
+        .named_children(&mut node.walk())
+        .find(|child| child.kind() == "attribute")
+    else {
+        return false;
+    };
+    let Some(path) = attribute
+        .named_children(&mut attribute.walk())
+        .find(|child| !matches!(child.kind(), "line_comment" | "block_comment"))
+    else {
+        return false;
+    };
+    path.kind() == "identifier"
+        && matches!(
+            path.utf8_text(src),
+            Ok("allow" | "expect" | "warn" | "deny" | "forbid")
+        )
+        && attribute
+            .child_by_field_name("arguments")
+            .is_some_and(|arguments| {
+                arguments.kind() == "token_tree"
+                    && arguments
+                        .child(0)
+                        .is_some_and(|delimiter| delimiter.kind() == "(")
+            })
 }
 
 /// Tree-sitter path: collect every `use_declaration` node (top-level and inside
@@ -140,7 +187,7 @@ fn collect_use_declarations(
         if let Ok(text) = node.utf8_text(src)
             && let Some(argument) = node.child_by_field_name("argument")
             && let Ok(path) = argument.utf8_text(src)
-            && let Some((glob, leaves)) = parse_use_bindings(path)
+            && let Some(bindings) = use_bindings(argument, src)
         {
             let mut cursor = node.walk();
             let plain_declaration = syntax_complete && !has_outer_attributes(node);
@@ -154,8 +201,8 @@ fn collect_use_declarations(
                     .then(|| path.to_string()),
                 removable,
                 line: node.start_position().row as u32 + 1,
-                glob,
-                leaves,
+                has_unnamed_dependencies: bindings.wildcard || bindings.anonymous,
+                leaves: bindings.leaves,
             });
         }
         // `use_declaration` nodes do not nest; no need to descend further.
@@ -186,13 +233,13 @@ fn parse_use_statements_linescan(source: &str) -> Vec<UseStatement> {
         else {
             continue;
         };
-        if let Some((glob, leaves)) = parse_use_bindings(path) {
+        if let Some((has_unnamed_dependencies, leaves)) = fallback_use_bindings(path) {
             out.push(UseStatement {
                 text: raw.to_string(),
                 portable_path: None,
                 removable: false,
                 line: (idx + 1) as u32,
-                glob,
+                has_unnamed_dependencies,
                 leaves,
             });
         }
@@ -200,30 +247,132 @@ fn parse_use_statements_linescan(source: &str) -> Vec<UseStatement> {
     out
 }
 
-/// Parses bindings from the import argument, after the syntax authority has
-/// separated visibility and the declaration boundary.
-fn parse_use_bindings(body: &str) -> Option<(bool, Vec<UseLeaf>)> {
+/// Reads binding identities from the grammar's argument fields. The original
+/// argument remains the rendering payload; only comparison ignores trivia.
+pub(super) fn use_bindings(argument: TsNode<'_>, src: &[u8]) -> Option<UseBindings> {
+    let mut bindings = UseBindings::default();
+    collect_use_bindings(argument, None, src, &mut bindings)?;
+    Some(bindings)
+}
+
+fn collect_use_bindings(
+    node: TsNode<'_>,
+    prefix: Option<&str>,
+    src: &[u8],
+    bindings: &mut UseBindings,
+) -> Option<()> {
+    match node.kind() {
+        "scoped_use_list" => {
+            let path = match node.child_by_field_name("path") {
+                Some(path) => canonical_use_path(path, src)?,
+                None => "::".to_owned(),
+            };
+            let path = join_use_path(prefix, &path)?;
+            collect_use_bindings(
+                node.child_by_field_name("list")?,
+                Some(&path),
+                src,
+                bindings,
+            )?;
+        }
+        "use_list" => {
+            for child in node.named_children(&mut node.walk()) {
+                if !matches!(child.kind(), "line_comment" | "block_comment") {
+                    collect_use_bindings(child, prefix, src, bindings)?;
+                }
+            }
+        }
+        "use_wildcard" => bindings.wildcard = true,
+        _ => {
+            let (path, alias) = if node.kind() == "use_as_clause" {
+                (
+                    node.child_by_field_name("path")?,
+                    Some(node.child_by_field_name("alias")?.utf8_text(src).ok()?),
+                )
+            } else {
+                (node, None)
+            };
+            let path = join_use_path(prefix, &canonical_use_path(path, src)?)?;
+            let binding = alias.or_else(|| path.rsplit("::").next())?;
+            if matches!(binding, "_" | "self" | "super" | "crate") {
+                bindings.anonymous = true;
+            } else {
+                bindings.leaves.push(UseLeaf {
+                    binding: binding.to_owned(),
+                    canonical_path: Some(path),
+                });
+            }
+        }
+    }
+    Some(())
+}
+
+fn canonical_use_path(node: TsNode<'_>, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "identifier" | "crate" | "self" | "super" => Some(node.utf8_text(src).ok()?.to_owned()),
+        "scoped_identifier" => {
+            let name = canonical_use_path(node.child_by_field_name("name")?, src)?;
+            let path = match node.child_by_field_name("path") {
+                Some(path) => canonical_use_path(path, src)?,
+                None => String::new(),
+            };
+            Some(format!("{path}::{name}"))
+        }
+        _ => None,
+    }
+}
+
+fn join_use_path(prefix: Option<&str>, path: &str) -> Option<String> {
+    match (prefix, path) {
+        (None, path) => Some(path.to_owned()),
+        (Some(prefix), "self") => Some(prefix.to_owned()),
+        (Some(_), path) if path.starts_with("::") => None,
+        (Some("::"), path) => Some(format!("::{path}")),
+        (Some(prefix), path) => Some(format!("{prefix}::{path}")),
+    }
+}
+
+/// Unverified names are only useful for dependency hints when the grammar is
+/// unavailable. They never authorize insertion, deduplication or removal.
+fn fallback_use_bindings(body: &str) -> Option<(bool, Vec<UseLeaf>)> {
     let body = body.trim();
-    let glob = body.contains('*');
+    let mut has_unnamed_dependencies = body.contains('*');
     let leaves: Vec<UseLeaf> = if let Some(open) = body.find('{') {
         let inner = body[open + 1..].trim_end().trim_end_matches('}');
         inner
             .split(',')
-            .filter_map(|item| leaf_binding(item.trim()))
-            .map(|binding| UseLeaf { binding })
+            .filter_map(|item| fallback_leaf_binding(item.trim()))
+            .filter(|binding| {
+                has_unnamed_dependencies |= binding == "_";
+                binding != "_"
+            })
+            .map(|binding| UseLeaf {
+                binding,
+                canonical_path: None,
+            })
             .collect()
     } else {
-        leaf_binding(body).map_or_default(|binding| vec![UseLeaf { binding }])
+        fallback_leaf_binding(body)
+            .filter(|binding| {
+                has_unnamed_dependencies |= binding == "_";
+                binding != "_"
+            })
+            .map_or_default(|binding| {
+                vec![UseLeaf {
+                    binding,
+                    canonical_path: None,
+                }]
+            })
     };
-    if leaves.is_empty() && !glob {
+    if leaves.is_empty() && !has_unnamed_dependencies {
         return None;
     }
-    Some((glob, leaves))
+    Some((has_unnamed_dependencies, leaves))
 }
 
 /// The in-code binding for a single `use` path segment (`a::b::C` -> `C`,
 /// `a::C as D` -> `D`). Returns `None` for globs and empty items.
-fn leaf_binding(item: &str) -> Option<String> {
+fn fallback_leaf_binding(item: &str) -> Option<String> {
     let item = item.trim();
     if item.is_empty() || item == "*" || item.ends_with("::*") {
         return None;
@@ -269,12 +418,35 @@ mod tests {
         let stmts = parse_use_statements(src);
         assert_eq!(stmts.len(), 4);
         assert_eq!(stmts[0].leaves[0].binding, "HashMap");
-        assert!(!stmts[0].glob);
+        assert!(!stmts[0].has_unnamed_dependencies);
         assert_eq!(stmts[1].leaves[0].binding, "C");
         assert_eq!(stmts[2].leaves.len(), 2);
         assert_eq!(stmts[2].leaves[0].binding, "Y");
         assert_eq!(stmts[2].leaves[1].binding, "Z");
-        assert!(stmts[3].glob);
+        assert!(stmts[3].has_unnamed_dependencies);
+    }
+
+    #[test]
+    fn use_bindings_preserve_path_identity_and_unnamed_dependencies() {
+        let imports = parse_use_statements(
+            "use ::std::{fmt::{self as\n    Formatting, Debug as _}, collections::HashMap, io::*};",
+        );
+        assert_eq!(imports.len(), 1);
+        assert!(imports[0].has_unnamed_dependencies);
+        assert_eq!(
+            imports[0]
+                .leaves
+                .iter()
+                .map(|leaf| (leaf.binding.as_str(), leaf.canonical_path.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                ("Formatting", Some("::std::fmt")),
+                ("HashMap", Some("::std::collections::HashMap")),
+            ]
+        );
+        let fallback = parse_use_statements_linescan("use crate::model::Widget as Alias;");
+        assert_eq!(fallback.len(), 1);
+        assert!(fallback[0].leaves[0].canonical_path.is_none());
     }
 
     #[test]

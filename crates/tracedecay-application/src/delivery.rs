@@ -18,11 +18,11 @@ use tracedecay_contracts::feedback::{
 };
 use tracedecay_contracts::{RequestAdmission, RequestContext, ResolvedScope, now_micros};
 use tracedecay_domain::feedback::{
-    CiFailureKindV1, CiFailureRunIdentityV1, FeedbackScopeV1, GitHubPullRequestSnapshotV1,
-    GitHubPullRequestStateV1, GitHubReviewCommentIdV1, GitHubReviewCoverageV1,
-    GitHubReviewIngressProviderOutcomeV1, GitHubReviewItemV1, GitHubReviewLifecycleV1,
-    GitHubReviewQuarantinedItemV1, GitHubReviewRateLimitCheckpointV1, GitHubReviewReadCheckpointV1,
-    GitHubReviewReadOperationV1,
+    CiFailureKindV1, CiFailureRunIdentityV1, FeedbackScopeV1, GitHubConversationCommentV1,
+    GitHubPullRequestReviewV1, GitHubPullRequestSnapshotV1, GitHubPullRequestStateV1,
+    GitHubReviewCommentIdV1, GitHubReviewCoverageV1, GitHubReviewIngressProviderOutcomeV1,
+    GitHubReviewItemV1, GitHubReviewLifecycleV1, GitHubReviewQuarantinedItemV1,
+    GitHubReviewRateLimitCheckpointV1, GitHubReviewReadCheckpointV1, GitHubReviewReadOperationV1,
 };
 use tracedecay_domain::{
     CanonicalObservationIdV1, CodeGenerationId, CommitId, ManifestDigest, ProjectId, ProviderId,
@@ -33,7 +33,7 @@ use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use crate::advisory::github_runtime::GitHubSourceAccessAuthorityV1;
+use crate::advisory::github_runtime::{GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1};
 use crate::advisory::{
     CiRetainedObservationManifestLoadOutcomeV1, GitHubActionsConclusionV1, GitHubActionsStatusV1,
     GitHubCheckAnnotationLevelV1, GitHubCheckAnnotationV1, GitHubCiRepositoryTargetV1,
@@ -98,6 +98,8 @@ pub struct ProjectDeliveryGitHubOperationSnapshotV1 {
     pub coverage: GitHubReviewCoverageV1,
     /// Comments this read observed but withheld from ingest.
     pub quarantined: Vec<GitHubReviewQuarantinedItemV1>,
+    pub conversation: Vec<GitHubConversationCommentV1>,
+    pub reviews: Vec<GitHubPullRequestReviewV1>,
     pub fetched_at: UtcMicros,
     pub checkpoint: GitHubReviewReadCheckpointV1,
 }
@@ -107,6 +109,10 @@ pub struct ProjectDeliveryPullRequestOperationV1 {
     pub operation: GitHubReviewReadOperationV1,
     pub latest_attempt: Option<ProjectDeliveryGitHubOperationSnapshotV1>,
     pub last_complete: Option<ProjectDeliveryGitHubOperationSnapshotV1>,
+    /// A newer, consensus-validated collection with partial prose coverage.
+    /// Consumers retain its observation time and use its membership instead
+    /// of resurrecting rows from the historical complete generation.
+    pub last_partial_collection: Option<ProjectDeliveryGitHubOperationSnapshotV1>,
 }
 
 /// Retained pull-request identity and diff shape from the allowlisted
@@ -116,6 +122,10 @@ pub struct ProjectDeliveryPullRequestOperationV1 {
 pub struct ProjectDeliveryPullRequestIdentityV1 {
     pub number: u64,
     pub title: String,
+    pub description: Option<String>,
+    pub observed_base_commit_id: CommitId,
+    pub observed_head_commit_id: CommitId,
+    pub observed_at: UtcMicros,
     pub state: ProjectDeliveryPullRequestStateV1,
     pub draft: bool,
     pub additions: u64,
@@ -173,7 +183,7 @@ pub struct ProjectDeliveryReviewItemV1 {
     pub observations: Vec<ProjectDeliveryReviewObservationV1>,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
 pub struct ProjectDeliveryGitHubTimelineV1 {
     pub pull_requests: Vec<ProjectDeliveryPullRequestV1>,
     pub review_items: Vec<ProjectDeliveryReviewItemV1>,
@@ -1298,6 +1308,7 @@ pub struct ProjectDeliveryReadOpenV1 {
     pub feedback_scope: FeedbackScopeV1,
     pub github_target: GitHubCiRepositoryTargetV1,
     pub github_http: GitHubHttpReadConfigV1,
+    pub github_source_access: Arc<dyn GitHubSourceAccessAuthorityV1>,
     pub review_bodies: Option<ProjectDeliveryReviewBodySourceV1>,
 }
 
@@ -1318,6 +1329,7 @@ struct ProjectDeliveryReadAuthorityV1 {
     github_reviews: ProjectGitHubReviewStoreV1,
     ci_checks: ProjectCiRetainedObservationStoreV1,
     releases: ProjectDeliveryReleaseMountV1,
+    github_source_access: Arc<dyn GitHubSourceAccessAuthorityV1>,
     review_bodies: Option<ProjectDeliveryReviewBodySourceV1>,
 }
 
@@ -1401,6 +1413,7 @@ pub fn open_project_delivery_read_authority_v1(
         github_reviews,
         ci_checks,
         releases,
+        github_source_access: input.github_source_access,
         review_bodies: input.review_bodies,
     }))
 }
@@ -1532,16 +1545,19 @@ impl ProjectDeliveryReadAuthorityV1 {
         let mut encoded_bytes = 0usize;
         let mut pull_requests_truncated = total_entries > entries.len();
         let mut review_items_truncated = total_entries > entries.len();
-        for entry in entries {
+        for entry in &entries {
             if encoded_bytes == MAX_PROJECT_DELIVERY_SOURCE_BYTES_V1 {
                 pull_requests_truncated = true;
                 review_items_truncated = true;
                 break;
             }
+            if let Some(refused) = self.github_read_refusal(context, &entry.request).await {
+                return refused;
+            }
             let remaining = MAX_PROJECT_DELIVERY_SOURCE_BYTES_V1 - encoded_bytes;
             let Some((state, consumed)) = self
                 .github_reviews
-                .load_bounded_entry(context, &entry, remaining)
+                .load_bounded_entry(context, entry, remaining)
                 .await
             else {
                 unavailable = true;
@@ -1549,6 +1565,9 @@ impl ProjectDeliveryReadAuthorityV1 {
                 review_items_truncated = true;
                 continue;
             };
+            if let Some(refused) = self.github_read_refusal(context, &entry.request).await {
+                return refused;
+            }
             encoded_bytes += consumed;
             let latest = &state.latest_attempt;
             outcomes.push(latest.ingress.outcome);
@@ -1560,6 +1579,10 @@ impl ProjectDeliveryReadAuthorityV1 {
                 &mut unavailable,
                 latest,
                 ProjectDeliveryReviewObservationKindV1::LatestAttempt,
+                state
+                    .last_partial_collection
+                    .as_ref()
+                    .map(|collection| &collection.response),
             );
             collect_review_observations(
                 &mut review_items,
@@ -1573,6 +1596,7 @@ impl ProjectDeliveryReadAuthorityV1 {
                     &mut unavailable,
                     &complete.response,
                     ProjectDeliveryReviewObservationKindV1::LastComplete,
+                    None,
                 );
                 if complete.response != *latest {
                     if complete.response.ingress.provider != latest.ingress.provider {
@@ -1636,6 +1660,15 @@ impl ProjectDeliveryReadAuthorityV1 {
         }
         self.hydrate_review_body_previews(context, &mut review_items)
             .await;
+        // Stored PR prose is disclosed directly, so its source authorization
+        // must still hold after all storage and optional body expansion work.
+        // A source-specific revocation cannot be overridden by the caller's
+        // broader daemon-source grant or by an older retained observation.
+        for entry in &entries {
+            if let Some(refused) = self.github_read_refusal(context, &entry.request).await {
+                return refused;
+            }
+        }
         let timeline = ProjectDeliveryGitHubTimelineV1 {
             pull_requests,
             review_items,
@@ -1665,6 +1698,29 @@ impl ProjectDeliveryReadAuthorityV1 {
             ProjectDeliveryGitHubSourceV1::Stale { timeline }
         } else {
             ProjectDeliveryGitHubSourceV1::Ready { timeline }
+        }
+    }
+
+    async fn github_read_refusal(
+        &self,
+        context: &RequestContext,
+        request: &GitHubReviewReadRequestV1,
+    ) -> Option<ProjectDeliveryGitHubSourceV1> {
+        match self.github_source_access.authorize(context, request).await {
+            GitHubProviderLifecycleV1::Ready => None,
+            GitHubProviderLifecycleV1::Denied | GitHubProviderLifecycleV1::Ambiguous => {
+                Some(ProjectDeliveryGitHubSourceV1::Denied {
+                    timeline: empty_github_timeline(),
+                })
+            }
+            GitHubProviderLifecycleV1::Stale => Some(ProjectDeliveryGitHubSourceV1::Stale {
+                timeline: empty_github_timeline(),
+            }),
+            GitHubProviderLifecycleV1::Unavailable => {
+                Some(ProjectDeliveryGitHubSourceV1::Unavailable {
+                    timeline: empty_github_timeline(),
+                })
+            }
         }
     }
 
@@ -1900,6 +1956,8 @@ fn github_operation_snapshot(
         outcome: response.ingress.outcome,
         coverage: response.ingress.coverage,
         quarantined: response.ingress.quarantined.clone(),
+        conversation: response.ingress.conversation.clone(),
+        reviews: response.ingress.reviews.clone(),
         fetched_at: response.ingress.fetched_at,
         checkpoint: response.checkpoint.clone(),
     }
@@ -1910,6 +1968,7 @@ fn collect_pull_request_operation(
     unavailable: &mut bool,
     response: &GitHubReviewReadResponseV1,
     kind: ProjectDeliveryReviewObservationKindV1,
+    partial_collection: Option<&GitHubReviewReadResponseV1>,
 ) {
     let key = (
         response.ingress.provider.as_str().to_owned(),
@@ -1929,7 +1988,12 @@ fn collect_pull_request_operation(
         if kind == ProjectDeliveryReviewObservationKindV1::LatestAttempt
             || pull_request.identity.is_none()
         {
-            pull_request.identity = Some(delivery_pull_request_identity(snapshot));
+            pull_request.identity = Some(delivery_pull_request_identity(
+                snapshot,
+                &response.ingress.provider_base_commit_id,
+                &response.ingress.provider_head_commit_id,
+                response.ingress.fetched_at,
+            ));
         }
     }
     let operation_index = match pull_request
@@ -1942,6 +2006,7 @@ fn collect_pull_request_operation(
             pull_request
                 .operations
                 .push(ProjectDeliveryPullRequestOperationV1 {
+                    last_partial_collection: None,
                     operation: response.ingress.operation,
                     latest_attempt: None,
                     last_complete: None,
@@ -1958,6 +2023,9 @@ fn collect_pull_request_operation(
         *unavailable = true;
     } else {
         *slot = Some(github_operation_snapshot(response));
+        if kind == ProjectDeliveryReviewObservationKindV1::LatestAttempt {
+            operation.last_partial_collection = partial_collection.map(github_operation_snapshot);
+        }
     }
 }
 
@@ -2004,6 +2072,7 @@ const fn github_operation_rank(operation: GitHubReviewReadOperationV1) -> u8 {
         GitHubReviewReadOperationV1::RestListPullRequestReviews => 1,
         GitHubReviewReadOperationV1::RestListPullRequestReviewComments => 2,
         GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads => 3,
+        GitHubReviewReadOperationV1::RestListPullRequestConversationComments => 4,
     }
 }
 
@@ -2100,10 +2169,17 @@ fn delivery_ci_check_rank(check: &ProjectDeliveryCiCheckV1) -> u8 {
 
 fn delivery_pull_request_identity(
     snapshot: &GitHubPullRequestSnapshotV1,
+    observed_base_commit_id: &CommitId,
+    observed_head_commit_id: &CommitId,
+    observed_at: UtcMicros,
 ) -> ProjectDeliveryPullRequestIdentityV1 {
     ProjectDeliveryPullRequestIdentityV1 {
         number: snapshot.number,
         title: snapshot.title.clone(),
+        description: snapshot.description.clone(),
+        observed_base_commit_id: observed_base_commit_id.clone(),
+        observed_head_commit_id: observed_head_commit_id.clone(),
+        observed_at,
         state: match snapshot.state {
             GitHubPullRequestStateV1::Open => ProjectDeliveryPullRequestStateV1::Open,
             GitHubPullRequestStateV1::Closed => ProjectDeliveryPullRequestStateV1::Closed,
@@ -2227,12 +2303,16 @@ mod tests {
     use serde_json::json;
     use tracedecay_contracts::feedback::FeedbackPortFuture;
     use tracedecay_domain::feedback::{
-        GitHubReviewCurrentBranchRemapV1, GitHubReviewImmutableAnchorV1,
-        GitHubReviewQuarantineReasonV1,
+        GitHubReviewAuthorClassV1, GitHubReviewCurrentBranchRemapV1, GitHubReviewImmutableAnchorV1,
+        GitHubReviewQuarantineReasonV1, GitHubReviewStateV1,
     };
-    use tracedecay_domain::{ContentDigest, FileOccurrenceId};
+    use tracedecay_domain::{ContentDigest, FileOccurrenceId, GitHubReviewIdV1};
 
     use super::*;
+    use crate::advisory::github_runtime::{
+        GitHubReviewAtomicRefreshStoreV1, GitHubReviewRefreshStateV1,
+        GitHubReviewRefreshStoreCommitOutcomeV1,
+    };
     use crate::advisory::{
         CiRetainedProviderObservationAuthorityV1, GitHubCanonicalReviewAnchorAuthorityV1,
         GitHubCanonicalReviewAnchorsV1, GitHubCiProviderRecordV1, GitHubCurrentBranchRemapper,
@@ -2309,6 +2389,7 @@ mod tests {
         coverage: GitHubReviewCoverageV1,
     ) -> GitHubReviewReadResponseV1 {
         GitHubReviewReadResponseV1 {
+            completed_collection_scan: false,
             ingress: tracedecay_domain::feedback::GitHubReviewIngressResultV1 {
                 provider: ProviderId::new(provider).unwrap(),
                 scope: scope.clone(),
@@ -2321,6 +2402,8 @@ mod tests {
                 coverage,
                 items: Vec::new(),
                 quarantined: Vec::new(),
+                conversation: Vec::new(),
+                reviews: Vec::new(),
                 pull_request: None,
                 fetched_at: UtcMicros(11),
             },
@@ -2343,6 +2426,8 @@ mod tests {
             outcome: GitHubReviewIngressProviderOutcomeV1::Complete,
             coverage: GitHubReviewCoverageV1::Complete,
             quarantined: Vec::new(),
+            conversation: Vec::new(),
+            reviews: Vec::new(),
             fetched_at: UtcMicros(20),
             checkpoint: GitHubReviewReadCheckpointV1 {
                 etag: None,
@@ -2351,6 +2436,7 @@ mod tests {
             },
         };
         ProjectDeliveryPullRequestOperationV1 {
+            last_partial_collection: None,
             operation: GitHubReviewReadOperationV1::RestGetPullRequest,
             latest_attempt: (kind == ProjectDeliveryReviewObservationKindV1::LatestAttempt)
                 .then_some(snapshot.clone()),
@@ -2380,6 +2466,10 @@ mod tests {
             identity: Some(ProjectDeliveryPullRequestIdentityV1 {
                 number: 42,
                 title: format!("Pull request {id}"),
+                description: None,
+                observed_base_commit_id: CommitId::new("commit.delivery.inbox.base").unwrap(),
+                observed_head_commit_id: CommitId::new(latest_head).unwrap(),
+                observed_at: UtcMicros(20),
                 state: ProjectDeliveryPullRequestStateV1::Open,
                 draft: false,
                 additions: 12,
@@ -2464,6 +2554,7 @@ mod tests {
             &mut unavailable,
             &latest,
             ProjectDeliveryReviewObservationKindV1::LatestAttempt,
+            None,
         );
         if complete.ingress.provider != latest.ingress.provider {
             unavailable = true;
@@ -2473,6 +2564,7 @@ mod tests {
             &mut unavailable,
             &complete,
             ProjectDeliveryReviewObservationKindV1::LastComplete,
+            None,
         );
 
         assert!(unavailable);
@@ -2497,6 +2589,7 @@ mod tests {
         let snapshot = |title: &str| GitHubPullRequestSnapshotV1 {
             number: 42,
             title: title.to_owned(),
+            description: None,
             state: tracedecay_domain::feedback::GitHubPullRequestStateV1::Open,
             draft: true,
             additions: 10,
@@ -2513,6 +2606,8 @@ mod tests {
         complete.ingress.pull_request = Some(snapshot("older complete"));
         let mut latest = complete.clone();
         latest.ingress.pull_request = Some(snapshot("newer attempt"));
+        latest.ingress.provider_head_commit_id = CommitId::new("commit.delivery.newer").unwrap();
+        latest.ingress.fetched_at = UtcMicros(22);
 
         let mut pull_requests = BTreeMap::new();
         let mut unavailable = false;
@@ -2523,12 +2618,14 @@ mod tests {
             &mut unavailable,
             &complete,
             ProjectDeliveryReviewObservationKindV1::LastComplete,
+            None,
         );
         collect_pull_request_operation(
             &mut pull_requests,
             &mut unavailable,
             &latest,
             ProjectDeliveryReviewObservationKindV1::LatestAttempt,
+            None,
         );
 
         let pull_request = pull_requests
@@ -2536,6 +2633,15 @@ mod tests {
             .unwrap();
         let identity = pull_request.identity.as_ref().unwrap();
         assert_eq!(identity.title, "newer attempt");
+        assert_eq!(
+            identity.observed_head_commit_id,
+            latest.ingress.provider_head_commit_id
+        );
+        assert_eq!(
+            identity.observed_base_commit_id,
+            latest.ingress.provider_base_commit_id
+        );
+        assert_eq!(identity.observed_at, latest.ingress.fetched_at);
         assert_eq!(identity.state, ProjectDeliveryPullRequestStateV1::Open);
         assert!(identity.draft);
         assert_eq!(
@@ -3248,6 +3354,7 @@ mod tests {
             github_reviews,
             ci_checks,
             releases: ProjectDeliveryReleaseMountV1::Unavailable,
+            github_source_access: Arc::new(ReadySourceAccess),
             review_bodies: None,
         };
         let request = ProjectDeliveryReadRequestV1 {
@@ -3298,6 +3405,7 @@ mod tests {
                 .unwrap(),
             ci_checks: ProjectCiRetainedObservationStoreV1::new(database, scope).unwrap(),
             releases: ProjectDeliveryReleaseMountV1::Unavailable,
+            github_source_access: Arc::new(ReadySourceAccess),
             review_bodies: None,
         };
         let control = GitHubReleaseReadControlV1::bounded(Instant::now() + Duration::from_secs(1));
@@ -3462,6 +3570,174 @@ mod tests {
         .unwrap()
     }
 
+    struct RevokeGitHubAfterAdmission(std::sync::atomic::AtomicBool);
+
+    impl GitHubSourceAccessAuthorityV1 for RevokeGitHubAfterAdmission {
+        fn authorize<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _request: &'a GitHubReviewReadRequestV1,
+        ) -> FeedbackPortFuture<'a, GitHubProviderLifecycleV1> {
+            let admitted = self.0.swap(false, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                if admitted {
+                    GitHubProviderLifecycleV1::Ready
+                } else {
+                    GitHubProviderLifecycleV1::Denied
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn delivery_rechecks_github_source_access_before_disclosing_retained_pr_prose() {
+        let fixture =
+            crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
+        let scope = test_scope(&fixture);
+        let context = github_review_context(&scope);
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("delivery-pr-prose-access.db");
+        crate::register_test_schema_installer();
+        let database_authority =
+            DatabaseAuthority::acquire_test(&path, "delivery-pr-prose-access").unwrap();
+        let (database, _) = Database::publish_test_runtime(
+            &path,
+            &database_authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .unwrap();
+        let store = ProjectGitHubReviewStoreV1::new(database.clone(), scope.clone()).unwrap();
+        for operation in [
+            GitHubReviewReadOperationV1::RestGetPullRequest,
+            GitHubReviewReadOperationV1::RestListPullRequestConversationComments,
+            GitHubReviewReadOperationV1::RestListPullRequestReviews,
+        ] {
+            let mut response = github_response(
+                &scope,
+                "provider.github",
+                GitHubReviewIngressProviderOutcomeV1::Complete,
+                GitHubReviewCoverageV1::Complete,
+            );
+            response.ingress.operation = operation;
+            match operation {
+                GitHubReviewReadOperationV1::RestGetPullRequest => {
+                    response.ingress.pull_request = Some(GitHubPullRequestSnapshotV1 {
+                        number: 42,
+                        title: "Retained PR".to_owned(),
+                        description: Some("Retained PR intent.".to_owned()),
+                        state: GitHubPullRequestStateV1::Open,
+                        draft: false,
+                        additions: 1,
+                        deletions: 0,
+                        changed_files: 1,
+                    });
+                }
+                GitHubReviewReadOperationV1::RestListPullRequestConversationComments => {
+                    response
+                        .ingress
+                        .conversation
+                        .push(GitHubConversationCommentV1 {
+                            comment_id: GitHubReviewCommentIdV1::new("1").unwrap(),
+                            author: None,
+                            author_class: GitHubReviewAuthorClassV1::OtherObservedRole,
+                            body: "Retained conversation.".to_owned(),
+                            url: "https://github.com/owner/repository/pull/42#issuecomment-1"
+                                .to_owned(),
+                            created_at: "2026-10-26T12:00:00Z".to_owned(),
+                            updated_at: "2026-10-26T12:00:00Z".to_owned(),
+                        });
+                }
+                GitHubReviewReadOperationV1::RestListPullRequestReviews => {
+                    response.ingress.reviews.push(GitHubPullRequestReviewV1 {
+                        review_id: GitHubReviewIdV1::new("1").unwrap(),
+                        state: GitHubReviewStateV1::Approved,
+                        author: None,
+                        body: Some("Retained review.".to_owned()),
+                        commit_id: Some(scope.head_commit_id.clone()),
+                        submitted_at: None,
+                        url: None,
+                    });
+                }
+                _ => unreachable!(),
+            }
+            let request = GitHubReviewReadRequestV1 {
+                operation,
+                scope: scope.clone(),
+                pull_request_id: response.ingress.pull_request_id.clone(),
+            };
+            let state = GitHubReviewRefreshStateV1::transition(&request, None, response).unwrap();
+            assert_eq!(
+                store
+                    .compare_and_record(&context, &request, None, &state)
+                    .await,
+                GitHubReviewRefreshStoreCommitOutcomeV1::Recorded
+            );
+        }
+        let mut authority = ProjectDeliveryReadAuthorityV1 {
+            profile_id: UserProfileId::new("profile.delivery-pr-prose-access").unwrap(),
+            scope: scope.clone(),
+            github_reviews: store,
+            ci_checks: ProjectCiRetainedObservationStoreV1::new(database, scope.clone()).unwrap(),
+            releases: ProjectDeliveryReleaseMountV1::Unavailable,
+            github_source_access: Arc::new(ReadySourceAccess),
+            review_bodies: None,
+        };
+        let request = ProjectDeliveryReadRequestV1 {
+            kind: ProjectDeliveryReadKindV1::Inbox,
+            expected_head_commit_id: scope.head_commit_id,
+            max_pull_requests: 1,
+            max_review_items: 8,
+            max_ci_checks: 1,
+            max_releases: 1,
+        };
+        let control = GitHubReleaseReadControlV1::bounded(Instant::now() + Duration::from_secs(1));
+        let ProjectDeliveryReadOutcomeV1::Ready { snapshot } =
+            authority.read(&context, &request, &control).await
+        else {
+            panic!("authorized retained read must answer");
+        };
+        let ProjectDeliveryGitHubSourceV1::Ready { timeline } = snapshot.github_reviews else {
+            panic!("GitHub source must be readable before revocation");
+        };
+        let pr = &timeline.pull_requests[0];
+        assert_eq!(
+            pr.identity.as_ref().unwrap().description.as_deref(),
+            Some("Retained PR intent.")
+        );
+        assert!(pr.operations.iter().any(|operation| {
+            operation.latest_attempt.as_ref().is_some_and(|snapshot| {
+                snapshot
+                    .conversation
+                    .iter()
+                    .any(|item| item.body == "Retained conversation.")
+            })
+        }));
+        assert!(pr.operations.iter().any(|operation| {
+            operation.latest_attempt.as_ref().is_some_and(|snapshot| {
+                snapshot
+                    .reviews
+                    .iter()
+                    .any(|item| item.body.as_deref() == Some("Retained review."))
+            })
+        }));
+
+        authority.github_source_access = Arc::new(RevokeGitHubAfterAdmission(
+            std::sync::atomic::AtomicBool::new(true),
+        ));
+        for _ in 0..2 {
+            let ProjectDeliveryReadOutcomeV1::Ready { snapshot } =
+                authority.read(&context, &request, &control).await
+            else {
+                panic!("source-specific denial preserves the other Delivery lanes");
+            };
+            let ProjectDeliveryGitHubSourceV1::Denied { timeline } = snapshot.github_reviews else {
+                panic!("revocation must prevent retained GitHub disclosure");
+            };
+            assert_eq!(timeline, ProjectDeliveryGitHubTimelineV1::default());
+        }
+    }
+
     /// Refreshes one captured rust-lang/log#741 review read through the
     /// production decoder, runtime transport, refresh coordinator and store,
     /// then reads the Delivery pull-request lane.
@@ -3534,6 +3810,7 @@ mod tests {
                 .unwrap(),
             ci_checks: ProjectCiRetainedObservationStoreV1::new(database, scope.clone()).unwrap(),
             releases: ProjectDeliveryReleaseMountV1::Unavailable,
+            github_source_access: Arc::new(ReadySourceAccess),
             review_bodies: None,
         };
         let read = ProjectDeliveryReadRequestV1 {
@@ -3658,6 +3935,7 @@ mod tests {
                 .unwrap(),
             ci_checks: ProjectCiRetainedObservationStoreV1::new(database, scope.clone()).unwrap(),
             releases: ProjectDeliveryReleaseMountV1::Unavailable,
+            github_source_access: Arc::new(ReadySourceAccess),
             review_bodies: None,
         };
         let expected_head_commit_id =

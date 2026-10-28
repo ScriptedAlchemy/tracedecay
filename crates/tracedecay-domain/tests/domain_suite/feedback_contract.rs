@@ -5,11 +5,13 @@ use tracedecay_domain::feedback::{
     FeedbackDedupeKeyV1, FeedbackDiagnosticBaselineIdentityV1, FeedbackDiagnosticBaselineV1,
     FeedbackDiagnosticClassificationV1, FeedbackDurabilityV1, FeedbackEvaluationInputV1,
     FeedbackEvidencePacketV1, FeedbackImpactStateV1, FeedbackImpactV1, FeedbackScopeV1,
-    FeedbackTargetV1, FeedbackTriggerV1, ProviderEvaluationStateV1,
+    FeedbackTargetV1, FeedbackTriggerV1, GitHubPullRequestIdV1, GitHubPullRequestSnapshotV1,
+    GitHubPullRequestStateV1, GitHubReviewCoverageV1, GitHubReviewIngressProviderOutcomeV1,
+    GitHubReviewIngressResultV1, GitHubReviewReadOperationV1, ProviderEvaluationStateV1,
 };
 use tracedecay_domain::{
     AgentInstanceId, CodeGenerationId, CommitId, FileOccurrenceId, HostInstanceId, ProjectId,
-    RepositoryId, RetrievalAnchorId, SessionId, UtcMicros, WorktreeId,
+    ProviderId, RepositoryId, RetrievalAnchorId, SessionId, UtcMicros, WorktreeId,
 };
 
 use tracedecay_domain::test_fixtures::id;
@@ -24,6 +26,57 @@ fn scope() -> FeedbackScopeV1 {
         branch_ref: "refs/heads/main".to_owned(),
         head_commit_id: id::<CommitId>("commit.fixture"),
     }
+}
+
+#[test]
+fn github_partial_identity_retains_required_validation() {
+    let scope = scope();
+    let mut ingress = GitHubReviewIngressResultV1 {
+        provider: id::<ProviderId>("provider.github"),
+        provider_head_commit_id: scope.head_commit_id.clone(),
+        scope,
+        pull_request_id: id::<GitHubPullRequestIdV1>("42"),
+        provider_base_commit_id: id::<CommitId>("commit.base"),
+        merge_base_commit_id: id::<CommitId>("commit.merge-base"),
+        operation: GitHubReviewReadOperationV1::RestGetPullRequest,
+        outcome: GitHubReviewIngressProviderOutcomeV1::Partial,
+        coverage: GitHubReviewCoverageV1::Partial,
+        pull_request: Some(GitHubPullRequestSnapshotV1 {
+            number: 42,
+            title: "Retain the validated PR identity".to_owned(),
+            description: None,
+            state: GitHubPullRequestStateV1::Open,
+            draft: false,
+            additions: 1,
+            deletions: 0,
+            changed_files: 1,
+        }),
+        items: Vec::new(),
+        quarantined: Vec::new(),
+        conversation: Vec::new(),
+        reviews: Vec::new(),
+        fetched_at: UtcMicros(10),
+    };
+    ingress.validate().unwrap();
+    let encoded = serde_json::to_vec(&ingress).unwrap();
+    let decoded: GitHubReviewIngressResultV1 = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(decoded, ingress);
+    decoded.validate().unwrap();
+
+    ingress.operation = GitHubReviewReadOperationV1::RestListPullRequestReviews;
+    assert!(ingress.validate().is_err());
+    ingress.operation = GitHubReviewReadOperationV1::RestGetPullRequest;
+    ingress.outcome = GitHubReviewIngressProviderOutcomeV1::Denied;
+    ingress.coverage = GitHubReviewCoverageV1::Denied;
+    assert!(ingress.validate().is_err());
+    ingress.outcome = GitHubReviewIngressProviderOutcomeV1::Partial;
+    ingress.coverage = GitHubReviewCoverageV1::Partial;
+    ingress.pull_request.as_mut().unwrap().title.clear();
+    assert!(ingress.validate().is_err());
+    ingress.pull_request = None;
+    ingress.outcome = GitHubReviewIngressProviderOutcomeV1::Complete;
+    ingress.coverage = GitHubReviewCoverageV1::Complete;
+    assert!(ingress.validate().is_err());
 }
 
 fn baseline_identity() -> FeedbackDiagnosticBaselineIdentityV1 {

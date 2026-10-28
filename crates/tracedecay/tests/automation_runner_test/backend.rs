@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use serde_json::json;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracing_subscriber::layer::SubscriberExt;
 
@@ -19,6 +19,7 @@ use tracedecay_automation_runtime::automation::backend::{
 };
 use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationConfig};
 use tracedecay_automation_runtime::ports::codex_app_server::SummaryConfig as AutomationSummaryConfig;
+use tracedecay_contracts::automation::SessionFactProposal;
 use tracedecay_domain::configuration::LcmSummarizerExecutableV1;
 use tracedecay_sessions::runtime::hosts::codex_app_server::{
     CodexAppServerSummaryConfig, run_prompt_with_codex_app_server,
@@ -69,7 +70,7 @@ fn combined_review_contract_requires_both_arrays_with_deterministic_input_hash()
     );
 
     assert_eq!(request.contract.task_key, "combined_review");
-    assert_eq!(request.contract.prompt_version, "combined_review:v3");
+    assert_eq!(request.contract.prompt_version, "combined_review:v4");
     assert!(request.contract.strict_json);
     assert_eq!(
         request.contract.response_schema["required"],
@@ -103,6 +104,218 @@ fn combined_review_contract_requires_both_arrays_with_deterministic_input_hash()
         json!({"apply": false}),
     );
     assert_ne!(request.input_hash, different_evidence.input_hash);
+}
+
+#[test]
+fn fact_response_schemas_and_decoder_agree_on_item_grammar() {
+    let proposal = json!({
+        "content": "Keep the project's API stable",
+        "category": "project",
+        "trust": 0.8,
+        "source_span": {"store_id": 7},
+        "reason": "The user asked for a stable public API"
+    });
+    let mut cases = vec![
+        ("omitted optional arrays".to_owned(), proposal.clone(), true),
+        ("non-object fact".to_owned(), json!("fact"), false),
+    ];
+    for (label, field, value, accepted) in [
+        ("empty tags", "tags", json!([]), true),
+        ("string tags", "tags", json!(["工具"]), true),
+        ("null tags", "tags", Value::Null, false),
+        ("non-array tags", "tags", json!("tool"), false),
+        ("non-string tag", "tags", json!([true]), false),
+        ("empty entities", "entities", json!([]), true),
+        ("string entities", "entities", json!(["TraceDecay"]), true),
+        ("null entities", "entities", Value::Null, false),
+        ("non-string entity", "entities", json!([7]), false),
+        ("numeric zero trust", "trust", json!(0), true),
+        ("numeric unit trust", "trust", json!(1), true),
+        ("low bucket", "trust", json!("low"), true),
+        ("folded medium bucket", "trust", json!(" MeDiUm "), true),
+        (
+            "Unicode-trimmed high bucket",
+            "trust",
+            json!("\u{0085}\u{2003} HIGH \u{3000}"),
+            true,
+        ),
+        ("negative trust", "trust", json!(-0.1), false),
+        ("trust above one", "trust", json!(1.1), false),
+        ("boolean trust", "trust", json!(true), false),
+        ("null trust", "trust", Value::Null, false),
+        ("numeric string trust", "trust", json!("0.8"), false),
+        ("unknown trust bucket", "trust", json!("sky-high"), false),
+        (
+            "non-whitespace bucket prefix",
+            "trust",
+            json!("\u{200b}high"),
+            false,
+        ),
+        (
+            "raw message",
+            "source_span",
+            json!({"session_id": "session", "message_id": "message"}),
+            true,
+        ),
+        (
+            "summary node",
+            "source_span",
+            json!({"node_id": "node"}),
+            true,
+        ),
+        (
+            "integral floating store identity",
+            "source_span",
+            json!({"store_id": 7.0}),
+            true,
+        ),
+        (
+            "minimum store identity",
+            "source_span",
+            json!({"store_id": i64::MIN}),
+            true,
+        ),
+        (
+            "maximum store identity",
+            "source_span",
+            json!({"store_id": i64::MAX}),
+            true,
+        ),
+        (
+            "string store identity",
+            "source_span",
+            json!({"store_id": "7"}),
+            false,
+        ),
+        (
+            "boolean store identity",
+            "source_span",
+            json!({"store_id": true}),
+            false,
+        ),
+        (
+            "fractional store identity",
+            "source_span",
+            json!({"store_id": 7.5}),
+            false,
+        ),
+        (
+            "store identity above i64",
+            "source_span",
+            json!({"store_id": 9_223_372_036_854_775_808_u64}),
+            false,
+        ),
+        (
+            "floating store identity above i64",
+            "source_span",
+            json!({"store_id": 9_223_372_036_854_775_808.0}),
+            false,
+        ),
+        (
+            "store identity below i64",
+            "source_span",
+            json!({"store_id": -18_446_744_073_709_551_616.0}),
+            false,
+        ),
+        (
+            "null store identity",
+            "source_span",
+            json!({"store_id": null}),
+            false,
+        ),
+        (
+            "incomplete raw identity",
+            "source_span",
+            json!({"session_id": "session"}),
+            false,
+        ),
+        (
+            "null raw identity",
+            "source_span",
+            json!({"session_id": "session", "message_id": null}),
+            false,
+        ),
+        (
+            "mixed raw identities",
+            "source_span",
+            json!({"session_id": "session", "message_id": "message", "store_id": 7}),
+            false,
+        ),
+        (
+            "mixed raw and summary identities",
+            "source_span",
+            json!({"store_id": 7, "node_id": "node"}),
+            false,
+        ),
+        (
+            "nullable extra identity",
+            "source_span",
+            json!({"store_id": 7, "node_id": null}),
+            false,
+        ),
+        (
+            "extra source field",
+            "source_span",
+            json!({"store_id": 7, "unknown": true}),
+            false,
+        ),
+        ("empty source", "source_span", json!({}), false),
+        ("null source", "source_span", Value::Null, false),
+        ("unknown category", "category", json!("unknown"), false),
+        ("non-string content", "content", json!(7), false),
+        ("non-string reason", "reason", json!(false), false),
+        ("extra proposal field", "unknown", json!(true), false),
+        ("legacy confidence field", "confidence", json!(0.8), false),
+    ] {
+        let mut item = proposal.clone();
+        item[field] = value;
+        cases.push((label.to_owned(), item, accepted));
+    }
+    for field in ["content", "category", "trust", "source_span", "reason"] {
+        let mut item = proposal.clone();
+        item.as_object_mut().unwrap().remove(field);
+        cases.push((format!("missing {field}"), item, false));
+    }
+
+    let reflector = AgentTaskRequest::new(
+        "fact-grammar".to_owned(),
+        AgentTaskKind::SessionReflector,
+        "Review bounded session evidence".to_owned(),
+        None,
+        json!({}),
+    );
+    let combined = AgentTaskRequest::new(
+        "fact-grammar-combined".to_owned(),
+        AgentTaskKind::CombinedReview,
+        "Review bounded session evidence".to_owned(),
+        None,
+        json!({}),
+    );
+    assert_eq!(reflector.contract.prompt_version, "session_reflector:v3");
+    assert_eq!(combined.contract.prompt_version, "combined_review:v4");
+    assert_eq!(
+        reflector.contract.response_schema["properties"]["facts"],
+        combined.contract.response_schema["properties"]["facts"],
+        "both task envelopes share one facts item grammar"
+    );
+    let validator = jsonschema::options()
+        .build(&reflector.contract.response_schema)
+        .expect("generated reflector schema must compile");
+    for (label, item, accepted) in &cases {
+        let decoded = serde_json::from_value::<SessionFactProposal>(item.clone());
+        assert_eq!(decoded.is_ok(), *accepted, "{label}: {decoded:?}");
+        let response = json!({"facts": [item]});
+        assert_eq!(
+            validator.is_valid(&response),
+            *accepted,
+            "{label}: {}",
+            validator
+                .iter_errors(&response)
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
 }
 
 #[test]

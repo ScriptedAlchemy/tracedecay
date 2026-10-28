@@ -172,6 +172,12 @@ pub enum StatusHookReplayV1 {
     Starting,
     /// The last sweep drained every hook spool it found.
     Drained,
+    /// The spools drained, but producer work they admitted waits for the
+    /// project's hook orchestrator to mount. The work stays owed and runs
+    /// once it does; nothing has failed.
+    Waiting {
+        waiting: Vec<StatusHookReplayFailureV1>,
+    },
     /// The last sweep could not drain these spools. Their records stay
     /// durable and the next sweep retries them.
     Failed {

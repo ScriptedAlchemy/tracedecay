@@ -1484,6 +1484,7 @@ async fn pr_context_returns_git_evidence_while_verified_graph_is_unavailable() {
             &cg,
             "tracedecay_pr_context",
             json!({
+                "view": "symbols",
                 "base_ref": "main",
                 "head_ref": "HEAD",
                 "format": "json",

@@ -49,7 +49,7 @@ fn assert_baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples(
             profile.fallback_matches_expected,
             "{}:{} ranking receipt drifted from \
              `expected_query_fallback_digests.{}` in \
-             crates/tracedecay-query/assets/runtime-root/tests/fixtures/search_quality/query-lexical-graph-workload-v1.json \
+             tests/fixtures/search_quality/query-lexical-graph-workload-v1.json \
              ({observed}). The receipt binds ordered ranking rows and lane coverage, \
              not generation or extractor-revision identity. Re-pin only that receipt \
              when the ranking itself changed; do not touch the workload identity pin.",

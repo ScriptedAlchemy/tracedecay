@@ -544,7 +544,15 @@ def process_group_process_count(process_group_id: int) -> int:
             tail = stat[stat.rfind(")") + 2 :].split()
             state = tail[0]
             group = int(tail[2])
-        except (FileNotFoundError, PermissionError, ValueError, IndexError):
+        except (
+            FileNotFoundError,
+            ProcessLookupError,
+            PermissionError,
+            ValueError,
+            IndexError,
+        ):
+            # A task can disappear before open (ENOENT) or while an already
+            # open procfs descriptor is read (ESRCH).
             continue
         if group == process_group_id and state != "Z":
             count += 1

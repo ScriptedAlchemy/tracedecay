@@ -86,6 +86,7 @@ class PrDogfoodOutputTests(unittest.TestCase):
             {"file": f"config_{index}.toml", "kind": "config_summary", "config_keys": 3}
             for index in range(config_summaries)
         ]
+        self.payload["removed"] = []
         self.payload["symbol_page"] = {
             "limit": 500,
             "returned": returned,
@@ -116,6 +117,22 @@ class PrDogfoodOutputTests(unittest.TestCase):
         # 193 seeds + 6 summaries = 199 returned).
         self.strict_bounded_prefix_payload(seeds=193, config_summaries=6)
         self.validate_strict(self.payload)
+
+    def test_strict_accepts_removed_symbols_without_head_graph_seeds(self) -> None:
+        self.strict_bounded_prefix_payload(seeds=0, config_summaries=0)
+        self.payload["removed"] = [{"name": "removed_api", "kind": "function"}]
+        self.payload["symbol_page"]["returned"] = 1
+        self.payload["analysis_coverage"]["symbols_returned"] = 1
+        self.validate_strict(self.payload)
+
+    def test_strict_rejects_complete_impact_for_removed_symbols(self) -> None:
+        self.strict_bounded_prefix_payload(seeds=0, config_summaries=0)
+        self.payload["removed"] = [{"name": "removed_api", "kind": "function"}]
+        self.payload["symbol_page"]["returned"] = 1
+        self.payload["analysis_coverage"]["symbols_returned"] = 1
+        self.payload["analysis_coverage"]["impact_partial"] = False
+        with self.assertRaisesRegex(ValueError, "analysis coverage is inconsistent"):
+            self.validate_strict(self.payload)
 
     def test_strict_rejects_returned_entries_that_are_neither_seed_nor_summary(
         self,

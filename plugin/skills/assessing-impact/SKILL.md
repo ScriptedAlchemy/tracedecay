@@ -7,16 +7,23 @@ metadata:
 
 # Assessing impact
 
-Use changed-symbol context to connect a proposed change to dependents and tests.
-For a working-tree change, `diff_context` composes that evidence across files;
-for one symbol, start with shallow `impact` and widen when its dependents warrant it.
-Resolve ambiguous symbols before interpreting the result.
+Connect a proposed change to dependents and tests. For specified files,
+`diff_context` is prospective and analyzes every indexed symbol in those files.
+Use `pr_context` for exact committed changes or `commit_context` for exact
+staged/net HEAD-to-worktree declarations before tracing their consumers. For one
+known symbol, start with shallow `impact` and widen when its dependents warrant
+it. Keep the returned node identity for follow-up; resolve an ambiguous name
+before interpreting its consumers.
 
 `test_map`, `affected`, and `test_risk` provide structural test evidence. A graph
 edge is not executed coverage: subprocesses, I/O, configuration, fixture loading,
 macros, and external consumers can be absent. Supplement the selected tests with
 the actual host or integration journey that exercises those boundaries. Zero
 indexed callers does not establish that a public API is unused.
+
+Use `affected` with `files` for a fresh file-based test selection. The similarly
+named `affected_tests` reads a completed feedback cycle's selection and requires
+its server-minted `request_handle`.
 
 `run_affected_tests` runs the supported Rust selection; other languages use their
 native runner. Check the reported selection and nonzero executed count. A passing
