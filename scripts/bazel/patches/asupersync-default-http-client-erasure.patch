@@ -1,0 +1,49 @@
+Type-erase Cx's default HTTP client slot so auto-trait proofs for a
+Cx-capturing future stop at the slot instead of walking the HTTP client's
+connection pool into rustls's private types (E0275 on Rust 1.99 with tls).
+Upstream: Dicklesworthstone/asupersync#86.
+
+diff --git a/src/cx/cx.rs b/src/cx/cx.rs
+index 753020313..9642f2df0 100644
+--- a/src/cx/cx.rs
++++ b/src/cx/cx.rs
+@@ -143,9 +143,27 @@ fn noop_waker() -> Waker {
+ 
+ /// Grouped handle fields shared behind a single `Arc` to reduce per-clone
+ /// refcount operations from ~13 to 1 for this bundle.
++/// The default HTTP client, behind a trait object.
++///
++/// Storing the concrete `HttpClient` here made every `Cx` structurally contain
++/// the client's connection pool, which under the `tls` feature reaches deep
++/// into rustls's private message types. Proving `Send` for any future that
++/// captures a `Cx` then walked that whole graph and overflowed the trait
++/// solver's recursion limit downstream (E0275). The `Send + Sync` supertraits
++/// end auto-trait proofs at this slot.
++trait DefaultHttpClient: Send + Sync {
++    fn client(&self) -> crate::http::h1::HttpClient;
++}
++
++impl DefaultHttpClient for crate::http::h1::HttpClient {
++    fn client(&self) -> crate::http::h1::HttpClient {
++        self.clone()
++    }
++}
++
+ #[derive(Clone)]
+ struct DefaultHttpClientSlot {
+-    inner: Arc<std::sync::OnceLock<crate::http::h1::HttpClient>>,
++    inner: Arc<std::sync::OnceLock<Arc<dyn DefaultHttpClient>>>,
+ }
+ 
+ impl Default for DefaultHttpClientSlot {
+@@ -167,8 +185,8 @@ impl std::fmt::Debug for DefaultHttpClientSlot {
+ impl DefaultHttpClientSlot {
+     fn get_or_init(&self) -> crate::http::h1::HttpClient {
+         self.inner
+-            .get_or_init(crate::http::h1::HttpClient::new)
+-            .clone()
++            .get_or_init(|| Arc::new(crate::http::h1::HttpClient::new()))
++            .client()
+     }
+ }
+ 
