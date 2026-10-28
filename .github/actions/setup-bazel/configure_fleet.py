@@ -72,7 +72,7 @@ build --local_resources=memory=HOST_RAM*.5
 # Windows keeps build scripts and tests on the hosted runner. MSVC paths for
 # remote Rust compilation/linking are shared through the V: toolchain drive.
 {execution}build --strategy=Rustc=remote
-build --bes_backend=grpc://ubuntu-main:1985
+build --bes_backend=grpc://{host}:1985
 build --bes_results_url=https://ubuntu-main.tail039078.ts.net/invocation/
 build --bes_timeout=30s
 build --bes_upload_mode=fully_async
@@ -95,4 +95,5 @@ if __name__ == "__main__":
         os.environ.get("TAILSCALE_OUTCOME", ""),
         os.environ["RUNNER_OS"],
         os.environ["RUNNER_ARCH"],
+        host=os.environ.get("BAZEL_FLEET_HOST", "ubuntu-main"),
     )

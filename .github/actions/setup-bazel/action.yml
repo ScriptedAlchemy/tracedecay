@@ -124,6 +124,14 @@ runs:
       env:
         TAILSCALE_OUTCOME: ${{ steps.tailscale.outcome }}
       run: |
+        if [[ "$RUNNER_OS" == Windows && "$TAILSCALE_OUTCOME" == success ]]; then
+          # NRPT/DNS can lag successful enrollment; query the local Tailscale API.
+          if coordinator=$("/c/Program Files/Tailscale/tailscale.exe" ip -4 ubuntu-main); then
+            export BAZEL_FLEET_HOST="$coordinator"
+          else
+            export TAILSCALE_OUTCOME=failure
+          fi
+        fi
         python3 "$GITHUB_ACTION_PATH/configure_fleet.py"
 
     - name: Map the shared Windows compiler path
