@@ -679,7 +679,7 @@ mod tests {
                     "days_since_activation": 30,
                     "views_since_activation": 2,
                     "uses_since_activation": 0,
-                    "verdict": "ignored",
+                    "verdict": "unknown",
                 },
                 {
                     "skill_id": "adopted-skill",

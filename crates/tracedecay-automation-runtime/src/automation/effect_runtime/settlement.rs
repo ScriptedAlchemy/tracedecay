@@ -61,7 +61,7 @@ use crate::automation::runner::{
     RetainedCombinedReviewSettlementGuards, ReusedSchedulerSkip,
 };
 use crate::automation::{AutomationCommittedReceipt, AutomationRunError};
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::Result;
 
 #[cfg(test)]
 #[path = "settlement/tests.rs"]
@@ -484,28 +484,6 @@ fn agent_task_kind(task: AutomationTaskV1) -> AgentTaskKind {
         AutomationTaskV1::CombinedReview => AgentTaskKind::CombinedReview,
         AutomationTaskV1::UserJob => AgentTaskKind::UserJob,
     }
-}
-
-/// The released proposal store (`fact_proposals.json`) and the archive its
-/// retirement wrote are a shape this binary neither reads nor retires.
-async fn refuse_released_fact_proposal_history(dashboard_root: &Path) -> Result<()> {
-    for name in ["fact_proposals.json", "fact_proposals.archive"] {
-        let path = dashboard_root.join(name);
-        let probe = path.clone();
-        if crate::automation::blocking_fs(move || std::fs::symlink_metadata(probe))
-            .await
-            .is_ok()
-        {
-            return Err(TraceDecayError::reset_required(
-                "automation fact proposal store",
-                format!(
-                    "'{}' is the released fact proposal history shape",
-                    path.display()
-                ),
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// Already-admitted retained request handed upward by the composition root.
@@ -1075,7 +1053,6 @@ impl AutomationEffectAuthority {
             "{}.json",
             journal_key.as_str().trim_start_matches("sha256:")
         ));
-        refuse_released_fact_proposal_history(&dashboard_root).await?;
         let task = request.task_kind();
         let retained_operation = RetainedSurfaceOperation::FactStoreCurate;
         let operation =
