@@ -1,4 +1,5 @@
 use crate::support::*;
+use tracedecay_automation_runtime::automation::scheduler::AutomationTaskLock;
 
 #[tokio::test]
 async fn scheduler_memory_curator_respects_failure_cooldown() {
@@ -230,57 +231,17 @@ async fn scheduler_skill_writer_skips_without_new_session_activity_since_last_su
 }
 
 #[tokio::test]
-async fn memory_curator_runner_recovers_stale_scheduler_lock_file() {
-    let temp = tempdir().unwrap();
-    let cg = init_project(temp.path()).await;
-    let lock_dir = cg.store_layout().dashboard_root.join("automation_locks");
-    fs::create_dir_all(&lock_dir).unwrap();
-    let lock_path = lock_dir.join("memory_curator.lock");
-    fs::write(&lock_path, "pid=999999\ncreated_at=100\n").unwrap();
-    let backend = JsonBackend::new(json!({"ops": []}));
-    let config = scheduler_config(None, None);
-
-    let run = run_memory_curator(
-        &cg,
-        &config,
-        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
-        &backend,
-        MemoryCuratorAutomationOptions {
-            trigger: AutomationTrigger::Scheduler,
-            fact_review_limit: 4,
-            min_confidence: 0.5,
-            run_id: None,
-        },
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(backend.calls(), 0);
-    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
-    assert_eq!(
-        run.ledger_record.error.as_deref(),
-        Some("scheduler_schedule_manual")
-    );
-    assert!(!lock_path.exists());
-}
-
-#[tokio::test]
 async fn scheduler_memory_curator_ledgers_active_lock_skip() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     seed_duplicate_facts(&cg).await;
-    let lock_dir = cg.store_layout().dashboard_root.join("automation_locks");
-    fs::create_dir_all(&lock_dir).unwrap();
-    let lock_path = lock_dir.join("memory_curator.lock");
-    fs::write(
-        &lock_path,
-        format!(
-            "pid={}\ncreated_at={}\n",
-            std::process::id(),
-            current_timestamp()
-        ),
+    let _held_lock = AutomationTaskLock::try_acquire(
+        &cg.store_layout().dashboard_root,
+        AgentTaskKind::MemoryCurator,
     )
-    .unwrap();
+    .await
+    .unwrap()
+    .expect("fresh key");
     let backend = JsonBackend::new(json!({"ops": []}));
     let config = scheduler_config(None, None);
 
@@ -305,7 +266,6 @@ async fn scheduler_memory_curator_ledgers_active_lock_skip() {
         run.ledger_record.error.as_deref(),
         Some("scheduler_lock_active")
     );
-    assert!(lock_path.exists());
     let records = load_run_records(&cg.store_layout().dashboard_root, 10)
         .await
         .unwrap();
