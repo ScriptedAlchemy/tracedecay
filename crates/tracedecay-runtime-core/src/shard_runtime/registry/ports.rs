@@ -136,18 +136,26 @@ impl ShardRuntimePublisher for LifecycleShardRuntimePublisher {
             runtime
                 .transition(RuntimeMaintenanceStateV1::Opening)
                 .map_err(runtime_lifecycle_failure)?;
-            // A `RuntimeHandle` held across the await overflows the `Send`
-            // proof (rust-lang/rust#159228), so it drops before publication.
-            let attachment =
-                LifecycleShardRuntimeAttachment::new(RepositoryPhysicalAttachmentFactory);
-            let physical = {
-                let executor = crate::native_runtime::handle().ok_or(
-                    StoreRuntimeRegistryFailure::RuntimeUnavailable {
-                        operation: "publish physical registered runtime",
-                    },
-                )?;
-                attachment.attach(&executor, &request, AdmissionConfigV1::default())?
-            };
+            let executor = crate::native_runtime::handle().ok_or(
+                StoreRuntimeRegistryFailure::RuntimeUnavailable {
+                    operation: "publish physical registered runtime",
+                },
+            )?;
+            // Attaching opens the file and parks its thread until the writer
+            // and readers have opened it on the storage pool.
+            let attach_request = request.clone();
+            let physical =
+                crate::native_runtime::spawn_blocking(move || {
+                    LifecycleShardRuntimeAttachment::new(RepositoryPhysicalAttachmentFactory)
+                        .attach(&executor, &attach_request, AdmissionConfigV1::default())
+                })
+                .await
+                .map_err(|message| {
+                    StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                        operation: "attach rusqlite repository runtime",
+                        message,
+                    }
+                })??;
             publish_lifecycle_runtime(request, runtime, physical).await
         })
     }
@@ -162,7 +170,7 @@ async fn publish_lifecycle_runtime(
         && let Err(error) =
             install_final_schema_before_publication(&request, attachment.as_physical()).await
     {
-        attachment.abort(request.locator.is_prospective());
+        let _ = attachment.abort(request.locator.is_prospective()).await;
         return Err(error);
     }
     if request.mode == StoreRuntimeOpenMode::Existing
@@ -171,7 +179,7 @@ async fn publish_lifecycle_runtime(
             verify_final_schema_before_existing_publication(&request, attachment.as_physical())
                 .await
     {
-        attachment.abort(request.locator.is_prospective());
+        let _ = attachment.abort(request.locator.is_prospective()).await;
         return Err(error);
     }
     if request.mode == StoreRuntimeOpenMode::Existing
@@ -181,34 +189,26 @@ async fn publish_lifecycle_runtime(
                 .await
     {
         // This failed attachment must finish closing before the registry can
-        // retry at a new epoch. Joining its physical workers is blocking work.
-        let created = request.locator.is_prospective();
-        crate::native_runtime::spawn_blocking(move || {
-            if created {
-                attachment.0.abort_initialization()
-            } else {
-                attachment.0.drain()?;
-                attachment.0.close_and_join()
-            }
-        })
-        .await
-        .and_then(|closed| closed)
-        .map_err(
-            |message| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation: "close runtime after writer authority refusal",
-                message,
-            },
-        )?;
+        // retry at a new epoch.
+        attachment
+            .abort(request.locator.is_prospective())
+            .await
+            .map_err(
+                |message| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "close runtime after writer authority refusal",
+                    message,
+                },
+            )?;
         return Err(error);
     }
     if let Err(error) = runtime.transition(RuntimeMaintenanceStateV1::Ready) {
-        attachment.abort(request.locator.is_prospective());
+        let _ = attachment.abort(request.locator.is_prospective()).await;
         return Err(runtime_lifecycle_failure(error));
     }
     if request.locator.is_prospective()
         && let Err(error) = attachment.commit_initialization()
     {
-        attachment.abort(true);
+        let _ = attachment.abort(true).await;
         return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
             operation: "commit initialized SQLite runtime",
             message: error,
@@ -361,13 +361,19 @@ impl LifecyclePhysicalAttachment {
         self.0.commit_initialization()
     }
 
-    fn abort(&self, created: bool) {
-        if created {
-            let _ = self.0.abort_initialization();
-        } else {
-            let _ = self.0.drain();
-            let _ = self.0.close_and_join();
-        }
+    /// Closes an attachment that will not be published. Joining its writer
+    /// and readers parks the calling thread.
+    async fn abort(self, created: bool) -> Result<(), String> {
+        crate::native_runtime::spawn_blocking(move || {
+            if created {
+                self.0.abort_initialization()
+            } else {
+                self.0.drain()?;
+                self.0.close_and_join()
+            }
+        })
+        .await
+        .and_then(|closed| closed)
     }
 
     fn into_box(self) -> Box<dyn PhysicalRuntimeAttachment> {

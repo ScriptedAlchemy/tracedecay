@@ -326,8 +326,10 @@ async fn drain_failure_is_terminal_and_retains_evicting_attachment() {
     drop(first);
 
     assert!(matches!(
-        registry.begin_or_join_open(&code_request("worktree.after-fault", &pin)),
-        StoreRuntimeOpenBegin::Rejected(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+        registry
+            .open(code_request("worktree.after-fault", &pin))
+            .await,
+        StoreRuntimeOpenResult::Failed(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
             operation: "drain",
             ..
         })
@@ -356,8 +358,10 @@ async fn incomplete_drain_is_verified_before_physical_close() {
     drop(first);
 
     assert!(matches!(
-        registry.begin_or_join_open(&code_request("worktree.after-incomplete-drain", &pin)),
-        StoreRuntimeOpenBegin::Rejected(
+        registry
+            .open(code_request("worktree.after-incomplete-drain", &pin))
+            .await,
+        StoreRuntimeOpenResult::Failed(
             StoreRuntimeRegistryFailure::PhysicalRuntimeNotDrained { .. }
         )
     ));
@@ -494,20 +498,20 @@ async fn failed_blocking_drain_restores_fault_and_wakes_reserved_open_joiners() 
         )
     ));
 
-    assert!(matches!(
-        initial,
-        StoreRuntimeOpenBegin::Rejected(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-            operation: "drain",
-            ..
-        })
-    ));
-    assert!(matches!(
-        duplicate_join.wait().await,
-        StoreRuntimeOpenResult::Failed(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-            operation: "drain",
-            ..
-        })
-    ));
+    let initial_join = match initial {
+        StoreRuntimeOpenBegin::Started(join) => join,
+        other => panic!("reserved open did not start its eviction: {other:?}"),
+    };
+    let (initial, duplicate) = asupersync::join!(initial_join.wait(), duplicate_join.wait());
+    for result in [initial, duplicate] {
+        assert!(matches!(
+            result,
+            StoreRuntimeOpenResult::Failed(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "drain",
+                ..
+            })
+        ));
+    }
     assert_eq!(control.close_calls.load(Ordering::SeqCst), 0);
     assert_eq!(publisher.calls.load(Ordering::SeqCst), 2);
     assert!(matches!(

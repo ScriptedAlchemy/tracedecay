@@ -9,7 +9,7 @@ use tracedecay_store::{
     StoreRuntimeBindingV1, StoreRuntimeRegistryPublicationV1,
 };
 
-use super::capacity::CapacityReservation;
+use super::capacity::{CapacityReservation, ReservedEviction};
 use super::leases::validate_profile_authority;
 use super::{
     PublishedShardRuntime, ReadyRuntime, RegistryEntry, RegistryState, RuntimeLocatorRecord,
@@ -327,13 +327,14 @@ impl StoreRuntimeRegistry {
             (binding, attempt, updates, join, eviction)
         };
 
-        if let Some(eviction) = eviction
-            && let Err(failure) = self.complete_eviction(eviction)
-        {
-            self.fail_reserved_open(&key, attempt, &updates, failure.clone());
-            return StoreRuntimeOpenBegin::Rejected(failure);
-        }
-
+        // A refused closure is dropped unrun, and its eviction completes inline.
+        let eviction = eviction.map(|reservation| {
+            let (outcomes, evicted) = std::sync::mpsc::channel();
+            (
+                ReservedEviction::new(self.clone(), reservation, outcomes),
+                evicted,
+            )
+        });
         let registry = self.clone();
         let database_authority = request.database_authority.clone();
         let mode = request.mode;
@@ -341,6 +342,21 @@ impl StoreRuntimeRegistry {
         let expected_opened_file_identity = request.expected_opened_file_identity;
         let guard = OpenAttemptGuard::new(registry.clone(), key.clone(), attempt, updates);
         let spawned = self.inner.operations.retain(move |cx| async move {
+            if let Some((mut eviction, evicted)) = eviction {
+                let queued =
+                    crate::native_runtime::spawn_blocking(move || eviction.complete()).await;
+                if let Err(failure) = evicted.try_recv().unwrap_or_else(|_| {
+                    Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                        operation: "evict idle registered runtime for open",
+                        message: queued
+                            .err()
+                            .unwrap_or_else(|| "eviction ended without an outcome".to_owned()),
+                    })
+                }) {
+                    guard.complete(Err(failure));
+                    return;
+                }
+            }
             let outcome = registry
                 .build_runtime(&key, binding, database_authority, mode, access)
                 .await;
@@ -532,26 +548,6 @@ impl StoreRuntimeRegistry {
             }
         }
         Ok(())
-    }
-
-    fn fail_reserved_open(
-        &self,
-        key: &StoreRuntimeKey,
-        attempt: u64,
-        updates: &watch::Sender<OpenState>,
-        failure: StoreRuntimeRegistryFailure,
-    ) {
-        let mut state = self.lock_state();
-        let still_opening = matches!(
-            state.entries.get(key),
-            Some(RegistryEntry::Opening(opening)) if opening.attempt == attempt
-        );
-        if still_opening {
-            state.entries.remove(key);
-            if let Err(error) = updates.send(OpenState::Failed(failure)) {
-                tracing::error!(%error, "failed to publish registered runtime open failure");
-            }
-        }
     }
 
     fn build_runtime<'a>(

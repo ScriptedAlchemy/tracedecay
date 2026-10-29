@@ -326,6 +326,96 @@ async fn read_only_open_mounts_readers_without_acquiring_a_writer() {
     assert_health_route(&project, false).await;
 }
 
+/// The store file is a FIFO, so opening it waits until a writer opens the
+/// other end. Only a task on the runtime's single worker does that while the
+/// open waits; a fallback thread ends a wait that parked the worker, so the
+/// failure is an assertion rather than a hang.
+#[cfg(unix)]
+#[asupersync::test]
+async fn store_open_keeps_the_async_worker_serving_while_the_file_opens() {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::sync::atomic::AtomicBool;
+
+    let root = TempDir::new().unwrap();
+    let held = root.path().join("held.db");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&held)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let held = held.canonicalize().unwrap();
+    let resolver = Arc::new(FileResolver::default());
+    resolver.push(held.clone());
+    let registry = StoreRuntimeRegistry::new(
+        asupersync::runtime::Runtime::current_handle().unwrap(),
+        resolver,
+        Arc::new(LifecycleShardRuntimePublisher),
+    )
+    .unwrap();
+
+    let (released_by_worker, fallback_stop) = std::sync::mpsc::channel::<()>();
+    let fallback = {
+        let held = held.clone();
+        std::thread::spawn(move || {
+            let parked = fallback_stop.recv_timeout(Duration::from_secs(10)).is_err();
+            if parked {
+                drop(OpenOptions::new().write(true).open(&held));
+            }
+            parked
+        })
+    };
+    let settled = AtomicBool::new(false);
+    let open = async {
+        let outcome = registry
+            .open(StoreRuntimeOpenRequest::new(
+                profile_shard(),
+                incarnation(),
+                None,
+            ))
+            .await;
+        settled.store(true, Ordering::SeqCst);
+        outcome
+    };
+    let release = async {
+        let cx = asupersync::Cx::current().unwrap();
+        while !settled.load(Ordering::SeqCst) {
+            match OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&held)
+            {
+                Ok(_writer) => {
+                    released_by_worker.send(()).unwrap();
+                    return true;
+                }
+                Err(error) => assert_eq!(error.raw_os_error(), Some(libc::ENXIO)),
+            }
+            asupersync::time::sleep(cx.now(), Duration::from_millis(1)).await;
+        }
+        false
+    };
+    let (outcome, released) = asupersync::join!(open, release);
+    drop(released_by_worker);
+    let parked = fallback.join().unwrap();
+
+    assert!(
+        released && !parked,
+        "the store open parked the runtime's only worker until the fallback thread released the file"
+    );
+    assert!(
+        matches!(
+            outcome,
+            StoreRuntimeOpenResult::Failed(
+                StoreRuntimeRegistryFailure::PhysicalRuntimeFailed { .. }
+            )
+        ),
+        "a FIFO is not a SQLite store: {outcome:?}"
+    );
+}
+
 #[asupersync::test]
 async fn read_only_open_refuses_nonfinal_schema_as_reset_required_before_publication() {
     let root = TempDir::new().unwrap();

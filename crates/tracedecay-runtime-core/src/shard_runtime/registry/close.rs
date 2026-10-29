@@ -7,7 +7,7 @@ use asupersync::channel::watch;
 
 use tracedecay_store::{RuntimeMaintenanceStateV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
-use super::capacity::{EvictionReservation, drain_and_close_physical};
+use super::capacity::{ReservedEviction, drain_and_close_physical};
 use super::{
     EvictingRuntime, RegistryEntry, StoreRuntimeKey, StoreRuntimeOwnerAttachment,
     StoreRuntimeRegistry, StoreRuntimeRegistryFailure,
@@ -126,34 +126,6 @@ impl Drop for CloseAttemptGuard {
     }
 }
 
-/// Completes one reserved shutdown eviction exactly once, inline when its
-/// settlement task never runs.
-struct ShutdownEviction {
-    registry: StoreRuntimeRegistry,
-    reservation: Option<EvictionReservation>,
-    outcomes: std::sync::mpsc::Sender<Result<(), StoreRuntimeRegistryFailure>>,
-}
-
-impl ShutdownEviction {
-    fn complete(&mut self) {
-        if let Some(reservation) = self.reservation.take() {
-            let outcome = self.registry.complete_eviction(reservation);
-            if let Err(std::sync::mpsc::SendError(Err(failure))) = self.outcomes.send(outcome) {
-                tracing::warn!(
-                    ?failure,
-                    "shutdown close failed after its waiter stopped waiting"
-                );
-            }
-        }
-    }
-}
-
-impl Drop for ShutdownEviction {
-    fn drop(&mut self) {
-        self.complete();
-    }
-}
-
 impl StoreRuntimeRegistry {
     /// Closes every mounted runtime that no lease, queued work, profile pin,
     /// or graph lease still holds, so each writer runs its shutdown TRUNCATE
@@ -256,11 +228,7 @@ impl StoreRuntimeRegistry {
         let mut first_failure = reserve_failure;
         let (outcomes, results) = std::sync::mpsc::channel();
         for reservation in reservations {
-            let mut eviction = ShutdownEviction {
-                registry: self.clone(),
-                reservation: Some(reservation),
-                outcomes: outcomes.clone(),
-            };
+            let mut eviction = ReservedEviction::new(self.clone(), reservation, outcomes.clone());
             // A refused closure is dropped unrun, and its eviction completes inline.
             if let Err(error) = self
                 .inner
