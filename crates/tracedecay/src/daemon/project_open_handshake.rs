@@ -275,8 +275,10 @@ pub(crate) fn project_open_error_response(
             ErrorCode::InternalError,
             detail.clone(),
             Some(json!({
-                "kind": "project_route_open_backoff",
+                "reason_code": "project_route_open_backoff",
                 "retryable": true,
+                "detail": detail,
+                "kind": "project_route_open_backoff",
                 "retry_after_ms": retry_after_ms,
             })),
         ),

@@ -1958,21 +1958,54 @@ pub(crate) mod tests {
         assert!(error.to_string().contains("unknown requested profile_id"));
     }
 
-    #[test]
-    fn direct_outputs_cover_train_and_validation() {
-        let fixture = packaged_fixture();
-        let fixture_root = fixture.root();
-        let workload = workload();
-        let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-            repo_root: fixture_root,
-            admitted_scope: fixture_admitted_scope,
-            workload_path: None,
-            profile_ids: Some(&["query-fallback".to_owned()]),
-        })
-        .expect("generate");
+    /// Exercise candidate and resource contracts against the same measured
+    /// evaluation the report uses. The caller isolates that evaluation in its
+    /// own process, so peak RSS cannot include concurrently running fixtures.
+    pub(crate) fn generate_and_verify_baseline_outputs(
+        fixture_root: &Path,
+        workload: &CandidateWorkloadV1,
+        admitted_scope: AdmittedCorpusScopeFn,
+    ) -> GenerateCandidateOutputsResultV1 {
+        let mut corpora = PublishedCorpusCache::default();
+        let result = generate_candidate_outputs_sharing_corpora(
+            &GenerateCandidateOutputsOptions {
+                repo_root: fixture_root,
+                admitted_scope,
+                workload_path: None,
+                profile_ids: Some(&["query-fallback".to_owned()]),
+            },
+            &mut corpora,
+        )
+        .expect("generate baseline candidates and resource measurements");
+        assert_direct_outputs_cover_train_and_validation(fixture_root, workload, &result);
+        assert_distinct_ten_x_corpus_produces_measured_resource_evidence(
+            fixture_root,
+            workload,
+            &result,
+            &corpora,
+        );
+        assert_resource_evidence_enforces_state_and_exact_catalog_without_size_caps(
+            fixture_root,
+            workload,
+            &result,
+        );
+        assert_candidate_bytes_match_direct_production_calls(
+            fixture_root,
+            workload,
+            &result,
+            admitted_scope,
+        );
+        result
+    }
+
+    fn assert_direct_outputs_cover_train_and_validation(
+        fixture_root: &Path,
+        workload: &CandidateWorkloadV1,
+        result: &GenerateCandidateOutputsResultV1,
+    ) {
         assert_eq!(result.outputs.len(), 2);
         let expected_corpus_digest =
-            compute_corpus_digest(fixture_root, &workload).expect("corpus digest");
+            compute_corpus_digest(fixture_root, workload).expect("corpus digest");
         for output in &result.outputs {
             assert_eq!(output.schema_version, 2);
             assert!(output.partition == "train" || output.partition == "validation");
@@ -2201,46 +2234,14 @@ pub(crate) mod tests {
         }
     }
 
-    #[test]
-    fn distinct_ten_x_corpus_produces_measured_resource_evidence() {
-        const CHILD_ENV: &str = "TRACEDECAY_RESOURCE_EVIDENCE_TEST_CHILD";
-        if std::env::var_os(CHILD_ENV).is_some() {
-            assert_distinct_ten_x_corpus_produces_measured_resource_evidence();
-            return;
-        }
-
-        let output = std::process::Command::new(
-            std::env::current_exe().expect("resource test binary has a current executable"),
-        )
-        .args([
-            "--exact",
-            "search_eval::candidate_output::tests::distinct_ten_x_corpus_produces_measured_resource_evidence",
-            "--nocapture",
-        ])
-        .env(CHILD_ENV, "1")
-        .output()
-        .expect("run resource measurement in a dedicated process");
-        assert!(
-            output.status.success(),
-            "dedicated resource measurement failed:\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    fn assert_distinct_ten_x_corpus_produces_measured_resource_evidence() {
-        let fixture = packaged_fixture();
-        let fixture_root = fixture.root();
-        let workload = workload();
-        let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-            repo_root: fixture_root,
-            admitted_scope: fixture_admitted_scope,
-            workload_path: None,
-            profile_ids: Some(&["query-fallback".to_owned()]),
-        })
-        .expect("generate");
+    fn assert_distinct_ten_x_corpus_produces_measured_resource_evidence(
+        fixture_root: &Path,
+        workload: &CandidateWorkloadV1,
+        result: &GenerateCandidateOutputsResultV1,
+        corpora: &PublishedCorpusCache,
+    ) {
         let report =
-            crate::evaluate_generated_outputs(fixture_root, &workload, &result).expect("evaluate");
+            crate::evaluate_generated_outputs(fixture_root, workload, result).expect("evaluate");
 
         let expected_status = crate::DirectEvaluationStatusV1::Fail;
         #[cfg(windows)]
@@ -2280,7 +2281,7 @@ pub(crate) mod tests {
             }
         }
         let failed_report =
-            crate::evaluate_generated_outputs(fixture_root, &workload, &quality_failure)
+            crate::evaluate_generated_outputs(fixture_root, workload, &quality_failure)
                 .expect("evaluate known quality failure with measured resources");
         assert_eq!(
             failed_report.status,
@@ -2299,10 +2300,8 @@ pub(crate) mod tests {
                 .any(|profile| profile.failed_queries > 0)
         );
 
-        let current = publish_corpus(fixture_root, &workload, fixture_admitted_scope)
-            .expect("current corpus");
-        let ten_x = publish_corpus_with_scale(fixture_root, &workload, 10, fixture_admitted_scope)
-            .expect("10x corpus");
+        let current = corpora.get(1).expect("generated current corpus");
+        let ten_x = corpora.get(10).expect("generated 10x corpus");
         for (scope_key, scoped) in &current.scopes {
             let (Some(scoped), Some(ten_x_scoped)) = (scoped, &ten_x.scopes[scope_key]) else {
                 assert!(scoped.is_none() && ten_x.scopes[scope_key].is_none());
@@ -2320,7 +2319,7 @@ pub(crate) mod tests {
 
         let mut missing_resource = result.clone();
         missing_resource.outputs[0].resources.remove("10x");
-        let report = crate::evaluate_generated_outputs(fixture_root, &workload, &missing_resource)
+        let report = crate::evaluate_generated_outputs(fixture_root, workload, &missing_resource)
             .expect("evaluate");
         assert_eq!(report.status, crate::DirectEvaluationStatusV1::Fail);
         assert_eq!(
@@ -2330,48 +2329,45 @@ pub(crate) mod tests {
 
         let mut duplicate_query = result.clone();
         duplicate_query.outputs[0].queries[1] = duplicate_query.outputs[0].queries[0].clone();
-        let error = crate::evaluate_generated_outputs(fixture_root, &workload, &duplicate_query)
+        let error = crate::evaluate_generated_outputs(fixture_root, workload, &duplicate_query)
             .expect_err("duplicate query row");
         assert!(error.to_string().contains("duplicate query row"));
 
         let mut duplicate_profile_partition = result.clone();
         duplicate_profile_partition.outputs[1] = duplicate_profile_partition.outputs[0].clone();
-        let error = crate::evaluate_generated_outputs(
-            fixture_root,
-            &workload,
-            &duplicate_profile_partition,
-        )
-        .expect_err("duplicate profile partition");
+        let error =
+            crate::evaluate_generated_outputs(fixture_root, workload, &duplicate_profile_partition)
+                .expect_err("duplicate profile partition");
         assert!(error.to_string().contains("duplicate profile/partition"));
 
-        let mut forged = result;
+        let mut forged = result.clone();
         forged.outputs[0].production_boundary = "lookalike".to_owned();
-        let error = crate::evaluate_generated_outputs(fixture_root, &workload, &forged)
+        let error = crate::evaluate_generated_outputs(fixture_root, workload, &forged)
             .expect_err("forged production boundary");
         assert!(error.to_string().contains("production boundary"));
 
         forged.outputs[0].production_boundary = PRODUCTION_BOUNDARY.to_owned();
         forged.outputs[0].fixture_source_commit = "forged".to_owned();
-        let error = crate::evaluate_generated_outputs(fixture_root, &workload, &forged)
+        let error = crate::evaluate_generated_outputs(fixture_root, workload, &forged)
             .expect_err("forged source commit");
         assert!(error.to_string().contains("source commit"));
 
         forged.outputs[0].fixture_source_commit = workload.source_repository_commit.clone();
         forged.outputs[0].corpus_digest = canonical_sha256(&"forged corpus").expect("digest");
-        let error = crate::evaluate_generated_outputs(fixture_root, &workload, &forged)
+        let error = crate::evaluate_generated_outputs(fixture_root, workload, &forged)
             .expect_err("forged corpus digest");
         assert!(error.to_string().contains("byte-exact corpus"));
 
         forged.outputs[0].corpus_digest =
-            compute_corpus_digest(fixture_root, &workload).expect("corpus digest");
+            compute_corpus_digest(fixture_root, workload).expect("corpus digest");
         forged.outputs[0].toolchain.clear();
-        let error = crate::evaluate_generated_outputs(fixture_root, &workload, &forged)
+        let error = crate::evaluate_generated_outputs(fixture_root, workload, &forged)
             .expect_err("missing environment");
         assert!(error.to_string().contains("environment summary"));
 
         forged.outputs[0].toolchain = "rustc:test".to_owned();
         forged.outputs[0].queries[0].abstained = !forged.outputs[0].queries[0].ranked.is_empty();
-        let error = crate::evaluate_generated_outputs(fixture_root, &workload, &forged)
+        let error = crate::evaluate_generated_outputs(fixture_root, workload, &forged)
             .expect_err("inconsistent abstention");
         assert!(error.to_string().contains("inconsistent abstention"));
     }
@@ -2501,19 +2497,11 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn resource_evidence_enforces_state_and_exact_catalog_without_size_caps() {
-        let fixture = packaged_fixture();
-        let fixture_root = fixture.root();
-        let workload = workload();
-        let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-            repo_root: fixture_root,
-            admitted_scope: fixture_admitted_scope,
-            workload_path: None,
-            profile_ids: Some(&["query-fallback".to_owned()]),
-        })
-        .expect("generate");
-
+    fn assert_resource_evidence_enforces_state_and_exact_catalog_without_size_caps(
+        fixture_root: &Path,
+        workload: &CandidateWorkloadV1,
+        result: &GenerateCandidateOutputsResultV1,
+    ) {
         let mut invalid_pending = result.clone();
         let current = invalid_pending.outputs[0]
             .resources
@@ -2521,7 +2509,7 @@ pub(crate) mod tests {
             .expect("current resource");
         current.status = ResourceMeasurementStatusV1::Pending;
         current.pending_reason = None;
-        let report = crate::evaluate_generated_outputs(fixture_root, &workload, &invalid_pending)
+        let report = crate::evaluate_generated_outputs(fixture_root, workload, &invalid_pending)
             .expect("evaluate");
         assert_eq!(
             report.profiles[0].resource_status,
@@ -2539,7 +2527,7 @@ pub(crate) mod tests {
             .get_mut("10x")
             .expect("10x resource")
             .eligible_chunks = current_chunks;
-        let report = crate::evaluate_generated_outputs(fixture_root, &workload, &wrong_scale)
+        let report = crate::evaluate_generated_outputs(fixture_root, workload, &wrong_scale)
             .expect("evaluate");
         assert_eq!(
             report.profiles[0].resource_status,
@@ -2555,7 +2543,7 @@ pub(crate) mod tests {
         current.peak_rss_bytes = Some(u64::MAX);
         current.pending_reason = None;
         current.latency_samples_us.fill(u64::MAX);
-        let report = crate::evaluate_generated_outputs(fixture_root, &workload, &large_measurement)
+        let report = crate::evaluate_generated_outputs(fixture_root, workload, &large_measurement)
             .expect("evaluate");
         // Only "current" was rewritten as measured; "10x" keeps the host's
         // own sample, which stays pending where peak RSS is unreadable.
@@ -2566,7 +2554,7 @@ pub(crate) mod tests {
         };
         assert_eq!(report.profiles[0].resource_status, expected_large);
 
-        let mut extra_resource = result;
+        let mut extra_resource = result.clone();
         let synthetic = extra_resource.outputs[0]
             .resources
             .get("current")
@@ -2575,7 +2563,7 @@ pub(crate) mod tests {
         extra_resource.outputs[0]
             .resources
             .insert("synthetic".to_owned(), synthetic);
-        let report = crate::evaluate_generated_outputs(fixture_root, &workload, &extra_resource)
+        let report = crate::evaluate_generated_outputs(fixture_root, workload, &extra_resource)
             .expect("evaluate");
         assert_eq!(
             report.profiles[0].resource_status,
@@ -2583,17 +2571,12 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn candidate_bytes_match_direct_production_calls() {
-        let fixture = packaged_fixture();
-        let workload = workload();
-        let result = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-            repo_root: fixture.root(),
-            admitted_scope: fixture_admitted_scope,
-            workload_path: None,
-            profile_ids: Some(&["query-fallback".to_owned()]),
-        })
-        .expect("generate");
+    fn assert_candidate_bytes_match_direct_production_calls(
+        fixture_root: &Path,
+        workload: &CandidateWorkloadV1,
+        result: &GenerateCandidateOutputsResultV1,
+        admitted_scope: AdmittedCorpusScopeFn,
+    ) {
         let train = result
             .outputs
             .iter()
@@ -2601,11 +2584,11 @@ pub(crate) mod tests {
             .expect("train output");
         let probe = train.queries.first().expect("at least one train query");
         let direct = retrieve_partition_query_bytes(
-            fixture.root(),
-            &workload,
+            fixture_root,
+            workload,
             "query-fallback",
             &probe.query_id,
-            fixture_admitted_scope,
+            admitted_scope,
         )
         .expect("direct retrieve");
         let generated = canonical_json_bytes(probe).expect("generated bytes");

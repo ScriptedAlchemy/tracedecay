@@ -732,6 +732,7 @@ async fn notify_unbound_worktree(
     }
 }
 
+#[tracing::instrument(name = "hosts.hooks.prepare_bound", level = "trace", skip_all)]
 fn prepare_bound_hook(
     runtime: &HookRuntimeV1,
     host: NativeHostIdentityV1,
@@ -998,6 +999,7 @@ enum PendingEnvelopeV1 {
     Unavailable,
 }
 
+#[tracing::instrument(name = "hosts.hooks.pending_envelope", level = "trace", skip_all)]
 fn replay_envelope_if_pending(
     data_root: &Path,
     host: NativeHostIdentityV1,

@@ -1032,4 +1032,27 @@ mod tests {
         });
         assert!(!error_is_project_open_retryable(&prose_only));
     }
+
+    #[test]
+    fn daemon_tool_call_error_round_trips_project_open_backoff() {
+        let refusal = super::super::project_open_error_response(
+            json!(1),
+            &tracedecay_domain::errors::TraceDecayError::project_open(
+                tracedecay_domain::errors::ProjectOpenFailureKind::BackedOff {
+                    retry_after_ms: 250,
+                },
+                "project open backed off",
+            ),
+        )
+        .error
+        .expect("backoff is a JSON-RPC error");
+
+        let error = daemon_tool_call_error(refusal);
+
+        let (reason_code, retryable, _) = error
+            .project_route_context()
+            .unwrap_or_else(|| panic!("backoff must retain typed refusal data: {error:?}"));
+        assert_eq!(reason_code, "project_route_open_backoff");
+        assert!(retryable);
+    }
 }
