@@ -25,7 +25,6 @@ mod triggers;
 
 #[cfg(test)]
 pub(crate) use triggers::SOURCE_CURSOR_ADVANCE_DELETE_GUARD_SQL;
-pub(crate) use triggers::TEMPORAL_OBSERVATION_EFFECT_DELETE_GUARD_SQL;
 
 use audit::{
     AuditCheckpoint, AuditProgress, audit_checkpoint_is_plausible, ensure_audit_checkpoint_schema,

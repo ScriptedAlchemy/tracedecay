@@ -1269,25 +1269,6 @@ async fn converge_registered_schema_on(
     rearmed.await.map_err(|error| {
         global_db_operation_message("rearm queued projection retries", error.durable_detail())
     })?;
-    let parked: Pin<
-        Box<dyn Future<Output = tracedecay_store::ProjectionStoreResult<u64>> + Send + '_>,
-    > = Box::pin(observation_projection::rearm_project_path_collisions(
-        database,
-    ));
-    parked.await.map_err(|error| {
-        global_db_operation_message(
-            "rearm Codex project path collisions",
-            error.durable_detail(),
-        )
-    })?;
-    let echoes: Pin<
-        Box<dyn Future<Output = tracedecay_store::ProjectionStoreResult<()>> + Send + '_>,
-    > = Box::pin(observation_projection::converge_codex_response_echoes(
-        database,
-    ));
-    echoes.await.map_err(|error| {
-        global_db_operation_message("retire Codex response echoes", error.durable_detail())
-    })?;
     let ensured: Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + '_>> =
         Box::pin(ensure_authority_invariants(
             database,
