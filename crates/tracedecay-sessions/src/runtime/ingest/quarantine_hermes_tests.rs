@@ -35,17 +35,10 @@ fn write_state_db(home: &Path) -> (PathBuf, PathBuf) {
     let state_db = profile.join("state.db");
     let connection = rusqlite::Connection::open(&state_db).unwrap();
     connection
-        .execute_batch(
-            "PRAGMA journal_mode = DELETE;
-             CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT);
-             CREATE TABLE messages (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 session_id TEXT NOT NULL,
-                 role TEXT NOT NULL,
-                 content TEXT,
-                 timestamp REAL NOT NULL
-             );",
-        )
+        .execute_batch("PRAGMA journal_mode = DELETE;")
+        .unwrap();
+    connection
+        .execute_batch(crate::runtime::hosts::hermes::TEST_STATE_DB_SCHEMA_SQL)
         .unwrap();
     for (row, session) in ["refused", "sibling"].into_iter().enumerate() {
         connection

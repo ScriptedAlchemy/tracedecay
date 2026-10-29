@@ -915,33 +915,14 @@ def _check_provider_verbs(plugin, ctx, host_home: Path, messages: list):
         ok("memory tool calls stay bound to the provider's session project")
 
         provider.handle_tool_call(
-            "fact_add",
-            {"content": "legacy alias", "fact_type": "decision"},
-        )
-        name, args, kwargs = calls[-1]
-        assert name == "tracedecay_fact_store_add", calls
-        assert "action" not in args, args
-        assert args["category"] == "decision", args
-        assert "fact_type" not in args, args
-        assert kwargs["project_root"] == expected_project_root, kwargs
-        conflict = provider.handle_tool_call(
-            "fact_add",
-            {
-                "content": "conflicting alias",
-                "fact_type": "decision",
-                "category": "observation",
-            },
-        )
-        assert "fact_type and category must agree" in conflict, conflict
-        provider.handle_tool_call(
             "fact_store",
-            {"action": "add", "content": "canonical field", "fact_type": "decision"},
+            {"action": "add", "content": "canonical field", "category": "decision"},
         )
         name, args, _kwargs = calls[-1]
         assert name == "tracedecay_fact_store_add", calls
         assert "action" not in args, args
-        assert args["fact_type"] == "decision" and "category" not in args, args
-        ok("legacy fact aliases translate fact_type without narrowing generic fact_store")
+        assert args["category"] == "decision" and "fact_type" not in args, args
+        ok("fact_store add routes category to the exact fact-store route")
 
         before = len(transcript_calls)
         provider.sync_turn("u", "a", session_id="other-session", messages=messages)
