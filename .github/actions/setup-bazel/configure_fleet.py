@@ -46,6 +46,15 @@ def configure_fleet(
 
     if enabled:
         windows = runner_os == "Windows"
+        fallback = (
+            "# Both Windows hosts use the pinned V: compiler. Recover worker\n"
+            "# infrastructure errors locally; compiler failures remain failures.\n"
+            "build --remote_local_fallback\n"
+            if windows
+            else "# Fleet compilation must not fall back onto the smaller hosted VM.\n"
+            "# Dynamic tests still have their explicitly scheduled local branch.\n"
+            "build --noremote_local_fallback\n"
+        )
         execution = (
             "build --spawn_strategy=local\nbuild --strategy=TestRunner=local\n"
             if windows
@@ -62,12 +71,11 @@ build --remote_instance_name=main
 build --remote_timeout=600
 # Survive brief coordinator restarts; five retries expire in about 3s.
 build --remote_retries=10
-# Fleet compilation must not fall back onto the smaller hosted VM.
-# Dynamic tests still have their explicitly scheduled local branch.
-build --noremote_local_fallback
-build --remote_download_outputs=toplevel
+{fallback}build --remote_download_outputs=toplevel
 build --jobs={16 if windows else 40}
-build --local_resources=cpu=HOST_CPUS
+# Four local Rust actions exhaust Windows hosted commit capacity. Bound local
+# fallback to the hosted-only build's two slots while remote work stays parallel.
+build --local_resources=cpu={2 if windows else "HOST_CPUS"}
 build --local_resources=memory=HOST_RAM*.5
 # Windows keeps build scripts and tests on the hosted runner. MSVC paths for
 # remote Rust compilation/linking are shared through the V: toolchain drive.
