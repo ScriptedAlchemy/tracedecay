@@ -209,7 +209,13 @@ fn resolve_hook_scope(
     project_root: &Path,
     project_id: &tracedecay_domain::ProjectId,
 ) -> std::result::Result<tracedecay_contracts::ResolvedScope, String> {
-    tracedecay_code_index_runtime::resolved_scope_for_project(project_root, project_id)
+    // Hook binding locators depend only on structural identity. Resolving HEAD
+    // opens a repository on every callback and cannot change either locator.
+    let repository_id = tracedecay_runtime_core::scope_identity::repository_id_for(project_root)
+        .map_err(|error| error.to_string())?;
+    let worktree_id = tracedecay_runtime_core::scope_identity::worktree_id_for(project_root)
+        .map_err(|error| error.to_string())?;
+    tracedecay_contracts::ResolvedScope::new(project_id.clone(), repository_id, worktree_id, None)
         .map_err(|error| error.to_string())
 }
 
@@ -221,7 +227,52 @@ fn hook_timings_enabled(profile: &ProfileRoot, project_root: &Path) -> Option<bo
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::*;
+
+    #[test]
+    fn hook_scope_preserves_binding_identity_across_head_changes() {
+        let checkout = tempfile::tempdir().unwrap();
+        let root = checkout.path().canonicalize().unwrap();
+        let project = tracedecay_domain::ProjectId::new("project.hook-scope").unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(&root)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&["init", "-q"]);
+        let mut previous = None;
+        for branch in ["refs/heads/first", "refs/heads/second"] {
+            git(&["symbolic-ref", "HEAD", branch]);
+            let hook = resolve_hook_scope(&root, &project).unwrap();
+            let indexed =
+                tracedecay_code_index_runtime::resolved_scope_for_project(&root, &project).unwrap();
+            assert_eq!(indexed.reference.as_ref().unwrap().as_str(), branch);
+            assert_eq!(hook.repository_id, indexed.repository_id);
+            let locators = tracedecay_agent_hosts::hooks::hook_scope_locators(&hook);
+            assert_eq!(
+                locators,
+                tracedecay_agent_hosts::hooks::hook_scope_locators(&indexed)
+            );
+            if let Some(previous) = previous {
+                assert_eq!(locators, previous);
+            }
+            previous = Some(locators);
+        }
+        let other = tempfile::tempdir().unwrap();
+        let other_scope = resolve_hook_scope(other.path(), &project).unwrap();
+        assert_ne!(
+            resolve_hook_scope(&root, &project).unwrap().worktree_id,
+            other_scope.worktree_id
+        );
+        assert!(resolve_hook_scope(&root.join("missing"), &project).is_err());
+    }
 
     /// Registration is process-global and every slot is a `OnceLock`, so the
     /// whole suite shares one installation. Doing it once here keeps the
