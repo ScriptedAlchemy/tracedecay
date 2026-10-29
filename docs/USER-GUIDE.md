@@ -444,8 +444,7 @@ so run `/hooks` inside Codex after install or recopy.
 Current Codex limitations: TraceDecay drives `codex plugin add` / `remove` but
 cannot reload an active Codex session or trust plugin command hooks for you
 (use `/hooks` after install or recopy). Uninstall drives `codex plugin remove
-tracedecay@personal` and then removes the staged source. The legacy Codex
-configuration files are left unchanged.
+tracedecay@personal` and then removes the staged source.
 
 Kimi's first global install is also two-step: TraceDecay stages source, then
 Kimi Code's `/plugins install <staged-path>` registers it after Kimi's trust
