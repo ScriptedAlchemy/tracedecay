@@ -114,16 +114,19 @@ fn mutate_verified_text_artifact_under_lock(
         ));
     }
     match mutation {
-        VerifiedTextArtifactMutationV1::Attach { descriptor, .. } => match entry.text_artifact() {
-            Some(existing) if existing == &descriptor => return Ok(pointer),
-            Some(_) => {
-                return Err(CodeGenerationRetentionErrorV1::Conflict(
-                    "sealed generation already names a different text artifact".to_owned(),
-                ));
+        VerifiedTextArtifactMutationV1::Attach { descriptor, .. } => {
+            match entry.text_artifact.as_ref() {
+                Some(existing) if existing == &descriptor => return Ok(pointer),
+                Some(_) => {
+                    return Err(CodeGenerationRetentionErrorV1::Conflict(
+                        "sealed generation already names a different text artifact".to_owned(),
+                    ));
+                }
+                None => entry.text_artifact = Some(descriptor),
             }
-            None => entry.text_artifact = Some(descriptor.into()),
-        },
-        VerifiedTextArtifactMutationV1::Withdraw { expected } => match entry.text_artifact() {
+        }
+        VerifiedTextArtifactMutationV1::Withdraw { expected } => match entry.text_artifact.as_ref()
+        {
             Some(existing) if existing == expected => entry.text_artifact = None,
             Some(_) => {
                 return Err(CodeGenerationRetentionErrorV1::Conflict(
@@ -142,10 +145,10 @@ fn mutate_verified_text_artifact_under_lock(
         );
         pointer.generation_index_truncated |= removed > 0;
     }
-    pointer.generation_index_digest = Some(durable_generation_index_digest(
+    pointer.generation_index_digest = durable_generation_index_digest(
         &pointer.generation_index,
         pointer.generation_index_truncated,
-    )?);
+    )?;
     validate_durable_generation_index(&pointer)?;
     let bytes = serde_json::to_vec(&pointer).map_err(|error| {
         CodeGenerationRetentionErrorV1::UnsafeState(format!(
@@ -257,7 +260,7 @@ pub(super) fn plan_collectable_text_artifacts_budgeted_cancellable(
     // staging directory is crash debris and therefore a candidate.
     let mut referenced = BTreeMap::new();
     for entry in active_pointer.map_or_default(|pointer| pointer.generation_index.as_slice()) {
-        if let Some(descriptor) = entry.text_artifact() {
+        if let Some(descriptor) = entry.text_artifact.as_ref() {
             validate_text_artifact_descriptor(descriptor)?;
             // Generations that sealed the same content name one artifact.
             if referenced
@@ -322,7 +325,7 @@ pub(super) fn plan_collectable_text_artifacts_budgeted_cancellable(
     }
     let active_entry_has_artifact = active_pointer.is_some_and(|pointer| {
         pointer.generation_index.iter().any(|entry| {
-            entry.generation_id == pointer.generation_id && entry.text_artifact().is_some()
+            entry.generation_id == pointer.generation_id && entry.text_artifact.is_some()
         })
     });
     let mut active_text_replacement_in_flight = false;
@@ -487,7 +490,7 @@ pub fn find_shared_text_artifact(
         for descriptor in pointer
             .generation_index
             .iter()
-            .filter_map(|entry| entry.text_artifact())
+            .filter_map(|entry| entry.text_artifact.as_ref())
             .filter(|descriptor| descriptor.content_key == *content_key)
         {
             validate_text_artifact_descriptor(descriptor)?;
@@ -523,7 +526,7 @@ fn scope_text_artifact_marks(
             pointer
                 .generation_index
                 .iter()
-                .filter_map(|entry| entry.text_artifact())
+                .filter_map(|entry| entry.text_artifact.as_ref())
                 .map(|descriptor| descriptor.artifact_file.clone()),
         );
     }
@@ -768,11 +771,7 @@ pub(super) fn validate_text_artifact_transaction(
             validate_durable_generation_index(pointer)?;
             let generation = CodeGenerationId::new(pointer.generation_id.clone())
                 .map_err(|error| CodeGenerationRetentionErrorV1::UnsafeState(error.to_string()))?;
-            let index_digest = pointer.generation_index_digest.clone().ok_or_else(|| {
-                CodeGenerationRetentionErrorV1::UnsafeState(
-                    "text-artifact transaction active pointer has no index digest".to_owned(),
-                )
-            })?;
+            let index_digest = pointer.generation_index_digest.clone();
             Ok::<_, CodeGenerationRetentionErrorV1>((generation, index_digest))
         })
         .transpose()?;
@@ -985,15 +984,8 @@ pub(super) fn build_text_artifact_receipt(
     deleted_artifacts: Vec<CodeTextArtifactRetentionCandidateV1>,
     completed_at: UtcMicros,
 ) -> Result<CodeTextArtifactRetentionReceiptV1, CodeGenerationRetentionErrorV1> {
-    let active_generation_index_digest = active_pointer
-        .map(|pointer| {
-            pointer.generation_index_digest.as_deref().ok_or_else(|| {
-                CodeGenerationRetentionErrorV1::UnsafeState(
-                    "active publication pointer has no generation index digest".to_owned(),
-                )
-            })
-        })
-        .transpose()?;
+    let active_generation_index_digest =
+        active_pointer.map(|pointer| pointer.generation_index_digest.as_str());
     let reclaimed_bytes = total_text_artifact_bytes(&deleted_artifacts);
     let material = CodeTextArtifactRetentionReceiptMaterialV1 {
         schema: TEXT_ARTIFACT_RECEIPT_SCHEMA,

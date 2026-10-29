@@ -4608,7 +4608,7 @@ async fn edit_during_text_projection_seals_its_successor_before_the_projection_f
             let pointer = active_pointer();
             let projected = |generation_id: &str| {
                 pointer.generation_index.iter().any(|entry| {
-                    entry.generation_id == generation_id && entry.text_artifact().is_some()
+                    entry.generation_id == generation_id && entry.text_artifact.is_some()
                 })
             };
             // Superseded text owners cancel at their publication fence;
@@ -4628,7 +4628,7 @@ async fn edit_during_text_projection_seals_its_successor_before_the_projection_f
         final_pointer
             .generation_index
             .iter()
-            .map(|entry| (&entry.generation_id, entry.text_artifact().is_some()))
+            .map(|entry| (&entry.generation_id, entry.text_artifact.is_some()))
             .collect::<Vec<_>>()
     );
     let latest = scheduler

@@ -10,8 +10,8 @@ use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::{CodeGenerationId, sha256_hex_suffix};
 
 use super::{
-    ACTIVE_POINTER_FILE, DurableGenerationIndexEntryV1, DurablePublicationPointerV1,
-    GENERATIONS_DIRECTORY, durable_generation_index_digest,
+    ACTIVE_POINTER_FILE, DurableGenerationCardinalityV1, DurableGenerationIndexEntryV1,
+    DurablePublicationPointerV1, GENERATIONS_DIRECTORY, durable_generation_index_digest,
 };
 
 /// One sealed generation file a fixture store holds.
@@ -74,7 +74,11 @@ pub fn write_generation_store_fixture(
         source_reference: None,
         source_revision: None,
         source_tree: None,
-        cardinality: None,
+        cardinality: DurableGenerationCardinalityV1 {
+            file_count: 0,
+            chunk_count: 0,
+            symbol_count: 0,
+        },
         text_artifact: None,
     };
     let generation_index = vec![active_entry];
@@ -89,7 +93,7 @@ pub fn write_generation_store_fixture(
         state_digest: active.state_digest.clone(),
         generation_index,
         generation_index_truncated: true,
-        generation_index_digest: Some(generation_index_digest),
+        generation_index_digest,
     };
     std::fs::write(
         store_root.join(ACTIVE_POINTER_FILE),

@@ -1114,7 +1114,7 @@ pub(super) fn resolve_staged_generation(
         source_total_bytes,
         symbol_count,
         edge_count: count(edges.len())?,
-        ambiguous_name_drops: Some(ambiguous_name_drops),
+        ambiguous_name_drops,
     };
     Ok(StagedResolutionPartsV1 {
         file_evidence,

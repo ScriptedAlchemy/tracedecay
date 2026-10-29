@@ -1531,19 +1531,15 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "durable code-generation index exceeds its entry bound",
             ));
         }
-        match pointer.generation_index_digest.as_deref() {
-            Some(digest)
-                if digest
-                    == Self::generation_index_digest(
-                        &pointer.generation_index,
-                        pointer.generation_index_truncated,
-                    )? => {}
-            None if pointer.generation_index.is_empty() && !pointer.generation_index_truncated => {}
-            _ => {
-                return Err(Self::corruption(
-                    "durable code-generation index digest does not match its entries",
-                ));
-            }
+        if pointer.generation_index_digest
+            != Self::generation_index_digest(
+                &pointer.generation_index,
+                pointer.generation_index_truncated,
+            )?
+        {
+            return Err(Self::corruption(
+                "durable code-generation index digest does not match its entries",
+            ));
         }
         let mut generations = BTreeSet::new();
         let mut exact_revisions = BTreeSet::new();
@@ -2011,10 +2007,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
         match CodeIndexPublishedGenerationV1::partitioned_text_metadata(&bytes) {
             Ok(metadata) => Ok(Some(metadata)),
-            Err(
-                CodeIndexProductionErrorV1::SourceCommitmentsUnavailable
-                | CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(_),
-            ) => Ok(None),
+            Err(CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(_)) => Ok(None),
             Err(error) => Err(Self::corruption(error.to_string())),
         }
     }
@@ -2085,7 +2078,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 }
             },
         ) {
-            Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable) => Ok(None),
             // A generation is a pure function of its source tree, so a
             // manifest revision this build no longer reads is refused rather
             // than repaired: abstain and let the scheduler rebuild it instead
@@ -2264,9 +2256,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let Some(generation) = decoded.map_err(Self::corruption)? else {
             return Ok(None);
         };
-        if let Some(cardinality) = entry.cardinality.as_ref()
-            && Self::generation_cardinality(&generation)? != *cardinality
-        {
+        if Self::generation_cardinality(&generation)? != entry.cardinality {
             return Err(Self::corruption(
                 "durable code-generation cardinality does not match its sealed generation",
             ));
@@ -2474,7 +2464,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
         let manifest = match CodeIndexPublishedGenerationV1::partitioned_text_metadata(&bytes) {
             Ok(manifest) => manifest,
-            Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable) => return Ok(None),
             Err(CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)) => {
                 tracing::warn!(
                     target: "tracedecay::code_index",
@@ -3332,7 +3321,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 .as_ref()
                 .map(|(_, revision, _)| revision.clone()),
             source_tree: exact_git_evidence.map(|(_, _, tree)| tree),
-            cardinality: Some(Self::publication_cardinality(generation)?),
+            cardinality: Self::publication_cardinality(generation)?,
             text_artifact: None,
         });
         generation_index.sort_by(|left, right| {
@@ -3356,7 +3345,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             || removed > 0;
         let generation_index_digest =
             Self::generation_index_digest(&generation_index, generation_index_truncated)?;
-        let mut pointer = match self.disposition {
+        let pointer = match self.disposition {
             CodeIndexPublicationDispositionV1::Active => DurablePublicationPointerV1 {
                 generation_id: generation.manifest().generation_id.as_str().to_owned(),
                 snapshot_content_identity: generation
@@ -3372,17 +3361,17 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 sealed_at_micros: generation.manifest().seal.sealed_at.0,
                 generation_file,
                 state_digest,
-                generation_index: Vec::new(),
-                generation_index_truncated: false,
-                generation_index_digest: None,
+                generation_index,
+                generation_index_truncated,
+                generation_index_digest,
             },
-            CodeIndexPublicationDispositionV1::RetainedHistory => {
-                prior_pointer.ok_or(CodeIndexPublicationStoreErrorV1::CompareAndSwap)?
-            }
+            CodeIndexPublicationDispositionV1::RetainedHistory => DurablePublicationPointerV1 {
+                generation_index,
+                generation_index_truncated,
+                generation_index_digest,
+                ..prior_pointer.ok_or(CodeIndexPublicationStoreErrorV1::CompareAndSwap)?
+            },
         };
-        pointer.generation_index = generation_index;
-        pointer.generation_index_truncated = generation_index_truncated;
-        pointer.generation_index_digest = Some(generation_index_digest);
         let bytes = serde_json::to_vec(&pointer).map_err(|error| {
             CodeIndexPublicationStoreErrorV1::Unavailable(format!(
                 "publication pointer serialization failed: {error}"

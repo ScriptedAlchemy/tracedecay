@@ -623,7 +623,7 @@ fn ambiguity_census_tracks_edited_references() {
             .metadata()
             .generation_statistics()
             .ambiguous_name_drops,
-        Some(1)
+        1
     );
     let removed = assert_sparse_matches_cold(&called, &empty);
     assert_eq!(
@@ -631,7 +631,7 @@ fn ambiguity_census_tracks_edited_references() {
             .metadata()
             .generation_statistics()
             .ambiguous_name_drops,
-        Some(0)
+        0
     );
 }
 
@@ -645,7 +645,7 @@ fn ambiguity_census_tracks_carried_references() {
             .metadata()
             .generation_statistics()
             .ambiguous_name_drops,
-        Some(1)
+        1
     );
     let removed = assert_sparse_matches_cold(&ambiguous, &unique);
     assert_eq!(
@@ -653,57 +653,8 @@ fn ambiguity_census_tracks_carried_references() {
             .metadata()
             .generation_statistics()
             .ambiguous_name_drops,
-        Some(0)
+        0
     );
-}
-
-#[test]
-fn ambiguity_census_preserves_unknown_parent_count() {
-    let mut store = MemorySealedPublicationStoreV1::default();
-    let before = ambiguous_rust_tree(AMBIGUOUS_CALL, "pub fn choice() -> u32 { 1 }");
-    let initial = publish(&mut owner(&store), &before, 1_100_000);
-    let mut legacy = store
-        .decode_active(&scope())
-        .expect("decode")
-        .expect("active");
-    assert_eq!(legacy.statistics.ambiguous_name_drops, Some(1));
-    let mut statistics = serde_json::to_value(&legacy.statistics).expect("statistics encode");
-    statistics
-        .as_object_mut()
-        .expect("statistics object")
-        .remove("ambiguous_name_drops");
-    legacy.statistics = serde_json::from_value(statistics).expect("legacy statistics decode");
-    let mut preparation = store
-        .prepare(&scope(), Some(&initial.manifest().generation_id))
-        .expect("prepare legacy publication");
-    let manifest_bytes = legacy
-        .encode_partitioned_sealed(|segment| {
-            preparation
-                .write_segment(segment)
-                .map_err(CodeIndexProductionErrorV1::Publication)
-        })
-        .expect("seal legacy publication");
-    let publication = CodeIndexSealedPublicationV1::from_prepared(
-        Arc::from(manifest_bytes),
-        legacy.projection().clone(),
-        Some(CodeIndexColdBuildReasonV1::NoParent),
-        (0, 0, 0),
-    )
-    .expect("verified legacy publication");
-    store
-        .commit(&mut preparation, &publication)
-        .expect("legacy publication");
-    let after = ambiguous_rust_tree(NO_AMBIGUOUS_CALL, "pub fn choice() -> u32 { 1 }");
-    let sparse = publish(&mut owner(&store), &after, 1_200_000);
-    assert_eq!(sparse.cold_reason(), None);
-    assert_eq!(
-        sparse
-            .metadata()
-            .generation_statistics()
-            .ambiguous_name_drops,
-        None
-    );
-    assert_eq!(answers(&store).statistics.ambiguous_name_drops, None);
 }
 
 #[test]
@@ -738,7 +689,7 @@ fn sparse_local_shadowing_preserves_gaps_and_the_generic_ambiguity_census() {
         let successor = publish(&mut incremental, &tree(app), sealed_at);
         assert_eq!(successor.cold_reason(), None);
         let restored = answers(&store);
-        assert_eq!(restored.statistics.ambiguous_name_drops, Some(0));
+        assert_eq!(restored.statistics.ambiguous_name_drops, 0);
         assert_eq!(
             restored
                 .unresolved_calls

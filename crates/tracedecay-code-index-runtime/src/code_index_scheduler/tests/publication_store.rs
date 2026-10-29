@@ -15,7 +15,7 @@ use tracedecay_application::code_index::DaemonCodeIndexControlV1;
 use tracedecay_code_index_retention::code_index_generations::{
     CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1, CodeGenerationRetentionErrorV1,
     CodeGenerationRetentionModeV1, DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
-    DurableGenerationIndexEntryV1, DurablePublicationPointerV1,
+    DurableGenerationCardinalityV1, DurableGenerationIndexEntryV1, DurablePublicationPointerV1,
     MAX_CODE_GENERATION_RETENTION_BATCH_V1, acquire_code_generation_store_lock,
     code_generation_segments_root, code_text_artifact_staging_root, code_text_artifacts_root,
     durable_generation_index_digest, execute_code_generation_retention_cancellable,
@@ -44,10 +44,9 @@ use super::super::publication_store::{
     ActiveGenerationDecodeChargeV1, UnpublishedCodeIndexPublicationV1,
 };
 use super::{
-    EIGHT_DAYS_SECS, GitFixture, RETAINED_REVISION_0, downgrade_pointer_to_pre_segment_bytes_shape,
-    execute_proof_bound_scope_retention, published, remove_historical_pointer_entries,
-    retention_generations, scheduler, seeded_scope, test_project_id, unix_now_secs,
-    with_untouched_fillers,
+    EIGHT_DAYS_SECS, GitFixture, RETAINED_REVISION_0, execute_proof_bound_scope_retention,
+    published, remove_historical_pointer_entries, retention_generations, scheduler, seeded_scope,
+    test_project_id, unix_now_secs, with_untouched_fillers,
 };
 use crate::code_index_scheduler::{
     CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
@@ -2131,13 +2130,12 @@ fn oversized_generations_still_produce_a_complete_retention_finding() {
     for entry in &mut pointer.generation_index {
         entry.size_bytes = ONE_GIB;
     }
-    pointer.generation_index_digest = Some(
+    pointer.generation_index_digest =
         tracedecay_code_index_retention::code_index_generations::durable_generation_index_digest(
             &pointer.generation_index,
             pointer.generation_index_truncated,
         )
-        .expect("digest sparse publication index"),
-    );
+        .expect("digest sparse publication index");
     std::fs::write(
         pointer_path,
         serde_json::to_vec(&pointer).expect("encode sparse publication pointer"),
@@ -2247,7 +2245,6 @@ fn restart_rejects_corrupt_sealed_generation() {
 enum RestartDecodeStatusV1 {
     Abstained,
     Decoded,
-    SourceCommitmentRefused,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2333,13 +2330,6 @@ fn restart_decode_census(
         Err(CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(_)) => {
             return RestartDecodeCensusV1 {
                 partitioned: RestartDecodeStatusV1::Abstained,
-                sanitizer: RestartIdentityStatusV1::NotReached,
-                pointer: RestartIdentityStatusV1::NotReached,
-            };
-        }
-        Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable) => {
-            return RestartDecodeCensusV1 {
-                partitioned: RestartDecodeStatusV1::SourceCommitmentRefused,
                 sanitizer: RestartIdentityStatusV1::NotReached,
                 pointer: RestartIdentityStatusV1::NotReached,
             };
@@ -2645,13 +2635,11 @@ fn rewrite_active_generation_as_previous_revision(
 }
 
 fn write_repaired_pointer(pointer_path: &Path, pointer: &mut DurablePublicationPointerV1) {
-    pointer.generation_index_digest = Some(
-        durable_generation_index_digest(
-            &pointer.generation_index,
-            pointer.generation_index_truncated,
-        )
-        .expect("generation index digest"),
-    );
+    pointer.generation_index_digest = durable_generation_index_digest(
+        &pointer.generation_index,
+        pointer.generation_index_truncated,
+    )
+    .expect("generation index digest");
     std::fs::write(
         pointer_path,
         serde_json::to_vec(pointer).expect("encode pointer"),
@@ -2839,7 +2827,11 @@ fn same_length_publication_pointer(
         source_reference: None,
         source_revision: None,
         source_tree: None,
-        cardinality: None,
+        cardinality: DurableGenerationCardinalityV1 {
+            file_count: 0,
+            chunk_count: 0,
+            symbol_count: 0,
+        },
         text_artifact: None,
     };
     let generation_index = vec![entry];
@@ -2851,9 +2843,8 @@ fn same_length_publication_pointer(
         generation_file: generation_index[0].generation_file.clone(),
         state_digest: digest,
         generation_index_truncated: false,
-        generation_index_digest: Some(
-            durable_generation_index_digest(&generation_index, false).expect("index digest"),
-        ),
+        generation_index_digest: durable_generation_index_digest(&generation_index, false)
+            .expect("index digest"),
         generation_index,
     }
 }
@@ -3447,7 +3438,7 @@ fn active_text_descriptor(
         .generation_index
         .iter()
         .find(|entry| entry.generation_id == pointer.generation_id)
-        .and_then(|entry| entry.text_artifact().cloned())
+        .and_then(|entry| entry.text_artifact.clone())
         .expect("active generation names a text artifact")
 }
 
@@ -3751,94 +3742,6 @@ fn a_sweep_never_collects_segments_a_publication_has_not_yet_named() {
     )
     .expect("sweep after publication");
     assert_eq!(segment_files(&segments_root), present);
-}
-
-/// The upgrade journey behind issue #1979. A pointer sealed before
-/// `segment_bytes` joined the digested entry decodes under this release
-/// (`#[serde(default)]`), but re-serializes with the new field, so the digest
-/// the old release stored no longer matches and the reader refuses the whole
-/// publication as corrupt. That refusal was terminal: nothing deleted the
-/// derived store, so the project stayed parked across restarts.
-#[test]
-fn a_pointer_sealed_before_segment_bytes_is_corrupt_until_the_store_is_reset() {
-    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn one() -> usize { 1 }\n")]);
-    let store = TempDir::new().expect("store root");
-    let pool = Arc::new(SharedCodeIndexBytePoolV1::default());
-    let mut sealed_by_old_release = scheduler(&fixture, store.path().to_path_buf(), pool.clone());
-    published(
-        sealed_by_old_release
-            .reconcile_now()
-            .expect("seal the generation the old release leaves behind"),
-    );
-    drop(sealed_by_old_release);
-    let pointer_path = store.path().join("active-code-generation-v1.json");
-    downgrade_pointer_to_pre_segment_bytes_shape(&pointer_path);
-
-    // The upgraded daemon mounts cold over the old store.
-    let mut upgraded = scheduler(&fixture, store.path().to_path_buf(), pool.clone());
-    let error = upgraded
-        .publication
-        .read_publication_pointer()
-        .expect_err("the re-serialized entries no longer match the stored digest");
-    match &error {
-        CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(detail) => assert!(
-            detail.contains("digest does not match its entries"),
-            "the reader must name the digest mismatch: {detail}"
-        ),
-        other => panic!("expected the corrupt publication authority, got {other:?}"),
-    }
-    let reconcile = upgraded
-        .reconcile_now()
-        .expect_err("a cold reconcile over the old pointer fails as corruption");
-    assert!(
-        reconcile.is_publication_authority_corruption(),
-        "reconcile must surface the typed corruption, got {reconcile}"
-    );
-
-    let receipt = upgraded
-        .reset_corrupt_publication_authority()
-        .expect("the derived store is deleted, not repaired");
-    assert_eq!(
-        receipt.removed_entries, 5,
-        "every derived top-level entry of the one-generation store is removed: {receipt:?}"
-    );
-    assert!(
-        !pointer_path.exists(),
-        "no copy of the corrupt pointer survives"
-    );
-    assert_eq!(
-        std::fs::read_dir(store.path().join("code-generations-v1"))
-            .expect("generations root is recreated empty")
-            .count(),
-        0
-    );
-    assert!(
-        store
-            .path()
-            .join(".code-generation-retention.lock")
-            .exists(),
-        "the held lock file is the one entry a reset keeps"
-    );
-    assert!(
-        upgraded
-            .publication
-            .read_publication_pointer()
-            .expect("a reset store reads as unpublished")
-            .is_none()
-    );
-
-    published(
-        upgraded
-            .reconcile_now()
-            .expect("the next pass rebuilds the publication from source"),
-    );
-    let rebuilt = upgraded
-        .publication
-        .read_publication_pointer()
-        .expect("the rebuilt pointer validates")
-        .expect("the rebuilt pointer exists");
-    assert_eq!(rebuilt.generation_index.len(), 1);
-    assert!(rebuilt.generation_index[0].segment_bytes > 0);
 }
 
 #[test]

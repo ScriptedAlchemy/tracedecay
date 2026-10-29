@@ -281,7 +281,6 @@ pub(super) fn status(entry: &RegistryEntry) -> GraphDbRegistryStatus {
             | GraphDbError::ProjectionMismatch { .. }
             | GraphDbError::GenerationMismatch { .. }
             | GraphDbError::Unavailable { .. }
-            | GraphDbError::SourceCommitmentsUnavailable { .. }
             | GraphDbError::SealedRevisionIncompatible { .. }
             | GraphDbError::SealSuperseded
             | GraphDbError::SealedStoreImmutable { .. }

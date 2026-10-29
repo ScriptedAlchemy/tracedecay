@@ -286,8 +286,7 @@ impl ExactTechnicalTermKindV1 {
 /// (every parser-emitted term is a slice of sanitized text, so this is the
 /// production case) and as an `original_bytes` array otherwise. The canonical
 /// bytes are a pure function of `kind` and the original bytes, so they are
-/// derived on read rather than persisted. Readers accept the earlier shape
-/// (`original_bytes` array plus `canonical_bytes` array) unchanged.
+/// derived on read rather than persisted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExactTechnicalTermV1 {
     kind: ExactTechnicalTermKindV1,
@@ -578,10 +577,6 @@ impl<'de> Deserialize<'de> for ExactTechnicalTermV1 {
             original_text: Option<String>,
             #[serde(default)]
             original_bytes: Option<Vec<u8>>,
-            /// Retained only for terms persisted before the canonical bytes
-            /// became derived; when present it must still recompute.
-            #[serde(default)]
-            canonical_bytes: Option<Vec<u8>>,
             span: SourceSpan,
             #[serde(default)]
             symbol_occurrence_id: Option<SymbolOccurrenceId>,
@@ -598,14 +593,6 @@ impl<'de> Deserialize<'de> for ExactTechnicalTermV1 {
             }
         };
         let canonical_bytes = Self::canonical_bytes_for(wire.kind, &original_bytes);
-        if wire
-            .canonical_bytes
-            .is_some_and(|persisted| persisted != canonical_bytes)
-        {
-            return Err(serde::de::Error::custom(DomainError::NonCanonical {
-                field: "exact technical term canonical bytes",
-            }));
-        }
         let term = Self {
             kind: wire.kind,
             original_bytes,
@@ -2021,7 +2008,6 @@ mod tests {
         wire["exact_terms"] = serde_json::json!([{
             "kind": "whole_symbol",
             "original_bytes": [99, 111, 109, 109, 101, 110, 116, 95, 102, 97, 107, 101],
-            "canonical_bytes": [99, 111, 109, 109, 101, 110, 116, 95, 102, 97, 107, 101],
             "span": { "start_byte": 6, "end_byte": 18 }
         }]);
 

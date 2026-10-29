@@ -1007,11 +1007,8 @@ pub(super) fn validate_scope_transaction(
                 .to_owned(),
         ));
     }
-    // Every identity field defaults, so a row from before the durable file-id
-    // fence deserializes rather than failing on a missing field. Name the
-    // refusal here instead: an incomplete or sentinel identity proves nothing
-    // about the directory, and recovery must not restore or unlink on
-    // timestamps alone.
+    // A zero or sentinel file-id pair proves nothing about the directory, and
+    // recovery must not restore or unlink on timestamps alone.
     for (scope_hash, identity) in &transaction.scope_identities {
         if !identity.has_durable_file_id() {
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(

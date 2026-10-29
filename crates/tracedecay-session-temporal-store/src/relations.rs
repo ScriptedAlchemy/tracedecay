@@ -852,7 +852,6 @@ fn map_graph_error(error: GraphDbError) -> SessionRelationError {
             SessionRelationError::Conflict
         }
         GraphDbError::Unavailable { .. }
-        | GraphDbError::SourceCommitmentsUnavailable { .. }
         | GraphDbError::SealedRevisionIncompatible { .. }
         | GraphDbError::SealSuperseded
         | GraphDbError::SealedStoreImmutable { .. }

@@ -1095,7 +1095,7 @@ impl DaemonCodeTextArtifactStoreV1 {
         let retained = pointer
             .iter()
             .flat_map(|pointer| pointer.generation_index.iter())
-            .filter_map(|entry| entry.text_artifact())
+            .filter_map(|entry| entry.text_artifact.as_ref())
             .map(|descriptor| self.restore_witness_path(descriptor))
             .collect::<Result<BTreeSet<_>, _>>()?;
         let mut retained = retained;
@@ -1144,7 +1144,7 @@ impl DaemonCodeTextArtifactStoreV1 {
         let still_referenced = pointer
             .iter()
             .flat_map(|pointer| pointer.generation_index.iter())
-            .filter_map(|entry| entry.text_artifact())
+            .filter_map(|entry| entry.text_artifact.as_ref())
             .any(|retained| {
                 self.restore_witness_path(retained)
                     .is_ok_and(|retained_path| retained_path == path)
@@ -1294,7 +1294,7 @@ impl DaemonCodeTextArtifactStoreV1 {
             .generation_index
             .iter()
             .find(|entry| entry.generation_id == generation_id.as_str())
-            .and_then(|entry| entry.text_artifact().cloned()))
+            .and_then(|entry| entry.text_artifact.clone()))
     }
 
     /// Withdraw one exact missing/corrupt derived artifact so the immutable
@@ -1322,7 +1322,7 @@ impl DaemonCodeTextArtifactStoreV1 {
             .generation_index
             .iter()
             .find(|entry| entry.generation_id == descriptor.generation_id.as_str())
-            .and_then(|entry| entry.text_artifact());
+            .and_then(|entry| entry.text_artifact.as_ref());
         if current != Some(descriptor) {
             return Err(RetrievalPortError::AuthorityUnavailable(
                 "durable text-artifact attachment changed during repair".to_owned(),

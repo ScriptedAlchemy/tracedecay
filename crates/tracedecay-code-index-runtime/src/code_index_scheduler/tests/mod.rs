@@ -382,47 +382,6 @@ fn progress_snapshot_for_generation(
     }
 }
 
-/// Rewrite the active pointer to the durable index entry shape every release
-/// before 0.1.0-beta.38 sealed: no `segment_bytes`, no `cardinality`. The
-/// stored `generation_index_digest` is left exactly as that release computed
-/// it over that shape.
-pub(super) fn downgrade_pointer_to_pre_segment_bytes_shape(pointer_path: &Path) {
-    let mut pointer: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(pointer_path).expect("read active pointer"))
-            .expect("decode active pointer");
-    let entries = pointer["generation_index"]
-        .as_array_mut()
-        .expect("durable generation index");
-    assert!(
-        !entries.is_empty(),
-        "the sealed pointer names its generation"
-    );
-    for entry in entries {
-        let entry = entry.as_object_mut().expect("index entry object");
-        assert!(
-            entry.remove("segment_bytes").is_some(),
-            "the current shape records segment bytes"
-        );
-        entry.remove("cardinality");
-    }
-    // The old release digested exactly the trimmed entries; the current
-    // struct re-adds `segment_bytes: 0` on re-serialization, so its digest
-    // over the same file can no longer reproduce this value.
-    let trimmed = tracedecay_domain::canonical_sha256(&(
-        pointer["generation_index"].clone(),
-        pointer["generation_index_truncated"]
-            .as_bool()
-            .unwrap_or(false),
-    ))
-    .expect("trimmed digest");
-    pointer["generation_index_digest"] = serde_json::Value::String(trimmed.as_str().to_owned());
-    std::fs::write(
-        pointer_path,
-        serde_json::to_vec(&pointer).expect("encode downgraded pointer"),
-    )
-    .expect("write downgraded pointer");
-}
-
 fn published(outcome: CodeIndexReconcileOutcomeV1) -> super::CodeIndexPublishEvidenceV1 {
     match outcome {
         CodeIndexReconcileOutcomeV1::Published(evidence) => evidence,
@@ -480,13 +439,11 @@ fn remove_historical_pointer_entries(store_root: &Path) {
         .generation_index
         .retain(|entry| entry.generation_id == pointer.generation_id);
     pointer.generation_index_truncated = true;
-    pointer.generation_index_digest = Some(
-        durable_generation_index_digest(
-            &pointer.generation_index,
-            pointer.generation_index_truncated,
-        )
-        .expect("digest active-only publication index"),
-    );
+    pointer.generation_index_digest = durable_generation_index_digest(
+        &pointer.generation_index,
+        pointer.generation_index_truncated,
+    )
+    .expect("digest active-only publication index");
     std::fs::write(
         pointer_path,
         serde_json::to_vec(&pointer).expect("encode legacy publication pointer"),
@@ -575,13 +532,11 @@ fn rewrite_active_rust_extractor_revision(store_root: &Path, revision: &str) {
     active.state_digest = state_digest;
     active.size_bytes = envelope_bytes.len() as u64;
     active.text_artifact = None;
-    pointer.generation_index_digest = Some(
-        durable_generation_index_digest(
-            &pointer.generation_index,
-            pointer.generation_index_truncated,
-        )
-        .expect("digest rewritten generation index"),
-    );
+    pointer.generation_index_digest = durable_generation_index_digest(
+        &pointer.generation_index,
+        pointer.generation_index_truncated,
+    )
+    .expect("digest rewritten generation index");
     std::fs::write(
         pointer_path,
         serde_json::to_vec(&pointer).expect("encode publication pointer"),
@@ -981,7 +936,7 @@ fn active_text_artifact_path(store_root: &Path) -> PathBuf {
 
 fn rewrite_active_text_artifact_format_revision(store_root: &Path, revision: u64) -> PathBuf {
     use tracedecay_code_index_retention::code_index_generations::{
-        DurablePublicationPointerV1, DurableTextArtifactSlotV1, durable_generation_index_digest,
+        DurablePublicationPointerV1, durable_generation_index_digest,
     };
 
     let pointer_path = store_root.join("active-code-generation-v1.json");
@@ -994,7 +949,7 @@ fn rewrite_active_text_artifact_format_revision(store_root: &Path, revision: u64
         .iter_mut()
         .find(|entry| entry.generation_id == pointer.generation_id)
         .expect("active generation entry");
-    let Some(DurableTextArtifactSlotV1::Current(descriptor)) = entry.text_artifact.as_mut() else {
+    let Some(descriptor) = entry.text_artifact.as_mut() else {
         panic!("active text artifact descriptor");
     };
     let old_path = store_root
@@ -1029,13 +984,11 @@ fn rewrite_active_text_artifact_format_revision(store_root: &Path, revision: u64
         ManifestDigest::new(format!("sha256:{artifact_hex}")).expect("rewritten artifact digest");
     descriptor.artifact_size_bytes =
         u64::try_from(artifact_bytes.len()).expect("artifact length fits u64");
-    pointer.generation_index_digest = Some(
-        durable_generation_index_digest(
-            &pointer.generation_index,
-            pointer.generation_index_truncated,
-        )
-        .expect("rewritten generation index digest"),
-    );
+    pointer.generation_index_digest = durable_generation_index_digest(
+        &pointer.generation_index,
+        pointer.generation_index_truncated,
+    )
+    .expect("rewritten generation index digest");
     std::fs::write(
         pointer_path,
         serde_json::to_vec(&pointer).expect("encode rewritten publication pointer"),
@@ -1285,13 +1238,11 @@ fn advance_pointer_to_unseated_successor(scoped_store_root: &Path, drift_content
         .expect("active generation index entry");
     active_entry.generation_id = pointer.generation_id.clone();
     active_entry.snapshot_content_identity = pointer.snapshot_content_identity.clone();
-    pointer.generation_index_digest = Some(
-        durable_generation_index_digest(
-            &pointer.generation_index,
-            pointer.generation_index_truncated,
-        )
-        .expect("digest successor publication index"),
-    );
+    pointer.generation_index_digest = durable_generation_index_digest(
+        &pointer.generation_index,
+        pointer.generation_index_truncated,
+    )
+    .expect("digest successor publication index");
     std::fs::write(
         &pointer_path,
         serde_json::to_vec(&pointer).expect("encode successor pointer"),
