@@ -42,7 +42,7 @@ fn write_codex_rollout(home: &Path, project: &Path, session: &str, day: &str) {
         serde_json::json!({
             "timestamp": format!("2026-{day}T00:00:01.000Z"),
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": "Investigate the billing regression"}
+            "payload": crate::common::codex_user_message_payload("Investigate the billing regression")
         }),
         serde_json::json!({
             "timestamp": format!("2026-{day}T00:00:02.000Z"),

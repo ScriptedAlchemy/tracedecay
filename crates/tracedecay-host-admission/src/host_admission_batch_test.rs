@@ -272,7 +272,7 @@ async fn jsonl_capture_resumes_after_durable_scope_coverage_through_a_fresh_faca
         json!({"timestamp": "2026-01-01T00:00:01Z", "type": "turn_context",
             "payload": {"cwd": registered}}),
         json!({"timestamp": "2026-01-01T00:00:02Z", "type": "event_msg",
-            "payload": {"type": "user_message", "message": "project-owned message"}}),
+            "payload": user_message_payload("project-owned message")}),
     ];
     let contents = lines
         .iter()
@@ -336,7 +336,7 @@ async fn jsonl_capture_resumes_after_durable_scope_coverage_through_a_fresh_faca
         json!({"timestamp": "2026-01-01T00:00:03Z", "type": "turn_context",
             "payload": {"cwd": workspace}}),
         json!({"timestamp": "2026-01-01T00:00:04Z", "type": "event_msg",
-            "payload": {"type": "user_message", "message": "profile-owned later message"}}),
+            "payload": user_message_payload("profile-owned later message")}),
     ]
     .iter()
     .map(ToString::to_string)
@@ -381,7 +381,7 @@ async fn jsonl_capture_resumes_after_durable_scope_coverage_through_a_fresh_faca
         let line = format!(
             "{}\n",
             json!({"timestamp": "2026-01-01T00:00:05Z", "type": "event_msg",
-                "payload": {"type": "user_message", "message": format!("append {ordinal}")}})
+                "payload": user_message_payload(format!("append {ordinal}"))})
         );
         std::fs::OpenOptions::new()
             .append(true)
@@ -1435,4 +1435,21 @@ async fn records_reoffered_under_a_new_generation_settle_as_covered_duplicates()
         ObservationSourceGenerationV1::new(2).unwrap()
     );
     assert_eq!(cursor.position(), first_generation_end.position());
+}
+
+/// Current Codex `item_completed/UserMessage` payload; the item id is derived
+/// from the text, so identical prompts share one message identity.
+fn user_message_payload(text: impl AsRef<str>) -> serde_json::Value {
+    let text = text.as_ref();
+    let id = text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    });
+    serde_json::json!({
+        "type": "item_completed",
+        "item": {
+            "type": "UserMessage",
+            "id": format!("user-item-{id:016x}"),
+            "content": [{"type": "text", "text": text}],
+        },
+    })
 }

@@ -42,7 +42,7 @@ fn write_codex_rollout_with_non_goal_response_item(
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:17.000Z",
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": "Continue implementation"}
+            "payload": crate::common::codex_user_message_payload("Continue implementation")
         }),
     );
     std::fs::write(&path, contents).unwrap();
@@ -65,7 +65,7 @@ async fn codex_response_item_tool_calls_are_searchable_by_their_arguments() {
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:20.500Z",
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": "Merge the PR and patch the file"}
+            "payload": crate::common::codex_user_message_payload("Merge the PR and patch the file")
         }),
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:21.000Z",
@@ -149,7 +149,7 @@ async fn codex_response_item_tool_arguments_are_sanitized_before_observation_and
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:30.500Z",
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": "Deploy the service"}
+            "payload": crate::common::codex_user_message_payload("Deploy the service")
         }),
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:31.000Z",
@@ -235,7 +235,7 @@ Completion audit:
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:06.000Z",
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": goal_context}
+            "payload": crate::common::codex_user_message_payload(goal_context)
         }),
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:07.000Z",

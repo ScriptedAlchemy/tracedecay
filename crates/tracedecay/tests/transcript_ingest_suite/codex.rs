@@ -328,7 +328,7 @@ pub(crate) fn write_codex_rollout(
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:01.000Z",
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": "Investigate the billing pipeline regression"}
+            "payload": crate::common::codex_user_message_payload("Investigate the billing pipeline regression")
         }),
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:02.000Z",
@@ -406,7 +406,7 @@ pub(crate) fn write_codex_rollout_with_structured_events(
             serde_json::json!({
                 "timestamp": "2026-01-03T00:00:01.000Z",
                 "type": "event_msg",
-                "payload": {"type": "user_message", "message": "quarkonium telemetry sweep"}
+                "payload": crate::common::codex_user_message_payload("quarkonium telemetry sweep")
             }),
             serde_json::json!({
                 "timestamp": "2026-01-03T00:00:01.100Z",

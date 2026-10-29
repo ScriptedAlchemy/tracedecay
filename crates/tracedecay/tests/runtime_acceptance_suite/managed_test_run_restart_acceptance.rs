@@ -53,7 +53,7 @@ fn write_codex_session(home: &Path, project: &Path) {
         json!({"timestamp": "2026-09-28T16:00:00.000Z", "type": "session_meta",
                "payload": {"id": SESSION, "cwd": project, "model": "gpt-5.6"}}),
         json!({"timestamp": "2026-09-28T16:00:01.000Z", "type": "event_msg",
-               "payload": {"type": "user_message", "message": "Run the affected greeting tests"}}),
+               "payload": crate::common::codex_user_message_payload("Run the affected greeting tests")}),
     ];
     let rollout: Vec<String> = records.iter().map(Value::to_string).collect();
     std::fs::write(

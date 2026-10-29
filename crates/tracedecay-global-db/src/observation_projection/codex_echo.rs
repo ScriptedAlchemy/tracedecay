@@ -1,9 +1,9 @@
 //! Codex records one conversational message twice in a rollout: a
 //! `response_item` message, and an `event_msg` with the same text in the same
-//! turn (`item_completed` `UserMessage`, or the legacy `user_message` and
-//! `agent_message`). Capture keeps both records. Projection keeps the event,
-//! which carries Codex's item identity, and retires the `response_item` row
-//! directly before it in the session.
+//! turn (`item_completed` `UserMessage`, or `agent_message`). Capture keeps
+//! both records. Projection keeps the event, which carries Codex's item
+//! identity, and retires the `response_item` row directly before it in the
+//! session.
 
 use serde::Deserialize;
 use tracedecay_domain::{
