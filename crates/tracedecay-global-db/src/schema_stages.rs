@@ -1201,9 +1201,6 @@ pub async fn converge_registered_schema(
         &[crate::registered_analytics::HOOK_ROUTE_PERFORMANCE_INDEX_SQL],
     )
     .await?;
-    let bodies: Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + '_>> =
-        Box::pin(observation::converge_canonical_bodies(database));
-    bodies.await?;
     if convergence.lcm_status_performance_indexes {
         let batches: Pin<
             Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + '_>,
