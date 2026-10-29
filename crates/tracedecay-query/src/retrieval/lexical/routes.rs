@@ -773,7 +773,6 @@ pub struct LexicalRouteReceiptV1 {
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub declaring_sites: BTreeSet<RetrievalAnchorId>,
     /// The planned query-shape route and its margin.
-    #[serde(default)]
     pub decision: LexicalRouteDecisionV1,
 }
 

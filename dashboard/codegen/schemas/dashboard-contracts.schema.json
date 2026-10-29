@@ -4796,7 +4796,6 @@
           "description": "Latest committed progress for the active generation, if one is mounted."
         },
         "rebuild_in_flight": {
-          "default": false,
           "description": "Whether the exact scheduler route owns a reconcile pass or has a\npending wake. A stale seated generation with this false is stalled,\nnot in a routine rebuild window.",
           "type": "boolean"
         },
