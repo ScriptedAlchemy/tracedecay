@@ -130,7 +130,7 @@ async fn a_session_attributed_test_run_survives_a_physical_daemon_restart_on_loo
         .expect("run tracedecay init");
     assert!(initialized.status.success(), "init failed: {initialized:?}");
     await_published_code_index(environment.home(), &project);
-    let handshake = tracedecay::daemon::handshake_for_current_client(
+    let handshake = crate::common::handshake_for_current_client(
         environment.profile(),
         Some(project.clone()),
         None,

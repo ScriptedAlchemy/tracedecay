@@ -295,21 +295,6 @@ fn daemon_per_client_admission_is_fair_and_reconnects_after_release() {
 }
 
 #[test]
-fn daemon_per_client_admission_leaves_legacy_clients_compatible() {
-    let admission = super::super::DaemonPerClientAdmission::new(1);
-    let mut legacy = test_handshake_defaults();
-    legacy.client_instance_id.clear();
-
-    assert!(admission.try_admit(&legacy).is_ok());
-    assert!(admission.try_admit(&legacy).is_ok());
-    assert_eq!(
-        admission.tracked_client_count(),
-        0,
-        "an absent stable instance id cannot be used as a fair identity"
-    );
-}
-
-#[test]
 fn daemon_per_client_fairness_never_blocks_reserved_health_requests() {
     let admission = super::super::DaemonPerClientAdmission::new(1);
     let mut client = test_handshake_defaults();

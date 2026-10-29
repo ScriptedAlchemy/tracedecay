@@ -22,6 +22,7 @@ fn test_handshake(profile_root: &std::path::Path) -> DaemonHandshake {
         "client_instance_id": "serve-proxy-lifecycle-test",
         "tool_list_changed_capable": false,
         "catalog_version": "",
+        "moved_store_adoption": "never",
     }))
     .expect("test handshake")
 }

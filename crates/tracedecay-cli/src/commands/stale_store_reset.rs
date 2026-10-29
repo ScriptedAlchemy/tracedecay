@@ -37,7 +37,10 @@ pub(crate) async fn handle_wipe_stale(profile: &ProfileRoot, assume_yes: bool) -
                 .to_owned(),
         });
     }
-    if !tracedecay_daemon_control::daemon_reachable(profile) {
+    if !tracedecay_daemon_control::daemon_reachable(
+        profile,
+        crate::product_runtime::PRODUCT_BUILD_VERSION,
+    ) {
         return Err(TraceDecayError::Config {
             message: "wipe --stale reads the stores that require reset from the running daemon; \
                       start it (`tracedecay daemon start`) and re-run. Nothing was wiped."

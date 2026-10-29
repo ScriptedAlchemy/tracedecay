@@ -338,6 +338,15 @@ pub(super) async fn initialize_test_project(
     store_layout
 }
 
+/// A conforming client instance id derived from a test label, so tests that
+/// name their clients still pass the daemon's handshake identity check.
+fn client_instance_id_for_label(label: &str) -> String {
+    let hash = label.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    });
+    format!("{hash:032x}")
+}
+
 fn test_handshake_defaults() -> DaemonHandshake {
     // Test processes only ever register the fixture product runtime, so every
     // handshake in the suite advertises one identical fixture version.

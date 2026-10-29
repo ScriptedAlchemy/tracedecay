@@ -225,6 +225,27 @@ pub(super) async fn refuse_unparseable_handshake(
     write_refusal_and_drain(transport, &refusal).await;
 }
 
+/// Whether this handshake names a client this daemon serves: the same build
+/// and a conforming client instance id. Anything else is answered with one
+/// typed revision-skew refusal frame and the connection closes; the daemon
+/// never serves a client from a different build.
+pub(super) async fn refuse_incompatible_handshake(
+    transport: &mut (impl tracedecay_mcp::McpTransport + Send),
+    handshake: &DaemonHandshake,
+) -> Result<bool> {
+    let daemon_version = binary_version()?;
+    if tracedecay_daemon_protocol::client_version_skew(&handshake.client_version, daemon_version)
+        .is_none()
+        && valid_client_instance_id(&handshake.client_instance_id)
+    {
+        return Ok(false);
+    }
+    let refusal =
+        tracedecay_daemon_protocol::DaemonHandshakeRefusal::for_revision_skew(daemon_version);
+    write_refusal_and_drain(transport, &refusal).await;
+    Ok(true)
+}
+
 /// Answer a rejected auth preface with one typed refusal frame and drain the
 /// input the client already pipelined, then let the connection close.
 ///
@@ -232,7 +253,7 @@ pub(super) async fn refuse_unparseable_handshake(
 /// at EOF, which every client surface reported as "connection closed, the
 /// outcome is unknown", a transport mystery for what is a definitive daemon
 /// answer. The frame never echoes the supplied token.
-async fn refuse_unauthenticated_client(
+pub(super) async fn refuse_unauthenticated_client(
     transport: &mut (impl tracedecay_mcp::McpTransport + Send),
     daemon_version: &str,
 ) {
@@ -1133,6 +1154,10 @@ fn serve_broker_socket_client_inner(
                 return Ok(None);
             }
         };
+        if refuse_incompatible_handshake(&mut transport, &handshake).await? {
+            drop(setup_activity);
+            return Ok(None);
+        }
         let first_request_line = tokio::select! {
             result = read_line_handling_wire_oversized(&mut transport) => result?,
             () = engine.lifecycle.wait_for_draining() => return Ok(None),
@@ -1282,7 +1307,6 @@ fn serve_broker_socket_client_inner(
                 else {
                     return Ok(None);
                 };
-                Box::pin(engine.log_client_version_skew(&handshake)).await?;
                 report_profile_host_admission_bootstrap_status(
                     Box::pin(schedule_user_profile_host_admission_replay_for_identity(
                         &engine.store_administration,
@@ -1702,6 +1726,10 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
             return Ok(());
         }
     };
+    if refuse_incompatible_handshake(&mut transport, &handshake).await? {
+        drop(setup_activity);
+        return Ok(());
+    }
     let Some(first_request_line) = read_line_handling_wire_oversized(&mut transport).await? else {
         return Ok(());
     };

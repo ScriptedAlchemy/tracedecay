@@ -158,7 +158,7 @@ async fn runtime_fixture() -> RuntimeFixture {
     });
     initialize_project(environment.home(), &project);
     await_published_code_index(environment.home(), &project);
-    let handshake = tracedecay::daemon::handshake_for_current_client(
+    let handshake = crate::common::handshake_for_current_client(
         environment.profile(),
         Some(project.clone()),
         None,
@@ -229,7 +229,7 @@ async fn lsp_runtime_fixture() -> RuntimeFixture {
     assert_command_success("open indexed LSP project", &storage);
     await_published_code_index(environment.home(), &project);
     await_analyzer_backed_lsp_owner(&daemon_events);
-    let handshake = tracedecay::daemon::handshake_for_current_client(
+    let handshake = crate::common::handshake_for_current_client(
         environment.profile(),
         Some(project.clone()),
         None,
@@ -339,7 +339,7 @@ async fn git_runtime_fixture() -> RuntimeFixture {
     // installs the owner's authority; the journeys start from a served project.
     await_published_code_index(environment.home(), &project);
 
-    let handshake = tracedecay::daemon::handshake_for_current_client(
+    let handshake = crate::common::handshake_for_current_client(
         environment.profile(),
         Some(project.clone()),
         None,
@@ -3127,7 +3127,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     let other_root_uri = url::Url::from_directory_path(other_project.path())
         .expect("cross-scope project root URI")
         .to_string();
-    let other_handshake = tracedecay::daemon::handshake_for_current_client(
+    let other_handshake = crate::common::handshake_for_current_client(
         fixture._environment.profile(),
         Some(other_project.path().to_path_buf()),
         None,

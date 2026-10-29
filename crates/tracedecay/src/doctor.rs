@@ -75,7 +75,8 @@ pub async fn run_doctor(
     check_binary(&mut dc, build_version);
 
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let daemon_listening = tracedecay_daemon_control::daemon_socket_connectable(profile);
+    let daemon_listening =
+        tracedecay_daemon_control::daemon_socket_connectable(profile, build_version);
     let independent = launch_independent_doctor_checks(
         profile,
         build_version,
@@ -133,6 +134,7 @@ fn launch_independent_doctor_checks(
     let version_for_service = build_version.to_owned();
     let profile_for_reset = profile.clone();
     let version_for_reset = build_version.to_owned();
+    let version_for_watcher = build_version.to_owned();
     let project_for_files = project_path.to_path_buf();
     let profile_root_for_files = profile.data_dir().to_path_buf();
     let profile_for_watcher = profile.clone();
@@ -165,7 +167,7 @@ fn launch_independent_doctor_checks(
             }
         }),
         watcher: spawn_doctor_check(move || {
-            collect_quiet(|dc| check_watcher(dc, &profile_for_watcher))
+            collect_quiet(|dc| check_watcher(dc, &profile_for_watcher, &version_for_watcher))
         }),
         hosts: spawn_doctor_check(move || {
             collect_quiet(|dc| check_host_integrations(dc, &profile_for_hosts, &project_for_hosts))
@@ -389,7 +391,7 @@ fn check_reset_required_stores(
     // Gate on the socket accepting, not a one-second initialize answer: the
     // reset census probe owns its own deadline, and a daemon busy attaching
     // stores still answers it there.
-    if !tracedecay_daemon_control::daemon_socket_connectable(profile) {
+    if !tracedecay_daemon_control::daemon_socket_connectable(profile, build_version) {
         return false;
     }
     match tracedecay_daemon_control::daemon_reset_required_stores(profile, build_version) {
@@ -977,10 +979,14 @@ fn check_binary(dc: &mut DoctorCounters, build_version: &str) {
 /// bounded scheduler reconciliation. Absent telemetry is reported as info, not
 /// a failure, activation comes from each project's pinned configuration.
 #[tracing::instrument(name = "doctor.check.watcher", level = "trace", skip_all)]
-fn check_watcher(dc: &mut DoctorCounters, profile: &tracedecay_runtime_core::config::ProfileRoot) {
+fn check_watcher(
+    dc: &mut DoctorCounters,
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
+    build_version: &str,
+) {
     dc.section("Watcher");
 
-    if !tracedecay_daemon_control::daemon_reachable(profile) {
+    if !tracedecay_daemon_control::daemon_reachable(profile, build_version) {
         dc.info("Daemon not running, watcher inactive; sync happens on hook/read events");
         return;
     }

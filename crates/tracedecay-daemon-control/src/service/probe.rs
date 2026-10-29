@@ -84,12 +84,12 @@ impl DaemonProcessProofV1 {
 /// A listening socket is not enough: installers and `tracedecay init` use this
 /// to decide that a daemon can admit work. Version mismatch still counts,
 /// an older process is running and still owns the profile.
-pub fn daemon_reachable(profile: &ProfileRoot) -> bool {
+pub fn daemon_reachable(profile: &ProfileRoot, client_version: &str) -> bool {
     default_socket_path(profile.data_dir()).is_ok_and(|path| {
         probe_daemon_process_with_timeout(
             profile,
             &path,
-            env!("CARGO_PKG_VERSION"),
+            client_version,
             DAEMON_REACHABILITY_PROBE_TIMEOUT,
         )
         .names_tracedecay()
@@ -104,13 +104,13 @@ pub fn daemon_reachable(profile: &ProfileRoot) -> bool {
 /// and a caller that owns its own deadline must not read that miss as "no
 /// daemon is running": the socket is connectable only because a process is
 /// accepting on it.
-pub fn daemon_socket_connectable(profile: &ProfileRoot) -> bool {
+pub fn daemon_socket_connectable(profile: &ProfileRoot, client_version: &str) -> bool {
     default_socket_path(profile.data_dir()).is_ok_and(|path| {
         matches!(
             daemon_readiness_probe(
                 profile,
                 &path,
-                env!("CARGO_PKG_VERSION"),
+                client_version,
                 DAEMON_REACHABILITY_PROBE_TIMEOUT,
             )
             .0,
@@ -454,6 +454,17 @@ fn query_daemon_identity_stream(
             return Err(TraceDecayError::Config {
                 message: "daemon closed the readiness probe before returning initialize"
                     .to_string(),
+            });
+        }
+        // A daemon of another build refuses the probe's handshake with a typed
+        // frame. That is still a TraceDecay process answering, with its own
+        // version.
+        if let Some(refusal) = tracedecay_daemon_protocol::DaemonHandshakeRefusal::from_line(&line)
+        {
+            return Ok(DaemonInitializeIdentity {
+                name: Some("tracedecay".to_owned()),
+                version: Some(refusal.daemon_version),
+                reset_required_stores: Vec::new(),
             });
         }
         let response: serde_json::Value = serde_json::from_str(line.trim())?;

@@ -40,18 +40,15 @@ mod tests {
 
     /// Build metadata never changes precedence, so whatever this process
     /// reports still begins with the version Release Please assigned, and it
-    /// is byte-identical to the registered runtime's composition.
+    /// is byte-identical to the registered runtime's build version.
     #[test]
-    fn a_registered_process_reports_the_runtime_composed_build_version() {
+    fn a_registered_process_reports_the_runtime_build_version() {
         let runtime = register_fixture_product_runtime();
         let version = build_version().expect("fixture product runtime registered");
         assert!(
             version.starts_with(PACKAGE_VERSION),
             "{version} must begin with the released version {PACKAGE_VERSION}"
         );
-        assert_eq!(
-            version,
-            format!("{PACKAGE_VERSION}+{}", runtime.source().full_sha)
-        );
+        assert_eq!(version, runtime.build_version());
     }
 }

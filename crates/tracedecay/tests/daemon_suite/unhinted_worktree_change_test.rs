@@ -84,7 +84,7 @@ async fn cli_reads_observe_unhinted_renames_and_writes() {
     let project_id = initialize_tracedecay(environment.home(), &project);
     let identity = exact_identity(&project, project_id);
     tracedecay_project::product_runtime::register_fixture_product_runtime();
-    let handshake = tracedecay::daemon::handshake_for_current_client(
+    let handshake = crate::common::handshake_for_current_client(
         environment.profile(),
         Some(project.clone()),
         None,
