@@ -370,7 +370,7 @@ fn daemon_client_saturation_response_is_typed_json_rpc_data() {
         .data
         .expect("typed data");
 
-    assert_eq!(data["kind"], "client_capacity_reached");
+    assert_eq!(data["reason_code"], "daemon_client_capacity_saturated");
     assert_eq!(data["retryable"], true);
     assert_eq!(data["capacity"], 3);
 }
@@ -587,11 +587,11 @@ async fn one_shot_tool_call_receives_a_matching_saturation_response() {
     .await
     .expect("saturation response timed out")
     .expect_err("saturated daemon must reject the tool call");
-    let message = error.to_string();
-    assert!(
-        message.contains("daemon client capacity reached"),
-        "expected a matching saturation response, got: {message}"
-    );
+    let (reason_code, retryable, _) = error
+        .project_route_context()
+        .unwrap_or_else(|| panic!("saturation must retain typed refusal data: {error:?}"));
+    assert_eq!(reason_code, "daemon_client_capacity_saturated");
+    assert!(retryable);
     client_done.send(()).expect("fake daemon awaits the client");
     server.await.expect("saturation server task");
 }
