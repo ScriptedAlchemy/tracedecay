@@ -499,10 +499,8 @@ jobs:
               ;;
             *) echo "Unknown Linux test shard: $SHARD" >&2; exit 1 ;;
           esac
-          resources=
           prebuild=true
           if [[ $SHARD == workspace-* ]]; then
-            resources=--default_test_resources=cpu=1
             # workspace-c's filesystem durability timing tests require
             # compilation to finish before they run.
             if [[ $SHARD != workspace-c ]]; then
@@ -516,7 +514,6 @@ jobs:
           fi
           {
             echo "patterns=${targets[*]}"
-            echo "resources=$resources"
             echo "prebuild=$prebuild"
           } >> "$GITHUB_OUTPUT"
 
@@ -526,7 +523,7 @@ jobs:
         run: bazel build --config=ci ${{ steps.targets.outputs.patterns }}
 
       - name: Build and test the selected targets
-        run: bazel test --config=ci ${{ steps.bazel.outputs.fleet-enabled == 'true' && '--default_test_resources=cpu=HOST_CPUS' || steps.targets.outputs.resources }} ${{ steps.targets.outputs.patterns }}
+        run: bazel test --config=ci ${{ steps.targets.outputs.patterns }}
 
       - name: Upload failed test diagnostics
         if: failure()

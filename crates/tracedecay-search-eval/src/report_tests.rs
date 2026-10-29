@@ -7,7 +7,7 @@ use tracedecay_query::search_quality::{
     QUERY_BASELINE_PROFILE, compute_profile_material_digest, evaluate_generated_outputs,
 };
 
-use crate::{GenerateCandidateOutputsOptions, generate_candidate_outputs};
+use crate::candidate_output::tests::generate_and_verify_baseline_outputs;
 
 const BASELINE_REPORT_RESOURCE_CHILD_ENV: &str = "TRACEDECAY_BASELINE_REPORT_RESOURCE_CHILD";
 
@@ -267,14 +267,7 @@ fn baseline_report_is_self_validating_and_refuses_conceptual_misses() {
     let fixture = crate::candidate_output::tests::packaged_fixture();
     let repo_root = fixture.root();
     let workload = fixture.workload();
-    let profile_ids = vec![QUERY_BASELINE_PROFILE.to_owned()];
-    let generated = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
-        repo_root,
-        workload_path: None,
-        profile_ids: Some(&profile_ids),
-        admitted_scope: direct_fixture_scope,
-    })
-    .expect("generate direct fixture outputs");
+    let generated = generate_and_verify_baseline_outputs(repo_root, workload, direct_fixture_scope);
     let report = evaluate_generated_outputs(repo_root, workload, &generated)
         .expect("evaluate direct fixture outputs");
 
