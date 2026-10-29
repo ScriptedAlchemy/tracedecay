@@ -123,15 +123,3 @@ pub async fn record_version(
 ) -> Result<(), SchemaVersionError> {
     schema_version::record_version(&EngineSchema(store), component, version).await
 }
-
-pub async fn retire_named_ledgers(
-    store: &(impl Executor + ?Sized),
-) -> Result<(), SchemaVersionError> {
-    schema_version::retire_named_ledgers(&EngineSchema(store)).await
-}
-
-pub async fn retire_user_version(
-    store: &(impl Executor + ?Sized),
-) -> Result<(), SchemaVersionError> {
-    schema_version::retire_user_version(&EngineSchema(store)).await
-}

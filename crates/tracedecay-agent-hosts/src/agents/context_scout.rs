@@ -1348,9 +1348,6 @@ pub enum ContextScoutDurableStartupOutcomeV1 {
         entries: Vec<ContextScoutDurableQueueEntryV1>,
         truncated: bool,
     },
-    /// The stored document predated delivery provenance. Startup replaced it
-    /// with an empty current document and did not replay its receipts.
-    Reset,
     Unavailable,
 }
 
@@ -1515,7 +1512,6 @@ impl<M> ContextScoutDurableRuntimeV1<M> {
                 }
                 entries
             }
-            ContextScoutDurableStartupOutcomeV1::Reset => return Ok(()),
             ContextScoutDurableStartupOutcomeV1::Unavailable => {
                 return Err(ContextScoutErrorV1::ConfigurationUnavailable);
             }
@@ -2743,7 +2739,6 @@ mod tests {
             .await
         {
             ContextScoutDurableStartupOutcomeV1::Ready { entries, .. } => entries,
-            ContextScoutDurableStartupOutcomeV1::Reset => Vec::new(),
             ContextScoutDurableStartupOutcomeV1::Unavailable => {
                 panic!("durable store should be readable")
             }

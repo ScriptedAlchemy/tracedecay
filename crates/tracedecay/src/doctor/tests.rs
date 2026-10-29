@@ -17,71 +17,16 @@ fn domain_symbol_rules_warning_is_silent_without_the_file() {
 }
 
 #[test]
-fn pr_autotrack_state_findings_name_stale_entries_and_blocking_state() {
+fn pr_autotrack_state_failure_names_a_blocking_state_file() {
     let data_root = tempfile::tempdir().expect("data root");
-    assert_eq!(
-        pr_autotrack_state_findings(data_root.path()),
-        Ok(Vec::new())
-    );
+    assert_eq!(pr_autotrack_state_failure(data_root.path()), None);
 
     let state_path = tracedecay_application::pr_tracking::state_path(data_root.path());
-    std::fs::write(
-        &state_path,
-        r#"{"managed":{"tracedecay/autotrack/pr/8":{"pr":8,"head_branch":"legacy","worktree":"pr-worktrees/pr-8","tracking_ref":"refs/tracedecay/pr/8"}}}"#,
-    )
-    .expect("write stale state");
-    let warnings = pr_autotrack_state_findings(data_root.path()).expect("stale entries warn");
-    assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].contains("'tracedecay/autotrack/pr/8'"));
-    assert!(warnings[0].contains("head_sha"));
-    assert!(warnings[0].contains("drops this entry"));
-
     std::fs::write(&state_path, "{not json").expect("write malformed state");
     let failure =
-        pr_autotrack_state_findings(data_root.path()).expect_err("malformed state is blocking");
+        pr_autotrack_state_failure(data_root.path()).expect("malformed state is blocking");
     assert!(failure.contains(&state_path.display().to_string()));
     assert!(failure.contains("until that file is removed"));
-}
-
-#[test]
-fn automation_effect_reset_findings_name_each_refused_journal_by_run_id() {
-    let dashboard_root = tempfile::tempdir().expect("dashboard root");
-    assert_eq!(
-        automation_effect_reset_findings(dashboard_root.path()),
-        Ok(Vec::new())
-    );
-    let journals = dashboard_root.path().join("automation_effects");
-    std::fs::create_dir_all(&journals).expect("journal directory");
-    let journal_file = |run_id: &str| {
-        let run_id = tracedecay_domain::RunId::new(run_id).expect("run id");
-        let key = tracedecay_domain::canonical_sha256(&(
-            "tracedecay.automation-run.terminal-key.v1",
-            &run_id,
-        ))
-        .expect("journal key");
-        journals.join(format!(
-            "{}.json",
-            key.as_str().trim_start_matches("sha256:")
-        ))
-    };
-    let legacy = br#"{"retirement":null,"admission":{"request":{"run_id":"run.legacy-memory"}}}"#;
-    std::fs::write(journal_file("run.legacy-memory"), legacy).expect("legacy journal");
-    // A journal whose admission names a run id that does not own its filename.
-    let misfiled = journal_file("run.other");
-    std::fs::write(&misfiled, legacy).expect("misfiled journal");
-    std::fs::write(journals.join("pending-index.json"), b"{}").expect("index");
-
-    let mut findings = automation_effect_reset_findings(dashboard_root.path()).expect("findings");
-    findings.sort();
-    assert_eq!(
-        findings,
-        vec![
-            "Automation effect journal ".to_owned()
-                + &misfiled.display().to_string()
-                + " requires reset: its shape is refused (unknown field `retirement`, expected `admission` or `state` at line 1 column 13); project-open recovery removes it",
-            "Automation run run.legacy-memory requires reset: its effect journal shape is refused (unknown field `retirement`, expected `admission` or `state` at line 1 column 13); project-open recovery removes the journal and the run id can run again".to_owned(),
-        ]
-    );
 }
 
 fn storage_runtime_finding(
@@ -537,18 +482,13 @@ fn doctor_warns_on_missing_or_running_disabled_units() {
 #[test]
 fn schema_convergence_severity_tracks_typed_state() {
     for (state, issues, warnings) in [
-        (SchemaConvergenceStateV1::PendingSchemaMigration, 0, 1),
-        (
-            SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress,
-            0,
-            1,
-        ),
+        (SchemaConvergenceStateV1::Pending, 0, 1),
+        (SchemaConvergenceStateV1::Running, 0, 1),
         (SchemaConvergenceStateV1::Degraded, 1, 0),
         (SchemaConvergenceStateV1::Completed, 0, 0),
     ] {
         let status = serde_json::json!({"doctor_report": {"schema_convergences": [{
             "store": "profile-sessions", "stage": "registered_schema", "state": state,
-            "progress": {"unit": "pages", "done": 4, "remaining": 7},
             "started_at_micros": 42, "degraded_row": "observation_id=obs-7"
         }]}});
         let mut counters = DoctorCounters::new();

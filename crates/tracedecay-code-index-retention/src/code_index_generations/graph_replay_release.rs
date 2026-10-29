@@ -280,7 +280,6 @@ fn validate_receipt(
         schema: RECEIPT_SCHEMA,
         active_generation_id: receipt.active_generation_id.as_ref(),
         vector_readable_sources: &receipt.vector_readable_sources,
-        rollback_floor: receipt.rollback_floor,
         deleted_generations: &receipt.deleted_generations,
         reclaimed_bytes: receipt.reclaimed_bytes,
         completed_at_micros: receipt.completed_at_micros,

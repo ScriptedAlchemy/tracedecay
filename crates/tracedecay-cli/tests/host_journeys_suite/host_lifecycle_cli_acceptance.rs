@@ -2190,8 +2190,6 @@ fn failed_opencode_install_preserves_creation_ownership_through_retry_and_uninst
         .expect("failed install retains component ownership");
         let creation = ownership
             .created_config
-            .as_ref()
-            .unwrap()
             .iter()
             .find(|creation| creation.relative_path == ".config/opencode/opencode.json")
             .expect("failed install retains config creation facts");

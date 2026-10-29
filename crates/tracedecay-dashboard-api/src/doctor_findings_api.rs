@@ -34,7 +34,7 @@ const STORAGE_KINDS: [DoctorStorageFindingKindV1; 6] = [
     DoctorStorageFindingKindV1::IncidentDebrisPresent,
     DoctorStorageFindingKindV1::RetentionBacklog,
     DoctorStorageFindingKindV1::TableGrowth,
-    DoctorStorageFindingKindV1::PendingSchemaMigration,
+    DoctorStorageFindingKindV1::SchemaConvergenceIncomplete,
 ];
 
 /// The canonical Doctor report projection for the read-only dashboard.
@@ -356,8 +356,7 @@ mod tests {
         ResidentMemoryReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, StorageDoctorPort,
     };
     use tracedecay_contracts::storage::{
-        SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStageV1,
-        SchemaConvergenceStateV1,
+        SchemaConvergenceFindingV1, SchemaConvergenceStageV1, SchemaConvergenceStateV1,
     };
     use tracedecay_contracts::{
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
@@ -692,11 +691,7 @@ mod tests {
             SchemaConvergenceFindingV1 {
                 store: "profile-sessions".to_owned(),
                 stage: SchemaConvergenceStageV1::RegisteredSchema,
-                state: SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress,
-                progress: Some(SchemaConvergenceProgressV1::Pages {
-                    done: 4,
-                    remaining: 7,
-                }),
+                state: SchemaConvergenceStateV1::Running,
                 started_at_micros: 42,
                 degraded_row: None,
             },
@@ -715,14 +710,7 @@ mod tests {
 
         assert_eq!(
             envelope.payload.schema_convergences[0].state,
-            SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress
-        );
-        assert_eq!(
-            envelope.payload.schema_convergences[0].progress,
-            Some(SchemaConvergenceProgressV1::Pages {
-                done: 4,
-                remaining: 7,
-            })
+            SchemaConvergenceStateV1::Running
         );
     }
 }

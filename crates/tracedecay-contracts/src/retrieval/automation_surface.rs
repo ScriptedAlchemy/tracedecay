@@ -61,7 +61,7 @@ pub struct AutomationRunListSurfaceRequestV1 {
 pub struct AutomationRunListEntryV1 {
     pub run_id: String,
     pub task: AgentTaskKind,
-    pub task_key: Option<String>,
+    pub task_key: String,
     pub trigger: AutomationTrigger,
     pub backend: String,
     pub model: Option<String>,

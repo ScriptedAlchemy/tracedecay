@@ -196,29 +196,23 @@ pub fn build_observation_retrieval_anchor(
     {
         let _span = tracing::trace_span!("store.observation.build_retrieval_anchor").entered();
         {
-            let aliases = observation
-                .identity()
-                .native_record_id()
-                .map(|native_record_id| {
-                    let locator = serde_json::json!({
-                        "owner": observation.scope(),
-                        "provider": observation.source().provider(),
-                        "session_id": observation.source().session_id(),
-                        "native_record_id": native_record_id,
-                    });
-                    let digest = PayloadReferenceV1::for_payload(&locator)
-                        .map_err(ObservationStoreError::Contract)?
-                        .digest()
-                        .as_str()
-                        .to_owned();
-                    let locator_digest = PrivacyDomainBoundLocatorDigest::new(digest)
-                        .map_err(ObservationStoreError::RetrievalAnchorContract)?;
-                    NativeAlias::new(NativeAliasKind::ProviderRecord, locator_digest)
-                        .map_err(ObservationStoreError::RetrievalAnchorContract)
-                })
-                .transpose()?
-                .into_iter()
-                .collect();
+            let locator = serde_json::json!({
+                "owner": observation.scope(),
+                "provider": observation.source().provider(),
+                "session_id": observation.source().session_id(),
+                "native_record_id": observation.identity().native_record_id(),
+            });
+            let digest = PayloadReferenceV1::for_payload(&locator)
+                .map_err(ObservationStoreError::Contract)?
+                .digest()
+                .as_str()
+                .to_owned();
+            let locator_digest = PrivacyDomainBoundLocatorDigest::new(digest)
+                .map_err(ObservationStoreError::RetrievalAnchorContract)?;
+            let aliases = vec![
+                NativeAlias::new(NativeAliasKind::ProviderRecord, locator_digest)
+                    .map_err(ObservationStoreError::RetrievalAnchorContract)?,
+            ];
             RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
                 target: RetrievalAnchorTarget::ExactObservation(
                     observation.observation_id().clone(),
@@ -279,10 +273,10 @@ pub enum ObservationCoverageReason {
     UnknownVersion,
     UnsupportedFact,
     DuplicateObservation,
-    /// A retained native record was written by an earlier canonical payload
-    /// revision and the current provider-specific semantic comparator proved
-    /// that only bounded source-context fields changed.
-    CanonicalPayloadRevision,
+    /// A retained native record was observed again at another physical
+    /// occurrence, and the provider-specific comparator proved that only its
+    /// evidence range or projected location changed.
+    ReplayedOccurrence,
     SanitizerRejected,
     SanitizerQuarantined,
     /// The daemon admission refused the record with a deterministic,
@@ -311,7 +305,7 @@ impl ObservationCoverageReason {
             Self::UnknownVersion => "unknown_version",
             Self::UnsupportedFact => "unsupported_fact",
             Self::DuplicateObservation => "duplicate_observation",
-            Self::CanonicalPayloadRevision => "canonical_payload_revision",
+            Self::ReplayedOccurrence => "replayed_occurrence",
             Self::SanitizerRejected => "sanitizer_rejected",
             Self::SanitizerQuarantined => "sanitizer_quarantined",
             Self::AdmissionRefused => "admission_refused",
@@ -345,7 +339,7 @@ impl ObservationCoverageReason {
             Self::SanitizerRejected
                 | Self::SanitizerQuarantined
                 | Self::DuplicateObservation
-                | Self::CanonicalPayloadRevision
+                | Self::ReplayedOccurrence
         )
     }
 
@@ -362,7 +356,7 @@ impl ObservationCoverageReason {
                 Self::SanitizerQuarantined,
                 Some(SanitizerDispositionV1::Quarantined)
             ) | (
-                Self::DuplicateObservation | Self::CanonicalPayloadRevision,
+                Self::DuplicateObservation | Self::ReplayedOccurrence,
                 Some(SanitizerDispositionV1::Accepted | SanitizerDispositionV1::Redacted)
             ) | (
                 Self::BlankFrame
@@ -411,7 +405,7 @@ impl FromStr for ObservationCoverageReason {
             "unknown_version" => Ok(Self::UnknownVersion),
             "unsupported_fact" => Ok(Self::UnsupportedFact),
             "duplicate_observation" => Ok(Self::DuplicateObservation),
-            "canonical_payload_revision" => Ok(Self::CanonicalPayloadRevision),
+            "replayed_occurrence" => Ok(Self::ReplayedOccurrence),
             "sanitizer_rejected" => Ok(Self::SanitizerRejected),
             "sanitizer_quarantined" => Ok(Self::SanitizerQuarantined),
             "admission_refused" => Ok(Self::AdmissionRefused),

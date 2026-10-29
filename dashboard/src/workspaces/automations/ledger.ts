@@ -473,13 +473,6 @@ export function latestRunForKey(runs: readonly AutomationRunRowV1[], taskKey: st
   return runs.find((run) => run.task_key === taskKey);
 }
 
-/** The newest run in the loaded page for a built-in scheduler task. Built-in
- * tasks record `task_key` equal to their task word; older rows carry only
- * `task`, so both are consulted. */
-export function latestRunForTask(runs: readonly AutomationRunRowV1[], task: string): AutomationRunRowV1 | undefined {
-  return runs.find((run) => run.task_key === task || (run.task_key === null && run.task === task));
-}
-
 /** The words a user job's schedule reduces to. Mirrors `parse_schedule`
  * inputs (jobs.rs) without evaluating them: `manual`, an interval, or the
  * schedule expression verbatim. */

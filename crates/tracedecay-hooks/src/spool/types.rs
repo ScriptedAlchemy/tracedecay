@@ -1,4 +1,3 @@
-use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::UtcMicros;
@@ -232,11 +231,6 @@ pub(super) struct HookSpoolMetaV1 {
     pub(super) next_sequence: u64,
     pub(super) acknowledged: Vec<AcknowledgedSequenceV1>,
     pub(super) integrity: SpoolIntegrityV1,
-    /// Released metadata persisted a per-append intent here. The torn-tail and
-    /// sequence-continuation rules recover that state exactly from the records
-    /// file, so it is accepted and never written back.
-    #[serde(default, rename = "append_intent", skip_serializing)]
-    pub(super) retired_append_intent: Option<IgnoredAny>,
 }
 
 impl HookSpoolMetaV1 {
@@ -247,7 +241,6 @@ impl HookSpoolMetaV1 {
             next_sequence: 1,
             acknowledged: Vec::new(),
             integrity: SpoolIntegrityV1::Healthy,
-            retired_append_intent: None,
         }
     }
 }

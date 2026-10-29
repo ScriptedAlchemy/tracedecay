@@ -2,7 +2,6 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
 use super::{AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, run_ledger_path};
-use crate::automation::backend::task_key as canonical_task_key;
 use crate::automation::config_error;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
@@ -30,11 +29,10 @@ fn validate_candidate(candidate: &AutomationRunLedgerRecord) -> Result<()> {
     super::validate_run_ledger_record_semantics(candidate)?;
     if candidate.trigger != AutomationTrigger::Scheduler
         || candidate.status != AutomationRunStatus::Skipped
-        || candidate.task_key.as_deref().is_none()
         || candidate.error.as_deref().is_none()
     {
         return Err(config_error(
-            "scheduler diagnostic must be a keyed scheduler skip with a reason",
+            "scheduler diagnostic must be a scheduler skip with a reason",
         ));
     }
     Ok(())
@@ -99,14 +97,8 @@ fn find_before_anchor(
             continue;
         }
         if is_effectful_anchor {
-            let anchor_task_key = projection
-                .task_key
-                .as_deref()
-                .unwrap_or_else(|| canonical_task_key(projection.task));
-            let candidate_task_key = candidate
-                .task_key
-                .as_deref()
-                .unwrap_or_else(|| canonical_task_key(candidate.task));
+            let anchor_task_key = projection.task_key.as_str();
+            let candidate_task_key = candidate.task_key.as_str();
             if projection.task != candidate.task
                 || anchor_task_key != candidate_task_key
                 || projection.trigger != AutomationTrigger::Scheduler
@@ -128,14 +120,8 @@ fn find_before_anchor(
                     candidate.run_id
                 )));
             }
-            let projected_task_key = projection
-                .task_key
-                .as_deref()
-                .unwrap_or_else(|| canonical_task_key(projection.task));
-            let candidate_task_key = candidate
-                .task_key
-                .as_deref()
-                .unwrap_or_else(|| canonical_task_key(candidate.task));
+            let projected_task_key = projection.task_key.as_str();
+            let candidate_task_key = candidate.task_key.as_str();
             if projection.task != candidate.task
                 || projected_task_key != candidate_task_key
                 || projection.trigger != candidate.trigger

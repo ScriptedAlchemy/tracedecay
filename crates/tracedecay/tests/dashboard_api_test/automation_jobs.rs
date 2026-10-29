@@ -378,7 +378,7 @@ for line in sys.stdin:
             settled.task,
             tracedecay_automation_runtime::automation::backend::AgentTaskKind::UserJob
         );
-        assert_eq!(settled.task_key.as_deref(), Some("user_job:retained-history"));
+        assert_eq!(settled.task_key, "user_job:retained-history");
         assert_eq!(
             settled.trigger,
             tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger::Dashboard

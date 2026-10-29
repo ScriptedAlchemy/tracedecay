@@ -54,7 +54,7 @@ async fn memory_curator_runner_ledgers_malformed_backend_output() {
         .unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].task, AgentTaskKind::MemoryCurator);
-    assert_eq!(records[0].task_key.as_deref(), Some("memory_curator"));
+    assert_eq!(records[0].task_key, "memory_curator");
     assert_eq!(records[0].status, AutomationRunStatus::Failed);
     assert_eq!(records[0].model.as_deref(), Some("fixture-model"));
     assert!(records[0].evidence_hash.is_some());

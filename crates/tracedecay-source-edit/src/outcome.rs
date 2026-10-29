@@ -25,7 +25,6 @@ pub struct SourceEditDurableOutcomeV1 {
     pub(super) before: Option<bool>,
     pub(super) import_count: Option<usize>,
     pub(super) finding_count: Option<usize>,
-    #[serde(default)]
     pub(super) failed: bool,
     pub(super) cancelled: bool,
     pub(super) timed_out: bool,

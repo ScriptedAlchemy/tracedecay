@@ -699,7 +699,6 @@ fn remote_identity_observation(identity: RepositoryRemoteIdentityV1) -> RemoteId
         RepositoryRemoteIdentityV1::Invalid => b"invalid\0".to_vec(),
         RepositoryRemoteIdentityV1::Oversized => b"oversized\0".to_vec(),
         RepositoryRemoteIdentityV1::Unavailable => b"unavailable\0".to_vec(),
-        RepositoryRemoteIdentityV1::Unknown => b"unknown\0".to_vec(),
     };
     RemoteIdentityObservation {
         identity,

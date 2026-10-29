@@ -14,12 +14,7 @@ use crate::{SessionMessageRecord, SessionRecord};
 #[cfg(test)]
 mod tests;
 
-pub const SESSION_MESSAGE_PROJECTOR_VERSION_V4: &str = "claude-session-message-v4";
-pub const SESSION_MESSAGE_PROJECTOR_VERSION_V5: &str = "claude-session-message-v5";
 /// v7 renders a message whose content is a block array as its text blocks.
-/// v6 (shipped in v1.0.0-beta.66) stored the array's JSON; its stores are
-/// reset through the LCM schema version rather than rebuilt, because their
-/// immutable session-temporal effects bind the v6 output digests.
 pub const SESSION_MESSAGE_PROJECTOR_VERSION_V7: &str = "claude-session-message-v7";
 pub const SESSION_MESSAGE_PROJECTOR_VERSION: &str = SESSION_MESSAGE_PROJECTOR_VERSION_V7;
 /// Immutable provider-usage row contract. Usage shares the canonical
@@ -73,8 +68,6 @@ impl ProjectionProvenance {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProjectionSkipReason {
     NonConversationalRecord,
-    /// A proven native stream observation replaced the historical combined source.
-    NativeSourceSuperseded,
     /// The observation's deterministic output identity is already owned by a
     /// different observation (duplicate-era provider records). The first
     /// binder keeps the output; this observation converges as a durable,
@@ -103,7 +96,6 @@ impl ProjectionSkipReason {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::NonConversationalRecord => "non_conversational_record",
-            Self::NativeSourceSuperseded => "native_source_superseded",
             Self::OutputCollision => "output_collision",
             Self::InvalidContract => "invalid_contract",
             Self::SanitizationRefused => "sanitization_refused",
@@ -114,7 +106,6 @@ impl ProjectionSkipReason {
     pub fn from_durable_str(value: &str) -> Option<Self> {
         match value {
             "non_conversational_record" => Some(Self::NonConversationalRecord),
-            "native_source_superseded" => Some(Self::NativeSourceSuperseded),
             "output_collision" => Some(Self::OutputCollision),
             "invalid_contract" => Some(Self::InvalidContract),
             "sanitization_refused" => Some(Self::SanitizationRefused),
@@ -501,26 +492,6 @@ pub struct ProjectionRebuildOutcome {
     projected_rows: usize,
     skipped_observations: usize,
     complete: bool,
-}
-
-/// Typed result of converging a retained predecessor projector generation.
-///
-/// `Current` means no predecessor-owned output remains. `RebuildRequired`
-/// reports the bounded rebuild attempt that is resumable across later drains
-/// and process restarts.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ProjectionPredecessorConvergence {
-    Current,
-    RebuildRequired(ProjectionRebuildOutcome),
-}
-
-impl ProjectionPredecessorConvergence {
-    pub fn rebuild(&self) -> Option<&ProjectionRebuildOutcome> {
-        match self {
-            Self::Current => None,
-            Self::RebuildRequired(rebuild) => Some(rebuild),
-        }
-    }
 }
 
 impl ProjectionRebuildOutcome {

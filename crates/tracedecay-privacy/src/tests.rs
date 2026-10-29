@@ -2,11 +2,11 @@ use serde_json::{Value, json};
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, CanonicalWorkflowSemanticKindV1,
-    ComponentVersion, ObservationContractError, ObservationId, ObservationIdentityMaterialV1,
-    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
-    ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1, ProviderId,
-    RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
-    SanitizerDispositionV1, SensitivityV1, SessionId,
+    ComponentVersion, ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1,
+    ObservationScopeV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    ObservationSourceRangeV1, PayloadReferenceV1, ProviderId, RetentionClass,
+    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
+    SensitivityV1, SessionId,
 };
 
 use super::detect::{
@@ -35,11 +35,13 @@ fn identity_for_session(record: &[u8], session_id: &str) -> ObservationIdentityM
     )
     .expect("valid Claude source identity");
     let end = u64::try_from(record.len().max(1)).expect("test record length fits in u64");
-    ObservationIdentityMaterialV1::new(
+    ObservationIdentityMaterialV1::for_native_record(
         source,
         ObservationScopeV1::Profile,
         ObservationSourceGenerationV1::new(1).expect("non-zero test generation"),
         ObservationSourceRangeV1::new(0, end).expect("non-empty test byte range"),
+        ObservationOrderingDomainV1::FileBytes,
+        ObservationId::new("record.privacy-test").unwrap(),
     )
     .expect("valid observation identity")
 }
@@ -518,76 +520,6 @@ fn provider_sanitizer_uses_provider_neutral_policy_and_receipt_domain() {
 }
 
 #[test]
-fn provider_sanitizer_allows_only_legacy_claude_to_omit_native_record_identity() {
-    let record = serde_json::to_vec(&json!({"message": "legacy identity fixture"})).unwrap();
-    let range = ObservationSourceRangeV1::new(0, u64::try_from(record.len()).unwrap()).unwrap();
-    let fixture = |provider: &str| {
-        let provider_id = ProviderId::new(provider).unwrap();
-        let session_id = SessionId::new("session.legacy-identity").unwrap();
-        let stable_record_id = ObservationId::new(format!("message.{provider}.legacy")).unwrap();
-        let parsed = parse_normalized_observation_record_v1(
-            &record,
-            range,
-            ObservationOrderingDomainV1::FileBytes,
-            |_| {
-                CanonicalObservationEnvelopeV1::new(
-                    provider_id.clone(),
-                    "message",
-                    stable_record_id.clone(),
-                    CanonicalObservationRelationsV1::new(session_id.clone())
-                        .with_message_id(stable_record_id.clone()),
-                    vec![CanonicalObservationFactV1::Message {
-                        role: CanonicalMessageRoleV1::Assistant,
-                        content: json!({"text": "legacy identity fixture"}),
-                        model: None,
-                        timestamp: None,
-                    }],
-                    CanonicalObservationEvidenceV1::new(
-                        ObservationOrderingDomainV1::FileBytes,
-                        range,
-                    ),
-                )
-                .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
-            },
-        )
-        .unwrap();
-        let source = ObservationSourceIdentityV1::for_provider(provider_id, session_id).unwrap();
-        let identity = ObservationIdentityMaterialV1::new(
-            source,
-            ObservationScopeV1::Profile,
-            ObservationSourceGenerationV1::new(1).unwrap(),
-            range,
-        )
-        .unwrap();
-        (parsed, identity)
-    };
-
-    let (parsed, identity) = fixture("claude");
-    let outcome = RecordSanitizerV1::observation_v1()
-        .unwrap()
-        .sanitize_parsed(parsed, identity, retention_class())
-        .expect("legacy Claude range identity remains compatible");
-    assert!(
-        outcome
-            .durable_observation()
-            .unwrap()
-            .identity()
-            .native_record_id()
-            .is_none()
-    );
-
-    let (parsed, identity) = fixture("hermes");
-    let error = RecordSanitizerV1::observation_v1()
-        .unwrap()
-        .sanitize_parsed(parsed, identity, retention_class())
-        .expect_err("non-Claude canonical observations require native record identity");
-    assert!(matches!(
-        error,
-        PrivacySanitizerError::DomainContract(ObservationContractError::InvalidCanonicalPayload)
-    ));
-}
-
-#[test]
 fn provider_sanitizer_preserves_stable_public_structural_ids() {
     let record = serde_json::to_vec(&json!({"message": "public identity fixture"})).unwrap();
     let range = ObservationSourceRangeV1::new(40, 41).unwrap();
@@ -638,11 +570,8 @@ fn provider_sanitizer_preserves_stable_public_structural_ids() {
     let durable = outcome.durable_observation().expect("durable observation");
     assert_eq!(durable.source().session_id().as_str(), "session.public-123");
     assert_eq!(
-        durable
-            .identity()
-            .native_record_id()
-            .map(ObservationId::as_str),
-        Some("message.public-123")
+        durable.identity().native_record_id().as_str(),
+        "message.public-123"
     );
     assert_eq!(
         durable.payload()["relations"]["session_id"].as_str(),
@@ -704,13 +633,7 @@ fn provider_sanitizer_protects_credential_shaped_structural_ids_consistently() {
     let durable = outcome.durable_observation().unwrap();
     let protected = durable.source().session_id().as_str();
     assert!(protected.starts_with("privacy.structural-id.v1."));
-    assert_eq!(
-        durable
-            .identity()
-            .native_record_id()
-            .map(ObservationId::as_str),
-        Some(protected)
-    );
+    assert_eq!(durable.identity().native_record_id().as_str(), protected);
     assert_eq!(
         durable.payload()["stable_record_id"].as_str(),
         Some(protected)

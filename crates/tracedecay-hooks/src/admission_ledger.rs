@@ -71,14 +71,12 @@ const ADMITTED_BODY_BYTES: usize = IDENTITY_BYTES + DIGEST_BYTES + 8;
 const ADMITTED_FRAME_BYTES: usize = ADMITTED_BODY_BYTES + FRAME_OVERHEAD_BYTES;
 const COMPLETED_FRAME_BYTES: usize = IDENTITY_BYTES + FRAME_OVERHEAD_BYTES;
 const MAX_FRAME_BODY_BYTES: usize = ADMITTED_BODY_BYTES + MAX_HOOK_PAYLOAD_BYTES;
-const FRAME_ADMITTED: u8 = 1;
 const FRAME_WORK: u8 = 2;
 const FRAME_COMPLETED: u8 = 3;
 const FRAME_ORDERED_ADMITTED: u8 = 4;
 const FRAME_NEXT_ORDER: u8 = 5;
 const FRAME_NATIVE_LIFECYCLE: u8 = 6;
 const FRAME_SUPERSEDED: u8 = 7;
-const FRAME_RECONSTRUCTED_ADMITTED: u8 = 8;
 const ORDERED_ADMITTED_BODY_BYTES: usize = ADMITTED_BODY_BYTES + 8;
 /// Superseded frames the log may carry before an append compacts it.
 const COMPACTION_SLACK_BYTES: u64 = 256 * 1024;
@@ -90,17 +88,14 @@ pub const PROJECT_HOOK_ADMISSIONS_DIR: &str = "hook-v2-admissions";
 /// The directory under a profile root holding one profile-scoped admission
 /// ledger per host.
 pub const PROFILE_HOOK_ADMISSIONS_DIR: &str = "hook-v2-profile-admissions";
-/// Where producer work lived, per host, before the admission ledger owned it.
-/// A project holding it is refused for reset with its ledgers.
-pub const PRE_LEDGER_PENDING_WORK_DIR: &str = "hook-v2-pending-work";
 /// Members of the pre-log ledger shape, which this binary refuses for reset.
 const PRE_LOG_MEMBERS: [&str; 2] = ["admissions.v1.bin", "admission-work-completions.v1.json"];
 
 /// Hook admission state under the data root `root` (a profile root or one
 /// project shard) that this binary refuses for reset, read from what is on
-/// disk: each host ledger that still holds the pre-log shape, and each host's
-/// pre-ledger pending-work spool. A daemon that never opened a ledger still
-/// reports it, so the reset census is right from the first status read.
+/// disk: each host ledger that still holds the pre-log shape. A daemon that
+/// never opened a ledger still reports it, so the reset census is right from
+/// the first status read.
 pub fn hook_admission_reset_required_roots(root: &Path) -> Vec<PathBuf> {
     let hosts = |directory: &str| {
         fs::read_dir(root.join(directory))
@@ -119,7 +114,6 @@ pub fn hook_admission_reset_required_roots(root: &Path) -> Vec<PathBuf> {
         .into_iter()
         .flat_map(hosts)
         .filter(holds_pre_log)
-        .chain(hosts(PRE_LEDGER_PENDING_WORK_DIR))
         .collect::<Vec<_>>();
     roots.sort();
     roots
@@ -183,9 +177,6 @@ pub enum HookAdmissionDecisionV1 {
 pub struct HookAdmissionLedgerReceiptV1 {
     pub decision: HookAdmissionDecisionV1,
     pub order: u64,
-    /// Historical compaction retained relative position, not a comparable
-    /// lifecycle sequence. Only a canonical observation can recover its range.
-    pub order_reconstructed: bool,
     pub work_settlement: Option<HookAdmissionWorkSettlementV1>,
 }
 
@@ -239,7 +230,6 @@ struct LedgerEntry {
     digest: [u8; DIGEST_BYTES],
     admitted_at: UtcMicros,
     order: u64,
-    order_reconstructed: bool,
 }
 
 #[derive(Debug)]
@@ -500,7 +490,6 @@ impl HookAdmissionLedgerV1 {
                         identity,
                         HookAdmissionDecisionV1::Conflict,
                         existing.order,
-                        existing.order_reconstructed,
                     ));
                 }
                 return self.stage_duplicate(identity, existing, work, lifecycle);
@@ -553,7 +542,6 @@ impl HookAdmissionLedgerV1 {
                 digest,
                 admitted_at: now,
                 order,
-                order_reconstructed: false,
             },
         );
         if let Some((work, _)) = work {
@@ -563,7 +551,7 @@ impl HookAdmissionLedgerV1 {
             self.insert_native_lifecycle(identity, lifecycle.clone())?;
         }
         self.compact_if_sparse()?;
-        Ok(self.staged(identity, HookAdmissionDecisionV1::Admitted, order, false))
+        Ok(self.staged(identity, HookAdmissionDecisionV1::Admitted, order))
     }
 
     /// Stage completion of an admission's producer work. `None` means it was
@@ -665,10 +653,8 @@ impl HookAdmissionLedgerV1 {
                     digest,
                     admitted_at,
                     order,
-                    order_reconstructed,
                     work,
                 } => {
-                    let order = order.unwrap_or(self.next_order);
                     self.next_order = self.next_order.max(
                         order
                             .checked_add(1)
@@ -686,7 +672,6 @@ impl HookAdmissionLedgerV1 {
                             digest,
                             admitted_at,
                             order,
-                            order_reconstructed,
                         },
                     );
                     if let Some(work) = work {
@@ -802,7 +787,6 @@ impl HookAdmissionLedgerV1 {
             identity,
             HookAdmissionDecisionV1::ExactDuplicate,
             existing.order,
-            existing.order_reconstructed,
         ))
     }
 
@@ -811,13 +795,11 @@ impl HookAdmissionLedgerV1 {
         identity: [u8; IDENTITY_BYTES],
         decision: HookAdmissionDecisionV1,
         order: u64,
-        order_reconstructed: bool,
     ) -> HookAdmissionStagedV1 {
         HookAdmissionStagedV1 {
             receipt: HookAdmissionLedgerReceiptV1 {
                 decision,
                 order,
-                order_reconstructed,
                 work_settlement: self.completed_work.get(&identity).copied(),
             },
             commit: self.commit_ticket(),
@@ -999,11 +981,7 @@ impl HookAdmissionLedgerV1 {
                 .map(|work| encode_work(&work.envelope))
                 .transpose()?;
             encode_frame(
-                if entry.order_reconstructed {
-                    FRAME_RECONSTRUCTED_ADMITTED
-                } else {
-                    FRAME_ORDERED_ADMITTED
-                },
+                FRAME_ORDERED_ADMITTED,
                 &encode_admitted_body(
                     *identity,
                     entry.digest,
@@ -1059,8 +1037,7 @@ enum LogFrame {
         identity: [u8; IDENTITY_BYTES],
         digest: [u8; DIGEST_BYTES],
         admitted_at: UtcMicros,
-        order: Option<u64>,
-        order_reconstructed: bool,
+        order: u64,
         work: Option<HookEventEnvelopeV2>,
     },
     Work {
@@ -1188,32 +1165,19 @@ fn scan_log(bytes: &[u8]) -> Result<(Vec<LogFrame>, usize), HookAdmissionLedgerE
         }
         let body = &bytes[offset + FRAME_PREFIX_BYTES..end];
         frames.push(match (kind, body.len()) {
-            (FRAME_ADMITTED | FRAME_ORDERED_ADMITTED | FRAME_RECONSTRUCTED_ADMITTED, length)
-                if length
-                    >= if kind == FRAME_ADMITTED {
-                        ADMITTED_BODY_BYTES
-                    } else {
-                        ORDERED_ADMITTED_BODY_BYTES
-                    } =>
-            {
+            (FRAME_ORDERED_ADMITTED, length) if length >= ORDERED_ADMITTED_BODY_BYTES => {
                 let mut digest = [0u8; DIGEST_BYTES];
                 digest.copy_from_slice(&body[IDENTITY_BYTES..IDENTITY_BYTES + DIGEST_BYTES]);
                 let mut admitted = [0u8; 8];
                 admitted.copy_from_slice(&body[IDENTITY_BYTES + DIGEST_BYTES..ADMITTED_BODY_BYTES]);
-                let (order, work_start) = if kind != FRAME_ADMITTED {
-                    let mut order = [0u8; 8];
-                    order.copy_from_slice(&body[ADMITTED_BODY_BYTES..ORDERED_ADMITTED_BODY_BYTES]);
-                    (Some(u64::from_le_bytes(order)), ORDERED_ADMITTED_BODY_BYTES)
-                } else {
-                    (None, ADMITTED_BODY_BYTES)
-                };
+                let mut order = [0u8; 8];
+                order.copy_from_slice(&body[ADMITTED_BODY_BYTES..ORDERED_ADMITTED_BODY_BYTES]);
                 LogFrame::Admitted {
                     identity: identity_at(body),
                     digest,
                     admitted_at: UtcMicros(i64::from_le_bytes(admitted)),
-                    order,
-                    order_reconstructed: kind != FRAME_ORDERED_ADMITTED,
-                    work: decode_work(&body[work_start..])?,
+                    order: u64::from_le_bytes(order),
+                    work: decode_work(&body[ORDERED_ADMITTED_BODY_BYTES..])?,
                 }
             }
             (FRAME_NEXT_ORDER, 8) => {
@@ -1517,67 +1481,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_frames_preserve_admission_order_when_rewritten() {
-        let root = TestDir::new("ledger-legacy-order");
-        drop(open(root.path(), UtcMicros(1)));
-        let first = envelope(9, 5);
-        let second = envelope(10, 5);
-        let mut bytes = log_header().to_vec();
-        for record in [&first, &second] {
-            // The master format stores identity, digest, time, then optional work.
-            let mut body = record.event_id.to_vec();
-            body.extend_from_slice(&hook_admission_digest(record).unwrap());
-            body.extend_from_slice(&2i64.to_le_bytes());
-            encode_frame(FRAME_ADMITTED, &body, &mut bytes).unwrap();
-        }
-        encode_frame(
-            FRAME_WORK,
-            &encode_work_body(second.event_id, &encode_work(&second).unwrap()),
-            &mut bytes,
-        )
-        .unwrap();
-        encode_frame(FRAME_COMPLETED, &first.event_id, &mut bytes).unwrap();
-        fs::write(root.path().join(LOG_FILE), bytes).unwrap();
-        let mut ledger = open(root.path(), UtcMicros(3));
-        let first_receipt = ledger.admit_with_receipt(&first, UtcMicros(4)).unwrap();
-        assert_eq!(first_receipt.order, 0);
-        assert!(first_receipt.order_reconstructed);
-        assert!(first_receipt.work_settlement.is_some());
-        assert_eq!(
-            ledger.pending_work_envelopes(UtcMicros(4)).unwrap(),
-            std::slice::from_ref(&second)
-        );
-        ledger.forget(&first.event_id);
-        ledger.rewrite().unwrap();
-        drop(ledger);
-        let mut reopened = open(root.path(), UtcMicros(5));
-        assert!(
-            reopened
-                .admit_with_receipt(&second, UtcMicros(6))
-                .unwrap()
-                .order_reconstructed
-        );
-        assert_eq!(
-            reopened
-                .admit_with_receipt(&second, UtcMicros(6))
-                .unwrap()
-                .order,
-            1
-        );
-        assert_eq!(
-            reopened
-                .admit_with_receipt(&envelope(11, 5), UtcMicros(6))
-                .unwrap()
-                .order,
-            2
-        );
-        assert_eq!(
-            reopened.pending_work_envelopes(UtcMicros(6)).unwrap(),
-            [second]
-        );
-    }
-
-    #[test]
     fn canonical_order_floor_changes_only_new_admissions_and_refuses_exhaustion() {
         let root = TestDir::new("ledger-canonical-order-floor");
         let now = UtcMicros(2);
@@ -1588,7 +1491,6 @@ mod tests {
             .unwrap();
         admitted.commit.wait().unwrap();
         assert_eq!(admitted.receipt.order, 99);
-        assert!(!admitted.receipt.order_reconstructed);
         let duplicate = ledger
             .stage_admission(&first, Some(&first), None, None, now)
             .unwrap();

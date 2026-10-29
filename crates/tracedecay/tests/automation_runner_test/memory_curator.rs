@@ -181,10 +181,7 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
     assert_eq!(backend.calls(), 2);
     assert_eq!(run.ledger_record.schema_version, 2);
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
-    assert_eq!(
-        run.ledger_record.task_key.as_deref(),
-        Some("memory_curator")
-    );
+    assert_eq!(run.ledger_record.task_key, "memory_curator");
     assert_eq!(
         run.ledger_record.prompt_version.as_deref(),
         Some("memory_curator:v2")

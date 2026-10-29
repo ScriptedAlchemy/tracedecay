@@ -9,7 +9,7 @@ mod graph_replay_release_tests;
 
 /// Marks the newest `count` superseded fixture generations as vector-readable
 /// sources so a fixture keeps exactly one collectable generation: the exact
-/// liveness mark production uses, standing in for the retired rollback floor.
+/// liveness mark production uses.
 fn protected_superseded(
     generations: &[FixtureGeneration],
     count: usize,
@@ -40,7 +40,11 @@ fn indexed_generation(
         source_reference: exact.then(|| format!("refs/heads/branch-{sequence}")),
         source_revision: exact.then(|| format!("{sequence:040x}")),
         source_tree: exact.then(|| format!("{:040x}", sequence + 1)),
-        cardinality: None,
+        cardinality: DurableGenerationCardinalityV1 {
+            file_count: 0,
+            chunk_count: 0,
+            symbol_count: 0,
+        },
         text_artifact: None,
     }
 }
@@ -166,8 +170,11 @@ fn durable_index_counts_text_bytes_and_never_evicts_the_active_text_head() {
     let mut text_head = indexed_generation(1, now - 3, 32, true);
     let text_head_id =
         CodeGenerationId::new(text_head.generation_id.clone()).expect("text-head generation id");
-    text_head.text_artifact =
-        Some(text_artifact(&text_head_id, 1, MAX_DURABLE_GENERATION_INDEX_BYTES_V1).into());
+    text_head.text_artifact = Some(text_artifact(
+        &text_head_id,
+        1,
+        MAX_DURABLE_GENERATION_INDEX_BYTES_V1,
+    ));
     let mut entries = vec![
         indexed_generation(0, now - 4, 32, true),
         text_head.clone(),
@@ -203,7 +210,7 @@ fn reference_retain_bounded_generation_index(
         });
         let mut artifacts = BTreeSet::new();
         entries.iter().fold(generation_bytes, |total, entry| {
-            let Some(artifact) = entry.text_artifact() else {
+            let Some(artifact) = entry.text_artifact.as_ref() else {
                 return total;
             };
             if artifacts.insert(artifact.artifact_file.as_str()) {
@@ -268,7 +275,7 @@ fn uneven_generation_history() -> (
     let text_head_id =
         CodeGenerationId::new(text_head.generation_id.clone()).expect("text-head generation id");
     let head_artifact = text_artifact(&text_head_id, 1, MAX_DURABLE_GENERATION_INDEX_BYTES_V1 / 4);
-    text_head.text_artifact = Some(head_artifact.clone().into());
+    text_head.text_artifact = Some(head_artifact.clone());
     let mut entries = vec![
         indexed_generation(
             1,
@@ -299,7 +306,7 @@ fn uneven_generation_history() -> (
             8,
             sequence % 2 == 0,
         );
-        entry.text_artifact = Some(shared_artifact.clone().into());
+        entry.text_artifact = Some(shared_artifact.clone());
         entries.push(entry);
     }
     let mut segment_heavy = indexed_generation(10, now - 70, 1, true);
@@ -308,7 +315,7 @@ fn uneven_generation_history() -> (
     // One removable generation shares the protected head's artifact, so its
     // eviction never releases those bytes.
     let mut head_sharer = indexed_generation(30, now - 60, 8, false);
-    head_sharer.text_artifact = Some(head_artifact.into());
+    head_sharer.text_artifact = Some(head_artifact);
     entries.push(head_sharer);
     for sequence in 100..(100 + MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1 + 4) {
         entries.push(indexed_generation(
@@ -422,7 +429,7 @@ fn single_pass_sweep_matches_the_remove_recompute_loop_on_randomized_histories()
                         other => u64::try_from(other).expect("ordinal") * 1_000,
                     };
                     entry.text_artifact =
-                        Some(text_artifact(&artifact_owner, shared, artifact_size).into());
+                        Some(text_artifact(&artifact_owner, shared, artifact_size));
                 }
                 entry
             })
@@ -475,14 +482,11 @@ fn single_pass_sweep_accounting_is_linear_on_thousands_of_shared_artifact_entrie
     for sequence in 1..=entry_count {
         let mut entry = indexed_generation(sequence, now - 1_000 + sequence as i64, 1, false);
         let owner = CodeGenerationId::new(entry.generation_id.clone()).expect("generation id");
-        entry.text_artifact = Some(
-            text_artifact(
-                &owner,
-                sequence / 8,
-                MAX_DURABLE_GENERATION_INDEX_BYTES_V1 / 2,
-            )
-            .into(),
-        );
+        entry.text_artifact = Some(text_artifact(
+            &owner,
+            sequence / 8,
+            MAX_DURABLE_GENERATION_INDEX_BYTES_V1 / 2,
+        ));
         entries.push(entry);
     }
     let mut reference = entries.clone();
@@ -578,7 +582,8 @@ fn verified_text_artifact_attachment_is_durable_and_idempotent_under_the_store_l
         read_active_pointer(fixture.store.path())
             .expect("durable active pointer")
             .generation_index[0]
-            .text_artifact()
+            .text_artifact
+            .as_ref()
             .cloned(),
         Some(descriptor)
     );
@@ -604,17 +609,19 @@ fn verified_text_artifact_attachment_retires_history_before_enforcing_byte_bound
             source_reference: None,
             source_revision: None,
             source_tree: None,
-            cardinality: None,
-            text_artifact: Some(prior_artifact.into()),
+            cardinality: DurableGenerationCardinalityV1 {
+                file_count: 0,
+                chunk_count: 0,
+                symbol_count: 0,
+            },
+            text_artifact: Some(prior_artifact),
         },
     );
-    pointer.generation_index_digest = Some(
-        durable_generation_index_digest(
-            &pointer.generation_index,
-            pointer.generation_index_truncated,
-        )
-        .expect("prior index digest"),
-    );
+    pointer.generation_index_digest = durable_generation_index_digest(
+        &pointer.generation_index,
+        pointer.generation_index_truncated,
+    )
+    .expect("prior index digest");
     std::fs::write(
         store.path().join(ACTIVE_POINTER_FILE),
         serde_json::to_vec(&pointer).expect("serialize prior pointer"),
@@ -645,7 +652,7 @@ fn verified_text_artifact_attachment_retires_history_before_enforcing_byte_bound
         active.id.as_str()
     );
     assert_eq!(
-        updated.generation_index[0].text_artifact(),
+        updated.generation_index[0].text_artifact.as_ref(),
         Some(&descriptor)
     );
     assert_eq!(
@@ -1389,13 +1396,11 @@ fn pad_generation_file(
                 entry.size_bytes = size_bytes;
             }
         }
-        pointer.generation_index_digest = Some(
-            durable_generation_index_digest(
-                &pointer.generation_index,
-                pointer.generation_index_truncated,
-            )
-            .expect("index digest"),
-        );
+        pointer.generation_index_digest = durable_generation_index_digest(
+            &pointer.generation_index,
+            pointer.generation_index_truncated,
+        )
+        .expect("index digest");
         std::fs::write(
             pointer_path,
             serde_json::to_vec(&pointer).expect("serialize active pointer"),
@@ -3271,14 +3276,17 @@ fn index_every_fixture_generation(
             source_reference: None,
             source_revision: None,
             source_tree: None,
-            cardinality: None,
+            cardinality: DurableGenerationCardinalityV1 {
+                file_count: 0,
+                chunk_count: 0,
+                symbol_count: 0,
+            },
             text_artifact: None,
         })
         .collect();
     pointer.generation_index_truncated = false;
-    pointer.generation_index_digest = Some(
-        durable_generation_index_digest(&pointer.generation_index, false).expect("index digest"),
-    );
+    pointer.generation_index_digest =
+        durable_generation_index_digest(&pointer.generation_index, false).expect("index digest");
     write_active_pointer(store.path(), "fixture-full-history", &pointer)
         .expect("write full-history pointer");
     pointer
@@ -3602,79 +3610,6 @@ fn missing_store_is_an_unpublished_plan_not_a_storage_failure() {
     assert_eq!(plan.active_generation_id, None);
     assert!(plan.collectable_generations.is_empty());
     assert!(!plan.has_collectable_work());
-}
-
-/// A descriptor published before artifacts carried a content key keeps the
-/// durable index readable and byte-identical, names nothing a reader may open
-/// or retention must keep, and is replaced by the next attached artifact.
-#[test]
-fn a_pre_key_text_artifact_descriptor_reads_as_retired_and_is_replaced() {
-    let (store, generations) = fixture_store(1);
-    let active = generations.last().expect("active generation");
-    let mut pointer = read_active_pointer(store.path()).expect("fixture pointer");
-    let retired = text_artifact_for_bytes(&active.id, b"pre-key artifact");
-    write_text_artifact(&store, &retired, b"pre-key artifact");
-    let generation_id = pointer.generation_id.clone();
-    let entry = pointer
-        .generation_index
-        .iter_mut()
-        .find(|entry| entry.generation_id == generation_id)
-        .expect("active entry");
-    entry.text_artifact = Some(DurableTextArtifactSlotV1::Retired(
-        RetiredCodeTextArtifactDescriptorV1 {
-            generation_id: retired.generation_id.clone(),
-            artifact_file: retired.artifact_file.clone(),
-            artifact_digest: retired.artifact_digest.clone(),
-            artifact_size_bytes: retired.artifact_size_bytes,
-        },
-    ));
-    pointer.generation_index_digest = Some(
-        durable_generation_index_digest(
-            &pointer.generation_index,
-            pointer.generation_index_truncated,
-        )
-        .expect("index digest"),
-    );
-    write_active_pointer(store.path(), "pre-key-fixture", &pointer).expect("write pointer");
-    let stored = std::fs::read_to_string(store.path().join(ACTIVE_POINTER_FILE))
-        .expect("read stored pointer");
-    assert!(
-        stored.contains(&retired.artifact_file) && !stored.contains("content_key"),
-        "the fixture stores the pre-key descriptor shape"
-    );
-    let reread = read_active_pointer(store.path()).expect("pre-key pointer stays readable");
-    assert_eq!(reread, pointer);
-    assert!(
-        reread
-            .generation_index
-            .iter()
-            .all(|entry| entry.text_artifact().is_none()),
-        "a pre-key descriptor names no openable artifact"
-    );
-    let report = run_code_generation_retention(
-        store.path(),
-        &BTreeSet::new(),
-        CodeGenerationRetentionModeV1::Apply,
-        UtcMicros(99),
-        None,
-    )
-    .expect("retention over a pre-key descriptor");
-    assert!(
-        report
-            .deleted_text_artifacts
-            .iter()
-            .any(|candidate| candidate.artifact_file == retired.artifact_file),
-        "the file a pre-key descriptor names is collected"
-    );
-    let attached = attach_fixture_text_artifact(&store, active, b"current artifact");
-    let after = read_active_pointer(store.path()).expect("pointer after attach");
-    assert!(
-        after
-            .generation_index
-            .iter()
-            .any(|entry| entry.text_artifact() == Some(&attached)),
-        "attaching a current artifact replaces the retired slot"
-    );
 }
 
 /// A writer refused because readers hold the store must wait out those

@@ -1794,6 +1794,7 @@ mod tests {
             "run_id": run_id,
             "trigger": AutomationTrigger::Dashboard,
             "task": AgentTaskKind::SkillWriter,
+            "task_key": "skill_writer",
             "backend": "codex_app_server",
             "status": AutomationRunStatus::Skipped,
             "accepted_count": 0,

@@ -1137,7 +1137,7 @@ mod tests {
             run_id: run_id.to_owned(),
             trigger: AutomationTrigger::Scheduler,
             task,
-            task_key: None,
+            task_key: crate::automation::backend::task_key(task).to_owned(),
             backend: "codex_app_server".to_owned(),
             backend_identity: None,
             host_mode: None,

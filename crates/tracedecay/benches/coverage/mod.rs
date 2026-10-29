@@ -2746,7 +2746,7 @@ async fn seed_automation_run(
         run_id: RUN_ID.to_owned(),
         trigger: AutomationTrigger::ManualCli,
         task: AgentTaskKind::MemoryCurator,
-        task_key: Some("memory_curator".to_owned()),
+        task_key: "memory_curator".to_owned(),
         backend: "codex_app_server".to_owned(),
         backend_identity: None,
         host_mode: Some("standalone".to_owned()),

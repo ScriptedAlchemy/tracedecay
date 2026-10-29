@@ -19,10 +19,7 @@ use super::planner::{
     dry_run_host_component_set_lifecycle_with_lifecycle_root_at, observe_artifact_at,
     plan_verified_complete_lifecycle_mutation, validate_artifact_contents_for_operation,
 };
-use super::writer::{
-    HostBundleWriterV1, ancestor_directories, read_regular_nofollow,
-    tracedecay_namespace_directories,
-};
+use super::writer::{HostBundleWriterV1, ancestor_directories, read_regular_nofollow};
 use super::{
     HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HostBundleError, HostBundleInstallReceiptV1,
     HostBundleLifecycleOpV1, HostBundleManifestV1, HostBundleReceiptArtifactV1,
@@ -250,7 +247,7 @@ impl HostBundleWriterV1 {
                     self.apply_artifact_mutation(mutation, &component.content_by_path)?;
                 }
             }
-            let (recorded_config, predates_creation_records) = recorded_creations(&prepared);
+            let recorded_config = recorded_creations(&prepared);
             let (applied, created_config) = with_host_config_creations(
                 &self.root_path,
                 &recorded_config,
@@ -274,11 +271,6 @@ impl HostBundleWriterV1 {
                     .filter_map(|component| component.receipt.as_ref())
                     .flat_map(|receipt| receipt.created_directories.iter().cloned()),
             );
-            if predates_creation_records {
-                recorded.extend(tracedecay_namespace_directories(prepared_artifact_paths(
-                    &prepared,
-                )));
-            }
             let created_directories = self.prune_created_directories(&recorded)?;
             let receipt = component_set_receipt_from_prepared(
                 &prepared,
@@ -472,21 +464,15 @@ fn prepared_artifact_paths(
     })
 }
 
-/// The config creation facts the set's previous receipts recorded, and
-/// whether any of them was written before creation was recorded at all.
+/// The config creation facts the set's previous receipts recorded.
 fn recorded_creations(
     prepared: &[PreparedHostComponentSetComponentV1],
-) -> (Vec<HostConfigCreationV1>, bool) {
-    let previous = prepared
+) -> Vec<HostConfigCreationV1> {
+    prepared
         .iter()
-        .filter_map(|component| component.receipt.as_ref());
-    let predates_records = previous
-        .clone()
-        .any(|receipt| receipt.created_config.is_none());
-    let recorded = previous
-        .flat_map(|receipt| receipt.created_config.iter().flatten().cloned())
-        .collect();
-    (recorded, predates_records)
+        .filter_map(|component| component.receipt.as_ref())
+        .flat_map(|receipt| receipt.created_config.iter().cloned())
+        .collect()
 }
 
 fn component_set_receipt_from_prepared(
@@ -540,12 +526,12 @@ fn component_set_receipt_from_prepared(
         });
     // Registration effects span the whole set, so their creation facts ride
     // on the first component like registration-only directories do.
-    let mut created_config = Some(created_config);
+    let mut created_config = created_config;
     let component_receipts = prepared
         .iter()
         .zip(owned_directories)
         .map(|(component, created_directories)| {
-            let created_config = Some(created_config.take().unwrap_or_default());
+            let created_config = std::mem::take(&mut created_config);
             // An unchanged companion, one whose plan writes nothing and whose
             // manifest is byte-identical to its durable receipt, keeps its
             // original operation provenance. "Writes nothing" must be read from

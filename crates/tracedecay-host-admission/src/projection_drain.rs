@@ -33,35 +33,6 @@ impl HostAdmissionFacade<'_> {
             .registered_database(host_scope(scope))?
             .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
         let store = self.store(provider, scope)?;
-        let predecessor: Pin<
-            Box<
-                dyn Future<
-                        Output = tracedecay_store::ProjectionStoreResult<
-                            tracedecay_store::ProjectionPredecessorConvergence,
-                        >,
-                    > + Send
-                    + '_,
-            >,
-        > = Box::pin(store.converge_projection_predecessor());
-        let predecessor = predecessor.await.map_err(|error| {
-            tracing::warn!(
-                error = %error.durable_detail(),
-                "predecessor projection convergence failed during host drain"
-            );
-            projection_error_outcome(&error)
-        })?;
-        if cancellation.is_cancelled() {
-            return Err(classify_error(&ObservationApplicationError::Cancelled));
-        }
-        if predecessor
-            .rebuild()
-            .is_some_and(|rebuild| !rebuild.is_complete())
-        {
-            return Ok(HostProjectionDrainOutcome {
-                deferred: true,
-                ..HostProjectionDrainOutcome::default()
-            });
-        }
         let external_source =
             tracedecay_session_memory::external_source_store::RuntimeExternalSourceStore::new(
                 database.runtime_client(),

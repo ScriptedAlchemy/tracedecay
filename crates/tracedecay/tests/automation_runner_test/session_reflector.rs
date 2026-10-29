@@ -1584,7 +1584,7 @@ async fn session_reflector_runner_ledgers_malformed_backend_output() {
         .unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].task, AgentTaskKind::SessionReflector);
-    assert_eq!(records[0].task_key.as_deref(), Some("session_reflector"));
+    assert_eq!(records[0].task_key, "session_reflector");
     assert_eq!(records[0].status, AutomationRunStatus::Failed);
     assert_eq!(records[0].model.as_deref(), Some("fixture-model"));
     assert!(records[0].evidence_hash.is_some());

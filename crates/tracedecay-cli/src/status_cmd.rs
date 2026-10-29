@@ -15,9 +15,7 @@ use tracedecay_contracts::project_open::{
 };
 use tracedecay_contracts::retained_surfaces::{FactCommitOwnerV1, MemoryStatusV1};
 use tracedecay_contracts::retrieval::StatusCodeIndexFreshnessV1;
-use tracedecay_contracts::storage::{
-    SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStateV1,
-};
+use tracedecay_contracts::storage::{SchemaConvergenceFindingV1, SchemaConvergenceStateV1};
 use tracedecay_runtime_core::native_runtime::{TimeoutError, timeout_at};
 
 use crate::commands::{reject_problem_envelope, reject_truncation_envelope};
@@ -135,21 +133,12 @@ const fn pull_request_discovery_label(kind: GitHubPullRequestDiscoveryKindV1) ->
 }
 
 fn schema_convergence_line(finding: &SchemaConvergenceFindingV1) -> String {
-    let progress = match &finding.progress {
-        Some(SchemaConvergenceProgressV1::Rows { done, remaining }) => {
-            format!(", rows {done} done / {remaining} remaining")
-        }
-        Some(SchemaConvergenceProgressV1::Pages { done, remaining }) => {
-            format!(", pages {done} done / {remaining} remaining")
-        }
-        None => String::new(),
-    };
     let degraded = finding
         .degraded_row
         .as_deref()
         .map_or_else(String::new, |row| format!(", row {row}"));
     format!(
-        "schema convergence: {} {} {}{progress}, started_at={}{}",
+        "schema convergence: {} {} {}, started_at={}{}",
         finding.store.as_str(),
         finding.stage.as_str(),
         finding.state.as_str(),
@@ -422,8 +411,8 @@ async fn handle_status_command_within(
             );
             for finding in &schema_convergences {
                 match finding.state {
-                    SchemaConvergenceStateV1::PendingSchemaMigration
-                    | SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress
+                    SchemaConvergenceStateV1::Pending
+                    | SchemaConvergenceStateV1::Running
                     | SchemaConvergenceStateV1::Degraded
                     | SchemaConvergenceStateV1::Completed => {
                         println!("{}", schema_convergence_line(finding));
@@ -528,8 +517,7 @@ mod tests {
         ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
     };
     use tracedecay_contracts::storage::{
-        SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStageV1,
-        SchemaConvergenceStateV1,
+        SchemaConvergenceFindingV1, SchemaConvergenceStageV1, SchemaConvergenceStateV1,
     };
 
     #[test]
@@ -681,22 +669,17 @@ mod tests {
     }
 
     #[test]
-    fn compact_lines_preserve_convergence_progress_and_project_open_reason() {
+    fn compact_lines_preserve_convergence_state_and_project_open_reason() {
         let convergence = SchemaConvergenceFindingV1 {
             store: "profile-sessions".to_owned(),
             stage: SchemaConvergenceStageV1::RegisteredSchema,
-            state: SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress,
-            progress: Some(SchemaConvergenceProgressV1::Rows {
-                done: 12,
-                remaining: 3,
-            }),
+            state: SchemaConvergenceStateV1::Running,
             started_at_micros: 42,
             degraded_row: None,
         };
         assert_eq!(
             schema_convergence_line(&convergence),
-            "schema convergence: profile-sessions registered_schema \
-             released_shape_convergence_in_progress, rows 12 done / 3 remaining, started_at=42"
+            "schema convergence: profile-sessions registered_schema running, started_at=42"
         );
 
         let project_open = ProjectOpenStatusV1 {

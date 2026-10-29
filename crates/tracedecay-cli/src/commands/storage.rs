@@ -33,9 +33,8 @@ const PROFILE_SQLITE_DATABASES: [&str; 3] = [
     USER_SESSIONS_DB_FILENAME,
     USER_MEMORY_DB_FILENAME,
 ];
-const PROFILE_DATABASE_PATHS: [&str; 15] = [
+const PROFILE_DATABASE_PATHS: [&str; 14] = [
     "projects",
-    "stores",
     "remote",
     "agent_managed",
     "user-sessions.grafeo",

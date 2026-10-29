@@ -18,8 +18,8 @@ pub(crate) use commit::record_commit;
 pub(crate) use commit::record_runtime_commit;
 pub(crate) use error::LedgerError;
 pub(crate) use idempotency::{LedgerDisposition, lookup_receipt};
+pub use schema::RUNTIME_LEDGER_SCHEMA;
 pub(crate) use schema::initialize_schema;
-pub use schema::{RETIRE_RUNTIME_EFFECTS_V1, RUNTIME_LEDGER_SCHEMA};
 
 #[cfg(test)]
 mod tests;

@@ -1246,56 +1246,6 @@ async fn owner_row_changes_record_candidates_that_gc_verifies() -> Result<(), St
     Ok(())
 }
 
-/// A store whose candidate triggers predate this schema lost references no
-/// trigger recorded. Installing the triggers records every existing payload as
-/// a candidate, so GC still reaps a payload whose owner was dropped before.
-#[asupersync::test]
-async fn installing_candidate_triggers_records_existing_payloads() -> Result<(), String> {
-    let store = test_store().await?;
-    let orphaned = seed_payload(&store, "message-orphaned", "orphaned body").await?;
-    let live = seed_payload(&store, "message-live", "live body").await?;
-    store
-        .conn
-        .execute_batch(
-            "DROP TRIGGER lcm_raw_messages_gc_candidate_delete;
-             DROP TRIGGER lcm_raw_messages_gc_candidate_update;",
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-    drop_raw_reference(&store, &orphaned).await?;
-    assert_eq!(mark_state(&store, &orphaned).await?, None);
-
-    schema::ensure_lcm_schema(&store.conn)
-        .await
-        .map_err(|err| err.to_string())?;
-    let installed_at = tracedecay_runtime_core::tracedecay::current_timestamp();
-    assert_eq!(
-        (
-            mark_state(&store, &orphaned).await?,
-            mark_state(&store, &live).await?
-        ),
-        (
-            Some("unreferenced".to_string()),
-            Some("unreferenced".to_string())
-        )
-    );
-    let report = run_payload_gc_with_apply(
-        &store.conn,
-        &store.storage_root,
-        PROVIDER,
-        None,
-        &grace_config(),
-        true,
-        installed_at + LcmGcConfig::MIN_GRACE_SECONDS as i64,
-    )
-    .await
-    .map_err(|err| err.to_string())?;
-
-    assert_eq!(report.unreferenced.refs, vec![orphaned]);
-    assert_eq!(mark_state(&store, &live).await?, None);
-    Ok(())
-}
-
 /// A live placeholder that arrives in a new row naming a payload with neither
 /// metadata nor a file is tombstoned by the next applied pass, which then
 /// moves past that row.

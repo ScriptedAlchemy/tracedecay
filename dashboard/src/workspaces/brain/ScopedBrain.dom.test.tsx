@@ -176,15 +176,14 @@ describe('ScopedBrain', () => {
 
   it('shows every schema convergence state for the selected project', async () => {
     const schemaConvergences = [
-      'pending_schema_migration',
-      'released_shape_convergence_in_progress',
+      'pending',
+      'running',
       'degraded',
       'completed',
     ].map((state, index) => ({
       store: 'profile-sessions',
       stage: 'registered_schema',
       state,
-      progress: index === 1 ? { unit: 'rows', done: 12, remaining: 3 } : null,
       started_at_micros: 42 + index,
       degraded_row: state === 'degraded' ? 'observation_id=obs-9' : null,
     }));
@@ -213,11 +212,10 @@ describe('ScopedBrain', () => {
 
     renderScoped();
 
-    expect(await screen.findByText('Pending schema migration')).toBeTruthy();
-    expect(screen.getByText('Released-shape convergence in progress')).toBeTruthy();
+    expect(await screen.findByText('Schema convergence pending')).toBeTruthy();
+    expect(screen.getByText('Schema convergence running')).toBeTruthy();
     expect(screen.getByText('Schema convergence degraded')).toBeTruthy();
     expect(screen.getByText('Schema convergence completed')).toBeTruthy();
-    expect(screen.getByText(/rows 12 done \/ 3 remaining/)).toBeTruthy();
   });
 
   it('does not infer an unmounted graph from a generic scoped read failure', async () => {

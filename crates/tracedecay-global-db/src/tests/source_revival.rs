@@ -114,7 +114,7 @@ fn reoffer(
             generation,
             identity.position(),
             identity.ordering_domain(),
-            identity.native_record_id().unwrap().clone(),
+            identity.native_record_id().clone(),
         )
         .unwrap(),
         original.receipt().clone(),
@@ -941,56 +941,5 @@ async fn an_exact_accepted_reoffer_revives_without_a_transport_receipt() {
     let runtime = runtime.reopen_profile_database_for_test().await.unwrap();
     let registered = runtime.profile_database();
     drain(&registered.observation_store()).await;
-    assert_eq!(projected_messages(registered).await, ["message.batch.0"]);
-}
-
-#[asupersync::test]
-async fn a_released_queue_upgrades_without_accepting_its_old_work() {
-    let tmp = TempDir::new().unwrap();
-    let runtime = RegisteredGlobalDbTestRuntime::profile(tmp.path())
-        .await
-        .unwrap();
-    let writes = sequential_writes(&SessionId::new("session.source-queue-upgrade").unwrap(), 1);
-    {
-        let registered = runtime.profile_database();
-        let store = registered.observation_store();
-        let source = Source::of(registered, &writes);
-        source.offer(1, &[&writes[0]]).await;
-        persist(&store, &writes).await;
-        assert_eq!(source.rewrite(1, 2, 0, &[]).await, 1);
-        let writer = registered.writer_connection().unwrap();
-        writer
-            .execute(
-                "ALTER TABLE projection_queue DROP COLUMN revival_start_offset",
-                (),
-            )
-            .await
-            .unwrap();
-        writer
-            .execute(
-                "ALTER TABLE projection_queue DROP COLUMN revival_generation",
-                (),
-            )
-            .await
-            .unwrap();
-    }
-    let runtime = runtime.reopen_profile_database_for_test().await.unwrap();
-    let registered = runtime.profile_database();
-    let store = registered.observation_store();
-    assert!(
-        registered
-            .writer_connection()
-            .unwrap()
-            .execute("UPDATE projection_queue SET revival_generation = '3'", (),)
-            .await
-            .is_err(),
-        "the upgraded queue rejects an incomplete fence"
-    );
-    drain(&store).await;
-    assert!(projected_messages(registered).await.is_empty());
-    let source = Source::of(registered, &writes);
-    source.rewrite(2, 3, 0, &[&writes[0]]).await;
-    source.accept(3, &writes[0]).await;
-    drain(&store).await;
     assert_eq!(projected_messages(registered).await, ["message.batch.0"]);
 }

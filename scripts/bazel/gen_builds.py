@@ -147,9 +147,6 @@ TEST_DATA = {
         "benchmark_data/index-bench/README.md",
     ],
     ("tracedecay-private-fs", "unit_test"): [":Cargo.toml"],
-    ("tracedecay-store-runtime", "unit_test"): [
-        "crates/tracedecay-code-index/tests/fixtures/partitioned_pre_paging/manifest.json",
-    ],
 }
 
 # #[path] modules a build script pulls in outside its own directory.

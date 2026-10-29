@@ -217,7 +217,7 @@ function RunDetail({
           {timing.kind === 'unparsed' ? timing.startedAt : `${formatUtc(timing.startedAt)} UTC`}
         </span>
         <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-          <span className="td-value min-w-0 truncate text-sm text-text-secondary">{run.task_key ?? run.task}</span>
+          <span className="td-value min-w-0 truncate text-sm text-text-secondary">{run.task_key}</span>
           <ToneWord tone={tone} word={run.status} className="text-body" />
         </div>
         <span className="td-value break-all text-xs text-text-muted">{run.run_id}</span>

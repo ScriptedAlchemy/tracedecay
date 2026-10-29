@@ -282,7 +282,7 @@ mod liveness {
                 project_id: "proj_live".to_string(),
                 store_kind: "graph".to_string(),
                 storage_mode: "profile_sharded".to_string(),
-                store_relpath: "stores/live".to_string(),
+                store_relpath: "projects/live".to_string(),
                 manifest_relpath: None,
                 created_at: 0,
                 last_verified_at: None,

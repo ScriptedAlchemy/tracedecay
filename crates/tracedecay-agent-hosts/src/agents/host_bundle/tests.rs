@@ -5,8 +5,8 @@ use sha2::{Digest, Sha256};
 use tracedecay_host_integration::host_bundle_storage_failure;
 
 use super::control::{
-    HOST_BUNDLE_CONTROL_DIR, HOST_BUNDLE_LOCK_FILE, component_set_receipt_file,
-    expected_ownership_marker, receipt_file, writer_lock_file,
+    HOST_BUNDLE_CONTROL_DIR, component_set_receipt_file, expected_ownership_marker, receipt_file,
+    writer_lock_file,
 };
 use super::doctor::doctor_artifact_state;
 use super::planner::plan_artifact_action;
@@ -499,14 +499,6 @@ fn a_host_lock_does_not_exclude_an_unrelated_host() {
             .join(HOST_BUNDLE_CONTROL_DIR)
             .join(writer_lock_file(HostKindV1::OpenCode))
             .is_file()
-    );
-    assert!(
-        !root
-            .path()
-            .join(HOST_BUNDLE_CONTROL_DIR)
-            .join(HOST_BUNDLE_LOCK_FILE)
-            .exists(),
-        "the retired lifecycle-root lock must not be recreated"
     );
 
     let codex = host_scoped_component_set(HostKindV1::Codex, "codex", b"v1");
@@ -1634,7 +1626,7 @@ fn receipt_doctor_classifies_missing_conflicting_and_corrupt_components() {
             ownership_marker: expected_ownership_marker(HostKindV1::Hermes, HostComponentV1::Core),
         }],
         created_directories: Vec::new(),
-        created_config: Some(Vec::new()),
+        created_config: Vec::new(),
     };
     let foreign_receipt_path = lifecycle
         .path()
@@ -1750,7 +1742,7 @@ fn write_component_receipt(
             })
             .collect(),
         created_directories: Vec::new(),
-        created_config: Some(Vec::new()),
+        created_config: Vec::new(),
     };
     for (relative_path, bytes) in artifacts {
         let Some(bytes) = bytes else {

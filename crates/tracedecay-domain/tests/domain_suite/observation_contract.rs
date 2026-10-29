@@ -6,7 +6,7 @@ use tracedecay_domain::{
     CanonicalClaudeSanitizationReceiptMaterialV1, CanonicalMessageRoleV1,
     CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
     CanonicalObservationIdV1, CanonicalObservationRelationsV1, CanonicalReasoningVisibilityV1,
-    CanonicalWorkflowSemanticKindV1, ClineTranscriptStream, ComponentVersion, DurableObservationV1,
+    CanonicalWorkflowSemanticKindV1, ComponentVersion, DurableObservationV1,
     MAX_CANONICAL_OBSERVATION_FACTS_V1, MAX_OBSERVATION_RECORD_BYTES,
     MAX_OBSERVATION_STRUCTURE_DEPTH, MAX_OBSERVATION_STRUCTURE_VALUES,
     ObservationCollisionOutcomeV1, ObservationContractError, ObservationId,
@@ -15,9 +15,8 @@ use tracedecay_domain::{
     ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1, ProjectId,
     ProviderId, ProviderUsageContractDimensionV1, RetentionClass, SanitizationReceiptId,
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId, classify_observation_collision, cline_native_source_successor_id,
-    cline_task_native_observation_id, prove_cline_native_source_transition,
-    tool_result_output_cut_state, tool_result_visible_text,
+    SessionId, classify_observation_collision, tool_result_output_cut_state,
+    tool_result_visible_text,
 };
 
 fn source(session_id: &str) -> ObservationSourceIdentityV1 {
@@ -33,11 +32,13 @@ fn provider_source(provider: &str, session_id: &str) -> ObservationSourceIdentit
 }
 
 fn profile_material() -> ObservationIdentityMaterialV1 {
-    ObservationIdentityMaterialV1::new(
+    ObservationIdentityMaterialV1::for_native_record(
         source("session.fixture"),
         ObservationScopeV1::Profile,
         ObservationSourceGenerationV1::new(7).unwrap(),
         ObservationSourceRangeV1::new(12, 34).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
+        ObservationId::new("record.fixture").unwrap(),
     )
     .unwrap()
 }
@@ -179,7 +180,7 @@ fn observation_ids_are_stable_and_payload_objects_are_canonical() {
 
     assert_eq!(
         observation_id.as_str(),
-        "sha256:3fe143a02ab7fbca28e297944f24e997badda9ca9b1e40c7d2a6e4f965cebad5"
+        "sha256:4e5ae91609b4283d729be77ec99bd46b3ad77ffaa377d022d2698b3ec96187ab"
     );
     assert_eq!(observation_id, idempotency_key);
 
@@ -204,12 +205,12 @@ fn claude_source_identity_names_its_provider() {
     assert_eq!(wire["source"]["provider"], "claude");
     assert_eq!(wire["source"]["session_id"], "session.fixture");
     assert!(wire.get("ordering_domain").is_none());
-    assert!(wire.get("native_record_id").is_none());
+    assert_eq!(wire["native_record_id"], "record.fixture");
     assert_eq!(
         CanonicalObservationIdV1::derive(&material)
             .unwrap()
             .as_str(),
-        "sha256:3fe143a02ab7fbca28e297944f24e997badda9ca9b1e40c7d2a6e4f965cebad5"
+        "sha256:4e5ae91609b4283d729be77ec99bd46b3ad77ffaa377d022d2698b3ec96187ab"
     );
 }
 
@@ -603,7 +604,7 @@ fn canonical_envelope_rejects_visible_reasoning_without_content() {
 }
 
 #[test]
-fn receipt_derivation_is_canonical_and_generation_bound() {
+fn receipt_derivation_is_canonical_and_record_bound() {
     let identity = profile_material();
     let payload = PayloadReferenceV1::for_payload(&json!({"message": "safe"})).unwrap();
     let material = CanonicalClaudeSanitizationReceiptMaterialV1::for_durable_payload(
@@ -618,19 +619,21 @@ fn receipt_derivation_is_canonical_and_generation_bound() {
 
     assert_eq!(
         receipt.receipt_id().as_str(),
-        "privacy.observation.v1.3add1af92e5b4ab3fa1cb2afc431570a5939c166d20001fc4e58df903e021623"
+        "privacy.observation.v1.7016b849d0e17c2d81623d25732b3fef9ec87f7ab11413840eace15f2be5c3ef"
     );
     assert_eq!(receipt.sanitizer_version().as_str(), "sanitizer.fixture.v1");
 
-    let changed_generation = ObservationIdentityMaterialV1::new(
+    let changed_record = ObservationIdentityMaterialV1::for_native_record(
         source("session.fixture"),
         ObservationScopeV1::Profile,
-        ObservationSourceGenerationV1::new(8).unwrap(),
+        ObservationSourceGenerationV1::new(7).unwrap(),
         ObservationSourceRangeV1::new(12, 34).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
+        ObservationId::new("record.fixture.other").unwrap(),
     )
     .unwrap();
     let changed = CanonicalClaudeSanitizationReceiptMaterialV1::for_durable_payload(
-        &changed_generation,
+        &changed_record,
         ComponentVersion::new("sanitizer.fixture.v1").unwrap(),
         SanitizerDispositionV1::Accepted,
         &[7; 32],
@@ -691,13 +694,15 @@ fn durable_observation_wire_carries_one_identity_and_rejects_an_alias_field() {
 #[test]
 fn scope_participates_in_identity_and_invalid_positions_are_rejected() {
     let profile = profile_material();
-    let project = ObservationIdentityMaterialV1::new(
+    let project = ObservationIdentityMaterialV1::for_native_record(
         source("session.fixture"),
         ObservationScopeV1::Project {
             project_id: ProjectId::new("project.fixture").unwrap(),
         },
         ObservationSourceGenerationV1::new(7).unwrap(),
         ObservationSourceRangeV1::new(12, 34).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
+        ObservationId::new("record.fixture").unwrap(),
     )
     .unwrap();
 
@@ -943,11 +948,13 @@ fn collision_classification_distinguishes_duplicates_collisions_and_new_identity
     let exact_retry = durable(material.clone(), reordered_payload);
     let collision = durable(material, json!({"a": 1, "b": 3}));
     let distinct = durable(
-        ObservationIdentityMaterialV1::new(
+        ObservationIdentityMaterialV1::for_native_record(
             source("session.fixture"),
             ObservationScopeV1::Profile,
             ObservationSourceGenerationV1::new(7).unwrap(),
             ObservationSourceRangeV1::new(34, 56).unwrap(),
+            ObservationOrderingDomainV1::FileBytes,
+            ObservationId::new("record.fixture.distinct").unwrap(),
         )
         .unwrap(),
         json!({"a": 1, "b": 2}),
@@ -999,393 +1006,6 @@ fn native_identity_fixture() -> ObservationIdentityMaterialV1 {
         ObservationId::new("message.fixture").unwrap(),
     )
     .unwrap()
-}
-
-fn cline_transition_observation(
-    provider: &str,
-    stream: ClineTranscriptStream,
-    native_source: bool,
-    range: ObservationSourceRangeV1,
-) -> DurableObservationV1 {
-    let source = if native_source {
-        stream
-            .source_identity(
-                ProviderId::new(provider).unwrap(),
-                SessionId::new("task.fixture").unwrap(),
-            )
-            .unwrap()
-    } else {
-        provider_source(provider, "task.fixture")
-    };
-    let (kind, native_id, facts) = match stream {
-        ClineTranscriptStream::ApiHistory => (
-            "message",
-            "task.fixture:api-message",
-            vec![
-                CanonicalObservationFactV1::Message {
-                    role: CanonicalMessageRoleV1::Assistant,
-                    content: json!({"text": "authored answer"}),
-                    model: Some("model.native".to_owned()),
-                    timestamp: Some(1_800_000_001),
-                },
-                CanonicalObservationFactV1::ToolInvocation {
-                    invocation_id: Some(ObservationId::new("call.native").unwrap()),
-                    name: "read_file".to_owned(),
-                    arguments: json!({"path": "src/main.rs"}),
-                },
-            ],
-        ),
-        ClineTranscriptStream::UiMessages => (
-            "usage",
-            "task.fixture:ui-request",
-            vec![CanonicalObservationFactV1::UncorrelatedUsage {
-                input_tokens: Some(1200),
-                output_tokens: Some(350),
-                cache_read_tokens: Some(8000),
-                cache_write_tokens: Some(500),
-                reasoning_tokens: None,
-                total_tokens: None,
-                native_kind: "api_req_started".to_owned(),
-                native_field: "text".to_owned(),
-                missing_dimensions: BTreeSet::from([
-                    ProviderUsageContractDimensionV1::Model,
-                    ProviderUsageContractDimensionV1::Scope,
-                ]),
-            }],
-        ),
-    };
-    let native_id = ObservationId::new(native_id).unwrap();
-    let envelope = CanonicalObservationEnvelopeV1::new(
-        ProviderId::new(provider).unwrap(),
-        kind,
-        native_id.clone(),
-        CanonicalObservationRelationsV1::new(SessionId::new("task.fixture").unwrap()),
-        facts,
-        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range)
-            .with_native_sequence(range.start())
-            .with_native_timestamp(1_800_000_001)
-            .with_revision("revision.native")
-            .unwrap(),
-    )
-    .unwrap();
-    durable(
-        ObservationIdentityMaterialV1::for_native_record(
-            source,
-            ObservationScopeV1::Profile,
-            ObservationSourceGenerationV1::new(if native_source { 9 } else { 3 }).unwrap(),
-            range,
-            ObservationOrderingDomainV1::SnapshotOrder,
-            native_id,
-        )
-        .unwrap(),
-        serde_json::to_value(envelope).unwrap(),
-    )
-}
-
-fn cline_payload_change(
-    observation: &DurableObservationV1,
-    pointer: &str,
-    replacement: Value,
-) -> DurableObservationV1 {
-    let mut payload = observation.payload().clone();
-    *payload.pointer_mut(pointer).unwrap() = replacement;
-    durable(observation.identity().clone(), payload)
-}
-
-#[test]
-fn cline_native_transition_proofs_bind_exact_records_and_stable_lookup_ids() {
-    for (provider, stream, old_start, new_start) in [
-        ("cline", ClineTranscriptStream::ApiHistory, 1, 1),
-        ("roo-code", ClineTranscriptStream::UiMessages, 5, 1),
-        ("kilo", ClineTranscriptStream::UiMessages, 3, 0),
-    ] {
-        let old = cline_transition_observation(
-            provider,
-            stream,
-            false,
-            ObservationSourceRangeV1::new(old_start, old_start + 1).unwrap(),
-        );
-        let new = cline_transition_observation(
-            provider,
-            stream,
-            true,
-            ObservationSourceRangeV1::new(new_start, new_start + 1).unwrap(),
-        );
-        let proof =
-            prove_cline_native_source_transition(&old, &new).expect("exact native transition");
-        assert_eq!(proof.predecessor_id(), old.observation_id());
-        assert_eq!(proof.successor_id(), new.observation_id());
-        assert_eq!(proof.predecessor_payload(), old.payload_reference());
-        assert_eq!(proof.successor_payload(), new.payload_reference());
-        assert_eq!(proof.stream(), stream);
-        assert_eq!(
-            cline_task_native_observation_id(&new).unwrap().as_ref(),
-            Some(old.observation_id())
-        );
-        assert_eq!(
-            cline_native_source_successor_id(&old).unwrap().as_ref(),
-            Some(new.observation_id())
-        );
-        let relocated = durable(
-            ObservationIdentityMaterialV1::for_native_record(
-                new.source().clone(),
-                new.scope().clone(),
-                ObservationSourceGenerationV1::new(27).unwrap(),
-                ObservationSourceRangeV1::new(40, 41).unwrap(),
-                ObservationOrderingDomainV1::SnapshotOrder,
-                new.identity().native_record_id().unwrap().clone(),
-            )
-            .unwrap(),
-            new.payload().clone(),
-        );
-        assert_eq!(
-            cline_task_native_observation_id(&relocated).unwrap(),
-            cline_task_native_observation_id(&new).unwrap()
-        );
-        assert_eq!(relocated.observation_id(), new.observation_id());
-        assert!(
-            prove_cline_native_source_transition(&old, &relocated).is_none(),
-            "stable lookup alone cannot authorize inconsistent evidence"
-        );
-    }
-}
-
-#[test]
-fn cline_native_transition_rejects_source_scope_and_native_identity_mismatches() {
-    let range = ObservationSourceRangeV1::new(1, 2).unwrap();
-    let old =
-        cline_transition_observation("cline", ClineTranscriptStream::ApiHistory, false, range);
-    let new = cline_transition_observation("cline", ClineTranscriptStream::ApiHistory, true, range);
-    let reidentify = |source, scope, native_id| {
-        durable(
-            ObservationIdentityMaterialV1::for_native_record(
-                source,
-                scope,
-                new.identity().generation(),
-                range,
-                ObservationOrderingDomainV1::SnapshotOrder,
-                native_id,
-            )
-            .unwrap(),
-            new.payload().clone(),
-        )
-    };
-    let wrong_key = ObservationSourceIdentityV1::for_provider_source(
-        ProviderId::new("cline").unwrap(),
-        SessionId::new("task.fixture").unwrap(),
-        SessionId::new("other-stream").unwrap(),
-    )
-    .unwrap();
-    for (name, source) in [
-        ("missing stream", old.source().clone()),
-        ("unknown stream", wrong_key),
-        (
-            "wrong stream kind",
-            ClineTranscriptStream::UiMessages
-                .source_identity(
-                    ProviderId::new("cline").unwrap(),
-                    SessionId::new("task.fixture").unwrap(),
-                )
-                .unwrap(),
-        ),
-        (
-            "other provider",
-            ClineTranscriptStream::ApiHistory
-                .source_identity(
-                    ProviderId::new("roo-code").unwrap(),
-                    SessionId::new("task.fixture").unwrap(),
-                )
-                .unwrap(),
-        ),
-        (
-            "other session",
-            ClineTranscriptStream::ApiHistory
-                .source_identity(
-                    ProviderId::new("cline").unwrap(),
-                    SessionId::new("task.other").unwrap(),
-                )
-                .unwrap(),
-        ),
-    ] {
-        let changed = reidentify(
-            source,
-            new.scope().clone(),
-            new.identity().native_record_id().unwrap().clone(),
-        );
-        assert!(
-            prove_cline_native_source_transition(&old, &changed).is_none(),
-            "{name}"
-        );
-    }
-    let changed_scope = reidentify(
-        new.source().clone(),
-        ObservationScopeV1::Project {
-            project_id: ProjectId::new("other-project").unwrap(),
-        },
-        new.identity().native_record_id().unwrap().clone(),
-    );
-    assert!(prove_cline_native_source_transition(&old, &changed_scope).is_none());
-    let changed_id = reidentify(
-        new.source().clone(),
-        new.scope().clone(),
-        ObservationId::new("other-native-record").unwrap(),
-    );
-    assert!(prove_cline_native_source_transition(&old, &changed_id).is_none());
-    assert!(
-        prove_cline_native_source_transition(&new, &new).is_none(),
-        "predecessor must be a combined task source"
-    );
-    assert!(cline_native_source_successor_id(&new).unwrap().is_none());
-    assert!(cline_task_native_observation_id(&old).unwrap().is_none());
-    assert_eq!(
-        ClineTranscriptStream::ApiHistory
-            .source_identity(
-                ProviderId::new("codex").unwrap(),
-                SessionId::new("task.fixture").unwrap()
-            )
-            .unwrap_err()
-            .to_string(),
-        "observation source identity is invalid"
-    );
-}
-
-#[test]
-fn cline_native_transition_rejects_authored_and_native_evidence_changes() {
-    let range = ObservationSourceRangeV1::new(1, 2).unwrap();
-    let old =
-        cline_transition_observation("cline", ClineTranscriptStream::ApiHistory, false, range);
-    let new = cline_transition_observation("cline", ClineTranscriptStream::ApiHistory, true, range);
-    for (pointer, replacement) in [
-        ("/facts/0/content/text", json!("changed answer")),
-        ("/facts/0/model", json!("different model")),
-        ("/facts/0/timestamp", json!(1_800_000_002)),
-        ("/facts/1/arguments/path", json!("secret.txt")),
-        ("/evidence/native_timestamp", json!(1_800_000_002)),
-        ("/evidence/revision", json!("changed revision")),
-        ("/native_record_kind", json!("usage")),
-    ] {
-        let changed = cline_payload_change(&new, pointer, replacement.clone());
-        assert!(
-            prove_cline_native_source_transition(&old, &changed).is_none(),
-            "successor {pointer}"
-        );
-        let changed = cline_payload_change(&old, pointer, replacement);
-        assert!(
-            prove_cline_native_source_transition(&changed, &new).is_none(),
-            "predecessor {pointer}"
-        );
-    }
-    let old = cline_transition_observation(
-        "kilo",
-        ClineTranscriptStream::UiMessages,
-        false,
-        ObservationSourceRangeV1::new(5, 6).unwrap(),
-    );
-    let new = cline_transition_observation("kilo", ClineTranscriptStream::UiMessages, true, range);
-    let changed = cline_payload_change(&new, "/facts/0/input_tokens", json!(1201));
-    assert!(
-        prove_cline_native_source_transition(&old, &changed).is_none(),
-        "usage counters cannot change"
-    );
-}
-
-#[test]
-fn cline_native_transition_preserves_sanitization_authority() {
-    let range = ObservationSourceRangeV1::new(1, 2).unwrap();
-    let old =
-        cline_transition_observation("cline", ClineTranscriptStream::ApiHistory, false, range);
-    let new = cline_transition_observation("cline", ClineTranscriptStream::ApiHistory, true, range);
-    for (disposition, sensitivity, version) in [
-        (
-            SanitizerDispositionV1::Redacted,
-            SensitivityV1::NonSensitive,
-            "sanitizer.fixture.v1",
-        ),
-        (
-            SanitizerDispositionV1::Accepted,
-            SensitivityV1::Sensitive,
-            "sanitizer.fixture.v1",
-        ),
-        (
-            SanitizerDispositionV1::Accepted,
-            SensitivityV1::NonSensitive,
-            "sanitizer.fixture.v2",
-        ),
-    ] {
-        let receipt = SanitizationReceiptV1::new(
-            SanitizationReceiptRefV1::new(
-                SanitizationReceiptId::new("receipt.changed").unwrap(),
-                ComponentVersion::new(version).unwrap(),
-            )
-            .unwrap(),
-            disposition,
-            sensitivity,
-            Some(new.payload_reference().clone()),
-        )
-        .unwrap();
-        let changed = DurableObservationV1::new(
-            new.identity().clone(),
-            receipt,
-            new.retention_class().clone(),
-            new.payload().clone(),
-        )
-        .unwrap();
-        assert!(
-            prove_cline_native_source_transition(&old, &changed).is_none(),
-            "{disposition:?}/{sensitivity:?}/{version}"
-        );
-    }
-}
-
-#[test]
-fn cline_native_transition_rejects_invalid_ui_offsets_and_ordering_domains() {
-    let old = cline_transition_observation(
-        "roo-code",
-        ClineTranscriptStream::UiMessages,
-        false,
-        ObservationSourceRangeV1::new(5, 6).unwrap(),
-    );
-    for range in [
-        ObservationSourceRangeV1::new(6, 7).unwrap(),
-        ObservationSourceRangeV1::new(1, 3).unwrap(),
-    ] {
-        let new = cline_transition_observation(
-            "roo-code",
-            ClineTranscriptStream::UiMessages,
-            true,
-            range,
-        );
-        assert!(
-            prove_cline_native_source_transition(&old, &new).is_none(),
-            "UI must lose only a nonnegative combined-file base"
-        );
-    }
-    let new = cline_transition_observation(
-        "roo-code",
-        ClineTranscriptStream::UiMessages,
-        true,
-        ObservationSourceRangeV1::new(1, 2).unwrap(),
-    );
-    assert!(
-        prove_cline_native_source_transition(
-            &old,
-            &cline_payload_change(&new, "/evidence/native_sequence", json!(2))
-        )
-        .is_none()
-    );
-    assert!(
-        prove_cline_native_source_transition(
-            &cline_payload_change(&old, "/evidence/native_sequence", json!(4)),
-            &new
-        )
-        .is_none()
-    );
-    let wrong_old = cline_payload_change(&old, "/evidence/ordering_domain", json!("file_bytes"));
-    let wrong_new = cline_payload_change(&new, "/evidence/ordering_domain", json!("file_bytes"));
-    assert!(
-        prove_cline_native_source_transition(&wrong_old, &wrong_new).is_none(),
-        "payload ordering must match the native snapshot identity"
-    );
 }
 
 #[test]

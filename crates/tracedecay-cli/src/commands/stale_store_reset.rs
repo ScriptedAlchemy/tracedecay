@@ -3,9 +3,7 @@ use std::time::Duration;
 
 use tracedecay_domain::errors::{ResettableStoreV1, Result, StoreResetRequiredV1, TraceDecayError};
 use tracedecay_global_db::profile_registry_maintenance::verify_store_path_absent;
-use tracedecay_hooks::{
-    PRE_LEDGER_PENDING_WORK_DIR, PROFILE_HOOK_ADMISSIONS_DIR, PROJECT_HOOK_ADMISSIONS_DIR,
-};
+use tracedecay_hooks::{PROFILE_HOOK_ADMISSIONS_DIR, PROJECT_HOOK_ADMISSIONS_DIR};
 use tracedecay_runtime_core::config::{GLOBAL_DB_FILENAME, ProfileRoot};
 use tracedecay_runtime_core::storage::{
     SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME, USER_SESSIONS_DB_FILENAME,
@@ -226,7 +224,7 @@ fn store_location(
         ),
         ResettableStoreV1::ProjectHookAdmissions { project_id } => (
             project_root(project_id)?,
-            StoreMembers::Directories(&[PROJECT_HOOK_ADMISSIONS_DIR, PRE_LEDGER_PENDING_WORK_DIR]),
+            StoreMembers::Directories(&[PROJECT_HOOK_ADMISSIONS_DIR]),
         ),
     })
 }

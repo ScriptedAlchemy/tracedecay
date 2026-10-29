@@ -313,7 +313,6 @@ async fn move_symbol_publishes_and_replays_without_retaining_source_bodies() {
     assert_eq!(replay.effect.as_ref().unwrap(), &moved_effect);
     let durability = crate::journal::SourceEditDurability::for_graph(&graph);
     assert!(!durability.journal_path().exists());
-    assert!(!durability.root.join("rollback-records").exists());
     let receipt = fs::read_to_string(
         durability
             .receipt_path(&moved_effect.idempotency_key)

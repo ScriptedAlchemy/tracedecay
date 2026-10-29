@@ -2714,10 +2714,7 @@
           "$ref": "#/$defs/AgentTaskKind"
         },
         "task_key": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "trigger": {
           "$ref": "#/$defs/AutomationTrigger"
@@ -2729,6 +2726,7 @@
         "run_id",
         "trigger",
         "task",
+        "task_key",
         "backend",
         "status",
         "reviewed_count",
@@ -2820,7 +2818,7 @@
       "type": "object"
     },
     "AutomationRunRowV1": {
-      "description": "One ledger record as the run-history row. `task_key` is the exact per-job\nidentity (`user_job:<id>`); rows written before it existed carry `null` and\ncannot be joined to a job.",
+      "description": "One ledger record as the run-history row. `task_key` is the exact per-job\nidentity (`user_job:<id>`).",
       "properties": {
         "accepted_count": {
           "format": "uint",
@@ -2900,10 +2898,7 @@
           "$ref": "#/$defs/AgentTaskKind"
         },
         "task_key": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "trigger": {
           "$ref": "#/$defs/AutomationTrigger"
@@ -11916,8 +11911,8 @@
           "type": "string"
         },
         {
-          "const": "pending_schema_migration",
-          "description": "A store whose historical schema convergence has not completed: the\nmigrations whose cost scales with store size are still pending, still\nrunning, or stopped on a failure. The daemon serves while they run, so\nthis is the surface that says which store is still migrating and why.",
+          "const": "schema_convergence_incomplete",
+          "description": "A store whose background schema convergence (the authority-invariant\naudit and projection retry re-arming that follow admission) has not\ncompleted: it is still pending, still running, or stopped on a failure.\nThe daemon serves meanwhile, so this is the surface that says which\nstore has not converged and why.",
           "type": "string"
         },
         {
@@ -24860,16 +24855,6 @@
             "null"
           ]
         },
-        "progress": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SchemaConvergenceProgressV1"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "stage": {
           "$ref": "#/$defs/SchemaConvergenceStageV1"
         },
@@ -24888,65 +24873,10 @@
         "store",
         "stage",
         "state",
-        "progress",
         "started_at_micros",
         "degraded_row"
       ],
       "type": "object"
-    },
-    "SchemaConvergenceProgressV1": {
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "properties": {
-            "done": {
-              "format": "uint64",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "remaining": {
-              "format": "uint64",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "unit": {
-              "const": "rows",
-              "type": "string"
-            }
-          },
-          "required": [
-            "unit",
-            "done",
-            "remaining"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "done": {
-              "format": "uint64",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "remaining": {
-              "format": "uint64",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "unit": {
-              "const": "pages",
-              "type": "string"
-            }
-          },
-          "required": [
-            "unit",
-            "done",
-            "remaining"
-          ],
-          "type": "object"
-        }
-      ]
     },
     "SchemaConvergenceStageV1": {
       "enum": [
@@ -24956,8 +24886,8 @@
     },
     "SchemaConvergenceStateV1": {
       "enum": [
-        "pending_schema_migration",
-        "released_shape_convergence_in_progress",
+        "pending",
+        "running",
         "degraded",
         "completed"
       ],
@@ -25883,7 +25813,7 @@
       "type": "object"
     },
     "SkillOutcomeVerdict": {
-      "description": "`adopted` means a use was recorded after activation. It is an adoption\nproxy, not evidence that the skill improved any task. `unknown` means no use was\nrecorded and neither task opportunity nor reliable host use telemetry\nexists, so it is never a failure. Snapshots written before that\ndistinction stored `unknown` as `ignored`.",
+      "description": "`adopted` means a use was recorded after activation. It is an adoption\nproxy, not evidence that the skill improved any task. `unknown` means no use was\nrecorded and neither task opportunity nor reliable host use telemetry\nexists, so it is never a failure.",
       "enum": [
         "adopted",
         "too_early",

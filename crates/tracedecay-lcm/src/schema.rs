@@ -4,7 +4,6 @@ use crate::retrieval_content::projected_content_hash;
 use tracedecay_runtime_core::db::engine::{Connection, TransactionBehavior};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_runtime_core::db::schema_version::{self as store_schema, LCM_COMPONENT};
-use tracedecay_store::CANONICAL_BODIES_TABLE_SQL;
 
 use super::{LcmError, LcmRawMessage, raw};
 
@@ -28,10 +27,10 @@ use super::util;
 /// `session_summary_sources` authority (session temporal schema) through
 /// [`SUMMARY_VISIBLE_SQL`]. Session rows LCM creates carry their store's
 /// scope as project fields (version 14). A message whose host content is a
-/// block array is stored as its text (version 15); version 14 stored the
-/// array's JSON, and its session-temporal effects bind that rendering's
-/// digests immutably. Older stores require a profile reset.
-pub const LCM_SCHEMA_VERSION: i64 = 15;
+/// block array is stored as its text (version 15). Version 16 creates every
+/// table, index and trigger in its final shape; no in-place upgrade runs on
+/// an existing store. Older stores require a profile reset.
+pub const LCM_SCHEMA_VERSION: i64 = 16;
 
 /// Visibility rule for every LCM summary read, over a `session_summary_nodes`
 /// row aliased `n`: a summary surfaces iff its availability in the session's
@@ -75,9 +74,6 @@ pub const RAW_MESSAGE_UNPUBLISHED_SQL: &str = "NOT EXISTS (
       AND published_provenance.output_message_id = raw.message_id
 )";
 
-const RETIRE_LEGACY_GREP_INDEX_SQL: &str =
-    "DROP INDEX IF EXISTS idx_lcm_raw_direct_user_candidate;";
-
 /// Indexes that keep expensive LCM reads off the message-body table pages.
 ///
 /// `lcm_status` aggregates whole-store counts on every probe. Without these
@@ -86,10 +82,7 @@ const RETIRE_LEGACY_GREP_INDEX_SQL: &str =
 /// body reads on a long-lived profile store for a one-row answer (issue #767
 /// measured 10.65 s daemon-side). Each entry is one independently committed
 /// idempotent batch. Fresh stores install the final index shape with the
-/// schema. Already-current daemon stores build missing indexes through
-/// lifecycle-owned post-admission convergence, while short-lived attaches
-/// converge synchronously. The one-time work is one full-table build per
-/// missing index instead of that same scan on every status call.
+/// schema.
 ///
 /// Each partial-index predicate must stay byte-identical to the query term
 /// that relies on it: SQLite substitutes a partial index only when its query
@@ -101,16 +94,10 @@ pub const LCM_STATUS_PERFORMANCE_INDEX_SQL: &[&str] = &[
          WHERE metadata_json IS NOT NULL
            AND json_valid(metadata_json)
            AND json_type(metadata_json, '$.ingest_protection.lossy') = 'true';",
-    // Only the retired SQL LCM grep engine read this index; dropping it keeps
-    // user-message writes from maintaining it.
-    RETIRE_LEGACY_GREP_INDEX_SQL,
-    // The byte-count variant covers the status COUNT+SUM without touching
-    // payload metadata rows and fully supersedes the plain owner index
-    // (same leading columns), so the replacement and the drop commit as one
-    // batch and no scope is ever left without an owner index.
+    // The byte-count owner index covers the status COUNT+SUM without
+    // touching payload metadata rows.
     "CREATE INDEX IF NOT EXISTS idx_lcm_external_payloads_owner_bytes
-         ON lcm_external_payloads(provider, session_id, byte_count);
-     DROP INDEX IF EXISTS idx_lcm_external_payloads_owner;",
+         ON lcm_external_payloads(provider, session_id, byte_count);",
 ];
 
 /// The single message FTS index. Session message search ranks over every
@@ -155,7 +142,6 @@ const RAW_FTS_DDL: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS lcm_raw_messages_f
 /// candidate, and GC verifies each candidate against its owner row after the
 /// grace window. A candidate whose owner still references it just loses its
 /// mark.
-const PAYLOAD_GC_CANDIDATE_TRIGGER: &str = "lcm_raw_messages_gc_candidate_delete";
 const PAYLOAD_GC_CANDIDATE_DDL: &str = "
     CREATE INDEX IF NOT EXISTS idx_lcm_gc_marks_state_first_seen
         ON lcm_gc_marks(state, first_seen_at);
@@ -193,31 +179,17 @@ const PAYLOAD_GC_CANDIDATE_DDL: &str = "
             WHERE lcm_gc_marks.state <> 'unreferenced';
         END;";
 
-/// Installs the payload GC candidate index and triggers. A store that
-/// predates them holds unreferenced payloads no trigger recorded, so the
-/// install records every existing payload as a candidate once; GC verifies
-/// each against its owner row. The dangling-placeholder scan starts after the
-/// rows that exist at install, which the reference scan it replaces covered.
+/// Installs the payload GC candidate index and triggers, and starts the
+/// dangling-placeholder scan at the rows that exist at install.
 async fn ensure_payload_gc_candidates(conn: &(impl Executor + ?Sized)) -> Result<(), LcmError> {
-    let installed = schema_object_exists(conn, PAYLOAD_GC_CANDIDATE_TRIGGER).await?;
     conn.execute_batch(PAYLOAD_GC_CANDIDATE_DDL).await?;
-    if !installed {
-        conn.execute(
-            "INSERT INTO lcm_gc_marks(payload_ref, state, first_seen_at, updated_at)
-             SELECT payload_ref, 'unreferenced', unixepoch(), unixepoch()
-             FROM lcm_external_payloads WHERE true
-             ON CONFLICT(payload_ref) DO NOTHING",
-            (),
-        )
-        .await?;
-        conn.execute(
-            "INSERT INTO lcm_gc_meta(key, value)
-             SELECT ?1, CAST(COALESCE(MAX(store_id), 0) AS TEXT) FROM lcm_raw_messages WHERE true
-             ON CONFLICT(key) DO NOTHING",
-            params![super::gc::DANGLING_SCAN_CURSOR],
-        )
-        .await?;
-    }
+    conn.execute(
+        "INSERT INTO lcm_gc_meta(key, value)
+         SELECT ?1, CAST(COALESCE(MAX(store_id), 0) AS TEXT) FROM lcm_raw_messages WHERE true
+         ON CONFLICT(key) DO NOTHING",
+        params![super::gc::DANGLING_SCAN_CURSOR],
+    )
+    .await?;
     Ok(())
 }
 
@@ -285,17 +257,7 @@ pub async fn ensure_lcm_schema_in_transaction(
     conn: &(impl Executor + ?Sized),
 ) -> Result<(), LcmError> {
     match require_admissible_lcm_schema(conn).await? {
-        LcmSchemaAdmission::Current => {
-            store_schema::retire_named_ledgers(conn)
-                .await
-                .map_err(schema_stamp_error)?;
-            conn.execute_batch(RETIRE_LEGACY_GREP_INDEX_SQL).await?;
-            conn.execute_batch(CANONICAL_BODIES_TABLE_SQL).await?;
-            ensure_raw_identity_schema(conn).await?;
-            ensure_payload_gc_candidates(conn).await?;
-            super::summary_convergence::ensure_schema(conn).await?;
-            return Ok(());
-        }
+        LcmSchemaAdmission::Current => return Ok(()),
         LcmSchemaAdmission::Fresh => {}
     }
 
@@ -341,6 +303,7 @@ pub async fn ensure_lcm_schema_in_transaction(
             tool_names TEXT,
             source_path TEXT,
             source_offset INTEGER,
+            location_path TEXT,
             UNIQUE(provider, message_id),
             FOREIGN KEY(provider, session_id)
                 REFERENCES sessions(provider, session_id) ON DELETE CASCADE
@@ -417,7 +380,6 @@ pub async fn ensure_lcm_schema_in_transaction(
     ensure_payload_gc_candidates(conn).await?;
     conn.execute_batch(RAW_FTS_DDL).await?;
     super::summary_convergence::ensure_schema(conn).await?;
-    super::summary_convergence::retire_predecessor_range_rewrite(conn).await?;
     for sql in LCM_STATUS_PERFORMANCE_INDEX_SQL {
         conn.execute_batch(sql).await?;
     }
@@ -433,7 +395,6 @@ fn schema_stamp_error(error: store_schema::SchemaVersionError) -> LcmError {
 }
 
 async fn ensure_raw_identity_schema(conn: &(impl Executor + ?Sized)) -> Result<(), LcmError> {
-    ensure_raw_message_location_schema(conn).await?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS lcm_raw_predecessor_ranges (
             provider TEXT NOT NULL,
@@ -452,74 +413,6 @@ async fn ensure_raw_identity_schema(conn: &(impl Executor + ?Sized)) -> Result<(
         ",
     )
     .await?;
-    Ok(())
-}
-
-/// Add the storage-only location to the exact shipped v15 raw-row shape.
-/// Bodies, metadata and their immutable provenance receipts are unchanged.
-async fn ensure_raw_message_location_schema(
-    conn: &(impl Executor + ?Sized),
-) -> Result<(), LcmError> {
-    // name, declared type, not-null, primary-key position, generated-column kind
-    const RELEASED_COLUMNS: &[(&str, &str, i64, i64, i64)] = &[
-        ("provider", "TEXT", 1, 0, 0),
-        ("message_id", "TEXT", 1, 0, 0),
-        ("session_id", "TEXT", 1, 0, 0),
-        ("store_id", "INTEGER", 0, 1, 0),
-        ("role", "TEXT", 1, 0, 0),
-        ("ordinal", "INTEGER", 1, 0, 0),
-        ("timestamp", "INTEGER", 0, 0, 0),
-        ("content", "TEXT", 0, 0, 0),
-        ("content_hash", "TEXT", 1, 0, 0),
-        ("storage_kind", "TEXT", 1, 0, 0),
-        ("payload_ref", "TEXT", 0, 0, 0),
-        ("placeholder_text", "TEXT", 0, 0, 0),
-        ("snippet_text", "TEXT", 1, 0, 2),
-        ("index_text", "TEXT", 1, 0, 2),
-        ("metadata_json", "TEXT", 0, 0, 0),
-        ("kind", "TEXT", 0, 0, 0),
-        ("model", "TEXT", 0, 0, 0),
-        ("tool_names", "TEXT", 0, 0, 0),
-        ("source_path", "TEXT", 0, 0, 0),
-        ("source_offset", "INTEGER", 0, 0, 0),
-    ];
-    let mut rows = conn
-        .query(
-            "SELECT name, type, [notnull], pk, hidden, dflt_value
-         FROM pragma_table_xinfo('lcm_raw_messages') ORDER BY cid",
-            (),
-        )
-        .await?;
-    let mut count = 0;
-    while let Some(row) = rows.next().await? {
-        let name = row.get::<String>(0)?;
-        let declared_type = row.get::<String>(1)?;
-        let actual = (
-            name.as_str(),
-            declared_type.as_str(),
-            row.get(2)?,
-            row.get(3)?,
-            row.get(4)?,
-        );
-        let expected = RELEASED_COLUMNS.get(count).copied().or_else(|| {
-            (count == RELEASED_COLUMNS.len()).then_some(("location_path", "TEXT", 0, 0, 0))
-        });
-        if expected != Some(actual) || row.get::<Option<String>>(5)?.is_some() {
-            return Err(LcmError::Db(
-                "unsupported LCM raw message column shape".to_owned(),
-            ));
-        }
-        count += 1;
-    }
-    drop(rows);
-    if count == RELEASED_COLUMNS.len() {
-        conn.execute_batch("ALTER TABLE lcm_raw_messages ADD COLUMN location_path TEXT;")
-            .await?;
-    } else if count != RELEASED_COLUMNS.len() + 1 {
-        return Err(LcmError::Db(
-            "incomplete LCM raw message column shape".to_owned(),
-        ));
-    }
     Ok(())
 }
 
@@ -659,6 +552,7 @@ mod tests {
     use super::*;
     use tracedecay_privacy::sanitize_lcm_payload_text;
     use tracedecay_runtime_core::db::engine::TestConnection;
+    use tracedecay_store::CANONICAL_BODIES_TABLE_SQL;
 
     async fn lcm_reader_test_connection() -> Result<(tempfile::TempDir, TestConnection), String> {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -716,13 +610,11 @@ mod tests {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let conn = TestConnection::open(&temp.path().join("sessions.db"));
         conn.execute_batch(&format!(
-            "CREATE TABLE session_schema_migrations (
-                name TEXT PRIMARY KEY,
-                version INTEGER NOT NULL,
-                applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+            "CREATE TABLE tracedecay_schema_version (
+                component TEXT PRIMARY KEY,
+                version INTEGER NOT NULL
             );
-            INSERT INTO session_schema_migrations(name, version, applied_at)
-            VALUES ('lcm', {PREVIOUS}, 123);"
+            INSERT INTO tracedecay_schema_version(component, version) VALUES ('lcm', {PREVIOUS});"
         ))
         .await
         .map_err(|error| error.to_string())?;
@@ -753,7 +645,7 @@ mod tests {
         assert_eq!(
             util::fetch_i64(
                 &*conn,
-                "SELECT version FROM session_schema_migrations WHERE name = 'lcm'",
+                "SELECT version FROM tracedecay_schema_version WHERE component = 'lcm'",
                 (),
                 "migration marker version",
             )
@@ -787,13 +679,11 @@ mod tests {
                 metadata_json TEXT,
                 PRIMARY KEY(provider, message_id)
             );
-            CREATE TABLE session_schema_migrations (
-                name TEXT PRIMARY KEY,
-                version INTEGER NOT NULL,
-                applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+            CREATE TABLE tracedecay_schema_version (
+                component TEXT PRIMARY KEY,
+                version INTEGER NOT NULL
             );
-            INSERT INTO session_schema_migrations(name, version, applied_at)
-            VALUES ('lcm', 6, 123);
+            INSERT INTO tracedecay_schema_version(component, version) VALUES ('lcm', 6);
             CREATE VIRTUAL TABLE lcm_lifecycle_state USING fts5(
                 provider,
                 conversation_id,
@@ -818,7 +708,7 @@ mod tests {
         assert_eq!(
             util::fetch_i64(
                 &*conn,
-                "SELECT version FROM session_schema_migrations WHERE name = 'lcm'",
+                "SELECT version FROM tracedecay_schema_version WHERE component = 'lcm'",
                 (),
                 "migration marker version",
             )
@@ -873,11 +763,6 @@ mod tests {
                 source_offset INTEGER,
                 metadata_json TEXT,
                 PRIMARY KEY(provider, message_id)
-            );
-            CREATE TABLE session_schema_migrations (
-                name TEXT PRIMARY KEY,
-                version INTEGER NOT NULL,
-                applied_at INTEGER NOT NULL DEFAULT (unixepoch())
             );",
         )
         .await
@@ -921,12 +806,6 @@ mod tests {
             .map_err(|err| err.to_string())?,
             LCM_SCHEMA_VERSION
         );
-        assert!(
-            !schema_object_exists(&*conn, "session_schema_migrations")
-                .await
-                .map_err(|error| error.to_string())?,
-            "a current install retires the legacy LCM ledger"
-        );
         assert_eq!(
             util::fetch_i64(
                 &*conn,
@@ -945,7 +824,7 @@ mod tests {
     /// superseded plain payload owner index is gone, its replacement covers
     /// the same leading columns.
     #[asupersync::test]
-    async fn schema_installs_current_indexes_and_retires_legacy_grep_index() -> Result<(), String> {
+    async fn schema_installs_current_indexes() -> Result<(), String> {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let conn = TestConnection::open(&temp.path().join("sessions.db"));
         conn.execute_batch(
@@ -997,66 +876,6 @@ mod tests {
                 .await
                 .map_err(|error| error.to_string())?,
             "fresh LCM schema is missing the bounded native-range lookup index"
-        );
-        conn.execute_batch(
-            "CREATE INDEX idx_lcm_raw_direct_user_candidate
-             ON lcm_raw_messages(provider, store_id) WHERE role = 'user';
-             INSERT INTO sessions(provider, session_id, project_key, project_path)
-             VALUES ('cursor', 'session-1', 'project-1', '/fixture');",
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        conn.execute(
-            "INSERT INTO lcm_raw_messages(provider, message_id, session_id, role,
-                ordinal, content, content_hash, storage_kind)
-             VALUES ('cursor', 'message-1', 'session-1', 'user', 1, ?1, ?2, 'inline')",
-            params!["retained source", projected_content_hash("retained source")],
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        ensure_lcm_schema(&conn)
-            .await
-            .map_err(|error| error.to_string())?;
-        assert!(
-            !schema_object_exists(&*conn, "idx_lcm_raw_direct_user_candidate")
-                .await
-                .map_err(|error| error.to_string())?,
-            "a current-schema store must retire the legacy grep index too"
-        );
-        let mut rows = conn
-            .query(
-                "SELECT content FROM lcm_raw_messages WHERE message_id = 'message-1'",
-                params![],
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|error| error.to_string())?
-            .expect("retained row");
-        assert_eq!(
-            row.get::<String>(0).map_err(|error| error.to_string())?,
-            "retained source"
-        );
-        drop(rows);
-        conn.execute_batch("DROP TABLE lcm_raw_predecessor_ranges;")
-            .await
-            .map_err(|error| error.to_string())?;
-        ensure_lcm_schema(&conn)
-            .await
-            .map_err(|error| error.to_string())?;
-        assert!(
-            schema_object_exists(&*conn, "lcm_raw_predecessor_ranges")
-                .await
-                .map_err(|error| error.to_string())?,
-            "current LCM schema did not repair native source-range provenance"
-        );
-        assert!(
-            schema_object_exists(&*conn, "idx_lcm_raw_predecessor_session_to")
-                .await
-                .map_err(|error| error.to_string())?,
-            "current LCM schema did not repair the bounded native-range lookup index"
         );
         Ok(())
     }
@@ -1190,60 +1009,6 @@ mod tests {
             checked += 1;
         }
         assert_eq!(checked, bodies.len() + 1);
-        Ok(())
-    }
-
-    #[asupersync::test]
-    async fn current_legacy_stamp_moves_onto_the_store_ledger() -> Result<(), String> {
-        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let conn = TestConnection::open(&temp.path().join("sessions.db"));
-        conn.execute_batch(
-            "CREATE TABLE sessions (
-                provider TEXT NOT NULL,
-                session_id TEXT NOT NULL,
-                project_key TEXT NOT NULL,
-                project_path TEXT NOT NULL,
-                PRIMARY KEY(provider, session_id)
-            );",
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        ensure_lcm_schema(&conn)
-            .await
-            .map_err(|error| error.to_string())?;
-        conn.execute_batch(
-            "DROP TABLE tracedecay_schema_version;
-            CREATE TABLE session_schema_migrations (
-                name TEXT PRIMARY KEY,
-                version INTEGER NOT NULL,
-                applied_at INTEGER NOT NULL DEFAULT (unixepoch())
-            );
-            INSERT INTO session_schema_migrations(name, version, applied_at)
-            VALUES ('lcm', 15, 123);",
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-
-        ensure_lcm_schema(&conn)
-            .await
-            .map_err(|error| error.to_string())?;
-        assert!(
-            !schema_object_exists(&*conn, "session_schema_migrations")
-                .await
-                .map_err(|error| error.to_string())?,
-            "adopting the current LCM stamp drops the legacy ledger"
-        );
-        assert_eq!(
-            util::fetch_i64(
-                &*conn,
-                "SELECT version FROM tracedecay_schema_version WHERE component = 'lcm'",
-                (),
-                "adopted LCM version",
-            )
-            .await
-            .map_err(|error| error.to_string())?,
-            LCM_SCHEMA_VERSION
-        );
         Ok(())
     }
 

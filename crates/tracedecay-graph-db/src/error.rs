@@ -129,10 +129,6 @@ pub enum GraphDbError {
         "sealed code generation was superseded while it was read; retry against the current seal"
     )]
     SealSuperseded,
-    #[error(
-        "sealed code generation `{sealed_state_digest}` predates authenticated source commitments"
-    )]
-    SourceCommitmentsUnavailable { sealed_state_digest: String },
     /// The sealed generation's rows are refused by the current reader's
     /// contract (a historical writer revision). No retry or rebuild of the
     /// graph can ever complete it; only a fresh code-index seal can.
@@ -200,9 +196,10 @@ pub fn classify_graph_store_error(
         GraphDbError::Unavailable { message } | GraphDbError::SealedStoreImmutable { message } => {
             GraphStoreFailureClass::Unavailable(message)
         }
-        error @ (GraphDbError::SourceCommitmentsUnavailable { .. }
-        | GraphDbError::SealedRevisionIncompatible { .. }
-        | GraphDbError::SealSuperseded) => GraphStoreFailureClass::Unavailable(error.to_string()),
+        error
+        @ (GraphDbError::SealedRevisionIncompatible { .. } | GraphDbError::SealSuperseded) => {
+            GraphStoreFailureClass::Unavailable(error.to_string())
+        }
         GraphDbError::Closed => {
             GraphStoreFailureClass::Unavailable("graph store is closed".to_owned())
         }

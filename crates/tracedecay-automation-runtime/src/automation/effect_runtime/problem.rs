@@ -207,6 +207,7 @@ mod tests {
             "run_id": "run.failed-ledger-problem",
             "trigger": "scheduler",
             "task": "memory_curator",
+            "task_key": "memory_curator",
             "backend": "codex_app_server",
             "status": "failed",
             "accepted_count": 0,

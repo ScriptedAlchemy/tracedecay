@@ -88,7 +88,8 @@ fn metric<'a>(metrics: &'a Value, name: &str) -> &'a Value {
 fn ledger_row(run_id: &str, task: &str, status: &str, started_at: i64) -> String {
     format!(
         "{{\"schema_version\":2,\"run_id\":\"{run_id}\",\"trigger\":\"scheduler\",\
-         \"task\":\"{task}\",\"backend\":\"codex_app_server\",\"status\":\"{status}\",\
+         \"task\":\"{task}\",\"task_key\":\"{task}\",\"backend\":\"codex_app_server\",\
+         \"status\":\"{status}\",\
          \"accepted_count\":0,\"rejected_count\":0,\"started_at\":\"{started_at}\",\
          \"completed_at\":\"{started_at}\",\"completed_at_micros\":{}}}",
         started_at.saturating_mul(1_000_000)

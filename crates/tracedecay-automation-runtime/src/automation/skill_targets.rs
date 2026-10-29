@@ -15,15 +15,6 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const NATIVE_NAMESPACE_DIR: &str = "agent-managed";
 const NATIVE_MANIFEST_FILE: &str = ".tracedecay-managed-skills.json";
-/// Typed reset authority for a host prompt file's managed-skill index; its
-/// reset deletes the refused block from that file.
-const MANAGED_SKILL_PROMPT_INDEX_AUTHORITY: &str = "managed skill prompt index";
-/// Markers of the released unslugged index block, which this binary neither
-/// adopts nor removes. Either one alone (an orphaned half) is the same shape.
-const RELEASED_UNSLUGGED_INDEX_MARKERS: [&str; 2] = [
-    "<!-- TRACEDECAY MANAGED SKILLS START -->",
-    "<!-- TRACEDECAY MANAGED SKILLS END -->",
-];
 
 pub use crate::automation::managed_skills::SkillInstallTarget;
 
@@ -220,7 +211,6 @@ pub fn export_prompt_skill_index(
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(err) => return Err(err.into()),
     };
-    refuse_released_unslugged_index(prompt_path, &existing)?;
     let updated = if skills.is_empty() {
         remove_marked_block_for_target(&existing, target)?
     } else {
@@ -263,7 +253,6 @@ pub fn remove_prompt_skill_index_for_target(
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(err) => return Err(err.into()),
     };
-    refuse_released_unslugged_index(prompt_path, &existing)?;
     let updated = remove_marked_block_for_target(&existing, target)?;
     if updated == existing {
         return Ok(());
@@ -306,7 +295,6 @@ pub fn stale_prompt_index_ids(
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) => return Err(err.into()),
     };
-    refuse_released_unslugged_index(prompt_path, &existing)?;
     let (start_marker, end_marker) = prompt_index_markers(target);
     let Some((start, end)) = managed_block_range(&existing, target, &start_marker, &end_marker)?
     else {
@@ -319,22 +307,6 @@ pub fn stale_prompt_index_ids(
     Ok(listed_prompt_index_ids(&existing[start..end])
         .filter(|id| !active.contains(id))
         .collect())
-}
-
-fn refuse_released_unslugged_index(prompt_path: &Path, existing: &str) -> Result<()> {
-    match RELEASED_UNSLUGGED_INDEX_MARKERS
-        .into_iter()
-        .find(|marker| existing.contains(marker))
-    {
-        Some(marker) => Err(TraceDecayError::reset_required(
-            MANAGED_SKILL_PROMPT_INDEX_AUTHORITY,
-            format!(
-                "'{}' carries the released unslugged managed-skill index marker `{marker}`",
-                prompt_path.display()
-            ),
-        )),
-        None => Ok(()),
-    }
 }
 
 fn listed_prompt_index_ids(block: &str) -> impl Iterator<Item = String> + '_ {

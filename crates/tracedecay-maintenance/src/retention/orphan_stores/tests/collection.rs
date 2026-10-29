@@ -1,5 +1,3 @@
-use tracedecay_contracts::doctor::{DoctorEvidenceStateV1, DoctorStorageFamilyReadV1};
-
 use super::*;
 
 /// Seed a profile with one live store and one identity-drift orphan store, then
@@ -455,7 +453,7 @@ async fn unregistered_collection_rejects_profile_contained_data_root_symlink() {
 fn delete_boundary_refuses_same_second_sqlite_mutation() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
-    let data_root = profile_root.join("stores/sqlite-race");
+    let data_root = profile_root.join("projects/sqlite-race");
     std::fs::create_dir_all(&data_root).unwrap();
     let database = data_root.join("graph.db");
     let connection = rusqlite::Connection::open(&database).unwrap();
@@ -495,11 +493,11 @@ fn delete_boundary_refuses_same_second_sqlite_mutation() {
 fn delete_boundary_refuses_empty_directory_replacement() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
-    let data_root = profile_root.join("stores/empty-rename-race");
+    let data_root = profile_root.join("projects/empty-rename-race");
     std::fs::create_dir_all(&data_root).unwrap();
     let expected = capture_store_content_fence(&profile_root, &data_root).unwrap();
 
-    let displaced = profile_root.join("stores/displaced-empty");
+    let displaced = profile_root.join("projects/displaced-empty");
     std::fs::rename(&data_root, &displaced).unwrap();
     std::fs::create_dir_all(&data_root).unwrap();
 
@@ -522,10 +520,10 @@ fn delete_boundary_refuses_empty_directory_replacement() {
 async fn registered_collection_payload_fence_cancellation_is_terminal() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
-    let data_root = profile_root.join("stores/payload-fence-cancelled");
+    let data_root = profile_root.join("projects/payload-fence-cancelled");
     seed_payload_fence_work(&data_root);
     let (_runtime, db) = open_registered_db(&profile_root).await;
-    let finding = payload_fence_finding(data_root.clone(), "stores/payload-fence-cancelled");
+    let finding = payload_fence_finding(data_root.clone(), "projects/payload-fence-cancelled");
     let cancellation = CancellationToken::new();
     cancellation.cancel();
 
@@ -646,79 +644,6 @@ async fn sweep_unregistered_stores_never_deletes_durable_memory_rows() {
     assert!(dir.exists(), "durable memory store was removed: {report:?}");
 }
 
-/// Seeds `branches/feature.db` (carrying a durable memory row) and its WAL the
-/// way the retired per-branch store layout left them. Returns the directory
-/// and the seeded bytes.
-fn seed_retired_branch_store(data_root: &Path, mtime_secs: i64) -> (PathBuf, u64) {
-    let branches = data_root.join("branches");
-    std::fs::create_dir_all(&branches).unwrap();
-    let database = branches.join("feature.db");
-    rusqlite::Connection::open(&database)
-        .unwrap()
-        .execute_batch(
-            "CREATE TABLE memory_facts (fact_id INTEGER PRIMARY KEY, content TEXT NOT NULL);
-             INSERT INTO memory_facts (fact_id, content) VALUES (1, 'old-layout fact');",
-        )
-        .unwrap();
-    let wal = branches.join("feature.db-wal");
-    std::fs::write(&wal, b"old-layout wal").unwrap();
-    let mut bytes = 0;
-    for path in [&database, &wal] {
-        bytes += std::fs::metadata(path).unwrap().len();
-    }
-    for path in [&database, &wal, &branches] {
-        filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(mtime_secs, 0)).unwrap();
-    }
-    (branches, bytes)
-}
-
-fn profile_file_names(root: &Path) -> Vec<String> {
-    let mut names = Vec::new();
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(directory) = pending.pop() {
-        for entry in std::fs::read_dir(directory).unwrap() {
-            let entry = entry.unwrap();
-            if entry.file_type().unwrap().is_dir() {
-                pending.push(entry.path());
-            }
-            names.push(entry.file_name().to_string_lossy().into_owned());
-        }
-    }
-    names
-}
-
-/// A manifestless unregistered directory holding only the retired branch-store
-/// layout is old data, not durable authority: its memory rows and sidecars do
-/// not protect it, and collection leaves no copy behind.
-#[asupersync::test]
-async fn sweep_unregistered_stores_collects_retired_branch_store_layout() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let profile_root = tmp.path().join("profile");
-    std::fs::create_dir_all(&profile_root).unwrap();
-    let (_runtime, db) = open_registered_db(&profile_root).await;
-    let base = 1_700_000_000i64;
-    let dir = profile_root.join("projects").join("proj_ghost_branches");
-    seed_retired_branch_store(&dir, base - 100 * DAY);
-
-    let report = sweep_unregistered_stores(&db, &profile_root, 7 * DAY, base, true)
-        .await
-        .unwrap();
-
-    assert!(
-        report.outcome.errors.is_empty(),
-        "{:?}",
-        report.outcome.errors
-    );
-    assert_eq!(report.outcome.collected.len(), 1);
-    assert!(!dir.exists());
-    assert!(
-        !profile_file_names(&profile_root)
-            .iter()
-            .any(|name| name.starts_with("feature.db")),
-        "no copy of the retired layout may remain"
-    );
-}
-
 /// The cold-store page over stores whose roots were removed from disk keeps
 /// the one whose exact registered root still has a live owner, which can
 /// still write into it, and collects the rest, including the store of a root
@@ -736,9 +661,9 @@ async fn cold_store_page_keeps_a_removed_root_store_only_while_that_exact_root_h
         .cast_signed();
     let removed_root = |name: &str| tmp.path().join("removed-worktrees").join(name);
     for (project_id, store_id, root) in [
-        ("proj_owned", "store_owned", "wt"),
-        ("proj_unowned", "store_unowned", "other"),
-        ("proj_prefix", "store_prefix", "wt-old"),
+        ("proj_owned", "proj_owned", "wt"),
+        ("proj_unowned", "proj_unowned", "other"),
+        ("proj_prefix", "proj_prefix", "wt-old"),
     ] {
         seed_store(
             &db,
@@ -765,12 +690,12 @@ async fn cold_store_page_keeps_a_removed_root_store_only_while_that_exact_root_h
         page.outcome,
         crate::retention::cold_store::ColdStorePageOutcomeV1::Processed
     );
-    let mut kept = std::fs::read_dir(profile_root.join("stores"))
+    let mut kept = std::fs::read_dir(profile_root.join("projects"))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .collect::<Vec<_>>();
     kept.sort_unstable();
-    assert_eq!(kept, ["store_owned"]);
+    assert_eq!(kept, ["proj_owned"]);
     for (project_id, registered) in [("proj_owned", 1), ("proj_unowned", 0), ("proj_prefix", 0)] {
         assert_eq!(
             db.try_list_store_instances_for_project(project_id)
@@ -781,127 +706,6 @@ async fn cold_store_page_keeps_a_removed_root_store_only_while_that_exact_root_h
             "{project_id}"
         );
     }
-}
-
-/// Production journey over one profile: a live registered store carrying a
-/// stray `branches/*.db` is reported by Doctor, the maintenance cold-store
-/// orphan-collection page deletes it without a copy, Doctor is then clean, and
-/// the live store's own files are byte-identical.
-#[asupersync::test]
-async fn cold_store_page_deletes_retired_branch_store_and_doctor_is_clean() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let profile_root = tmp.path().join("profile");
-    std::fs::create_dir_all(profile_root.join("projects")).unwrap();
-    let live_root = tmp.path().join("live-repo");
-    std::fs::create_dir_all(&live_root).unwrap();
-    let (_runtime, db) = open_registered_db(&profile_root).await;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        .cast_signed();
-    let data_root = seed_store(
-        &db,
-        &profile_root,
-        "proj_live",
-        "store_live",
-        &live_root,
-        now,
-    )
-    .await;
-    let (branches, seeded_bytes) = seed_retired_branch_store(&data_root, now);
-    let live_files = [
-        data_root.join("graph.db"),
-        data_root.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
-    ];
-    let live_bytes = live_files
-        .iter()
-        .map(|path| std::fs::read(path).unwrap())
-        .collect::<Vec<_>>();
-
-    let before = crate::retention::diagnostics::collect_profile_storage_findings(
-        &db,
-        &profile_root,
-        &BTreeSet::new(),
-        7 * DAY,
-        now,
-    )
-    .await;
-    let DoctorStorageFamilyReadV1::Observed { findings } = &before.incident_debris else {
-        panic!(
-            "incident debris must be observed: {:?}",
-            before.incident_debris
-        );
-    };
-    assert_eq!(
-        findings
-            .iter()
-            .map(|finding| finding.finding().state())
-            .collect::<Vec<_>>(),
-        [DoctorEvidenceStateV1::Degraded],
-        "the stray retired store must surface before collection"
-    );
-
-    let page = crate::retention::cold_store::run_cold_store_page(
-        &profile_root,
-        &db,
-        Some(7),
-        &BTreeSet::new(),
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(
-        page.outcome,
-        crate::retention::cold_store::ColdStorePageOutcomeV1::Processed
-    );
-    assert_eq!(page.reclaimed_bytes, seeded_bytes);
-    assert!(
-        !branches.exists(),
-        "the retired directory itself is removed"
-    );
-    assert!(
-        !profile_file_names(&profile_root)
-            .iter()
-            .any(|name| name.starts_with("feature.db")),
-        "no copy of the retired layout may remain"
-    );
-    for (path, bytes) in live_files.iter().zip(&live_bytes) {
-        assert_eq!(&std::fs::read(path).unwrap(), bytes, "{}", path.display());
-    }
-    assert_eq!(
-        db.try_list_store_instances_for_project("proj_live")
-            .await
-            .unwrap()
-            .len(),
-        1,
-        "the live store registration is untouched"
-    );
-
-    let after = crate::retention::diagnostics::collect_profile_storage_findings(
-        &db,
-        &profile_root,
-        &BTreeSet::new(),
-        7 * DAY,
-        now,
-    )
-    .await;
-    let DoctorStorageFamilyReadV1::Observed { findings } = &after.incident_debris else {
-        panic!(
-            "incident debris must be observed: {:?}",
-            after.incident_debris
-        );
-    };
-    assert_eq!(
-        findings
-            .iter()
-            .map(|finding| finding.finding().state())
-            .collect::<Vec<_>>(),
-        [DoctorEvidenceStateV1::HealthyCompleteCoverage]
-    );
-    assert_eq!(after.orphan_stores, DoctorStorageFamilyReadV1::Absent);
-    assert_eq!(after.unregistered_stores, DoctorStorageFamilyReadV1::Absent);
 }
 
 /// The durable-data check covers the manifest-selected project graph and
@@ -933,10 +737,12 @@ mod durable_inventory {
         assert_eq!(
             durable_database_inventory(
                 Some(&manifest_bytes("custom-main.db")),
-                Path::new("stores/inventory"),
+                Path::new("projects/inventory"),
                 unbounded_collection_control(),
             ),
-            DurableDatabaseInventoryV1::Resolved(PathBuf::from("stores/inventory/custom-main.db")),
+            DurableDatabaseInventoryV1::Resolved(PathBuf::from(
+                "projects/inventory/custom-main.db"
+            )),
             "the manifest's custom main graph path must be honoured, not the default filename"
         );
     }
@@ -946,7 +752,7 @@ mod durable_inventory {
         assert_eq!(
             durable_database_inventory(
                 None,
-                Path::new("stores/inventory"),
+                Path::new("projects/inventory"),
                 unbounded_collection_control(),
             ),
             DurableDatabaseInventoryV1::Unverifiable,
@@ -961,7 +767,7 @@ mod durable_inventory {
             assert_eq!(
                 durable_database_inventory(
                     Some(&bytes),
-                    Path::new("stores/inventory"),
+                    Path::new("projects/inventory"),
                     unbounded_collection_control(),
                 ),
                 DurableDatabaseInventoryV1::Unverifiable,
@@ -972,7 +778,7 @@ mod durable_inventory {
         assert_eq!(
             durable_database_inventory(
                 Some(&manifest_bytes("/tmp/graph.db")),
-                Path::new("stores/inventory"),
+                Path::new("projects/inventory"),
                 unbounded_collection_control(),
             ),
             DurableDatabaseInventoryV1::Unverifiable,
@@ -985,7 +791,7 @@ mod durable_inventory {
         assert_eq!(
             durable_database_inventory(
                 Some(&manifest_bytes("graph.db")),
-                Path::new("stores/inventory"),
+                Path::new("projects/inventory"),
                 cancelled_collection_control(),
             ),
             DurableDatabaseInventoryV1::Interrupted,
@@ -996,7 +802,7 @@ mod durable_inventory {
     #[asupersync::test]
     async fn a_store_whose_manifest_is_unreadable_is_never_reported_empty() {
         let profile = tempfile::tempdir().unwrap();
-        let data_root = profile.path().join("stores/unreadable");
+        let data_root = profile.path().join("projects/unreadable");
         std::fs::create_dir_all(&data_root).unwrap();
 
         let check = check_store_durable_memory(
@@ -1018,7 +824,7 @@ mod durable_inventory {
     #[asupersync::test]
     async fn a_pre_cancelled_durable_snapshot_reports_interrupted() {
         let profile = tempfile::tempdir().unwrap();
-        let data_root = profile.path().join("stores/cancelled");
+        let data_root = profile.path().join("projects/cancelled");
         std::fs::create_dir_all(&data_root).unwrap();
         rusqlite::Connection::open(data_root.join("graph.db")).unwrap();
 

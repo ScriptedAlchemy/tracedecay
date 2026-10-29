@@ -19,7 +19,7 @@ use tracedecay_domain::{
     RepositoryRemoteIdentityV1, RetentionClass, RetrievalAnchorRecord, RetrievalAnchorRecordParts,
     RetrievalAnchorTarget, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
     SanitizerDispositionV1, SensitivityV1, SessionId, TreeId, UtcMicros, VectorWatermark,
-    WorktreeId, is_canonical_payload_revision_replay,
+    WorktreeId, is_replayed_occurrence,
 };
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::admission::HostAdmissionScope;
@@ -89,12 +89,10 @@ fn observation_in_scope(
     body: &str,
     scope: ObservationScopeV1,
 ) -> DurableObservationV1 {
-    let payload = claude_records::canonical_envelope(
-        &claude_records::assistant_record(body),
-        source().session_id().as_str(),
-        start,
-        end,
-    );
+    let mut native = claude_records::assistant_record(body);
+    native["uuid"] = json!(format!("row.{generation}.{start}.{end}"));
+    let payload =
+        claude_records::canonical_envelope(&native, source().session_id().as_str(), start, end);
     let payload_reference = PayloadReferenceV1::for_payload(&payload).unwrap();
     let receipt = SanitizationReceiptV1::new(
         SanitizationReceiptRefV1::new(
@@ -107,11 +105,13 @@ fn observation_in_scope(
         Some(payload_reference),
     )
     .unwrap();
-    let identity = ObservationIdentityMaterialV1::new(
+    let identity = ObservationIdentityMaterialV1::for_native_record(
         source(),
         scope,
         ObservationSourceGenerationV1::new(generation).unwrap(),
         ObservationSourceRangeV1::new(start, end).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
+        ObservationId::new(payload["stable_record_id"].as_str().unwrap()).unwrap(),
     )
     .unwrap();
 
@@ -399,40 +399,24 @@ fn provider_observation(fixture: ProviderObservationFixture<'_>) -> DurableObser
     .unwrap()
 }
 
-fn canonical_revision_observation(
+fn occurrence_observation(
     provider: &str,
     generation: u64,
     start: u64,
     end: u64,
     receipt_id: &str,
-    legacy: bool,
     content: &str,
 ) -> DurableObservationV1 {
-    let session_id = format!("session.{provider}.canonical-revision");
+    let session_id = format!("session.{provider}.occurrence");
     let stable_record_id = ObservationId::new("record.stable").unwrap();
-    let mut relations =
+    let relations =
         CanonicalObservationRelationsV1::new(SessionId::new(session_id.clone()).unwrap())
             .with_message_id(stable_record_id.clone());
-    if legacy {
-        relations = match provider {
-            "codex" => relations.with_turn_id(ObservationId::new("route.turn").unwrap()),
-            "cursor" => relations.with_thread_id(ObservationId::new("route.thread").unwrap()),
-            _ => unreachable!("fixture provider is allowlisted"),
-        };
-    }
     let session = match provider {
         "codex" => CanonicalObservationFactV1::Session {
-            project_path: Some(if legacy {
-                "/route/project".to_owned()
-            } else {
-                "/stable/project".to_owned()
-            }),
-            location_path: Some(if legacy {
-                "/route/location".to_owned()
-            } else {
-                "/stable/project".to_owned()
-            }),
-            transcript_path: legacy.then(|| "/route/rollout.jsonl".to_owned()),
+            project_path: Some("/stable/project".to_owned()),
+            location_path: Some("/stable/project".to_owned()),
+            transcript_path: None,
             title: None,
             started_at: None,
             ended_at: None,
@@ -458,15 +442,12 @@ fn canonical_revision_observation(
     let message = CanonicalObservationFactV1::Message {
         role: CanonicalMessageRoleV1::Assistant,
         content: json!(content),
-        model: (provider == "cursor" && legacy).then(|| "route.model".to_owned()),
-        timestamp: (provider == "cursor" && legacy).then_some(1_700_000_000_000_000),
+        model: None,
+        timestamp: None,
     };
     let range = ObservationSourceRangeV1::new(start, end).unwrap();
-    let mut evidence =
+    let evidence =
         CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SqliteRowId, range);
-    if provider == "cursor" && legacy {
-        evidence = evidence.with_native_timestamp(1_700_000_000_000_000);
-    }
     let payload = serde_json::to_value(
         CanonicalObservationEnvelopeV1::new(
             ProviderId::new(provider).unwrap(),
@@ -510,10 +491,10 @@ fn canonical_revision_observation(
     .unwrap()
 }
 
-/// Snapshot-provider analogue of [`canonical_revision_observation`]: a
-/// message-only canonical envelope ordered by snapshot position, like records
-/// admitted before location facts were projected.
-fn snapshot_revision_observation(
+/// Snapshot-provider analogue of [`occurrence_observation`]: a canonical
+/// envelope ordered by snapshot position that leads with the location-only
+/// `Session` fact current snapshot capture projects.
+fn snapshot_occurrence_observation(
     provider: &str,
     generation: u64,
     start: u64,
@@ -521,7 +502,7 @@ fn snapshot_revision_observation(
     receipt_id: &str,
     content: &str,
 ) -> DurableObservationV1 {
-    let session_id = format!("session.{provider}.location-revision");
+    let session_id = format!("session.{provider}.location-occurrence");
     let stable_record_id = ObservationId::new("record.snapshot.stable").unwrap();
     let relations =
         CanonicalObservationRelationsV1::new(SessionId::new(session_id.clone()).unwrap())
@@ -532,6 +513,18 @@ fn snapshot_revision_observation(
         model: None,
         timestamp: None,
     };
+    let session = CanonicalObservationFactV1::Session {
+        project_path: None,
+        location_path: Some("/workspace/task".to_owned()),
+        transcript_path: None,
+        title: None,
+        started_at: None,
+        ended_at: None,
+        source: None,
+        native_source: None,
+        profile: None,
+        location_provenance: Some("task_metadata".to_owned()),
+    };
     let range = ObservationSourceRangeV1::new(start, end).unwrap();
     let evidence =
         CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::SnapshotOrder, range);
@@ -541,7 +534,7 @@ fn snapshot_revision_observation(
             "message",
             stable_record_id.clone(),
             relations,
-            vec![message],
+            vec![session, message],
             evidence,
         )
         .unwrap(),
@@ -913,8 +906,9 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
     let deltas = table_deltas(&before, &user_table_counts(&database_path));
     assert_eq!(
         deltas.len(),
-        7,
-        "receipt, observation, anchors, provenance, cursor, and queue must commit: {deltas:?}"
+        8,
+        "receipt, observation, anchors, native alias, provenance, cursor, and queue must \
+         commit: {deltas:?}"
     );
     assert!(
         deltas.values().all(|delta| *delta == 1),
@@ -1002,6 +996,64 @@ async fn drifted_observation_shape_refuses_admission_with_reset_required() {
     assert_eq!(
         legacy_rows, 1,
         "refused data must be preserved for recovery"
+    );
+}
+
+/// A `projection_queue` from before the revival columns existed refuses
+/// admission with the typed `ResetRequired` state at open, so no store reaches
+/// its first queue write without them.
+#[tokio::test]
+async fn projection_queue_without_revival_columns_refuses_admission_with_reset_required() {
+    let tmp = TempDir::new().unwrap();
+    let bootstrap = profile_runtime(&tmp).await;
+    let db_path = bootstrap
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    drop(bootstrap);
+
+    let raw_conn = rusqlite::Connection::open(&db_path).unwrap();
+    raw_conn.pragma_update(None, "foreign_keys", false).unwrap();
+    let dependents = raw_conn
+        .prepare(
+            "SELECT sql FROM sqlite_master
+             WHERE tbl_name = 'projection_queue' AND type IN ('index', 'trigger')
+               AND sql IS NOT NULL",
+        )
+        .unwrap()
+        .query_map((), |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    raw_conn
+        .execute_batch(
+            "DROP TABLE projection_queue;
+            CREATE TABLE projection_queue (
+                observation_id TEXT PRIMARY KEY,
+                observation_sequence INTEGER NOT NULL UNIQUE,
+                attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+                next_retry_at_micros INTEGER NOT NULL DEFAULT 0 CHECK(next_retry_at_micros >= 0),
+                last_error TEXT,
+                FOREIGN KEY(observation_id) REFERENCES observations(observation_id)
+            );",
+        )
+        .unwrap();
+    for sql in &dependents {
+        raw_conn.execute_batch(sql).unwrap();
+    }
+    drop(raw_conn);
+
+    let error = match HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay")).await {
+        Ok(_) => panic!("a queue without revival columns must refuse admission"),
+        Err(error) => error,
+    };
+    let (authority, reason) = error
+        .reset_required_context()
+        .unwrap_or_else(|| panic!("expected the typed ResetRequired state, got: {error}"));
+    assert_eq!(authority, "authority schema");
+    assert!(
+        reason.contains("projection_queue"),
+        "the refusal must name the drifted table: {reason}"
     );
 }
 
@@ -1220,137 +1272,126 @@ async fn relocated_native_duplicate_advances_coverage_without_reinserting_observ
 }
 
 #[tokio::test]
-async fn canonical_payload_revision_replays_advance_typed_coverage() {
-    for provider in ["codex", "cursor"] {
-        let tmp = TempDir::new().unwrap();
-        let runtime = profile_runtime(&tmp).await;
-        let store = runtime
-            .observation_store(HostAdmissionScope::Profile)
-            .unwrap();
-        let database_path = runtime
-            .database_path(HostAdmissionScope::Profile)
-            .unwrap()
-            .to_path_buf();
-        let stored = canonical_revision_observation(
-            provider,
-            1,
-            41,
-            42,
-            &format!("receipt.{provider}.legacy"),
-            true,
-            "stable authored content",
-        );
-        store
-            .persist_observation(provider_write(stored.clone(), None))
-            .await
-            .unwrap();
-        // Retained observations can outlive a rebuilt source frontier. The
-        // replay must restore that missing coverage without rewriting the
-        // immutable pre-revision observation row.
-        let connection = rusqlite::Connection::open(&database_path).unwrap();
-        connection
-            .execute("DELETE FROM source_cursors", ())
-            .unwrap();
-        drop(connection);
-        let replay = canonical_revision_observation(
-            provider,
-            1,
-            41,
-            42,
-            &format!("receipt.{provider}.current"),
-            false,
-            "stable authored content",
-        );
-        assert_eq!(stored.observation_id(), replay.observation_id());
+async fn replayed_cursor_occurrence_advances_typed_coverage() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    let stored = occurrence_observation(
+        "cursor",
+        1,
+        41,
+        42,
+        "receipt.cursor.stored",
+        "stable authored content",
+    );
+    store
+        .persist_observation(provider_write(stored.clone(), None))
+        .await
+        .unwrap();
+    // Retained observations can outlive a rebuilt source frontier. The
+    // replay must restore that missing coverage without rewriting the
+    // immutable retained observation row.
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    connection
+        .execute("DELETE FROM source_cursors", ())
+        .unwrap();
+    drop(connection);
+    let mirrored = occurrence_observation(
+        "cursor",
+        1,
+        51,
+        52,
+        "receipt.cursor.mirrored",
+        "stable authored content",
+    );
+    assert_eq!(stored.observation_id(), mirrored.observation_id());
 
-        let outcome = store
-            .persist_observation(provider_write(replay.clone(), None))
+    let outcome = store
+        .persist_observation(provider_write(mirrored.clone(), None))
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        ObservationPersistOutcome::CoveredDuplicate(_)
+    ));
+    assert_eq!(
+        store
+            .get_source_cursor(mirrored.source(), mirrored.scope())
             .await
-            .unwrap();
-        assert!(matches!(
-            outcome,
-            ObservationPersistOutcome::CoveredDuplicate(_)
-        ));
-        assert_eq!(
-            store
-                .get_source_cursor(replay.source(), replay.scope())
-                .await
-                .unwrap(),
-            Some(provider_cursor(
-                provider,
-                &format!("session.{provider}.canonical-revision"),
-                1,
-                42,
-            ))
-        );
-        let connection = rusqlite::Connection::open(database_path).unwrap();
-        let advance = connection
-            .query_row(
-                "SELECT reason, receipt_id FROM source_cursor_advances",
-                (),
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .unwrap();
-        assert_eq!(
-            advance,
-            (
-                "canonical_payload_revision".to_owned(),
-                format!("receipt.{provider}.current")
-            )
-        );
-        assert_eq!(
-            connection
-                .query_row("SELECT COUNT(*) FROM observations", (), |row| row
-                    .get::<_, i64>(0))
-                .unwrap(),
-            1
-        );
-    }
+            .unwrap(),
+        Some(provider_cursor(
+            "cursor",
+            "session.cursor.occurrence",
+            1,
+            52
+        ))
+    );
+    let connection = rusqlite::Connection::open(database_path).unwrap();
+    let advance = connection
+        .query_row(
+            "SELECT reason, receipt_id FROM source_cursor_advances",
+            (),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        advance,
+        (
+            "replayed_occurrence".to_owned(),
+            "receipt.cursor.mirrored".to_owned()
+        )
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM observations", (), |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
 }
 
 #[tokio::test]
-async fn canonical_payload_revision_compatibility_separates_revisions_from_unshipped_differences() {
+async fn replayed_occurrence_compatibility_separates_replays_from_unshipped_differences() {
     for provider in ["codex", "cursor"] {
         let tmp = TempDir::new().unwrap();
         let runtime = profile_runtime(&tmp).await;
         let store = runtime
             .observation_store(HostAdmissionScope::Profile)
             .unwrap();
-        let stored = canonical_revision_observation(
+        let stored = occurrence_observation(
             provider,
             1,
             41,
             42,
-            &format!("receipt.{provider}.legacy.negative"),
-            true,
+            &format!("receipt.{provider}.stored.negative"),
             "original authored content",
         );
         store
             .persist_observation(provider_write(stored.clone(), None))
             .await
             .unwrap();
-        let old_cursor = provider_cursor(
-            provider,
-            &format!("session.{provider}.canonical-revision"),
-            1,
-            42,
-        );
-        let current = canonical_revision_observation(
+        let old_cursor =
+            provider_cursor(provider, &format!("session.{provider}.occurrence"), 1, 42);
+        let current = occurrence_observation(
             provider,
             1,
             41,
             42,
             &format!("receipt.{provider}.current.negative"),
-            false,
             "original authored content",
         );
-        let changed_range = canonical_revision_observation(
+        let changed_range = occurrence_observation(
             provider,
             2,
             71,
             72,
             &format!("receipt.{provider}.changed.range"),
-            false,
             "original authored content",
         );
         let changed_content = mutate_observation_payload(
@@ -1418,19 +1459,19 @@ async fn canonical_payload_revision_compatibility_separates_revisions_from_unshi
         //   the store cannot tell an unshipped difference from a stale writer
         //   that lost a cursor race. The verdict is the retryable
         //   `CursorConflict`, and no ledger, cursor, or row moves.
-        // * At the frontier with a moved range, Codex: the Codex revision
-        //   normalizer never adopts a candidate's `evidence.range`, so the
-        //   record is an unshipped difference and stays fail-closed with the
-        //   terminal `ObservationCollision`. The refusal still records
+        // * At the frontier with a moved range, Codex: no Codex comparator
+        //   adopts a candidate's `evidence.range`, so the record is an
+        //   unshipped difference and stays fail-closed with the terminal
+        //   `ObservationCollision`. The refusal still records
         //   coverage, the cursor advances past the refused range so ingest
         //   does not re-read the refused record forever.
-        // * At the frontier with a moved range, Cursor: the Cursor normalizer
-        //   deliberately replaces `evidence.range` with the candidate's
-        //   (`normalize_cursor_payload_revision`), because a Cursor record
-        //   carries its own `stable_record_id` and a rewritten transcript
-        //   moves it. That is the shipped canonical-payload-revision replay,
-        //   so it settles as `CoveredDuplicate` over the retained row and
-        //   advances the cursor rather than refusing.
+        // * At the frontier with a moved range, Cursor: the comparator
+        //   deliberately adopts the candidate's `evidence.range`
+        //   (`adopt_cursor_evidence_range`), because a Cursor record carries
+        //   its own `stable_record_id` and a transcript can mirror it at
+        //   another offset. That is a replayed occurrence, so it settles as
+        //   `CoveredDuplicate` over the retained row and advances the cursor
+        //   rather than refusing.
         let mut durable_cursor = old_cursor.clone();
         for (difference, changed, expected_cursor) in candidates {
             let at_scan_frontier = expected_cursor.is_some();
@@ -1449,9 +1490,8 @@ async fn canonical_payload_revision_compatibility_separates_revisions_from_unshi
                         );
                     }
                     "cursor" => {
-                        let outcome = result.expect(
-                            "a moved Cursor range is the shipped canonical payload revision",
-                        );
+                        let outcome =
+                            result.expect("a moved Cursor range is a replayed occurrence");
                         assert!(
                             matches!(outcome, ObservationPersistOutcome::CoveredDuplicate(_)),
                             "{provider} {difference} must settle as a covered duplicate, \
@@ -1462,7 +1502,7 @@ async fn canonical_payload_revision_compatibility_separates_revisions_from_unshi
                 }
                 durable_cursor = provider_cursor(
                     provider,
-                    &format!("session.{provider}.canonical-revision"),
+                    &format!("session.{provider}.occurrence"),
                     changed.identity().generation().generation_id(),
                     changed.identity().position().end(),
                 );
@@ -1487,83 +1527,15 @@ async fn canonical_payload_revision_compatibility_separates_revisions_from_unshi
     }
 }
 
-/// Codex capture used to drop every `response_item` tool-call `arguments` to
-/// null, so a rewritten rollout now carries the real arguments for the same
-/// observation id. The revision normalizer adopts them only when the retained
-/// payload has none; a retained non-null value or any other authored change
-/// stays an identity collision.
+/// Snapshot hosts and Vibe lead every canonical payload with a location-only
+/// `Session` fact derived again on each rescan. A retained location-only
+/// session adopts a moved path/provenance, but any other authored difference,
+/// or a retained record without that leading session, stays an identity
+/// collision.
 #[test]
-fn canonical_payload_revision_adopts_only_dropped_codex_tool_arguments() {
-    let base = canonical_revision_observation(
-        "codex",
-        1,
-        41,
-        42,
-        "receipt.codex.tool-args.base",
-        false,
-        "stable authored content",
-    );
-    let with_tool_invocation = |receipt_id: &str, name: &str, arguments: serde_json::Value| {
-        mutate_observation_payload(&base, receipt_id, |payload| {
-            payload["facts"].as_array_mut().unwrap().push(json!({
-                "kind": "tool_invocation",
-                "invocation_id": "call-merge",
-                "name": name,
-                "arguments": arguments,
-            }));
-        })
-    };
-
-    let stored_dropped = with_tool_invocation(
-        "receipt.codex.tool-args.dropped",
-        "exec_command",
-        serde_json::Value::Null,
-    );
-    let current_captured = with_tool_invocation(
-        "receipt.codex.tool-args.captured",
-        "exec_command",
-        json!({"cmd": "gh pr merge 366 --squash"}),
-    );
-    assert!(is_canonical_payload_revision_replay(
-        &stored_dropped,
-        &current_captured
-    ));
-
-    let stored_authored = with_tool_invocation(
-        "receipt.codex.tool-args.authored-a",
-        "exec_command",
-        json!({"cmd": "a"}),
-    );
-    let current_authored = with_tool_invocation(
-        "receipt.codex.tool-args.authored-b",
-        "exec_command",
-        json!({"cmd": "b"}),
-    );
-    assert!(!is_canonical_payload_revision_replay(
-        &stored_authored,
-        &current_authored
-    ));
-
-    let current_renamed = with_tool_invocation(
-        "receipt.codex.tool-args.renamed",
-        "apply_patch",
-        json!({"cmd": "gh pr merge 366 --squash"}),
-    );
-    assert!(!is_canonical_payload_revision_replay(
-        &stored_dropped,
-        &current_renamed
-    ));
-}
-
-/// Snapshot hosts and Vibe now lead every canonical payload with a
-/// location-only `Session` fact. The revision normalizer adopts that fact for
-/// records admitted before the change, and for retained location-only sessions
-/// adopts a moved path/provenance, but any other authored difference stays an
-/// identity collision.
-#[test]
-fn canonical_payload_revision_adopts_snapshot_location_session() {
+fn replayed_occurrence_adopts_a_moved_snapshot_location() {
     for provider in ["cline", "kiro"] {
-        let stored = snapshot_revision_observation(
+        let stored = snapshot_occurrence_observation(
             provider,
             1,
             41,
@@ -1571,37 +1543,13 @@ fn canonical_payload_revision_adopts_snapshot_location_session() {
             &format!("receipt.{provider}.location.stored"),
             "stable authored content",
         );
-        let location_session = |payload: &mut serde_json::Value| {
-            let session = serde_json::to_value(CanonicalObservationFactV1::Session {
-                project_path: None,
-                location_path: Some("/workspace/task".to_string()),
-                transcript_path: None,
-                title: None,
-                started_at: None,
-                ended_at: None,
-                source: None,
-                native_source: None,
-                profile: None,
-                location_provenance: Some("task_metadata".to_string()),
-            })
-            .unwrap();
-            payload["facts"].as_array_mut().unwrap().insert(0, session);
-        };
-        let current = mutate_observation_payload(
+        let moved = mutate_observation_payload(
             &stored,
-            &format!("receipt.{provider}.location.current"),
-            location_session,
+            &format!("receipt.{provider}.location.moved"),
+            |payload| payload["facts"][0]["location_path"] = json!("/workspace/moved"),
         );
         assert!(
-            is_canonical_payload_revision_replay(&stored, &current),
-            "{provider}: a leading location session must adopt on replay"
-        );
-
-        let moved = mutate_observation_payload(&current, "receipt.location.moved", |payload| {
-            payload["facts"][0]["location_path"] = json!("/workspace/moved");
-        });
-        assert!(
-            is_canonical_payload_revision_replay(&current, &moved),
+            is_replayed_occurrence(&stored, &moved),
             "{provider}: a moved location path must adopt on replay"
         );
 
@@ -1609,26 +1557,35 @@ fn canonical_payload_revision_adopts_snapshot_location_session() {
             &stored,
             &format!("receipt.{provider}.location.changed"),
             |payload| {
-                location_session(payload);
+                payload["facts"][0]["location_path"] = json!("/workspace/moved");
                 payload["facts"][1]["content"] = json!("changed authored content");
             },
         );
         assert!(
-            !is_canonical_payload_revision_replay(&stored, &changed_content),
+            !is_replayed_occurrence(&stored, &changed_content),
             "{provider}: location adoption must not launder authored changes"
         );
 
         let bloated_session = mutate_observation_payload(
             &stored,
             &format!("receipt.{provider}.location.bloated"),
+            |payload| payload["facts"][0]["project_path"] = json!("/workspace/task"),
+        );
+        assert!(
+            !is_replayed_occurrence(&stored, &bloated_session),
+            "{provider}: a session with authored fields is not location-only"
+        );
+
+        let without_location = mutate_observation_payload(
+            &stored,
+            &format!("receipt.{provider}.location.absent"),
             |payload| {
-                location_session(payload);
-                payload["facts"][0]["project_path"] = json!("/workspace/task");
+                payload["facts"].as_array_mut().unwrap().remove(0);
             },
         );
         assert!(
-            !is_canonical_payload_revision_replay(&stored, &bloated_session),
-            "{provider}: a session with authored fields is not location-only"
+            !is_replayed_occurrence(&without_location, &stored),
+            "{provider}: a record retained without its location session is a collision"
         );
     }
 }
@@ -2338,7 +2295,7 @@ async fn concurrent_exact_retry_commits_one_sequence_and_settles_one_receipt() {
     assert_eq!(replay[0].sequence(), committed.sequence());
     assert_eq!(replay[0].observation(), &candidate);
     let deltas = table_deltas(&counts_before, &user_table_counts(&database_path));
-    assert_eq!(deltas.len(), 7);
+    assert_eq!(deltas.len(), 8);
     assert!(deltas.values().all(|delta| *delta == 1));
 }
 

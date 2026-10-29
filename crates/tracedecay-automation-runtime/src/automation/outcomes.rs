@@ -55,14 +55,12 @@ const SECS_PER_DAY: i64 = 24 * 60 * 60;
 /// `adopted` means a use was recorded after activation. It is an adoption
 /// proxy, not evidence that the skill improved any task. `unknown` means no use was
 /// recorded and neither task opportunity nor reliable host use telemetry
-/// exists, so it is never a failure. Snapshots written before that
-/// distinction stored `unknown` as `ignored`.
+/// exists, so it is never a failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillOutcomeVerdict {
     Adopted,
     TooEarly,
-    #[serde(alias = "ignored")]
     Unknown,
 }
 
@@ -187,18 +185,10 @@ pub struct AutomationOutcomesSnapshot {
 pub fn skill_outcome(summary: &SkillUsageRecord, now_unix: i64) -> Option<SkillOutcomeRecord> {
     let activated_at = summary.activated_at?;
     let secs_since_activation = now_unix.saturating_sub(activated_at);
-    let views_since_activation = count_since_activation(
-        summary.view_count,
-        summary.view_count_at_activation,
-        summary.last_viewed_at,
-        activated_at,
-    );
-    let uses_since_activation = count_since_activation(
-        summary.use_count,
-        summary.use_count_at_activation,
-        summary.last_used_at,
-        activated_at,
-    );
+    let views_since_activation =
+        count_since_activation(summary.view_count, summary.view_count_at_activation);
+    let uses_since_activation =
+        count_since_activation(summary.use_count, summary.use_count_at_activation);
     let verdict = if uses_since_activation > 0 {
         SkillOutcomeVerdict::Adopted
     } else if secs_since_activation < SKILL_ACTIVATION_WINDOW_SECS {
@@ -217,21 +207,10 @@ pub fn skill_outcome(summary: &SkillUsageRecord, now_unix: i64) -> Option<SkillO
     })
 }
 
-/// Activity since activation, preferring the exact baseline captured at
-/// activation time. Ledgers written before baselines existed fall back to the
-/// last-activity timestamp: activity at or after activation counts the full
-/// total (a conservative over-count is fine for adoption detection).
-fn count_since_activation(
-    total: u64,
-    baseline_at_activation: Option<u64>,
-    last_activity_at: Option<i64>,
-    activated_at: i64,
-) -> u64 {
-    match baseline_at_activation {
-        Some(baseline) => total.saturating_sub(baseline),
-        None if last_activity_at.is_some_and(|at| at >= activated_at) => total,
-        None => 0,
-    }
+/// Activity since activation, measured from the baseline captured at
+/// activation time. A missing baseline counts no activity.
+fn count_since_activation(total: u64, baseline_at_activation: Option<u64>) -> u64 {
+    baseline_at_activation.map_or(0, |baseline| total.saturating_sub(baseline))
 }
 
 /// Computes the current trajectory from one terminal automatic-fact receipt.

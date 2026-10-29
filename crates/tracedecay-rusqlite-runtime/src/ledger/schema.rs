@@ -36,14 +36,6 @@ CREATE TABLE IF NOT EXISTS td_runtime_writer_idempotency_v2 (
 ) WITHOUT ROWID;
 "#;
 
-/// Drops the transactional outbox and inbox tables, which no production code
-/// ever wrote. Registered stores run it on every schema install, so a store
-/// created before the retirement converges to the same shape as a fresh one.
-pub const RETIRE_RUNTIME_EFFECTS_V1: &str = "
-DROP TABLE IF EXISTS td_runtime_writer_outbox_v1;
-DROP TABLE IF EXISTS td_runtime_writer_inbox_v1;
-";
-
 /// Installs the runtime ledger tables.
 ///
 /// Store creation owns the durable schema. Standalone runtime requests may

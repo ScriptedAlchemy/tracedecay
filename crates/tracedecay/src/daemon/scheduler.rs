@@ -222,13 +222,7 @@ fn scheduler_record_log_fields(
         AutomationRunStatus::Queued => "queued",
         AutomationRunStatus::Running => "running",
     };
-    let task = record
-        .task_key
-        .as_deref()
-        .unwrap_or_else(|| {
-            tracedecay_automation_runtime::automation::backend::task_key(record.task)
-        })
-        .to_string();
+    let task = record.task_key.clone();
     let mut fields = vec![
         ("project", project_path.display().to_string()),
         ("task", task),

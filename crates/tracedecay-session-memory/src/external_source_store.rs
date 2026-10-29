@@ -9,16 +9,15 @@ use tracedecay_contracts::{
     try_now_micros,
 };
 use tracedecay_domain::{
-    CanonicalObservationIdV1, ClineTranscriptStream, ComponentVersion, DurableObservationV1,
-    LocatorDigest, ManifestDigest, ObservationScopeV1, ObservationSourceIdentityV1, ProviderId,
-    SourceAcquisitionCapabilitiesV1, SourceAcquisitionContractV1, SourceAggregateFrontierV1,
-    SourceBindingOwnerV1, SourceBindingV1, SourceCaptureModeV1, SourceContentStateV1,
-    SourceCoverageV1, SourceCursorV1, SourceDefinitionV1, SourceDeletionSemanticsV1,
-    SourceEnvelopeKindV1, SourceInstanceId, SourceNativeObjectIdV1, SourceObjectObservationV1,
-    SourceObjectRevisionV1, SourcePartitionFrontierV1, SourcePartitionIdV1,
-    SourceProviderEnvelopeV1, SourceRefetchStrategyV1, SourceRefreshCauseV1,
-    SourceRefreshReceiptV1, SourceSnapshotIdV1, SourceWholeRootStageV1, UtcMicros,
-    canonical_sha256, cline_task_native_observation_id, prove_cline_native_source_transition,
+    ClineTranscriptStream, ComponentVersion, DurableObservationV1, LocatorDigest, ManifestDigest,
+    ObservationScopeV1, ObservationSourceIdentityV1, ProviderId, SourceAcquisitionCapabilitiesV1,
+    SourceAcquisitionContractV1, SourceAggregateFrontierV1, SourceBindingOwnerV1, SourceBindingV1,
+    SourceCaptureModeV1, SourceContentStateV1, SourceCoverageV1, SourceCursorV1,
+    SourceDefinitionV1, SourceDeletionSemanticsV1, SourceEnvelopeKindV1, SourceInstanceId,
+    SourceNativeObjectIdV1, SourceObjectObservationV1, SourceObjectRevisionV1,
+    SourcePartitionFrontierV1, SourcePartitionIdV1, SourceProviderEnvelopeV1,
+    SourceRefetchStrategyV1, SourceRefreshCauseV1, SourceRefreshReceiptV1, SourceSnapshotIdV1,
+    SourceWholeRootStageV1, UtcMicros, canonical_sha256, cline_task_native_observation_id,
     sha256_hex_suffix,
 };
 use tracedecay_store::{
@@ -197,7 +196,6 @@ fn host_source_authority(
 fn prepare_host_source_commit(
     receipt: &tracedecay_store::ObservationCommitReceipt,
     current: Option<&SourceStoreStateV1>,
-    predecessor: Option<SourceObjectRevisionV1>,
     runtime: &tracedecay_store::StoreRuntimeBindingV1,
 ) -> Result<
     (tracedecay_domain::SourceBindingIdentityV1, SourceCommitV1),
@@ -324,12 +322,8 @@ fn prepare_host_source_commit(
     .map_err(invalid)?;
     let mutation = SourceObjectMutationV1::new(
         source_observation,
-        predecessor.clone(),
-        if predecessor.is_some() {
-            SourceObjectTransitionV1::Successor
-        } else {
-            SourceObjectTransitionV1::Initial
-        },
+        None,
+        SourceObjectTransitionV1::Initial,
         evidence,
     )
     .map_err(invalid)?;
@@ -404,11 +398,7 @@ impl RuntimeExternalSourceStore {
             receipts.iter().zip(binding_identities).enumerate()
         {
             let current = states.get(&binding_identity).and_then(Option::as_ref);
-            let predecessor = self
-                .host_source_predecessor(receipt.observation(), current, &binding_identity)
-                .await?;
-            let (_, commit) =
-                prepare_host_source_commit(receipt, current, predecessor, self.runtime.binding())?;
+            let (_, commit) = prepare_host_source_commit(receipt, current, self.runtime.binding())?;
             if let Some(existing) = self
                 .read_receipt(binding_identity.clone(), commit.idempotency_key().clone())
                 .await?
@@ -423,14 +413,7 @@ impl RuntimeExternalSourceStore {
                         )
                     })?;
                 if existing.request_digest() != commit.request_digest()
-                    || !self
-                        .host_receipt_is_current_or_superseded(
-                            receipt.observation(),
-                            source_observation,
-                            current,
-                            &binding_identity,
-                        )
-                        .await?
+                    || !host_receipt_is_current(source_observation, current)?
                 {
                     return Err(RuntimeExternalSourceErrorV1::IdempotencyConflict);
                 }
@@ -620,192 +603,6 @@ impl RuntimeExternalSourceStore {
         Ok(false)
     }
 
-    /// A stream cutover may replace only the exact retained combined record.
-    async fn host_source_predecessor(
-        &self,
-        observation: &DurableObservationV1,
-        current: Option<&SourceStoreStateV1>,
-        binding: &tracedecay_domain::SourceBindingIdentityV1,
-    ) -> Result<Option<SourceObjectRevisionV1>, RuntimeExternalSourceErrorV1> {
-        let object = host_source_object(observation)?;
-        let previous = match current {
-            Some(state) => state
-                .observed_object(object.native_object())
-                .map_err(invalid)?,
-            None => None,
-        };
-        let Some(previous) = previous else {
-            return Ok(None);
-        };
-        if previous == &object {
-            return Ok(None);
-        }
-        let Some(prior_id) = cline_task_native_observation_id(observation).map_err(invalid)? else {
-            // Historical receipt replay is checked separately and never writes.
-            return Ok(None);
-        };
-        let prior = self
-            .read_host_observation(prior_id.clone())
-            .await?
-            .ok_or(RuntimeExternalSourceErrorV1::IdempotencyConflict)?;
-        if prove_cline_native_source_transition(&prior, observation).is_none()
-            || host_source_object(&prior)? != *previous
-        {
-            return Err(RuntimeExternalSourceErrorV1::IdempotencyConflict);
-        }
-        let key = derive_logical_effect_idempotency(
-            LogicalEffectIdempotencyDomain::HostObservation,
-            &prior_id,
-        )
-        .map_err(invalid)?;
-        let retained = self
-            .read_receipt(binding.clone(), key)
-            .await?
-            .ok_or(RuntimeExternalSourceErrorV1::IdempotencyConflict)?;
-        let committed_previous = current
-            .map(|state| state.latest_mutation(object.native_object()))
-            .transpose()
-            .map_err(invalid)?
-            .flatten()
-            .is_some_and(|mutation| {
-                mutation.observation() == previous && retained.committed(mutation)
-            });
-        if !committed_previous {
-            return Err(RuntimeExternalSourceErrorV1::IdempotencyConflict);
-        }
-        Ok(Some(previous.revision().clone()))
-    }
-
-    /// An immutable old receipt stays valid after its one proven native-stream
-    /// successor. Reading it must never reinstall its obsolete payload.
-    async fn host_receipt_is_current_or_superseded(
-        &self,
-        observation: &DurableObservationV1,
-        object: &SourceObjectObservationV1,
-        current: Option<&SourceStoreStateV1>,
-        binding: &tracedecay_domain::SourceBindingIdentityV1,
-    ) -> Result<bool, RuntimeExternalSourceErrorV1> {
-        let Some(state) = current else {
-            return Ok(false);
-        };
-        let Some(latest) = state
-            .observed_object(object.native_object())
-            .map_err(invalid)?
-        else {
-            return Ok(false);
-        };
-        if latest == object {
-            return Ok(true);
-        }
-        if observation.source().explicit_source_key().is_some()
-            || !matches!(
-                observation.source().provider().as_str(),
-                "cline" | "roo-code" | "kilo"
-            )
-        {
-            return Ok(false);
-        }
-        let Some(native_id) = observation.identity().native_record_id() else {
-            return Ok(false);
-        };
-        for stream in [
-            ClineTranscriptStream::ApiHistory,
-            ClineTranscriptStream::UiMessages,
-        ] {
-            let source = stream
-                .source_identity(
-                    observation.source().provider().clone(),
-                    observation.source().session_id().clone(),
-                )
-                .map_err(invalid)?;
-            let identity = tracedecay_domain::ObservationIdentityMaterialV1::for_native_record(
-                source,
-                observation.scope().clone(),
-                observation.identity().generation(),
-                observation.identity().position(),
-                observation.identity().ordering_domain(),
-                native_id.clone(),
-            )
-            .map_err(invalid)?;
-            let id = CanonicalObservationIdV1::derive(&identity).map_err(invalid)?;
-            let Some(successor) = self.read_host_observation(id.clone()).await? else {
-                continue;
-            };
-            if prove_cline_native_source_transition(observation, &successor).is_none()
-                || host_source_object(&successor)? != *latest
-            {
-                continue;
-            }
-            let key = derive_logical_effect_idempotency(
-                LogicalEffectIdempotencyDomain::HostObservation,
-                &id,
-            )
-            .map_err(invalid)?;
-            let Some(retained) = self.read_receipt(binding.clone(), key).await? else {
-                return Ok(false);
-            };
-            return Ok(state
-                .latest_mutation(object.native_object())
-                .map_err(invalid)?
-                .is_some_and(|mutation| {
-                    mutation.observation() == latest
-                        && mutation.predecessor() == Some(object.revision())
-                        && mutation.transition() == SourceObjectTransitionV1::Successor
-                        && retained.committed(mutation)
-                }));
-        }
-        Ok(false)
-    }
-
-    async fn read_host_observation(
-        &self,
-        observation_id: CanonicalObservationIdV1,
-    ) -> Result<Option<DurableObservationV1>, RuntimeExternalSourceErrorV1> {
-        let operation = RepositoryReadOperationV1::Project(
-            tracedecay_store::ProjectReadOperationV1::Observation(
-                tracedecay_store::ObservationReadOperationV1::Observation { observation_id },
-            ),
-        );
-        let digest = canonical_sha256(&operation).map_err(invalid)?;
-        let suffix = digest_suffix(digest.as_str())?;
-        let request = tracedecay_store::RuntimeReadRequestV1::new(
-            self.runtime.binding().clone(),
-            tracedecay_store::ConsistencyModeV1::LatestAvailable,
-            RuntimeReadOperationV1::Repository { op: operation },
-            tracedecay_store::OperationPriorityV1::Foreground,
-            1,
-            runtime_control(suffix, runtime_now()?)?,
-        )
-        .map_err(invalid)?;
-        let probe = Arc::new(ExternalSourceRuntimeProbe::from_control(request.control()));
-        let outcome = self
-            .runtime
-            .dispatch_read(request, probe)
-            .await
-            .map_err(|failure| dispatch_error("host observation", failure))?;
-        if !matches!(
-            outcome.coverage(),
-            RuntimeReadCoverageV1::Latest { .. } | RuntimeReadCoverageV1::Complete { .. }
-        ) {
-            return Err(read_unavailable("host observation", outcome.coverage()));
-        }
-        match outcome.value() {
-            Some(RuntimeReadResultV1::Repository {
-                result: RepositoryReadResultV1::Project(result),
-            }) => match result.as_ref() {
-                tracedecay_store::ProjectReadResultV1::Observation(
-                    tracedecay_store::ObservationReadResultV1::Observation(row),
-                ) => Ok(row.as_ref().as_ref().map(|row| row.observation.clone())),
-                _ => Err(invalid(
-                    "host observation read returned a mismatched result",
-                )),
-            },
-            _ => Err(invalid(
-                "host observation read returned a mismatched result",
-            )),
-        }
-    }
-
     async fn read_receipt(
         &self,
         binding: tracedecay_domain::SourceBindingIdentityV1,
@@ -991,6 +788,21 @@ fn host_source_binding(
     .map_err(invalid)?;
     validate_host_source_shard(&binding, runtime)?;
     Ok(binding)
+}
+
+/// A retained receipt stays valid only while its object is the latest one
+/// observed. Reading it must never reinstall an obsolete payload.
+fn host_receipt_is_current(
+    object: &SourceObjectObservationV1,
+    current: Option<&SourceStoreStateV1>,
+) -> Result<bool, RuntimeExternalSourceErrorV1> {
+    let Some(state) = current else {
+        return Ok(false);
+    };
+    Ok(state
+        .observed_object(object.native_object())
+        .map_err(invalid)?
+        == Some(object))
 }
 
 fn host_task_source(

@@ -22,10 +22,6 @@ use super::{
 };
 
 pub(super) const HOST_BUNDLE_CONTROL_DIR: &str = ".tracedecay-host-bundle-v1";
-/// Retired lifecycle-root lock. Hosts do not share a write target, so each
-/// host owns `writer.{slug}.v1.lock`. This name is not acquired; a new binary
-/// must not recreate it or independent hosts serialize again.
-pub(super) const HOST_BUNDLE_LOCK_FILE: &str = "writer.v1.lock";
 pub(super) const MAX_CONTROL_FILE_BYTES: usize = 256 * 1024;
 
 /// Load the newest durable aggregate receipt for one host.
@@ -199,7 +195,7 @@ pub(super) fn validate_receipt(
     {
         return Err(HostBundleError::ReceiptCorrupted);
     }
-    let created_config = receipt.created_config.as_deref().unwrap_or_default();
+    let created_config = &receipt.created_config;
     for creation in created_config {
         validate_relative_install_path(Path::new(&creation.relative_path))?;
         if !creation

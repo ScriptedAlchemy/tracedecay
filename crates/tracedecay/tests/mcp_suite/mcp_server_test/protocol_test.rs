@@ -1417,9 +1417,8 @@ async fn test_resources_read_overview() {
     );
 }
 
-/// Branch metadata written before the per-branch store layout was retired
-/// still names the project store as each branch's `db_file`; it opens, and
-/// the branches resource reports provenance scopes without a store reference.
+/// The branches resource reports each tracked branch as a provenance scope of
+/// the project store.
 #[tokio::test]
 async fn test_resources_read_branches_reports_provenance_scopes() {
     let dir = TempDir::new().unwrap();
@@ -1432,7 +1431,7 @@ async fn test_resources_read_branches_reports_provenance_scopes() {
         .unwrap();
     fs::write(
         cg.store_layout().data_root.join("branch-meta.json"),
-        r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"0","gc_protected":false},"feature/one":{"db_file":"tracedecay.db","parent":"main","created_at":"0","last_synced_at":"7","gc_protected":false}}}"#,
+        r#"{"default_branch":"main","branches":{"main":{"created_at":"0","last_synced_at":"0","gc_protected":false},"feature/one":{"parent":"main","created_at":"0","last_synced_at":"7","gc_protected":false}}}"#,
     )
     .unwrap();
     let server = Box::pin(McpServer::new(cg, None)).await;
@@ -1475,12 +1474,6 @@ async fn test_resources_read_branches_reports_provenance_scopes() {
         }),
         "{body}"
     );
-    for branch in branches {
-        assert!(
-            branch.get("db_file").is_none(),
-            "retired store reference leaked: {branch}"
-        );
-    }
 }
 
 fn branch_named<'a>(branches: &'a [Value], name: &str) -> &'a Value {

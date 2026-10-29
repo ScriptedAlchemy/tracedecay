@@ -15,7 +15,6 @@ import {
   jobScheduleWord,
   jobTaskKey,
   latestRunForKey,
-  latestRunForTask,
   ledgerWindow,
   observedSchedulerActivity,
   receiptsByRun,
@@ -32,6 +31,7 @@ function ledgerRecord(
     schema_version: 2,
     trigger: 'scheduler',
     task: 'memory_curator',
+    task_key: 'memory_curator',
     backend: 'codex_app_server',
     reviewed_count: 0,
     accepted_count: 0,
@@ -249,23 +249,9 @@ describe('exact-identity joins', () => {
       run({ run_id: 'newest-other', task: 'user_job', task_key: 'user_job:other' }),
       run({ run_id: 'newest-nightly', task: 'user_job', task_key: 'user_job:nightly' }),
       run({ run_id: 'older-nightly', task: 'user_job', task_key: 'user_job:nightly' }),
-      run({ run_id: 'legacy', task: 'user_job', task_key: null }),
     ];
     expect(jobTaskKey('nightly')).toBe('user_job:nightly');
     expect(latestRunForKey(rows, jobTaskKey('nightly'))?.run_id).toBe('newest-nightly');
-    // A pre-`task_key` user-job row belongs to no job.
-    expect(latestRunForKey(rows, jobTaskKey('legacy'))).toBeUndefined();
-  });
-
-  it('joins a built-in task on its task key, falling back to the task word only for keyless rows', () => {
-    const rows = [
-      run({ run_id: 'keyed', task: 'memory_curator', task_key: 'memory_curator' }),
-      run({ run_id: 'keyless', task: 'skill_writer', task_key: null }),
-      run({ run_id: 'user', task: 'user_job', task_key: 'user_job:x' }),
-    ];
-    expect(latestRunForTask(rows, 'memory_curator')?.run_id).toBe('keyed');
-    expect(latestRunForTask(rows, 'skill_writer')?.run_id).toBe('keyless');
-    expect(latestRunForTask(rows, 'user_job')).toBeUndefined();
   });
 });
 

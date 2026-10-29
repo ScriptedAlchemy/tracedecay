@@ -439,7 +439,7 @@ async fn open_runtime_configuration_from_store(
     }
     let daemon_binding = daemon_project_source_binding(&target)?;
     let current = store.current().await.map_err(map_configuration_error)?;
-    let mut current = match store
+    let current = match store
         .converge_registered_registry_shape(&current.revision_id, now_micros())
         .await
     {
@@ -447,72 +447,26 @@ async fn open_runtime_configuration_from_store(
         Err(error) => current_after_conflict(store, error).await?,
     };
     let source_bindings_key = source_bindings_setting_key()?;
-    enum SourceBindingCheck {
-        Verified,
-        LocatorDigestDrift,
-        Mismatch,
-    }
-    let mut rebind_attempted = false;
-    loop {
-        let check = {
-            let Some(ConfigurationValueV1::SourceBindings(configured_bindings)) =
-                current.snapshot.effective_values.get(&source_bindings_key)
-            else {
-                return Err(TraceDecayError::reset_required(
-                    "configuration",
-                    "canonical configuration source bindings are missing",
-                ));
-            };
-            let authority_bindings = configured_bindings
-                .iter()
-                .filter(|candidate| {
-                    candidate.source_kind == daemon_binding.source_kind
-                        && candidate.authority == daemon_binding.authority
-                })
-                .collect::<Vec<_>>();
-            match authority_bindings.as_slice() {
-                [candidate] if **candidate == daemon_binding => SourceBindingCheck::Verified,
-                [candidate]
-                    if candidate.binding_id == daemon_binding.binding_id
-                        && candidate.source_locator_digest
-                            != daemon_binding.source_locator_digest =>
-                {
-                    SourceBindingCheck::LocatorDigestDrift
-                }
-                _ => SourceBindingCheck::Mismatch,
-            }
-        };
-        match check {
-            SourceBindingCheck::Verified => break,
-            // Exactly one daemon-owned binding for this registry-verified
-            // project whose only drift is the locator digest: a binding
-            // published under the retired root-derived digest. The registry
-            // owns identity and has already resolved this exact registered
-            // project, so republish the binding with the project digest under
-            // compare-and-swap instead of demanding a reset.
-            SourceBindingCheck::LocatorDigestDrift if !rebind_attempted => {
-                rebind_attempted = true;
-                // A concurrent open may have won the swap; adopt what it
-                // published and re-verify it exactly.
-                current = match store
-                    .publish_daemon_source_binding(
-                        &current.revision_id,
-                        &ProtectedChange::RebindSource(daemon_binding.clone()),
-                        now_micros(),
-                    )
-                    .await
-                {
-                    Ok(state) => state,
-                    Err(error) => current_after_conflict(store, error).await?,
-                };
-            }
-            SourceBindingCheck::LocatorDigestDrift | SourceBindingCheck::Mismatch => {
-                return Err(TraceDecayError::reset_required(
-                    "configuration",
-                    "canonical configuration source binding does not match the registered project",
-                ));
-            }
-        }
+    let Some(ConfigurationValueV1::SourceBindings(configured_bindings)) =
+        current.snapshot.effective_values.get(&source_bindings_key)
+    else {
+        return Err(TraceDecayError::reset_required(
+            "configuration",
+            "canonical configuration source bindings are missing",
+        ));
+    };
+    let authority_bindings = configured_bindings
+        .iter()
+        .filter(|candidate| {
+            candidate.source_kind == daemon_binding.source_kind
+                && candidate.authority == daemon_binding.authority
+        })
+        .collect::<Vec<_>>();
+    if !matches!(authority_bindings.as_slice(), [candidate] if **candidate == daemon_binding) {
+        return Err(TraceDecayError::reset_required(
+            "configuration",
+            "canonical configuration source binding does not match the registered project",
+        ));
     }
     let current = provision_github_origin_source_binding(store, &target, current).await?;
     let configuration =

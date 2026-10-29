@@ -257,10 +257,9 @@ mod runtime_configuration_cutover {
         ConfigurationRevisionId::new(value).expect("fixture revision id is canonical")
     }
 
-    /// A locator digest no current project derives, as a binding published
-    /// under the retired root-derived digest carries.
-    fn retired_locator_digest() -> LocatorDigest {
-        LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).expect("retired locator digest")
+    /// A locator digest no current project derives.
+    fn foreign_locator_digest() -> LocatorDigest {
+        LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).expect("foreign locator digest")
     }
 
     #[asupersync::test]
@@ -1329,90 +1328,6 @@ mod runtime_configuration_cutover {
         assert_eq!(github_source_bindings(&moved), expected("rust-lang", "log"));
     }
 
-    /// A daemon binding published under the retired root-derived locator
-    /// digest rebinds once to the project digest. Every later checkout,
-    /// renamed or a second clone, verifies against that one binding.
-    #[asupersync::test]
-    async fn ensure_runtime_configuration_rebinds_a_retired_locator_digest_once() {
-        let profile = TempDir::new().expect("temporary profile root");
-        let root = TempDir::new().expect("temporary root");
-        let checkout = root.path().join("checkout");
-        let clone = root.path().join("checkout-clone");
-        let project_id = project_id("proj_runtime_rebind_retired");
-        for path in [&checkout, &clone] {
-            std::fs::create_dir_all(path).expect("create checkout");
-            tracedecay_runtime_core::storage::pin_fixture_repository_identity(
-                path,
-                project_id.as_str(),
-            )
-            .expect("write enrollment marker");
-        }
-        let layout = tracedecay_runtime_core::storage::resolve_layout(&checkout, profile.path())
-            .expect("resolve store layout");
-        std::fs::create_dir_all(&layout.data_root).expect("create data root");
-        let runtime =
-            HostAdmissionTestRuntimeV1::project(profile.path(), &checkout, project_id.clone())
-                .await
-                .expect("open retained project runtime");
-        let database = runtime
-            .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
-            .expect("bind registered project database");
-        let store =
-            tracedecay_global_db::configuration::GlobalDbConfigurationControlStore::new_registered(
-                database.as_ref(),
-            );
-        let daemon =
-            tracedecay_configuration::config::scope_control::daemon_owned_project_source_binding(
-                &project_id,
-            )
-            .expect("build daemon binding");
-        let retired = ScopeSourceBinding::new(
-            daemon.binding_id,
-            daemon.source_kind,
-            retired_locator_digest(),
-            daemon.authority,
-        )
-        .expect("build retired daemon binding");
-        let seeded_revision = revision_id("configuration.seeded.retired-locator");
-        let resolution = resolve_configuration(
-            &ConfigurationRegistry::core().expect("configuration registry"),
-            &[ConfigurationLayerV1 {
-                layer: ConfigurationLayerIdV1::Project {
-                    project_id: project_id.clone(),
-                },
-                revision_id: seeded_revision.clone(),
-                entries: BTreeMap::from([(
-                    SettingKey::new(SOURCE_BINDINGS_SETTING_KEY).expect("source bindings key"),
-                    ConfigurationValueV1::SourceBindings(vec![retired]),
-                )]),
-            }],
-        )
-        .expect("resolve seeded binding");
-        store
-            .initialize_canonical(&seeded_revision, &resolution, UtcMicros(1))
-            .await
-            .expect("seed store with the retired binding");
-
-        let healed = runtime
-            .ensure_runtime_configuration_for_test(&checkout, &layout)
-            .await
-            .expect("a retired locator digest rebinds instead of resetting");
-        assert_ne!(
-            healed.revision_id(),
-            &seeded_revision,
-            "the rebind publishes one new durable revision"
-        );
-        let from_clone = runtime
-            .ensure_runtime_configuration_for_test(&clone, &layout)
-            .await
-            .expect("a second clone verifies against the rebound binding");
-        assert_eq!(
-            from_clone.revision_id(),
-            healed.revision_id(),
-            "a second clone must not rebind the project's binding again"
-        );
-    }
-
     /// Locator drift may heal only through the exact daemon-owned binding.
     /// A store whose single authority-matching binding carries a foreign
     /// binding id (and a store whose bindings belong to another project)
@@ -1457,7 +1372,7 @@ mod runtime_configuration_cutover {
             SourceBindingId::new("binding.operator.project-open".to_owned())
                 .expect("foreign binding id"),
             tracedecay_configuration::config::scope_control::DAEMON_PROJECT_SOURCE_KIND,
-            retired_locator_digest(),
+            foreign_locator_digest(),
             AuthorityRef::Project(project_id.clone()),
         )
         .expect("build foreign-id binding");
