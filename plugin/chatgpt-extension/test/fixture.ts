@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -97,7 +97,7 @@ export class DaemonFixture {
   }
 
   static async create(): Promise<DaemonFixture> {
-    const root = await mkdtemp(path.join(os.tmpdir(), "tracedecay-chatgpt-ext-"));
+    const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "tracedecay-chatgpt-ext-")));
     const fixture = new DaemonFixture(root);
     await mkdir(fixture.profileRoot, { recursive: true });
     await mkdir(path.join(fixture.home, ".config"), { recursive: true });

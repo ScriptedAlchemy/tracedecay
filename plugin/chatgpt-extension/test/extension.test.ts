@@ -100,7 +100,9 @@ beforeAll(async () => {
   });
   const billingProject = projects.find((project) => project.project_root === billing.root);
   const shippingProject = projects.find((project) => project.project_root === shipping.root);
-  if (!billingProject || !shippingProject) throw new Error("fixture projects were not registered");
+  if (!billingProject || !shippingProject) {
+    throw new Error(`fixture project roots differ: expected ${JSON.stringify([billing.root, shipping.root])}, received ${JSON.stringify(projects.map((project) => project.project_root))}`);
+  }
   billingProjectId = billingProject.project_id;
   shippingProjectId = shippingProject.project_id;
 });
