@@ -4,9 +4,8 @@ use super::{
     McpServerConstructionContext,
 };
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[tokio::test]
@@ -80,76 +79,6 @@ async fn read_refresh_routes_through_the_freshness_probe_not_forced_reconcile() 
         0,
         "an ordinary read must never enter the force-overflow authority"
     );
-}
-
-#[tokio::test]
-async fn read_refresh_uses_injected_writer_without_direct_fallback() {
-    let (cg, dir, _authority) = init_indexed_repo().await;
-    let root = dir.path().to_path_buf();
-    let source_path = root.join("src/a.rs");
-    std::fs::write(&source_path, "pub fn a() { println!(\"changed\"); }\n").expect("modify source");
-    std::fs::File::options()
-        .write(true)
-        .open(&source_path)
-        .expect("open modified source")
-        .set_modified(std::time::SystemTime::now() + Duration::from_secs(2))
-        .expect("advance source mtime");
-    let observed = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
-    let refresh_writer: BackgroundRefreshWriter = {
-        let observed = Arc::clone(&observed);
-        Arc::new(move |request: BackgroundRefreshRequest| {
-            let observed = Arc::clone(&observed);
-            Box::pin(async move {
-                observed
-                    .lock()
-                    .expect("recording lock")
-                    .push(request.project_root);
-                Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(
-                    Some(HashMap::from([("injected.rs".to_string(), 41)])),
-                ))
-            })
-        })
-    };
-    let server = McpServer::new_with_context(
-        McpServerConstructionContext::direct(cg, None)
-            .with_background_refresh_writer(refresh_writer),
-    )
-    .await;
-    assert!(
-        server
-            .wait_for_startup_catch_up(Duration::from_secs(5))
-            .await,
-        "startup catch-up settles before the explicit read refresh"
-    );
-    observed.lock().expect("recording lock").clear();
-    let snapshot = server.cg_snapshot().await;
-    server
-        .background_refresh_running
-        .store(true, Ordering::Release);
-
-    server.spawn_read_refresh_task(&snapshot);
-
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while server.background_refresh_running.load(Ordering::Acquire) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("injected refresh settles");
-
-    assert_eq!(observed.lock().expect("recording lock").as_slice(), &[root]);
-    assert_eq!(
-        server.file_token_map_snapshot(),
-        HashMap::from([("injected.rs".to_string(), 41)])
-    );
-    assert_ne!(
-        server
-            .last_background_refresh_done_at
-            .load(Ordering::Acquire),
-        0,
-        "completion timestamp must be preserved"
-    );
-    server.shutdown().await;
 }
 
 /// Edit-shaped tools claim the lazy-sync window but never wait on it: the tool

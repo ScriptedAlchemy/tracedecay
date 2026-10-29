@@ -63,6 +63,9 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+gix.workspace = true
+rusqlite.workspace = true
+tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["full", "test-util"] }
 # Test-only helper surfaces reached across crate boundaries by this crate's

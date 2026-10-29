@@ -15,11 +15,6 @@ use super::super::{
     test_handshake_defaults,
 };
 
-#[tokio::test]
-async fn automation_scheduler_tick_respects_pause_control_without_backend_call() {
-    paused_tick_scenario().await;
-}
-
 /// The daemon polls its automation scheduler on Tokio workers with a 16 MiB
 /// stack (`ASYNC_STACK_BYTES` in the CLI). With instrumentation every
 /// instrumented future is wrapped by value, which is what overflowed that

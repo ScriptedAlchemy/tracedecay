@@ -822,7 +822,14 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    use super::await_dispatch_with_cancellation;
+    use super::{
+        await_dispatch_with_cancellation, project_server_retired_error, rmcp_response_result,
+    };
+    use crate::JsonRpcResponse;
+    use rmcp::model::{
+        CallToolResponse, CallToolResult, ErrorCode, InitializeResult, ListToolsResult,
+    };
+    use serde_json::json;
 
     #[tokio::test]
     async fn cancellation_stops_dispatch_when_registration_can_never_arrive() {
@@ -896,6 +903,99 @@ mod tests {
         assert!(
             registered.load(Ordering::SeqCst),
             "registration must complete so the selected target can settle"
+        );
+    }
+
+    #[test]
+    fn rmcp_selected_project_retirement_error_is_stable() {
+        let error = project_server_retired_error();
+        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
+        assert_eq!(
+            error.message,
+            "tool project route failed: project server was retired",
+        );
+        assert_eq!(
+            error.data,
+            Some(json!({
+                "reason_code": "project_server_retired",
+                "retryable": true,
+                "detail": "the retained project server was replaced or revoked; retry against the current owner",
+            })),
+        );
+    }
+
+    #[test]
+    fn response_conversion_preserves_tool_content_and_rpc_errors() {
+        let complete: CallToolResponse =
+            rmcp_response_result::<CallToolResult>(JsonRpcResponse::success(
+                json!(7),
+                json!({"content": [{"type": "text", "text": "ok"}]}),
+            ))
+            .map(Into::into)
+            .expect("tool response");
+        let CallToolResponse::Complete(CallToolResult { content, .. }) = complete else {
+            panic!("ordinary TraceDecay tool responses must stay complete");
+        };
+        assert_eq!(
+            content[0].as_text().map(|text| text.text.as_str()),
+            Some("ok")
+        );
+
+        let error = rmcp_response_result::<ListToolsResult>(JsonRpcResponse::error_with_data(
+            json!("request"),
+            crate::transport::ErrorCode::InvalidParams,
+            "invalid arguments".to_owned(),
+            Some(json!({"reason": "missing_query"})),
+        ))
+        .expect_err("error response");
+        assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+        assert_eq!(error.message, "invalid arguments");
+        assert_eq!(error.data, Some(json!({"reason": "missing_query"})));
+    }
+
+    #[test]
+    fn adapter_accepts_the_dispatch_initialize_response_shape() {
+        let initialized: InitializeResult = rmcp_response_result(JsonRpcResponse::success(
+            json!(1),
+            crate::server::initialize_result(
+                "9.8.7",
+                "TraceDecay instructions",
+                Some("2024-11-05"),
+            ),
+        ))
+        .expect("rmcp must accept the server's own initialize result shape");
+
+        let observed = serde_json::to_value(&initialized).expect("serialize initialized response");
+        assert_eq!(observed["protocolVersion"], json!("2024-11-05"));
+        assert_eq!(observed["instructions"], json!("TraceDecay instructions"));
+        assert_eq!(observed["serverInfo"]["name"], json!("tracedecay"));
+        assert_eq!(
+            observed["capabilities"],
+            json!({"tools": {"listChanged": true}, "resources": {}})
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_stops_dispatch_before_live_request_registration() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let cancel_attempts = Arc::clone(&attempts);
+
+        let result = await_dispatch_with_cancellation(
+            std::future::pending::<()>(),
+            std::future::ready(()),
+            move || {
+                cancel_attempts.fetch_add(1, Ordering::SeqCst);
+                false
+            },
+            None,
+        )
+        .await;
+
+        assert_eq!(result, None);
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "an unregistered request has no admitted work to poll for cancellation"
         );
     }
 }

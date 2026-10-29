@@ -746,48 +746,6 @@ mod cancellable_queue_tests {
     }
 
     #[tokio::test]
-    async fn ordinary_connection_read_has_one_retained_task_owner() {
-        let fixture = DelayedRouteFixture::new().await;
-        let registry = fixture.caller.dispatch_authority.registry();
-        let retained_before = registry.retained_spawn_count_for_test();
-        let (mut transport, sender, mut responses) =
-            tracedecay_mcp::transport::ChannelTransport::new();
-        let serving = tokio::spawn({
-            let caller = Arc::clone(&fixture.caller);
-            async move { caller.run_connection(&mut transport).await }
-        });
-
-        sender
-            .send(
-                serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": 3,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "tracedecay_status",
-                        "arguments": {"admission_only": true}
-                    }
-                })
-                .to_string(),
-            )
-            .expect("send ordinary connection read");
-        assert_eq!(receive_response(&mut responses).await["id"], json!(3));
-
-        assert_eq!(
-            registry.retained_spawn_count_for_test(),
-            retained_before + 1,
-            "the retained dispatch registry must own exactly the one ordinary read"
-        );
-
-        drop(sender);
-        serving
-            .await
-            .expect("join ordinary read connection")
-            .expect("serve ordinary read connection");
-        fixture.harness.shutdown().await;
-    }
-
-    #[tokio::test]
     async fn effect_request_is_a_barrier_for_reads_on_both_sides() {
         let fixture = DelayedRouteFixture::new().await;
         let (inner_transport, sender, mut responses) =

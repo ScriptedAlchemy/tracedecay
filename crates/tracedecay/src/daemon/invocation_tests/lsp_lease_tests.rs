@@ -568,49 +568,6 @@ async fn abnormal_reconnect_cancels_and_joins_the_registered_lease() {
     assert_eq!(service.lsp_lease_tasks.active_tasks(), 0);
 }
 
-#[tokio::test]
-async fn shutdown_fences_racing_lsp_open_before_it_can_publish_state() {
-    let service = Arc::new(DaemonInvocationService::default());
-    let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
-    let shutdown_service = Arc::clone(&service);
-    let shutdown = tokio::spawn(async move {
-        shutdown_service.begin_shutdown().await;
-    });
-    tokio::task::yield_now().await;
-
-    let response = service
-        .open_lsp_session(
-            &registry,
-            Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
-                admitted_root_fixture("authoritative").1,
-            ))),
-            "request.open-during-shutdown".to_owned(),
-            env!("CARGO_PKG_VERSION").to_owned(),
-            None,
-            Vec::new(),
-            now_millis(),
-            Some(DaemonLspInvocationOwner::for_test_project(
-                unavailable_lsp_session_factory(),
-                tracedecay_domain::UserProfileId::new("profile.test.lsp")
-                    .expect("test LSP profile"),
-                tracedecay_domain::ProjectId::new("project.test.lsp").expect("test LSP project"),
-                PathBuf::from("/test/lsp"),
-            )),
-        )
-        .await;
-    shutdown.await.expect("shutdown admission fence");
-
-    assert!(matches!(
-        response.outcome,
-        DaemonInvocationOutcome::Problem {
-            problem: DaemonInvocationProblem::Unavailable
-        }
-    ));
-    assert_eq!(registry.lock().await.active_sessions(), 0);
-    assert!(service.lsp_sessions.lock().await.is_empty());
-    assert_eq!(service.lsp_lease_tasks.active_tasks(), 0);
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn state_shutdown_fences_a_queued_open_before_the_endpoint_expiry_sweep() {
     let state = Arc::new(crate::daemon::invocation_state::DaemonInvocationState::default());

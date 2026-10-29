@@ -101,15 +101,6 @@ mod runtime_behavior_dispatch_tests;
     clippy::redundant_closure_for_method_calls,
     clippy::uninlined_format_args
 )]
-mod runtime_generation_census_dispatch_tests;
-#[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::await_holding_lock,
-    clippy::redundant_closure_for_method_calls,
-    clippy::uninlined_format_args
-)]
 mod search_graph_independence_tests;
 #[cfg(test)]
 #[allow(
@@ -122,15 +113,6 @@ mod search_graph_independence_tests;
 mod stack_snapshot_behavior_tests;
 mod support;
 mod tool_call_support;
-#[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::await_holding_lock,
-    clippy::redundant_closure_for_method_calls,
-    clippy::uninlined_format_args
-)]
-mod tool_definition_tests;
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

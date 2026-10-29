@@ -174,8 +174,6 @@ pub struct RetainedDispatchRegistry {
     capacity: usize,
     active_slots: Arc<AtomicUsize>,
     state: RetainedDispatchStateMutex<RetainedDispatchState>,
-    #[cfg(any(test, feature = "test-transport"))]
-    retained_spawn_count: AtomicUsize,
 }
 
 impl RetainedDispatchRegistry {
@@ -193,8 +191,6 @@ impl RetainedDispatchRegistry {
                 active: HashMap::new(),
                 next_id: 0,
             }),
-            #[cfg(any(test, feature = "test-transport"))]
-            retained_spawn_count: AtomicUsize::new(0),
         }
     }
 
@@ -270,8 +266,6 @@ impl RetainedDispatchRegistry {
                 (id, worker_settlement)
             })
             .map_err(|error| dispatch_runtime_unavailable_error(&error))?;
-        #[cfg(any(test, feature = "test-transport"))]
-        self.retained_spawn_count.fetch_add(1, Ordering::AcqRel);
         state.active.insert(
             id,
             ActiveDispatch {
@@ -286,12 +280,6 @@ impl RetainedDispatchRegistry {
     #[cfg(test)]
     async fn active_count_for_test(&self) -> usize {
         self.state.lock().await.active.len()
-    }
-
-    #[cfg(feature = "test-transport")]
-    #[doc(hidden)]
-    pub fn retained_spawn_count_for_test(&self) -> usize {
-        self.retained_spawn_count.load(Ordering::Acquire)
     }
 
     #[cfg(test)]

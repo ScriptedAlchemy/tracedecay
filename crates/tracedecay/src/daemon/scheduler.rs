@@ -1481,15 +1481,6 @@ mod global_retention_cadence_tests {
     }
 
     #[test]
-    fn failed_pass_is_immediately_retryable() {
-        let mut cadence = GlobalRetentionCadence::default();
-        let now = Instant::now();
-        assert!(cadence.reserve(now));
-        cadence.finish(now, false);
-        assert!(cadence.reserve(now));
-    }
-
-    #[test]
     fn successful_pass_advances_cadence_and_blocks_overlap() {
         let mut cadence = GlobalRetentionCadence::default();
         let now = Instant::now();

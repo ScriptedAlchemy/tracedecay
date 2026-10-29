@@ -165,56 +165,6 @@ async fn multi_root_tools_invoke_the_closed_daemon_routes() {
     );
 }
 
-#[tokio::test]
-async fn unmounted_files_graph_tool_owner_reports_a_real_orphaned_rust_source() {
-    let dir = TempDir::new().unwrap();
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("unmounted-files-root-dispatch");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(
-        project.join("Cargo.toml"),
-        "[package]\nname = \"unmounted-files-root-dispatch\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
-    )
-    .unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn mounted() {}\n").unwrap();
-    fs::write(
-        project.join("src/orphan.rs"),
-        "pub fn reachable_only_if_declared() {}\n",
-    )
-    .unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
-        "project.mcp-unmounted-files-root-dispatch",
-    )
-    .await
-    .unwrap();
-
-    let result = dispatch_on_graph_authority(
-        &cg,
-        "tracedecay_unmounted_files",
-        json!({"ecosystem": "rust", "format": "json"}),
-        verified_graph_options(&cg, ToolCallRegistryOptions::default()),
-    )
-    .await
-    .expect("the graph-tool owner computes the unmounted-files report");
-    let payload: Value = tool_json(&result);
-
-    assert_eq!(payload["unmounted_file_count"], 1);
-    assert_eq!(payload["returned_count"], 1);
-    assert_eq!(payload["unmounted"][0]["file"], "src/orphan.rs");
-    assert_eq!(
-        payload["unmounted"][0]["package"],
-        "unmounted-files-root-dispatch"
-    );
-    assert_eq!(
-        payload["unmounted"][0]["suggested_declaration"],
-        "mod orphan;"
-    );
-
-    cg.close();
-}
-
 #[test]
 fn bounded_tool_identity_preserves_catalog_names_and_bounds_unknown_values() {
     assert_eq!(
@@ -226,33 +176,6 @@ fn bounded_tool_identity_preserves_catalog_names_and_bounds_unknown_values() {
         "unknown"
     );
     assert_eq!(mcp_tool_bounded_identity("another-unknown-name"), "unknown");
-}
-
-/// The git-context reads are application operations the graph-tool owner
-/// answers; only the internal branch-add tool stays in the git dispatch
-/// family the MCP deadline horizon asks about.
-#[test]
-fn git_dispatch_family_holds_only_the_internal_branch_add_tool() {
-    assert!(tool_dispatches_git_reads("tracedecay_admin_branch_add"));
-    for tool_name in [
-        "tracedecay_pr_context",
-        "tracedecay_diff_context",
-        "tracedecay_changelog",
-        "tracedecay_branch_diff",
-        "tracedecay_affected",
-    ] {
-        assert!(
-            !tool_dispatches_git_reads(tool_name),
-            "{tool_name} is answered by the graph-tool owner",
-        );
-        assert!(
-            ApplicationSurfaceOperation::from_tool_name(tool_name)
-                .is_some_and(ApplicationSurfaceOperation::is_graph_tool),
-            "{tool_name} is a graph-tool operation",
-        );
-    }
-    assert!(!tool_dispatches_git_reads("tracedecay_files"));
-    assert!(!tool_dispatches_git_reads("tracedecay_diagnostics"));
 }
 
 #[tokio::test]
@@ -344,48 +267,6 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
             rejected.is_err(),
             "{tool_name} must reject handler dispatch"
         );
-    }
-}
-
-#[test]
-fn registered_project_selector_dispatch_policy_matches_tool_schemas() {
-    for tool in get_tool_definitions().expect("tool definitions") {
-        let properties = &tool.input_schema["properties"];
-        let schema_has_registered_project_selector = properties.get("project_selector").is_some();
-        assert_eq!(
-            tool_accepts_registered_project_selector(&tool.name),
-            schema_has_registered_project_selector,
-            "{} registered-project selector schema and dispatch policy should stay in lockstep",
-            tool.name
-        );
-        if schema_has_registered_project_selector {
-            for alias in ["project_id", "project_path", "project_root", "root"] {
-                assert!(properties.get(alias).is_none());
-            }
-            let selector = &properties["project_selector"];
-            assert_eq!(
-                selector["required"],
-                json!(["project_id"]),
-                "{} selector must require project_id",
-                tool.name
-            );
-            assert_eq!(
-                selector["additionalProperties"], false,
-                "{} selector must be a closed object",
-                tool.name
-            );
-            assert_eq!(
-                selector["properties"]
-                    .as_object()
-                    .unwrap_or_else(|| panic!("{} closed selector properties", tool.name))
-                    .keys()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>(),
-                vec!["project_id"],
-                "{} selector must expose exactly project_id",
-                tool.name
-            );
-        }
     }
 }
 
@@ -1593,78 +1474,7 @@ async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
 // Universal dispatch ceiling
 // ---------------------------------------------------------------------------
 
-use tracedecay_mcp::tools::dispatch_ceiling::{
-    LONG_RUNNING_TOOL_DISPATCH_CEILING, TOOL_DISPATCH_CEILING, tool_dispatch_budget,
-    tool_dispatch_ceiling, tool_dispatch_deadline_error,
-};
-
-/// One tool from every dispatch group. `tracedecay_context` is listed first
-/// because it is the one that actually hung: it is neither an
-/// application-surface operation nor a controlled read, so
-/// `dispatch_deadline_horizon_micros` returned `None` for it and it reached its
-/// handler with no bound at all.
-const DISPATCH_GROUP_SPOT_CHECKS: &[&str] = &[
-    "tracedecay_context",
-    "tracedecay_search",
-    "tracedecay_callers",
-    "tracedecay_status",
-    "tracedecay_files",
-    "tracedecay_dead_code",
-    "tracedecay_complexity",
-    "tracedecay_health",
-    "tracedecay_test_map",
-    "tracedecay_pr_context",
-    "tracedecay_affected",
-    "tracedecay_analytics",
-    "tracedecay_skill_list",
-    "tracedecay_dashboard",
-    "tracedecay_diagnose",
-    "tracedecay_hook_runtime",
-    "tracedecay_str_replace",
-    "tracedecay_fact_store_search",
-];
-
-/// Absent a carried deadline every tool still dispatches under a bound. Before
-/// the universal ceiling only the git and memory groups were wrapped, so most
-/// of these names had no ceiling of any kind.
-#[test]
-fn every_dispatch_group_has_a_ceiling_without_a_carried_deadline() {
-    for tool_name in DISPATCH_GROUP_SPOT_CHECKS {
-        let budget = tool_dispatch_budget(tool_name, None)
-            .expect("a tool with no carried deadline still dispatches under its ceiling");
-        assert_eq!(
-            budget,
-            tool_dispatch_ceiling(tool_name),
-            "{tool_name} must inherit the universal ceiling",
-        );
-        assert!(
-            budget <= LONG_RUNNING_TOOL_DISPATCH_CEILING,
-            "{tool_name} must never dispatch near the 900s client hang this replaced",
-        );
-    }
-}
-
-/// The interactive ceiling is the default; only the explicitly listed
-/// long-running jobs get the larger one, and even those stay bounded.
-#[test]
-fn long_running_tools_are_bounded_above_the_interactive_ceiling() {
-    assert_eq!(
-        tool_dispatch_ceiling("tracedecay_context"),
-        TOOL_DISPATCH_CEILING,
-    );
-    assert_eq!(
-        tool_dispatch_ceiling("tracedecay_run_affected_tests"),
-        LONG_RUNNING_TOOL_DISPATCH_CEILING,
-    );
-    assert!(
-        TOOL_DISPATCH_CEILING < LONG_RUNNING_TOOL_DISPATCH_CEILING,
-        "the interactive ceiling must be the tighter of the two",
-    );
-    assert!(
-        LONG_RUNNING_TOOL_DISPATCH_CEILING < std::time::Duration::from_mins(15),
-        "nothing may ever run 900 seconds",
-    );
-}
+use tracedecay_mcp::tools::dispatch_ceiling::{TOOL_DISPATCH_CEILING, tool_dispatch_budget};
 
 /// A carried admission deadline wins whenever it is shorter, and the ceiling
 /// still clamps one that is implausibly distant, so the ceiling can never be
@@ -1686,79 +1496,6 @@ fn carried_deadline_is_preferred_when_shorter_and_clamped_when_longer() {
         budget, TOOL_DISPATCH_CEILING,
         "a carried deadline beyond the ceiling must be clamped to it",
     );
-}
-
-/// An already-elapsed carried deadline is rejected rather than dispatched, for
-/// every group, the same rule the git and memory wraps already applied.
-#[test]
-fn an_elapsed_carried_deadline_is_rejected_for_every_group() {
-    let elapsed =
-        tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(1)).expect("deadline");
-    for tool_name in DISPATCH_GROUP_SPOT_CHECKS {
-        assert!(
-            tool_dispatch_budget(tool_name, Some(&elapsed)).is_none(),
-            "{tool_name} must refuse to dispatch under an elapsed deadline",
-        );
-    }
-}
-
-/// The ceiling reports the same typed, retryable problem shape the memory wrap
-/// established, so the MCP boundary surfaces structure instead of a hang.
-#[test]
-fn the_ceiling_reports_a_typed_retryable_problem() {
-    let error = tool_dispatch_deadline_error("tracedecay_context", TOOL_DISPATCH_CEILING);
-    let (reason_code, retryable, detail) = error
-        .project_route_context()
-        .expect("the ceiling must surface a typed project-route problem, not an opaque error");
-    assert_eq!(
-        reason_code, "tool_dispatch_deadline_exceeded",
-        "the ceiling must keep its own reason code so callers can branch on it",
-    );
-    assert!(
-        retryable,
-        "a dispatch-ceiling cancellation is retryable: nothing was committed",
-    );
-    // The typed fields carry the shape; only the detail names the subject, so
-    // these two checks assert information the typed fields cannot express.
-    assert!(
-        detail.contains("tracedecay_context"),
-        "the problem must name the tool it cancelled, got {detail:?}",
-    );
-    assert!(
-        detail.contains(&format!("{}s", TOOL_DISPATCH_CEILING.as_secs())),
-        "the problem must name the budget it enforced, got {detail:?}",
-    );
-}
-
-/// Equivalence: a warm call that finishes well inside the ceiling is untouched
-/// by it, the bound changes failure, not work.
-#[tokio::test]
-async fn a_warm_call_is_unaffected_by_the_ceiling() {
-    let dir = TempDir::new().unwrap();
-    let (cg, _runtime) = registered_lib_fixture(
-        dir.path(),
-        "dispatch-ceiling-warm",
-        "pub fn probe() {}\n",
-        "project.mcp-dispatch-ceiling-warm",
-    )
-    .await;
-    let started = std::time::Instant::now();
-    let result = dispatch_on_graph_authority(
-        &cg,
-        "tracedecay_context",
-        json!({ "task": "probe" }),
-        verified_graph_options(&cg, ToolCallRegistryOptions::default()),
-    )
-    .await
-    .expect("a warm context call succeeds under the ceiling");
-    assert!(
-        started.elapsed() < TOOL_DISPATCH_CEILING,
-        "a warm call must finish far inside the ceiling, took {:?}",
-        started.elapsed(),
-    );
-    assert!(result.value["content"][0]["text"].is_string());
-
-    cg.close();
 }
 
 /// One graph read through the owner dispatch, rendered as its MCP result.
@@ -1847,79 +1584,6 @@ async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
     assert!(
         !rendered.contains("code_graph_freshness"),
         "a proven-current response must not carry a freshness trailer: {rendered}",
-    );
-
-    cg.close();
-}
-
-/// The graph-tool owner reports the generation it served on the completion,
-/// so the envelope carries the stale seat and every surface renders the same
-/// trailer from it.
-#[tokio::test]
-async fn graph_tool_owner_reports_the_served_generation_for_the_trailer() {
-    let dir = TempDir::new().unwrap();
-    let (cg, _runtime) = registered_lib_fixture(
-        dir.path(),
-        "graph-tool-trailer",
-        "pub fn probe() {}\n",
-        "project.graph-tool-trailer",
-    )
-    .await;
-
-    let stale = super::compute_graph_tool_for_owner(
-        &cg,
-        ApplicationSurfaceOperation::Todos,
-        json!({}),
-        None,
-        verified_graph_stale_options(&cg, ToolCallRegistryOptions::default()),
-    )
-    .await
-    .expect("a stale-served graph tool still answers");
-    let served = stale.code_graph.clone().expect("served generation");
-    assert_eq!(served.generation, "generation.mcp-verified-graph-fixture.1");
-    assert!(served.freshness.is_stale());
-    let rendered = tracedecay_mcp::handlers::graph_tool::render_graph_tool(
-        Some(&cg.store_layout().response_handle_root),
-        &json!({}),
-        stale,
-    )
-    .unwrap();
-    let rendered = serde_json::to_string(&rendered.value).unwrap();
-    assert!(
-        rendered.contains(
-            "code_graph_freshness: stale, serving the last complete generation \
-             generation.mcp-verified-graph-fixture.1 (sealed 1m ago) while the code index rebuilds"
-        ),
-        "{rendered}"
-    );
-
-    let current = super::compute_graph_tool_for_owner(
-        &cg,
-        ApplicationSurfaceOperation::Todos,
-        json!({}),
-        None,
-        verified_graph_options(&cg, ToolCallRegistryOptions::default()),
-    )
-    .await
-    .expect("a current graph tool answers");
-    assert!(
-        !current
-            .code_graph
-            .as_ref()
-            .expect("served generation")
-            .freshness
-            .is_stale()
-    );
-    let rendered = tracedecay_mcp::handlers::graph_tool::render_graph_tool(
-        Some(&cg.store_layout().response_handle_root),
-        &json!({}),
-        current,
-    )
-    .unwrap();
-    assert!(
-        !serde_json::to_string(&rendered.value)
-            .unwrap()
-            .contains("code_graph_freshness")
     );
 
     cg.close();

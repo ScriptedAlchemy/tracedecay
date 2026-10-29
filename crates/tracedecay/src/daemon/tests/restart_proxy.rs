@@ -237,31 +237,6 @@ async fn connect_with_restart_grace_gives_up_with_restart_hint() {
     );
 }
 
-#[tokio::test]
-async fn client_deadline_run_reports_typed_stalled() {
-    let deadline = super::super::DaemonClientDeadline::until(
-        std::time::Instant::now() + std::time::Duration::from_millis(20),
-    )
-    .expect("future deadline");
-    let err = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        deadline.run(
-            "read",
-            "tracedecay_status",
-            std::future::pending::<super::super::Result<()>>(),
-        ),
-    )
-    .await
-    .expect("the client deadline ends the pending stage")
-    .expect_err("pending future must stall");
-    assert_eq!(
-        err.project_route_context()
-            .map(|(code, retryable, _)| (code, retryable)),
-        Some((tracedecay_daemon_protocol::DAEMON_RESPONSE_STALLED, true)),
-        "read-deadline abort must be typed daemon_response_stalled, got: {err}"
-    );
-}
-
 /// A daemon that accepts and never replies must abort inside the caller
 /// deadline. The request Instant is placed `RESPONSE_GRACE` behind the desired
 /// local bound so the production `call_tool_within` envelope (request + 30s

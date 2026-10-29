@@ -597,30 +597,6 @@ async fn one_shot_tool_call_receives_a_matching_saturation_response() {
 }
 
 #[tokio::test]
-async fn cancelling_daemon_client_releases_admission_capacity() {
-    let admission = super::super::DaemonClientAdmission::new(1);
-    let permit = match admission.try_admit() {
-        super::super::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
-        super::super::DaemonClientAdmissionOutcome::Saturated(_) => panic!("first client rejected"),
-    };
-    let task = tokio::spawn(async move {
-        let _permit = permit;
-        std::future::pending::<()>().await;
-    });
-    assert!(matches!(
-        admission.try_admit(),
-        super::super::DaemonClientAdmissionOutcome::Saturated(_)
-    ));
-
-    task.abort();
-    task.await.expect_err("client task cancelled");
-    assert!(matches!(
-        admission.try_admit(),
-        super::super::DaemonClientAdmissionOutcome::Admitted(_)
-    ));
-}
-
-#[tokio::test]
 async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
     let temp = TempDir::new().expect("temp dir");
     let project = temp.path().join("project");

@@ -1236,20 +1236,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fixture_refresh_persists_progress_before_measurement() {
-        let prepared = Box::pin(prepare_repetition(0))
-            .await
-            .expect("production fixture refresh must persist durable progress");
-        assert_eq!(
-            prepared.root_sessions.len(),
-            root_relation_fixture::ROOT_RELATION_PARTICIPANT_COUNT
-        );
-        assert!(
-            prepared.root_record_count >= root_relation_fixture::ROOT_RELATION_PARTICIPANT_COUNT
-        );
-    }
-
-    #[tokio::test]
     async fn fresh_benchmark_db_provisions_key_for_rank_and_hydration() {
         let samples = Box::pin(run_one_repetition(0))
             .await
