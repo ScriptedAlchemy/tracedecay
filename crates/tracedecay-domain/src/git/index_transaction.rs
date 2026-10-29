@@ -223,9 +223,6 @@ struct GitIndexReceiptDigestMaterial<'a> {
     old_head: Option<&'a GitOidV1>,
     new_head: Option<&'a GitOidV1>,
     selected_hunk_digests: &'a [ManifestDigest],
-    // Always null. Receipts stored before commit_index was removed digest
-    // this key, so dropping it would break every stored receipt digest.
-    created_commit: Option<()>,
     outcome: GitIndexReceiptOutcomeV1,
     committed_at: UtcMicros,
 }
@@ -311,7 +308,6 @@ impl GitIndexTransactionReceiptV1 {
             old_head: self.old_head.as_ref(),
             new_head: self.new_head.as_ref(),
             selected_hunk_digests: &self.selected_hunk_digests,
-            created_commit: None,
             outcome: self.outcome,
             committed_at: self.committed_at,
         })
@@ -391,26 +387,18 @@ impl<'de> Deserialize<'de> for GitIndexTransactionReceiptV1 {
             operation: GitIndexTransactionOperationV1,
             old_snapshot_digest: ManifestDigest,
             final_snapshot_digest: ManifestDigest,
-            #[serde(default = "crate::canonical_text::default_true")]
             final_snapshot_captured: bool,
             old_index_tree: Option<GitOidV1>,
             new_index_tree: Option<GitOidV1>,
             old_head: Option<GitOidV1>,
             new_head: Option<GitOidV1>,
             selected_hunk_digests: Vec<ManifestDigest>,
-            #[serde(default)]
-            created_commit: Option<serde::de::IgnoredAny>,
             outcome: GitIndexReceiptOutcomeV1,
             committed_at: UtcMicros,
             receipt_digest: ManifestDigest,
         }
 
         let wire = Wire::deserialize(deserializer)?;
-        if wire.created_commit.is_some() {
-            return Err(serde::de::Error::custom(
-                "git index receipt carries a created commit, which no operation produces",
-            ));
-        }
         let receipt = Self {
             receipt_id: wire.receipt_id,
             transaction_id: wire.transaction_id,
