@@ -247,7 +247,8 @@ describe("ChatGPT extension against a live TraceDecay daemon", () => {
     expect(symbol.graph.data.edges.length).toBe(2);
     expect(symbol.evidence).not.toBeNull();
     const authority = await fixture.readAuthority();
-    expect(symbol.provenance?.authority).toEqual({ profile_root: fixture.profileRoot, daemon_version: authority!.version, daemon_pid: authority!.pid });
+    expect(authority).not.toBeNull();
+    expect(symbol.provenance?.authority).toEqual({ profile_root: authority!.profile_root, daemon_version: authority!.version, daemon_pid: authority!.pid });
     expect(symbol.evidence!.markdown).toContain(`- Commit: ${billing.head()}`);
     expect(symbol.evidence!.markdown).toContain("src/report.ts::renderBillingReport");
     expect(symbol.evidence!.markdown).toContain(`- Generation: ${search.provenance!.generation}`);

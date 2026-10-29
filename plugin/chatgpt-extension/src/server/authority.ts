@@ -40,8 +40,15 @@ export type AuthorityLookup =
   | { readonly kind: "absent"; readonly failure: Failure }
   | { readonly kind: "invalid"; readonly failure: Failure };
 
+export function daemonAuthorityRecordPath(profileRoot: string): string {
+  // Windows protects the authority files in a private directory; mirror
+  // tracedecay-daemon-identity's authority_state_root on each platform.
+  const root = process.platform === "win32" ? path.join(profileRoot, "daemon-authority") : profileRoot;
+  return path.join(root, "daemon-authority.json");
+}
+
 export async function readDaemonAuthority(profileRoot: string): Promise<AuthorityLookup> {
-  const recordPath = path.join(profileRoot, "daemon-authority.json");
+  const recordPath = daemonAuthorityRecordPath(profileRoot);
   let raw: string;
   try {
     raw = await readFile(recordPath, "utf8");

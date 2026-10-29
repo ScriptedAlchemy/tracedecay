@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DaemonAuthorityRecordSchema } from "../src/server/authority.js";
+import { daemonAuthorityRecordPath, DaemonAuthorityRecordSchema } from "../src/server/authority.js";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -128,7 +128,7 @@ export class DaemonFixture {
 
   async readAuthority() {
     try {
-      const raw = await readFile(path.join(this.profileRoot, "daemon-authority.json"), "utf8");
+      const raw = await readFile(daemonAuthorityRecordPath(this.profileRoot), "utf8");
       const parsed = DaemonAuthorityRecordSchema.safeParse(JSON.parse(raw));
       return parsed.success ? parsed.data : null;
     } catch {

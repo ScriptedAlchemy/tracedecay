@@ -1,12 +1,13 @@
 import { Client, InMemoryTransport, StreamableHTTPClientTransport, type CallToolResult } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
-import { mkdtemp, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { request as httpRequest } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonBridge } from "../src/server/bridge.js";
+import { readDaemonAuthority } from "../src/server/authority.js";
 import { createExtensionServer, serveLoopbackHttp } from "../src/server/main.js";
 import { DaemonFailure, ServeSession } from "../src/server/serve-client.js";
 
@@ -36,6 +37,26 @@ async function rejection(promise: Promise<unknown>): Promise<unknown> {
   }
   throw new Error("expected the call to reject");
 }
+
+describe("native daemon authority", () => {
+  it("reads the native private authority location and refuses an absent record", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "td-native-authority-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const record = {
+      pid: process.pid, process_run_id: "native-fixture", started_at_unix_secs: 1,
+      epoch: 1, version: "fixture", endpoint: null, http_application_endpoint: "127.0.0.1:1",
+      auth_token: "isolated-fixture-token", profile_root: root,
+    };
+    if (process.platform === "win32") {
+      await writeFile(path.join(root, "daemon-authority.json"), JSON.stringify(record));
+    }
+    expect(await readDaemonAuthority(root)).toMatchObject({ kind: "absent" });
+    const directory = process.platform === "win32" ? path.join(root, "daemon-authority") : root;
+    await mkdir(directory, { recursive: true });
+    await writeFile(path.join(directory, "daemon-authority.json"), JSON.stringify(record));
+    expect(await readDaemonAuthority(root)).toEqual({ kind: "available", record });
+  });
+});
 
 describe("embedded server entry", () => {
   it("serves when launched through a symlinked path", async () => {
