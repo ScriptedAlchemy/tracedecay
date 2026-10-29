@@ -182,12 +182,6 @@ async fn wait_for_schema_convergence(
     .expect("registered schema convergence must reach a terminal state")
 }
 
-const LCM_STATUS_PERFORMANCE_INDEX_NAMES: [&str; 2] = [
-    "idx_lcm_raw_lossy_ingest",
-    "idx_lcm_external_payloads_owner_bytes",
-];
-const SUPERSEDED_LCM_PAYLOAD_OWNER_INDEX: &str = "idx_lcm_external_payloads_owner";
-
 /// The `SQLite` scalar one query returns, for the fixtures that assert on a
 /// single count or marker.
 async fn scalar_i64(connection: &(impl QueryExecutor + ?Sized), sql: &str) -> i64 {
@@ -198,57 +192,6 @@ async fn scalar_i64(connection: &(impl QueryExecutor + ?Sized), sql: &str) -> i6
         .expect("scalar row")
         .get::<i64>(0)
         .expect("decode scalar")
-}
-
-/// Which of `candidates` the store currently carries, in name order. A
-/// migration that replaces an index is observable here as the set changing.
-async fn installed_index_names(
-    connection: &(impl QueryExecutor + ?Sized),
-    candidates: &[&str],
-) -> Vec<String> {
-    let quoted = candidates
-        .iter()
-        .map(|name| format!("'{name}'"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut rows = connection
-        .query(
-            &format!(
-                "SELECT name FROM sqlite_master
-                 WHERE type = 'index' AND name IN ({quoted})
-                 ORDER BY name"
-            ),
-            (),
-        )
-        .await
-        .expect("read installed index names");
-    let mut names = Vec::new();
-    while let Some(row) = rows.next().await.expect("step installed index name") {
-        names.push(row.get::<String>(0).expect("decode installed index name"));
-    }
-    names
-}
-
-async fn installed_lcm_status_index_names(
-    connection: &(impl QueryExecutor + ?Sized),
-) -> Vec<String> {
-    let mut candidates = LCM_STATUS_PERFORMANCE_INDEX_NAMES.to_vec();
-    candidates.push(SUPERSEDED_LCM_PAYLOAD_OWNER_INDEX);
-    installed_index_names(connection, &candidates).await
-}
-
-async fn deferred_lcm_fixture_row_count(connection: &(impl QueryExecutor + ?Sized)) -> i64 {
-    scalar_i64(
-        connection,
-        "SELECT COUNT(*)
-         FROM sessions AS session
-         JOIN lcm_raw_messages AS message
-           ON message.provider = session.provider
-          AND message.session_id = session.session_id
-         WHERE session.session_id = 'deferred-index-session'
-           AND message.message_id = 'deferred-index-message'",
-    )
-    .await
 }
 
 fn accepting_memory_write_control() -> FactWriteControl {
@@ -618,104 +561,6 @@ async fn project_sessions_mount_uses_typed_enrollment_and_is_idempotent() {
         )
     );
     assert_eq!(first.db_path(), sessions_path);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn daemon_admission_remains_ready_while_lcm_indexes_converge_in_background() {
-    let (_temporary, identity, project_id, project_root, sessions_path, _database_scope) =
-        project_sessions_pending_convergence("project.schema-admission").await;
-    let seed = TestConnection::open(&sessions_path);
-    seed.execute_batch(
-        r"INSERT INTO sessions(provider, session_id, project_key, project_path)
-           VALUES ('cursor', 'deferred-index-session', 'project.schema-admission', '/deferred');
-           INSERT INTO lcm_raw_messages (
-               provider, message_id, session_id, role, ordinal, content,
-               content_hash, storage_kind, metadata_json
-           ) VALUES (
-               'cursor', 'deferred-index-message', 'deferred-index-session', 'assistant', 1,
-               'deferred body', 'deferred-hash', 'inline', NULL
-           );
-           DROP INDEX idx_lcm_raw_lossy_ingest;
-           DROP INDEX idx_lcm_external_payloads_owner_bytes;
-           CREATE INDEX idx_lcm_external_payloads_owner
-               ON lcm_external_payloads(provider, session_id);",
-    )
-    .await
-    .expect("seed an already-current store without the LCM status indexes");
-    drop(seed);
-    let shard_id = StoreShardIdV1::project_sessions(
-        identity.brain_id().clone(),
-        identity.profile_id().clone(),
-        project_id.clone(),
-    );
-    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
-        .await
-        .expect("session runtime registry");
-    let convergence_gate = registry.block_registered_schema_convergence_for_test();
-
-    // The gate holds convergence until the assertions below, so an admission
-    // that waited on convergence never returns.
-    let database = registry
-        .project_sessions(project_id, [project_root])
-        .await
-        .expect("registered project sessions");
-    convergence_gate.wait_until_blocked().await;
-
-    assert_eq!(
-        registry.registered_schema_convergence_status(&shard_id),
-        Some(RegisteredSchemaConvergenceStatus::Running)
-    );
-    {
-        let snapshot = database
-            .read_snapshot()
-            .await
-            .expect("ordinary read snapshot while convergence is pending");
-        let indexes = installed_lcm_status_index_names(&snapshot).await;
-        for index in LCM_STATUS_PERFORMANCE_INDEX_NAMES {
-            assert!(
-                !indexes.iter().any(|installed| installed == index),
-                "daemon admission synchronously built {index}: {indexes:?}"
-            );
-        }
-        assert!(
-            indexes
-                .iter()
-                .any(|index| index == SUPERSEDED_LCM_PAYLOAD_OWNER_INDEX),
-            "daemon admission retired the old payload index before convergence: {indexes:?}"
-        );
-        assert_eq!(
-            deferred_lcm_fixture_row_count(&snapshot).await,
-            1,
-            "ordinary session and LCM reads must remain available while convergence is pending"
-        );
-    }
-    convergence_gate.release();
-    assert_eq!(
-        wait_for_schema_convergence(&registry, &shard_id).await,
-        RegisteredSchemaConvergenceStatus::Complete
-    );
-    let snapshot = database
-        .read_snapshot()
-        .await
-        .expect("ordinary read snapshot after convergence");
-    let indexes = installed_lcm_status_index_names(&snapshot).await;
-    for index in LCM_STATUS_PERFORMANCE_INDEX_NAMES {
-        assert!(
-            indexes.iter().any(|installed| installed == index),
-            "background convergence did not build {index}: {indexes:?}"
-        );
-    }
-    assert!(
-        !indexes
-            .iter()
-            .any(|index| index == SUPERSEDED_LCM_PAYLOAD_OWNER_INDEX),
-        "background convergence left the superseded payload index in place: {indexes:?}"
-    );
-    assert_eq!(
-        deferred_lcm_fixture_row_count(&snapshot).await,
-        1,
-        "background convergence must preserve seeded session and LCM rows"
-    );
 }
 
 async fn migrating_session_row_count(connection: &(impl QueryExecutor + ?Sized)) -> i64 {

@@ -387,7 +387,6 @@ pub async fn ensure_registered_schema(
 pub struct RegisteredSchemaConvergence {
     force_exhaustive: bool,
     is_fresh: bool,
-    lcm_status_performance_indexes: bool,
 }
 
 /// Typed schema states an admissible store was classified into, carried from
@@ -818,7 +817,6 @@ pub async fn ensure_registered_schema_for_admission(
     Ok(RegisteredSchemaConvergence {
         force_exhaustive,
         is_fresh,
-        lcm_status_performance_indexes: false,
     })
 }
 
@@ -1188,29 +1186,11 @@ async fn install_registered_schema_stage_sequence(
 /// an older shape forward: the historical projection-anchor binding, retrieval
 /// anchor, repository provenance, projector version migration, and session
 /// project-path passes were all one-time legacy upgrades and have been removed.
-/// Existing daemon stores also build the LCM status indexes here, after
-/// admission, before the authority invariant audit pages historical rows.
 #[tracing::instrument(name = "global_db.schema.persist.converge", level = "trace", skip_all)]
 pub async fn converge_registered_schema(
     database: &Database,
     convergence: RegisteredSchemaConvergence,
 ) -> tracedecay_domain::errors::Result<()> {
-    converge_migration_batches(
-        database,
-        "converge hook route performance index",
-        &[crate::registered_analytics::HOOK_ROUTE_PERFORMANCE_INDEX_SQL],
-    )
-    .await?;
-    if convergence.lcm_status_performance_indexes {
-        let batches: Pin<
-            Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + '_>,
-        > = Box::pin(converge_migration_batches(
-            database,
-            "converge LCM status performance indexes",
-            tracedecay_lcm::schema::LCM_STATUS_PERFORMANCE_INDEX_SQL,
-        ));
-        batches.await?;
-    }
     // The invariant pass pages historical authority rows and can legitimately
     // outlive an ordinary open on a large store. The admission phase has
     // already installed and validated its guard triggers, so daemon reads and
@@ -1221,27 +1201,6 @@ pub async fn converge_registered_schema(
         Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + '_>,
     > = Box::pin(converge_registered_schema_on(database, convergence));
     invariants.await
-}
-
-/// Runs one store-sized migration as a sequence of independently durable
-/// batches on the long-lease migration writer.
-///
-/// One batch per statement is what lets an interrupted daemon resume without
-/// redoing the statements that already completed, and the long-lease writer is
-/// what keeps a statement whose cost scales with the store out of a caller's
-/// leased transaction.
-async fn converge_migration_batches(
-    database: &Database,
-    operation: &'static str,
-    batches: &[&str],
-) -> tracedecay_domain::errors::Result<()> {
-    for sql in batches {
-        database
-            .execute_authority_revalidated_batch(operation, sql)
-            .await
-            .map_err(|error| global_db_operation_error(operation, error))?;
-    }
-    Ok(())
 }
 
 #[tracing::instrument(
@@ -1296,20 +1255,6 @@ async fn converge_registered_schema_on(
 pub async fn converge_attached_registered_schema(
     database: &Database,
 ) -> tracedecay_domain::errors::Result<()> {
-    converge_migration_batches(
-        database,
-        "converge hook route performance index",
-        &[crate::registered_analytics::HOOK_ROUTE_PERFORMANCE_INDEX_SQL],
-    )
-    .await?;
-    if hosts_session_features(&database.registered_binding().shard_id.scope) {
-        converge_migration_batches(
-            database,
-            "converge LCM status performance indexes",
-            tracedecay_lcm::schema::LCM_STATUS_PERFORMANCE_INDEX_SQL,
-        )
-        .await?;
-    }
     let force_exhaustive =
         !authority_invariant_triggers_intact(&database.read_connection()).await?;
     converge_registered_schema_on(
@@ -1317,7 +1262,6 @@ pub async fn converge_attached_registered_schema(
         RegisteredSchemaConvergence {
             force_exhaustive,
             is_fresh: false,
-            lcm_status_performance_indexes: false,
         },
     )
     .await
@@ -1426,7 +1370,6 @@ pub(crate) async fn ensure_attached_registered_schema(
         None => RegisteredSchemaAttachmentV1::Admitted(RegisteredSchemaConvergence {
             force_exhaustive,
             is_fresh: configuration_fresh.is_some(),
-            lcm_status_performance_indexes: session_features != SessionFeatureSchema::NotHosted,
         }),
     })
 }
