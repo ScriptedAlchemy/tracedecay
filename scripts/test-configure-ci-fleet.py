@@ -47,12 +47,22 @@ class ConfigureCiFleetTest(unittest.TestCase):
             for option in shlex.split(line, comments=True)[1:]
         }
 
+    def resource_limits(self) -> dict[str, str]:
+        return dict(
+            option.removeprefix("--local_resources=").split("=", 1)
+            for line in self.rc.read_text().splitlines()
+            for option in shlex.split(line, comments=True)[1:]
+            if option.startswith("--local_resources=")
+        )
+
     def test_reachable_executor_prefers_remote_rust_without_hosted_fallback(self) -> None:
         self.endpoint.listen()
         self.assertTrue(self.configure())
         options = self.options()
         self.assertEqual(options["--config"], "rbe-linux")
         self.assertIn("--noremote_local_fallback", options)
+        self.assertNotIn("--remote_local_fallback", options)
+        self.assertEqual(self.resource_limits()["cpu"], "HOST_CPUS")
         self.assertEqual(options["--remote_retries"], "10")
         strategies = [
             line for line in self.rc.read_text().splitlines() if "--strategy=" in line
@@ -61,13 +71,18 @@ class ConfigureCiFleetTest(unittest.TestCase):
         self.assertIn("build --strategy=TestRunner=dynamic,local", strategies)
         self.assertEqual(self.output.read_text(), "enabled=true\n")
 
-    def test_windows_executor_offloads_compilation_and_keeps_native_tests_local(self) -> None:
+    def test_windows_executor_configures_bounded_local_fallback(self) -> None:
         self.endpoint.listen()
         self.assertTrue(self.configure(runner_os="Windows"))
         options = self.options()
         self.assertEqual(options["--config"], "rbe-windows")
         self.assertEqual(options["--jobs"], "16")
         self.assertEqual(options["--spawn_strategy"], "local")
+        self.assertIn("--remote_local_fallback", options)
+        self.assertNotIn("--noremote_local_fallback", options)
+        self.assertEqual(
+            self.resource_limits(), {"cpu": "2", "memory": "HOST_RAM*.5"}
+        )
         host, port = self.endpoint.getsockname()
         self.assertEqual(options["--remote_executor"], f"grpc://{host}:{port}")
         self.assertEqual(options["--bes_backend"], f"grpc://{host}:1985")
@@ -75,6 +90,16 @@ class ConfigureCiFleetTest(unittest.TestCase):
         self.assertIn("build --strategy=Rustc=remote", self.rc.read_text())
         self.assertIn("build --strategy=TestRunner=local", self.rc.read_text())
         self.assertEqual(self.output.read_text(), "enabled=true\n")
+
+    def test_macos_executor_uses_remote_only_compilation(self) -> None:
+        self.endpoint.listen()
+        self.assertTrue(self.configure(runner_os="macOS", arch="ARM64"))
+        options = self.options()
+        self.assertEqual(options["--config"], "rbe-macos")
+        self.assertIn("--noremote_local_fallback", options)
+        self.assertNotIn("--remote_local_fallback", options)
+        self.assertEqual(self.resource_limits()["cpu"], "HOST_CPUS")
+        self.assertIn("build --strategy=Rustc=remote", self.rc.read_text())
 
     def test_unsupported_windows_architecture_does_not_contact_executor(self) -> None:
         self.endpoint.listen()
