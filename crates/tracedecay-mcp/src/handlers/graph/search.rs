@@ -713,6 +713,7 @@ mod tests {
                 "logical_evidence_id": format!("evidence.{name}"),
                 "occurrences": [],
                 "exact_class": "exact_message",
+                "source_role": "production_other",
                 "utility_micros": utility,
                 "contributions": [],
                 "freshness": [],
