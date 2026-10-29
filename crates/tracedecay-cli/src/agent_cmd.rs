@@ -2832,17 +2832,13 @@ mod tests {
         for path in [&config_path, &context_path, &agent_path] {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         }
-        let mut legacy_config: serde_json::Value =
+        let mut seeded_config: serde_json::Value =
             serde_json::from_slice(OPENCODE_CONTEXT_CONFIG).unwrap();
-        legacy_config["lsp"] = serde_json::json!({
-            "tracedecay": {"command": ["tracedecay", "lsp", "bridge", "--stdio"]},
+        seeded_config["lsp"] = serde_json::json!({
             "operator": {"command": ["operator-lsp"]}
         });
-        std::fs::write(
-            &config_path,
-            serde_json::to_vec_pretty(&legacy_config).unwrap(),
-        )
-        .unwrap();
+        let seeded_bytes = serde_json::to_vec_pretty(&seeded_config).unwrap();
+        std::fs::write(&config_path, &seeded_bytes).unwrap();
         std::fs::write(&context_path, b"context-sentinel\n").unwrap();
         std::fs::write(&agent_path, b"agent-sentinel\n").unwrap();
         let core_set = canonical_host_component_set_with_tracedecay_bin(
@@ -2878,21 +2874,10 @@ mod tests {
                 &ComponentSetApplyContext::with_tracedecay_bin(&tracedecay_bin),
             )
             .unwrap();
-            let config: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
-            assert_eq!(config["unrelated"]["keep"], true);
             assert_eq!(
-                config["mcp"]["servers"]["other"]["command"],
-                serde_json::json!(["other"])
-            );
-            assert_eq!(
-                config["mcp"]["servers"]["tracedecay"]["command"],
-                serde_json::json!(["tracedecay", "serve"])
-            );
-            assert!(config["lsp"].get("tracedecay").is_none());
-            assert_eq!(
-                config["lsp"]["operator"]["command"],
-                serde_json::json!(["operator-lsp"])
+                std::fs::read(&config_path).unwrap(),
+                seeded_bytes,
+                "a Core lifecycle never rewrites opencode.json"
             );
             assert_eq!(std::fs::read(&context_path).unwrap(), b"context-sentinel\n");
             assert_eq!(std::fs::read(&agent_path).unwrap(), b"agent-sentinel\n");

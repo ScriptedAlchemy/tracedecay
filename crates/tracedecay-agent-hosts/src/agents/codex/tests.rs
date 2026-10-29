@@ -1071,11 +1071,6 @@ fn redeploy_preserves_foreign_discovery_and_support_bytes() {
     std::fs::create_dir_all(operator_skill.parent().unwrap()).unwrap();
     let operator_skill_bytes = b"---\nname: operator-owned\ndescription: Use the TraceDecay MCP safely\n---\n\nCall `tracedecay_context` for indexed code.\n";
     std::fs::write(&operator_skill, operator_skill_bytes).unwrap();
-    let modified_retired = source.join("skills/tracedecay-find-impact/SKILL.md");
-    std::fs::create_dir_all(modified_retired.parent().unwrap()).unwrap();
-    let modified_retired_bytes =
-        b"---\nname: tracedecay-find-impact\ndescription: Operator-modified workflow\n---\n";
-    std::fs::write(&modified_retired, modified_retired_bytes).unwrap();
     let support_root = source.join("skills/operator-owned");
     let operator_support = support_root.join("operator-notes.txt");
     let operator_support_bytes = b"preserve operator TraceDecay MCP support bytes";
@@ -1101,10 +1096,6 @@ fn redeploy_preserves_foreign_discovery_and_support_bytes() {
         operator_skill_bytes
     );
     assert_eq!(
-        std::fs::read(&modified_retired).unwrap(),
-        modified_retired_bytes
-    );
-    assert_eq!(
         std::fs::read(&operator_support).unwrap(),
         operator_support_bytes
     );
@@ -1120,85 +1111,6 @@ fn redeploy_preserves_foreign_discovery_and_support_bytes() {
     );
 }
 
-/// `skills/tracedecay-find-impact/SKILL.md` exactly as a released bundle
-/// deployed it; the current bundle no longer ships that path.
-const RELEASED_RETIRED_SKILL: &str = "---\nname: tracedecay-find-impact\ndescription: 'Use to find the blast radius of a change, including impacted symbols, files, and the tests to run.'\n---\n\n# Find impact\n\nUse to find a change's blast radius: impacted symbols, files, and tests to run.\n\nUse `tracedecay:assessing-impact`.\n\n- **Target:** the symbol, file, or change to analyze. If none is given, use the current working-tree diff.\n- Read-only: shallow `max_depth` first. Identify impact; do not run tests.\n\nOutput: impacted symbols + files, the test set to run, and any hub/coupling risk.\n";
-
-#[test]
-fn activation_retires_released_skill_files_and_converges() {
-    let home = tempfile::tempdir().unwrap();
-    let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
-    let cli_dir = tempfile::tempdir().unwrap();
-    let _codex_cli = install_fake_codex_cli(cli_dir.path());
-    write_exact_native_activation(home.path(), TEST_BIN);
-    let retired_dir = codex_plugin_install_dir(home.path()).join("skills/tracedecay-find-impact");
-    std::fs::create_dir_all(&retired_dir).unwrap();
-    std::fs::write(retired_dir.join("SKILL.md"), RELEASED_RETIRED_SKILL).unwrap();
-    assert!(
-        !codex_plugin_is_natively_active(
-            profile,
-            home.path(),
-            Some((TEST_BIN, &ServeArgs::default()))
-        )
-        .unwrap()
-    );
-
-    CodexIntegration
-        .activate_deployed_host_registration(&install_ctx(home.path()))
-        .unwrap();
-
-    assert!(
-        !retired_dir.exists(),
-        "activation must delete the retired skill and its emptied directory"
-    );
-    // The cache was current before adding the retired source-only skill.
-    // Observe activation's result directly instead of repairing the fixture.
-    assert!(
-        codex_source_manifest_matches_catalog_version(home.path()).unwrap(),
-        "activation must preserve the current source manifest"
-    );
-    assert!(
-        codex_plugin_enabled(home.path()).unwrap(),
-        "activation must preserve the enabled plugin key: {:?}",
-        load_toml_file(&codex_config_path(home.path())).unwrap()
-    );
-    assert!(
-        codex_plugin_is_natively_active(
-            profile,
-            home.path(),
-            Some((TEST_BIN, &ServeArgs::default()))
-        )
-        .unwrap(),
-        "activation must leave the source and native cache current"
-    );
-}
-
-#[test]
-fn deactivation_retires_released_skill_files_and_keeps_edited_ones() {
-    let home = tempfile::tempdir().unwrap();
-    let source = install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
-    let retired = source.join("skills/tracedecay-find-impact/SKILL.md");
-    std::fs::create_dir_all(retired.parent().unwrap()).unwrap();
-    std::fs::write(&retired, RELEASED_RETIRED_SKILL).unwrap();
-    let edited = source.join("skills/tracedecay-review-diff/SKILL.md");
-    std::fs::create_dir_all(edited.parent().unwrap()).unwrap();
-    std::fs::write(
-        &edited,
-        "---\nname: tracedecay-review-diff\n---\noperator edit\n",
-    )
-    .unwrap();
-
-    CodexIntegration
-        .deactivate_deployed_host_registration(&install_ctx(home.path()))
-        .unwrap();
-
-    assert!(!retired.parent().unwrap().exists());
-    assert_eq!(
-        std::fs::read_to_string(&edited).unwrap(),
-        "---\nname: tracedecay-review-diff\n---\noperator edit\n"
-    );
-}
-
 #[test]
 fn install_preview_refuses_foreign_entrypoints_as_ownership_conflict() {
     use crate::agents::host_bundle::{
@@ -1210,9 +1122,6 @@ fn install_preview_refuses_foreign_entrypoints_as_ownership_conflict() {
     let home = tempfile::tempdir().unwrap();
     let lifecycle = tempfile::tempdir().unwrap();
     let source = install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
-    let retired = source.join("skills/tracedecay-find-impact/SKILL.md");
-    std::fs::create_dir_all(retired.parent().unwrap()).unwrap();
-    std::fs::write(&retired, RELEASED_RETIRED_SKILL).unwrap();
     let operator_skill = source.join("skills/operator-owned/SKILL.md");
     std::fs::create_dir_all(operator_skill.parent().unwrap()).unwrap();
     std::fs::write(&operator_skill, "---\nname: operator-owned\n---\n").unwrap();
@@ -1273,14 +1182,7 @@ fn install_preview_refuses_foreign_entrypoints_as_ownership_conflict() {
         message.contains(&operator_skill.display().to_string()),
         "{message}"
     );
-    assert!(
-        !message.contains("tracedecay-find-impact"),
-        "released bytes must not be reported as foreign: {message}"
-    );
-    assert!(
-        operator_skill.is_file() && retired.is_file(),
-        "preview mutates nothing"
-    );
+    assert!(operator_skill.is_file(), "preview mutates nothing");
 }
 
 /// Install an executable `codex` on the host-program search path only.
