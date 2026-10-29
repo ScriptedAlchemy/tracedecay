@@ -55,7 +55,7 @@ fn admitted_project_id(home: &Path, project: &Path) -> String {
 }
 
 fn project_handshake(environment: &common::IsolatedHome, project: &Path) -> DaemonHandshake {
-    tracedecay::daemon::handshake_for_current_client(
+    crate::common::handshake_for_current_client(
         environment.profile(),
         Some(project.to_path_buf()),
         None,

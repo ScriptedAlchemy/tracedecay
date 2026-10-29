@@ -168,8 +168,6 @@ where
     )
     .await?;
 
-    let mut affected_tests = traversal.test_distances.keys().cloned().collect::<Vec<_>>();
-    affected_tests.sort();
     let ranked = rank_affected_tests(&traversal.test_distances);
     let ranked_tests = ranked
         .iter()
@@ -187,18 +185,16 @@ where
         .map(|test| test.path.clone())
         .collect::<Vec<_>>();
 
-    let touched_files = unique_file_paths(affected_tests.iter().map(String::as_str));
+    let touched_files = unique_file_paths(ranked_tests.iter().map(|test| test.path.as_str()));
     let result = AffectedResultV1 {
         changed_files: files,
-        count: affected_tests.len(),
-        affected_tests,
+        count: ranked_tests.len(),
         ranked_tests,
         recommended_tests,
         ranking_metadata: AffectedRankingMetadataV1 {
             strategy: "dependency_distance_then_path".to_owned(),
             distance: "minimum file-dependency hops from the changed files".to_owned(),
             recommended_proximity: ["changed", "direct", "near"].map(str::to_owned).to_vec(),
-            compatibility_field: "affected_tests".to_owned(),
         },
         freshness: None,
     };

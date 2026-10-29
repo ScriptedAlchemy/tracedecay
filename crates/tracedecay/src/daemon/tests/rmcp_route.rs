@@ -92,7 +92,7 @@ async fn rmcp_route_fixture_with_projects(
     let handshake = DaemonHandshake {
         project_path: Some(project),
         client_identity,
-        client_instance_id: format!("rmcp-route-{label}"),
+        client_instance_id: client_instance_id_for_label(&format!("rmcp-route-{label}")),
         ..test_handshake_defaults()
     };
     register_mcp_route_observer(&handshake.client_instance_id);
@@ -954,7 +954,7 @@ async fn mount_rmcp_target(
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
         client_identity: fixture.handshake.client_identity.clone(),
-        client_instance_id: "rmcp-selected-target".to_owned(),
+        client_instance_id: client_instance_id_for_label("rmcp-selected-target"),
         ..test_handshake_defaults()
     };
     let target = fixture

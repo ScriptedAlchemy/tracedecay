@@ -162,7 +162,7 @@ fn write_codex_rollout(home: &Path, session: &str, turns: &[&Path]) {
         records.push(serde_json::json!({
             "timestamp": at(1),
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": format!("{session} prompt {turn}")}
+            "payload": crate::common::codex_user_message_payload(format!("{session} prompt {turn}"))
         }));
         records.push(serde_json::json!({
             "timestamp": at(2),

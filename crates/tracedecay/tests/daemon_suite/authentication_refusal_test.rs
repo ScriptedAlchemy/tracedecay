@@ -65,7 +65,7 @@ async fn rejected_token_reads_typed_refusal_and_daemon_keeps_serving() {
     let preface = DaemonAuthPreface::new("not-the-daemon-token")
         .to_line()
         .expect("preface json");
-    let handshake = projectless_handshake(&profile_root, "auth-refusal-raw-client")
+    let handshake = projectless_handshake(&profile_root, "0000000000000000000000000000b001")
         .to_line()
         .expect("handshake json");
     let request = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"tracedecay_status","arguments":{}}}"#;
@@ -114,7 +114,7 @@ async fn rejected_token_reads_typed_refusal_and_daemon_keeps_serving() {
 
     // A healthy client (whose transport resolves the daemon's real authority
     // token) must still be served after the refusal.
-    let healthy = projectless_handshake(&profile_root, "auth-refusal-healthy-client");
+    let healthy = projectless_handshake(&profile_root, "0000000000000000000000000000b002");
     let report = tokio::time::timeout(
         RESPONSE_TIMEOUT,
         call_tool(

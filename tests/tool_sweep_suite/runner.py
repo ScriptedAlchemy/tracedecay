@@ -645,7 +645,14 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, Any]]:
                     {
                         "timestamp": "2026-09-12T00:00:01.000Z",
                         "type": "event_msg",
-                        "payload": {"type": "user_message", "message": lcm_message},
+                        "payload": {
+                            "type": "item_completed",
+                            "item": {
+                                "type": "UserMessage",
+                                "id": "user-item-tool-sweep-lcm",
+                                "content": [{"type": "text", "text": lcm_message}],
+                            },
+                        },
                     }
                 ),
             )

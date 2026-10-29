@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpMethod {
     Initialize,
-    /// `initialized` / `notifications/initialized`, compatibility no-ops.
+    /// `notifications/initialized`, acknowledged without a response.
     InitializedAck,
     ToolsList,
     ToolsCall,
@@ -27,7 +27,7 @@ pub fn classify_mcp_method(method: &str) -> McpMethod {
     }
     match method {
         "initialize" => McpMethod::Initialize,
-        "initialized" | "notifications/initialized" => McpMethod::InitializedAck,
+        "notifications/initialized" => McpMethod::InitializedAck,
         "tools/list" => McpMethod::ToolsList,
         "tools/call" => McpMethod::ToolsCall,
         "resources/list" => McpMethod::ResourcesList,

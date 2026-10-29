@@ -22,6 +22,33 @@ use super::{CHUNK_ROWS, MAX_HERMES_IDENTITY_BYTES, MAX_HERMES_PAGE_BYTES, MAX_HE
 
 pub(super) const HERMES_PAYLOAD_BATCH_ROWS: usize = 256;
 
+const REQUIRED_MESSAGE_COLUMNS: &[&str] = &[
+    "id",
+    "session_id",
+    "role",
+    "content",
+    "timestamp",
+    "reasoning",
+    "active",
+    "tool_name",
+    "tool_calls",
+];
+const REQUIRED_SESSION_COLUMNS: &[&str] = &[
+    "id",
+    "model",
+    "parent_session_id",
+    "cwd",
+    "source",
+    "title",
+    "started_at",
+    "ended_at",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+];
+
 #[derive(Clone)]
 pub(super) struct HermesReadSql {
     admission: String,
@@ -44,9 +71,8 @@ impl HermesReadSql {
     }
 }
 
-/// Column names of the `messages` table, `active` (v12 rewind soft-delete)
-/// and `reasoning` arrived in later Hermes schema revisions, so the sweep
-/// probes before selecting to stay readable on legacy stores.
+/// Column names of the `messages` table, checked against the required schema
+/// before the sweep selects them.
 pub async fn message_columns(
     conn: &SqliteReadConn,
 ) -> Result<std::collections::BTreeSet<String>, String> {
@@ -114,12 +140,8 @@ fn validate_required_columns(
 pub async fn validate_required_schema(conn: &SqliteReadConn) -> Result<(), String> {
     let messages = message_columns(conn).await?;
     let sessions = table_columns(conn, "sessions").await?;
-    validate_required_columns(
-        "messages",
-        &messages,
-        &["id", "session_id", "role", "content", "timestamp"],
-    )?;
-    validate_required_columns("sessions", &sessions, &["id"])
+    validate_required_columns("messages", &messages, REQUIRED_MESSAGE_COLUMNS)?;
+    validate_required_columns("sessions", &sessions, REQUIRED_SESSION_COLUMNS)
 }
 
 fn sql_byte_len(expr: &str) -> String {
@@ -172,103 +194,28 @@ fn sql_value_oversized(expr: &str, max_bytes: usize) -> String {
     )
 }
 
-pub(super) fn select_new_messages_sql(
-    message_columns: &std::collections::BTreeSet<String>,
-    session_columns: &std::collections::BTreeSet<String>,
-) -> HermesReadSql {
-    let reasoning_raw = if message_columns.contains("reasoning") {
-        "m.reasoning"
-    } else {
-        "NULL"
-    };
-    let active_expr = if message_columns.contains("active") {
-        "m.active"
-    } else {
-        "1"
-    };
-    let session_usage_frontier = if message_columns.contains("active") {
-        "CASE WHEN m.active != 0 AND m.id = (
+pub(super) fn select_new_messages_sql() -> HermesReadSql {
+    let reasoning_raw = "m.reasoning";
+    let active_expr = "m.active";
+    let session_usage_frontier = "CASE WHEN m.active != 0 AND m.id = (
              SELECT MAX(frontier.id)
              FROM messages frontier
              WHERE frontier.session_id = m.session_id AND frontier.active != 0
-         ) THEN 1 ELSE 0 END"
-    } else {
-        "CASE WHEN m.id = (
-             SELECT MAX(frontier.id)
-             FROM messages frontier
-             WHERE frontier.session_id = m.session_id
-         ) THEN 1 ELSE 0 END"
-    };
-    let tool_name_raw = if message_columns.contains("tool_name") {
-        "m.tool_name"
-    } else {
-        "NULL"
-    };
-    let tool_calls_raw = if message_columns.contains("tool_calls") {
-        "m.tool_calls"
-    } else {
-        "NULL"
-    };
-    let session_model_raw = if session_columns.contains("model") {
-        "s.model"
-    } else {
-        "NULL"
-    };
-    let parent_session_id_raw = if session_columns.contains("parent_session_id") {
-        "s.parent_session_id"
-    } else {
-        "NULL"
-    };
-    let session_cwd_raw = if session_columns.contains("cwd") {
-        "s.cwd"
-    } else {
-        "NULL"
-    };
-    let session_source_raw = if session_columns.contains("source") {
-        "s.source"
-    } else {
-        "NULL"
-    };
-    let session_title_raw = if session_columns.contains("title") {
-        "s.title"
-    } else {
-        "NULL"
-    };
-    let session_started_at = if session_columns.contains("started_at") {
-        "s.started_at"
-    } else {
-        "NULL"
-    };
-    let session_ended_at = if session_columns.contains("ended_at") {
-        "s.ended_at"
-    } else {
-        "NULL"
-    };
-    let input_tokens_raw = if session_columns.contains("input_tokens") {
-        "s.input_tokens"
-    } else {
-        "NULL"
-    };
-    let output_tokens_raw = if session_columns.contains("output_tokens") {
-        "s.output_tokens"
-    } else {
-        "NULL"
-    };
-    let cache_read_tokens_raw = if session_columns.contains("cache_read_tokens") {
-        "s.cache_read_tokens"
-    } else {
-        "NULL"
-    };
-    let cache_write_tokens_raw = if session_columns.contains("cache_write_tokens") {
-        "s.cache_write_tokens"
-    } else {
-        "NULL"
-    };
-    let reasoning_tokens_raw = if session_columns.contains("reasoning_tokens") {
-        "s.reasoning_tokens"
-    } else {
-        "NULL"
-    };
+         ) THEN 1 ELSE 0 END";
+    let tool_name_raw = "m.tool_name";
+    let tool_calls_raw = "m.tool_calls";
+    let session_model_raw = "s.model";
+    let parent_session_id_raw = "s.parent_session_id";
+    let session_cwd_raw = "s.cwd";
+    let session_source_raw = "s.source";
+    let session_title_raw = "s.title";
+    let session_started_at = "s.started_at";
+    let session_ended_at = "s.ended_at";
+    let input_tokens_raw = "s.input_tokens";
+    let output_tokens_raw = "s.output_tokens";
+    let cache_read_tokens_raw = "s.cache_read_tokens";
+    let cache_write_tokens_raw = "s.cache_write_tokens";
+    let reasoning_tokens_raw = "s.reasoning_tokens";
     let id_max = MAX_HERMES_IDENTITY_BYTES;
     let value_max = MAX_HERMES_VALUE_BYTES;
     let measured = format!(
@@ -367,8 +314,7 @@ pub(super) fn select_new_messages_sql(
 /// against its session-scoped authoritative SQLite-row cursor. The caller
 /// decides whether a source error is runtime noise or migration-blocking.
 /// Opens a Hermes `state.db` read-only and derives everything a page sweep
-/// needs before its first read: the physical incarnation and the column-probed
-/// bounded SELECT.
+/// needs before its first read: the physical incarnation and the bounded SELECT.
 async fn open_state_source(
     source: &HermesProfileSource,
 ) -> Result<
@@ -393,13 +339,9 @@ async fn open_state_source(
     }?;
     let message_columns = message_columns(&conn).await?;
     let session_columns = table_columns(&conn, "sessions").await?;
-    validate_required_columns(
-        "messages",
-        &message_columns,
-        &["id", "session_id", "role", "content", "timestamp"],
-    )?;
-    validate_required_columns("sessions", &session_columns, &["id"])?;
-    let select_sql = select_new_messages_sql(&message_columns, &session_columns);
+    validate_required_columns("messages", &message_columns, REQUIRED_MESSAGE_COLUMNS)?;
+    validate_required_columns("sessions", &session_columns, REQUIRED_SESSION_COLUMNS)?;
+    let select_sql = select_new_messages_sql();
     Ok((
         conn,
         generation,
@@ -614,7 +556,7 @@ pub(super) async fn read_new_rows_strict(
     let select_sql = select_sql.clone();
     conn.with(move |conn| read_new_rows_strict_sync(conn, &select_sql, prev))
         .await
-        .unwrap_or_else(|| Err("could not query legacy Hermes state rows".to_string()))
+        .unwrap_or_else(|| Err("could not query Hermes state rows".to_string()))
 }
 
 #[derive(Clone, Copy)]
@@ -645,17 +587,17 @@ fn read_new_rows_strict_sync(
     {
         let mut statement = conn
             .prepare_cached(select_sql.admission_sql())
-            .map_err(|error| format!("could not query legacy Hermes state rows: {error}"))?;
+            .map_err(|error| format!("could not query Hermes state rows: {error}"))?;
         let mut rows = statement
             .query(rusqlite::params![prev.position as i64])
-            .map_err(|error| format!("could not query legacy Hermes state rows: {error}"))?;
+            .map_err(|error| format!("could not query Hermes state rows: {error}"))?;
         while let Some(row) = rows
             .next()
-            .map_err(|error| format!("could not read legacy Hermes state row: {error}"))?
+            .map_err(|error| format!("could not read Hermes state row: {error}"))?
         {
             let rowid = row
                 .get::<_, i64>(0)
-                .map_err(|error| format!("legacy Hermes state row has no id: {error}"))?;
+                .map_err(|error| format!("Hermes state row has no id: {error}"))?;
             let measured_bytes = row_i64_flag(row, 1).max(0) as u64;
             let remaining = MAX_HERMES_PAGE_BYTES.saturating_sub(page_bytes);
             let payload_fits_budget = measured_bytes <= remaining;
@@ -687,37 +629,37 @@ fn read_new_rows_strict_sync(
         let payload_sql = select_sql.payload_sql(batch.len());
         let mut statement = conn
             .prepare_cached(&payload_sql)
-            .map_err(|error| format!("could not query legacy Hermes state rows: {error}"))?;
+            .map_err(|error| format!("could not query Hermes state rows: {error}"))?;
         let mut rows = statement
             .query(rusqlite::params_from_iter(batch.iter().flat_map(
                 |candidate| [candidate.rowid, i64::from(candidate.payload_fits_budget)],
             )))
-            .map_err(|error| format!("could not query legacy Hermes state rows: {error}"))?;
+            .map_err(|error| format!("could not query Hermes state rows: {error}"))?;
         let mut expected = batch.iter();
         while let Some(row) = rows
             .next()
-            .map_err(|error| format!("could not read legacy Hermes state row: {error}"))?
+            .map_err(|error| format!("could not read Hermes state row: {error}"))?
         {
             let Some(candidate) = expected.next() else {
-                return Err("legacy Hermes payload query returned an unadmitted row".to_string());
+                return Err("Hermes payload query returned an unadmitted row".to_string());
             };
             let rowid = row
                 .get::<_, i64>(0)
-                .map_err(|error| format!("legacy Hermes state row has no id: {error}"))?;
+                .map_err(|error| format!("Hermes state row has no id: {error}"))?;
             if rowid != candidate.rowid {
                 return Err(format!(
-                    "legacy Hermes payload row order changed: expected {}, got {rowid}",
+                    "Hermes payload row order changed: expected {}, got {rowid}",
                     candidate.rowid
                 ));
             }
             let mapped = map_payload_row(*candidate, row)
-                .ok_or_else(|| format!("legacy Hermes state row {rowid} is malformed"))?;
+                .ok_or_else(|| format!("Hermes state row {rowid} is malformed"))?;
             max_rowid = max_rowid.max(rowid as u64);
             items.push(mapped);
         }
         if let Some(missing) = expected.next() {
             return Err(format!(
-                "legacy Hermes payload query omitted admitted row {}",
+                "Hermes payload query omitted admitted row {}",
                 missing.rowid
             ));
         }

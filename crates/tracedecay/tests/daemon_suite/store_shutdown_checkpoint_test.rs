@@ -109,7 +109,7 @@ async fn graceful_stop_truncates_profile_and_project_store_wals() {
     let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |_| {});
     let project_id = initialize_tracedecay(environment.home(), &project);
     tracedecay_project::product_runtime::register_fixture_product_runtime();
-    let handshake = tracedecay::daemon::handshake_for_current_client(
+    let handshake = crate::common::handshake_for_current_client(
         environment.profile(),
         Some(project.clone()),
         None,
@@ -372,7 +372,7 @@ async fn route_bind_eviction_releases_the_evicted_project_stores() {
     let mut sessions = Vec::new();
     for project in cached {
         initialize_tracedecay(environment.home(), project);
-        let handshake = tracedecay::daemon::handshake_for_current_client(
+        let handshake = crate::common::handshake_for_current_client(
             environment.profile(),
             Some(project.clone()),
             None,
@@ -489,7 +489,7 @@ async fn route_bind_eviction_cannot_retire_a_reopened_projects_owners() {
     let mut sessions = Vec::new();
     for project in cached {
         initialize_tracedecay(environment.home(), project);
-        let handshake = tracedecay::daemon::handshake_for_current_client(
+        let handshake = crate::common::handshake_for_current_client(
             environment.profile(),
             Some(project.clone()),
             None,
@@ -544,7 +544,7 @@ async fn route_bind_eviction_cannot_retire_a_reopened_projects_owners() {
     let _ = fs::remove_file(&bind_entered);
     fs::write(&bind_hold, b"hold").expect("hold file");
     let evicted = cached[0].clone();
-    let reopen_handshake = tracedecay::daemon::handshake_for_current_client(
+    let reopen_handshake = crate::common::handshake_for_current_client(
         environment.profile(),
         Some(evicted.clone()),
         None,
@@ -674,7 +674,7 @@ async fn capacity_retirement_behind_a_parked_bind_eviction_cleanup_completes() {
     });
     tracedecay_project::product_runtime::register_fixture_product_runtime();
     let handshake = |project: &Path| {
-        tracedecay::daemon::handshake_for_current_client(
+        crate::common::handshake_for_current_client(
             environment.profile(),
             Some(project.to_path_buf()),
             None,
@@ -814,7 +814,7 @@ async fn capacity_retirement_completes_while_a_maintenance_tick_runs() {
     // recently used one, a store the parked tick listed.
     initialize_tracedecay(environment.home(), incoming);
     tracedecay_project::product_runtime::register_fixture_product_runtime();
-    let incoming_handshake = tracedecay::daemon::handshake_for_current_client(
+    let incoming_handshake = crate::common::handshake_for_current_client(
         environment.profile(),
         Some(incoming.clone()),
         None,

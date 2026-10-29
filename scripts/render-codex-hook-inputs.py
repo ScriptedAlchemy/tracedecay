@@ -2,7 +2,7 @@
 """Render Codex JSONL cases where hook text changed model-visible input.
 
 Codex rollouts contain both user-facing events (`event_msg.item_completed`
-`UserMessage`, or legacy `event_msg.user_message`) and model-visible message
+`UserMessage`) and model-visible message
 records (`response_item` messages). This script compares them and prints compact
 Markdown cases showing hook-added developer/user text.
 """
@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Iterable
 
 
-LEGACY_TRACEDECAY_HINT = "tracedecay is available via MCP. Prefer tracedecay MCP tools"
 DYNAMIC_TRACEDECAY_HINT = "tracedecay hint:"
 FULL_BOOTSTRAP_TRACEDECAY_HINT = "Below is the full `tracedecay:using-tracedecay`"
 COMPACT_TRACEDECAY_HINT = "TraceDecay project hint:"
@@ -134,13 +133,6 @@ def parse_file(path: Path) -> tuple[list[Record], list[Record]]:
                 continue
             timestamp = str(record.get("timestamp", ""))
             if record.get("type") == "event_msg":
-                if payload.get("type") == "user_message":
-                    message = payload.get("message")
-                    if isinstance(message, str):
-                        submitted_users.append(
-                            Record(path, line_no, timestamp, "user", message)
-                        )
-                    continue
                 if payload.get("type") == "item_completed":
                     item = payload.get("item")
                     if not isinstance(item, dict) or item.get("type") != "UserMessage":
@@ -238,7 +230,6 @@ def next_model_user(
 
 
 def trace_hint_kind(text: str) -> str | None:
-    has_legacy = LEGACY_TRACEDECAY_HINT in text
     has_dynamic = DYNAMIC_TRACEDECAY_HINT in text
     has_full_bootstrap = FULL_BOOTSTRAP_TRACEDECAY_HINT in text
     has_compact = COMPACT_TRACEDECAY_HINT in text
@@ -246,10 +237,6 @@ def trace_hint_kind(text: str) -> str | None:
         return "full_bootstrap_developer_hook_hint"
     if has_compact:
         return "compact_developer_hook_hint"
-    if has_legacy and has_dynamic:
-        return "combined_developer_hook_hint"
-    if has_legacy:
-        return "legacy_developer_hook_hint"
     if has_dynamic:
         return "dynamic_developer_hook_hint"
     return None
@@ -270,7 +257,6 @@ def build_cases(
         "model_messages": 0,
         "submitted_user_messages": 0,
         "developer_trace_hints": 0,
-        "legacy_developer_trace_hints": 0,
         "dynamic_developer_trace_hints": 0,
         "full_bootstrap_developer_trace_hints": 0,
         "compact_developer_trace_hints": 0,
@@ -288,15 +274,7 @@ def build_cases(
             hint_kind = trace_hint_kind(message.text) if message.role == "developer" else None
             if hint_kind:
                 stats["developer_trace_hints"] += 1
-                if hint_kind in {
-                    "legacy_developer_hook_hint",
-                    "combined_developer_hook_hint",
-                }:
-                    stats["legacy_developer_trace_hints"] += 1
-                if hint_kind in {
-                    "dynamic_developer_hook_hint",
-                    "combined_developer_hook_hint",
-                }:
+                if hint_kind == "dynamic_developer_hook_hint":
                     stats["dynamic_developer_trace_hints"] += 1
                 if hint_kind == "full_bootstrap_developer_hook_hint":
                     stats["full_bootstrap_developer_trace_hints"] += 1

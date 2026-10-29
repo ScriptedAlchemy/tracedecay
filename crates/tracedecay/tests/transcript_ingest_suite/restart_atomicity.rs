@@ -475,7 +475,7 @@ fn write_codex_rollout_fixture(home: &Path, project: &Path, session: &str) -> Pa
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:01.000Z",
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": "Investigate the billing pipeline regression"}
+            "payload": crate::common::codex_user_message_payload("Investigate the billing pipeline regression")
         }),
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:02.000Z",
@@ -1384,7 +1384,7 @@ async fn codex_restart_partial_malformed_and_projection_failure() {
     std::fs::write(
         &path,
         format!(
-            "{prefix}{{\"timestamp\":\"2026-01-01T00:00:03.000Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"Partial Codex"
+            "{prefix}{{\"timestamp\":\"2026-01-01T00:00:03.000Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"item_completed\",\"item\":{{\"type\":\"UserMessage\",\"id\":\"user-item-partial\",\"content\":[{{\"type\":\"text\",\"text\":\"Partial Codex"
         ),
     )
     .unwrap();
@@ -1404,7 +1404,7 @@ async fn codex_restart_partial_malformed_and_projection_failure() {
     let suffix = serde_json::json!({
         "timestamp": "2026-01-01T00:00:03.000Z",
         "type": "event_msg",
-        "payload": {"type": "user_message", "message": "Codex suffix after restart"}
+        "payload": crate::common::codex_user_message_payload("Codex suffix after restart")
     });
     std::fs::write(&path, format!("{prefix}{suffix}\n")).unwrap();
     let rejected = open_project_session_db(&project).await.unwrap();
@@ -1437,7 +1437,7 @@ async fn codex_restart_partial_malformed_and_projection_failure() {
     let malformed_suffix = serde_json::json!({
         "timestamp": "2026-01-01T00:00:04.000Z",
         "type": "event_msg",
-        "payload": {"type": "user_message", "message": "Codex after malformed frame"}
+        "payload": crate::common::codex_user_message_payload("Codex after malformed frame")
     });
     let current = std::fs::read_to_string(&path).unwrap();
     std::fs::write(
@@ -1601,10 +1601,7 @@ async fn claude_and_codex_jsonl_truncation_replacement_retires_prior_frames() {
                         serde_json::json!({
                             "timestamp": "2026-01-02T00:00:01.000Z",
                             "type": "event_msg",
-                            "payload": {
-                                "type": "user_message",
-                                "message": "codex-trunc-repl-9f3a second generation."
-                            }
+                            "payload": crate::common::codex_user_message_payload("codex-trunc-repl-9f3a second generation.")
                         }),
                         serde_json::json!({
                             "timestamp": "2026-01-02T00:00:02.000Z",

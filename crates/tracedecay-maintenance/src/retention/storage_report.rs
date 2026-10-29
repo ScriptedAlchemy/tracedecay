@@ -87,7 +87,6 @@ pub struct StoreSizeReportEntry {
     /// files nor directories. Non-zero makes `total_bytes` a floor.
     pub unavailable_entry_count: usize,
     /// Whether the store walk was complete, partial, or unavailable.
-    #[serde(default)]
     pub size_coverage: StorageReportSizeCoverageV1,
     /// Reclaimable free-page bytes of the graph database, or `None` when it
     /// could not be sampled without waiting on a live writer.
@@ -95,7 +94,6 @@ pub struct StoreSizeReportEntry {
     /// Free pages as a fraction of total pages, or `None` when unsampled.
     pub free_page_ratio: Option<f64>,
     /// Whether the registered canonical root still exists.
-    #[serde(default)]
     pub root_state: Option<ProjectRootStateV1>,
 }
 
@@ -122,7 +120,6 @@ pub struct StorageReportSizeCoverageV1 {
     pub state: StorageReportSizeStateV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<StorageReportSizeReasonV1>,
-    #[serde(default)]
     pub unavailable_entry_count: usize,
 }
 
@@ -181,10 +178,8 @@ pub struct StoreKindBytesV1 {
     /// Every `*.grafeo` container at the store root and its `*.grafeo.wal/`
     /// segment directory. Opening a container replays its whole block log
     /// into heap, so these bytes are resident memory at open.
-    #[serde(default)]
     pub graph_container: u64,
     /// `tracedecay.graph-replay/`: retired generations kept for replay.
-    #[serde(default)]
     pub graph_replay_pool: u64,
     /// `sessions.db` with its sidecars and spools.
     pub sessions: u64,
@@ -260,14 +255,12 @@ pub struct StorageReport {
     pub profile_root: String,
     pub stores: Vec<StoreSizeReportEntry>,
     pub code_generation_retention: Vec<CodeGenerationRetentionDryRunEntry>,
-    #[serde(default)]
     pub code_generation_retention_availability: Vec<CodeGenerationRetentionAvailabilityEntry>,
     pub unregistered_dir_count: usize,
     pub unregistered_bytes: u64,
     pub global_db_bytes: u64,
     /// `user-sessions.db` with its `-wal` and `-shm`. Profile-level, not a
-    /// project store; omitted from older reports.
-    #[serde(default)]
+    /// project store.
     pub user_sessions_db_bytes: u64,
     /// A direct, read-only census of every regular file under the profile
     /// root. The daemon's bounded per-page response leaves this absent; the
@@ -296,13 +289,11 @@ pub struct StorageReportCoverage {
     /// Sizing coverage for unregistered directories on this directory page.
     /// Kept separate from the outer cursor: a cursor never implies that a
     /// partially sampled subtree was fully sized.
-    #[serde(default)]
     pub unregistered_size: StorageReportSizeCoverageV1,
     /// Enumeration stopped before all unregistered directories were counted.
     /// Independent of size coverage: all names can be counted even when a
     /// subtree cannot be measured. Counts across unfinished pages also remain
     /// lower bounds through the outer `state` and continuation cursor.
-    #[serde(default)]
     pub unregistered_count_is_lower_bound: bool,
 }
 
@@ -421,7 +412,6 @@ pub struct ProfileTotalSizeV1 {
     /// Graph database families of every registered store in this report.
     pub registered_store_bytes: u64,
     pub global_db_bytes: u64,
-    #[serde(default)]
     pub user_sessions_db_bytes: u64,
     pub unregistered_bytes: u64,
     /// Families known to exist that this report did not fully size.
@@ -568,14 +558,8 @@ pub struct CodeGenerationRetentionDryRunEntry {
     /// Whether every listed generation was proven to match the content digest in
     /// its name. False when the digest scan exceeded its budget and the entry
     /// was produced from metadata alone: the counts and byte totals are exact,
-    /// the integrity claim is not. Absent in payloads predating this field,
-    /// which were only ever emitted after a full verification.
-    #[serde(default = "digest_verified_default")]
+    /// the integrity claim is not.
     pub digest_verified: bool,
-}
-
-fn digest_verified_default() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]

@@ -682,7 +682,6 @@ describe("TraceDecayClient generated operation bindings", () => {
         "affected",
         {
           changed_files: [],
-          affected_tests: [],
           count: 0,
           ranked_tests: [],
           recommended_tests: [],
@@ -690,7 +689,6 @@ describe("TraceDecayClient generated operation bindings", () => {
             strategy: "x",
             distance: "x",
             recommended_proximity: [],
-            compatibility_field: "x",
           },
         },
       ],

@@ -36,7 +36,6 @@ pub(super) async fn open_project_for_handshake(
         // mint a fresh path-derived identity and let the missing-index
         // fallback below bootstrap it.
         Err(err) if handshake.allow_init && is_unregistered_identity_error(&err) => {
-            refuse_enrollment_from_another_build(project_path, handshake)?;
             (
                 Box::pin(
                     tracedecay_project::project::TraceDecay::resolve_first_touch_configuration_layout_with_adoption(
@@ -130,32 +129,6 @@ pub(super) async fn open_project_for_handshake(
         }
         Err(open_err) => Err(open_err),
     }
-}
-
-/// First-touch enrollment writes this profile's registry before any request
-/// is served. A client from another build, such as a checkout build that
-/// resolved the installed profile, is not this installation's client: it is
-/// refused before it enrolls anything.
-fn refuse_enrollment_from_another_build(
-    project_path: &Path,
-    handshake: &DaemonHandshake,
-) -> Result<()> {
-    let daemon_version = super::core_handshake::binary_version()?;
-    let Some(client_version) =
-        tracedecay_daemon_protocol::client_version_skew(&handshake.client_version, daemon_version)
-    else {
-        return Ok(());
-    };
-    Err(TraceDecayError::project_route(
-        tracedecay_daemon_protocol::client::DAEMON_PROTOCOL_REVISION_SKEW,
-        false,
-        format!(
-            "daemon (version {daemon_version}) refuses to enroll '{}' for client version \
-             {client_version}; {}",
-            project_path.display(),
-            tracedecay_daemon_protocol::version_skew_action(daemon_version, &client_version)
-        ),
-    ))
 }
 
 /// Whether `err` is the specific fail-closed error raised when identity

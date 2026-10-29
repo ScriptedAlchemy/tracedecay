@@ -49,9 +49,39 @@ use rows::HermesRow;
 #[cfg(test)]
 use state_db::{
     HERMES_PAYLOAD_BATCH_ROWS, message_columns, open_read_only_strict, read_new_rows_strict,
-    select_new_messages_sql, table_columns, try_ingest_state_db_bounded_with_admission,
-    validate_required_schema,
+    select_new_messages_sql, try_ingest_state_db_bounded_with_admission, validate_required_schema,
 };
+
+/// DDL for the Hermes `state.db` columns the sweep selects. Test fixtures
+/// create their stores from it so they stay on the required schema.
+#[cfg(test)]
+pub(crate) const TEST_STATE_DB_SCHEMA_SQL: &str = "
+    CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        source TEXT,
+        model TEXT,
+        parent_session_id TEXT,
+        started_at REAL,
+        ended_at REAL,
+        cwd TEXT,
+        title TEXT,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        cache_read_tokens INTEGER,
+        cache_write_tokens INTEGER,
+        reasoning_tokens INTEGER
+    );
+    CREATE TABLE messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT,
+        tool_name TEXT,
+        tool_calls TEXT,
+        timestamp REAL NOT NULL,
+        reasoning TEXT,
+        active INTEGER NOT NULL DEFAULT 1
+    );";
 
 const PROVIDER: &str = "hermes";
 const OBSERVATION_RETENTION: &str = "transcript.hermes.v1";

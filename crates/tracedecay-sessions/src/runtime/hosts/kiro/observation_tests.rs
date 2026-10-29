@@ -32,18 +32,21 @@ async fn byte_budget_charges_once_and_defers_second_before_parse() {
         serde_json::json!({"folder": format!("file://{}", project.display())}).to_string(),
     )
     .unwrap();
-    let first_path = workspace_dir.join("a-first.chat");
+    let first_path = workspace_dir.join("a-first");
     std::fs::write(
         &first_path,
         serde_json::json!({
             "executionId": "first",
-            "chat": [{"role": "human", "content": "first"}]
+            "messages": [{"role": "user", "content": "first"}]
         })
         .to_string(),
     )
     .unwrap();
-    let hostile = format!("{{\"executionId\":\"hostile\",\"chat\":{}", "x".repeat(256));
-    let second_path = workspace_dir.join("z-hostile.chat");
+    let hostile = format!(
+        "{{\"executionId\":\"hostile\",\"messages\":{}",
+        "x".repeat(256)
+    );
+    let second_path = workspace_dir.join("z-hostile");
     std::fs::write(&second_path, &hostile).unwrap();
     let source = KiroSource {
         agent_dir,
@@ -112,10 +115,10 @@ async fn pre_cancelled_snapshot_capture_does_not_advance_kiro_source() {
     )
     .unwrap();
     std::fs::write(
-        workspace_dir.join("cancelled.chat"),
+        workspace_dir.join("cancelled"),
         serde_json::json!({
             "executionId": "cancelled",
-            "chat": [{"role": "human", "content": "retry me"}]
+            "messages": [{"role": "user", "content": "retry me"}]
         })
         .to_string(),
     )
@@ -180,10 +183,10 @@ async fn aggregate_budget_replay_charges_committed_prefix_and_retries_suffix() {
     .unwrap();
     for id in ["a", "b"] {
         std::fs::write(
-            workspace_dir.join(format!("{id}.chat")),
+            workspace_dir.join(id),
             serde_json::json!({
                 "executionId": id,
-                "chat": [{"role": "human", "content": format!("message-{id}")}]
+                "messages": [{"role": "user", "content": format!("message-{id}")}]
             })
             .to_string(),
         )
@@ -431,7 +434,7 @@ fn hostile_lookalike_fields_remain_absent() {
 fn fixture_backed_workspace_session_message_reaches_canonical_envelope() {
     // Exact modern workspace-session message shape from
     // tests/transcript_ingest_suite/kiro.rs::write_workspace_session_json.
-    // Provider-parser path: modern_messages → normalize_kiro_snapshot_observations
+    // Provider-parser path: snapshot_messages → normalize_kiro_snapshot_observations
     // → canonical_snapshot_envelope (not a hand-built canonical record).
     let input: Value = serde_json::from_str(include_str!(
         "../../../../../../tests/fixtures/provider_normalization/kiro/workspace_session.input.json"
@@ -443,7 +446,7 @@ fn fixture_backed_workspace_session_message_reaches_canonical_envelope() {
     .expect("Kiro golden expected envelope");
     let session_id = input["sessionId"].as_str().unwrap();
     let model = input["modelId"].as_str();
-    let messages = modern_messages(
+    let messages = snapshot_messages(
         input["messages"].as_array().unwrap(),
         session_id,
         Path::new("workspace-session.json"),

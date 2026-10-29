@@ -597,7 +597,6 @@ pub struct CodeIndexWorktreeFreshnessV1 {
     /// Whether the exact scheduler route owns a reconcile pass or has a
     /// pending wake. A stale seated generation with this false is stalled,
     /// not in a routine rebuild window.
-    #[serde(default)]
     pub rebuild_in_flight: bool,
     /// Pending hook-hint count, when cheaply available.
     pub hook_hint_count: Option<u64>,
@@ -1029,23 +1028,7 @@ mod tests {
     }
 
     #[test]
-    fn graph_serving_readiness_is_additive_for_older_daemon_responses() {
-        let mut value = serde_json::to_value(CodeIndexWorktreeFreshnessV1::default())
-            .expect("freshness serializes");
-        value
-            .as_object_mut()
-            .expect("freshness object")
-            .remove("code_graph_serving");
-        value
-            .as_object_mut()
-            .expect("freshness object")
-            .remove("rebuild_in_flight");
-
-        let decoded: CodeIndexWorktreeFreshnessV1 =
-            serde_json::from_value(value).expect("older response remains readable");
-        assert_eq!(decoded.code_graph_serving, None);
-        assert!(!decoded.rebuild_in_flight);
-
+    fn graph_serving_readiness_terminal_verdicts() {
         assert!(CodeGraphServingReadinessV1::Ready.is_terminal_verdict());
         assert!(
             CodeGraphServingReadinessV1::Warming {

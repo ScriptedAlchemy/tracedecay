@@ -1026,7 +1026,7 @@ mod tests {
                     global_db_path: profile.path().join("global.db"),
                 },
                 client_version: env!("CARGO_PKG_VERSION").to_owned(),
-                client_instance_id: "client.lsp-pump-test".to_owned(),
+                client_instance_id: "0000000000000000000000000000c001".to_owned(),
                 tool_list_changed_capable: false,
                 catalog_version: String::new(),
                 moved_store_adoption: MovedStoreAdoption::Never,

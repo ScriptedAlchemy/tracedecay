@@ -377,7 +377,11 @@ async fn handle_storage_report(
     };
     let daemon_owns_profile = profile_root == default_profile_root;
     let project_root = project_root.map(PathBuf::from);
-    let report = if daemon_owns_profile && tracedecay_daemon_control::daemon_reachable(profile) {
+    let report = if daemon_owns_profile
+        && tracedecay_daemon_control::daemon_reachable(
+            profile,
+            crate::product_runtime::PRODUCT_BUILD_VERSION,
+        ) {
         let mut report =
             brokered_storage_report(profile, project_id.as_deref(), project_root.as_deref())
                 .await?;

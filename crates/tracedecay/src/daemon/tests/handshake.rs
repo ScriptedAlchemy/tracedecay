@@ -258,6 +258,72 @@ async fn wire_drifted_handshake_reads_typed_refusal_then_clean_eof() {
         .expect("a refused handshake is a served connection, not a serve error");
 }
 
+/// A client from another build, one that reports no version, or one with a
+/// non-conforming instance id is refused at the handshake with the same typed
+/// revision-skew frame and a clean EOF; nothing it pipelined is served.
+#[cfg(unix)]
+#[tokio::test]
+async fn skewed_client_handshake_reads_typed_refusal_then_clean_eof() {
+    let home = TempDir::new().expect("home");
+    let home = home.path().canonicalize().expect("canonical home");
+    let client_identity = test_client_identity_for(home.join("client"));
+    let _database_scope = enter_test_daemon_database_scope(
+        &client_identity.profile_root,
+        "handshake-skew-refusal-test",
+    );
+
+    let skewed_clients = [
+        DaemonHandshake {
+            client_version: "0.0.0-skewed".to_owned(),
+            ..test_handshake_defaults()
+        },
+        DaemonHandshake {
+            client_version: String::new(),
+            ..test_handshake_defaults()
+        },
+        DaemonHandshake {
+            client_instance_id: "not-a-client-instance".to_owned(),
+            ..test_handshake_defaults()
+        },
+    ];
+    for skewed in skewed_clients {
+        let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
+        let (reader, mut writer, server_task) =
+            super::connect_authenticated_test_client(engine).await;
+        writer
+            .write_all(format!("{}\n", skewed.to_line().expect("handshake line")).as_bytes())
+            .await
+            .expect("write skewed handshake");
+        writer
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n")
+            .await
+            .expect("write pipelined request");
+
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        let refusal_line =
+            tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+                .await
+                .expect("refusal must arrive before the read deadline")
+                .expect("the refusal read must not fail with a transport reset")
+                .expect("the daemon must answer a skewed client with a refusal line");
+        let refusal = tracedecay_daemon_protocol::DaemonHandshakeRefusal::from_line(&refusal_line)
+            .expect("the refusal line must parse as the typed refusal frame");
+        assert_eq!(
+            refusal.refusal,
+            tracedecay_daemon_protocol::DaemonHandshakeRefusalReason::UnsupportedRevision
+        );
+        let eof = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+            .await
+            .expect("connection close must arrive before the read deadline")
+            .expect("the close must be a clean EOF, not a connection reset");
+        assert_eq!(eof, None, "no frames follow the refusal");
+        server_task
+            .await
+            .expect("server task should complete")
+            .expect("a refused handshake is a served connection, not a serve error");
+    }
+}
+
 /// Garbage that is not even JSON refuses as `invalid_handshake`; the daemon
 /// still answers instead of resetting.
 #[cfg(unix)]
@@ -380,41 +446,6 @@ async fn rejected_auth_preface_reads_typed_refusal_then_clean_eof() {
         .await
         .expect("server task should complete")
         .expect("a refused auth preface is a served connection, not a serve error");
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn daemon_engine_logs_version_skew_once_per_client_version() {
-    let engine = super::super::DaemonEngine::default();
-    let mut handshake = test_handshake_defaults();
-    handshake.client_version = "0.0.0-skewed".to_string();
-
-    assert_eq!(
-        engine
-            .client_version_skew_to_log(&handshake)
-            .await
-            .expect("fixture product runtime registered"),
-        Some("0.0.0-skewed".to_string()),
-        "first connection from a skewed client should be logged"
-    );
-    assert_eq!(
-        engine
-            .client_version_skew_to_log(&handshake)
-            .await
-            .expect("fixture product runtime registered"),
-        None,
-        "repeat connections from the same client version must not spam the log"
-    );
-
-    let matching = test_handshake_defaults();
-    assert_eq!(
-        engine
-            .client_version_skew_to_log(&matching)
-            .await
-            .expect("fixture product runtime registered"),
-        None,
-        "matching client versions are not skew"
-    );
 }
 
 #[cfg(unix)]
@@ -734,23 +765,6 @@ fn proxy_records_negotiated_catalog_capability_and_version() {
 
     assert!(handshake.tool_list_changed_capable);
     assert_eq!(handshake.catalog_version, "2.0.0");
-
-    let legacy_responses = vec![
-        json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": {
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "tracedecay", "version": "1.0.0"}
-            }
-        })
-        .to_string(),
-    ];
-    let metadata = super::super::proxy_initialize_metadata(&initialize, &legacy_responses);
-    let mut legacy = test_handshake_defaults();
-    super::super::apply_proxy_initialize_metadata(&mut legacy, metadata);
-    assert!(!legacy.tool_list_changed_capable);
-    assert_eq!(legacy.catalog_version, "");
 }
 
 /// A saturated daemon must still name wire skew.
@@ -793,8 +807,16 @@ async fn saturated_daemon_refuses_wire_drifted_handshake_instead_of_resetting() 
     });
 
     let (reader, mut writer) = client.into_split();
-    // Valid JSON that is not this daemon's handshake shape, then the request a
-    // real client pipelines behind it before it starts reading.
+    // The auth preface every client writes first, then valid JSON that is not
+    // this daemon's handshake shape, then the request a real client pipelines
+    // behind it before it starts reading.
+    let preface = tracedecay_daemon_protocol::transport::DaemonAuthPreface::new("saturated-token")
+        .to_line()
+        .expect("preface line");
+    writer
+        .write_all(format!("{preface}\n").as_bytes())
+        .await
+        .expect("write preface");
     writer
         .write_all(b"{\"handshake_revision\":99,\"client\":\"future-build\"}\n")
         .await

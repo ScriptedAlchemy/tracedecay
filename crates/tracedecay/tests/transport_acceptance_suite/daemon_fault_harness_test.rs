@@ -475,7 +475,7 @@ async fn assert_daemon_crash_stage(
             profile_root: profile_root.clone(),
         },
         client_version: env!("CARGO_PKG_VERSION").to_string(),
-        client_instance_id: "daemon-fault-harness".to_string(),
+        client_instance_id: "0000000000000000000000000000c003".to_string(),
         tool_list_changed_capable: false,
         catalog_version: String::new(),
         moved_store_adoption: tracedecay_project::project::MovedStoreAdoption::Never,

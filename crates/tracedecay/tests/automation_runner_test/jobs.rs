@@ -1172,17 +1172,11 @@ async fn scheduler_prefilter_config_skip_precedes_live_lock_and_is_exact() {
     let dashboard_root = temp.path().join("dashboard");
     let profile_root = temp.path().join("profile");
     fs::create_dir_all(&profile_root).unwrap();
-    let lock_dir = dashboard_root.join("automation_locks");
-    fs::create_dir_all(&lock_dir).unwrap();
-    fs::write(
-        lock_dir.join("user_job_disabled-prefilter.lock"),
-        format!(
-            "pid={}\ncreated_at={}\n",
-            std::process::id(),
-            current_timestamp()
-        ),
-    )
-    .unwrap();
+    let _held_lock =
+        AutomationTaskLock::try_acquire_keyed(&dashboard_root, "user_job_disabled-prefilter")
+            .await
+            .unwrap()
+            .expect("fresh key");
 
     let mut job = sample_job("disabled-prefilter");
     job.schedule = Some("manual".to_owned());
@@ -1253,17 +1247,11 @@ async fn scheduler_prefilter_live_lock_wins_over_not_due_summary() {
     let dashboard_root = temp.path().join("dashboard");
     let profile_root = temp.path().join("profile");
     fs::create_dir_all(&profile_root).unwrap();
-    let lock_dir = dashboard_root.join("automation_locks");
-    fs::create_dir_all(&lock_dir).unwrap();
-    fs::write(
-        lock_dir.join("user_job_locked-prefilter.lock"),
-        format!(
-            "pid={}\ncreated_at={}\n",
-            std::process::id(),
-            current_timestamp()
-        ),
-    )
-    .unwrap();
+    let _held_lock =
+        AutomationTaskLock::try_acquire_keyed(&dashboard_root, "user_job_locked-prefilter")
+            .await
+            .unwrap()
+            .expect("fresh key");
 
     let mut job = sample_job("locked-prefilter");
     job.schedule = Some("every 1h".to_owned());

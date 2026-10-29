@@ -1004,15 +1004,6 @@ async fn affected_central_daemon_fixture_preserves_set_and_ranks_near_tests_over
     let payload: Value = serde_json::from_str(text).expect("affected JSON payload");
 
     assert_eq!(
-        payload["affected_tests"],
-        json!([
-            "tests/daemon_direct_test.rs",
-            "tests/mcp_near_test.rs",
-            "tests/serve_transitive_test.rs"
-        ]),
-        "the compatibility list must remain exhaustive and path-sorted"
-    );
-    assert_eq!(
         payload["ranked_tests"],
         json!([
             {
@@ -1068,11 +1059,10 @@ async fn affected_central_daemon_fixture_preserves_set_and_ranks_near_tests_over
     )
     .expect("affected JSON payload");
     assert_eq!(
-        unpublished["affected_tests"],
+        unpublished["ranked_tests"],
         json!([]),
         "a path this generation never published has no dependents, not an error"
     );
-    assert_eq!(unpublished["ranked_tests"], json!([]));
     assert_eq!(unpublished["recommended_tests"], json!([]));
 }
 
@@ -1148,9 +1138,15 @@ async fn affected_follows_public_wrapper_to_nested_unit_test_file() {
     let text = result["content"][0]["text"].as_str().unwrap();
     let payload: Value = serde_json::from_str(text).expect("affected JSON payload");
 
+    let reached = payload["ranked_tests"]
+        .as_array()
+        .expect("ranked tests")
+        .iter()
+        .map(|test| test["path"].clone())
+        .collect::<Vec<_>>();
     assert_eq!(
-        payload["affected_tests"],
-        json!(["src/edits/execute_tests.rs"]),
+        reached,
+        vec![json!("src/edits/execute_tests.rs")],
         "the inner implementation must reach tests through its public wrapper: {payload}"
     );
 

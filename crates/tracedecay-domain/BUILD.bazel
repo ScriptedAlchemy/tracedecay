@@ -52,7 +52,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = [],
     compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures_host_events_claude", "//tests:fixtures_host_events_codex", "//tests:fixtures_host_events_cursor", "//tests:fixtures_host_events_hermes", "//tests:fixtures_host_events_kiro", "//tests:fixtures_host_events_pi"],
-    data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
 )
 
 rust_test(
@@ -67,7 +67,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = [],
     compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/domain_suite/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures_host_events_claude", "//tests:fixtures_host_events_codex", "//tests:fixtures_host_events_cursor", "//tests:fixtures_host_events_hermes", "//tests:fixtures_host_events_kiro", "//tests:fixtures_host_events_pi"],
-    data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/domain_suite/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/domain_suite/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
 )
 
 rust_test(
@@ -82,7 +82,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = [],
     compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures_host_events_claude", "//tests:fixtures_host_events_codex", "//tests:fixtures_host_events_cursor", "//tests:fixtures_host_events_hermes", "//tests:fixtures_host_events_kiro", "//tests:fixtures_host_events_pi"],
-    data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
 )
 
 rust_test(

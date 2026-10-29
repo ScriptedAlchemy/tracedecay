@@ -45,7 +45,7 @@ fn write_codex_rollout_with_goal_events(
         serde_json::json!({
             "timestamp": "2026-01-02T00:00:01.000Z",
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": "start the overhaul"}
+            "payload": crate::common::codex_user_message_payload("start the overhaul")
         }),
     ];
     records.append(&mut goal_events);
@@ -90,7 +90,7 @@ fn write_codex_rollout_with_workflow_lifecycle(
         serde_json::json!({
             "timestamp": "2026-01-04T00:00:01.000Z",
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": "start the overhaul"}
+            "payload": crate::common::codex_user_message_payload("start the overhaul")
         }),
     ];
     records.append(&mut goal_events);
