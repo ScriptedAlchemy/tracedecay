@@ -131,7 +131,7 @@ async fn git_context_tools_refuse_arguments_outside_their_typed_request() {
             json!({"files": ["tests/probe_test.rs"], "depth": 3, "format": "json"}),
         )
         .await,
-        r#"{"affected_tests":["tests/probe_test.rs"],"changed_files":["tests/probe_test.rs"],"count":1,"freshness":{"state":"fresh"},"ranked_tests":[{"distance":0,"path":"tests/probe_test.rs","proximity":"changed","rank":1}],"ranking_metadata":{"compatibility_field":"affected_tests","distance":"minimum file-dependency hops from the changed files","recommended_proximity":["changed","direct","near"],"strategy":"dependency_distance_then_path"},"recommended_tests":["tests/probe_test.rs"]}"#
+        r#"{"changed_files":["tests/probe_test.rs"],"count":1,"freshness":{"state":"fresh"},"ranked_tests":[{"distance":0,"path":"tests/probe_test.rs","proximity":"changed","rank":1}],"ranking_metadata":{"distance":"minimum file-dependency hops from the changed files","recommended_proximity":["changed","direct","near"],"strategy":"dependency_distance_then_path"},"recommended_tests":["tests/probe_test.rs"]}"#
     );
     assert_invalid_request(
         &refusal(

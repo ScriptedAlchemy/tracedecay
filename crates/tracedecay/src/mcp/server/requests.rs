@@ -386,10 +386,10 @@ impl McpServer {
                 request.client_info_name(),
                 request.requested_protocol_version(),
             )),
-            // Some clients send the initialized notification with an id (or
-            // via the alternate method name); both stay compatibility no-ops.
-            // Hook events were consumed by the early notification dispatch
-            // above and can never reach this match with a response due.
+            // Some clients send the initialized notification with an id; it
+            // stays a no-op. Hook events were consumed by the early
+            // notification dispatch above and can never reach this match with
+            // a response due.
             McpMethod::InitializedAck | McpMethod::HookEvent | McpMethod::Cancelled => None,
             McpMethod::ToolsList => Some(self.handle_tools_list(id)),
             McpMethod::ToolsCall => Some(

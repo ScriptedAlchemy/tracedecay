@@ -791,7 +791,7 @@ async fn preserved_profile_lcm_discovery_converges_without_blocking_retrieval() 
         json!({
             "query": DIRECT_USER_QUERY,
             "message_type": "direct_user",
-            "since": since,
+            "start_time": since,
             "limit": 5,
             "format": "json",
         }),

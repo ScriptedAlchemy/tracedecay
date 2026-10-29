@@ -206,14 +206,12 @@ pub struct AffectedRankingMetadataV1 {
     pub strategy: String,
     pub distance: String,
     pub recommended_proximity: Vec<String>,
-    pub compatibility_field: String,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AffectedResultV1 {
     pub changed_files: Vec<String>,
-    pub affected_tests: Vec<String>,
     pub count: usize,
     pub ranked_tests: Vec<RankedAffectedTestV1>,
     /// Tests within two dependency hops of a changed file.

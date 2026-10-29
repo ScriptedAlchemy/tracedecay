@@ -1034,7 +1034,7 @@ async fn lcm_grep_accepts_relative_time_filters() {
             "query": "orchard relative timestamp",
             "scope": "session",
             "session_id": "lcm-relative-timestamps",
-            "since": "last hour",
+            "start_time": "last hour",
             "limit": 10
         }),
         None,
