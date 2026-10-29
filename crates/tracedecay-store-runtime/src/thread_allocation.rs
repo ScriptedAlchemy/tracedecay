@@ -10,12 +10,17 @@ use std::cell::Cell;
 
 thread_local! {
     static LIVE: Cell<isize> = const { Cell::new(0) };
+    static PEAK: Cell<isize> = const { Cell::new(0) };
 }
 
 struct ThreadCountingAllocator;
 
 fn charge(bytes: isize) {
-    let _ = LIVE.try_with(|live| live.set(live.get() + bytes));
+    let _ = LIVE.try_with(|live| {
+        let now = live.get() + bytes;
+        live.set(now);
+        let _ = PEAK.try_with(|peak| peak.set(peak.get().max(now)));
+    });
 }
 
 // SAFETY: every call delegates to `System` with the caller's layout; the
@@ -65,4 +70,17 @@ pub(crate) fn live_after<R>(work: impl FnOnce() -> R) -> (R, isize) {
     let start = LIVE.with(Cell::get);
     let result = work();
     (result, LIVE.with(Cell::get) - start)
+}
+
+/// Runs `work` and returns its result with the bytes it left live on this
+/// thread and the most it held live at once, both relative to the start.
+pub(crate) fn live_and_peak_during<R>(work: impl FnOnce() -> R) -> (R, isize, isize) {
+    let start = LIVE.with(Cell::get);
+    PEAK.with(|peak| peak.set(start));
+    let result = work();
+    (
+        result,
+        LIVE.with(Cell::get) - start,
+        PEAK.with(Cell::get) - start,
+    )
 }

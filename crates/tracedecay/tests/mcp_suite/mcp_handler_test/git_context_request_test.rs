@@ -6,8 +6,11 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::{Value, json};
+use tracedecay_code_index::graph_projection::CodeGraphReadinessRequirement;
 
 use crate::support::{
     ProductionCompositionFixture, extract_text, production_composition_fixture_with_sources,
@@ -188,14 +191,23 @@ async fn pr_context_default_brief_orients_from_exact_commits_through_mcp() {
     let head_oid = git_stdout(&fixture.project_root, &["rev-parse", "HEAD"]);
     let server = fixture.harness.server(&fixture.project_root).unwrap();
     wait_for_current_graph(&server).await;
-    // Brief enrichment only reads a resident graph and never warms one; the
-    // exact symbols view loads it, as a reviewer's first read would.
-    call_json(
-        &fixture,
-        "tracedecay_pr_context",
-        json!({"view": "symbols", "base_ref": base_oid, "head_ref": head_oid, "format": "json"}),
-    )
-    .await;
+    // Brief enrichment only reads resident data. Retain the serving owner's
+    // actual catalog across this journey so an idle park cannot race the brief.
+    let graph = fixture
+        .harness
+        .published_code_graph_store_for_test(&fixture.project_root)
+        .await
+        .expect("published production graph");
+    let graph_for_rewarm = Arc::clone(&graph);
+    let graph_admission = tokio::task::spawn_blocking(move || {
+        graph_for_rewarm.await_rewarm_and_retain_for(
+            Duration::from_secs(20),
+            CodeGraphReadinessRequirement::Catalog,
+        )
+    })
+    .await
+    .expect("graph admission task")
+    .expect("published graph catalog rewarms");
     let output = call_json(
         &fixture,
         "tracedecay_pr_context",
@@ -276,6 +288,9 @@ async fn pr_context_default_brief_orients_from_exact_commits_through_mcp() {
     }
     assert!(compact.contains("signature_changed"), "{compact}");
     assert!(compact.contains("Budget:"), "{compact}");
+
+    drop(graph_admission);
+    drop(graph);
 
     // Follow the briefing's exact revisions after the worktree has moved on.
     fs::write(

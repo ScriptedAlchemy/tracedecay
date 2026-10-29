@@ -5,6 +5,7 @@ use std::sync::Mutex;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tracedecay_contracts::retrieval::{PrContextBriefV1, PrContextSourceStateV1, PrContextViewV1};
 
 use super::dispatch_test_support::*;
 use super::*;
@@ -1484,7 +1485,6 @@ async fn pr_context_returns_git_evidence_while_verified_graph_is_unavailable() {
             &cg,
             "tracedecay_pr_context",
             json!({
-                "view": "symbols",
                 "base_ref": "main",
                 "head_ref": "HEAD",
                 "format": "json",
@@ -1494,23 +1494,43 @@ async fn pr_context_returns_git_evidence_while_verified_graph_is_unavailable() {
         .await
         .expect("transient verified graph failure must preserve available Git evidence");
         assert_ne!(result.semantic_error(), Some(true));
-        let payload = tool_json(&result);
+        let brief: PrContextBriefV1 = serde_json::from_value(tool_json(&result))
+            .expect("default PR response uses the closed briefing contract");
 
-        assert_eq!(payload["base"], "main");
-        assert_eq!(payload["head"], "HEAD");
-        assert_eq!(payload["base_oid"], base_oid);
-        assert_eq!(payload["head_oid"], head_oid);
-        assert_eq!(payload["merge_base"], merge_base);
-        assert_eq!(payload["status"], "partial");
-        assert_eq!(payload["files_changed"], 1);
-        assert_eq!(payload["changes"][0]["path"], "src/lib.rs");
-        assert_eq!(payload["changes"][0]["status"], "modified");
-        assert_eq!(payload["analysis_coverage"]["complete"], false);
+        assert_eq!(brief.view, PrContextViewV1::Brief);
+        assert_eq!(brief.base, "main");
+        assert_eq!(brief.head, "HEAD");
+        assert_eq!(brief.base_oid, base_oid);
+        assert_eq!(brief.head_oid, head_oid);
+        assert_eq!(brief.merge_base, merge_base);
+        assert_eq!(brief.files_changed, 1);
+        assert_eq!(brief.changes[0].file, "src/lib.rs");
+        assert_eq!(brief.changes[0].change, "modified");
+        assert_eq!(brief.source_analysis.state, PrContextSourceStateV1::Ready);
         assert_eq!(
-            payload["verified_graph_evidence"]["reason_code"],
-            expected_reason
+            brief.graph_analysis.state,
+            PrContextSourceStateV1::Unavailable
         );
-        assert_eq!(payload["verified_graph_evidence"]["status"], "unavailable");
+        assert!(
+            brief.graph_analysis.detail.contains(expected_reason),
+            "{brief:?}"
+        );
+        assert!(
+            brief.entry_points.iter().any(|entry| {
+                entry.symbol == "src/lib.rs::after"
+                    && entry.location.file == "src/lib.rs"
+                    && entry.revision == head_oid
+                    && entry.node_id.is_none()
+            }),
+            "{brief:?}"
+        );
+        assert!(
+            brief
+                .entry_points
+                .iter()
+                .all(|entry| entry.node_id.is_none())
+        );
+        assert!(brief.freshness.is_none());
     }
 
     cg.close();

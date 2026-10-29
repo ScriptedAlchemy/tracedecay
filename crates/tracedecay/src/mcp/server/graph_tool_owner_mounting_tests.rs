@@ -2,9 +2,15 @@
 //! a call whose tool declares the project session stores answers the typed
 //! `mounting` problem, while a graph-only call is answered.
 
+use std::sync::Arc;
+
 use serde_json::{Value, json};
 
 use super::McpServer;
+use tracedecay_code_index_runtime::CodeIndexSchedulerRegistryV1;
+use tracedecay_code_index_runtime::project_reads::project_code_graph_projection_read_port;
+use tracedecay_daemon_service::DaemonCodeGraphReadAdmission;
+use tracedecay_graph_query::admitted_verified_graph_query_port_with_source;
 use tracedecay_mcp::transport::JsonRpcRequest;
 
 async fn call_tool(server: &McpServer, name: &str, arguments: Value) -> Value {
@@ -30,6 +36,32 @@ async fn a_session_store_tool_on_the_core_owner_is_mounting_while_graph_tools_an
             "project.core-owner",
         )
         .await;
+    // Core composition publishes real graph authority before the session
+    // stores mount. An unseated scheduler represents an unavailable index.
+    let scope = context
+        .admitted_project_scope
+        .clone()
+        .expect("registered project scope");
+    let graph_admission: super::CodeGraphReadAdmissionPort =
+        Arc::new(DaemonCodeGraphReadAdmission::production(
+            context.cg.project_root().to_path_buf(),
+            scope.clone(),
+            Arc::clone(context.cg.configuration_runtime()),
+        ));
+    let graph_projection = project_code_graph_projection_read_port(
+        CodeIndexSchedulerRegistryV1::new(1),
+        context.cg.project_root().to_path_buf(),
+        scope,
+    );
+    let graph_query = admitted_verified_graph_query_port_with_source(
+        Arc::clone(&graph_admission),
+        Arc::clone(&graph_projection),
+        context.cg.source_read_context(),
+    );
+    context = context
+        .with_code_graph_read_admission_port(graph_admission)
+        .with_code_graph_projection_read_port(graph_projection)
+        .with_verified_graph_query_port(graph_query);
     // The core owner serves before the project session store mounts.
     context.project_session_db = None;
     let server =
@@ -80,6 +112,11 @@ async fn a_session_store_tool_on_the_core_owner_is_mounting_while_graph_tools_an
         served.source_analysis.state,
         tracedecay_contracts::retrieval::PrContextSourceStateV1::Ready
     );
+    assert_eq!(
+        served.graph_analysis.state,
+        tracedecay_contracts::retrieval::PrContextSourceStateV1::Unavailable
+    );
+    assert!(served.freshness.is_none());
 
     let active = call_tool(
         &server,
