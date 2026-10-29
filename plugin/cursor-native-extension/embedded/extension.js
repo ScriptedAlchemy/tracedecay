@@ -5,7 +5,6 @@ const __rslib_import_meta_url__ = /*#__PURE__*/ (function () {
     : (document.currentScript && document.currentScript.src) ||
       new URL('main.js', document.baseURI).href;
 })();
-;
 var __webpack_modules__ = ({
 "../../node_modules/.pnpm/semver@7.8.5/node_modules/semver/classes/comparator.js"(module, __unused_rspack_exports, __webpack_require__) {
 
@@ -26008,14 +26007,14 @@ __webpack_require__.d(__webpack_exports__, {
   TextEdit: () => (TextEdit),
   URI: () => (URI),
   VersionedTextDocumentIdentifier: () => (VersionedTextDocumentIdentifier),
-  WorkspaceChange: () => (WorkspaceChange),
   WorkspaceEdit: () => (WorkspaceEdit),
   WorkspaceFolder: () => (WorkspaceFolder),
   WorkspaceSymbol: () => (WorkspaceSymbol),
   integer: () => (integer),
   uinteger: () => (uinteger)
 }, {
-  EOL: EOL
+  EOL: EOL,
+  WorkspaceChange: WorkspaceChange
 });
 
 
