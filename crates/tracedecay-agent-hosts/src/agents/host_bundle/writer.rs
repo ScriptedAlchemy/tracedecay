@@ -18,10 +18,10 @@ use tracedecay_private_fs::capability_dir::replace_file;
 use tracedecay_runtime_core::storage::retry_transient_file_op;
 
 use super::control::{
-    HOST_BUNDLE_CONTROL_DIR, HOST_BUNDLE_LOCK_FILE, MAX_CONTROL_FILE_BYTES,
-    component_set_receipt_file, component_slug, is_safe_component, parse_receipt, receipt_file,
-    receipt_identity_from_file_name, receipt_schema_probe, superseded_identities,
-    validate_component_set_receipt, validate_receipt, writer_lock_file,
+    HOST_BUNDLE_CONTROL_DIR, MAX_CONTROL_FILE_BYTES, component_set_receipt_file, component_slug,
+    is_safe_component, parse_receipt, receipt_file, receipt_identity_from_file_name,
+    receipt_schema_probe, superseded_identities, validate_component_set_receipt, validate_receipt,
+    writer_lock_file,
 };
 use super::model::HostBundleExecutionRequestV1;
 use super::planner::{
@@ -117,9 +117,6 @@ impl HostBundleWriterV1 {
             return Ok(());
         }
         self.host_lock = None;
-        if writer_lock_file(host) == HOST_BUNDLE_LOCK_FILE {
-            return Err(HostBundleError::UnsafeInstallPath);
-        }
         self.host_lock = Some(open_host_writer_lock(&self.control, host)?);
         Ok(())
     }
@@ -230,22 +227,6 @@ impl HostBundleWriterV1 {
                 .iter()
                 .flat_map(|receipt| receipt.created_directories.iter().cloned()),
         );
-        if previous_receipt
-            .as_ref()
-            .is_some_and(|receipt| receipt.created_config.is_none())
-        {
-            recorded.extend(tracedecay_namespace_directories(
-                manifest
-                    .artifacts
-                    .iter()
-                    .map(|artifact| artifact.relative_path.as_str())
-                    .chain(
-                        plan.mutations
-                            .iter()
-                            .map(|mutation| mutation.relative_path.as_str()),
-                    ),
-            ));
-        }
         let created_directories = self
             .prune_created_directories(&recorded)?
             .into_iter()
@@ -274,10 +255,10 @@ impl HostBundleWriterV1 {
             created_directories,
             // This path runs no host registration: the set transaction's
             // facts carry forward until an uninstall consumes them.
-            created_config: Some(match (request.lifecycle.operation, &previous_receipt) {
+            created_config: match (request.lifecycle.operation, &previous_receipt) {
                 (HostBundleLifecycleOpV1::Uninstall, _) | (_, None) => Vec::new(),
-                (_, Some(previous)) => previous.created_config.clone().unwrap_or_default(),
-            }),
+                (_, Some(previous)) => previous.created_config.clone(),
+            },
         };
         self.write_receipt(&receipt)?;
         Ok(receipt)
@@ -657,25 +638,6 @@ pub(super) fn ancestor_directories<'a>(
         }
     }
     directories
-}
-
-/// Ancestors of `paths` at or below a directory named in TraceDecay's own
-/// namespace (`tracedecay`, `tracedecay.*`, `tracedecay-*`): TraceDecay's to
-/// remove once empty even when no receipt recorded creating them, which is
-/// how releases that predate `created_directories` left them.
-pub(super) fn tracedecay_namespace_directories<'a>(
-    paths: impl IntoIterator<Item = &'a str>,
-) -> BTreeSet<String> {
-    ancestor_directories(paths)
-        .into_iter()
-        .filter(|directory| {
-            directory.split('/').any(|name| {
-                name == "tracedecay"
-                    || name.starts_with("tracedecay.")
-                    || name.starts_with("tracedecay-")
-            })
-        })
-        .collect()
 }
 
 fn validate_artifact_contents(

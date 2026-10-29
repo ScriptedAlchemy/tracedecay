@@ -38,9 +38,7 @@ struct StoredQueueEntryV1 {
 struct StoredDeliveryAddressV1 {
     envelope_id: [u8; 16],
     address: ContextScoutAddressV1,
-    #[serde(default)]
-    entry: Option<ContextScoutDurableQueueEntryV1>,
-    #[serde(default)]
+    entry: ContextScoutDurableQueueEntryV1,
     lease: Option<ContextScoutLeaseV1>,
 }
 
@@ -309,59 +307,6 @@ fn mutation_receipt_key(effect_identity: &ManifestDigest) -> Option<String> {
     Some(format!("{MUTATION_RECEIPT_KEY_PREFIX_V1}{suffix}"))
 }
 
-/// A document written before delivery addresses were part of the state.
-/// Receipts in that document are not replayed into the current shape.
-fn document_needs_provenance_reset(encoded: &str, project_id: [u8; 16]) -> bool {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(encoded) else {
-        return false;
-    };
-    let Some(object) = value.as_object() else {
-        return false;
-    };
-    let Some(stored_project) = object.get("project_id") else {
-        return false;
-    };
-    let Ok(stored_project) = serde_json::from_value::<[u8; 16]>(stored_project.clone()) else {
-        return false;
-    };
-    if stored_project != project_id {
-        return false;
-    }
-    if has_untagged_candidate_evidence(object) {
-        return true;
-    }
-    if !object.contains_key("delivery_addresses")
-        || !object.contains_key("delivery_provenance_complete")
-    {
-        return object.contains_key("entries") && object.contains_key("receipts");
-    }
-    match serde_json::from_str::<StoredContextScoutStateV1>(encoded) {
-        Ok(state) => {
-            !state.delivery_provenance_complete || !state.has_complete_delivery_provenance()
-        }
-        Err(_) => false,
-    }
-}
-
-/// A queued candidate written before candidate evidence became the tagged
-/// code/session union carries a bare evidence object with no `kind`. Such a
-/// document cannot decode into the current shape, so startup resets it
-/// instead of reporting the durable state unavailable forever.
-fn has_untagged_candidate_evidence(object: &serde_json::Map<String, serde_json::Value>) -> bool {
-    let untagged = |stored: &serde_json::Value| {
-        stored
-            .pointer("/entry/envelope/candidate/evidence")
-            .and_then(serde_json::Value::as_object)
-            .is_some_and(|evidence| !evidence.contains_key("kind"))
-    };
-    ["entries", "delivery_addresses"].into_iter().any(|field| {
-        object
-            .get(field)
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|rows| rows.iter().any(untagged))
-    })
-}
-
 fn decode_mutation_settlement(encoded: &str) -> Option<ContextScoutMutationSettlementV1> {
     if encoded.len() > MAX_MUTATION_RECEIPT_BYTES_V1 {
         return None;
@@ -432,11 +377,9 @@ impl StoredContextScoutStateV1 {
             binding.address.project_id == project_id
                 && binding.address.validate().is_ok()
                 && delivery_envelopes.insert(binding.envelope_id)
-                && binding.entry.as_ref().is_none_or(|entry| {
-                    entry.validate().is_ok()
-                        && entry.work.address == binding.address
-                        && entry.envelope.envelope_id == binding.envelope_id
-                })
+                && binding.entry.validate().is_ok()
+                && binding.entry.work.address == binding.address
+                && binding.entry.envelope.envelope_id == binding.envelope_id
                 && binding
                     .lease
                     .is_none_or(|lease| lease.lease_id != [0; 16] && lease.expires_at.0 > 0)
@@ -459,11 +402,9 @@ impl StoredContextScoutStateV1 {
     fn has_complete_delivery_provenance(&self) -> bool {
         self.delivery_addresses.len() == self.receipts.len()
             && self.delivery_addresses.iter().all(|binding| {
-                binding.entry.is_some()
-                    && self
-                        .receipts
-                        .iter()
-                        .any(|receipt| receipt.envelope_id == binding.envelope_id)
+                self.receipts
+                    .iter()
+                    .any(|receipt| receipt.envelope_id == binding.envelope_id)
             })
     }
 
@@ -535,26 +476,20 @@ impl StoredContextScoutStateV1 {
                 .find(|binding| binding.envelope_id == receipt.envelope_id)
             {
                 if binding.address != claim.entry.work.address
-                    || binding
-                        .entry
-                        .as_ref()
-                        .is_some_and(|stored| stored != &claim.entry)
+                    || binding.entry != claim.entry
                     || binding.lease.is_some_and(|stored| stored != claim.lease)
                 {
                     return ContextScoutDurableStoreOutcomeV1::Superseded;
                 }
-                if binding.entry.as_ref() == Some(&claim.entry)
-                    && binding.lease == Some(claim.lease)
-                {
+                if binding.lease == Some(claim.lease) {
                     return ContextScoutDurableStoreOutcomeV1::Duplicate;
                 }
-                binding.entry = Some(claim.entry.clone());
                 binding.lease = Some(claim.lease);
             } else {
                 self.delivery_addresses.push(StoredDeliveryAddressV1 {
                     envelope_id: claim.entry.envelope.envelope_id,
                     address: claim.entry.work.address,
-                    entry: Some(claim.entry.clone()),
+                    entry: claim.entry.clone(),
                     lease: Some(claim.lease),
                 });
             }
@@ -582,7 +517,7 @@ impl StoredContextScoutStateV1 {
         self.delivery_addresses.push(StoredDeliveryAddressV1 {
             envelope_id: claim.entry.envelope.envelope_id,
             address: claim.entry.work.address,
-            entry: Some(claim.entry.clone()),
+            entry: claim.entry.clone(),
             lease: Some(claim.lease),
         });
         self.trim_receipts();
@@ -665,7 +600,7 @@ impl StoredContextScoutStateV1 {
                 self.delivery_addresses
                     .iter()
                     .filter(|binding| binding.lease == Some(lease))
-                    .filter_map(|binding| binding.entry.as_ref()),
+                    .map(|binding| &binding.entry),
             )
             .find(|entry| {
                 entry.work == work
@@ -803,9 +738,7 @@ impl ProjectContextScoutDurableStoreV1 {
                 omitted: 0,
             });
         };
-        if encoded.len() > MAX_STORED_STATE_BYTES_V1
-            || document_needs_provenance_reset(&encoded, self.project_id)
-        {
+        if encoded.len() > MAX_STORED_STATE_BYTES_V1 {
             return ContextScoutRecentReadOutcomeV1::Unavailable;
         }
         let Ok(state) = serde_json::from_str::<StoredContextScoutStateV1>(&encoded) else {
@@ -833,7 +766,7 @@ impl ProjectContextScoutDurableStoreV1 {
             .iter()
             .filter(|binding| matches(binding.address))
             .filter_map(|binding| {
-                let entry = binding.entry.as_ref()?.clone();
+                let entry = binding.entry.clone();
                 if entry.envelope.configuration_revision != configuration_revision {
                     return None;
                 }
@@ -941,9 +874,6 @@ impl ProjectContextScoutDurableStoreV1 {
         drop(rows);
 
         let mut state = match encoded {
-            Some(encoded) if document_needs_provenance_reset(&encoded, self.project_id) => {
-                return None;
-            }
             Some(encoded) if encoded.len() <= MAX_STORED_STATE_BYTES_V1 => {
                 serde_json::from_str::<StoredContextScoutStateV1>(&encoded).ok()?
             }
@@ -1002,12 +932,6 @@ impl ProjectContextScoutDurableStoreV1 {
         if now.0 <= 0 || limit == 0 || limit > MAX_SCOUT_ACTIVE_ADDRESSES {
             return ContextScoutDurableStartupOutcomeV1::Unavailable;
         }
-        if self.provenance_reset_required().await {
-            return match self.replace_with_fresh_state().await {
-                Some(()) => ContextScoutDurableStartupOutcomeV1::Reset,
-                None => ContextScoutDurableStartupOutcomeV1::Unavailable,
-            };
-        }
         // Startup is a read that *may* need to requeue expired claims. Asking
         // for the exclusive writer lane before knowing that made project open
         // depend on it unconditionally: a concurrently opening sibling route
@@ -1032,31 +956,6 @@ impl ProjectContextScoutDurableStoreV1 {
         })
         .await
         .unwrap_or(ContextScoutDurableStartupOutcomeV1::Unavailable)
-    }
-
-    async fn provenance_reset_required(&self) -> bool {
-        let Ok(Some(encoded)) = self.database.get_metadata(STORE_KEY_V1).await else {
-            return false;
-        };
-        document_needs_provenance_reset(&encoded, self.project_id)
-    }
-
-    /// Replaces a pre-provenance document with an empty current one. The
-    /// previous receipts, feedback, and queue entries are not copied.
-    async fn replace_with_fresh_state(&self) -> Option<()> {
-        let transaction = self
-            .database
-            .begin_write_transaction("reset Context Scout durable store")
-            .await
-            .ok()?;
-        let encoded =
-            serde_json::to_string(&StoredContextScoutStateV1::new(self.project_id)).ok()?;
-        self.database
-            .set_metadata_unguarded(&transaction, STORE_KEY_V1, &encoded)
-            .await
-            .ok()?;
-        transaction.commit().await.ok()?;
-        Some(())
     }
 
     /// Decodes the durable state without taking the writer lane. `None` means
@@ -1322,8 +1221,7 @@ impl ProjectContextScoutDurableStoreV1 {
                 || state
                     .delivery_addresses
                     .iter()
-                    .filter_map(|binding| binding.entry.as_ref())
-                    .any(same_suggestion)
+                    .any(|binding| same_suggestion(&binding.entry))
             {
                 return ContextScoutDurableStoreOutcomeV1::Duplicate;
             }
