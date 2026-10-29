@@ -413,6 +413,8 @@ impl BrokerResponseWriter {
                 else {
                     return Ok(());
                 };
+                let is_protocol_error =
+                    request.cancelled || matches!(&item, rmcp::model::JsonRpcMessage::Error(_));
                 let bytes = if request.cancelled {
                     let id = response_id.ok_or_else(|| {
                         std::io::Error::new(
@@ -436,9 +438,15 @@ impl BrokerResponseWriter {
                     .as_deref()
                     .map(BrokerSelectedResponseLease::response_revoked)
                     .or_else(|| {
-                        response_lifecycle
-                            .as_deref()
-                            .map(BrokerResponseLifecycle::response_revoked)
+                        // An unleased protocol refusal carries no selected
+                        // project payload, including after core retirement.
+                        if is_protocol_error {
+                            None
+                        } else {
+                            response_lifecycle
+                                .as_deref()
+                                .map(BrokerResponseLifecycle::response_revoked)
+                        }
                     });
                 let write_result = match response_revoked {
                     None => BrokerStreamTransport::write_all_and_flush(writer, bytes)
@@ -636,6 +644,8 @@ impl BrokerStreamTransport {
 #[cfg(test)]
 mod tests {
     use std::future::poll_fn;
+    #[cfg(unix)]
+    use std::io::{BufRead, BufReader, Read};
     use std::pin::pin;
     use std::task::Poll;
     use std::time::{Duration, Instant};
@@ -643,6 +653,16 @@ mod tests {
     use tracedecay_runtime_core::native_runtime;
 
     use super::*;
+
+    #[cfg(unix)]
+    struct TestResponseLease(CancellationToken);
+
+    #[cfg(unix)]
+    impl BrokerSelectedResponseLease for TestResponseLease {
+        fn response_revoked(&self) -> &CancellationToken {
+            &self.0
+        }
+    }
 
     /// Polls `future` once, then races it against a bound so a wake that
     /// never comes fails the test instead of hanging it.
@@ -695,6 +715,124 @@ mod tests {
         ))
         .expect("native runtime");
         assert!(closed, "the probe must observe the peer's full close");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retired_connections_deliver_unleased_errors_and_suppress_payloads() {
+        let lifecycle = ProjectServerResponseLifecycle::default();
+        lifecycle.revoke();
+        let (server, client) = std::os::unix::net::UnixStream::pair().unwrap();
+        server.set_nonblocking(true).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let transport = BrokerStreamTransport::new(BrokerStream::Unix(
+            asupersync::net::unix::UnixStream::from_std(server).unwrap(),
+        ))
+        .with_project_response_lifecycle(lifecycle);
+        let refusal = json!({
+            "jsonrpc": "2.0", "id": 1,
+            "error": {
+                "code": -32000, "message": "project server response was revoked",
+                "data": {"reason_code": "response_revoked", "retryable": true}
+            }
+        });
+        transport.observe_incoming_message(&json!({"id": 1, "method": "tools/call"}));
+        native_runtime::block_on(transport.send(serde_json::from_value(refusal.clone()).unwrap()))
+            .expect("native runtime")
+            .expect("retirement refusal must reach the caller");
+        let mut client = BufReader::new(client);
+        let mut line = String::new();
+        client.read_line(&mut line).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&line).unwrap(),
+            refusal
+        );
+
+        for (id, is_error) in [(2, false), (3, true)] {
+            transport.observe_incoming_message(&json!({"id": id, "method": "tools/call"}));
+            let payload = serde_json::from_value(json!({
+                "jsonrpc": "2.0", "id": id,
+                "result": {
+                    "content": [{"type": "text", "text": "retired project payload"}],
+                    "isError": is_error
+                }
+            }))
+            .unwrap();
+            let error = native_runtime::block_on(transport.send(payload))
+                .expect("native runtime")
+                .expect_err(
+                    "retirement must still suppress successful and semantic-error payloads",
+                );
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        }
+        client.get_mut().set_nonblocking(true).unwrap();
+        assert_eq!(
+            client.read(&mut [0]).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_project_leases_control_errors_and_payloads_after_caller_retirement() {
+        let caller = ProjectServerResponseLifecycle::default();
+        caller.revoke();
+        let selected = RmcpSelectedProjectResponseAuthority::<TestResponseLease>::default();
+        let (server, client) = std::os::unix::net::UnixStream::pair().unwrap();
+        server.set_nonblocking(true).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let transport = BrokerStreamTransport::new(BrokerStream::Unix(
+            asupersync::net::unix::UnixStream::from_std(server).unwrap(),
+        ))
+        .with_project_response_lifecycle(caller)
+        .with_rmcp_selected_project_responses(selected.clone());
+        let mut client = BufReader::new(client);
+        for (id, revoked) in [(1, true), (2, false)] {
+            let lifecycle = ProjectServerResponseLifecycle::default();
+            if revoked {
+                lifecycle.revoke();
+            }
+            selected
+                .retain(
+                    &json!(id),
+                    TestResponseLease(lifecycle.response_revoked().clone()),
+                )
+                .unwrap();
+            transport.observe_incoming_message(&json!({"id": id, "method": "tools/call"}));
+            let message = if revoked {
+                json!({"jsonrpc": "2.0", "id": id, "error": {
+                    "code": -32000, "message": "selected response was revoked"
+                }})
+            } else {
+                json!({"jsonrpc": "2.0", "id": id, "result": {
+                    "content": [{"type": "text", "text": "live selected project"}]
+                }})
+            };
+            let result = native_runtime::block_on(
+                transport.send(serde_json::from_value(message.clone()).unwrap()),
+            )
+            .expect("native runtime");
+            if revoked {
+                assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
+            } else {
+                result.expect("the live selected lease is the response authority");
+                let mut line = String::new();
+                client.read_line(&mut line).unwrap();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&line).unwrap(),
+                    message
+                );
+            }
+        }
+        client.get_mut().set_nonblocking(true).unwrap();
+        assert_eq!(
+            client.read(&mut [0]).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 
     #[test]

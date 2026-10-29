@@ -744,16 +744,20 @@ jobs:
         run: bazel test --config=ci --test_output=errors //scripts:gen_builds_test
 
   # The configuration users actually receive: the release build of
-  # `tracedecay-cli`, whose default features are `production`. Nothing else on
-  # a push compiles it, so a break confined to the release graph (the
-  # mimalloc allocator, the embedded dashboard, opt-level 3) would otherwise
-  # first appear while a release is being cut.
+  # `tracedecay-cli`, whose default features are `production`. It catches a
+  # break confined to the release graph (the mimalloc allocator, the embedded
+  # dashboard, opt-level 3). That build is the slowest job in a run and rarely
+  # fails where the debug jobs pass, so ordinary PRs skip it; every master
+  # push and the release PR still run it before a release is cut. A skipped
+  # job still satisfies the required check.
   shipped-cli:
     permissions:
       contents: read
       id-token: write
     name: Shipped CLI build (x86_64-linux)
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    if: >-
+      ${{ github.event_name != 'pull_request' ||
+      (startsWith(github.head_ref, 'release-please--') && !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
