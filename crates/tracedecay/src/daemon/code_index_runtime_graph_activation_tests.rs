@@ -49,7 +49,8 @@ use tracedecay_query::code_search::{
 use tracedecay_query::retrieval::lexical::LexicalRoutingV1;
 use tracedecay_runtime_core::resident_memory::{
     ProcessResidentMemoryV1, ProcessResidentSampleV1, RESIDENT_OWNER_IDLE_WINDOW_V1,
-    ResidentMemoryPressureV1, ResidentOwnerKindV1, ResidentOwnersReportV1, ResidentOwnersV1,
+    ResidentMemoryComponentIdV1, ResidentMemoryPressureV1, ResidentOwnerKindV1,
+    ResidentOwnersReportV1, ResidentOwnersV1,
 };
 use tracedecay_runtime_core::runtime_telemetry::{
     GenerationCensusServingFreshness, GenerationCensusSnapshot, GenerationCensusUnavailableReason,
@@ -417,6 +418,7 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
         project_database,
         policy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         seated: Arc::default(),
+        resident_memory: unconstrained_resident_memory(),
     };
 
     let activated = latest.clone();
@@ -544,6 +546,7 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
         project_database: Arc::clone(&project_database),
         policy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         seated: Arc::default(),
+        resident_memory: unconstrained_resident_memory(),
     };
     activation
         .activate(
@@ -3015,4 +3018,92 @@ where
     <T as TryFrom<String>>::Error: std::fmt::Debug,
 {
     T::try_from(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
+}
+
+/// The catalog warm that follows a publication reserves what it builds from
+/// the daemon's resident-memory authority, so admission sees it, and gives
+/// the reservation back once the catalog serves as its own measured owner.
+///
+/// Fails if the warm builds the catalog without a reservation (#4559) or
+/// keeps it after the catalog is published.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_catalog_warm_after_publication_reserves_resident_memory() {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let limit = NonZeroU64::new(16 * GIB).expect("limit");
+    let catalog_build =
+        ResidentMemoryComponentIdV1::new("code_graph.catalog.build.v1").expect("component id");
+    let ledger = Arc::new(std::sync::OnceLock::<
+        std::sync::Weak<ProcessResidentMemoryV1>,
+    >::new());
+    let catalog_peak = Arc::new(AtomicU64::new(0));
+    let sampler = {
+        let ledger = Arc::clone(&ledger);
+        let catalog_peak = Arc::clone(&catalog_peak);
+        Arc::new(move || {
+            if let Some(memory) = ledger.get().and_then(std::sync::Weak::upgrade) {
+                catalog_peak.fetch_max(
+                    memory.snapshot().process_shared_charge_for(catalog_build),
+                    Ordering::AcqRel,
+                );
+            }
+            // Observe the ledger without supplying an RSS estimate.
+            None
+        })
+    };
+    let memory = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::new(ResidentMemoryPressureV1::with_sampler(limit, sampler)),
+    ));
+    ledger
+        .set(Arc::downgrade(&memory))
+        .expect("bind the observed ledger");
+    let mount = PersistentGraphMountV1::mount(
+        CodeIndexSchedulerRegistryV1::with_resident_memory(1, Arc::clone(&memory)),
+        &fixture,
+        &store,
+        "catalog warm reserves resident memory",
+    )
+    .await;
+    let graph = mount
+        .registry
+        .latest_text_serving_for_root(fixture.path())
+        .await
+        .expect("the published text owner serves")
+        .interactive_graph_store()
+        .expect("the published graph serves");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !graph.interactive_catalog_has_completed_a_warm() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the catalog warm never settled: {:?}",
+            graph.serving_warmth()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        catalog_peak.load(Ordering::Acquire) > 0,
+        "the catalog warm must reserve what it builds"
+    );
+    assert_eq!(
+        memory.snapshot().process_shared_charge_for(catalog_build),
+        0,
+        "the published catalog is measured as its owner, not left reserved"
+    );
+    mount.shutdown().await;
+}
+
+/// An authority whose own limit is the machine's, with no measured
+/// pressure, for activations whose admission is not under test.
+fn unconstrained_resident_memory() -> Arc<ProcessResidentMemoryV1> {
+    let limit =
+        tracedecay_runtime_core::resident_memory::detected_process_resident_memory_limit_v1();
+    Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::new(ResidentMemoryPressureV1::with_sampler(
+            limit,
+            Arc::new(|| None),
+        )),
+    ))
 }

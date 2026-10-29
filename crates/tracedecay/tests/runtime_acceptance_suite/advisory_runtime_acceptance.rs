@@ -47,7 +47,7 @@ use tracedecay_contracts::{
 use tracedecay_domain::feedback::{
     FeedbackCycleTerminationV1, FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewCommentIdV1,
     GitHubReviewCurrentBranchRemapV1, GitHubReviewImmutableAnchorV1, GitHubReviewReadOperationV1,
-    ProviderEvaluationStateV1,
+    GitHubReviewStateV1, ProviderEvaluationStateV1,
 };
 use tracedecay_domain::{
     ActorId, CommitId, ContentDigest, FileOccurrenceId, ManifestDigest, ProjectId, ProviderId,
@@ -321,16 +321,28 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
     let review = captured_response(include_str!(
         "../../../../crates/tracedecay-application/src/advisory/fixtures/provider_branch_review/review.json"
     ));
-    assert!(
-        decoder
-            .decode(
-                &review_request,
-                &metadata,
-                serde_json::to_vec(&vec![review]).unwrap().as_slice(),
-            )
-            .await
-            .is_some()
+    let reviews = decoder
+        .decode(
+            &review_request,
+            &metadata,
+            serde_json::to_vec(&vec![review]).unwrap().as_slice(),
+        )
+        .await
+        .expect("authentic review preserves identity and state without optional prose")
+        .ingress
+        .reviews;
+    assert_eq!(reviews.len(), 1);
+    assert_eq!(reviews[0].review_id.as_str(), "4669021204");
+    assert_eq!(reviews[0].state, GitHubReviewStateV1::Commented);
+    assert_eq!(
+        reviews[0].author.as_deref(),
+        Some("chatgpt-codex-connector[bot]")
     );
+    assert_eq!(
+        reviews[0].commit_id.as_ref().map(CommitId::as_str),
+        Some("986f25cca6d2e703e889fb57326696b0d92c965f")
+    );
+    assert!(reviews[0].body.is_none());
 
     let fixture_anchors = FixtureAnchors::default();
     let graphql_decoder = GitHubOfficialResponseDecoderV1::new(

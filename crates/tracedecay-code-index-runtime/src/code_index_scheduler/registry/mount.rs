@@ -367,6 +367,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 project_database,
                 policy: Arc::new(AtomicBool::new(graph_activation_policy.is_enabled())),
                 seated: Arc::default(),
+                resident_memory: Arc::clone(&self.resident_memory),
             },
             source_inputs.path_policy,
             source_inputs.pending_admission,

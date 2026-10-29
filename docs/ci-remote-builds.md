@@ -34,9 +34,14 @@ actual memory use. The shared action cache remains enabled. Tests carry Node,
 Rust Analyzer, and their compiler tools as declared runfiles.
 Each remote test reserves four worker CPU units and the Rust harness uses four
 threads. The local branch reserves the hosted runner CPU budget so suites do not
-compete with one another for local cores. Once the fleet is selected, remote compilation does not fall back to the hosted
-runner. Linux/macOS dynamic tests retain their scheduled local branch. Actual compiler errors, failed
-tests, and remote action execution timeouts still fail the build. BuildBuddy events
+compete with one another for local cores. Linux and macOS remote compilation do
+not fall back to the hosted runner; their dynamic tests retain the scheduled
+local branch. Windows retries remote infrastructure failures locally with the
+same pinned compiler and SDK, including worker cleanup and rejected output
+downloads. It keeps sixteen remote jobs while reserving at most two local CPU
+slots and half the hosted runner's RAM. This recovers eligible actions without
+repairing the remote cache itself. Actual compiler errors, failed tests, and
+remote action execution timeouts still fail the build. BuildBuddy events
 upload asynchronously, so a reporting outage does not fail a successful build.
 A terminated runner can leave an incomplete report.
 

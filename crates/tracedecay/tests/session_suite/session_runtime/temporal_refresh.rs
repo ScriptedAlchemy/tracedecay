@@ -1228,15 +1228,23 @@ async fn worker_recovery_exposes_blocker_and_drains_backlog() {
         tokio::time::timeout(Duration::from_secs(1), projector.retry_started.notified()).await;
     let recovering = registry.profile_worker_status(db.db_path()).await;
     projector.release_retry.notify_one();
-    let drained = tokio::time::timeout(Duration::from_secs(1), async {
-        registry.wait_profile_idle(db.db_path()).await;
-        let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db);
-        let running = store.running_session_refreshes().await;
-        let recovered = registry.profile_worker_status(db.db_path()).await;
-        (running, recovered)
+    // Recovery is complete when its durable projection obligation is gone,
+    // not when unrelated historical or summary work happens to go idle.
+    // Waiting for global quiescence can strand this focused assertion behind
+    // independent background capacity and the fleet's suite-wide timeout.
+    let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db);
+    let recovered = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let running = store.running_session_refreshes().await.unwrap();
+            let status = registry.profile_worker_status(db.db_path()).await;
+            if running.is_empty() && status.is_available() && status.backlog == 0 {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     })
-    .await;
-    let before_shutdown = registry.profile_worker_status(db.db_path()).await;
+    .await
+    .expect("panicked worker must recover and drain its durable backlog");
     // Shut down lease-owning workers before evaluating the recovery assertions.
     let stopped = tokio::time::timeout(
         tracedecay_session_runtime::DAEMON_CLIENT_DRAIN_DEADLINE + Duration::from_secs(1),
@@ -1259,11 +1267,6 @@ async fn worker_recovery_exposes_blocker_and_drains_backlog() {
         recovering.retry_class,
         Some(SessionTemporalRefreshRetryClass::Projector)
     );
-    let (running, recovered) = drained.unwrap_or_else(|error| {
-        panic!("restarted worker did not drain its backlog: {error}; {before_shutdown:?}");
-    });
-    assert!(running.unwrap().is_empty());
-    assert!(recovered.is_available());
     assert_eq!(recovered.backlog, 0);
     assert_eq!(recovered.blocker, None);
     assert_eq!(recovered.retry_class, None);
