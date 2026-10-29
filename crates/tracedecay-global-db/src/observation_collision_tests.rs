@@ -2080,42 +2080,30 @@ async fn refusal_cas_accepts_equivalent_cursor_json_spelling() {
     );
 }
 
-/// A codex observation in either its legacy route-context form or its current
-/// canonical form. Mirrors the workspace revision-compatibility fixtures: the
-/// two forms share one canonical observation id, and moving legacy → current
-/// is a recognized canonical payload revision replay.
-fn codex_revision_observation(
+/// One Cursor native record read at transcript offset `start`. A Cursor
+/// transcript can mirror a record at another offset, so two offsets share one
+/// canonical observation id and moving between them is a replayed occurrence.
+fn cursor_occurrence_observation(
     session_id: &SessionId,
     generation: u64,
     receipt_id: &str,
-    legacy: bool,
+    start: u64,
     content: &str,
 ) -> DurableObservationV1 {
-    let stable_record_id = ObservationId::new("record.codex.revision").unwrap();
-    let mut relations = CanonicalObservationRelationsV1::new(session_id.clone())
+    let stable_record_id = ObservationId::new("record.cursor.occurrence").unwrap();
+    let relations = CanonicalObservationRelationsV1::new(session_id.clone())
         .with_message_id(stable_record_id.clone());
-    if legacy {
-        relations = relations.with_turn_id(ObservationId::new("route.turn").unwrap());
-    }
     let session_fact = CanonicalObservationFactV1::Session {
-        project_path: Some(if legacy {
-            "/route/project".to_owned()
-        } else {
-            "/stable/project".to_owned()
-        }),
-        location_path: Some(if legacy {
-            "/route/location".to_owned()
-        } else {
-            "/stable/project".to_owned()
-        }),
-        transcript_path: legacy.then(|| "/route/rollout.jsonl".to_owned()),
+        project_path: Some("/stable/project".to_owned()),
+        location_path: Some("/stable/project".to_owned()),
+        transcript_path: Some("/stable/session.jsonl".to_owned()),
         title: None,
         started_at: None,
         ended_at: None,
-        source: Some("codex_rollout".to_owned()),
-        native_source: Some("codex".to_owned()),
+        source: Some("cursor_transcript".to_owned()),
+        native_source: Some("cursor".to_owned()),
         profile: None,
-        location_provenance: Some("rollout_context".to_owned()),
+        location_provenance: Some("transcript_record".to_owned()),
     };
     let message_fact = CanonicalObservationFactV1::Message {
         role: CanonicalMessageRoleV1::Assistant,
@@ -2123,10 +2111,10 @@ fn codex_revision_observation(
         model: None,
         timestamp: None,
     };
-    let range = ObservationSourceRangeV1::new(0, 1).unwrap();
+    let range = ObservationSourceRangeV1::new(start, start + 1).unwrap();
     let payload = serde_json::to_value(
         CanonicalObservationEnvelopeV1::new(
-            ProviderId::new("codex").unwrap(),
+            ProviderId::new("cursor").unwrap(),
             "message",
             stable_record_id.clone(),
             relations,
@@ -2137,7 +2125,7 @@ fn codex_revision_observation(
     )
     .unwrap();
     let source = ObservationSourceIdentityV1::for_provider(
-        ProviderId::new("codex").unwrap(),
+        ProviderId::new("cursor").unwrap(),
         session_id.clone(),
     )
     .unwrap();
@@ -2161,11 +2149,10 @@ fn codex_revision_observation(
 
 /// Codex P2: an earlier invalid rewrite records the refusal terminal, and a
 /// LATER candidate at the same generation and range that IS a recognized
-/// canonical payload revision replay must still converge as
-/// `CoveredDuplicate`. The terminal is bound to the exact refused candidate
+/// replayed occurrence must still converge as `CoveredDuplicate`. The terminal is bound to the exact refused candidate
 /// digest, so it can never blanket-reject every differing digest.
 #[asupersync::test]
-async fn canonical_payload_revision_replay_survives_an_earlier_refusal() {
+async fn replayed_occurrence_survives_an_earlier_refusal() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
@@ -2173,39 +2160,39 @@ async fn canonical_payload_revision_replay_survives_an_earlier_refusal() {
     let store = runtime
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
-    let session_id = SessionId::new("session.codex.revision-after-refusal").unwrap();
+    let session_id = SessionId::new("session.cursor.occurrence-after-refusal").unwrap();
 
-    // Retained legacy-form record.
-    let legacy = codex_revision_observation(
+    // Retained record, read where the transcript first held it.
+    let retained = cursor_occurrence_observation(
         &session_id,
         1,
-        "receipt.codex.revision.legacy",
-        true,
+        "receipt.cursor.occurrence.retained",
+        1,
         "stable authored content",
     );
     assert!(matches!(
         store
-            .persist_observation(anchored_write_for(legacy.clone(), None))
+            .persist_observation(anchored_write_for(retained.clone(), None))
             .await
             .unwrap(),
         ObservationPersistOutcome::Committed(_)
     ));
     let committed_cursor = store
-        .get_source_cursor(legacy.source(), legacy.scope())
+        .get_source_cursor(retained.source(), retained.scope())
         .await
         .unwrap();
 
     // Invalid rewrite at the rescan frontier (generation 2, from zero):
     // authored content changed, so it is a true identity collision and
     // records the refusal terminal.
-    let corrupted = codex_revision_observation(
+    let corrupted = cursor_occurrence_observation(
         &session_id,
         2,
-        "receipt.codex.revision.corrupted",
-        false,
+        "receipt.cursor.occurrence.corrupted",
+        0,
         "corrupted rewrite content",
     );
-    assert_eq!(corrupted.observation_id(), legacy.observation_id());
+    assert_eq!(corrupted.observation_id(), retained.observation_id());
     let refusal = store
         .persist_observation(anchored_write_for(corrupted.clone(), committed_cursor))
         .await
@@ -2220,21 +2207,23 @@ async fn canonical_payload_revision_replay_survives_an_earlier_refusal() {
         ),
         "{refusal:?}"
     );
-    assert_eq!(identity_collision_advance_count(&runtime, &legacy).await, 1);
+    assert_eq!(
+        identity_collision_advance_count(&runtime, &retained).await,
+        1
+    );
 
-    // The recognized revision replay arrives at the SAME generation and range
-    // as the refusal: same canonical id, same authored content, only the
-    // bounded legacy source-context fields differ from the retained form. Its
-    // digest differs from BOTH the retained and the refused digests, so the
-    // terminal must not swallow it.
-    let revision = codex_revision_observation(
+    // The replayed occurrence arrives at the SAME generation and range as the
+    // refusal: same canonical id, same authored content, only the evidence
+    // range differs from the retained form. Its digest differs from BOTH the
+    // retained and the refused digests, so the terminal must not swallow it.
+    let revision = cursor_occurrence_observation(
         &session_id,
         2,
-        "receipt.codex.revision.current",
-        false,
+        "receipt.cursor.occurrence.current",
+        0,
         "stable authored content",
     );
-    assert_eq!(revision.observation_id(), legacy.observation_id());
+    assert_eq!(revision.observation_id(), retained.observation_id());
     assert_ne!(
         revision.payload_reference().digest(),
         corrupted.payload_reference().digest()
@@ -2242,22 +2231,22 @@ async fn canonical_payload_revision_replay_survives_an_earlier_refusal() {
     let outcome = store
         .persist_observation(anchored_write_for(revision, None))
         .await
-        .expect("a recognized revision replay must not be terminally rejected");
+        .expect("a replayed occurrence must not be terminally rejected");
     assert!(
         matches!(outcome, ObservationPersistOutcome::CoveredDuplicate(_)),
         "{outcome:?}"
     );
-    // The retained row is still the legacy form, untouched.
+    // The retained row is still the first occurrence, untouched.
     let stored = store
-        .get_observation(legacy.observation_id())
+        .get_observation(retained.observation_id())
         .await
         .unwrap()
         .expect("retained observation row");
-    assert_eq!(stored.observation().payload(), legacy.payload());
+    assert_eq!(stored.observation().payload(), retained.payload());
 }
 
 #[asupersync::test]
-async fn an_accepted_canonical_payload_revision_revives_a_retired_record() {
+async fn an_accepted_replayed_occurrence_revives_a_retired_record() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
@@ -2266,41 +2255,41 @@ async fn an_accepted_canonical_payload_revision_revives_a_retired_record() {
         .registered_database(HostAdmissionScope::Profile)
         .unwrap();
     let store = registered.observation_store();
-    let session_id = SessionId::new("session.codex.revision-revival").unwrap();
-    let legacy = codex_revision_observation(
+    let session_id = SessionId::new("session.cursor.occurrence-revival").unwrap();
+    let retained = cursor_occurrence_observation(
         &session_id,
         1,
-        "receipt.codex.revival.legacy",
-        true,
+        "receipt.cursor.revival.retained",
+        1,
         "stable authored content",
     );
     registered
         .record_observation_source_presence(
-            legacy.source(),
-            legacy.scope(),
+            retained.source(),
+            retained.scope(),
             &[ObservationSourcePresenceV1 {
-                observation_id: legacy.observation_id().clone(),
-                generation: legacy.identity().generation(),
-                start_offset: 0,
+                observation_id: retained.observation_id().clone(),
+                generation: retained.identity().generation(),
+                start_offset: retained.identity().position().start(),
             }],
         )
         .await
         .unwrap();
     store
-        .persist_observation(anchored_write_for(legacy.clone(), None))
+        .persist_observation(anchored_write_for(retained.clone(), None))
         .await
         .unwrap();
     store
-        .project_observation(legacy.observation_id())
+        .project_observation(retained.observation_id())
         .await
         .unwrap();
     assert_eq!(table_count(&runtime, "lcm_raw_messages").await, 1);
     let retired_generation = ObservationSourceGenerationV1::new(2).unwrap();
     registered
         .begin_observation_source_rewrite(
-            legacy.source(),
-            legacy.scope(),
-            legacy.identity().generation(),
+            retained.source(),
+            retained.scope(),
+            retained.identity().generation(),
             retired_generation,
             0,
         )
@@ -2309,8 +2298,8 @@ async fn an_accepted_canonical_payload_revision_revives_a_retired_record() {
     assert_eq!(
         registered
             .complete_observation_source_rewrite(
-                legacy.source(),
-                legacy.scope(),
+                retained.source(),
+                retained.scope(),
                 retired_generation,
             )
             .await
@@ -2319,11 +2308,11 @@ async fn an_accepted_canonical_payload_revision_revives_a_retired_record() {
     );
     assert_eq!(table_count(&runtime, "lcm_raw_messages").await, 0);
 
-    let revision = codex_revision_observation(
+    let revision = cursor_occurrence_observation(
         &session_id,
         3,
-        "receipt.codex.revival.current",
-        false,
+        "receipt.cursor.revival.current",
+        0,
         "stable authored content",
     );
     registered
@@ -2333,13 +2322,13 @@ async fn an_accepted_canonical_payload_revision_revives_a_retired_record() {
             &[ObservationSourcePresenceV1 {
                 observation_id: revision.observation_id().clone(),
                 generation: revision.identity().generation(),
-                start_offset: 0,
+                start_offset: revision.identity().position().start(),
             }],
         )
         .await
         .unwrap();
     let expected = store
-        .get_source_cursor(legacy.source(), legacy.scope())
+        .get_source_cursor(retained.source(), retained.scope())
         .await
         .unwrap();
     let outcome = store
@@ -2352,18 +2341,18 @@ async fn an_accepted_canonical_payload_revision_revives_a_retired_record() {
     ));
     assert_eq!(table_count(&runtime, "lcm_raw_messages").await, 0);
     store
-        .project_observation(legacy.observation_id())
+        .project_observation(retained.observation_id())
         .await
         .unwrap();
     assert_eq!(table_count(&runtime, "lcm_raw_messages").await, 1);
     assert_eq!(
         store
-            .get_observation(legacy.observation_id())
+            .get_observation(retained.observation_id())
             .await
             .unwrap()
             .unwrap()
             .observation(),
-        &legacy
+        &retained
     );
 }
 
@@ -3024,7 +3013,7 @@ async fn failed_coverage_advance_leaves_no_visible_refusal_marker() {
         .execute(
             "INSERT INTO source_cursor_advances
                 (source_json, scope_json, coverage_json, reason, receipt_id)
-             VALUES (?1, ?2, ?3, 'canonical_payload_revision', ?4)",
+             VALUES (?1, ?2, ?3, 'replayed_occurrence', ?4)",
             params![
                 source_json.as_str(),
                 scope_json.as_str(),
@@ -3062,7 +3051,7 @@ async fn failed_coverage_advance_leaves_no_visible_refusal_marker() {
     );
     assert!(matches!(
         disagreement.stored().reason(),
-        CursorAdvanceLedgerReasonV1::Known(ObservationCoverageReason::CanonicalPayloadRevision)
+        CursorAdvanceLedgerReasonV1::Known(ObservationCoverageReason::ReplayedOccurrence)
     ));
     assert!(matches!(
         disagreement.stored().receipt_id(),

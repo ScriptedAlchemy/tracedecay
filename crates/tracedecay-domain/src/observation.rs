@@ -2710,20 +2710,17 @@ pub fn classify_observation_collision(
     }
 }
 
-/// Whether `candidate` is the current canonical form of a retained Codex or
-/// Cursor record written before route-only source context was removed, a
-/// Cursor native record replayed from another physical transcript occurrence,
-/// or a snapshot-host (Cline-family, Kiro) or Vibe record written before its
-/// location was projected as a leading `Session` fact.
+/// Whether `candidate` is `existing`'s native record observed again at another
+/// physical occurrence: a Cursor record mirrored at another transcript offset,
+/// or a snapshot-host (Cline-family, Kiro) or Vibe record whose projected
+/// location moved since it was retained.
 ///
-/// The compatibility is deliberately directional and field-bounded. It first
-/// binds both payloads to the same native record identity, then permits only
-/// the exact source-context fields those providers formerly synthesized, the
-/// Codex tool-invocation `arguments` that earlier capture dropped to null, and,
-/// for Cursor, the physical evidence range. Any authored fact, role, content,
-/// non-null arguments, native timestamp, or unrelated relation still differs
-/// after normalization and therefore remains an identity collision.
-pub fn is_canonical_payload_revision_replay(
+/// The comparison is deliberately field-bounded. It first binds both payloads
+/// to the same native record identity, then permits only the Cursor evidence
+/// range or the leading location-only `Session` fact's location. Any authored
+/// fact, role, content, timestamp, or relation still differs after
+/// normalization and therefore remains an identity collision.
+pub fn is_replayed_occurrence(
     existing: &DurableObservationV1,
     candidate: &DurableObservationV1,
 ) -> bool {
@@ -2767,208 +2764,65 @@ pub fn is_canonical_payload_revision_replay(
 
     let mut normalized = existing.payload().clone();
     let current = candidate.payload();
-    let legacy_context_changed = match candidate_envelope.provider().as_str() {
-        "codex" => normalize_codex_payload_revision(&mut normalized, current),
-        "cursor" => normalize_cursor_payload_revision(&mut normalized, current),
+    let occurrence_changed = match candidate_envelope.provider().as_str() {
+        "cursor" => adopt_cursor_evidence_range(&mut normalized, current),
         "cline" | "roo-code" | "kilo" | "kiro" | "vibe" => {
-            normalize_snapshot_location_revision(&mut normalized, current)
+            adopt_moved_snapshot_location(&mut normalized, current)
         }
         _ => false,
     };
-    legacy_context_changed && normalized == *current
+    occurrence_changed && normalized == *current
 }
 
-/// Snapshot hosts (Cline-family, Kiro) and Vibe now lead every canonical
-/// payload with a location-only `Session` fact; records admitted before that
-/// change carry none. The revision is directional: an existing payload gains
-/// the candidate's leading location session verbatim, or a retained
-/// location-only session may adopt a moved `location_path`/`location_provenance`.
-/// A candidate whose first fact is not a location-only session, or any deeper
-/// difference, stays an identity collision.
-fn normalize_snapshot_location_revision(existing: &mut Value, current: &Value) -> bool {
-    let (Some(existing_object), Some(current_object)) =
-        (existing.as_object_mut(), current.as_object())
-    else {
-        return false;
-    };
-    let (Some(existing_facts), Some(current_facts)) = (
-        existing_object
-            .get_mut("facts")
-            .and_then(Value::as_array_mut),
-        current_object.get("facts").and_then(Value::as_array),
+/// Snapshot hosts (Cline-family, Kiro) and Vibe lead every canonical payload
+/// with a location-only `Session` fact derived again on each rescan. A
+/// retained location-only session adopts the candidate's moved
+/// `location_path`/`location_provenance`; any deeper difference stays an
+/// identity collision.
+fn adopt_moved_snapshot_location(existing: &mut Value, current: &Value) -> bool {
+    let (Some(existing_session), Some(current_session)) = (
+        existing
+            .pointer_mut("/facts/0")
+            .and_then(Value::as_object_mut),
+        current.pointer("/facts/0").and_then(Value::as_object),
     ) else {
         return false;
     };
-    let Some(current_session) = current_facts.first().and_then(Value::as_object) else {
-        return false;
-    };
-    if current_session.get("kind").and_then(Value::as_str) != Some("session")
+    if !is_location_only_session_fact(existing_session)
         || !is_location_only_session_fact(current_session)
     {
         return false;
     }
-    let existing_is_session = existing_facts
-        .first()
-        .and_then(Value::as_object)
-        .is_some_and(|fact| fact.get("kind").and_then(Value::as_str) == Some("session"));
-    if existing_is_session {
-        if existing_facts.len() != current_facts.len() {
-            return false;
-        }
-        let Some(existing_session) = existing_facts.first_mut().and_then(Value::as_object_mut)
-        else {
-            return false;
-        };
-        if !is_location_only_session_fact(existing_session) {
-            return false;
-        }
-        let mut changed = false;
-        for key in ["location_path", "location_provenance"] {
-            changed |= replace_with_current_field(existing_session, current_session, key);
-        }
-        changed
-    } else {
-        if existing_facts.len() + 1 != current_facts.len() {
-            return false;
-        }
-        existing_facts.insert(0, current_facts[0].clone());
-        true
+    let mut changed = false;
+    for key in ["location_path", "location_provenance"] {
+        changed |= replace_with_current_field(existing_session, current_session, key);
     }
+    changed
 }
 
 /// A session fact may carry only the projected location. Fields the
 /// serializer always emits (`source`) or that are absent in this revision's
 /// shape must be unset or JSON null to count as location-only.
 fn is_location_only_session_fact(fact: &serde_json::Map<String, Value>) -> bool {
-    fact.iter().all(|(key, value)| {
-        matches!(
-            key.as_str(),
-            "kind" | "location_path" | "location_provenance"
-        ) || value.is_null()
-    })
+    fact.get("kind").and_then(Value::as_str) == Some("session")
+        && fact.iter().all(|(key, value)| {
+            matches!(
+                key.as_str(),
+                "kind" | "location_path" | "location_provenance"
+            ) || value.is_null()
+        })
 }
 
-fn normalize_codex_payload_revision(existing: &mut Value, current: &Value) -> bool {
-    let (Some(existing_object), Some(current_object)) =
-        (existing.as_object_mut(), current.as_object())
-    else {
-        return false;
-    };
-    let mut changed =
-        remove_legacy_relation_when_current_absent(existing_object, current_object, "turn_id");
-    let (Some(existing_facts), Some(current_facts)) = (
-        existing_object
-            .get_mut("facts")
-            .and_then(Value::as_array_mut),
-        current_object.get("facts").and_then(Value::as_array),
-    ) else {
-        return false;
-    };
-    if existing_facts.len() != current_facts.len() {
-        return false;
-    }
-    for (existing_fact, current_fact) in existing_facts.iter_mut().zip(current_facts) {
-        let (Some(existing_fact), Some(current_fact)) =
-            (existing_fact.as_object_mut(), current_fact.as_object())
-        else {
-            return false;
-        };
-        if existing_fact.get("kind") != current_fact.get("kind") {
-            return false;
-        }
-        match current_fact.get("kind").and_then(Value::as_str) {
-            Some("session") => {
-                if current_fact.contains_key("transcript_path") {
-                    return false;
-                }
-                for key in ["project_path", "location_path", "transcript_path"] {
-                    changed |= replace_with_current_field(existing_fact, current_fact, key);
-                }
-            }
-            Some("tool_invocation")
-                if existing_fact.get("arguments").is_none_or(Value::is_null) =>
-            {
-                changed |= replace_with_current_field(existing_fact, current_fact, "arguments");
-            }
-            Some("provider_usage") if is_unknown_absent_model(current_fact.get("model")) => {
-                changed |= replace_with_current_field(existing_fact, current_fact, "model");
-            }
-            Some("uncorrelated_usage")
-                if current_adds_only_missing_model(existing_fact, current_fact) =>
-            {
-                changed |=
-                    replace_with_current_field(existing_fact, current_fact, "missing_dimensions");
-            }
-            _ => {}
-        }
-    }
-    changed
-}
-
-fn normalize_cursor_payload_revision(existing: &mut Value, current: &Value) -> bool {
-    let (Some(existing_object), Some(current_object)) =
-        (existing.as_object_mut(), current.as_object())
-    else {
-        return false;
-    };
-    let mut changed =
-        remove_legacy_relation_when_current_absent(existing_object, current_object, "thread_id");
-    let (Some(existing_facts), Some(current_facts)) = (
-        existing_object
-            .get_mut("facts")
-            .and_then(Value::as_array_mut),
-        current_object.get("facts").and_then(Value::as_array),
-    ) else {
-        return false;
-    };
-    if existing_facts.len() != current_facts.len() {
-        return false;
-    }
-    for (existing_fact, current_fact) in existing_facts.iter_mut().zip(current_facts) {
-        let (Some(existing_fact), Some(current_fact)) =
-            (existing_fact.as_object_mut(), current_fact.as_object())
-        else {
-            return false;
-        };
-        if existing_fact.get("kind") != current_fact.get("kind") {
-            return false;
-        }
-        if current_fact.get("kind").and_then(Value::as_str) == Some("message") {
-            for key in ["model", "timestamp"] {
-                if !current_fact.contains_key(key) {
-                    changed |= existing_fact.remove(key).is_some();
-                }
-            }
-        }
-    }
+/// A Cursor transcript can mirror one native record at another offset, so the
+/// same record arrives again with a different physical evidence range.
+fn adopt_cursor_evidence_range(existing: &mut Value, current: &Value) -> bool {
     let (Some(existing_evidence), Some(current_evidence)) = (
-        existing_object
-            .get_mut("evidence")
-            .and_then(Value::as_object_mut),
-        current_object.get("evidence").and_then(Value::as_object),
+        existing.get_mut("evidence").and_then(Value::as_object_mut),
+        current.get("evidence").and_then(Value::as_object),
     ) else {
         return false;
     };
-    if !current_evidence.contains_key("native_timestamp") {
-        changed |= existing_evidence.remove("native_timestamp").is_some();
-    }
-    changed |= replace_with_current_field(existing_evidence, current_evidence, "range");
-    changed
-}
-
-fn remove_legacy_relation_when_current_absent(
-    existing: &mut serde_json::Map<String, Value>,
-    current: &serde_json::Map<String, Value>,
-    relation: &str,
-) -> bool {
-    let Some(existing_relations) = existing.get_mut("relations").and_then(Value::as_object_mut)
-    else {
-        return false;
-    };
-    let Some(current_relations) = current.get("relations").and_then(Value::as_object) else {
-        return false;
-    };
-    !current_relations.contains_key(relation) && existing_relations.remove(relation).is_some()
+    replace_with_current_field(existing_evidence, current_evidence, "range")
 }
 
 fn replace_with_current_field(
@@ -2989,31 +2843,6 @@ fn replace_with_current_field(
         }
     }
     true
-}
-
-fn is_unknown_absent_model(model: Option<&Value>) -> bool {
-    model.is_some_and(|model| {
-        model.get("state").and_then(Value::as_str) == Some("unknown")
-            && model.get("reason").and_then(Value::as_str) == Some("absent")
-    })
-}
-
-fn current_adds_only_missing_model(
-    existing: &serde_json::Map<String, Value>,
-    current: &serde_json::Map<String, Value>,
-) -> bool {
-    let (Some(existing_dimensions), Some(current_dimensions)) = (
-        existing.get("missing_dimensions").and_then(Value::as_array),
-        current.get("missing_dimensions").and_then(Value::as_array),
-    ) else {
-        return false;
-    };
-    let mut expected = existing_dimensions.clone();
-    expected.push(Value::String("model".to_owned()));
-    expected.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
-    let mut actual = current_dimensions.clone();
-    actual.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
-    expected == actual
 }
 
 fn validate_sha256(value: &str, field: &'static str) -> Result<(), ObservationContractError> {

@@ -933,7 +933,7 @@ fn canonical_cursor_advance_receipt_remains_typed_after_authority_lookup() {
         write.observation().identity().ordering_domain(),
         Some(write.next_cursor().clone()),
         ObservationSourceRangeV1::new(1, 2).unwrap(),
-        ObservationCoverageReason::CanonicalPayloadRevision,
+        ObservationCoverageReason::ReplayedOccurrence,
         write.observation().receipt().clone(),
     )
     .unwrap();

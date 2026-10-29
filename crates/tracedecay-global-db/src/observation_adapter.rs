@@ -13,8 +13,8 @@ use tracedecay_domain::{
     RetrievalAnchorId, RetrievalAnchorRecord, SanitizationReceiptV1, canonical_json_bytes,
     canonical_json_bytes_and_sha256, canonical_sha256, classify_observation_collision,
     cline_native_source_successor_id, cline_task_native_observation_id, codex_rollout_siblings,
-    is_canonical_payload_revision_replay, is_codex_rollout_source,
-    prove_cline_native_source_transition, sha256_hex_suffix,
+    is_codex_rollout_source, is_replayed_occurrence, prove_cline_native_source_transition,
+    sha256_hex_suffix,
 };
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
@@ -382,12 +382,12 @@ impl GlobalDbObservationStore {
                     classify_observation_collision(retained.observation(), observation)
                 })
             });
-        let canonical_payload_revision = pending.is_none()
+        let replayed_occurrence = pending.is_none()
             && existing.as_ref().is_some_and(|retained| {
-                is_canonical_payload_revision_replay(retained.observation(), observation)
+                is_replayed_occurrence(retained.observation(), observation)
             });
         if collision == Some(ObservationCollisionOutcomeV1::IdentityCollision)
-            && !canonical_payload_revision
+            && !replayed_occurrence
         {
             if pending.is_some() {
                 return Ok(PreparedObservationPersist::AwaitsDurablePredecessor(
@@ -451,7 +451,7 @@ impl GlobalDbObservationStore {
                 observation.payload_reference().digest().clone(),
             ));
         }
-        if canonical_payload_revision {
+        if replayed_occurrence {
             return Ok(PreparedObservationPersist::Submit(Box::new(write)));
         }
         let same_identity = pending
@@ -2148,7 +2148,7 @@ fn persist_outcome_from_submit(
         RuntimeSubmitOutcomeV1::Committed { .. }
         | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
         | RuntimeSubmitOutcomeV1::ExactReplay { .. }
-            if is_canonical_payload_revision_replay(stored.observation(), candidate)
+            if is_replayed_occurrence(stored.observation(), candidate)
                 || (stored.observation().identity() != candidate.identity()
                     && classify_observation_collision(stored.observation(), candidate)
                         == ObservationCollisionOutcomeV1::ExactDuplicate) =>
