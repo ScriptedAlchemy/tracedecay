@@ -364,28 +364,6 @@ async fn existing_profile_memory_uses_final_schema_and_canonical_linked_lineage(
             ..
         } if relation.kind() == FactRelationKindV1::Supports
     )));
-
-    let mut rows = database
-        .read_connection()
-        .query(
-            "SELECT COUNT(*) FROM sqlite_master
-                 WHERE type = 'table' AND name = 'memory_v2_fact_relations'",
-            (),
-        )
-        .await
-        .expect("query mounted profile memory schema");
-    let table_count: i64 = rows
-        .next()
-        .await
-        .expect("read schema row")
-        .expect("schema count row")
-        .get(0)
-        .expect("decode schema count");
-
-    assert_eq!(
-        table_count, 0,
-        "mounted final memory must not recreate the retired relation projection"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

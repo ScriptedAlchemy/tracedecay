@@ -1383,7 +1383,7 @@ pub(crate) fn refusal_problem(result: &Value) -> &Value {
 /// the semantic-error mark the transport later renders as `isError`, and a
 /// result rebuilt from the transport's reply carries `isError` itself.
 pub(crate) fn tool_result_problem(result: &ToolResult) -> &Value {
-    if result.semantic_error() != Some(true) {
+    if !result.semantic_error() {
         return refusal_problem(&result.value);
     }
     let problem = &result.value["structuredContent"]["problem"];

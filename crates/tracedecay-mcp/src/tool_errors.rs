@@ -23,42 +23,6 @@ pub const TOOL_ARGUMENTS_INVALID: &str = "tool_arguments_invalid";
 pub const SESSION_SYNC_CANCELLED_BEFORE_ADMISSION: &str = "session_sync_cancelled_before_admission";
 pub const SESSION_SYNC_DEADLINE_EXCEEDED: &str = "session_sync_deadline_exceeded";
 
-fn plain_text_tool_failure(text: &str) -> bool {
-    text.starts_with("git error:") || text.starts_with("git diff failed:")
-}
-
-fn value_has_semantic_error(value: &Value) -> bool {
-    value
-        .get("content")
-        .and_then(Value::as_array)
-        .is_some_and(|content| {
-            content.iter().any(|item| {
-                let Some(text) = item.get("text").and_then(Value::as_str) else {
-                    return false;
-                };
-                let trimmed = text.trim_start();
-                if plain_text_tool_failure(trimmed) {
-                    return true;
-                }
-                if !trimmed.starts_with('{') {
-                    return false;
-                }
-                let Ok(payload) = serde_json::from_str::<Value>(trimmed) else {
-                    return false;
-                };
-                payload.get("success").and_then(Value::as_bool) == Some(false)
-                    || payload.get("error").is_some_and(|error| !error.is_null())
-                    || payload
-                        .get("failed")
-                        .and_then(Value::as_u64)
-                        .is_some_and(|failed| failed > 0)
-                    || payload
-                        .get("exit_code")
-                        .is_some_and(|code| !code.is_null() && code.as_i64() != Some(0))
-            })
-        })
-}
-
 /// Projects a hook-runtime error's typed context for test assertions.
 ///
 /// The status is whatever the admission authority reported, carried through
@@ -81,46 +45,23 @@ pub(crate) fn structured_hook_error_data(error: &TraceDecayError) -> Option<Valu
     }))
 }
 
-/// Whether an MCP tool result should be classified as a semantic failure for
-/// analytics/`isError` purposes.
-///
-/// Handlers that build results structurally (e.g. edit tools, whose result
-/// struct carries a `success: bool`) call
-/// [`ToolResult::with_semantic_error`] to record the outcome directly, that
-/// marker is authoritative and wins over the rendered text. Handlers that
-/// have not been migrated to set the marker leave it `None`, and this falls
-/// back to the pre-existing text-based heuristic (`value_has_semantic_error`)
-/// that sniffs the rendered response text for JSON failure shapes or known
-/// plain-text failure prefixes.
+/// Whether an MCP tool result is a semantic failure for analytics/`isError`
+/// purposes. The handler-set structural marker
+/// ([`ToolResult::with_semantic_error`]) is the only signal; the rendered
+/// text is never inspected.
 #[must_use]
 pub fn tool_result_has_semantic_error(result: &ToolResult) -> bool {
-    result
-        .semantic_error()
-        .unwrap_or_else(|| value_has_semantic_error(&result.value))
+    result.semantic_error()
 }
 
 /// Reason to record for a semantically-failed tool result, for the
-/// `failure_reason` analytics field. Prefers the handler-supplied structural
+/// `failure_reason` analytics field: the handler-supplied structural
 /// [`ToolResult::failure_message`] (e.g. an edit result's `message`, such as
-/// "`old_str` not found"); falls back to the rendered response's first text
-/// block for handlers that only signal failure via `value_has_semantic_error`
-/// text heuristics. Callers must only invoke this once the result is already
-/// known to be a semantic failure, it does not itself re-check that.
+/// "`old_str` not found"). Callers must only invoke this once the result is
+/// already known to be a semantic failure, it does not itself re-check that.
 #[must_use]
 pub fn semantic_failure_reason(result: &ToolResult) -> Option<String> {
-    if let Some(message) = result.failure_message() {
-        return Some(message.to_string());
-    }
-    result
-        .value
-        .get("content")
-        .and_then(Value::as_array)
-        .and_then(|content| {
-            content
-                .iter()
-                .find_map(|item| item.get("text").and_then(Value::as_str))
-        })
-        .map(|text| text.trim_start().to_string())
+    result.failure_message().map(str::to_owned)
 }
 
 /// The MCP `structuredContent` member of a tool result that refuses with
