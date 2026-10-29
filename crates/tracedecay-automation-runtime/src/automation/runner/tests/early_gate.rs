@@ -11,7 +11,7 @@ use super::super::session_reflector::run_session_reflector_for_store_with_public
 use super::super::*;
 use crate::automation::backend::{AgentTaskBackend, AgentTaskRequest, AgentTaskResponse};
 use crate::automation::config::{
-    AutomationBackend, AutomationHostMode, AutomationTaskConfig, AutomationTaskSet,
+    AutomationBackendV1, AutomationHostModeV1, AutomationTaskSetV1, AutomationTaskSettingsV1,
 };
 use crate::automation::lifecycle::AutomationRunLedgerPublication;
 use crate::automation::run_ledger::AutomationRunStatus;
@@ -70,23 +70,23 @@ impl AgentTaskBackend for RecordingBackend {
     }
 }
 
-fn scheduled_disabled_config() -> AutomationConfig {
-    AutomationConfig {
+fn scheduled_disabled_config() -> AutomationSettingsV1 {
+    AutomationSettingsV1 {
         enabled: false,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            session_reflector: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            session_reflector: AutomationTaskSettingsV1 {
                 enabled: false,
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            skill_writer: AutomationTaskConfig {
+            skill_writer: AutomationTaskSettingsV1 {
                 enabled: false,
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     }
 }
 

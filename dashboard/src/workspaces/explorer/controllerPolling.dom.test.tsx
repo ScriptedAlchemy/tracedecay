@@ -238,13 +238,10 @@ describe('explorer run-status polling', () => {
     expect(result?.outcome).toBe('transport');
     expect(result?.outcome === 'transport' ? result.state : null).toBe('offline');
     // The failure is on screen, and no lane is pretending to still be working.
-    // The semantic lane keeps its own standing condition: a daemon that cannot
-    // be reached says nothing about a source that was never registered.
     const byLane = new Map(view.result.current.lanes.map((lane) => [lane.lane, lane.state]));
     expect(byLane.get('code')).toBe('offline');
     expect(byLane.get('sessions')).toBe('offline');
     expect(byLane.get('knowledge')).toBe('offline');
-    expect(byLane.get('semantic')).toBe('unregistered');
     expect(view.result.current.anyPending).toBe(false);
   });
 

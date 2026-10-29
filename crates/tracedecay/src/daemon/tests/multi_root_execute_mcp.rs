@@ -120,7 +120,7 @@ fn assert_problem(
     retry: &str,
     legal_actions: &[&str],
 ) {
-    assert_eq!(result.semantic_error(), Some(true));
+    assert!(result.semantic_error());
     let body = envelope(result);
     assert_eq!(body["binding_id"], "binding.http.multi_root.execute.v1");
     let application = &body["application"];
@@ -405,7 +405,7 @@ async fn run_multi_root_execute() {
         execute_arguments(SCOPE_SET_ID, 1, &digest, 0),
     )
     .await;
-    assert_eq!(page_zero.semantic_error(), None);
+    assert!(!page_zero.semantic_error());
     let page_zero_body = envelope(&page_zero);
     assert_eq!(
         page_zero_body["binding_id"],

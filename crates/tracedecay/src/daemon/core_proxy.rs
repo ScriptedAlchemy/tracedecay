@@ -587,11 +587,11 @@ pub(crate) async fn resolve_daemon_initialize_route(
                 identity,
             ) => {
                 // An initialize route has no retained configuration authority.
-                // Never revive legacy-file fallback here, but a fresh repo with
-                // no published snapshot follows the schema default (auto-init
-                // enabled), not fail-closed: treating a missing snapshot as
-                // "disabled" contradicted the config default and left explicit
-                // initialize-roots repos unable to open at all.
+                // A fresh repo with no published snapshot follows the schema
+                // default (auto-init enabled), not fail-closed: treating a
+                // missing snapshot as "disabled" contradicted the config
+                // default and left explicit initialize-roots repos unable to
+                // open at all.
                 let allow_init = tracedecay_project::config::cached_sync_config(
                     profile.data_dir(),
                     &identity.worktree_root,

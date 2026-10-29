@@ -318,9 +318,7 @@ impl AgentIntegration for DroidIntegration {
                 &ctx.catalog_profiles.serve_args(self.id()),
             ),
             HostComponentV1::Core => droid_hooks_registration_state(&ctx.home),
-            HostComponentV1::Agent | HostComponentV1::OperatorMcp => {
-                HostBundleRegistrationStateV1::Missing
-            }
+            HostComponentV1::Agent => HostBundleRegistrationStateV1::Missing,
         }
     }
 

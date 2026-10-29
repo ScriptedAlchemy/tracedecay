@@ -4,7 +4,7 @@ use super::activation::latest_component_activation_states;
 use super::audit::{audit_from_transaction, insert_dry_run_audit_event};
 use super::mutation::{
     build_configuration_commit, commit_configuration_transaction, commit_direct_in_transaction,
-    current_state_from_transaction, derived_identifier, map_store_error, project_rollback_snapshot,
+    current_state_from_transaction, derived_identifier, map_store_error,
     protected_change_snapshot_v1, replay_control_receipt, result_revision_id,
     rollback_redacted_changes, validate_apply_request, validate_plan_evidence,
 };
@@ -334,7 +334,7 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                         .map_err(ConfigurationError::validation)?,
                         "configuration rollback plan id",
                     )?;
-                    let snapshot = project_rollback_snapshot(target.snapshot)?;
+                    let snapshot = target.snapshot;
                     let changes = rollback_redacted_changes(&current.snapshot, &snapshot)?;
                     if changes.is_empty() {
                         return Err(ConfigurationError::PlanStale);
@@ -454,7 +454,7 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                         .await
                         .map_err(map_store_error)?
                         .ok_or(ConfigurationError::PlanStale)?;
-                    let snapshot = project_rollback_snapshot(target.snapshot)?;
+                    let snapshot = target.snapshot;
                     if rollback_redacted_changes(&current.snapshot, &snapshot)?
                         != plan.redacted_changes
                     {

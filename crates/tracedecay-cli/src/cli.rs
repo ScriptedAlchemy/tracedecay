@@ -76,10 +76,6 @@ pub enum HostBundleComponentArg {
     Core,
     Agent,
     ContextMcp,
-    /// Retired name of `context-mcp`, still accepted on the hosts that
-    /// offered it.
-    #[value(hide = true)]
-    OperatorMcp,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -332,12 +328,6 @@ pub enum Commands {
         #[arg(long, requires = "agent")]
         local: bool,
     },
-    /// PreToolUse hook handler (called by Claude Code, not by users directly)
-    #[command(name = "hook-pre-tool-use", hide = true)]
-    HookPreToolUse,
-    /// UserPromptSubmit hook handler (resets session counter)
-    #[command(name = "hook-prompt-submit", hide = true)]
-    HookPromptSubmit,
     /// Stop hook handler (prints session token savings)
     #[command(name = "hook-stop", hide = true)]
     HookStop,
@@ -353,24 +343,12 @@ pub enum Commands {
     /// Claude Code SubagentStart hook handler (called by Claude Code, not by users directly)
     #[command(name = "hook-claude-subagent-start", hide = true)]
     HookClaudeSubagentStart,
-    /// Kiro PreToolUse hook handler (called by Kiro, not by users directly)
-    #[command(name = "hook-kiro-pre-tool-use", hide = true)]
-    HookKiroPreToolUse,
     /// Kiro UserPromptSubmit hook handler (called by Kiro, not by users directly)
     #[command(name = "hook-kiro-prompt-submit", hide = true)]
     HookKiroPromptSubmit,
-    /// Kiro PostToolUse hook handler for incremental sync
-    #[command(name = "hook-kiro-post-tool-use", hide = true)]
-    HookKiroPostToolUse,
-    /// Cursor subagentStart hook handler (called by Cursor, not by users directly)
-    #[command(name = "hook-cursor-subagent-start", hide = true)]
-    HookCursorSubagentStart,
     /// Cursor postToolUse hook handler (called by Cursor, not by users directly)
     #[command(name = "hook-cursor-post-tool-use", hide = true)]
     HookCursorPostToolUse,
-    /// Cursor beforeSubmitPrompt hook handler (called by Cursor, not by users directly)
-    #[command(name = "hook-cursor-before-submit-prompt", hide = true)]
-    HookCursorBeforeSubmitPrompt,
     /// Cursor preCompact hook handler (called by Cursor, not by users directly)
     #[command(name = "hook-cursor-pre-compact", hide = true)]
     HookCursorPreCompact,
@@ -458,9 +436,7 @@ pub enum Commands {
         /// List every tool with its full schema instead of stubbing the tools
         /// outside the always-loaded set. For hosts that defer tool schemas
         /// themselves, such as Claude Code.
-        // The Claude plugin deployed by 1.0.0-beta.83 passes
-        // `--claude-code-tool-search`, which served the same full list.
-        #[arg(long, alias = "claude-code-tool-search")]
+        #[arg(long)]
         full_tool_list: bool,
         /// List only the tools in this catalog profile (`default`, `compact`,
         /// `administrative`, `host-limited`). Unlisted tools stay callable by

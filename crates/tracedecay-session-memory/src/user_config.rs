@@ -2,7 +2,7 @@
 //!
 //! All fields have defaults so a missing file or missing fields are handled
 //! gracefully. Keys other profile readers own (e.g. GitHub repositories) are
-//! preserved; retired keys are dropped at load and erased by the next write.
+//! preserved.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -12,26 +12,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::canonical_text::default_true;
 
-use tracedecay_automation::config::AutomationConfig;
+use tracedecay_automation::config::AutomationSettingsV1;
 use tracedecay_runtime_core::storage::{append_lock_path, retry_transient_file_op};
-
-/// Keys canonical `user.*` configuration settings own, and state of the
-/// retired worldwide counter (its upload opt-in, pending amount and flush
-/// timestamps) and status worldwide/flag decoration. They are never read from
-/// this file; an older profile that still carries them loads normally and the
-/// next write erases them. The pending amount is dropped without an upload.
-const RETIRED_KEYS: [&str; 10] = [
-    "upload_enabled",
-    "pending_upload",
-    "last_upload_at",
-    "last_flush_attempt_at",
-    "watcher_debounce",
-    "extraction_timeout_secs",
-    "last_worldwide_total",
-    "last_worldwide_fetch_at",
-    "cached_country_flags",
-    "last_flags_fetch_at",
-];
 
 /// User-level tracedecay configuration.
 #[derive(Debug, Serialize, Deserialize)]
@@ -78,8 +60,8 @@ pub struct UserConfig {
 
     /// Global defaults for self-improvement automation. Project/profile
     /// dashboard sidecars may override these values.
-    #[serde(default, skip_serializing_if = "AutomationConfig::is_default")]
-    pub automation: AutomationConfig,
+    #[serde(default, skip_serializing_if = "AutomationSettingsV1::is_default")]
+    pub automation: AutomationSettingsV1,
 
     /// Whether lifecycle hooks inject fact-store memory into agent context
     /// (session digests, prompt-gated recall, the Cursor memory rule).
@@ -103,7 +85,7 @@ impl Default for UserConfig {
             agent_catalog_profile: BTreeMap::new(),
             last_installed_version: String::new(),
             previous_version: String::new(),
-            automation: AutomationConfig::default(),
+            automation: AutomationSettingsV1::default(),
             memory_injection_enabled: true,
             extra: BTreeMap::new(),
         }
@@ -267,14 +249,7 @@ impl UserConfig {
     /// silently turn a stored opt-out (dashboard, memory injection) back on
     /// and drop the tracked hosts.
     pub fn load(profile_root: &Path) -> std::result::Result<Self, ConfigSaveError> {
-        read_profile_config::<Self>(profile_root).map(Self::without_retired_keys)
-    }
-
-    fn without_retired_keys(mut self) -> Self {
-        for key in RETIRED_KEYS {
-            self.extra.remove(key);
-        }
-        self
+        read_profile_config::<Self>(profile_root)
     }
 
     /// Saves the user-level config file atomically.
@@ -591,19 +566,14 @@ mod tests {
     }
 
     #[test]
-    fn save_erases_retired_keys_and_preserves_other_readers_keys() {
+    fn save_preserves_other_readers_keys() {
         let temp = TempDir::new().unwrap();
         let profile = temp.path();
         let path = config_path(profile);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "upload_enabled = true\npending_upload = 4200\nlast_upload_at = 1711375100\n\
-             last_flush_attempt_at = 1711375150\n\
-             watcher_debounce = \"9s\"\nextraction_timeout_secs = 5\n\
-             last_worldwide_total = 1000000\nlast_worldwide_fetch_at = 1711375200\n\
-             cached_country_flags = [\"🇺🇸\", \"🇩🇪\"]\nlast_flags_fetch_at = 1711375200\n\
-             future_key = \"keep-me\"\n[future_table]\nflag = true\n",
+            "future_key = \"keep-me\"\n[future_table]\nflag = true\n",
         )
         .unwrap();
 
@@ -618,23 +588,6 @@ mod tests {
         assert!(saved.contains("[future_table]"));
         assert!(saved.contains("flag = true"));
         assert!(saved.contains("last_version_check_at = 3"));
-        for retired in [
-            "upload_enabled",
-            "pending_upload",
-            "last_upload_at",
-            "last_flush_attempt_at",
-            "watcher_debounce",
-            "extraction_timeout_secs",
-            "last_worldwide_total",
-            "last_worldwide_fetch_at",
-            "cached_country_flags",
-            "last_flags_fetch_at",
-        ] {
-            assert!(
-                !saved.contains(retired),
-                "{retired} survived a write:\n{saved}"
-            );
-        }
     }
 
     #[test]

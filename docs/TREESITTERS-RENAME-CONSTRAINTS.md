@@ -30,12 +30,8 @@ migration (`docs/RUST-PARSER-MIGRATION.md`), not renaming them.
 | Build-script coupling | Upstream's build script compiles vendored C/C++ grammars under `.cargo/config.toml` `CFLAGS=-DNDEBUG` | `CHANGELOG.md:582-583` |
 | API tracedecay consumes | `all_languages()`, `markdown::LANGUAGE`, `markdown::inline::LANGUAGE` | `ts_provider.rs:27`, `markdown_extractor.rs:70,139` |
 
-The project *itself* rebranded tracedecay → tracedecay (lib/bin name is `tracedecay`,
-`Cargo.toml:97,100`; version reset at `CHANGELOG.md:12`) and carries extensive
-pre-rebrand compatibility shims (legacy `.tracedecay/` dir at `src/config.rs:16`,
-legacy archive names at `src/cloud.rs:140`, legacy `TRACEDECAY_*` env at
-`src/config.rs:152`). **Only the grammar-bundle dependency retains the legacy
-`tracedecay-` prefix, and that is intentional** (`AGENTS.md:20`).
+Only the grammar-bundle dependency retains the `tracedecay-` prefix, and that is
+intentional (`AGENTS.md:20`).
 
 ## Why it must keep the name (constraints)
 
@@ -98,24 +94,6 @@ scripts that hardcode the `aovestdipaperino/tracedecay-large-treesitters` git UR
 `tracedecay-large/medium/lite` dependencies entirely in favour of in-tree Rust
 parsers. Eliminating the dependency removes the naming question outright and is the
 recommended end state rather than a rename.
-
-## Recommended compatibility-policy wording
-
-Add the following (verbatim or adapted) to the compatibility policy / `AGENTS.md`
-`Learned Workspace Facts`, expanding on the existing one-liner at `AGENTS.md:20`:
-
-> **`tracedecay-large-treesitters` is an external upstream dependency and must not be
-> renamed, vendored, or forked.** The crate name, git repo
-> (`aovestdipaperino/tracedecay-large-treesitters`), crates.io publication, build
-> script, and vendored grammars are owned by the upstream and intentionally kept on
-> the legacy `tracedecay-*` name despite the tracedecay rebrand. The `large → medium
-> → lite` tier names are coupled inside the upstream's own manifests, so the three
-> crates rise and fall together. Renaming is only safe if (a) the upstream renames
-> all three crates and republishes, or (b) the project explicitly adopts a
-> maintained fork as a policy change. Until then, keep the exact name in
-> `Cargo.toml`, keep import sites as `tracedecay_large_treesitters::*`, and prefer the
-> Rust-parser migration (`docs/RUST-PARSER-MIGRATION.md`) as the path to eventually
-> removing the dependency rather than renaming it.
 
 ## Verification trail
 

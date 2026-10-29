@@ -13,10 +13,11 @@ use tracedecay_contracts::{
 use tracedecay_daemon_identity::profile_identity;
 use tracedecay_domain::{TemporalModeV1, UtcMicros};
 use tracedecay_session_memory::context::ResolvedSessionIdentity;
+use tracedecay_session_memory::session::SessionRefreshServicePort;
 use tracedecay_session_runtime::retained::{
     ProfileRetainedAuthoritiesV1, ProfileRetainedConnectionAuthorityV1,
-    RetainedSessionRefreshPortV1, execute_profile_retained_application,
-    profile_retained_connection_authority, profile_session_retrieval_serving_identity,
+    execute_profile_retained_application, profile_retained_connection_authority,
+    profile_session_retrieval_serving_identity,
 };
 use tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot;
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
@@ -73,7 +74,7 @@ async fn execute_refresh(
     profile_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     session_identity: &ResolvedSessionIdentity,
     connection: &ProfileRetainedConnectionAuthorityV1,
-    refresh: Option<&dyn RetainedSessionRefreshPortV1>,
+    refresh: Option<&dyn SessionRefreshServicePort>,
     request: RetainedSurfaceRequestV1,
     label: &str,
 ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, ApplicationProblem> {

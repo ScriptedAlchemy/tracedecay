@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { hitEvidence, laneGrade } from './evidence.ts';
-import { semanticLane, type ExplorerLaneReadModel } from './laneModel.ts';
+import type { ExplorerLaneReadModel } from './laneModel.ts';
 import { codeHits, knowledgeHits, sessionHits } from './model.ts';
 
 describe('hitEvidence', () => {
@@ -45,6 +45,5 @@ describe('laneGrade', () => {
     expect(laneGrade(pending)).toBeNull();
     expect(laneGrade(locked)).toBe('UNAVAILABLE');
     expect(laneGrade({ state: 'offline', lane: 'sessions' })).toBe('UNAVAILABLE');
-    expect(laneGrade(semanticLane())).toBe('UNAVAILABLE');
   });
 });

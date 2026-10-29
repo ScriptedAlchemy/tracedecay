@@ -14,8 +14,9 @@ use tracedecay_contracts::{
     RetainedMemoryExecutionPortV1, RetainedSurfaceExecutionErrorV1, RetainedSurfacePortsV1,
 };
 use tracedecay_domain::{FactOwnerV1, ManifestDigest, ProjectId};
+use tracedecay_session_memory::session::SessionRefreshServicePort;
 use tracedecay_session_runtime::retained::{
-    ProjectRetainedSessionAuthoritiesV1, RetainedSessionRefreshPortV1, map_execution_error,
+    ProjectRetainedSessionAuthoritiesV1, map_execution_error,
 };
 use tracedecay_store_runtime::retained_memory::{
     MemoryTargetAccessV1, RetainedMemoryTargetAuthorityV1, RetainedMemoryTargetV1,
@@ -44,7 +45,7 @@ pub struct ProductionRetainedAuthoritiesV1 {
     pub mounted_session_store_id: Option<tracedecay_session_memory::context::SessionStoreId>,
     pub mounted_session_root_id: Option<tracedecay_session_memory::context::SessionRootId>,
     pub registered_session_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
-    pub project_refresh: Option<Arc<dyn RetainedSessionRefreshPortV1>>,
+    pub project_refresh: Option<Arc<dyn SessionRefreshServicePort>>,
     pub project_retrieval: Option<
         Arc<dyn tracedecay_session_runtime::session_retrieval::SessionApplicationRetrievalPortV1>,
     >,

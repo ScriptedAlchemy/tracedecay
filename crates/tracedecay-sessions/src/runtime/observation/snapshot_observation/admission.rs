@@ -222,8 +222,8 @@ where
 /// complete source-generation batches.
 ///
 /// This deliberately re-reads complete snapshots and derives a new source
-/// generation from their content; it neither consults nor advances legacy parse
-/// offsets. `max_new_bytes` is one logical source-byte budget for the complete
+/// generation from their content; it neither consults nor advances append-only
+/// parse offsets. `max_new_bytes` is one logical source-byte budget for the complete
 /// sweep. A source the store permanently refuses is quarantined in `sweep`
 /// and the sweep moves on to the next one.
 #[allow(clippy::too_many_arguments)]

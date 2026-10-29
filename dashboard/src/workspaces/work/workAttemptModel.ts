@@ -13,11 +13,9 @@ import type { WorkResult } from './workApi.ts';
 /**
  * One page of the attempt list, read into the facts the Work projections need.
  *
- * The retired snapshot projection exposed only a run id and a terminal flag.
- * That was not an execution record: a run is not an executor, a second row was
- * not provably a retry, and a reference was not an event. The attempt list is
- * the execution record, so everything this module derives is read off
- * `WorkAttemptV1` rather than inferred from incidence.
+ * The attempt list is the execution record, so everything this module derives
+ * is read off `WorkAttemptV1`: a run is not an executor, a second row is not
+ * provably a retry, and a reference is not an event.
  *
  * Three readings come out of it, and they are exactly the three the timeline
  * previously drew as named absences:

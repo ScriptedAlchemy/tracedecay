@@ -106,15 +106,7 @@ duplicating business logic.
 - **Foundation, policy:** expose read-only capability metadata to policy routing. Availability and effect metadata inform a decision but never execute it.
 - **Foundation, daemon:** bind each executable capability to the single tracedecayd/application authority. Catalog consumers never open a database or bypass application authorization.
 - **Foundation, profiles:** define explicit capability sets and hard ceilings for default, compact, administrative, and host-limited surfaces. Absence is explicit, not a hidden fallback.
-- **Foundation, compatibility:** retain a deprecated name as a `SurfaceBinding`
-  only when actual independent public release evidence proves a supported
-  caller; a direct compatibility test alone is not release evidence. Pure
-  source-only names are replaced in place, as are branch-era V2 callable names.
-  A binding survives only for that released public protocol; it delegates to
-  the canonical operation or returns an actionable negotiated upgrade result,
-  never a generic unknown-operation response. After retirement it behaves as
-  an ordinary unknown name; authorized callers may use ordinary discovery
-  guidance. No retired-name tombstone registry or compatibility ledger exists.
+- **Foundation, names:** names change in place. A retired name is an ordinary unknown name; no compatibility binding, tombstone, or ledger exists.
 - **Bindings, bindings:** map CLI commands, MCP tools, HTTP operations, and LSP
   methods to the same CapabilityId and typed application handler where the
   protocol exposes a callable product operation. Dashboard binding, dashboard
@@ -325,7 +317,7 @@ There is no aggregate or universal count shared by all profiles.
    to the same CapabilityId, schemas, effect, cursor, deadline/cancellation,
    and receipt contract.
 4. **Retirement:** delete legacy handler registries and duplicate discovery
-   metadata after supported names pass direct compatibility behavior. Do not
+   metadata after every binding passes direct parity. Do not
    retain a shadow registry, generated inventory, or declaration-only gate.
 Plan 24/32 contributions enter the runtime snapshot only with their shipped
 typed application handlers. SDK BindingIds enter only with shipped official
@@ -383,7 +375,7 @@ same behavior is covered directly.
   authorization, paging/streaming, problems/retry directives, cancellation,
   receipts, reconnect/resume, and unavailable/partial lifecycle semantics.
 - Discovery tests prove compact profiles stay bounded and administrative/private capabilities are filtered correctly.
-- Compatibility tests cover only currently supported names and typed guidance for retired names; no frozen total-count assertion is allowed.
+- Tests cover only currently supported names; no frozen total-count assertion is allowed.
 - Architecture tests reject source parsers, generators, generated inventories, plan/workflow dependencies, execution logic, storage, transport implementations, and UI code from tracedecay-tool-catalog.
 - Repository checks verify no public adapter has a handler-local query, policy, persistence, or authorization path that bypasses the cataloged application use case.
 

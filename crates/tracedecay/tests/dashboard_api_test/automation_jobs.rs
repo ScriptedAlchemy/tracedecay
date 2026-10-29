@@ -16,7 +16,7 @@ fn dashboard_three_request_chain_cannot_enable_and_run_a_shell_command() {
         let mut global_config = tracedecay_session_memory::user_config::UserConfig::default();
         global_config.automation.enabled = true;
         global_config.automation.backend =
-            tracedecay_automation_runtime::automation::config::AutomationBackend::CodexAppServer;
+            tracedecay_automation_runtime::automation::config::AutomationBackendV1::CodexAppServer;
         global_config
             .save(&profile_root)
             .expect("global user config should save");

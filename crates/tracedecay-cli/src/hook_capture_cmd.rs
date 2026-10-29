@@ -21,11 +21,6 @@ use crate::cli::Commands;
 /// event it answers when that subcommand is specific to one event.
 const NATIVE_CAPTURE_COMMANDS: &[(&str, NativeHookCaptureSourceV1, Option<&str>)] = &[
     (
-        "hook-prompt-submit",
-        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::ClaudeCode),
-        Some("UserPromptSubmit"),
-    ),
-    (
         "hook-stop",
         NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::ClaudeCode),
         Some("Stop"),
@@ -46,34 +41,14 @@ const NATIVE_CAPTURE_COMMANDS: &[(&str, NativeHookCaptureSourceV1, Option<&str>)
         Some("SubagentStart"),
     ),
     (
-        "hook-kiro-pre-tool-use",
-        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::Kiro),
-        Some("preToolUse"),
-    ),
-    (
         "hook-kiro-prompt-submit",
         NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::Kiro),
         Some("userPromptSubmit"),
     ),
     (
-        "hook-kiro-post-tool-use",
-        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::Kiro),
-        Some("postToolUse"),
-    ),
-    (
-        "hook-cursor-subagent-start",
-        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::CursorDesktop),
-        Some("subagentStart"),
-    ),
-    (
         "hook-cursor-post-tool-use",
         NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::CursorDesktop),
         Some("postToolUse"),
-    ),
-    (
-        "hook-cursor-before-submit-prompt",
-        NativeHookCaptureSourceV1::Host(NativeHostIdentityV1::CursorDesktop),
-        Some("beforeSubmitPrompt"),
     ),
     (
         "hook-cursor-pre-compact",
@@ -174,32 +149,6 @@ pub(crate) fn try_run(args: &[OsString]) -> Option<i32> {
     // Native callbacks must never enter normal CLI startup: that path owns
     // lifecycle maintenance and may open product state before the daemon has
     // admitted the observation.
-    if command == "hook-pre-tool-use" {
-        install_stderr_tracing(StderrTracingDefault::Silent);
-        if args.len() != 2 {
-            return Some(refused("hook callbacks take no arguments"));
-        }
-        // Claude's pre-tool callback has no replay-safe native observation.
-        // An empty successful response preserves the host's normal allow path
-        // without reviving the removed hook-local policy authority. The
-        // invocation itself is still adoption telemetry, and `TOOL_INPUT`
-        // carries no event name, so the hook name is supplied here. The
-        // allow response never depends on it: a process without a profile
-        // records nothing and still allows the tool.
-        match ProfileRoot::from_env() {
-            Ok(profile) => drop(
-                tracedecay_agent_hosts::hooks::record_native_capture_invoked(
-                    &tracedecay::hook_runtime(profile),
-                    std::env::current_dir().ok().as_deref(),
-                    NativeHostIdentityV1::ClaudeCode,
-                    Some("preToolUse"),
-                    &std::env::var("TOOL_INPUT").unwrap_or_default(),
-                ),
-            ),
-            Err(error) => tracing::debug!(%error, "preToolUse invocation not recorded"),
-        }
-        return Some(0);
-    }
     // Hooks with a provider-supported synchronous response must enter the
     // async composition root: their existing handlers perform the canonical
     // V2 admission/replay journey and render only daemon-approved guidance.
@@ -260,17 +209,12 @@ fn native_response_command_from_name(command: &str) -> bool {
 
 fn capture_command_name(command: &Commands) -> Option<&'static str> {
     match command {
-        Commands::HookPromptSubmit => Some("hook-prompt-submit"),
         Commands::HookStop => Some("hook-stop"),
         Commands::HookClaudeSessionStart => Some("hook-claude-session-start"),
         Commands::HookClaudePostToolUse => Some("hook-claude-post-tool-use"),
         Commands::HookClaudeSubagentStart => Some("hook-claude-subagent-start"),
-        Commands::HookKiroPreToolUse => Some("hook-kiro-pre-tool-use"),
         Commands::HookKiroPromptSubmit => Some("hook-kiro-prompt-submit"),
-        Commands::HookKiroPostToolUse => Some("hook-kiro-post-tool-use"),
-        Commands::HookCursorSubagentStart => Some("hook-cursor-subagent-start"),
         Commands::HookCursorPostToolUse => Some("hook-cursor-post-tool-use"),
-        Commands::HookCursorBeforeSubmitPrompt => Some("hook-cursor-before-submit-prompt"),
         Commands::HookCursorPreCompact => Some("hook-cursor-pre-compact"),
         Commands::HookCursorAfterFileEdit => Some("hook-cursor-after-file-edit"),
         Commands::HookCursorSessionStart => Some("hook-cursor-session-start"),

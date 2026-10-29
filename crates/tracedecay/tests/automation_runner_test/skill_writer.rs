@@ -48,18 +48,18 @@ async fn skill_writer_runner_skips_when_task_is_disabled() {
         "The disabled task must not invoke this backend.",
         "no_action",
     ));
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            skill_writer: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            skill_writer: AutomationTaskSettingsV1 {
                 enabled: false,
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
 
     let run = run_skill_writer(
@@ -203,11 +203,11 @@ async fn skill_writer_host_modes_do_not_select_alternate_lcm_storage() {
     ));
     for (host_mode, query) in [
         (
-            AutomationHostMode::Standalone,
+            AutomationHostModeV1::Standalone,
             "active project skill writer evidence",
         ),
         (
-            AutomationHostMode::DelegatedHost,
+            AutomationHostModeV1::DelegatedHost,
             "project skill writer evidence",
         ),
     ] {
@@ -226,7 +226,7 @@ async fn skill_writer_host_modes_do_not_select_alternate_lcm_storage() {
         )
         .await
         .unwrap();
-        if host_mode == AutomationHostMode::Standalone {
+        if host_mode == AutomationHostModeV1::Standalone {
             assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
         } else {
             assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
@@ -1460,7 +1460,7 @@ async fn skill_writer_runner_records_noop_fallback_when_backend_run_task_fails()
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
     let backend = FailingBackend::new(AgentTaskKind::SkillWriter);
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         timeout_secs: 1,
         ..enabled_skill_writer_config()
     };

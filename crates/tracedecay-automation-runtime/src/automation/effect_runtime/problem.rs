@@ -11,14 +11,13 @@ use tracedecay_contracts::{
 use crate::automation::run_ledger::AutomationRunLedgerRecord;
 
 use super::contract::contract_error;
-use super::terminal::AutomationSettledProblem;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub fn reset_required_problem(
     operation: &tracedecay_contracts::ApplicationOperation,
     context: &RequestContext,
     request: &AutomationRunRequestV1,
-) -> Result<AutomationSettledProblem> {
+) -> Result<AutomationRunProblemV1> {
     zero_effect_terminal(
         operation,
         context,
@@ -37,7 +36,7 @@ pub fn indeterminate_external_effect_problem(
     operation: &tracedecay_contracts::ApplicationOperation,
     context: &RequestContext,
     request: &AutomationRunRequestV1,
-) -> Result<AutomationSettledProblem> {
+) -> Result<AutomationRunProblemV1> {
     zero_effect_terminal(
         operation,
         context,
@@ -167,7 +166,7 @@ fn zero_effect_terminal(
     context: &RequestContext,
     request: &AutomationRunRequestV1,
     problem: ApplicationProblem,
-) -> Result<AutomationSettledProblem> {
+) -> Result<AutomationRunProblemV1> {
     problem.validate().map_err(contract_error)?;
     let problem = ApplicationProblemEnvelope::new(
         operation.result_contract().clone(),

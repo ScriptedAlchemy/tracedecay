@@ -25,14 +25,11 @@ pub struct ToolResult {
     internal_analytics: Option<Value>,
     /// Structural signal that the handler itself determined this call failed
     /// semantically (e.g. an edit whose `success` field is `false`), set by
-    /// the handler rather than inferred later from rendered response text.
-    /// `None` means the handler did not classify outcome structurally, so
-    /// callers should fall back to text-based heuristics; `Some(true)`/
-    /// `Some(false)` are authoritative and skip those heuristics.
-    semantic_error: Option<bool>,
+    /// the handler and never inferred from rendered response text.
+    semantic_error: bool,
     /// Handler-provided human-readable reason for a structural semantic
     /// failure (e.g. an edit result's `message`, such as "`old_str` not
-    /// found"). Only meaningful when `semantic_error == Some(true)`; used to
+    /// found"). Only meaningful when `semantic_error` is set; used to
     /// populate analytics `failure_reason` without re-deriving it from
     /// rendered response text.
     failure_message: Option<String>,
@@ -54,7 +51,7 @@ impl ToolResult {
             value,
             touched_files,
             internal_analytics: None,
-            semantic_error: None,
+            semantic_error: false,
             failure_message: None,
             token_accounting: None,
             cost: None,
@@ -91,15 +88,15 @@ impl ToolResult {
 
     /// Record a handler-determined semantic outcome for this call. Pass
     /// `true` when the handler knows the operation failed (e.g. an edit's
-    /// `success: false`), `false` when the handler knows it succeeded.
+    /// `success: false`).
     #[must_use]
     pub fn with_semantic_error(mut self, is_error: bool) -> Self {
-        self.semantic_error = Some(is_error);
+        self.semantic_error = is_error;
         self
     }
 
-    /// The handler-determined semantic outcome, if the handler set one.
-    pub fn semantic_error(&self) -> Option<bool> {
+    /// Whether the handler determined this call failed semantically.
+    pub fn semantic_error(&self) -> bool {
         self.semantic_error
     }
 

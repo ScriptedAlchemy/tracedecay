@@ -37,8 +37,8 @@ pub(crate) use tracedecay_automation_runtime::automation::backend::{
     AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
 };
 pub(crate) use tracedecay_automation_runtime::automation::config::{
-    AutomationBackend, AutomationConfig, AutomationHostMode, AutomationTaskConfig,
-    AutomationTaskSet,
+    AutomationBackendV1, AutomationHostModeV1, AutomationSettingsV1, AutomationTaskSetV1,
+    AutomationTaskSettingsV1,
 };
 pub(crate) use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillSource, ManagedSkillState,
@@ -287,7 +287,7 @@ impl AutomationSessionRetrieval for RejectedAutomationSessionRetrieval {
 
 pub(crate) async fn run_session_reflector(
     cg: &TraceDecay,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     run_control: &AutomationRunControl,
     backend: &dyn AgentTaskBackend,
     options: SessionReflectorAutomationOptions,
@@ -311,7 +311,7 @@ pub(crate) async fn run_session_reflector(
 
 pub(crate) async fn run_skill_writer(
     cg: &TraceDecay,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     backend: &dyn AgentTaskBackend,
     options: SkillWriterAutomationOptions,
 ) -> Result<
@@ -333,7 +333,7 @@ pub(crate) async fn run_skill_writer(
 
 pub(crate) async fn run_combined_review(
     cg: &TraceDecay,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     run_control: &AutomationRunControl,
     backend: &dyn AgentTaskBackend,
     options: CombinedReviewAutomationOptions,
@@ -354,7 +354,7 @@ pub(crate) async fn run_combined_review(
 
 pub(crate) async fn run_memory_curator(
     cg: &TraceDecay,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     run_control: &AutomationRunControl,
     backend: &dyn AgentTaskBackend,
     options: MemoryCuratorAutomationOptions,
@@ -1246,20 +1246,20 @@ pub(crate) fn assert_noop_fallback_record(
 
 /// Standalone automation config with only the skill writer task enabled on a
 /// manual schedule; override fields with struct update syntax where needed.
-pub(crate) fn enabled_skill_writer_config() -> AutomationConfig {
-    AutomationConfig {
+pub(crate) fn enabled_skill_writer_config() -> AutomationSettingsV1 {
+    AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            skill_writer: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            skill_writer: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     }
 }
 
@@ -1278,35 +1278,35 @@ pub(crate) fn manual_skill_writer_options(profile_root: &Path) -> SkillWriterAut
 pub(crate) fn scheduler_config(
     interval_secs: Option<u64>,
     cooldown_secs: Option<u64>,
-) -> AutomationConfig {
-    AutomationConfig {
+) -> AutomationSettingsV1 {
+    AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            memory_curator: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            memory_curator: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: interval_secs.map(|_| "interval".to_string()),
                 interval_secs,
                 cooldown_secs,
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            session_reflector: AutomationTaskConfig {
+            session_reflector: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: interval_secs.map(|_| "interval".to_string()),
                 interval_secs,
                 cooldown_secs,
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            skill_writer: AutomationTaskConfig {
+            skill_writer: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: interval_secs.map(|_| "interval".to_string()),
                 interval_secs,
                 cooldown_secs,
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     }
 }
 

@@ -53,8 +53,7 @@ import { workDagReading } from './workViewsModel.ts';
  * Work, channel thirteen.
  *
  * This page reads one current `WorkGraphReadV1` and
- * reduces its exact product-graph entry to the local camera model; the legacy
- * projection snapshot is not a second authority. A route that refuses is
+ * reduces its exact product-graph entry to the local camera model. A route that refuses is
  * reported as the refusal it was. Execution belongs to the Workflow runtime,
  * which has its own workspace, this channel is the task graph.
  *

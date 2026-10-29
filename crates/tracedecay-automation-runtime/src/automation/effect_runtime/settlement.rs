@@ -47,8 +47,8 @@ use crate::automation::effect_runtime::projection::{
     project_skip_reason,
 };
 use crate::automation::effect_runtime::{
-    AutomationSettledProblem, AutomationSettledTerminal, add_pending_blocking, contract_error,
-    curate_receipt_outcome, digest, effect_authority_digest as calculate_effect_authority_digest,
+    AutomationSettledTerminal, add_pending_blocking, contract_error, curate_receipt_outcome,
+    digest, effect_authority_digest as calculate_effect_authority_digest,
     finalize_terminal_housekeeping, journal, recovered_partial_terminal, remove_pending_blocking,
 };
 use crate::automation::run_ledger::{
@@ -233,7 +233,7 @@ pub enum RetainedAutomationSettlementOutcome {
         record: AutomationRunLedgerRecord,
     },
     Problem {
-        problem: Box<AutomationSettledProblem>,
+        problem: Box<AutomationRunProblemV1>,
         record: Option<AutomationRunLedgerRecord>,
     },
     Reused {
@@ -820,9 +820,8 @@ impl AutomationEffectAuthority {
         error: AutomationRunError,
         guard: AutomationRunSettlementGuard,
         observer: Option<AutomationLedgerObserver>,
-    ) -> RetainedSettlementWaiter<
-        Result<(AutomationSettledProblem, Option<AutomationRunLedgerRecord>)>,
-    > {
+    ) -> RetainedSettlementWaiter<Result<(AutomationRunProblemV1, Option<AutomationRunLedgerRecord>)>>
+    {
         RetainedSettlementWaiter::start(move || {
             self.settle_retained_problem_blocking(
                 error,
@@ -952,7 +951,7 @@ impl AutomationEffectAuthority {
         guard: RetainedSettlementGuardOwner,
         observer: Option<AutomationLedgerObserver>,
         #[cfg(test)] phase_hook: Option<SettlementPhaseHook>,
-    ) -> Result<RetainedOwnerValue<(AutomationSettledProblem, Option<AutomationRunLedgerRecord>)>>
+    ) -> Result<RetainedOwnerValue<(AutomationRunProblemV1, Option<AutomationRunLedgerRecord>)>>
     {
         let projection = match error {
             AutomationRunError::PartialEffect {
@@ -1523,7 +1522,7 @@ impl AutomationEffectAuthority {
         committed_receipt: Box<tracedecay_contracts::EffectReceipt>,
         detail: String,
         committed_outer_result: AutomationRunResultV1,
-    ) -> Result<AutomationSettledProblem> {
+    ) -> Result<AutomationRunProblemV1> {
         let problem =
             retained_surface_execution_problem(RetainedSurfaceExecutionErrorV1::PartialEffect {
                 reason_code,
@@ -1617,7 +1616,7 @@ impl AutomationEffectAuthority {
         run_id: &str,
         committed: &AutomationCommittedReceipt,
         detail: &'static str,
-    ) -> Result<AutomationSettledProblem> {
+    ) -> Result<AutomationRunProblemV1> {
         if run_id != self.admission.request.run_id.as_str() {
             return Err(contract_error(
                 "automation run identity changed before settlement",
@@ -1656,7 +1655,7 @@ impl AutomationEffectAuthority {
         &self,
         problem: ApplicationProblem,
         committed_receipts: Vec<AutomationCommittedReceiptV1>,
-    ) -> Result<AutomationSettledProblem> {
+    ) -> Result<AutomationRunProblemV1> {
         problem.validate().map_err(contract_error)?;
         let problem = ApplicationProblemEnvelope::new(
             self.operation.result_contract().clone(),

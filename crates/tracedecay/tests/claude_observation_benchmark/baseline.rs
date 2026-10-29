@@ -58,10 +58,7 @@ pub(super) struct ProviderBaseline {
     pub(super) fixture: ProviderFixture,
     pub(super) checks: Vec<String>,
     pub(super) bounds: ProviderBounds,
-    /// Additive v1 field. Validation requires it for every provider while old
-    /// tolerant readers can continue to consume the original v1 fields.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) measurement: Option<ProviderMeasurement>,
+    pub(super) measurement: ProviderMeasurement,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -97,7 +94,6 @@ pub(super) struct ProviderMeasurement {
 pub(super) struct ProviderBaselineCatalog {
     schema_version: u32,
     catalog_id: &'static str,
-    compatibility: &'static str,
     baselines: Vec<ProviderBaseline>,
 }
 
@@ -144,7 +140,6 @@ pub(super) fn catalog() -> ProviderBaselineCatalog {
     ProviderBaselineCatalog {
         schema_version: PROVIDER_BASELINE_SCHEMA_VERSION,
         catalog_id: PROVIDER_BASELINE_CATALOG_ID,
-        compatibility: "v1_additive_optional_measurement_field",
         baselines: expected(),
     }
 }
@@ -174,10 +169,7 @@ pub(super) fn validate(baselines: &[ProviderBaseline]) {
         assert!(!fixture.source_paths.is_empty());
         assert!(fixture.redacted_secret.starts_with(REDACTION_MARKER));
         assert!(!fixture.redacted_secret.contains("sk-test-"));
-        let measurement = baseline
-            .measurement
-            .as_ref()
-            .unwrap_or_else(|| panic!("{} has no measured result contract", baseline.provider));
+        let measurement = &baseline.measurement;
         assert!(
             measurement.harness_measures_performance,
             "{} cannot be pending",
@@ -249,12 +241,12 @@ fn baseline(provider: &str) -> ProviderBaseline {
             fair_rotation_providers: PROVIDERS.len(),
             peak_resource_fields: strings(PEAK_RESOURCE_FIELDS),
         },
-        measurement: Some(ProviderMeasurement {
+        measurement: ProviderMeasurement {
             harness_path: format!("{provider}_production_observation_pipeline_v1"),
             harness_measures_performance: true,
             result_schema: "provider-observation-performance-result-v1".to_string(),
             required_metrics: strings(PERFORMANCE_METRICS),
-        }),
+        },
     }
 }
 

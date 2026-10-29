@@ -94,8 +94,8 @@ pub fn aggregate_hook_completed_readiness(rows: &[Value]) -> HookCompletedReadin
 /// row is indistinguishable from the response row the same event produces.
 ///
 /// `hook_name` is the event the subcommand itself names. It wins over the
-/// payload's own event name, so an empty, malformed, or nameless payload (and
-/// Claude's `TOOL_INPUT`-driven `preToolUse`) still records the host event.
+/// payload's own event name, so an empty, malformed, or nameless payload still
+/// records the host event.
 ///
 /// The returned span writes `hook_completed` when dropped; the caller notes
 /// the capture outcome on it first.

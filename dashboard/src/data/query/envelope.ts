@@ -10,7 +10,7 @@ export type EnvelopeResult<T> =
   | { outcome: 'transport'; state: DashboardDomainStateV1; detail?: string; responseReceived?: true };
 
 /** Dashboard envelopes retain domain state even on non-2xx responses. Unlike
- * legacy payload routes, an absent payload can itself be a typed reading. */
+ * payload routes, an absent payload can itself be a typed reading. */
 export async function fetchEnvelope<T>(
   url: string,
   payloadSchema: WireSchema<T>,

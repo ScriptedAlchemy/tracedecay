@@ -9,7 +9,6 @@ use tracedecay_domain::{
 };
 
 use super::{composition_lanes, corpus_lanes, id, mixed_caps, no_caps, profile};
-use crate::retrieval::fusion::same_source_fusion_tests::legacy_compose;
 use crate::retrieval::fusion::{
     CompositionKernel, CompositionOutputV1, DeterministicFixedPointFusion, FusionStageInput,
     RetrievalCursorKeyringV1, digest_candidate_set,
@@ -17,9 +16,9 @@ use crate::retrieval::fusion::{
 use crate::retrieval::ordering::{OrderedFusedCandidates, decision_cmp};
 use crate::retrieval::stage_counters;
 
-// The former comparator remains an independent test oracle. Production
-// comparison reads only prepared records; this intentionally reconstructs
-// each tie-break vector from the candidate, as the original implementation did.
+// An independent specification of the ordering. Production comparison reads
+// only prepared records; this reconstructs each tie-break vector from the
+// candidate.
 fn compare_fused(left: &FusedCandidate, right: &FusedCandidate) -> Ordering {
     fn canonical<T: Ord>(items: impl Iterator<Item = T>) -> Vec<T> {
         let mut items = items.collect::<Vec<_>>();
@@ -202,7 +201,7 @@ fn ranking_key_variants() -> Vec<FusedCandidate> {
 }
 
 #[test]
-fn prepared_ranking_keys_match_the_original_order_with_one_normalization() {
+fn prepared_ranking_keys_match_the_ordering_spec_with_one_normalization() {
     let fusion = DeterministicFixedPointFusion::new(id("ranking.fixture.v1"));
     let anchor_tiers: BTreeMap<RetrievalAnchorId, u32> = BTreeMap::from([
         (id("anchor.higher-tier"), 2),
@@ -755,7 +754,7 @@ fn saturated_scores_preserve_retriever_strength_before_identity_ties() {
 }
 
 #[test]
-fn fused_duplicate_accounting_matches_the_former_pipeline_and_cursors() {
+fn fused_duplicate_accounting_admits_the_same_anchors_in_any_lane_order_and_cursors_cover_them() {
     let kernel = CompositionKernel::new(id("ranking.fixture.v1"));
     let mut lanes = corpus_lanes();
     let shared = lanes
@@ -813,6 +812,7 @@ fn fused_duplicate_accounting_matches_the_former_pipeline_and_cursors() {
         std::collections::BTreeMap::from([(id("anchor.c20"), 2)]);
 
     for (graph_threshold, policy) in [(0, no_caps()), (600_000, mixed_caps())] {
+        let mut baseline = None;
         for permutation in 0..6 {
             let mut permuted = lanes.clone();
             let offset = permutation % permuted.len();
@@ -842,21 +842,11 @@ fn fused_duplicate_accounting_matches_the_former_pipeline_and_cursors() {
                 profile,
                 lanes: composition_lanes(permuted),
             };
-            let expected = legacy_compose(&kernel, &input, &policy, &anchor_tiers)
-                .expect("former pipeline composes this admitted fixture");
             stage_counters::reset();
             let actual = kernel
                 .compose_with_anchor_tiers(&input, &policy, &anchor_tiers)
                 .expect("integrated fusion preserves admission");
             assert_eq!(stage_counters::snapshot().compact_sorts, 1);
-            assert_eq!(
-                actual, expected,
-                "permutation {permutation}, graph threshold {graph_threshold}"
-            );
-            assert_eq!(
-                digest_candidate_set(&actual.ranked_candidates).unwrap(),
-                digest_candidate_set(&expected.ranked_candidates).unwrap(),
-            );
             assert!(
                 actual.dedupe_decisions.iter().any(|decision| {
                     decision.decision.kind == RankingDecisionKind::SameSourceDuplicateCollapse
@@ -864,9 +854,22 @@ fn fused_duplicate_accounting_matches_the_former_pipeline_and_cursors() {
                 }),
                 "three lanes must exercise duplicate accounting, including filtered contributions"
             );
+            let admitted = actual
+                .ranked_candidates
+                .iter()
+                .map(|ranked| ranked.candidate.anchor_id.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            match &baseline {
+                None => baseline = Some(admitted),
+                Some(first) => assert_eq!(
+                    &admitted, first,
+                    "permutation {permutation}, graph threshold {graph_threshold}"
+                ),
+            }
+            let mut paged = Vec::new();
             let mut cursor = None;
             loop {
-                let actual_page = kernel
+                let page = kernel
                     .paginate_at(
                         &request,
                         &query,
@@ -877,23 +880,17 @@ fn fused_duplicate_accounting_matches_the_former_pipeline_and_cursors() {
                         UtcMicros(10),
                     )
                     .unwrap();
-                let expected_page = kernel
-                    .paginate_at(
-                        &request,
-                        &query,
-                        &keyring,
-                        &expected,
-                        5,
-                        cursor.as_ref(),
-                        UtcMicros(10),
-                    )
-                    .unwrap();
-                assert_eq!(actual_page, expected_page);
-                cursor = actual_page.cursor;
+                paged.extend(page.ranked_candidates);
+                cursor = page.cursor;
                 if cursor.is_none() {
                     break;
                 }
             }
+            assert_eq!(
+                digest_candidate_set(&paged).unwrap(),
+                digest_candidate_set(&actual.ranked_candidates).unwrap(),
+                "cursor pages must cover every ranked candidate exactly once"
+            );
         }
     }
 }

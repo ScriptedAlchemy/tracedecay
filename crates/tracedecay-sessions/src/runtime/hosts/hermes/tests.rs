@@ -1417,9 +1417,7 @@ async fn multi_page_session_emits_one_usage_checkpoint_and_a_later_frontier_upda
 async fn unreadable_state_db_is_a_counted_source_failure_not_a_clean_sweep() {
     let dir = tempfile::tempdir().unwrap();
     initialize_owned_store_before_foreign_fixture(dir.path()).await;
-    // The pin resolver is a root-registered port and stays unwired in this
-    // crate's tests, so the project qualifies as a candidate destination by
-    // being a git worktree instead of carrying a config pin.
+    // The project qualifies as a candidate destination by being a git worktree.
     let project_root = dir.path().join("project");
     std::fs::create_dir_all(&project_root).unwrap();
     let init = std::process::Command::new(tracedecay_runtime_core::git::try_git_program().unwrap())

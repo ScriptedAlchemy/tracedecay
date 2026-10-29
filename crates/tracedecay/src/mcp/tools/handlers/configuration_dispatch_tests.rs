@@ -125,7 +125,7 @@ async fn available_configuration_effect_reaches_canonical_executor() {
     .await
     .expect("verified configuration effect must reach its canonical executor");
 
-    assert_eq!(result.semantic_error(), Some(true));
+    assert!(result.semantic_error());
     assert_eq!(
         result.failure_message(),
         Some("application surface unavailable")
@@ -229,7 +229,7 @@ async fn every_other_configuration_effect_reaches_the_authoritative_daemon_execu
         .await
         .expect("every catalog-advertised configuration effect must reach its daemon handler");
 
-        assert_eq!(result.semantic_error(), Some(true));
+        assert!(result.semantic_error());
         assert_eq!(
             result.failure_message(),
             Some("application surface unavailable")
@@ -332,7 +332,7 @@ async fn every_configuration_read_and_preview_reaches_its_canonical_daemon_handl
         )
         .await
         .expect("every catalog-advertised configuration read must reach its daemon handler");
-        assert_eq!(result.semantic_error(), Some(true));
+        assert!(result.semantic_error());
         assert_eq!(
             result.failure_message(),
             Some("application surface unavailable")

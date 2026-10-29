@@ -33,8 +33,8 @@ before adding another abstraction.
 When replacing an internal API, read and apply the
 `principle-migrate-callers-then-delete-legacy-apis` skill (pstack plugin).
 Inventory and migrate every internal caller, then delete the legacy API in the
-same wave. Use only time-boxed adapters. Do not add compatibility layers without
-proven external or persisted consumers.
+same wave. Add no adapters or compatibility layers: old stores, clients, and
+hosts are refused through the typed reset and refusal paths.
 
 ## Delegation and ownership
 

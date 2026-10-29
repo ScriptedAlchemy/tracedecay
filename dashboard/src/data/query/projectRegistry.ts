@@ -52,11 +52,10 @@ export function projectRegistryEntryKey(projectId: string): readonly string[] {
  * and every entry at once. */
 export const projectRegistryInvalidationKey = [PROJECT_REGISTRY_ROOT] as const;
 
-/** Result of a registry fetch. A decoded registry envelope is authoritative
- * regardless of the HTTP status it travelled with: registry outcomes live in
- * the payload's `status`, while HTTP remains authoritative for write and
- * authorization refusals, malformed bodies, and failures with no typed
- * registry outcome. */
+/** Result of a registry fetch. A decoded registry envelope answers a 2xx:
+ * registry outcomes live in the payload's `status`, while HTTP remains
+ * authoritative for write and authorization refusals, malformed bodies, and
+ * every non-2xx answer. */
 export type ProjectRegistryResult<T> =
   | { outcome: 'envelope'; envelope: DashboardEnvelopeV1<T> }
   | { outcome: 'transport'; state: DashboardDomainStateV1; detail?: string };
@@ -64,10 +63,9 @@ export type ProjectRegistryResult<T> =
 /**
  * `GET /api/projects` or `GET /api/projects/{id}`, envelope-only.
  *
- * A body is accepted only when it is `DashboardEnvelopeV1<T>`. The envelope's
- * known registry outcomes (`not_found`, `missing_registry`, and
- * `registry_unavailable`) are preserved across a 200 or an older non-2xx
- * transport. A non-typed non-2xx answer remains an error.
+ * A body is accepted only when it is `DashboardEnvelopeV1<T>` on a 2xx. The
+ * envelope's registry outcomes (`not_found`, `missing_registry`, and
+ * `registry_unavailable`) travel with a 200. A non-2xx answer is an error.
  */
 export async function fetchProjectRegistry<T>(
   url: string,
@@ -100,16 +98,10 @@ export async function fetchProjectRegistry<T>(
     return { outcome: 'transport', state: 'unsupported_schema' };
   }
   const envelope = parsed.data as DashboardEnvelopeV1<T>;
-  if (response.ok || typedRegistryOutcome(envelope.payload)) {
+  if (response.ok) {
     return { outcome: 'envelope', envelope };
   }
   return { outcome: 'transport', state: 'error', detail: `HTTP ${response.status}` };
-}
-
-function typedRegistryOutcome(payload: unknown): boolean {
-  if (typeof payload !== 'object' || payload === null) return false;
-  const status = (payload as { status?: unknown }).status;
-  return status === PROJECT_NOT_FOUND || isRegistryUnavailableStatus(status);
 }
 
 function isRegistryUnavailableStatus(status: unknown): boolean {

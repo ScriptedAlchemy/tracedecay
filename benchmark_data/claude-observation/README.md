@@ -33,19 +33,16 @@ and projection, and replay measures the bounded authoritative-store query.
 Scopes are embedded beside each distribution so the commit sample is not
 misrepresented as excluding the adapter's parse and normalization work.
 
-The provider catalog remains schema v1. Its measurement block is an additive
-optional field for wire compatibility, while executable validation requires
-that block for every supported provider and rejects pending paths. This avoids
-an unnecessary incompatible schema-v2 claim. A normal test deserializes the
-complete manifest with unknown fields denied, executes every production adapter
-once, and proves each repeat is a durable no-op.
+The provider catalog is schema v1. Executable validation requires its
+measurement block for every supported provider and rejects pending paths. A
+normal test deserializes the complete manifest with unknown fields denied,
+executes every production adapter once, and proves each repeat is a durable
+no-op.
 
-The current measurement includes the nested
-`provider_observation_performance` result and `hook_telemetry_readiness`
-diagnostic. [evidence-index.json](evidence-index.json) identifies
-[result-2026-07-26-dc17dd73.json](result-2026-07-26-dc17dd73.json) as the
-legacy `current_acceptance`; that field is deprecated and grants no authority.
-Earlier artifacts remain `historical_stale`.
+The measurement includes the nested `provider_observation_performance` result
+and `hook_telemetry_readiness` diagnostic. [evidence-index.json](evidence-index.json)
+names the single `current_acceptance` artifact, or `null` while no acceptance
+run is published.
 
 The measurement embeds hook telemetry readiness as
 `hook-telemetry-baseline-readiness-v1`, not as a measured baseline. It reads the
@@ -59,7 +56,7 @@ on instrumented hosts; Hermes coverage remains partial. Checked-in distributions
 and aggregate timeout/disposition counts remain explicitly unavailable rather
 than being represented as zero.
 
-The legacy schema records real SHA-256 identities for workload members and
+The result schema records real SHA-256 identities for workload members and
 native fixtures plus the host target, Rust/Cargo versions, kernel, and hardware.
 Those source/content digests remain useful provenance. Do not recreate the
 former clean-checkout archive, tracked-source snapshot, compiler-input
@@ -91,39 +88,12 @@ and compatibility transcript counters report those projector outputs.
 The timed no-op retry replays after the durable end cursor and must return zero
 new observations; a full replay verifies unchanged cardinality afterward.
 
-The current [measurement result](result-2026-07-26-dc17dd73.json) records
-source revision `dc17dd731e97f9262e570afd9e7ec1602d8af99e` with 3 warmups and
-30 independent measured repetitions of 64 records (30 × 64 = 1,920 records).
-The raw artifact records the Linux kernel, CPU, memory, Rust/Cargo toolchains,
-every repetition, and the nearest-rank/sample-standard-deviation method.
-
-- Pipeline batch latency: p50 2,341,276,568 ns; p95 2,527,159,267 ns; p99
-  2,708,492,865 ns.
-- Pipeline throughput: 27.11224430907219 records/s.
-- Timed pipeline CPU: 69,110 ms; peak RSS: 153,276 KiB.
-- Timed process write I/O: 1,551,220,736 bytes; SQLite database/WAL/SHM growth:
-  1,122,556,640 bytes across the 30 independent databases.
-- Exact no-op retry plus bounded replay: p50 1,185,536 ns; p95 1,504,741 ns;
-  p99 1,558,623 ns; 40 ms CPU total; zero process write bytes, database growth,
-  observation-count delta, and coordinator work counters.
-- Round-robin fairness: maximum provider turn distance 8.
-
-The earlier [measurement result](result-2026-07-16-00d3d73a.json) remains
-`historical_stale` after the checked-in workload identity changed.
-
-The earlier [measurement result](result-2026-07-16-8d53b4a9.json) remains
-`historical_stale` after the PR6 provider-ingestion correctness changes.
-
-The earlier [measurement result](result-2026-07-15-0c289212.json) remains
-`historical_stale` because it predates workload schema 3.
-
-The [historical result](result-2026-07-15-b05b4cd5.json) was captured from clean
-commit `b05b4cd570ab8e3385604c0fef31902fdc3f1e8b`.
-
-> **Historical/stale evidence:** this result predates schema 2 provenance and
-> complete workload validation. Its JSON carries
-> `"evidence_status": "historical_stale"` and is not current product evidence.
-> Retain it only for provenance.
+No acceptance result is published: `current_acceptance` is `null` until
+`scripts/run-claude-observation-benchmark.sh` seals one on a Linux evidence
+run. A published result records the source revision, 3 warmups and 30
+independent measured repetitions of 64 records, the Linux kernel, CPU, memory,
+Rust/Cargo toolchains, every repetition, and the nearest-rank/sample-standard-
+deviation method.
 
 ```console
 scripts/run-claude-observation-benchmark.sh

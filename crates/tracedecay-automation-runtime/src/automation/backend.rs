@@ -13,7 +13,7 @@ pub use tracedecay_automation::backend::{
 pub use tracedecay_contracts::automation::AgentTaskRetryAttempt;
 use tracedecay_domain::configuration::LcmSummarizerExecutableV1;
 
-use super::config::{AutomationBackend, AutomationConfig};
+use super::config::{AutomationBackendV1, AutomationSettingsV1};
 use crate::ports::codex_app_server::{
     SummaryConfig as CodexAppServerSummaryConfig, run_prompt as run_prompt_with_codex_app_server,
 };
@@ -85,19 +85,19 @@ pub const CODEX_EXECUTABLE_UNCONFIGURED: &str =
 /// Whether the configured backend can run, given the `codex` executable the
 /// project's configuration snapshot binds. Nothing is resolved from `PATH`.
 pub fn backend_availability(
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     codex: &LcmSummarizerExecutableV1,
 ) -> AgentBackendAvailability {
     match config.backend {
-        AutomationBackend::Disabled => AgentBackendAvailability {
-            backend: AutomationBackend::Disabled,
+        AutomationBackendV1::Disabled => AgentBackendAvailability {
+            backend: AutomationBackendV1::Disabled,
             available: false,
             executable: None,
             reason: Some("automation backend is disabled".to_string()),
         },
-        AutomationBackend::CodexAppServer => match codex.canonical_path() {
+        AutomationBackendV1::CodexAppServer => match codex.canonical_path() {
             None => AgentBackendAvailability {
-                backend: AutomationBackend::CodexAppServer,
+                backend: AutomationBackendV1::CodexAppServer,
                 available: false,
                 executable: None,
                 reason: Some(CODEX_EXECUTABLE_UNCONFIGURED.to_string()),
@@ -106,14 +106,14 @@ pub fn backend_availability(
                 let executable = path.to_string_lossy().into_owned();
                 if path.is_file() {
                     AgentBackendAvailability {
-                        backend: AutomationBackend::CodexAppServer,
+                        backend: AutomationBackendV1::CodexAppServer,
                         available: true,
                         executable: Some(executable),
                         reason: None,
                     }
                 } else {
                     AgentBackendAvailability {
-                        backend: AutomationBackend::CodexAppServer,
+                        backend: AutomationBackendV1::CodexAppServer,
                         available: false,
                         reason: Some(format!(
                             "codex app-server backend executable '{executable}' was not found"
@@ -211,7 +211,7 @@ pub struct CodexAppServerBackend {
 
 impl CodexAppServerBackend {
     pub fn from_automation_config(
-        config: &AutomationConfig,
+        config: &AutomationSettingsV1,
         codex: &LcmSummarizerExecutableV1,
     ) -> Self {
         Self::new(config.model_id.clone(), config.timeout_secs, codex)

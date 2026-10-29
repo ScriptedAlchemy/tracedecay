@@ -19,11 +19,12 @@ use tracedecay_daemon_protocol::{
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_session_memory::session::SessionRefreshServicePort;
 use tracedecay_session_runtime::lcm_authority::mount_registered_lcm_authority;
 use tracedecay_session_runtime::retained::{
     ProfileRetainedAuthoritiesV1, ProfileRetainedConnectionAuthorityV1, ProfileRetainedTerminalV1,
-    RetainedSessionRefreshPortV1, execute_profile_retained_application,
-    profile_retained_connection_authority, profile_session_retrieval_serving_identity,
+    execute_profile_retained_application, profile_retained_connection_authority,
+    profile_session_retrieval_serving_identity,
 };
 use tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot;
 use tracedecay_sessions::runtime::user_sessions_db_path;
@@ -185,7 +186,7 @@ async fn execute_profile_retained(
         lcm_authority: lcm_authority.as_deref(),
         session_refresh: session_refresh
             .as_ref()
-            .map(|refresh| refresh.service.as_ref() as &dyn RetainedSessionRefreshPortV1),
+            .map(|refresh| refresh.service.as_ref() as &dyn SessionRefreshServicePort),
         refresh_status: session_refresh
             .as_ref()
             .map(|refresh| Arc::clone(&refresh.serving)),

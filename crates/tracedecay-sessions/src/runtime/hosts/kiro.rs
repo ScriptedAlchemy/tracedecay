@@ -255,7 +255,7 @@ fn collect_user_workspace_session_files(
 /// Captures bounded Kiro snapshots through the daemon-owned observation authority.
 ///
 /// This deliberately re-reads complete snapshots and derives a new source generation
-/// from their content hash; it neither consults nor advances legacy parse offsets.
+/// from their content hash; it neither consults nor advances append-only parse offsets.
 /// `max_new_bytes` is one logical source-byte budget for the complete sweep.
 #[tracing::instrument(name = "sessions.hosts.kiro.capture", level = "trace", skip_all)]
 pub async fn capture_kiro_snapshot_observations(

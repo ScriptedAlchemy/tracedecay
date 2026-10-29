@@ -22,13 +22,9 @@ uses `tracedecay` (not the Claude/Codex `graph` key). Each Cursor workspace
 gets its own project store.
 
 Cursor runs plugin MCP servers in its profile scope, spawned per workspace
-with the workspace folder as the working directory, and it never expands
-`${workspaceFolder}` there (every spawn of the former `--path
-${workspaceFolder}` template logged the literal string). `serve` therefore
-resolves the workspace from its working directory (project walk-up, then the
-enclosing git checkout) and from MCP initialize roots. A `--path` value that
-still carries an unexpanded `${...}` template is discarded with a stderr
-warning and the same discovery runs.
+with the workspace folder as the working directory. `serve` resolves the
+workspace from that working directory (project walk-up, then the enclosing
+git checkout) and from MCP initialize roots; the bundle passes no `--path`.
 
 When discovery lands on a directory the profile has not enrolled, the MCP
 handshake still completes and every tool call answers with the typed

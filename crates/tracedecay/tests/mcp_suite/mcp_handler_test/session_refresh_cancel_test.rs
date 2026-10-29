@@ -179,7 +179,7 @@ fn assert_cancel_payload(
 async fn dispatch_profile_refresh(
     profile_database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     authority: &tracedecay_session_runtime::retained::ProfileRetainedConnectionAuthorityV1,
-    refresh: Option<&dyn tracedecay_session_runtime::retained::RetainedSessionRefreshPortV1>,
+    refresh: Option<&dyn tracedecay_session_memory::session::SessionRefreshServicePort>,
     tool_name: &str,
     arguments: Value,
 ) -> Value {

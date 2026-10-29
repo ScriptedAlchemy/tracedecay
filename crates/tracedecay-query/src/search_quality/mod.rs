@@ -6,23 +6,15 @@
 //!
 //! # Evidence, not activation authority
 //!
-//! Retiring the dense FastEmbed lane deleted `native_qualification` and the
-//! paired held-out Student-t practical-effect gate with it, because the only
-//! thing that gate governed was activating a lane that no longer exists. The
-//! exact/lexical/graph lanes are unconditionally part of production retrieval:
-//! there is nothing left for a measurement to switch on.
+//! The exact/lexical/graph lanes are unconditionally part of production
+//! retrieval: there is nothing for a measurement to switch on.
 //!
 //! Everything in this module is therefore evidence-only. A `Pass` report says
 //! the checked-in labels were met on the packaged corpus; it does not qualify,
 //! activate, promote, or accept a retrieval profile, and no caller may treat it
 //! as doing so. Validation of the packaged workload, including natural-language
 //! need provenance, attests that the measurement inputs are fit and sourced,
-//! never that retrieval is qualified.
-//!
-//! Re-introducing a qualification gate is a schema change, not a comment
-//! change: workload schema 1 carries no `methodology_version`, no practical-
-//! effect bound, no `policy_freeze`, and no `decision_policy`, so it cannot
-//! express a held-out methodology or a single-variant policy slice. See
+//! never that retrieval is qualified. See
 //! `docs/development/search-quality-direct-evaluation.md`.
 
 pub mod candidate_output;

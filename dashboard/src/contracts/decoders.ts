@@ -4153,9 +4153,9 @@ export const DoctorFamilyUnavailableReasonV1Schema: z.ZodUnion<[z.ZodLiteral<"un
 /** Stable Doctor finding families.
 
 The initial list covers advisory findings from
-Brain, Explorer, Loom, Code, and Observatory, plus the legacy
-`core_doctor` checks (graph quick-check, temporal/migration health,
-configuration compatibility drift, code-index mount state, session ingest).
+Brain, Explorer, Loom, Code, and Observatory, plus the daemon
+core doctor checks (graph quick-check, temporal health, configuration
+drift, code-index mount state, session ingest).
 Each family maps to one audited typed input surface. The set is kept small
 and honest; new families are added through a future versioned enum rather
 than by widening the meaning of an existing variant. */

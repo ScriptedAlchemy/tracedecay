@@ -468,8 +468,8 @@ pub(crate) async fn cleanup_manual_branch_activation(
 
 /// Retires only the manual artifacts proven by a persisted graph-source entry
 /// before branch metadata removal commits. The source's exact worktree,
-/// synthetic ref, and OID are the ownership proof; a legacy entry without
-/// that proof is intentionally left untouched rather than guessing at Git
+/// synthetic ref, and OID are the ownership proof; an entry without that
+/// proof is refused with a typed activation error rather than guessing at Git
 /// artifacts. The lifecycle lease returns only after synchronous Git teardown
 /// finishes, so request cancellation cannot admit a concurrent replacement
 /// while the blocking worker still owns those artifacts.

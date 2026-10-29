@@ -883,7 +883,7 @@ impl McpServer {
 
         // `TraceDecay` materializes this from one resolved configuration
         // snapshot when it opens. Copy it once so catch-up, sync-on-read,
-        // the staleness banner, and telemetry never re-read legacy input,
+        // the staleness banner, and telemetry never re-read input,
         // a database, or IPC per call.
         let sync_config = cg.get_config().sync.clone();
         let telemetry_config = cg.get_config().telemetry.clone();

@@ -43,7 +43,7 @@ interface CodeViewBlocker {
 const VIEW_PARAM = 'view';
 const FOCUS_PARAM = 'symbol';
 
-/** Unknown or retired views open Cortex without losing the symbol identity. */
+/** Unknown views open Cortex without losing the symbol identity. */
 export function readCodeLocation(params: URLSearchParams): CodeLocation {
   const focusId = params.get(FOCUS_PARAM);
   const requested = params.get(VIEW_PARAM);

@@ -12,7 +12,7 @@ use super::backend::{
     AgentTaskRetryReport, BackendRetryPolicy, run_agent_task_with_retry_report,
     runtime_failure_class,
 };
-use super::config::AutomationConfig;
+use super::config::AutomationSettingsV1;
 use super::lifecycle::{
     AgentTaskRunContext, AutomationCommittedReceipt, AutomationRunControl, AutomationRunError,
     AutomationRunLedgerPublication, AutomationRunPublication, AutomationRunResult,
@@ -81,7 +81,7 @@ pub struct MemoryCuratorAutomationRun {
 /// ledger terminal before the daemon accepts the outer application terminal.
 pub async fn run_memory_curator_with_backend_for_retained_settlement(
     cg: &AutomationProjectContext,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     options: MemoryCuratorAutomationOptions,
@@ -148,7 +148,7 @@ impl MemoryCuratorStore<'_> {
 #[tracing::instrument(name = "automation.run.memory_curator", level = "trace", skip_all)]
 async fn run_memory_curator_for_store_with_publication(
     store: MemoryCuratorStore<'_>,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     options: MemoryCuratorAutomationOptions,
@@ -907,7 +907,7 @@ fn memory_curation_report(
 }
 
 fn memory_curation_decision(
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     authority: &CurationApplyAuthorityV1,
     evidence_hash: Option<&str>,
     accepted_ops: &[Value],

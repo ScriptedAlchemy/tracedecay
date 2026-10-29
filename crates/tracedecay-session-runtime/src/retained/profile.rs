@@ -19,13 +19,13 @@ use tracedecay_domain::{
 use tracedecay_session_memory::context::{
     ProfileId, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
 };
+use tracedecay_session_memory::session::SessionRefreshServicePort;
 use tracedecay_store::StoreShardIdV1;
 
 use tracedecay_contracts::RetainedMemoryExecutionPortV1;
 
 use super::lcm::DirectRetainedLcmPortV1;
 use super::session::DirectRetainedSessionPortV1;
-use super::session_refresh::RetainedSessionRefreshPortV1;
 use crate::lcm_authority::MountedLcmAuthorityPort;
 use tracedecay_domain::errors::TraceDecayError;
 
@@ -38,7 +38,7 @@ pub struct ProfileRetainedAuthoritiesV1<'a> {
     pub lcm_authority: Option<&'a dyn MountedLcmAuthorityPort>,
     /// Daemon-wide profile session refresh service; refresh handles it issues
     /// stay valid across every connection that reaches the same profile store.
-    pub session_refresh: Option<&'a dyn RetainedSessionRefreshPortV1>,
+    pub session_refresh: Option<&'a dyn SessionRefreshServicePort>,
     /// Serving-status port of the mounted profile refresh worker. Retrieval
     /// with `RequireFresh` reads this instead of assuming the worker is
     /// missing when only the wake was retained.

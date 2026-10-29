@@ -2,7 +2,7 @@
 //! plugin-bundle staleness.
 //!
 //! Cursor never retries an MCP server whose spawn failed: one bad startup
-//! (literal `${workspaceFolder}` path, uninitialized project, …) turns every
+//! (an uninitialized project, a daemon connection failure, …) turns every
 //! later tool call in that session into "Timed out waiting for connection"
 //! until the user toggles the server or reloads the window. The stdio spawn
 //! happens outside tracedecay's control, so `tracedecay doctor` inspects
@@ -29,9 +29,6 @@ const MAX_LOG_BYTES: u64 = 1024 * 1024;
 /// Findings from scanning Cursor's MCP logs for tracedecay-scoped failures.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct CursorMcpLogFindings {
-    /// Log lines where tracedecay was spawned with a literal, unexpanded
-    /// `${workspaceFolder}` argument.
-    pub literal_placeholder_lines: usize,
     /// Failed MCP spawns whose scope Cursor will not retry, including generic
     /// connection closure and managed-daemon transport failures.
     pub connection_failures: usize,
@@ -47,9 +44,7 @@ pub(crate) struct CursorMcpLogFindings {
 
 impl CursorMcpLogFindings {
     pub(crate) fn has_findings(&self) -> bool {
-        self.literal_placeholder_lines > 0
-            || self.connection_failures > 0
-            || self.daemon_transport_failures > 0
+        self.connection_failures > 0 || self.daemon_transport_failures > 0
     }
 }
 
@@ -85,10 +80,6 @@ pub(crate) fn scan_cursor_mcp_logs(logs_root: &Path) -> CursorMcpLogFindings {
                 if require_tracedecay_mention && !line.contains("tracedecay") {
                     continue;
                 }
-                if line.contains("${workspaceFolder}") && line.contains("no TraceDecay index") {
-                    findings.literal_placeholder_lines += 1;
-                    affected = true;
-                }
                 let daemon_transport_failure = line.contains("Connection failed: MCP error -32603")
                     && line.contains("TraceDecay daemon connection failed")
                     && (line.contains("Broken pipe") || line.contains("Connection reset by peer"));
@@ -115,7 +106,6 @@ pub(crate) fn report_cursor_mcp_log_findings(dc: &mut DoctorCounters, home: &Pat
     let mut findings = CursorMcpLogFindings::default();
     for root in cursor_log_roots(home) {
         let scanned = scan_cursor_mcp_logs(&root);
-        findings.literal_placeholder_lines += scanned.literal_placeholder_lines;
         findings.connection_failures += scanned.connection_failures;
         findings.daemon_transport_failures += scanned.daemon_transport_failures;
         findings.scanned_any_log |= scanned.scanned_any_log;
@@ -129,14 +119,6 @@ pub(crate) fn report_cursor_mcp_log_findings(dc: &mut DoctorCounters, home: &Pat
     if !findings.has_findings() {
         dc.pass("No tracedecay MCP spawn failures in recent Cursor logs");
         return;
-    }
-    if findings.literal_placeholder_lines > 0 {
-        dc.warn(&format!(
-            "Cursor spawned tracedecay with a literal unexpanded `${{workspaceFolder}}` \
-             {} time(s) in recent logs (Cursor does not expand it for plugin MCP servers; \
-             the current bundle passes no `--path`, run `tracedecay update-plugin`)",
-            findings.literal_placeholder_lines
-        ));
     }
     if findings.connection_failures > 0 {
         dc.warn(&format!(
@@ -250,12 +232,9 @@ mod tests {
         std::fs::write(dir.join(file_name), contents).unwrap();
     }
 
-    /// Fixture mirroring the real failure captured on 2026-07-02: Cursor
-    /// passed a literal `${workspaceFolder}` to `serve --path`, serve exited,
-    /// and the scope died with `MCP error -32000`.
+    /// Fixture of a failed spawn: the scope died with `MCP error -32000`.
     const REAL_FAILURE_LOG: &str = "\
 2026-07-02 02:46:22.011 [info] connecting stdio for \"tracedecay\" (plugin-tracedecay-tracedecay)\n\
-2026-07-02 02:46:22.473 [error] config error: no TraceDecay index found at '${workspaceFolder}' — run 'tracedecay init' first\n\
 2026-07-02 02:46:22.474 [warning] Connection failed: MCP error -32000: Connection closed\n\
 2026-07-02 02:46:23.271 [info] Successfully connected to stdio server\n";
 
@@ -265,7 +244,7 @@ mod tests {
 2026-07-19 18:37:54.946 [warning] Connection failed: MCP error -32603: TraceDecay daemon connection failed: io error: Connection reset by peer (os error 104)\n";
 
     #[test]
-    fn scan_detects_literal_placeholder_and_connection_failure() {
+    fn scan_detects_a_connection_failure() {
         let logs = TempDir::new().unwrap();
         write_session_log(
             logs.path(),
@@ -276,7 +255,6 @@ mod tests {
 
         let findings = scan_cursor_mcp_logs(logs.path());
         assert!(findings.scanned_any_log);
-        assert_eq!(findings.literal_placeholder_lines, 1);
         assert_eq!(findings.connection_failures, 1);
         assert_eq!(findings.affected_logs.len(), 1);
         assert!(findings.has_findings());

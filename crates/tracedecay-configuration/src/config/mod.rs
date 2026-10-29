@@ -18,7 +18,6 @@ use std::sync::{Arc, OnceLock};
 
 use tracedecay_automation::Result as AutomationResult;
 use tracedecay_automation::config::{AdmittedAutomationConfig, admit_config};
-use tracedecay_contracts::{ConfigurationSettingActionV1, ConfigurationSettingFindingV1};
 use tracedecay_domain::configuration::{
     AUTOMATION_SETTINGS_SETTING_KEY, AutomationSettingsV1, ConfigurationRevisionId,
     ConfigurationSnapshotV1, ConfigurationValueV1, INDEX_EXCLUDE_SETTING_KEY,
@@ -35,7 +34,7 @@ use tracedecay_domain::configuration::{
     SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey, TELEMETRY_TIMINGS_SETTING_KEY,
 };
 use tracedecay_domain::errors::{AutomationErrorMessage, Result, TraceDecayError};
-use tracedecay_domain::{IndexPathPolicyV1, ProjectId, validate_index_path_patterns};
+use tracedecay_domain::{IndexPathPolicyV1, ProjectId};
 use tracedecay_global_db::configuration::contracts::ConfigurationCurrentStateV1;
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 
@@ -270,18 +269,13 @@ fn runtime_config_from_snapshot(
     Ok(RuntimeTraceDecayConfig {
         automation: match required_setting(snapshot, AUTOMATION_SETTINGS_SETTING_KEY)? {
             ConfigurationValueV1::AutomationSettings(settings) => {
-                // Read-only pins can precede registry convergence. Project
-                // current settings without changing the historical snapshot
-                // or admitting schedules that reports still need to expose.
-                let mut current = settings.as_ref().clone();
-                current.retire_lock_timeout();
-                Arc::new(current)
+                Arc::new(settings.as_ref().clone())
             }
             _ => return Err(config_error("expected automation settings")),
         },
         index_paths: IndexPathPolicyV1::new(
-            applied_index_patterns(snapshot, INDEX_EXCLUDE_SETTING_KEY)?,
-            applied_index_patterns(snapshot, INDEX_INCLUDE_SETTING_KEY)?,
+            required_string_list(snapshot, INDEX_EXCLUDE_SETTING_KEY)?,
+            required_string_list(snapshot, INDEX_INCLUDE_SETTING_KEY)?,
         )
         .map_err(|error| config_error(format!("resolved index path policy is invalid: {error}")))?,
         max_file_size: required_unsigned(snapshot, INDEX_MAX_FILE_SIZE_SETTING_KEY)?,
@@ -395,65 +389,6 @@ pub fn required_string_list(
     }
 }
 
-/// Splits a stored index path pattern list into the patterns indexing
-/// applies and a finding for each one that does not compile.
-///
-/// Writes refuse such a pattern, but an earlier release stored patterns it
-/// never compiled. Refusing the whole pin would also refuse the `set` and
-/// `unset` that repair it, so the pin applies the rest and
-/// [`setting_findings`] reports each skipped pattern.
-fn partition_index_patterns(
-    patterns: Vec<String>,
-) -> (Vec<String>, Vec<ConfigurationSettingFindingV1>) {
-    // One set compiles when every member does; only a failing list needs the
-    // per-pattern compiles that name its invalid members.
-    if validate_index_path_patterns(&patterns).is_ok() {
-        return (patterns, Vec::new());
-    }
-    let mut applied = Vec::with_capacity(patterns.len());
-    let mut findings = Vec::new();
-    for pattern in patterns {
-        match validate_index_path_patterns(std::slice::from_ref(&pattern)) {
-            Ok(()) => applied.push(pattern),
-            Err(error) => findings.push(ConfigurationSettingFindingV1::InvalidIndexPathPattern {
-                pattern,
-                message: error.message,
-                legal_actions: vec![
-                    ConfigurationSettingActionV1::Set,
-                    ConfigurationSettingActionV1::Unset,
-                ],
-            }),
-        }
-    }
-    (applied, findings)
-}
-
-fn applied_index_patterns(
-    snapshot: &ConfigurationSnapshotV1,
-    key_name: &str,
-) -> Result<Vec<String>> {
-    Ok(partition_index_patterns(required_string_list(snapshot, key_name)?).0)
-}
-
-/// The parts of a stored `value` for `key` that the runtime configuration
-/// does not apply.
-pub fn setting_findings(
-    key: &SettingKey,
-    value: &ConfigurationValueV1,
-) -> Vec<ConfigurationSettingFindingV1> {
-    match value {
-        ConfigurationValueV1::StringList(patterns)
-            if matches!(
-                key.as_str(),
-                INDEX_EXCLUDE_SETTING_KEY | INDEX_INCLUDE_SETTING_KEY
-            ) =>
-        {
-            partition_index_patterns(patterns.clone()).1
-        }
-        _ => Vec::new(),
-    }
-}
-
 fn required_lcm_summarizer_executables(
     snapshot: &ConfigurationSnapshotV1,
 ) -> Result<LcmSummarizerExecutablesV1> {
@@ -481,10 +416,9 @@ mod tests {
     use tracedecay_domain::ProjectId;
     use tracedecay_domain::configuration::{
         AUTOMATION_SETTINGS_SETTING_KEY, ConfigurationLayerIdV1, ConfigurationRevisionId,
-        ConfigurationSnapshotV1, ConfigurationValueV1, INDEX_EXCLUDE_SETTING_KEY,
-        INDEX_MAX_FILE_SIZE_SETTING_KEY, SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
-        SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
-        SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey,
+        ConfigurationSnapshotV1, ConfigurationValueV1, INDEX_MAX_FILE_SIZE_SETTING_KEY,
+        SYNC_READ_COOLDOWN_SECS_SETTING_KEY, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
+        SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey,
     };
     use tracedecay_domain::errors::TraceDecayError;
 
@@ -573,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn pin_decodes_supported_sync_settings_without_retired_keys() {
+    fn pin_decodes_supported_sync_settings() {
         let complete = resolved(BTreeMap::from([
             (
                 SettingKey::new(SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY).unwrap(),
@@ -592,17 +526,7 @@ mod tests {
                 ConfigurationValueV1::Unsigned(45),
             ),
         ]));
-        let mut values = complete.effective_values;
-        let mut provenance = complete.provenance;
-        for raw_key in [
-            "sync.full_sync_escalation_files.v1",
-            "sync.max_concurrent_syncs.v1",
-        ] {
-            let key = SettingKey::new(raw_key).unwrap();
-            values.remove(&key);
-            provenance.remove(&key);
-        }
-        let snapshot = ConfigurationSnapshotV1::new(values, provenance).unwrap();
+        let snapshot = complete;
 
         let pinned = PinnedRuntimeConfiguration::new(target(), revision(), snapshot).unwrap();
 
@@ -649,7 +573,7 @@ mod tests {
             Err(TraceDecayError::Config { .. })
         ));
         let mut noncanonical = resolved(BTreeMap::new());
-        let mut settings = tracedecay_automation::config::AutomationConfig::default();
+        let mut settings = tracedecay_automation::config::AutomationSettingsV1::default();
         settings.tasks.memory_curator.schedule = Some(" hourly ".to_owned());
         noncanonical.effective_values.insert(
             key,
@@ -659,23 +583,6 @@ mod tests {
             PinnedRuntimeConfiguration::new(target(), revision(), noncanonical),
             Err(TraceDecayError::Config { .. })
         ));
-    }
-
-    #[test]
-    fn pin_skips_a_stored_index_pattern_that_no_longer_compiles() {
-        // An earlier release accepted patterns it never compiled; loading
-        // one must not take every tool down with the configuration.
-        let key = SettingKey::new(INDEX_EXCLUDE_SETTING_KEY).unwrap();
-        let stored = resolved(BTreeMap::from([(
-            key,
-            ConfigurationValueV1::StringList(vec!["src/[abc".to_owned(), "docs/**".to_owned()]),
-        )]));
-
-        let pinned = PinnedRuntimeConfiguration::new(target(), revision(), stored).unwrap();
-
-        assert_eq!(pinned.config().index_paths.exclude_patterns(), ["docs/**"]);
-        assert!(pinned.config().index_paths.excludes("docs/guide.md"));
-        assert!(!pinned.config().index_paths.excludes("src/a"));
     }
 
     #[test]
@@ -701,72 +608,11 @@ mod tests {
     }
 
     #[test]
-    fn pin_projects_retired_automation_settings_without_rewriting_history() {
-        let key = SettingKey::new(AUTOMATION_SETTINGS_SETTING_KEY).unwrap();
-        let task = tracedecay_automation::backend::AgentTaskKind::MemoryCurator;
-        for schedule in ["every 10m", "after lunch"] {
-            let mut settings = tracedecay_automation::config::AutomationConfig::default();
-            settings.tasks.memory_curator.schedule = Some(schedule.to_owned());
-            settings.tasks.memory_curator.interval_secs = Some(5);
-            let mut snapshot = resolved(BTreeMap::from([(
-                key.clone(),
-                ConfigurationValueV1::AutomationSettings(Box::new(settings.clone())),
-            )]));
-            let mut historical_settings = serde_json::to_value(&settings).unwrap();
-            historical_settings["tasks"]["memory_curator"]["stale_lock_secs"] =
-                serde_json::json!(3600);
-            historical_settings["tasks"]["session_reflector"]["stale_lock_secs"] =
-                serde_json::Value::Null;
-            // The third task keeps the absent historical representation.
-            snapshot.effective_values.insert(
-                key.clone(),
-                ConfigurationValueV1::AutomationSettings(Box::new(
-                    serde_json::from_value(historical_settings).unwrap(),
-                )),
-            );
-            let historical =
-                ConfigurationSnapshotV1::new(snapshot.effective_values, snapshot.provenance)
-                    .unwrap();
-            let stored_bytes = serde_json::to_vec(&historical).unwrap();
-
-            let pin = PinnedRuntimeConfiguration::new(
-                target(),
-                revision(),
-                serde_json::from_slice(&stored_bytes).unwrap(),
-            )
-            .unwrap();
-
-            assert_eq!(pin.config().automation.as_ref(), &settings);
-            let effective = serde_json::to_value(pin.config().automation.as_ref()).unwrap();
-            for task in ["memory_curator", "session_reflector", "skill_writer"] {
-                assert!(effective["tasks"][task].get("stale_lock_secs").is_none());
-            }
-            assert_eq!(serde_json::to_vec(pin.snapshot()).unwrap(), stored_bytes);
-            pin.snapshot().validate().unwrap();
-            if schedule == "every 10m" {
-                assert_eq!(
-                    pin.admitted_automation().unwrap().schedule(task),
-                    Some(
-                        tracedecay_automation::config::AutomationSchedule::Interval {
-                            every_secs: 600,
-                        }
-                    ),
-                );
-            } else {
-                assert!(matches!(
-                    pin.admitted_automation(),
-                    Err(TraceDecayError::Automation(_))
-                ));
-            }
-        }
-    }
-
-    #[test]
     fn pin_retains_schedule_admission_without_refusing_raw_settings() {
         let key =
             SettingKey::new(tracedecay_domain::configuration::AUTOMATION_SETTINGS_SETTING_KEY)
                 .unwrap();
-        let mut settings = tracedecay_automation::config::AutomationConfig::default();
+        let mut settings = tracedecay_automation::config::AutomationSettingsV1::default();
         settings.tasks.memory_curator.schedule = Some("every 10m".to_owned());
         settings.tasks.memory_curator.interval_secs = Some(5);
         let snapshot = resolved(BTreeMap::from([(

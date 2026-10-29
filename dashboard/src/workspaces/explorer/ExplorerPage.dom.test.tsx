@@ -286,7 +286,7 @@ function unavailable(sourceId: SourceId, code: string, message: string) {
   return withoutAnswer(sourceId, 'unavailable', code, message);
 }
 
-function lane(name: 'Code' | 'Sessions' | 'Knowledge' | 'Semantic') {
+function lane(name: 'Code' | 'Sessions' | 'Knowledge') {
   return screen.getByRole('region', { name: `${name} lane` });
 }
 
@@ -298,7 +298,7 @@ async function search(query = 'graph') {
 }
 
 describe('ExplorerPage independent lane lifecycle', () => {
-  it('draws four lanes, and a ready lane never makes an unavailable neighbour look ready', async () => {
+  it('draws three lanes, and a ready lane never makes an unavailable neighbour look ready', async () => {
     renderExplorer({
       ...SEARCH_ROUTES,
       '/api/explorer/queries': {
@@ -319,7 +319,6 @@ describe('ExplorerPage independent lane lifecycle', () => {
     expect(lane('Code').getAttribute('data-lane-state')).toBe('ready');
     expect(lane('Sessions').getAttribute('data-lane-state')).toBe('ready');
     expect(lane('Knowledge').getAttribute('data-lane-state')).toBe('unavailable');
-    expect(lane('Semantic').getAttribute('data-lane-state')).toBe('unregistered');
 
     // The unavailable lane prints the source's own reason and no count , 
     // a dash, never a zero, because zero is what a source that looked says.
@@ -336,31 +335,7 @@ describe('ExplorerPage independent lane lifecycle', () => {
     expect(within(lane('Sessions')).getByText('2')).toBeTruthy();
 
     // The summary counts only lanes that answered.
-    expect(screen.getByText(/2 of 4 lanes answered · 2 not served/)).toBeTruthy();
-  });
-
-  it('renders the semantic lane as a standing typed absence in browse and in search', async () => {
-    renderExplorer(SEARCH_ROUTES);
-    // Browse mode: the three source lanes hold their overview rows.
-    await screen.findByRole('button', { name: /graph_api\.rs/ });
-    expect(lane('Code').getAttribute('data-lane-state')).toBe('ready');
-    expect(within(lane('Code')).getByText('shown from the overview endpoint')).toBeTruthy();
-
-    const browse = within(lane('Semantic'));
-    expect(browse.getByText('No production authority')).toBeTruthy();
-    // Named in the header chip and again in the body, so the reason survives
-    // whichever of the two a narrow layout keeps in view.
-    expect(browse.getAllByText(/no semantic retrieval source is registered/).length).toBe(2);
-    expect(browse.getAllByText('Source unavailable').length).toBeGreaterThan(0);
-    expect(browse.queryByRole('button')).toBeNull();
-
-    await search();
-    await screen.findByText(/hits for/);
-    // Three sources answered; the fourth lane still says exactly why it has
-    // no rows, and nothing about the ready lanes leaked into it.
-    expect(lane('Semantic').getAttribute('data-lane-state')).toBe('unregistered');
-    expect(within(lane('Semantic')).getByText('No production authority')).toBeTruthy();
-    expect(within(lane('Semantic')).queryByText('EXACT')).toBeNull();
+    expect(screen.getByText(/2 of 3 lanes answered · 1 not served/)).toBeTruthy();
   });
 
   it('keeps a lane the coordinator is still reading distinct from lanes that answered', async () => {
@@ -435,7 +410,6 @@ describe('ExplorerPage scope truth', () => {
     });
     expect(lane('Sessions').getAttribute('data-lane-state')).toBe('locked');
     expect(lane('Knowledge').getAttribute('data-lane-state')).toBe('locked');
-    expect(lane('Semantic').getAttribute('data-lane-state')).toBe('unregistered');
     expect(
       within(lane('Code')).getAllByText(/Other project is not the active project/).length,
     ).toBeGreaterThan(0);

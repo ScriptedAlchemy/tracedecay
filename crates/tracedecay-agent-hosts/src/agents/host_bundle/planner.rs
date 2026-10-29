@@ -15,8 +15,7 @@ use tracedecay_host_integration::host_bundle_stale_preview;
 use tracedecay_host_integration::host_bundle_storage_failure;
 
 use super::control::{
-    component_receipts, read_receipt_at, validate_component_set_request,
-    validate_hermes_profile_bindings,
+    read_receipt_at, validate_component_set_request, validate_hermes_profile_bindings,
 };
 use super::model::{
     CompetingHostExtensionClaimV1, HostBundleExecutionRequestV1, HostBundleLifecyclePreviewV1,
@@ -466,10 +465,6 @@ struct HostComponentArtifactStateV1 {
     component: HostComponentV1,
     manifest_digest: [u8; 32],
     receipt_digest: Option<[u8; 32]>,
-    // Skipped when empty so a host without legacy receipts keeps the exact
-    // revision it had before legacy receipts were tracked.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    superseded_receipt_digests: Vec<[u8; 32]>,
     observed: Vec<ObservedHostArtifactV1>,
 }
 
@@ -488,17 +483,16 @@ fn component_set_artifact_state_revision(
     components.sort_by_key(|component| component.manifest.component);
     let mut states = Vec::with_capacity(components.len());
     for component in components {
-        let receipts = component_receipts(
-            artifact_root,
+        let receipt = read_receipt_at(
+            lifecycle_root,
             component.manifest.host,
             component.manifest.component,
-            |host, component| read_receipt_at(lifecycle_root, host, component),
         )?;
         let mut paths = BTreeMap::new();
         for artifact in &component.manifest.artifacts {
             paths.insert(artifact.relative_path.clone(), (None, None));
         }
-        if let Some(receipt) = &receipts.evidence {
+        if let Some(receipt) = &receipt {
             for artifact in &receipt.artifacts {
                 paths.insert(
                     artifact.relative_path.clone(),
@@ -532,12 +526,7 @@ fn component_set_artifact_state_revision(
         states.push(HostComponentArtifactStateV1 {
             component: component.manifest.component,
             manifest_digest: component.manifest.canonical_digest()?,
-            receipt_digest: receipts.own.as_ref().map(receipt_digest).transpose()?,
-            superseded_receipt_digests: receipts
-                .superseded
-                .iter()
-                .map(receipt_digest)
-                .collect::<Result<_, _>>()?,
+            receipt_digest: receipt.as_ref().map(receipt_digest).transpose()?,
             observed,
         });
     }
@@ -602,14 +591,8 @@ pub fn dry_run_host_bundle_lifecycle_with_lifecycle_root_at(
     }
     validate_competing_extension_claims(competing_extension_claims)?;
     verifier.verify_manifest(manifest)?;
-    let receipts = component_receipts(
-        artifact_root,
-        manifest.host,
-        manifest.component,
-        |host, component| read_receipt_at(lifecycle_root, host, component),
-    )?;
-    let owned_receipt = receipts
-        .evidence
+    let receipt = read_receipt_at(lifecycle_root, manifest.host, manifest.component)?;
+    let owned_receipt = receipt
         .as_ref()
         .filter(|receipt| receipt.operation != HostBundleLifecycleOpV1::Uninstall);
     let manifest_observed = if request.lifecycle.operation == HostBundleLifecycleOpV1::Uninstall {

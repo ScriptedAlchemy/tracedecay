@@ -98,7 +98,6 @@ export function laneGrade(read: ExplorerLaneReadModel): EvidenceGrade | null {
     case 'locked':
     case 'unsupported_schema':
     case 'unanswered':
-    case 'unregistered':
     case 'indeterminate':
       return 'UNAVAILABLE';
     default: {

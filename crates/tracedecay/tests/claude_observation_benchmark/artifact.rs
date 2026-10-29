@@ -1,18 +1,14 @@
-use std::collections::BTreeSet;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 pub(super) use tracedecay_domain::canonical_text::sha256_hex;
 
-use super::metrics::{
-    aggregate_samples, ticks_to_ms, validate_no_op_invariants, validate_no_op_samples,
-};
+use super::metrics::{aggregate_samples, ticks_to_ms, validate_no_op_invariants};
 use super::model::{
     BenchmarkResult, BuildIdentity, Distribution, EvidenceStatus, GitSnapshot,
     PROVIDER_COMMIT_SCOPE, PROVIDER_PARSE_SCOPE, PROVIDER_REPLAY_SCOPE,
@@ -20,9 +16,8 @@ use super::model::{
 };
 use super::{
     BENCHMARK_COMMAND, HARNESS_SOURCES, MEASURED_REPETITIONS, NATIVE_PROVIDER_FIXTURES,
-    PROVIDER_PIPELINE_SCOPE, RECORDS_PER_REPETITION, RESULT_SCHEMA_VERSION, RETIRED_WORKLOAD_ID,
-    WARMUP_REPETITIONS, WORKLOAD_ID, WORKLOAD_MANIFEST, WORKLOAD_MANIFEST_PATH,
-    WORKLOAD_SCHEMA_VERSION,
+    PROVIDER_PIPELINE_SCOPE, RECORDS_PER_REPETITION, RESULT_SCHEMA_VERSION, WARMUP_REPETITIONS,
+    WORKLOAD_ID, WORKLOAD_MANIFEST, WORKLOAD_MANIFEST_PATH,
 };
 
 pub(super) struct MeasuredBuild {
@@ -35,16 +30,6 @@ pub(super) struct MeasuredBuild {
 pub(super) struct EvidenceIndex {
     pub(super) schema_version: u32,
     pub(super) current_acceptance: Option<String>,
-    pub(super) historical_stale: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct ArtifactEnvelope {
-    schema_version: u32,
-    evidence_status: String,
-    workload_id: String,
-    #[serde(flatten)]
-    rest: Map<String, Value>,
 }
 
 pub(super) fn assert_repository_evidence() {
@@ -72,22 +57,6 @@ pub(super) fn validate_evidence_directory(
             index.schema_version
         ));
     }
-    let historical_index = index
-        .historical_stale
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    if historical_index.len() != index.historical_stale.len() {
-        return Err("evidence index contains duplicate historical artifacts".to_string());
-    }
-    if index
-        .current_acceptance
-        .as_ref()
-        .is_some_and(|name| historical_index.contains(name))
-    {
-        return Err("current acceptance is also indexed as historical".to_string());
-    }
-
     let mut files = fs::read_dir(directory)
         .map_err(|error| format!("read {}: {error}", directory.display()))?
         .filter_map(Result::ok)
@@ -102,41 +71,19 @@ pub(super) fn validate_evidence_directory(
     files.sort();
 
     let mut acceptance = Vec::new();
-    let mut historical = BTreeSet::new();
     for name in files {
         let path = directory.join(&name);
         let bytes = fs::read(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
-        let envelope = serde_json::from_slice::<ArtifactEnvelope>(&bytes)
+        let result = serde_json::from_slice::<BenchmarkResult>(&bytes)
             .map_err(|error| format!("parse {}: {error}", path.display()))?;
-        match envelope.evidence_status.as_str() {
-            "acceptance" => {
-                let result = serde_json::from_slice::<BenchmarkResult>(&bytes)
-                    .map_err(|error| format!("parse schema-2 {}: {error}", path.display()))?;
-                validate_acceptance_result(&result)?;
-                acceptance.push(name);
-            }
-            "historical_stale" => {
-                validate_historical_result(&envelope)?;
-                historical.insert(name);
-            }
-            status => {
-                return Err(format!(
-                    "{} has unsupported evidence_status {status}",
-                    path.display()
-                ));
-            }
-        }
+        validate_acceptance_result(&result)?;
+        acceptance.push(name);
     }
 
     if acceptance.len() > 1 {
         return Err(format!(
             "expected at most one acceptance artifact, found {}",
             acceptance.len()
-        ));
-    }
-    if historical != historical_index {
-        return Err(format!(
-            "historical evidence index mismatch: indexed={historical_index:?}, files={historical:?}"
         ));
     }
     match (&index.current_acceptance, acceptance.as_slice()) {
@@ -148,79 +95,6 @@ pub(super) fn validate_evidence_directory(
         )),
         (None, _) => Err("unindexed current acceptance artifact".to_string()),
     }
-}
-
-/// Historical and retired artifacts keep the workload id they were sealed
-/// under; only live acceptance evidence must carry the current id.
-fn is_recognized_workload_id(workload_id: &str) -> bool {
-    workload_id == WORKLOAD_ID || workload_id == RETIRED_WORKLOAD_ID
-}
-
-fn validate_historical_result(result: &ArtifactEnvelope) -> Result<(), String> {
-    if result.schema_version == RESULT_SCHEMA_VERSION {
-        return validate_retired_acceptance_result(result);
-    }
-    if result.schema_version != 1
-        || !is_recognized_workload_id(&result.workload_id)
-        || string(&result.rest, "stale_reason")?.is_empty()
-        || unsigned(&result.rest, "superseded_by_result_schema_version")?
-            != u64::from(RESULT_SCHEMA_VERSION)
-        || !is_lower_hex(string(&result.rest, "benchmark_commit")?, 40)
-        || boolean(&result.rest, "benchmark_commit_dirty")?
-    {
-        return Err("historical result provenance is invalid".to_string());
-    }
-    if unsigned(&result.rest, "warmup_repetitions")?
-        != u64::try_from(WARMUP_REPETITIONS).expect("warmup count fits u64")
-        || unsigned(&result.rest, "measured_repetitions")?
-            != u64::try_from(MEASURED_REPETITIONS).expect("sample count fits u64")
-        || unsigned(&result.rest, "records_per_repetition")?
-            != u64::try_from(RECORDS_PER_REPETITION).expect("record count fits u64")
-        || unsigned(&result.rest, "measured_records")?
-            != u64::try_from(MEASURED_REPETITIONS * RECORDS_PER_REPETITION)
-                .expect("measured record count fits u64")
-    {
-        return Err("historical result repetition contract mismatch".to_string());
-    }
-    let pipeline = samples(&result.rest, "pipeline_raw_samples")?;
-    let no_op = samples(&result.rest, "no_op_replay_raw_samples")?;
-    validate_sample_sequence(&pipeline, RECORDS_PER_REPETITION)?;
-    validate_no_op_samples(&no_op, 0, RECORDS_PER_REPETITION)?;
-    validate_distribution(&result.rest, "pipeline_batch_latency", &pipeline)?;
-    validate_distribution(&result.rest, "no_op_replay_latency", &no_op)?;
-    let no_op_totals = result
-        .rest
-        .get("no_op_replay_totals")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "historical result lacks no-op totals".to_string())?;
-    if no_op_totals.is_empty() || no_op_totals.values().any(|value| value.as_u64() != Some(0)) {
-        return Err("historical no-op coordinator reported work".to_string());
-    }
-    validate_aggregates(&result.rest, &pipeline, &no_op)
-}
-
-fn validate_retired_acceptance_result(result: &ArtifactEnvelope) -> Result<(), String> {
-    let git_before = result
-        .rest
-        .get("git_before")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "retired acceptance result lacks git_before".to_string())?;
-    if !is_recognized_workload_id(&result.workload_id)
-        || string(&result.rest, "stale_reason")?.is_empty()
-        || unsigned(&result.rest, "superseded_by_workload_schema_version")?
-            != u64::from(WORKLOAD_SCHEMA_VERSION)
-        || !is_lower_hex(string(git_before, "commit")?, 40)
-        || boolean(git_before, "dirty")?
-    {
-        return Err("retired acceptance result provenance is invalid".to_string());
-    }
-    let pipeline = samples(&result.rest, "pipeline_raw_samples")?;
-    let no_op = samples(&result.rest, "no_op_replay_raw_samples")?;
-    validate_sample_sequence(&pipeline, RECORDS_PER_REPETITION)?;
-    validate_no_op_samples(&no_op, 0, 0)?;
-    validate_distribution(&result.rest, "pipeline_batch_latency", &pipeline)?;
-    validate_distribution(&result.rest, "no_op_replay_latency", &no_op)?;
-    validate_aggregates(&result.rest, &pipeline, &no_op)
 }
 
 fn validate_acceptance_result(result: &BenchmarkResult) -> Result<(), String> {
@@ -531,43 +405,6 @@ fn validate_provider_phase(
     Ok(())
 }
 
-fn validate_aggregates(
-    fields: &Map<String, Value>,
-    pipeline_samples: &[RawPhaseSample],
-    no_op_samples: &[RawPhaseSample],
-) -> Result<(), String> {
-    let pipeline = aggregate_samples(pipeline_samples);
-    let no_op = aggregate_samples(no_op_samples);
-    let expected = [
-        ("pipeline_cpu_ticks", pipeline.cpu_ticks),
-        ("pipeline_process_write_bytes", pipeline.process_write_bytes),
-        (
-            "database_storage_growth_bytes",
-            pipeline.database_storage_growth_bytes,
-        ),
-        ("no_op_replay_cpu_ticks", no_op.cpu_ticks),
-        (
-            "no_op_replay_process_write_bytes",
-            no_op.process_write_bytes,
-        ),
-        (
-            "no_op_replay_database_storage_growth_bytes",
-            no_op.database_storage_growth_bytes,
-        ),
-        (
-            "peak_rss_kib",
-            pipeline.peak_rss_kib.max(no_op.peak_rss_kib),
-        ),
-    ];
-    if expected
-        .iter()
-        .any(|(field, value)| unsigned(fields, field) != Ok(*value))
-    {
-        return Err("historical result aggregate mismatch".to_string());
-    }
-    Ok(())
-}
-
 fn validate_sample_sequence(
     samples: &[RawPhaseSample],
     replayed_observations: usize,
@@ -586,23 +423,6 @@ fn validate_sample_sequence(
     Ok(())
 }
 
-fn validate_distribution(
-    fields: &Map<String, Value>,
-    name: &str,
-    samples: &[RawPhaseSample],
-) -> Result<(), String> {
-    let distribution = serde_json::from_value::<Distribution>(
-        fields
-            .get(name)
-            .cloned()
-            .ok_or_else(|| format!("historical result lacks {name}"))?,
-    )
-    .map_err(|error| format!("parse historical {name}: {error}"))?;
-    distribution_matches(&distribution, samples)
-        .then_some(())
-        .ok_or_else(|| format!("historical {name} mismatch"))
-}
-
 fn distribution_matches(expected: &Distribution, samples: &[RawPhaseSample]) -> bool {
     let actual = Distribution::from_samples(
         &samples
@@ -618,37 +438,6 @@ fn distribution_matches(expected: &Distribution, samples: &[RawPhaseSample]) -> 
         && actual.max_ns == expected.max_ns
         && float_close(actual.mean_ns, expected.mean_ns)
         && float_close(actual.sample_stddev_ns, expected.sample_stddev_ns)
-}
-
-fn samples(fields: &Map<String, Value>, name: &str) -> Result<Vec<RawPhaseSample>, String> {
-    serde_json::from_value(
-        fields
-            .get(name)
-            .cloned()
-            .ok_or_else(|| format!("historical result lacks {name}"))?,
-    )
-    .map_err(|error| format!("parse historical {name}: {error}"))
-}
-
-fn string<'a>(fields: &'a Map<String, Value>, name: &str) -> Result<&'a str, String> {
-    fields
-        .get(name)
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("artifact lacks string {name}"))
-}
-
-fn unsigned(fields: &Map<String, Value>, name: &str) -> Result<u64, String> {
-    fields
-        .get(name)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| format!("artifact lacks unsigned {name}"))
-}
-
-fn boolean(fields: &Map<String, Value>, name: &str) -> Result<bool, String> {
-    fields
-        .get(name)
-        .and_then(Value::as_bool)
-        .ok_or_else(|| format!("artifact lacks boolean {name}"))
 }
 
 fn float_close(left: f64, right: f64) -> bool {

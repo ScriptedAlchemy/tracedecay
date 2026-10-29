@@ -91,17 +91,6 @@ class AggregateTest(unittest.TestCase):
         # Overall opportunities exclude the context row.
         self.assertEqual(s["overall"]["opportunities"], 6)
 
-    def test_passed_alias(self):
-        # score.py emits "pass"; ensure "passed" is tolerated as a fallback.
-        rows = [
-            {"id": "w1", "category": "factstore-write", "passed": True},
-            {"id": "w2", "category": "factstore-write", "passed": False},
-        ]
-        s = scorecard.aggregate(rows)
-        self.assertEqual(s["buckets"]["write"]["opportunities"], 2)
-        self.assertEqual(s["buckets"]["write"]["triggered"], 1)
-        self.assertAlmostEqual(s["buckets"]["write"]["adoption_pct"], 50.0, places=2)
-
 
 class CorpusDenominatorTest(unittest.TestCase):
     def test_corpus_counts_missing_scenarios(self):

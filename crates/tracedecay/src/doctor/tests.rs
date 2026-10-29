@@ -610,12 +610,4 @@ async fn network_section_probes_only_the_github_release_lookup() {
         "{:?}",
         counters.checks
     );
-    assert!(
-        !counters
-            .checks
-            .iter()
-            .any(|check| check.message.to_lowercase().contains("worldwide")),
-        "doctor must not probe or mention the retired worldwide counter: {:?}",
-        counters.checks
-    );
 }

@@ -27,7 +27,6 @@ pub use profile::{
     profile_session_retrieval_serving_identity,
 };
 pub use session::{DirectRetainedSessionPortV1, ProjectRetainedSessionAuthoritiesV1};
-pub use session_refresh::RetainedSessionRefreshPortV1;
 
 /// The root selects the profile registry; session consumers acquire its lease
 /// only after admission, inside their existing bounded execution.

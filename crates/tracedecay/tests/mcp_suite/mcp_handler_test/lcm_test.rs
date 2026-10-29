@@ -1302,7 +1302,7 @@ async fn lcm_status_cli_bridge_accepts_json_args() {
     let project_arg = cg.project_root().display().to_string();
     close_test_graph(cg).await;
     let _daemon = common::spawn_tracedecay_daemon(&home);
-    // Compatibility `tracedecay tool` still returns the typed warming state
+    // `tracedecay tool` still returns the typed warming state
     // from `call_default_tool_within` without an internal project-open retry
     // (unlike the typed application-surface CLI path). Waiting that documented
     // retryable state out is the client protocol for this bridge.

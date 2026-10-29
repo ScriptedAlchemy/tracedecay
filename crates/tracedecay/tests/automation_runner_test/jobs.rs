@@ -37,7 +37,7 @@ fn job_schedule_decision(
 
 async fn evaluate_and_record_scheduler_skip(
     dashboard_root: &Path,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     executable: Option<&Path>,
     job: &AutomationJob,
     run_id: &str,
@@ -74,12 +74,12 @@ fn sample_job(id: &str) -> AutomationJob {
     }
 }
 
-fn enabled_job_config() -> AutomationConfig {
-    AutomationConfig {
+fn enabled_job_config() -> AutomationSettingsV1 {
+    AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        ..AutomationConfig::default()
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        ..AutomationSettingsV1::default()
     }
 }
 
@@ -317,7 +317,7 @@ fn parse_schedule_accepts_five_field_cron_expressions() {
     assert!(!cron.matches(wednesday_0915 - 3_600)); // 08:15
     assert!(!cron.matches(wednesday_0915 + 4 * 86_400)); // Sunday 09:15
 
-    // Legacy shorthands keep working.
+    // Named shorthands resolve to intervals.
     assert_eq!(
         resolve_schedule(Some("hourly"), None).unwrap(),
         AutomationSchedule::Interval {
@@ -628,7 +628,7 @@ async fn user_job_pre_run_command_is_refused_unless_allowed() {
             None
         }
     }
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         allow_job_commands: true,
         ..enabled_job_config()
     };
@@ -696,7 +696,7 @@ async fn user_job_pre_run_command_runs_from_project_root() {
         }
     }
 
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         allow_job_commands: true,
         ..enabled_job_config()
     };
@@ -730,7 +730,7 @@ async fn run_scheduled_pre_run_failure(
 
     let mut job = sample_job(job_id);
     job.pre_run_command = Some(command.to_string());
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         allow_job_commands: true,
         ..enabled_job_config()
     };
@@ -1001,7 +1001,7 @@ async fn user_job_backend_failure_records_failed_ledger_entry() {
     fs::create_dir_all(&profile_root).unwrap();
 
     let job = sample_job("fails");
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         timeout_secs: 1,
         ..enabled_job_config()
     };

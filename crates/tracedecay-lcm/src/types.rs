@@ -210,21 +210,6 @@ impl std::str::FromStr for LcmGrepSort {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LcmGrepHit {
-    pub kind: String,
-    pub provider: String,
-    pub session_id: String,
-    pub message_id: Option<String>,
-    pub node_id: Option<String>,
-    pub store_id: Option<i64>,
-    /// Raw-message role (`assistant`/`user`/`tool`/`system`); `None` for
-    /// summary nodes and rows ingested before roles were recorded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
-    pub snippet: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmExpandQueryResponse {
     // `answer` and `needs_synthesis` lead the payload so the synthesized answer
     // renders first in both JSON and generic markdown output.

@@ -2,10 +2,8 @@
 //!
 //! The dashboard resolves a named collection through the daemon application
 //! transport; selection precedence and read mapping are owned by the
-//! application resolver. No default collection is currently configurable,
-//! the retired `query.default_collection.v1` setting fails closed in old
-//! stores and no replacement setting exists, so an unnamed resolution
-//! reports the typed no-collection state instead of guessing a scope set.
+//! application resolver. An unnamed resolution reports the typed
+//! no-collection state instead of guessing a scope set.
 
 use axum::Json;
 use axum::extract::{Query, State};
@@ -30,8 +28,7 @@ pub struct CollectionQueryV1 {
 /// `GET /api/multi-root/collection`, resolve the selected named collection.
 ///
 /// An explicit `collection` query parameter names the target; without one the
-/// selector falls through to the (currently absent) default collection and
-/// reports the typed no-collection state.
+/// resolution reports the typed no-collection state.
 #[tracing::instrument(name = "dashboard_api.multi_root.resolve", level = "trace", skip_all)]
 pub async fn resolve_collection(
     State(state): State<DashboardState>,
@@ -69,7 +66,7 @@ pub(crate) async fn resolve_collection_capability(
             MultiRootCollectionUnavailableV1::TransportNotAdmitted.reason(),
         );
     };
-    let selector = MultiRootCollectionSelectorV1::new(explicit_target, None);
+    let selector = MultiRootCollectionSelectorV1::new(explicit_target);
     let Some(target) = selector.target().cloned() else {
         return MultiRootCapabilityV1::unavailable(
             MultiRootCollectionUnavailableV1::NoCollectionNamed.reason(),

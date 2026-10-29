@@ -1870,53 +1870,6 @@ fn maintenance_preparation_wakes_for_an_unreferenced_final_segment() {
     );
 }
 
-/// Earlier seals wrote a read bundle beside the generation and its segments.
-/// No reader names those files any more, so ordinary maintenance reclaims
-/// every file of that shape and leaves other names in the roots alone.
-#[test]
-fn maintenance_reclaims_retired_read_bundle_files() {
-    let store = tempfile::TempDir::new().expect("create unpublished store");
-    let generations_root = store.path().join(GENERATIONS_DIRECTORY);
-    let segments_root = store.path().join(GENERATION_SEGMENTS_DIRECTORY);
-    std::fs::create_dir_all(&generations_root).expect("create generation root");
-    std::fs::create_dir_all(&segments_root).expect("create segment root");
-    let hex = "ab".repeat(32);
-    let retired = [
-        generations_root.join(format!("read-bundle-{hex}.json")),
-        generations_root.join(format!(".read-bundle-{hex}.4242.1.tmp")),
-        segments_root.join(format!("read-bundle-artifact-{hex}.bin")),
-    ];
-    for path in &retired {
-        std::fs::write(path, b"retired read bundle bytes").expect("write retired bundle file");
-    }
-    let unrelated = segments_root.join("unrelated.txt");
-    std::fs::write(&unrelated, b"not a retention shape").expect("write unrelated file");
-
-    let plan = prepare_next_code_generation_retention_cancellable(
-        store.path(),
-        &BTreeSet::new(),
-        &|| false,
-        None,
-    )
-    .expect("prepare retired bundle retention unit");
-    assert!(plan.has_collectable_work());
-    let report = execute_code_generation_retention(
-        store.path(),
-        plan,
-        CodeGenerationRetentionModeV1::Apply,
-        UtcMicros(99),
-        None,
-    )
-    .expect("execute retired bundle retention unit");
-
-    assert_eq!(
-        retired.iter().map(|path| path.exists()).collect::<Vec<_>>(),
-        vec![false, false, false]
-    );
-    assert!(unrelated.exists());
-    assert!(report.deleted_generations.is_empty());
-}
-
 #[test]
 fn collectable_maintenance_preparation_escalates_to_full_verification() {
     let (store, _generations) = fixture_store(8);
@@ -2619,39 +2572,6 @@ fn scope_recovery_restores_quarantined_scopes_without_a_durable_receipt() {
     assert!(store.path().join(&live).is_dir());
     assert!(!scope_transaction_path(store.path()).exists());
     assert!(!staged_root.exists());
-}
-
-#[test]
-fn scope_recovery_deletes_a_retired_binding_cleanup_intent() {
-    let (store, live, stranded) = fixture_scope_store();
-    let intent = store
-        .path()
-        .join(".code-index-scope-binding-cleanup-intent-v1.json");
-    std::fs::write(
-        &intent,
-        format!(
-            r#"{{"schema":"tracedecay.code-index-scope-binding-cleanup-intent.v1","scope_hash":"{stranded}"}}"#
-        ),
-    )
-    .expect("write a binding-cleanup intent from before its authority was retired");
-
-    recover_scope_root_retention(store.path()).expect("recover the scope store");
-
-    let mut entries: Vec<String> = std::fs::read_dir(store.path())
-        .expect("list the scope store")
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    entries.sort();
-    let mut expected = vec![
-        ".code-index-scope-retention.lock".to_owned(),
-        live,
-        stranded,
-    ];
-    expected.sort();
-    assert_eq!(
-        entries, expected,
-        "recovery deletes the inert intent and keeps every scope"
-    );
 }
 
 #[test]

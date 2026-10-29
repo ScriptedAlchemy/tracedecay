@@ -49,11 +49,11 @@ without the token. A request to `/api/**` without the token gets
 `401 dashboard_request_unauthenticated`; a request whose `Host` or `Origin`
 does not name the bound listener gets `403`.
 
-## Code graph plugin API
+## Code graph API
 
-The dashboard's Code Graph view reads a project-local, bounded API over the
-indexed code graph (`nodes`, `edges`, `files` in `.tracedecay/tracedecay.db`),
-mounted in `crates/tracedecay-dashboard-api/src/lib.rs` (see `graph_api`).
+The SPA code workspace reads a project-local, bounded API over the indexed code
+graph, mounted in `crates/tracedecay-dashboard-api/src/lib.rs` (see
+`graph_api`).
 
 | Route | Description |
 |---|---|

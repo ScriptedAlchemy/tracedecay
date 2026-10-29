@@ -159,7 +159,7 @@ fn all_noop_curation_is_settled_without_claiming_a_store_mutation() {
     let operations = vec![json!({"op": "add"}), json!({"op": "remove"})];
     let evidence = crate::automation::artifacts::sha256_bytes(b"all-noop curation evidence");
     let decision = memory_curation_decision(
-        &AutomationConfig::default(),
+        &AutomationSettingsV1::default(),
         &authority,
         Some(&evidence),
         &operations,

@@ -13,7 +13,7 @@ use crate::automation::backend::{
     AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, AgentTaskRetryReport,
     runtime_failure_class,
 };
-use crate::automation::config::AutomationConfig;
+use crate::automation::config::AutomationSettingsV1;
 use crate::automation::lifecycle::{
     AgentRunFinalizer, AgentTaskRunContext, AutomationCommittedReceipt, AutomationRunControl,
     AutomationRunError, AutomationRunLedgerPublication, AutomationRunResult,
@@ -335,7 +335,7 @@ async fn skipped_session_reflector_run(
 
 pub(super) fn rejected_session_reflector_run(
     run: &AgentTaskRunContext<'_>,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     reason: &str,
     budget_stage: Option<SessionRetrievalBudgetStageV1>,
     evidence_hash: Option<String>,
@@ -385,7 +385,7 @@ pub(super) enum SessionReflectorFinalization {
 pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     run_control: &AutomationRunControl,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     authority: &tracedecay_policy::CurationApplyAuthorityV1,
     finalizer: &AgentRunFinalizer<'_>,
     output: ProposedAgentOutput<'_>,
@@ -630,7 +630,7 @@ pub(super) async fn run_session_reflector_for_store_with_publication<A: ProjectM
     sessions_db: RegisteredGlobalDbLeaseV1,
     retrieval: &dyn AutomationSessionRetrieval,
     memory: &MemoryApplication<A>,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     run_control: &AutomationRunControl,
     authority: &tracedecay_policy::CurationApplyAuthorityV1,
     backend: &dyn AgentTaskBackend,
@@ -664,7 +664,7 @@ fn run_session_reflector_for_store_with_publication_inner<'a, A: ProjectMemoryFa
     sessions_db: RegisteredGlobalDbLeaseV1,
     retrieval: &'a dyn AutomationSessionRetrieval,
     memory: &'a MemoryApplication<A>,
-    config: &'a AutomationConfig,
+    config: &'a AutomationSettingsV1,
     run_control: &'a AutomationRunControl,
     authority: &'a tracedecay_policy::CurationApplyAuthorityV1,
     backend: &'a dyn AgentTaskBackend,
@@ -946,7 +946,7 @@ fn run_session_reflector_for_store_with_publication_inner<'a, A: ProjectMemoryFa
 #[allow(clippy::too_many_arguments)]
 async fn run_session_reflector_with_backend_and_retrieval_publication(
     cg: &AutomationProjectContext,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     run_control: &AutomationRunControl,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
@@ -994,7 +994,7 @@ async fn run_session_reflector_with_backend_and_retrieval_publication(
 #[allow(clippy::too_many_arguments)]
 pub async fn run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
     cg: &AutomationProjectContext,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     run_control: &AutomationRunControl,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,

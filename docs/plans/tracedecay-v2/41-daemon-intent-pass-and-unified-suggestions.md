@@ -164,7 +164,7 @@ overstate the top probability, so thresholds never transfer.
 
 | Host | Boundaries admitted today | Suggestion surface | Gap closed in phase 2 |
 |---|---|---|---|
-| Claude Code | SessionStart, PostToolUse (edit tools), Stop | `hookSpecificOutput.additionalContext` | register `UserPromptSubmit`; promote `hook-prompt-submit` from capture-only |
+| Claude Code | SessionStart, PostToolUse (edit tools), Stop | `hookSpecificOutput.additionalContext` | register `UserPromptSubmit` |
 | Codex | SessionStart, PostToolUse, Stop | `additionalContext` | route `UserPromptSubmit` through dispatch; drop local hint |
 | Cursor | sessionStart, afterFileEdit, stop | `additional_context` on sessionStart / postToolUse | decode `postToolUse` -> ToolLifecycle; `beforeSubmitPrompt` cannot inject |
 | Kiro | `userPromptSubmit` | stdout | bounded lookup |

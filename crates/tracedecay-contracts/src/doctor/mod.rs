@@ -6,15 +6,6 @@
 //! that gathers findings across every family into a [`DoctorReportV1`]. This
 //! module owns no store, transport, provider runtime, or health formula;
 //! source-port implementations and any surface binding are owned elsewhere.
-//!
-//! # Install / doctor parity after host wire renames
-//!
-//! When a host lifecycle retires write targets (for example Kiro's shift to a
-//! global MCP-only install), Doctor must keep install/doctor parity: either
-//! grade the current owned surface, or emit an explicit migration advisory for
-//! leftover retired artifacts. Silent omission of retired steering/agent
-//! checks is schema drift. Operators need a truthful advisory, not a green
-//! report that ignores rotting files.
 
 mod adapters;
 mod report;
@@ -44,10 +35,10 @@ pub use sources::{
     ProfileAuthorityReadV1, RemoteAuthorityReadV1, RemoteListenerReadV1, RemoteOperationalReadV1,
     ResidentMemoryDoctorPort, ResidentMemoryHolderReadV1, ResidentMemoryOwnerReadV1,
     ResidentMemoryReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1,
-    StorageDoctorPort, UnappliedConfigurationSettingV1, advisory_feedback_findings,
-    code_index_finding, configuration_finding, github_source_finding, host_integration_finding,
-    ingest_refusal_finding, language_server_finding, observability_finding,
-    operational_audit_findings, resident_memory_findings, runtime_health_finding,
+    StorageDoctorPort, advisory_feedback_findings, code_index_finding, configuration_finding,
+    github_source_finding, host_integration_finding, ingest_refusal_finding,
+    language_server_finding, observability_finding, operational_audit_findings,
+    resident_memory_findings, runtime_health_finding,
 };
 pub use types::{
     DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,

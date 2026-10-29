@@ -504,16 +504,11 @@ mod tests {
 
     use super::*;
 
-    /// A completed tool response persists its tokens-saved accounting locally
-    /// and leaves the profile `config.toml` alone. The retired worldwide
-    /// counter used to write its pending-upload amount there after a response.
+    /// A completed tool response persists its tokens-saved accounting locally.
     #[tokio::test]
-    async fn completed_response_persists_local_accounting_without_counter_state() {
+    async fn completed_response_persists_local_accounting() {
         let (cg, _project, authority) =
             super::super::writer_test_support::init_indexed_repo().await;
-        let config_path =
-            tracedecay_session_memory::user_config::config_path(authority.profile_root());
-        let config_before = std::fs::read(&config_path).ok();
         let project_root = cg.project_root().to_path_buf();
         let context = super::super::writer_test_support::registered_context(cg, &authority);
         let server = super::super::McpServer::new_with_context(context).await;
@@ -535,12 +530,6 @@ mod tests {
             .await
             .expect("tool call should produce a response");
         server.ledger_writes_settled().await;
-        assert_eq!(
-            std::fs::read(&config_path).ok(),
-            config_before,
-            "a response must not write counter state into the profile config"
-        );
-
         let accounted = tokens_saved.load(Ordering::Acquire);
         server.spawn_token_accounting_persist(&project_root, "tracedecay_search", 41, 100);
         server.ledger_writes_settled().await;

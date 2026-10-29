@@ -760,7 +760,7 @@ mod tests {
                 .expect("an unadmitted executor returns a typed result, not an error"),
         );
 
-        assert_eq!(result.semantic_error(), Some(true));
+        assert!(result.semantic_error());
         let message = result.failure_message().unwrap_or_default();
         assert!(
             message.contains("search is unavailable") && message.contains("code_index_unavailable"),
@@ -783,7 +783,7 @@ mod tests {
                 .expect("an unadmitted executor returns a typed result, not an error"),
         );
 
-        assert_eq!(result.semantic_error(), Some(true));
+        assert!(result.semantic_error());
         let message = result.failure_message().unwrap_or_default();
         assert!(
             message.contains("branch diff main..feature is unavailable")
@@ -817,7 +817,7 @@ mod tests {
                 .await
                 .expect("the context's active branch resolves head"),
         );
-        assert_eq!(with_branch.semantic_error(), Some(true));
+        assert!(with_branch.semantic_error());
     }
 
     #[test]

@@ -846,12 +846,6 @@ fn automatic_fact_state_wire_contract_is_terminal_only() {
             state
         );
     }
-    for retired in ["pending", "pending_approval", "applying", "rejected"] {
-        assert!(
-            serde_json::from_value::<ProjectMemoryAutomaticFactStateV1>(json!(retired)).is_err(),
-            "retired state {retired:?} must not deserialize"
-        );
-    }
 }
 
 #[test]

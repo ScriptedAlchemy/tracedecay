@@ -17,8 +17,8 @@ use super::backend::{
 };
 use super::backend_identity::{backend_identity, is_deterministic_failure_class};
 use super::config::{
-    AdmittedAutomationConfig, AutomationBackend, AutomationConfig, AutomationHostMode,
-    AutomationTaskConfig,
+    AdmittedAutomationConfig, AutomationBackendV1, AutomationHostModeV1, AutomationSettingsV1,
+    AutomationTaskSettingsV1,
 };
 use super::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
@@ -331,12 +331,12 @@ fn schedule_decision_for_trigger(
             AutomationSkipReasonV1::AutomationDisabled,
         ));
     }
-    if config.host_mode == AutomationHostMode::DelegatedHost {
+    if config.host_mode == AutomationHostModeV1::DelegatedHost {
         return Ok(AutomationScheduleDecision::skipped(
             AutomationSkipReasonV1::DelegatedHostMode,
         ));
     }
-    if config.backend == AutomationBackend::Disabled {
+    if config.backend == AutomationBackendV1::Disabled {
         return Ok(AutomationScheduleDecision::skipped(
             AutomationSkipReasonV1::BackendDisabled,
         ));
@@ -576,7 +576,7 @@ enum BackendFailureStanding {
 /// callers cannot treat them as unstamped-legacy and silently re-admit.
 fn deterministic_backend_failure_standing(
     record: &AutomationRunLedgerRecord,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     executable: Option<&Path>,
 ) -> Result<BackendFailureStanding> {
     let Some(classification) = record.error_classification else {
@@ -676,17 +676,19 @@ pub fn cron_is_due(cron: &CronSchedule, last_completed_at: Option<i64>, now_secs
 /// User jobs carry their own schedule/enabled state (see
 /// `automation::jobs`), so the fixed-task config lookup falls back to a
 /// disabled default that makes the fixed-task gates skip them.
-const USER_JOB_TASK_CONFIG: AutomationTaskConfig = AutomationTaskConfig {
+const USER_JOB_TASK_CONFIG: AutomationTaskSettingsV1 = AutomationTaskSettingsV1 {
     enabled: false,
     schedule: None,
     interval_secs: None,
     cooldown_secs: None,
     min_idle_secs: None,
-    legacy_stale_lock_secs: None,
     session_evidence_budget_backoff_secs: None,
 };
 
-fn task_config(config: &AutomationConfig, task: AgentTaskKind) -> Option<&AutomationTaskConfig> {
+fn task_config(
+    config: &AutomationSettingsV1,
+    task: AgentTaskKind,
+) -> Option<&AutomationTaskSettingsV1> {
     match task {
         AgentTaskKind::MemoryCurator => Some(&config.tasks.memory_curator),
         AgentTaskKind::SessionReflector => Some(&config.tasks.session_reflector),
@@ -752,7 +754,7 @@ fn try_acquire_task_lock_blocking(
 fn open_task_lease(path: &Path) -> std::io::Result<Option<FileLease>> {
     tracedecay_runtime_core::storage::reject_symlink_components(path, "automation task lease")?;
     #[cfg(windows)]
-    let file = tracedecay_runtime_core::windows_security::open_or_create_private_lock_file(path)?;
+    let file = tracedecay_private_fs::windows::open_or_create_private_lock_file(path)?;
     #[cfg(not(windows))]
     let file = {
         let parent_path = path.parent().ok_or_else(|| {
@@ -905,7 +907,7 @@ mod tests {
 
     use super::super::backend::{AgentTaskFailureClass, AgentTaskRetryAttempt};
     use super::super::backend_identity::BACKEND_IDENTITY_SUPPRESSED;
-    use super::super::config::AutomationTaskSet;
+    use super::super::config::AutomationTaskSetV1;
     use super::*;
     use tempfile::tempdir;
     use tracedecay_automation::evidence_budget::{
@@ -1101,25 +1103,25 @@ mod tests {
         );
     }
 
-    fn session_evidence_task_config() -> AutomationTaskConfig {
-        AutomationTaskConfig {
+    fn session_evidence_task_config() -> AutomationTaskSettingsV1 {
+        AutomationTaskSettingsV1 {
             enabled: true,
             schedule: Some("interval".to_owned()),
             interval_secs: Some(60),
-            ..AutomationTaskConfig::default()
+            ..AutomationTaskSettingsV1::default()
         }
     }
 
-    fn session_evidence_config() -> AutomationConfig {
-        AutomationConfig {
+    fn session_evidence_config() -> AutomationSettingsV1 {
+        AutomationSettingsV1 {
             enabled: true,
-            backend: AutomationBackend::CodexAppServer,
-            tasks: AutomationTaskSet {
+            backend: AutomationBackendV1::CodexAppServer,
+            tasks: AutomationTaskSetV1 {
                 session_reflector: session_evidence_task_config(),
                 skill_writer: session_evidence_task_config(),
-                ..AutomationTaskSet::default()
+                ..AutomationTaskSetV1::default()
             },
-            ..AutomationConfig::default()
+            ..AutomationSettingsV1::default()
         }
     }
 
@@ -1173,27 +1175,27 @@ mod tests {
     /// A `memory_curator` config on a plain interval schedule: the task that
     /// burned the measured 26.9 runs/hour, and the one with no session-evidence
     /// gate in front of it.
-    fn curator_config() -> AutomationConfig {
-        AutomationConfig {
+    fn curator_config() -> AutomationSettingsV1 {
+        AutomationSettingsV1 {
             enabled: true,
-            backend: AutomationBackend::CodexAppServer,
-            tasks: AutomationTaskSet {
-                memory_curator: AutomationTaskConfig {
+            backend: AutomationBackendV1::CodexAppServer,
+            tasks: AutomationTaskSetV1 {
+                memory_curator: AutomationTaskSettingsV1 {
                     enabled: true,
                     schedule: Some("interval".to_owned()),
                     interval_secs: Some(60),
-                    ..AutomationTaskConfig::default()
+                    ..AutomationTaskSettingsV1::default()
                 },
-                ..AutomationTaskSet::default()
+                ..AutomationTaskSetV1::default()
             },
-            ..AutomationConfig::default()
+            ..AutomationSettingsV1::default()
         }
     }
 
     /// One terminal failure whose retry ladder reproduced `classification` on
     /// every attempt, stamped with `identity`.
     fn settled_backend_failure(
-        config: &AutomationConfig,
+        config: &AutomationSettingsV1,
         executable: Option<&Path>,
         error: &str,
         classification: AgentTaskFailureClass,
@@ -1771,7 +1773,7 @@ evidence about it",
     }
 
     fn schedule_decision(
-        config: &AutomationConfig,
+        config: &AutomationSettingsV1,
         executable: Option<&Path>,
         task: AgentTaskKind,
         records: &[AutomationRunLedgerRecord],

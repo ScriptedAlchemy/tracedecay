@@ -33,7 +33,7 @@ use tracedecay_store::{
 use super::backend::AgentTaskKind;
 use super::config_error;
 use super::managed_skills::{ManagedSkillState, list_managed_skills};
-use super::skill_usage::{SkillUsageSummary, summarize_skill_usage};
+use super::skill_usage::{SkillUsageRecord, summarize_skill_usage};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_session_memory::memory::{
     MemoryApplication, MemoryApplicationError, memory_application_error,
@@ -184,7 +184,7 @@ pub struct AutomationOutcomesSnapshot {
 
 /// Computes the adoption verdict for one activated skill. `None` when the
 /// skill has never been activated (no post-activation window to measure).
-pub fn skill_outcome(summary: &SkillUsageSummary, now_unix: i64) -> Option<SkillOutcomeRecord> {
+pub fn skill_outcome(summary: &SkillUsageRecord, now_unix: i64) -> Option<SkillOutcomeRecord> {
     let activated_at = summary.activated_at?;
     let secs_since_activation = now_unix.saturating_sub(activated_at);
     let views_since_activation = count_since_activation(
@@ -391,7 +391,7 @@ pub async fn refresh_fact_outcomes<A: ProjectMemoryFactStore>(
 }
 
 pub fn compute_skill_outcomes(
-    summaries: &[SkillUsageSummary],
+    summaries: &[SkillUsageRecord],
     now_unix: i64,
 ) -> Vec<SkillOutcomeRecord> {
     summaries

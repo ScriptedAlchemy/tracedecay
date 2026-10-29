@@ -303,7 +303,7 @@ impl CodeGraphActivationAuthorityV1 {
         *seated.write().unwrap_or_else(PoisonError::into_inner) = Some(generation);
     }
 
-    /// Validate and seat an already-published revision-7 graph directly from
+    /// Validate and seat an already-published graph directly from
     /// its durable verified head. `Ok(false)` is an explicit abstention for
     /// non-persistent or disabled authorities; every persistent mismatch is a
     /// typed error so the scheduler can retain pending coverage and replay.
