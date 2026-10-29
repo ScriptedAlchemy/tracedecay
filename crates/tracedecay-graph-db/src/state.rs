@@ -31,6 +31,25 @@ use crate::{
     GraphWriteBatch, SourceGeneration,
 };
 
+pub(crate) type ReadAllocationAdmission<'a> =
+    Option<&'a mut dyn FnMut(usize) -> Result<(), GraphDbError>>;
+
+fn allocation_metadata(bytes: Option<usize>) -> Result<usize, GraphDbError> {
+    bytes.ok_or_else(|| GraphDbError::unavailable("native graph allocation metadata unavailable"))
+}
+
+pub(crate) fn admitted_node(
+    store: &dyn GraphStore,
+    id: NodeId,
+    admit: &mut ReadAllocationAdmission<'_>,
+) -> Result<Option<Node>, GraphDbError> {
+    if let Some(admit) = admit {
+        let bytes = allocation_metadata(store.node_allocation_bytes(id))?;
+        admit(bytes.saturating_mul(3))?;
+    }
+    Ok(store.get_node(id))
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct StoredEntity {
     pub(crate) node: NodeId,
@@ -353,11 +372,43 @@ pub(crate) fn load_entity(
     namespace: &GraphNamespace,
     identity: &GraphEntityId,
 ) -> Result<Option<StoredEntity>, GraphDbError> {
-    let Some((node_id, node, stored_namespace, projection)) =
-        load_indexed_entity_node(database, namespace, identity)?
+    load_entity_admitted(database, namespace, identity, &mut None)
+}
+
+pub(crate) fn load_entity_admitted(
+    database: &GrafeoDB,
+    namespace: &GraphNamespace,
+    identity: &GraphEntityId,
+    admit: &mut ReadAllocationAdmission<'_>,
+) -> Result<Option<StoredEntity>, GraphDbError> {
+    let store = database.graph_store();
+    let key = entity_key_value(namespace, identity);
+    let Some(node_id) = unique_property_node_admitted(
+        store.as_ref(),
+        ENTITY_KEY_PROPERTY,
+        &key,
+        ENTITY_LABEL,
+        "entity identity",
+        |node| {
+            matches_indexed_identity(node, namespace, identity.as_str(), ENTITY_ID_PROPERTY, &key)
+        },
+        admit,
+    )?
     else {
         return Ok(None);
     };
+    let node = admitted_node(store.as_ref(), node_id, admit)?
+        .ok_or_else(|| GraphDbError::unavailable("indexed entity node is unreadable"))?;
+    let (stored_namespace, projection) = verify_indexed_entity_owner(
+        node.get_property(NAMESPACE_PROPERTY),
+        node.get_property(PROJECTION_PROPERTY),
+        node.get_property(ENTITY_ID_PROPERTY),
+        namespace,
+        identity,
+    )?;
+    if let Some(admit) = admit {
+        admit(allocation_metadata(store.node_allocation_bytes(node_id))?.saturating_mul(3))?;
+    }
     Ok(Some(StoredEntity {
         node: node_id,
         namespace: stored_namespace,
@@ -413,11 +464,21 @@ pub(crate) fn load_relation(
     namespace: &GraphNamespace,
     identity: &GraphRelationId,
 ) -> Result<Option<StoredRelation>, GraphDbError> {
-    load_relation_by_key(
+    load_relation_admitted(database, namespace, identity, &mut None)
+}
+
+pub(crate) fn load_relation_admitted(
+    database: &GrafeoDB,
+    namespace: &GraphNamespace,
+    identity: &GraphRelationId,
+    admit: &mut ReadAllocationAdmission<'_>,
+) -> Result<Option<StoredRelation>, GraphDbError> {
+    load_relation_by_key_admitted(
         database,
         namespace,
         identity,
         &mut EndpointIdentityCache::default(),
+        admit,
     )
 }
 
@@ -453,8 +514,18 @@ fn load_relation_by_key(
     identity: &GraphRelationId,
     cache: &mut EndpointIdentityCache,
 ) -> Result<Option<StoredRelation>, GraphDbError> {
+    load_relation_by_key_admitted(database, namespace, identity, cache, &mut None)
+}
+
+fn load_relation_by_key_admitted(
+    database: &GrafeoDB,
+    namespace: &GraphNamespace,
+    identity: &GraphRelationId,
+    cache: &mut EndpointIdentityCache,
+    admit: &mut ReadAllocationAdmission<'_>,
+) -> Result<Option<StoredRelation>, GraphDbError> {
     let indexed_key = relation_key_value(namespace, identity);
-    let Some(locator) = unique_property_node(
+    let Some(locator) = unique_property_node_admitted(
         database.graph_store().as_ref(),
         RELATION_KEY_PROPERTY,
         &indexed_key,
@@ -469,12 +540,17 @@ fn load_relation_by_key(
                 &indexed_key,
             )
         },
+        admit,
     )?
     else {
         return Ok(None);
     };
-    let (stored_namespace, relation) =
-        load_owned_relation_by_locator(database.graph_store().as_ref(), locator, cache)?;
+    let (stored_namespace, relation) = load_owned_relation_by_locator_admitted(
+        database.graph_store().as_ref(),
+        locator,
+        cache,
+        admit,
+    )?;
     if stored_namespace != *namespace || relation.relation.identity != *identity {
         return Err(GraphDbError::Corrupt {
             message: "relation native index does not match its scalar identity".to_owned(),
@@ -498,9 +574,17 @@ fn load_owned_relation_by_locator(
     locator_id: NodeId,
     cache: &mut EndpointIdentityCache,
 ) -> Result<(GraphNamespace, StoredRelation), GraphDbError> {
-    let locator = store
-        .get_node(locator_id)
-        .ok_or_else(|| GraphDbError::Corrupt {
+    load_owned_relation_by_locator_admitted(store, locator_id, cache, &mut None)
+}
+
+fn load_owned_relation_by_locator_admitted(
+    store: &dyn GraphStore,
+    locator_id: NodeId,
+    cache: &mut EndpointIdentityCache,
+    admit: &mut ReadAllocationAdmission<'_>,
+) -> Result<(GraphNamespace, StoredRelation), GraphDbError> {
+    let locator =
+        admitted_node(store, locator_id, admit)?.ok_or_else(|| GraphDbError::Corrupt {
             message: "indexed relation locator is unreadable".to_owned(),
         })?;
     let edge_i64 = required_i64(
@@ -511,6 +595,11 @@ fn load_owned_relation_by_locator(
         message: "relation edge identity is negative".to_owned(),
     })?;
     let edge_id = EdgeId::new(edge_u64);
+    if let Some(admit) = admit {
+        let locator_bytes = allocation_metadata(store.node_allocation_bytes(locator_id))?;
+        let edge_bytes = allocation_metadata(store.edge_allocation_bytes(edge_id))?;
+        admit(locator_bytes.saturating_add(edge_bytes).saturating_mul(3))?;
+    }
     let edge = store
         .get_edge(edge_id)
         .ok_or_else(|| GraphDbError::Corrupt {
@@ -527,6 +616,13 @@ fn load_owned_relation_by_locator(
     )?)
     .map_err(|error| persisted_validation_error("relation projection", error))?;
     let relation = decode_relation(&locator, &edge)?;
+    if let Some(admit) = admit {
+        let held = allocation_metadata(store.node_allocation_bytes(locator_id))?
+            .saturating_add(allocation_metadata(store.edge_allocation_bytes(edge_id))?);
+        let endpoints = allocation_metadata(store.node_allocation_bytes(edge.src))?
+            .saturating_add(allocation_metadata(store.node_allocation_bytes(edge.dst))?);
+        admit(held.saturating_add(endpoints).saturating_mul(3))?;
+    }
     let (source_namespace, source_identity) = cache.identity(store, edge.src)?;
     let (target_namespace, target_identity) = cache.identity(store, edge.dst)?;
     let same_namespace = source_namespace == namespace && target_namespace == namespace;
@@ -1306,8 +1402,54 @@ fn unique_property_node(
     description: &str,
     matches_identity: impl Fn(&Node) -> Result<bool, GraphDbError>,
 ) -> Result<Option<NodeId>, GraphDbError> {
+    unique_property_node_admitted(
+        store,
+        property,
+        value,
+        label,
+        description,
+        matches_identity,
+        &mut None,
+    )
+}
+
+fn unique_property_node_admitted(
+    store: &dyn GraphStore,
+    property: &str,
+    value: &Value,
+    label: &str,
+    description: &str,
+    matches_identity: impl Fn(&Node) -> Result<bool, GraphDbError>,
+    admit: &mut ReadAllocationAdmission<'_>,
+) -> Result<Option<NodeId>, GraphDbError> {
+    let lookup = if let Some(admit) = admit {
+        // Compact lookup sizing encodes the dictionary query and holds a
+        // comparator; reserve that scratch before asking for candidate demand.
+        let payload = match value {
+            Value::String(value) => value.len(),
+            Value::Bytes(value) => value.len().saturating_mul(2),
+            _ => 0,
+        };
+        admit(
+            property
+                .len()
+                .saturating_add(payload.saturating_mul(3))
+                .saturating_add(128),
+        )?;
+        let key = grafeo_common::types::PropertyKey::new(property);
+        let bytes = allocation_metadata(store.property_lookup_allocation_bytes(&key, value))?;
+        admit(bytes)?;
+        bytes
+    } else {
+        0
+    };
     let mut found: Option<NodeId> = None;
     for node_id in store.find_nodes_by_property(property, value) {
+        if let Some(admit) = admit {
+            admit(lookup.saturating_add(
+                allocation_metadata(store.node_allocation_bytes(node_id))?.saturating_mul(3),
+            ))?;
+        }
         let Some(node) = store.get_node(node_id) else {
             continue;
         };

@@ -327,9 +327,12 @@ async fn hook_orchestration_supersedes_same_address_without_replay_delay() {
     .unwrap();
     let first_completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed_first_completions = Arc::clone(&first_completions);
+    let first_completed = Arc::new(tokio::sync::Notify::new());
+    let observed_first_completed = Arc::clone(&first_completed);
     let mut first = saved_edit_request(Some(hook_lifecycle()));
     first.completion = Some(Arc::new(move |_| {
         observed_first_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        observed_first_completed.notify_one();
     }));
     assert_eq!(runtime.admit(first), HookOrchestrationAdmissionV1::Enqueued);
     first_started.notified().await;
@@ -364,10 +367,9 @@ async fn hook_orchestration_supersedes_same_address_without_replay_delay() {
         HookOrchestrationAdmissionV1::Enqueued,
         "a newer edit/stop event at the same address must replace queued work"
     );
-    tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        second_completed.notified(),
-    )
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        tokio::join!(first_completed.notified(), second_completed.notified());
+    })
     .await
     .expect("superseding event runs as soon as the cancelled worker releases capacity");
     assert!(first_dropped.load(std::sync::atomic::Ordering::Acquire));

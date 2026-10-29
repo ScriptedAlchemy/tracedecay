@@ -153,6 +153,23 @@ pub struct GraphEntity {
 }
 
 impl GraphEntity {
+    /// Upper bound on owned heap allocations, excluding the inline row.
+    pub fn heap_allocation_bound(&self) -> usize {
+        self.labels
+            .iter()
+            .fold(
+                self.identity
+                    .0
+                    .capacity()
+                    .saturating_add(ordered_node_bytes(
+                        self.labels.len(),
+                        size_of::<GraphLabel>(),
+                    )),
+                |bytes, label| bytes.saturating_add(label.0.capacity()),
+            )
+            .saturating_add(property_allocation_bound(&self.properties))
+    }
+
     pub fn new(
         identity: GraphEntityId,
         labels: BTreeSet<GraphLabel>,
@@ -183,6 +200,17 @@ pub struct GraphRelation {
 }
 
 impl GraphRelation {
+    /// Upper bound on owned heap allocations, excluding the inline row.
+    pub fn heap_allocation_bound(&self) -> usize {
+        self.identity
+            .0
+            .capacity()
+            .saturating_add(self.from.0.capacity())
+            .saturating_add(self.to.0.capacity())
+            .saturating_add(self.kind.0.capacity())
+            .saturating_add(property_allocation_bound(&self.properties))
+    }
+
     pub fn new(
         identity: GraphRelationId,
         from: GraphEntityId,
@@ -204,6 +232,37 @@ impl GraphRelation {
     pub(crate) fn validate(&self) -> Result<(), GraphDbError> {
         validate_properties(&self.properties)
     }
+}
+
+// Degree-six B-trees have eleven slots per node and at least five occupied
+// slots outside the root. Include headers and internal child pointers.
+fn ordered_node_bytes(entries: usize, entry_bytes: usize) -> usize {
+    if entries == 0 {
+        return 0;
+    }
+    let nodes = entries.saturating_sub(1) / 5 + 1;
+    let leaf = (2 * size_of::<usize>()).saturating_add(11 * entry_bytes);
+    nodes
+        .saturating_mul(leaf)
+        .saturating_add((nodes.saturating_add(3) / 6).saturating_mul(12 * size_of::<usize>()))
+}
+
+fn property_allocation_bound(properties: &BTreeMap<GraphPropertyName, GraphProperty>) -> usize {
+    properties.iter().fold(
+        ordered_node_bytes(
+            properties.len(),
+            size_of::<(GraphPropertyName, GraphProperty)>(),
+        ),
+        |bytes, (name, property)| {
+            bytes
+                .saturating_add(name.0.capacity())
+                .saturating_add(match property {
+                    GraphProperty::String(value) => value.capacity(),
+                    GraphProperty::Bytes(value) => value.capacity(),
+                    _ => 0,
+                })
+        },
+    )
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
