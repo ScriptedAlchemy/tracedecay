@@ -172,28 +172,6 @@ mod tests {
         DirectEvaluationStatusV1, QUERY_BASELINE_PROFILE, packaged,
     };
 
-    /// The packaged evaluator carries its own workload, corpus, and Git
-    /// authority, so `compare` needs nothing from the checkout it runs in.
-    #[test]
-    fn packaged_evaluator_compares_the_fallback_profile_from_its_own_root() {
-        let profiles = vec!["query-fallback".to_owned()];
-
-        let report =
-            crate::compare_default_direct(Some(&profiles)).expect("packaged evaluator execution");
-        assert_eq!(report.command, "compare");
-        assert_eq!(
-            report
-                .profiles
-                .iter()
-                .map(|profile| (profile.profile_id.as_str(), profile.partition.as_str()))
-                .collect::<Vec<_>>(),
-            [
-                ("query-fallback", "train"),
-                ("query-fallback", "validation")
-            ]
-        );
-    }
-
     #[test]
     fn source_and_packaged_evaluations_preserve_corpus_and_fallback_receipts() {
         let assets = super::materialize().expect("materialized evaluator fixture");
@@ -220,8 +198,22 @@ mod tests {
             crate::root_admitted_corpus_scope,
         )
         .expect("source-backed evaluator execution");
+        // The packaged entry point must carry its own workload, corpus, and
+        // Git authority, independently of the enrolled source fixture above.
         let packaged =
             crate::compare_default_direct(Some(&profiles)).expect("packaged evaluator execution");
+        assert_eq!(packaged.command, "compare");
+        assert_eq!(
+            packaged
+                .profiles
+                .iter()
+                .map(|profile| (profile.profile_id.as_str(), profile.partition.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("query-fallback", "train"),
+                ("query-fallback", "validation")
+            ]
+        );
 
         assert_eq!(source.workload_digest, packaged::WORKLOAD_SHA256);
         assert_eq!(source.workload_digest, packaged.workload_digest);
