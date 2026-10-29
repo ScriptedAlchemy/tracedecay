@@ -178,8 +178,7 @@ fn verified_graph_db_schema(
 /// with its WAL/SHM sidecars only when refused (a real SQLite database whose
 /// version or exact relational shape this binary does not accept). A database
 /// already at the canonical schema and exact shape is a typed error, so this
-/// cannot wipe a healthy store. When `other_reset_pending` names another
-/// refused shape the caller resets, nothing refused here is not an error.
+/// cannot wipe a healthy store.
 fn reset_refused_project_graph_store(
     profile_root: &Path,
     project_id: &str,
@@ -863,26 +862,28 @@ mod storage_coverage_output_tests {
 mod reset_project_store_tests {
     use super::*;
 
-    fn write_graph_db_with_user_version(db_path: &Path, version: u32) {
+    fn write_graph_db_at_version(db_path: &Path, version: u32) {
         std::fs::create_dir_all(db_path.parent().expect("db parent")).expect("db dir");
         let connection = rusqlite::Connection::open(db_path).expect("create store");
         connection
             .execute_batch(&format!(
-                "PRAGMA user_version = {version}; CREATE TABLE anchor (id INTEGER);"
+                "CREATE TABLE tracedecay_schema_version (
+                     component TEXT PRIMARY KEY,
+                     version INTEGER NOT NULL
+                 );
+                 INSERT INTO tracedecay_schema_version (component, version)
+                 VALUES ('graph', {version});
+                 CREATE TABLE anchor (id INTEGER);"
             ))
             .expect("stamp store");
         drop(connection);
     }
 
-    fn write_store_with_user_version(
-        profile_root: &Path,
-        project_id: &str,
-        version: u32,
-    ) -> PathBuf {
+    fn write_store_at_version(profile_root: &Path, project_id: &str, version: u32) -> PathBuf {
         let data_root =
             tracedecay_runtime_core::storage::profile_sharded_data_root(profile_root, project_id);
         let db_path = data_root.join(tracedecay_runtime_core::config::DB_FILENAME);
-        write_graph_db_with_user_version(&db_path, version);
+        write_graph_db_at_version(&db_path, version);
         db_path
     }
 
@@ -890,7 +891,7 @@ mod reset_project_store_tests {
     fn refused_old_schema_store_is_reset_and_transcript_inputs_survive() {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
-        let db_path = write_store_with_user_version(&profile_root, "proj_refused_v18", 18);
+        let db_path = write_store_at_version(&profile_root, "proj_refused_v18", 18);
         // WAL/SHM sidecars and durable transcript inputs share the store dir.
         let wal_path = db_path.with_file_name("tracedecay.db-wal");
         std::fs::write(&wal_path, b"wal").unwrap();

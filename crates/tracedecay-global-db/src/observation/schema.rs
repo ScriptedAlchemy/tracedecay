@@ -255,11 +255,6 @@ const OBSERVATION_AUTHORITY_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS sanit
 pub async fn ensure_observation_schema(
     conn: &(impl Executor + Sync),
 ) -> tracedecay_domain::errors::Result<Option<crate::registered::RefusedAuthorityV1>> {
-    schema_version::retire_named_ledgers(conn)
-        .await
-        .map_err(|error| {
-            global_db_operation_message(OBSERVATION_SCHEMA_OPERATION, error.to_string())
-        })?;
     let table_preexisted = observation_table_exists(conn).await?;
     tracedecay_runtime_core::db::retrieval_anchor_schema::install_retrieval_anchor_schema(
         conn,

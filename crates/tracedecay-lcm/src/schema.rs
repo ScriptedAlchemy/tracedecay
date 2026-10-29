@@ -286,9 +286,6 @@ pub async fn ensure_lcm_schema_in_transaction(
 ) -> Result<(), LcmError> {
     match require_admissible_lcm_schema(conn).await? {
         LcmSchemaAdmission::Current => {
-            store_schema::retire_named_ledgers(conn)
-                .await
-                .map_err(schema_stamp_error)?;
             conn.execute_batch(RETIRE_LEGACY_GREP_INDEX_SQL).await?;
             conn.execute_batch(CANONICAL_BODIES_TABLE_SQL).await?;
             ensure_raw_identity_schema(conn).await?;
@@ -716,13 +713,11 @@ mod tests {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let conn = TestConnection::open(&temp.path().join("sessions.db"));
         conn.execute_batch(&format!(
-            "CREATE TABLE session_schema_migrations (
-                name TEXT PRIMARY KEY,
-                version INTEGER NOT NULL,
-                applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+            "CREATE TABLE tracedecay_schema_version (
+                component TEXT PRIMARY KEY,
+                version INTEGER NOT NULL
             );
-            INSERT INTO session_schema_migrations(name, version, applied_at)
-            VALUES ('lcm', {PREVIOUS}, 123);"
+            INSERT INTO tracedecay_schema_version(component, version) VALUES ('lcm', {PREVIOUS});"
         ))
         .await
         .map_err(|error| error.to_string())?;
@@ -753,7 +748,7 @@ mod tests {
         assert_eq!(
             util::fetch_i64(
                 &*conn,
-                "SELECT version FROM session_schema_migrations WHERE name = 'lcm'",
+                "SELECT version FROM tracedecay_schema_version WHERE component = 'lcm'",
                 (),
                 "migration marker version",
             )
@@ -787,13 +782,11 @@ mod tests {
                 metadata_json TEXT,
                 PRIMARY KEY(provider, message_id)
             );
-            CREATE TABLE session_schema_migrations (
-                name TEXT PRIMARY KEY,
-                version INTEGER NOT NULL,
-                applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+            CREATE TABLE tracedecay_schema_version (
+                component TEXT PRIMARY KEY,
+                version INTEGER NOT NULL
             );
-            INSERT INTO session_schema_migrations(name, version, applied_at)
-            VALUES ('lcm', 6, 123);
+            INSERT INTO tracedecay_schema_version(component, version) VALUES ('lcm', 6);
             CREATE VIRTUAL TABLE lcm_lifecycle_state USING fts5(
                 provider,
                 conversation_id,
@@ -818,7 +811,7 @@ mod tests {
         assert_eq!(
             util::fetch_i64(
                 &*conn,
-                "SELECT version FROM session_schema_migrations WHERE name = 'lcm'",
+                "SELECT version FROM tracedecay_schema_version WHERE component = 'lcm'",
                 (),
                 "migration marker version",
             )
@@ -873,11 +866,6 @@ mod tests {
                 source_offset INTEGER,
                 metadata_json TEXT,
                 PRIMARY KEY(provider, message_id)
-            );
-            CREATE TABLE session_schema_migrations (
-                name TEXT PRIMARY KEY,
-                version INTEGER NOT NULL,
-                applied_at INTEGER NOT NULL DEFAULT (unixepoch())
             );",
         )
         .await
@@ -920,12 +908,6 @@ mod tests {
             .await
             .map_err(|err| err.to_string())?,
             LCM_SCHEMA_VERSION
-        );
-        assert!(
-            !schema_object_exists(&*conn, "session_schema_migrations")
-                .await
-                .map_err(|error| error.to_string())?,
-            "a current install retires the legacy LCM ledger"
         );
         assert_eq!(
             util::fetch_i64(
@@ -1190,60 +1172,6 @@ mod tests {
             checked += 1;
         }
         assert_eq!(checked, bodies.len() + 1);
-        Ok(())
-    }
-
-    #[asupersync::test]
-    async fn current_legacy_stamp_moves_onto_the_store_ledger() -> Result<(), String> {
-        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let conn = TestConnection::open(&temp.path().join("sessions.db"));
-        conn.execute_batch(
-            "CREATE TABLE sessions (
-                provider TEXT NOT NULL,
-                session_id TEXT NOT NULL,
-                project_key TEXT NOT NULL,
-                project_path TEXT NOT NULL,
-                PRIMARY KEY(provider, session_id)
-            );",
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        ensure_lcm_schema(&conn)
-            .await
-            .map_err(|error| error.to_string())?;
-        conn.execute_batch(
-            "DROP TABLE tracedecay_schema_version;
-            CREATE TABLE session_schema_migrations (
-                name TEXT PRIMARY KEY,
-                version INTEGER NOT NULL,
-                applied_at INTEGER NOT NULL DEFAULT (unixepoch())
-            );
-            INSERT INTO session_schema_migrations(name, version, applied_at)
-            VALUES ('lcm', 15, 123);",
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-
-        ensure_lcm_schema(&conn)
-            .await
-            .map_err(|error| error.to_string())?;
-        assert!(
-            !schema_object_exists(&*conn, "session_schema_migrations")
-                .await
-                .map_err(|error| error.to_string())?,
-            "adopting the current LCM stamp drops the legacy ledger"
-        );
-        assert_eq!(
-            util::fetch_i64(
-                &*conn,
-                "SELECT version FROM tracedecay_schema_version WHERE component = 'lcm'",
-                (),
-                "adopted LCM version",
-            )
-            .await
-            .map_err(|error| error.to_string())?,
-            LCM_SCHEMA_VERSION
-        );
         Ok(())
     }
 

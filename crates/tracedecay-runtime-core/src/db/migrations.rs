@@ -59,8 +59,7 @@ fn schema_stamp_error(error: crate::db::schema_version::SchemaVersionError) -> T
     }
 }
 
-/// Recorded graph version. An unstamped file is 0, and a legacy pragma is
-/// visible until [`adopt_graph_stamp`] moves it.
+/// Recorded graph version. An unstamped file is 0.
 async fn get_version(conn: &(impl QueryExecutor + Sync)) -> Result<u32> {
     let version =
         crate::db::schema_version::read_version(conn, crate::db::schema_version::GRAPH_COMPONENT)
@@ -87,11 +86,6 @@ async fn record_graph_version(conn: &(impl Executor + Sync), version: u32) -> Re
     .map_err(schema_stamp_error)
 }
 
-async fn adopt_graph_stamp(conn: &(impl Executor + Sync)) -> Result<()> {
-    crate::db::schema_version::retire_user_version(conn)
-        .await
-        .map_err(schema_stamp_error)
-}
 /// Configures incremental auto-vacuum for a brand-new database before any
 /// schema-shaping pragmas or tables are created.
 pub async fn configure_fresh_auto_vacuum(conn: &Connection, operation: &str) -> Result<()> {
@@ -235,83 +229,6 @@ async fn store_has_objects(conn: &impl QueryExecutor) -> Result<bool> {
     .await
 }
 
-async fn retired_sqlite_projection_object(conn: &impl QueryExecutor) -> Result<Option<String>> {
-    let mut rows = conn
-        .query(
-            "SELECT name FROM sqlite_master
-             WHERE type IN ('table', 'view', 'trigger')
-               AND (
-                   name IN (
-                       'nodes', 'edges', 'files', 'unresolved_refs',
-                       'node_fingerprints', 'redundancy_pairs',
-                       'memory_facts', 'memory_entities',
-                       'memory_fact_entities', 'memory_feedback_events',
-                       'memory_oplog', 'memory_fact_relations',
-                       'memory_banks', 'memory_bank_dirty',
-                       'memory_v2_banks', 'memory_v2_bank_dirty',
-                       'memory_v2_fact_relations',
-                       'memory_v2_assertion_vectors',
-                       'memory_v2_legacy_map', 'memory_v2_legacy_quarantine',
-                       'memory_v2_backfill_progress',
-                       'memory_v2_legacy_proposal_map',
-                       'memory_v2_proposals',
-                       'memory_v2_proposal_transitions',
-                       'memory_v2_proposal_current',
-                       'memory_v2_legacy_feedback_event_map',
-                       'memory_v2_feedback_history_repair_progress',
-                       'memory_v2_compatibility_operation_receipts',
-                       'memory_v2_compatibility_banks',
-                       'memory_v2_compatibility_bank_dirty'
-                   )
-                   OR name GLOB 'nodes_fts*'
-                   OR name GLOB 'memory_facts_fts*'
-               )
-             ORDER BY name
-             LIMIT 1",
-            (),
-        )
-        .await
-        .map_err(|error| TraceDecayError::Database {
-            message: format!("failed to probe for retired SQLite projection objects: {error}"),
-            operation: "ensure_schema_current".to_owned(),
-        })?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| TraceDecayError::Database {
-            message: format!("failed to read retired SQLite projection object probe: {error}"),
-            operation: "ensure_schema_current".to_owned(),
-        })?
-    else {
-        return Ok(None);
-    };
-    row.get::<String>(0)
-        .map(Some)
-        .map_err(|error| TraceDecayError::Database {
-            message: format!("failed to decode retired SQLite projection object name: {error}"),
-            operation: "ensure_schema_current".to_owned(),
-        })
-}
-
-/// Refuses a store that still carries an object of a retired `SQLite`
-/// projection, whatever its stamp, naming the retired object in the refusal.
-async fn require_no_retired_sqlite_projection_object(
-    conn: &(impl QueryExecutor + Sync),
-) -> Result<()> {
-    let Some(object) = retired_sqlite_projection_object(conn).await? else {
-        return Ok(());
-    };
-    let current = get_version(conn).await?;
-    Err(TraceDecayError::reset_required(
-        "SQLite store",
-        format!(
-            "database schema v{current} still contains retired SQLite projection object \
-             '{object}'; remove the store directory and let this binary create the exact \
-             relational shape"
-        ),
-    ))
-}
-
 fn unsupported_schema_version(current: u32) -> TraceDecayError {
     TraceDecayError::reset_required(
         "SQLite store",
@@ -346,8 +263,7 @@ async fn ensure_schema_current_engine_connection(
     if current == 0 && !store_has_objects(conn).await? {
         return create_schema_engine_connection(conn).await;
     }
-    verify_final_schema_connection(conn).await?;
-    adopt_graph_stamp(conn).await
+    verify_final_schema_connection(conn).await
 }
 
 /// Verifies that an already-existing store has the one exact final shape this
@@ -356,7 +272,6 @@ async fn ensure_schema_current_engine_connection(
 pub(crate) async fn verify_final_schema_connection(
     conn: &(impl QueryExecutor + Sync),
 ) -> Result<()> {
-    require_no_retired_sqlite_projection_object(conn).await?;
     let current = get_version(conn).await?;
     if current != SCHEMA_VERSION {
         return Err(unsupported_schema_version(current));
@@ -371,8 +286,7 @@ pub(crate) async fn ensure_schema_current_connection(conn: &Connection) -> Resul
     if current == 0 && !store_has_objects(conn).await? {
         return create_schema_connection(conn).await;
     }
-    verify_final_schema_connection(conn).await?;
-    adopt_graph_stamp(conn).await
+    verify_final_schema_connection(conn).await
 }
 
 #[cfg(test)]

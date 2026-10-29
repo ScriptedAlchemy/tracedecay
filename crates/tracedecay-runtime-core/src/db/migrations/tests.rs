@@ -6,15 +6,11 @@ use tracedecay_rusqlite_runtime::exact_sql::{
 
 use crate::db::engine::{Connection, TestConnection};
 
-use super::{
-    SCHEMA_VERSION, create_schema_connection, ensure_schema_current_connection,
-    verify_final_schema_connection,
-};
+use super::{SCHEMA_VERSION, create_schema_connection, ensure_schema_current_connection};
 use crate::db::engine::params;
 use tracedecay_domain::errors::TraceDecayError;
 
 mod final_shape;
-mod fts;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -56,33 +52,13 @@ async fn create_schema_db() -> (TestConnection, TempDir) {
 }
 
 async fn set_user_version(conn: &Connection, version: u32) {
-    if ledger_table_exists(conn).await {
-        crate::db::schema_version::record_version(
-            conn,
-            crate::db::schema_version::GRAPH_COMPONENT,
-            i64::from(version),
-        )
-        .await
-        .expect("failed to set schema version");
-        return;
-    }
-    conn.execute(&format!("PRAGMA user_version = {version}"), ())
-        .await
-        .expect("failed to set user_version");
-}
-
-async fn ledger_table_exists(conn: &Connection) -> bool {
-    let mut rows = conn
-        .query(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tracedecay_schema_version'",
-            (),
-        )
-        .await
-        .expect("probe schema ledger");
-    rows.next()
-        .await
-        .expect("read schema ledger probe")
-        .is_some()
+    crate::db::schema_version::record_version(
+        conn,
+        crate::db::schema_version::GRAPH_COMPONENT,
+        i64::from(version),
+    )
+    .await
+    .expect("failed to set schema version");
 }
 
 async fn get_user_version(conn: &Connection) -> u32 {
@@ -91,20 +67,6 @@ async fn get_user_version(conn: &Connection) -> u32 {
             .await
             .expect("failed to read schema version");
     u32::try_from(version.unwrap_or(0)).expect("schema version fits u32")
-}
-
-async fn pragma_user_version(conn: &Connection) -> u32 {
-    let mut rows = conn
-        .query("PRAGMA user_version", ())
-        .await
-        .expect("failed to query user_version");
-    let row = rows
-        .next()
-        .await
-        .expect("failed to read user_version row")
-        .expect("user_version should return a row");
-    let version: i64 = row.get(0).expect("failed to read user_version value");
-    u32::try_from(version).expect("user_version fits u32")
 }
 
 /// Checks whether a table exists in `sqlite_master`.
@@ -265,178 +227,6 @@ async fn the_former_v26_shape_is_refused_without_mutation() {
     assert!(!column_exists(&conn, "graph_publication_replay_v1", "expected_prior_head").await);
 }
 
-#[asupersync::test]
-async fn a_current_stamp_with_retired_code_graph_tables_is_reset_required() {
-    for retired in [
-        "nodes",
-        "edges",
-        "files",
-        "unresolved_refs",
-        "nodes_fts",
-        "nodes_fts_data",
-        "node_fingerprints",
-        "redundancy_pairs",
-    ] {
-        let (conn, _dir) = create_schema_db().await;
-        conn.execute_batch(&format!("CREATE TABLE {retired} (id INTEGER);"))
-            .await
-            .unwrap();
-
-        let error = ensure_schema_current_connection(&conn)
-            .await
-            .expect_err("a current stamp must not conceal retired graph storage");
-        assert_eq!(
-            error
-                .reset_required_context()
-                .map(|(authority, _reason)| authority),
-            Some("SQLite store")
-        );
-        assert!(
-            error.to_string().contains(retired),
-            "the refusal must identify the retired object: {error}"
-        );
-        assert!(table_exists(&conn, retired).await);
-        assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
-    }
-}
-
-#[asupersync::test]
-async fn a_current_stamp_with_retired_memory_projection_objects_is_reset_required() {
-    for retired in [
-        "memory_facts",
-        "memory_entities",
-        "memory_fact_entities",
-        "memory_feedback_events",
-        "memory_oplog",
-        "memory_fact_relations",
-        "memory_v2_fact_relations",
-        "memory_facts_fts",
-        "memory_facts_fts_data",
-        "memory_banks",
-        "memory_bank_dirty",
-        "memory_v2_banks",
-        "memory_v2_bank_dirty",
-        "memory_v2_assertion_vectors",
-        "memory_v2_legacy_map",
-        "memory_v2_legacy_quarantine",
-        "memory_v2_backfill_progress",
-        "memory_v2_legacy_proposal_map",
-        "memory_v2_proposals",
-        "memory_v2_proposal_transitions",
-        "memory_v2_proposal_current",
-        "memory_v2_legacy_feedback_event_map",
-        "memory_v2_feedback_history_repair_progress",
-        "memory_v2_compatibility_operation_receipts",
-        "memory_v2_compatibility_banks",
-        "memory_v2_compatibility_bank_dirty",
-    ] {
-        let (conn, _dir) = create_schema_db().await;
-        conn.execute_batch(&format!("CREATE TABLE {retired} (id INTEGER);"))
-            .await
-            .unwrap();
-
-        let error = ensure_schema_current_connection(&conn)
-            .await
-            .expect_err("a current stamp must not conceal retired memory storage");
-        assert_eq!(
-            error
-                .reset_required_context()
-                .map(|(authority, _reason)| authority),
-            Some("SQLite store")
-        );
-        assert!(
-            error.to_string().contains(retired),
-            "the refusal must identify the retired object: {error}"
-        );
-        assert!(table_exists(&conn, retired).await);
-        assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
-    }
-}
-
-/// v36 retired the semantic-vector staging family with dense code retrieval.
-/// A leftover object of that family on the current stamp is refused by the
-/// writer ladder and by the read-only verifier, and the refusal names it.
-#[asupersync::test]
-async fn a_retired_semantic_vector_staging_object_is_reset_required_on_every_stamp() {
-    for (retired, ddl) in [
-        (
-            "semantic_vector_stages",
-            "CREATE TABLE semantic_vector_stages (stage_id TEXT PRIMARY KEY);",
-        ),
-        (
-            "semantic_vector_replay_stage_identity_guard",
-            "CREATE TRIGGER semantic_vector_replay_stage_identity_guard
-             BEFORE INSERT ON graph_publication_replay_v1 BEGIN
-                 SELECT RAISE(ABORT, 'retired staging guard');
-             END;",
-        ),
-    ] {
-        for stamped in [SCHEMA_VERSION] {
-            let (conn, _dir) = create_schema_db().await;
-            conn.execute_batch(ddl).await.unwrap();
-            set_user_version(&conn, stamped).await;
-
-            let writer_error = ensure_schema_current_connection(&conn)
-                .await
-                .expect_err("a retired staging object must not be admitted or repaired");
-            let read_only_error = verify_final_schema_connection(&conn)
-                .await
-                .expect_err("a read-only verifier must refuse a retired staging object");
-            for error in [writer_error, read_only_error] {
-                assert_eq!(
-                    error
-                        .reset_required_context()
-                        .map(|(authority, _reason)| authority),
-                    Some("SQLite store"),
-                    "v{stamped} {retired}: {error}"
-                );
-                assert!(
-                    error.to_string().contains(retired),
-                    "v{stamped} refusal must identify the retired object: {error}"
-                );
-            }
-            assert_eq!(
-                string_column(
-                    &conn,
-                    &format!("SELECT name FROM sqlite_master WHERE name = '{retired}'"),
-                )
-                .await,
-                [retired],
-                "refusal must leave the retired object in place"
-            );
-            assert_eq!(get_user_version(&conn).await, stamped);
-        }
-    }
-}
-
-#[asupersync::test]
-async fn a_current_stamp_with_retired_memory_projection_columns_is_reset_required() {
-    for retired in ["source_label", "projection_state", "vector_watermark_json"] {
-        let (conn, _dir) = create_schema_db().await;
-        conn.execute_batch(&format!(
-            "ALTER TABLE memory_v2_current_facts ADD COLUMN {retired} TEXT;"
-        ))
-        .await
-        .unwrap();
-
-        let error = ensure_schema_current_connection(&conn)
-            .await
-            .expect_err("a current stamp must not conceal retired projection columns");
-        assert_eq!(
-            error
-                .reset_required_context()
-                .map(|(authority, _reason)| authority),
-            Some("SQLite store")
-        );
-        assert!(
-            error.to_string().contains("memory_v2_current_facts"),
-            "the refusal must identify the incompatible projection table: {error}"
-        );
-        assert!(column_exists(&conn, "memory_v2_current_facts", retired).await);
-        assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
-    }
-}
-
 /// Creation is atomic: an interrupted create leaves neither DDL nor a version
 /// stamp behind, and the retry still produces the full shape.
 #[asupersync::test]
@@ -516,32 +306,6 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
         "fresh creation must install exactly the final memory table inventory",
     );
 
-    for retired in [
-        "nodes",
-        "edges",
-        "files",
-        "unresolved_refs",
-        "nodes_fts",
-        "nodes_fts_data",
-        "node_fingerprints",
-        "redundancy_pairs",
-        "memory_facts",
-        "memory_entities",
-        "memory_fact_entities",
-        "memory_feedback_events",
-        "memory_oplog",
-        "memory_fact_relations",
-        "memory_facts_fts",
-        "memory_facts_fts_data",
-        "semantic_vector_stages",
-        "semantic_vector_stage_batches",
-    ] {
-        assert!(
-            !table_exists(&conn, retired).await,
-            "retired SQLite projection table {retired} must not be created"
-        );
-    }
-
     conn.execute(
         "INSERT INTO graph_publication_replay_v1 (
             shard_id, namespace, projection, generation, idempotency_key,
@@ -577,26 +341,6 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
         .await
     );
     assert!(column_exists(&conn, "memory_v2_automatic_fact_receipts", "request_digest").await);
-    for retired in [
-        "memory_v2_legacy_map",
-        "memory_v2_legacy_quarantine",
-        "memory_v2_backfill_progress",
-        "memory_v2_legacy_proposal_map",
-        "memory_v2_legacy_feedback_event_map",
-        "memory_v2_feedback_history_repair_progress",
-        "memory_v2_compatibility_operation_receipts",
-        "memory_v2_compatibility_banks",
-        "memory_v2_compatibility_bank_dirty",
-        "memory_v2_banks",
-        "memory_v2_bank_dirty",
-        "memory_v2_assertion_vectors",
-        "memory_v2_fact_relations",
-    ] {
-        assert!(
-            !table_exists(&conn, retired).await,
-            "retired table {retired} must not be created"
-        );
-    }
     for table in ["memory_v2_operation_receipts", "memory_v2_feedback_history"] {
         assert!(table_exists(&conn, table).await, "missing table {table}");
     }
@@ -612,12 +356,6 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
         assert!(
             column_exists(&conn, "memory_v2_current_facts", column).await,
             "missing memory_v2_current_facts.{column}"
-        );
-    }
-    for retired in ["source_label", "projection_state", "vector_watermark_json"] {
-        assert!(
-            !column_exists(&conn, "memory_v2_current_facts", retired).await,
-            "retired memory_v2_current_facts.{retired} must not be created"
         );
     }
 
@@ -807,41 +545,4 @@ async fn the_content_digest_lookup_is_an_indexed_point_read() {
         !plan.contains("SCAN digests"),
         "the digest lookup must never scan the digest table: {plan}"
     );
-}
-
-#[asupersync::test]
-async fn a_user_version_stamp_at_the_current_schema_upgrades_onto_the_ledger() {
-    let (conn, _dir) = create_schema_db().await;
-    conn.execute_batch("DROP TABLE tracedecay_schema_version")
-        .await
-        .expect("remove the adopted ledger");
-    conn.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), ())
-        .await
-        .expect("restore the legacy stamp");
-
-    ensure_schema_current_connection(&conn)
-        .await
-        .expect("current legacy stamp must be admitted and adopted");
-
-    assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
-    assert_eq!(pragma_user_version(&conn).await, 0);
-    assert!(ledger_table_exists(&conn).await);
-}
-
-#[asupersync::test]
-async fn an_older_user_version_is_refused_without_adopting_it() {
-    let (conn, _dir) = create_schema_db().await;
-    conn.execute_batch("DROP TABLE tracedecay_schema_version")
-        .await
-        .expect("remove the adopted ledger");
-    conn.execute("PRAGMA user_version = 38", ())
-        .await
-        .expect("stamp the previous graph schema");
-
-    let error = ensure_schema_current_connection(&conn)
-        .await
-        .expect_err("an older pragma must be refused");
-    assert!(error.to_string().contains("database schema v38"), "{error}");
-    assert_eq!(pragma_user_version(&conn).await, 38);
-    assert!(!ledger_table_exists(&conn).await);
 }

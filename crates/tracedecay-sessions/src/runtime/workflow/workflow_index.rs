@@ -86,8 +86,7 @@ impl From<crate::runtime::git_correlation::GitCorrelationError> for WorkflowInde
 }
 
 /// Ensures the workflow-index tables exist in the session store. A store
-/// already at this version keeps its tables; the shared ledger still retires
-/// any legacy stamp so a current store moves onto it.
+/// already at this version keeps its tables.
 pub async fn ensure_workflow_index_schema(
     conn: &(impl Executor + Sync),
 ) -> Result<(), WorkflowIndexError> {
@@ -95,9 +94,6 @@ pub async fn ensure_workflow_index_schema(
         .await?
         .is_some_and(|version| version >= WORKFLOW_INDEX_SCHEMA_VERSION)
     {
-        store_schema::retire_named_ledgers(conn)
-            .await
-            .map_err(stamp_error)?;
         return Ok(());
     }
     conn.execute_batch(
