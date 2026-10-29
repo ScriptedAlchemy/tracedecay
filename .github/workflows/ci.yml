@@ -564,13 +564,15 @@ jobs:
         run: test "${{ needs.linux-test.result }}" = "success"
 
   windows-test:
+    # Windows jobs share one private worker; let Linux use hosted runner slots first.
+    needs: linux-test
     permissions:
       contents: read
       id-token: write
     # Branch protection requires this check name.
     name: Test Windows
     if: >-
-      ${{ (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
+      ${{ !cancelled() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
       (github.event_name != 'workflow_dispatch' ||
       (inputs.run_os &&
       (inputs.native_platform == 'all' || inputs.native_platform == 'windows'))) }}
