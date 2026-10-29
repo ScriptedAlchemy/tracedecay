@@ -46,3 +46,9 @@ pub use settlement::{
     DispatchSettlement, DispatchToolPolicy, PreparedDispatchControl, RetainedDispatchAuthority,
     RetainedDispatchOutcome, RetainedDispatchRegistry, dispatch_cancelled_error,
 };
+
+#[cfg(test)]
+mod freshness_tests;
+
+#[cfg(test)]
+mod staleness_banner_tests;

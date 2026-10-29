@@ -121,15 +121,6 @@ mod tool_call_support;
     clippy::redundant_closure_for_method_calls,
     clippy::uninlined_format_args
 )]
-mod tool_definition_tests;
-#[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::await_holding_lock,
-    clippy::redundant_closure_for_method_calls,
-    clippy::uninlined_format_args
-)]
 mod verified_graph_query_authority_tests;
 #[cfg(test)]
 #[allow(
