@@ -28,6 +28,11 @@ fn protocol_owner_classifies_every_transport_method() {
         McpMethod::HookEvent
     );
     assert_eq!(classify_mcp_method("unknown"), McpMethod::Unknown);
+    assert_eq!(classify_mcp_method("initialized"), McpMethod::Unknown);
+    assert_eq!(
+        classify_mcp_method("notifications/initialized"),
+        McpMethod::InitializedAck
+    );
 }
 
 #[test]

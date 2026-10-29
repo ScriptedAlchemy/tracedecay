@@ -173,7 +173,7 @@ fn doctor_runtime_unavailable(
             "quick_check_error": reason,
             "authority_audit_ok": null,
             "authority_audit_reason": "authority_audit_not_run",
-            "authority_audit_error": "authority_audit_not_run",
+            "authority_audit_error": null,
         },
         "doctor_runtime": {
             "status": "unavailable",
@@ -462,11 +462,7 @@ async fn doctor_runtime_value_inner(
     };
     value["database"]["authority_audit_ok"] = json!(authority_ok);
     value["database"]["authority_audit_reason"] = json!(authority_reason);
-    // `authority_audit_error` carries the observed detail when there is one and
-    // otherwise mirrors the typed reason so readers that only know the older
-    // key still see the same vocabulary.
-    value["database"]["authority_audit_error"] =
-        json!(authority_detail.or_else(|| authority_reason.map(str::to_string)));
+    value["database"]["authority_audit_error"] = json!(authority_detail);
 
     let canonical_session_path = session_path
         .canonicalize()

@@ -520,8 +520,6 @@ pub struct LcmGrepRequestV1 {
     pub role: Option<LcmRoleV1>,
     pub start_time: Option<RetainedTimeFilterV1>,
     pub end_time: Option<RetainedTimeFilterV1>,
-    pub since: Option<RetainedTimeFilterV1>,
-    pub until: Option<RetainedTimeFilterV1>,
     pub limit: Option<u64>,
     pub cursor: Option<String>,
     pub temporal_mode: Option<TemporalModeV1>,
