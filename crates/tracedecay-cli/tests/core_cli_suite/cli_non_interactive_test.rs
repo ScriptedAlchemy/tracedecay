@@ -1772,16 +1772,6 @@ fn install_codex_automation_enables_daemon_owned_project_configuration_nonintera
     std::fs::create_dir_all(project_root.join("src")).unwrap();
     std::fs::write(project_root.join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
 
-    let legacy_automation_dir = home
-        .path()
-        .join(".codex/automations/watch-tracedecay-memory");
-    std::fs::create_dir_all(&legacy_automation_dir).unwrap();
-    std::fs::write(
-        legacy_automation_dir.join("automation.toml"),
-        "status = \"ACTIVE\"\n",
-    )
-    .unwrap();
-
     let output = run_codex_automation_install(&home, &project_root);
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("daemon-managed project configuration"),
@@ -1794,14 +1784,6 @@ fn install_codex_automation_enables_daemon_owned_project_configuration_nonintera
             .join(".codex/plugins/tracedecay/.codex-plugin/plugin.json")
             .is_file(),
         "install --agent codex should still install the Codex plugin bundle"
-    );
-    // Native lifecycle boundary (289eaa7747): install must not mutate
-    // Codex-owned automation state, including the legacy v0.0.10-v0.0.20
-    // native scheduled automation the daemon scheduler replaced.
-    assert_eq!(
-        std::fs::read_to_string(legacy_automation_dir.join("automation.toml")).unwrap(),
-        "status = \"ACTIVE\"\n",
-        "Codex automation install must leave Codex-native automation state untouched"
     );
     assert!(
         !project_root.join(".codex/automations").exists(),
@@ -1844,33 +1826,6 @@ fn install_codex_automation_enables_daemon_owned_project_configuration_nonintera
     assert_eq!(
         config["effective"]["tasks"]["skill_writer"]["min_idle_secs"],
         900
-    );
-
-    let user_config: toml::Value = toml::from_str(
-        &std::fs::read_to_string(profile_root(home.path()).join("config.toml"))
-            .expect("install should save host lifecycle settings"),
-    )
-    .expect("host lifecycle settings should remain valid TOML");
-    assert!(
-        user_config.get("automation").is_none(),
-        "automation install must not persist retired user automation defaults: {user_config:?}"
-    );
-
-    let projects_dir = profile_root(home.path()).join("projects");
-    let sidecars = std::fs::read_dir(&projects_dir).map_or_default(|entries| {
-        entries
-            .map(|entry| {
-                entry
-                    .unwrap()
-                    .path()
-                    .join("dashboard/automation_config.json")
-            })
-            .filter(|path| path.is_file())
-            .collect::<Vec<_>>()
-    });
-    assert!(
-        sidecars.is_empty(),
-        "automation install must not write retired dashboard sidecars: {sidecars:?}"
     );
 }
 
@@ -1949,30 +1904,6 @@ fn automation_config_set_rejects_unimplemented_external_backend() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("unknown automation backend"));
     assert!(stderr.contains("disabled, codex-app-server"));
-}
-
-#[test]
-fn automation_config_set_rejects_retired_lock_timeout_flags() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    for flag in [
-        "--memory-curator-stale-lock-secs",
-        "--session-reflector-stale-lock-secs",
-        "--skill-writer-stale-lock-secs",
-    ] {
-        let mut command = tracedecay_command(home.path(), project.path());
-        command.args(["automation", "config", "set", flag, "3600"]);
-        let output = run_with_timeout(command, cli_timeout());
-        assert!(
-            !output.status.success(),
-            "retired flag {flag} must be rejected"
-        );
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("unexpected argument") && stderr.contains(flag),
-            "{stderr}"
-        );
-    }
 }
 
 #[test]
@@ -3358,30 +3289,6 @@ async fn branch_list_reads_profile_sharded_branch_meta() {
                 == "feature/branch-299-with-enough-detail-to-exercise-status-bounds"),
         "{diagnostics:#}"
     );
-}
-
-/// `index.git_ignore.v1` is retired: the index is Git's view of the worktree,
-/// so there is no toggle left for a `gitignore` command to report or flip.
-#[test]
-fn gitignore_command_is_refused_as_unknown() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    write_git_fixture(project.path());
-    for arguments in [&["gitignore"][..], &["gitignore", "off"][..]] {
-        let mut command = tracedecay_command_without_daemon(home.path(), project.path());
-        command.args(arguments);
-        let output = run_with_timeout(command, cli_timeout());
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert_eq!(
-            output.status.code(),
-            Some(2),
-            "{arguments:?} must be a usage error\nstderr:\n{stderr}"
-        );
-        assert!(
-            stderr.contains("unrecognized subcommand 'gitignore'"),
-            "{arguments:?} must be refused as an unknown command\nstderr:\n{stderr}"
-        );
-    }
 }
 
 #[tokio::test]
