@@ -816,7 +816,7 @@ pub(crate) fn failed_backend_fallback_report(record: &AutomationRunLedgerRecord)
     json!({
         "status": "failed",
         "run_id": record.run_id,
-        "task": record.task_key.as_deref().unwrap_or_else(|| task_key(record.task)),
+        "task": record.task_key,
         "fallback_status": record.fallback_status,
         "error": record.error,
         "proposed_ops": record.proposed_ops,
@@ -1248,7 +1248,7 @@ impl<'a> AgentRunFinalizer<'a> {
             run_id: self.run_id.to_string(),
             trigger: self.trigger,
             task: self.task,
-            task_key: Some(task_key(self.task).to_string()),
+            task_key: task_key(self.task).to_string(),
             backend: self.config.backend.as_str().to_string(),
             // Stamped on every terminal record so a settled deterministic
             // failure can be re-admitted the moment the backend or

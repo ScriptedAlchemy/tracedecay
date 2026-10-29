@@ -527,7 +527,7 @@ fn latest_terminal_job_record<'a>(
     trigger: Option<AutomationTrigger>,
 ) -> Result<Option<(&'a AutomationRunLedgerRecord, i64)>> {
     latest_record_by_canonical_completion(records.iter().filter(|record| {
-        record.task_key.as_deref() == Some(task_key)
+        record.task_key == task_key
             && trigger.is_none_or(|trigger| record.trigger == trigger)
             && matches!(
                 record.status,
@@ -844,7 +844,7 @@ impl JobRunContext<'_> {
             run_id: self.run_id.to_string(),
             trigger: self.trigger,
             task: AgentTaskKind::UserJob,
-            task_key: Some(job_task_key(&self.job.id)),
+            task_key: job_task_key(&self.job.id),
             backend: self.config.backend.as_str().to_string(),
             backend_identity: super::backend_identity::backend_identity(
                 self.config,

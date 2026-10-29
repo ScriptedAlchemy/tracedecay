@@ -1569,11 +1569,7 @@ impl AutomationEffectAuthority {
             .task
             .expected_external_task_key()
             .unwrap_or_else(|| task_key(admitted_task).to_owned());
-        let prior_task_key = reused
-            .prior_record
-            .task_key
-            .as_deref()
-            .unwrap_or_else(|| task_key(reused.prior_record.task));
+        let prior_task_key = reused.prior_record.task_key.as_str();
         if reused.requested_run_id != self.admission.request.run_id.as_str()
             || reused.prior_record.run_id == reused.requested_run_id
             || !matches!(

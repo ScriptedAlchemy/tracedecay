@@ -15,13 +15,12 @@ use tracedecay_automation_runtime::automation::run_ledger::{
 };
 
 /// One ledger record as the run-history row. `task_key` is the exact per-job
-/// identity (`user_job:<id>`); rows written before it existed carry `null` and
-/// cannot be joined to a job.
+/// identity (`user_job:<id>`).
 #[derive(Debug, Serialize, JsonSchema)]
 pub(crate) struct AutomationRunRowV1 {
     run_id: String,
     task: AgentTaskKind,
-    task_key: Option<String>,
+    task_key: String,
     trigger: AutomationTrigger,
     backend: String,
     model: Option<String>,
@@ -328,7 +327,7 @@ mod tests {
             "completed_at": "1754000031",
         })));
 
-        assert_eq!(row.task_key.as_deref(), Some("user_job:nightly"));
+        assert_eq!(row.task_key, "user_job:nightly");
         assert_eq!(
             row.error_classification,
             Some(AgentTaskFailureClass::Retryable)
@@ -339,12 +338,13 @@ mod tests {
     }
 
     #[test]
-    fn run_history_row_keeps_absent_identity_and_failure_fields_null() {
+    fn run_history_row_keeps_absent_failure_fields_null() {
         let row = run_history_row(&record(json!({
             "schema_version": 2,
-            "run_id": "legacy_run",
+            "run_id": "manual_run",
             "trigger": "manual_cli",
             "task": "memory_curator",
+            "task_key": "memory_curator",
             "backend": "claude",
             "status": "succeeded",
             "accepted_count": 1,
@@ -353,9 +353,8 @@ mod tests {
             "completed_at": "1754000060",
         })));
 
-        // A pre-`task_key` row must not be joined to any job, and an absent
-        // failure classification is an absence rather than a default class.
-        assert_eq!(row.task_key, None);
+        // An absent failure classification is an absence rather than a
+        // default class.
         assert_eq!(row.error_classification, None);
         assert_eq!(row.error_retryable, None);
         assert_eq!(row.backend_attempt_count, 0);

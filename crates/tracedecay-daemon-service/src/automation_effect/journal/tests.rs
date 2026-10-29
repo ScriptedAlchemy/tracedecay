@@ -1091,8 +1091,8 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
     );
     assert_eq!(prior_record.task, AgentTaskKind::MemoryCurator);
     assert_eq!(
-        prior_record.task_key.as_deref(),
-        Some(task_key(AgentTaskKind::MemoryCurator))
+        prior_record.task_key,
+        task_key(AgentTaskKind::MemoryCurator)
     );
     assert_eq!(prior_record.error.as_deref(), Some("backend_disabled"));
     let prior_spool_files = exact_spool_files(dashboard_root);

@@ -115,7 +115,7 @@ fn record(
         run_id: run_id.to_owned(),
         trigger,
         task,
-        task_key: Some(task_key.to_owned()),
+        task_key: task_key.to_owned(),
         backend: "codex_app_server".to_owned(),
         backend_identity: None,
         host_mode: Some("standalone".to_owned()),

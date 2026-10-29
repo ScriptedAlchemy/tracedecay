@@ -15,7 +15,6 @@ use tracedecay_domain::errors::ProjectOpenFailureKind;
 
 use tracedecay_agent_hosts::agents::{self, DoctorCounters, HealthcheckContext};
 use tracedecay_application::advisory::github_runtime;
-use tracedecay_automation_runtime::automation::effect_runtime::pending_automation_effect_resets_blocking;
 #[cfg(unix)]
 use tracedecay_daemon_service::logging::recent_watcher_events;
 
@@ -1077,52 +1076,22 @@ fn pr_autotrack_state_findings(data_root: &Path) -> std::result::Result<Vec<Stri
     }
 }
 
-/// Reports PR auto-tracking state and refused automation effect journals for
-/// the project's persisted layout, when it has one.
+/// Reports PR auto-tracking state for the project's persisted layout, when it
+/// has one.
 fn check_persisted_state_resets(dc: &mut DoctorCounters, profile_root: &Path, project_path: &Path) {
     let Ok(Some(layout)) =
         tracedecay_runtime_core::storage::resolve_persisted_layout(project_path, profile_root)
     else {
         return;
     };
-    for findings in [
-        pr_autotrack_state_findings(&layout.data_root),
-        automation_effect_reset_findings(&layout.dashboard_root),
-    ] {
-        match findings {
-            Ok(warnings) => {
-                for warning in warnings {
-                    dc.warn(&warning);
-                }
+    match pr_autotrack_state_findings(&layout.data_root) {
+        Ok(warnings) => {
+            for warning in warnings {
+                dc.warn(&warning);
             }
-            Err(failure) => dc.fail(&failure),
         }
+        Err(failure) => dc.fail(&failure),
     }
-}
-
-/// One warning per refused automation effect journal, named by its run id,
-/// that project-open recovery resets; the error names an unreadable journal
-/// directory.
-fn automation_effect_reset_findings(
-    dashboard_root: &Path,
-) -> std::result::Result<Vec<String>, String> {
-    let resets = pending_automation_effect_resets_blocking(dashboard_root)
-        .map_err(|error| format!("Automation effect journals could not be read: {error}"))?;
-    Ok(resets
-        .into_iter()
-        .map(|reset| match reset.run_id {
-            Some(run_id) => format!(
-                "Automation run {} requires reset: its effect journal shape is refused ({}); project-open recovery removes the journal and the run id can run again",
-                run_id.as_str(),
-                reset.reason
-            ),
-            None => format!(
-                "Automation effect journal {} requires reset: its shape is refused ({}); project-open recovery removes it",
-                reset.journal.display(),
-                reset.reason
-            ),
-        })
-        .collect())
 }
 
 /// Check the profile `config.toml` and the GitHub review sources it names.

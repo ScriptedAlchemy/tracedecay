@@ -132,7 +132,7 @@ pub(super) fn unpersisted_rejected_parts(
         run_id: run.run_id.clone(),
         trigger: run.trigger,
         task,
-        task_key: Some(task_key(task).to_string()),
+        task_key: task_key(task).to_string(),
         backend: config.backend.as_str().to_string(),
         backend_identity: crate::automation::backend_identity::backend_identity(
             config,

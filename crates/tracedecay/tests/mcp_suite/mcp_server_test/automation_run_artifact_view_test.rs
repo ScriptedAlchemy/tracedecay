@@ -74,7 +74,7 @@ fn base_record(
         run_id: run_id.to_owned(),
         trigger: AutomationTrigger::Scheduler,
         task: AgentTaskKind::SessionReflector,
-        task_key: Some("session_reflector".to_owned()),
+        task_key: "session_reflector".to_owned(),
         backend: "codex_app_server".to_owned(),
         backend_identity: None,
         host_mode: Some("standalone".to_owned()),

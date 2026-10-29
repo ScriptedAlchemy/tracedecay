@@ -627,7 +627,7 @@ export type AutomationRunLedgerRecord = {
   status: AutomationRunStatus;
   strict_json?: boolean | null | undefined;
   task: AgentTaskKind;
-  task_key?: string | null | undefined;
+  task_key: string;
   trigger: AutomationTrigger;
   validation_report?: unknown;
 };
@@ -667,7 +667,7 @@ export type AutomationRunRowV1 = {
   started_at: string;
   status: AutomationRunStatus;
   task: AgentTaskKind;
-  task_key: string | null;
+  task_key: string;
   trigger: AutomationTrigger;
 };
 

@@ -103,9 +103,7 @@ fn print_automation_run_list(
             "{}\t{}\t{}\t{:?}\t{}\t{}\t{}\t{}",
             record.run_id,
             record.status.as_str(),
-            record.task_key.as_deref().unwrap_or_else(|| {
-                tracedecay_automation_runtime::automation::backend::task_key(record.task)
-            }),
+            record.task_key,
             record.trigger,
             record.accepted_count,
             record.rejected_count,
@@ -120,12 +118,7 @@ fn print_automation_run_record(
 ) {
     println!("run_id: {}", record.run_id);
     println!("status: {}", record.status.as_str());
-    println!(
-        "task: {}",
-        record.task_key.as_deref().unwrap_or_else(|| {
-            tracedecay_automation_runtime::automation::backend::task_key(record.task)
-        })
-    );
+    println!("task: {}", record.task_key);
     println!("trigger: {:?}", record.trigger);
     println!("backend: {}", record.backend);
     if let Some(model) = record.model.as_deref() {

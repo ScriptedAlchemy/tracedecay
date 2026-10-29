@@ -549,7 +549,7 @@ mod tests {
             run_id: "run-outcomes".to_string(),
             trigger: AutomationTrigger::ManualCli,
             task: AgentTaskKind::SkillWriter,
-            task_key: Some("skill_writer".to_string()),
+            task_key: "skill_writer".to_string(),
             backend: "codex_app_server".to_string(),
             backend_identity: None,
             host_mode: None,

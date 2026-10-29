@@ -163,8 +163,7 @@ pub struct AutomationRunLedgerRecord {
     pub run_id: String,
     pub trigger: AutomationTrigger,
     pub task: AgentTaskKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_key: Option<String>,
+    pub task_key: String,
     pub backend: String,
     /// The durable backend/configuration identity this run executed under.
     ///

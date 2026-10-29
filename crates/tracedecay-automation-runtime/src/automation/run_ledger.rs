@@ -35,8 +35,6 @@ pub(crate) use scheduler_diagnostic::append_or_reuse_scheduler_diagnostic;
 
 const RUN_LEDGER_FILENAME: &str = "automation_runs.jsonl";
 const RUN_LEDGER_AUTHORITY: &str = "automation run ledger";
-const RETIRED_SCHEMA_REASON: &str =
-    "a row predates schema v2 (the released v1 wrote RFC3339 timestamps)";
 const RUN_ARTIFACTS_DIR: &str = "automation_artifacts";
 /// Bounded tail window retained by durable append deduplication. Ledger
 /// readers use the fixed-buffer `exact_lookup` scanner instead of allocating
@@ -386,83 +384,19 @@ pub(super) fn canonical_started_at_seconds(
     parse_nonnegative_unix_integer(started_at, label)
 }
 
-/// A row below schema v2 is a typed reset that the locked read performs; a
-/// newer row is not, because a downgraded binary must not reset history a
-/// newer one wrote.
+/// A row below schema v2 requires a ledger reset; a newer row does not,
+/// because a downgraded binary must not reset history a newer one wrote.
 fn require_supported_schema(schema_version: u32) -> Result<()> {
     match schema_version {
         2 => Ok(()),
         0..2 => Err(TraceDecayError::reset_required(
             RUN_LEDGER_AUTHORITY,
-            RETIRED_SCHEMA_REASON,
+            format!("a row has retired schema version {schema_version}"),
         )),
         _ => Err(config_error(format!(
             "automation run ledger schema version {schema_version} is unsupported"
         ))),
     }
-}
-
-fn is_retired_schema_refusal(error: &TraceDecayError) -> bool {
-    error.reset_required_context() == Some((RUN_LEDGER_AUTHORITY, RETIRED_SCHEMA_REASON))
-}
-
-/// One retired row makes every complete-ledger read refuse, so the locked
-/// read deletes the whole ledger; nothing is kept or converted.
-fn reset_retired_run_ledger(path: &Path, refusal: &TraceDecayError) -> Result<()> {
-    forget_rewritten_run_ledger(path);
-    tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(path)
-        .map_err(TraceDecayError::from)?;
-    tracing::warn!(
-        automation_run_ledger = %path.display(),
-        refusal = %refusal,
-        "reset retired automation run ledger"
-    );
-    Ok(())
-}
-
-/// A skipped row whose label is outside the closed skip-reason registry
-/// (retired aliases such as `task_disabled`) is deleted from the ledger on
-/// its own; every other row is kept byte for byte.
-fn reset_unregistered_skip_row(path: &Path, span: &std::ops::Range<u64>) -> Result<()> {
-    let bytes = std::fs::read(path).map_err(TraceDecayError::from)?;
-    let (Ok(start), Ok(end)) = (usize::try_from(span.start), usize::try_from(span.end)) else {
-        return Err(config_error(
-            "automation run ledger row span exceeds addressable memory",
-        ));
-    };
-    let end = if bytes.get(end) == Some(&b'\n') {
-        end + 1
-    } else {
-        end
-    };
-    let (Some(head), Some(tail)) = (bytes.get(..start), bytes.get(end..)) else {
-        return Err(config_error(
-            "automation run ledger row span lies outside the ledger",
-        ));
-    };
-    // ponytail: holds the ledger in memory once per unregistered row; a
-    // streaming copy is the upgrade if released ledgers prove large.
-    let kept = [head, tail].concat();
-    let temp_path = path.with_extension("jsonl.reset");
-    tracedecay_runtime_core::storage::PrivateStoreIo::write_file_atomically_durable(
-        path, &temp_path, &kept,
-    )
-    .map_err(TraceDecayError::from)?;
-    forget_rewritten_run_ledger(path);
-    tracing::warn!(
-        automation_run_ledger = %path.display(),
-        row_start = span.start,
-        "reset automation run ledger row with an unregistered skip reason"
-    );
-    Ok(())
-}
-
-/// A deleted or replaced ledger breaks the append-only witness both derived
-/// caches rely on.
-fn forget_rewritten_run_ledger(path: &Path) {
-    let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    run_ledger_summary_memo().retain(|(memo_path, _, _), _| *memo_path != canonical_path);
-    lifecycle_index::discard_run_ledger_index(path);
 }
 
 pub(super) fn validate_run_ledger_record_semantics(
@@ -812,9 +746,6 @@ fn validate_requested_task_key(task_key: &str) -> Result<()> {
 ///
 /// Only a proven `NotFound` is absence. A root that cannot be stat'd, or one
 /// that is not a directory, is a typed failure rather than an empty ledger.
-///
-/// A read refused for a row below schema v2 resets the ledger under the lock
-/// and answers from `absent`, exactly what the reset ledger holds.
 fn with_run_ledger_read_lock<T>(
     dashboard_root: &Path,
     path: &Path,
@@ -845,17 +776,8 @@ fn with_run_ledger_read_lock<T>(
                     .map_err(TraceDecayError::from)
             }
         }?;
-        let match_result = {
-            let _span = tracing::trace_span!("automation.run_ledger.read_lock.body").entered();
-            read()
-        };
-        match match_result {
-            Err(refusal) if is_retired_schema_refusal(&refusal) => {
-                reset_retired_run_ledger(path, &refusal)?;
-                Ok(absent())
-            }
-            answered => answered,
-        }
+        let _span = tracing::trace_span!("automation.run_ledger.read_lock.body").entered();
+        read()
     })();
     let unlock = lock.unlock().map_err(TraceDecayError::from);
     result.and_then(|value| unlock.map(|()| value))
@@ -911,20 +833,14 @@ impl RunRecordFilter {
     fn matches_projection(&self, record: &exact_lookup::RunLedgerRowProjection) -> bool {
         match self {
             Self::Any => true,
-            Self::TaskKey(requested) => {
-                record
-                    .task_key
-                    .as_deref()
-                    .unwrap_or_else(|| canonical_task_key(record.task))
-                    == requested
-            }
+            Self::TaskKey(requested) => record.task_key.as_str() == requested,
         }
     }
 
     fn matches_record(&self, record: &AutomationRunLedgerRecord) -> bool {
         match self {
             Self::Any => true,
-            Self::TaskKey(requested) => effective_record_task_key(record) == requested,
+            Self::TaskKey(requested) => record.task_key.as_str() == requested,
         }
     }
 }
@@ -1151,39 +1067,16 @@ pub(super) fn is_session_evidence_budget_exhausted_reason(reason: Option<&str>) 
     reason == Some(SESSION_EVIDENCE_BUDGET_EXHAUSTED)
 }
 
-/// Either the decoded summary or the span of a selected skipped row whose
-/// label the closed skip-reason registry does not know.
-enum TaskSummaryScan {
-    Summary(AutomationRunLedgerTaskSummary),
-    UnregisteredSkip(std::ops::Range<u64>),
-}
-
-/// The caller holds the exclusive ledger lock, so resetting an unregistered
-/// skip row and rescanning is one serialized step. Each reset deletes one row,
-/// which bounds the loop by the ledger's row count.
-fn read_run_ledger_task_summary(
-    path: &Path,
-    task: AgentTaskKind,
-    requested_task_key: &str,
-) -> Result<AutomationRunLedgerTaskSummary> {
-    loop {
-        match scan_run_ledger_task_summary(path, task, requested_task_key)? {
-            TaskSummaryScan::Summary(summary) => return Ok(summary),
-            TaskSummaryScan::UnregisteredSkip(span) => reset_unregistered_skip_row(path, &span)?,
-        }
-    }
-}
-
 #[tracing::instrument(
     name = "automation_runtime.run_ledger.scan_task_summary",
     level = "trace",
     skip_all
 )]
-fn scan_run_ledger_task_summary(
+fn read_run_ledger_task_summary(
     path: &Path,
     task: AgentTaskKind,
     requested_task_key: &str,
-) -> Result<TaskSummaryScan> {
+) -> Result<AutomationRunLedgerTaskSummary> {
     // Visible bytes are stabilized by the committed lifecycle index consulted
     // below, which syncs only when the ledger actually grew.
     let Some(file) = {
@@ -1191,9 +1084,7 @@ fn scan_run_ledger_task_summary(
         exact_lookup::open_committed_run_ledger(path, false)
     }?
     else {
-        return Ok(TaskSummaryScan::Summary(
-            AutomationRunLedgerTaskSummary::default(),
-        ));
+        return Ok(AutomationRunLedgerTaskSummary::default());
     };
     // Answer an unchanged ledger from the memo instead of rescanning it. See
     // `RUN_LEDGER_SUMMARY_MEMO` for why `(len, tail digest)` read under the
@@ -1208,7 +1099,7 @@ fn scan_run_ledger_task_summary(
         }
     }?;
     if let Some(summary) = cached_run_ledger_task_summary(&memo_key, file_len, &tail_digest) {
-        return Ok(TaskSummaryScan::Summary(summary));
+        return Ok(summary);
     }
     let mut rows = exact_lookup::ForwardJsonlScanner::new(&file, path)?;
     let mut selected = TaskSummarySpans::default();
@@ -1216,10 +1107,7 @@ fn scan_run_ledger_task_summary(
         let Some(projection) = exact_lookup::scan_jsonl_row(&file, path, line)? else {
             continue;
         };
-        let effective_task_key = projection
-            .task_key
-            .as_deref()
-            .unwrap_or_else(|| canonical_task_key(projection.task));
+        let effective_task_key = projection.task_key.as_str();
         if projection.task != task || effective_task_key != requested_task_key {
             continue;
         }
@@ -1263,18 +1151,17 @@ fn scan_run_ledger_task_summary(
     .map(|projection| projection.run_id.clone())
     .collect::<std::collections::HashSet<_>>();
     let lifecycles = exact_lookup::read_committed_run_lifecycles(&file, path, &selected_run_ids)?;
-    let scan = decode_task_summary(&file, path, task, requested_task_key, selected, &lifecycles)?;
-    if let TaskSummaryScan::Summary(summary) = &scan {
-        store_run_ledger_task_summary(
-            memo_key,
-            CachedTaskSummary {
-                file_len,
-                tail_digest,
-                summary: summary.clone(),
-            },
-        );
-    }
-    Ok(scan)
+    let summary =
+        decode_task_summary(&file, path, task, requested_task_key, selected, &lifecycles)?;
+    store_run_ledger_task_summary(
+        memo_key,
+        CachedTaskSummary {
+            file_len,
+            tail_digest,
+            summary: summary.clone(),
+        },
+    );
+    Ok(summary)
 }
 
 fn select_summary_projection(
@@ -1300,7 +1187,7 @@ fn decode_task_summary(
     requested_task_key: &str,
     selected: TaskSummarySpans,
     lifecycles: &std::collections::HashMap<String, exact_lookup::LogicalRunLifecycle>,
-) -> Result<TaskSummaryScan> {
+) -> Result<AutomationRunLedgerTaskSummary> {
     let mut summary = AutomationRunLedgerTaskSummary::default();
     let TaskSummarySpans {
         latest_logical_activity,
@@ -1332,10 +1219,7 @@ fn decode_task_summary(
                 "automation task summary lifecycle changed its selected completion order",
             ));
         }
-        let projection_task_key = projection
-            .task_key
-            .as_deref()
-            .unwrap_or_else(|| canonical_task_key(projection.task));
+        let projection_task_key = projection.task_key.as_str();
         if projection.task != task || projection_task_key != requested_task_key {
             return Err(config_error(
                 "automation task summary lifecycle changed its task identity",
@@ -1376,7 +1260,7 @@ fn decode_task_summary(
         } else {
             let record = exact_lookup::decode_jsonl_row(file, path, &projection.span)?;
             require_projection_identity(&record, projection)?;
-            if record.task != task || effective_record_task_key(&record) != requested_task_key {
+            if record.task != task || record.task_key.as_str() != requested_task_key {
                 return Err(config_error(
                     "automation task summary selection changed task identity during decode",
                 ));
@@ -1386,7 +1270,13 @@ fn decode_task_summary(
                     AutomationSkipReasonV1::from_ledger_reason(reason).is_none()
                 })
             {
-                return Ok(TaskSummaryScan::UnregisteredSkip(projection.span.clone()));
+                return Err(TraceDecayError::reset_required(
+                    RUN_LEDGER_AUTHORITY,
+                    format!(
+                        "skipped run '{}' carries an unregistered skip reason",
+                        record.run_id
+                    ),
+                ));
             }
             summary.records.push(record);
             summary.records.len() - 1
@@ -1415,7 +1305,7 @@ fn decode_task_summary(
             }
         }
     }
-    Ok(TaskSummaryScan::Summary(summary))
+    Ok(summary)
 }
 
 #[tracing::instrument(
@@ -1517,7 +1407,7 @@ fn read_filtered_run_records_two_pass(
             ));
         }
         selected.push(FilteredRunSelection {
-            effective_task_key: effective_record_task_key(record).to_owned(),
+            effective_task_key: record.task_key.as_str().to_owned(),
             record: record.clone(),
         });
     }
@@ -1540,10 +1430,7 @@ fn read_filtered_run_records_two_pass(
             continue;
         };
         let entry = &selected[index];
-        let projection_task_key = projection
-            .task_key
-            .as_deref()
-            .unwrap_or_else(|| canonical_task_key(projection.task));
+        let projection_task_key = projection.task_key.as_str();
         if projection.task != entry.record.task
             || projection_task_key != entry.effective_task_key
             || projection.trigger != entry.record.trigger
@@ -1623,13 +1510,6 @@ fn require_projection_identity(
             "automation run ledger row projection changed during filtered decode",
         ))
     }
-}
-
-fn effective_record_task_key(record: &AutomationRunLedgerRecord) -> &str {
-    record
-        .task_key
-        .as_deref()
-        .unwrap_or_else(|| canonical_task_key(record.task))
 }
 
 fn artifact_relative_path(run_id: &str, kind: AutomationRunArtifactKind) -> String {
@@ -1728,7 +1608,7 @@ mod tests {
     fn ledger_line(run_id: &str, completed_at: i64) -> String {
         format!(
             "{{\"schema_version\":2,\"run_id\":\"{run_id}\",\"trigger\":\"scheduler\",\
-             \"task\":\"memory_curator\",\"backend\":\"codex_app_server\",\"status\":\"succeeded\",\
+             \"task\":\"memory_curator\",\"task_key\":\"memory_curator\",\"backend\":\"codex_app_server\",\"status\":\"succeeded\",\
              \"accepted_count\":0,\"rejected_count\":0,\"started_at\":\"{completed_at}\",\
              \"completed_at\":\"{completed_at}\",\"completed_at_micros\":{}}}",
             completed_at.saturating_mul(1_000_000),
@@ -1817,7 +1697,7 @@ mod tests {
     fn skipped_session_reflector_line(run_id: &str, reason: &str, completed_at: i64) -> String {
         format!(
             "{{\"schema_version\":2,\"run_id\":\"{run_id}\",\"trigger\":\"scheduler\",\
-             \"task\":\"session_reflector\",\"backend\":\"codex_app_server\",\
+             \"task\":\"session_reflector\",\"task_key\":\"session_reflector\",\"backend\":\"codex_app_server\",\
              \"status\":\"skipped\",\"accepted_count\":0,\"rejected_count\":0,\
              \"error\":\"{reason}\",\"started_at\":\"{completed_at}\",\
              \"completed_at\":\"{completed_at}\",\"completed_at_micros\":{}}}",
@@ -1863,48 +1743,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn task_summary_resets_only_a_non_canonical_budget_exhausted_row() {
-        for label in [
-            "session_evidence_budget_exhaustedX",
-            "session_evidence_budget_exhausted_request_candidate_bytes",
-        ] {
-            let kept = skipped_session_reflector_line(
-                "run-exhausted",
-                SESSION_EVIDENCE_BUDGET_EXHAUSTED,
-                100,
-            );
-            let lines = vec![
-                kept.clone(),
-                skipped_session_reflector_line("run-retired-label", label, 200),
-            ];
-            let (_temp, path) = write_ledger(&lines);
-
-            let summary = read_run_ledger_task_summary(
-                &path,
-                AgentTaskKind::SessionReflector,
-                "session_reflector",
-            )
-            .unwrap();
-
-            assert_eq!(
-                summary.latest_logical_activity().unwrap().run_id,
-                "run-exhausted",
-                "{label}"
-            );
-            assert_eq!(
-                summary
-                    .latest_session_evidence_budget_exhausted()
-                    .unwrap()
-                    .run_id,
-                "run-exhausted"
-            );
-            assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("{kept}\n"));
-        }
-    }
-
     #[tokio::test]
-    async fn locked_read_resets_a_ledger_holding_a_schema_v1_row() {
+    async fn locked_read_refuses_a_schema_v1_row_without_a_reset() {
         let retired = ledger_line("run-retired", 1)
             .replace("\"schema_version\":2", "\"schema_version\":1")
             .replace(
@@ -1913,27 +1753,21 @@ mod tests {
             );
         let (temp, path) = write_ledger(&[ledger_line("run-current", 2), retired]);
 
-        let refusal =
-            read_run_ledger_task_summary(&path, AgentTaskKind::MemoryCurator, "memory_curator")
-                .expect_err("an unlocked scan only refuses");
-        assert_eq!(
-            refusal.reset_required_context(),
-            Some((
-                "automation run ledger",
-                "a row predates schema v2 (the released v1 wrote RFC3339 timestamps)"
-            ))
-        );
-        assert!(path.exists());
-
-        let summary = load_run_ledger_task_summary(
+        let refusal = load_run_ledger_task_summary(
             temp.path(),
             AgentTaskKind::MemoryCurator,
             "memory_curator",
         )
         .await
-        .unwrap();
-        assert_eq!(summary.records().len(), 0);
-        assert!(!path.exists(), "the retired ledger is deleted, not kept");
+        .expect_err("a retired row refuses the read");
+        assert_eq!(
+            refusal.reset_required_context(),
+            Some((
+                "automation run ledger",
+                "a row has retired schema version 1"
+            ))
+        );
+        assert!(path.exists(), "the refused ledger is kept for the operator");
     }
 
     #[tokio::test]
@@ -2142,13 +1976,13 @@ mod tests {
     #[test]
     fn malformed_newest_matching_run_reserves_identity_before_fallback() {
         let older = ledger_line("same-run", 100).replace(
-            "\"task\":\"memory_curator\"",
+            "\"task\":\"memory_curator\",\"task_key\":\"memory_curator\"",
             "\"task\":\"user_job\",\"task_key\":\"user_job:nightly\"",
         );
         let older = older.replace("\"succeeded\"", "\"running\"");
         let newer = ledger_line("same-run", 200)
             .replace(
-                "\"task\":\"memory_curator\"",
+                "\"task\":\"memory_curator\",\"task_key\":\"memory_curator\"",
                 "\"task\":\"user_job\",\"task_key\":\"user_job:nightly\"",
             )
             .replace("\"accepted_count\":0", "\"accepted_count\":false");
@@ -2178,7 +2012,7 @@ mod tests {
     #[test]
     fn filtered_reads_fail_closed_on_any_traversed_malformed_row() {
         let target = ledger_line("target", 100).replace(
-            "\"task\":\"memory_curator\"",
+            "\"task\":\"memory_curator\",\"task_key\":\"memory_curator\"",
             "\"task\":\"user_job\",\"task_key\":\"user_job:nightly\"",
         );
         let (_temp, path) = write_ledger(&[target.clone(), "{\"unrelated\":".to_owned()]);
@@ -2214,7 +2048,7 @@ mod tests {
             .unwrap_err()
             .to_string(),
             format!(
-                "config error: automation run ledger '{}' contains malformed JSON at byte 423: invalid JSON number",
+                "config error: automation run ledger '{}' contains malformed JSON at byte 451: invalid JSON number",
                 path.display()
             )
         );
@@ -2504,8 +2338,10 @@ mod tests {
     #[test]
     fn task_summary_rejects_semantically_invalid_unrelated_rows() {
         let valid = ledger_line("selected", 100);
-        let unrelated = ledger_line("unrelated", 200)
-            .replace("\"task\":\"memory_curator\"", "\"task\":\"skill_writer\"");
+        let unrelated = ledger_line("unrelated", 200).replace(
+            "\"task\":\"memory_curator\",\"task_key\":\"memory_curator\"",
+            "\"task\":\"skill_writer\",\"task_key\":\"skill_writer\"",
+        );
         let invalid_rows = [
             (
                 unrelated.clone().replace(
@@ -2690,7 +2526,7 @@ mod tests {
     #[tokio::test]
     async fn task_key_read_finds_record_behind_more_than_two_hundred_unrelated_runs() {
         let mut lines = vec![ledger_line("skill-target", 1).replace(
-            "\"task\":\"memory_curator\"",
+            "\"task\":\"memory_curator\",\"task_key\":\"memory_curator\"",
             "\"task\":\"skill_writer\",\"task_key\":\"skill_writer\"",
         )];
         lines.extend((0..250).map(|index| ledger_line(&format!("unrelated-{index}"), 2 + index)));
@@ -2707,7 +2543,7 @@ mod tests {
     #[tokio::test]
     async fn scheduler_effectful_anchor_is_not_evicted_by_same_task_non_effect_rows() {
         let anchor = ledger_line("scheduler-anchor", 1).replace(
-            "\"task\":\"memory_curator\"",
+            "\"task\":\"memory_curator\",\"task_key\":\"memory_curator\"",
             "\"task\":\"user_job\",\"task_key\":\"user_job:nightly\"",
         );
         let mut lines = vec![anchor];
@@ -2715,7 +2551,7 @@ mod tests {
             ledger_line(&format!("manual-{index}"), 2 + index)
                 .replace("\"trigger\":\"scheduler\"", "\"trigger\":\"dashboard\"")
                 .replace(
-                    "\"task\":\"memory_curator\"",
+                    "\"task\":\"memory_curator\",\"task_key\":\"memory_curator\"",
                     "\"task\":\"user_job\",\"task_key\":\"user_job:nightly\"",
                 )
         }));

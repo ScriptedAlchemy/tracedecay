@@ -1382,7 +1382,7 @@ async fn skill_writer_runner_ledgers_malformed_backend_output() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].schema_version, 2);
     assert_eq!(records[0].task, AgentTaskKind::SkillWriter);
-    assert_eq!(records[0].task_key.as_deref(), Some("skill_writer"));
+    assert_eq!(records[0].task_key, "skill_writer");
     assert_eq!(
         records[0].prompt_version.as_deref(),
         Some("skill_writer:v4")
@@ -1433,7 +1433,7 @@ async fn skill_writer_runner_ledgers_missing_skills_array() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].schema_version, 2);
     assert_eq!(records[0].task, AgentTaskKind::SkillWriter);
-    assert_eq!(records[0].task_key.as_deref(), Some("skill_writer"));
+    assert_eq!(records[0].task_key, "skill_writer");
     assert_eq!(records[0].status, AutomationRunStatus::Failed);
     assert_eq!(records[0].model.as_deref(), Some("fixture-model"));
     assert!(records[0].evidence_hash.is_some());

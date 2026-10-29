@@ -1979,7 +1979,7 @@ export const AutomationRunLedgerRecordSchema: z.ZodObject<{
   status: z.ZodType<AutomationRunStatus, unknown>;
   strict_json: z.ZodOptional<z.ZodType<boolean | null, unknown>>;
   task: z.ZodType<AgentTaskKind, unknown>;
-  task_key: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  task_key: z.ZodType<string, unknown>;
   trigger: z.ZodType<AutomationTrigger, unknown>;
   validation_report: z.ZodOptional<z.ZodType<unknown, unknown>>;
 }> = z.object({
@@ -2016,7 +2016,7 @@ export const AutomationRunLedgerRecordSchema: z.ZodObject<{
   status: z.lazy(() => AutomationRunStatusSchema),
   strict_json: z.boolean().nullable().optional(),
   task: z.lazy(() => AgentTaskKindSchema),
-  task_key: z.string().nullable().optional(),
+  task_key: z.string(),
   trigger: z.lazy(() => AutomationTriggerSchema),
   validation_report: z.unknown().optional(),
 });
@@ -2064,8 +2064,7 @@ export const AutomationRunResultV1Schema: z.ZodObject<{
 }).strict();
 
 /** One ledger record as the run-history row. `task_key` is the exact per-job
-identity (`user_job:<id>`); rows written before it existed carry `null` and
-cannot be joined to a job. */
+identity (`user_job:<id>`). */
 export const AutomationRunRowV1Schema: z.ZodObject<{
   accepted_count: z.ZodType<number, unknown>;
   artifact_kinds: z.ZodType<Array<string>, unknown>;
@@ -2083,7 +2082,7 @@ export const AutomationRunRowV1Schema: z.ZodObject<{
   started_at: z.ZodType<string, unknown>;
   status: z.ZodType<AutomationRunStatus, unknown>;
   task: z.ZodType<AgentTaskKind, unknown>;
-  task_key: z.ZodType<string | null, unknown>;
+  task_key: z.ZodType<string, unknown>;
   trigger: z.ZodType<AutomationTrigger, unknown>;
 }> = z.object({
   accepted_count: z.number().int().min(0),
@@ -2102,7 +2101,7 @@ export const AutomationRunRowV1Schema: z.ZodObject<{
   started_at: z.string(),
   status: z.lazy(() => AutomationRunStatusSchema),
   task: z.lazy(() => AgentTaskKindSchema),
-  task_key: z.string().nullable(),
+  task_key: z.string(),
   trigger: z.lazy(() => AutomationTriggerSchema),
 });
 

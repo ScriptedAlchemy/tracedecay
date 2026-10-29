@@ -1213,7 +1213,7 @@ pub(crate) fn assert_noop_fallback_record(
     expected_output: Value,
 ) {
     assert_eq!(record.task, task);
-    assert_eq!(record.task_key.as_deref(), Some(task_key));
+    assert_eq!(record.task_key, task_key);
     assert_eq!(record.status, AutomationRunStatus::Failed);
     assert_eq!(record.reviewed_count, 0);
     assert_eq!(record.accepted_count, 0);
@@ -1329,7 +1329,7 @@ pub(crate) fn scheduler_record_for(
         run_id: run_id.to_string(),
         trigger: AutomationTrigger::Scheduler,
         task,
-        task_key: Some(test_task_key(task).to_string()),
+        task_key: test_task_key(task).to_string(),
         backend: "codex_app_server".to_string(),
         backend_identity: None,
         host_mode: Some("standalone".to_string()),

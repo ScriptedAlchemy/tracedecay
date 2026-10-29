@@ -377,7 +377,7 @@ fn job_schedule_decision_enforces_interval_cron_and_enabled() {
     // Prior scheduler run after the noon occurrence: not due.
     let mut ran_after = scheduler_record("run-1", AutomationRunStatus::Succeeded, 1_782_907_500);
     ran_after.task = AgentTaskKind::UserJob;
-    ran_after.task_key = Some(job_task_key(&job.id));
+    ran_after.task_key = job_task_key(&job.id);
     assert_eq!(
         job_schedule_decision(&job, std::slice::from_ref(&ran_after), now),
         Some(AutomationSkipReasonV1::SchedulerCronNotDue)
@@ -479,7 +479,7 @@ async fn user_job_delivers_output_to_file_and_records_ledger() {
     // Ledger recording under user_job:<id> with the standard artifact chain.
     let record = &run.ledger_record;
     assert_eq!(record.task, AgentTaskKind::UserJob);
-    assert_eq!(record.task_key.as_deref(), Some("user_job:daily-digest"));
+    assert_eq!(record.task_key, "user_job:daily-digest");
     assert_eq!(record.prompt_version.as_deref(), Some("user_job:v2"));
     assert_eq!(record.status, AutomationRunStatus::Succeeded);
     assert_eq!(record.trigger, AutomationTrigger::Dashboard);
@@ -503,65 +503,7 @@ async fn user_job_delivers_output_to_file_and_records_ledger() {
     let records = load_run_records(&dashboard_root, 10).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].run_id, "user-job-run-1");
-    assert_eq!(
-        records[0].task_key.as_deref(),
-        Some("user_job:daily-digest")
-    );
-}
-
-#[tokio::test]
-async fn scheduled_user_job_resets_a_schema_v1_ledger_and_records_a_v2_run() {
-    let temp = tempdir().unwrap();
-    let dashboard_root = temp.path().join("dashboard");
-    let profile_root = temp.path().join("profile");
-    fs::create_dir_all(&profile_root).unwrap();
-    fs::create_dir_all(&dashboard_root).unwrap();
-    let ledger_path = dashboard_root.join("automation_runs.jsonl");
-    fs::write(
-        &ledger_path,
-        concat!(
-            r#"{"schema_version":1,"run_id":"released-v1-run","trigger":"scheduler","#,
-            r#""task":"user_job","task_key":"user_job:daily-digest","backend":"codex_app_server","#,
-            r#""status":"succeeded","accepted_count":0,"rejected_count":0,"#,
-            r#""started_at":"2099-01-01T00:00:00Z","completed_at":"2099-01-01T00:00:01Z"}"#,
-            "\n",
-        ),
-    )
-    .unwrap();
-
-    let backend = ContentBackend::new("# Digest\n\nNothing changed today.");
-    let run = settle_user_job(
-        &dashboard_root,
-        &enabled_job_config(),
-        &backend,
-        &sample_job("daily-digest"),
-        UserJobRunOptions {
-            trigger: AutomationTrigger::Scheduler,
-            run_id: Some("after-reset-run".to_string()),
-            profile_root: Some(profile_root),
-            project_root: None,
-            occurrence_anchor_run_id: None,
-        },
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(backend.calls(), 1);
-    assert_eq!(run.report["status"], json!("delivered"));
-    let records = load_run_records(&dashboard_root, 10).await.unwrap();
-    assert_eq!(
-        records
-            .iter()
-            .map(|record| (record.run_id.as_str(), record.schema_version, record.status))
-            .collect::<Vec<_>>(),
-        [("after-reset-run", 2, AutomationRunStatus::Succeeded)]
-    );
-    assert!(
-        !fs::read_to_string(&ledger_path)
-            .unwrap()
-            .contains("released-v1-run"),
-        "the retired row is deleted with its ledger"
-    );
+    assert_eq!(records[0].task_key, "user_job:daily-digest");
 }
 
 #[tokio::test]
@@ -1028,10 +970,7 @@ async fn user_job_backend_failure_records_failed_ledger_entry() {
     assert_eq!(backend.calls(), 1);
     assert_eq!(run.report["status"], json!("failed"));
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Failed);
-    assert_eq!(
-        run.ledger_record.task_key.as_deref(),
-        Some("user_job:fails")
-    );
+    assert_eq!(run.ledger_record.task_key, "user_job:fails");
     assert_eq!(
         run.ledger_record.error_classification,
         Some(AgentTaskFailureClass::Unavailable)
@@ -1273,7 +1212,7 @@ async fn scheduler_prefilter_live_lock_wins_over_not_due_summary() {
         current_timestamp(),
     );
     recent.task = AgentTaskKind::UserJob;
-    recent.task_key = Some(job_task_key(&job.id));
+    recent.task_key = job_task_key(&job.id);
     append_run_record(&dashboard_root, &recent).await.unwrap();
 
     let config = enabled_job_config();

@@ -82,7 +82,7 @@ mod tests {
             run_id: "run-42".to_owned(),
             trigger: AutomationTrigger::Scheduler,
             task: AgentTaskKind::MemoryCurator,
-            task_key: Some("memory_curator".to_owned()),
+            task_key: "memory_curator".to_owned(),
             backend: "codex_app_server".to_owned(),
             backend_identity: None,
             host_mode: Some("app_server".to_owned()),

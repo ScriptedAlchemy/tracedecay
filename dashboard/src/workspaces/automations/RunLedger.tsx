@@ -129,7 +129,7 @@ function RunLine({
   return (
     <InspectRow
       testId={`run-row-${run.run_id}`}
-      label={`Run ${run.run_id}: ${run.task_key ?? run.task}, ${run.status}`}
+      label={`Run ${run.run_id}: ${run.task_key}, ${run.status}`}
       inspected={inspected}
       selected={selected}
       onInspect={onInspect}
@@ -145,7 +145,7 @@ function RunLine({
     >
       <Cell>
         <span className="flex min-w-0 flex-col gap-0.5">
-          <span className="td-value truncate text-sm text-text-primary">{run.task_key ?? run.task}</span>
+          <span className="td-value truncate text-sm text-text-primary">{run.task_key}</span>
           <span className="truncate text-sm text-text-muted">
             {run.trigger} · {run.backend}
             {run.model ? ` · ${run.model}` : ''}

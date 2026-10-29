@@ -2714,10 +2714,7 @@
           "$ref": "#/$defs/AgentTaskKind"
         },
         "task_key": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "trigger": {
           "$ref": "#/$defs/AutomationTrigger"
@@ -2729,6 +2726,7 @@
         "run_id",
         "trigger",
         "task",
+        "task_key",
         "backend",
         "status",
         "reviewed_count",
@@ -2820,7 +2818,7 @@
       "type": "object"
     },
     "AutomationRunRowV1": {
-      "description": "One ledger record as the run-history row. `task_key` is the exact per-job\nidentity (`user_job:<id>`); rows written before it existed carry `null` and\ncannot be joined to a job.",
+      "description": "One ledger record as the run-history row. `task_key` is the exact per-job\nidentity (`user_job:<id>`).",
       "properties": {
         "accepted_count": {
           "format": "uint",
@@ -2900,10 +2898,7 @@
           "$ref": "#/$defs/AgentTaskKind"
         },
         "task_key": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "trigger": {
           "$ref": "#/$defs/AutomationTrigger"

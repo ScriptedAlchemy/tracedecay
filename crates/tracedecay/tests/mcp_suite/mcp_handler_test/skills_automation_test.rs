@@ -51,7 +51,7 @@ async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
             run_id: run_id.to_string(),
             trigger: AutomationTrigger::Dashboard,
             task: tracedecay_automation_runtime::automation::backend::AgentTaskKind::MemoryCurator,
-            task_key: Some("memory_curator".to_string()),
+            task_key: "memory_curator".to_string(),
             backend: "codex_app_server".to_string(),
             backend_identity: None,
             host_mode: Some("standalone".to_string()),
