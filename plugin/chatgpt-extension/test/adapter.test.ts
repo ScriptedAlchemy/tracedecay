@@ -1,13 +1,15 @@
 import { Client, InMemoryTransport, StreamableHTTPClientTransport, type CallToolResult } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { request as httpRequest } from "node:http";
+import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonBridge } from "../src/server/bridge.js";
-import { readDaemonAuthority } from "../src/server/authority.js";
+import { probeDaemon, readDaemonAuthority } from "../src/server/authority.js";
 import { createExtensionServer, serveLoopbackHttp } from "../src/server/main.js";
 import { DaemonFailure, ServeSession } from "../src/server/serve-client.js";
 
@@ -39,6 +41,29 @@ async function rejection(promise: Promise<unknown>): Promise<unknown> {
 }
 
 describe("native daemon authority", () => {
+  it("distinguishes a live unreachable process from an exited process with a stale HTTP endpoint", async () => {
+    const http = createHttpServer((_request, response) => response.writeHead(401).end());
+    http.listen(0, "127.0.0.1");
+    await once(http, "listening");
+    const address = http.address();
+    if (address === null || typeof address === "string") throw new Error("missing HTTP address");
+    const record = {
+      pid: process.pid, process_run_id: "probe-fixture", started_at_unix_secs: 1,
+      epoch: 1, version: "fixture", endpoint: null, http_application_endpoint: `127.0.0.1:${address.port}`,
+      auth_token: "isolated-fixture-token", profile_root: PACKAGE_ROOT,
+    };
+    try {
+      expect(await probeDaemon(record)).toBeNull();
+    } finally {
+      await new Promise<void>((resolve, reject) => http.close((error) => error ? reject(error) : resolve()));
+    }
+    expect(await probeDaemon(record)).toMatchObject({ kind: "disconnected", code: "daemon_unreachable" });
+    const child = spawn(NODE_BINARY, ["-e", ""], { stdio: "ignore" });
+    await once(child, "exit");
+    if (child.pid === undefined) throw new Error("probe child did not start");
+    expect(await probeDaemon({ ...record, pid: child.pid })).toMatchObject({ kind: "disconnected", code: "daemon_exited" });
+  });
+
   it("reads the native private authority location and refuses an absent record", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "td-native-authority-"));
     cleanups.push(() => rm(root, { recursive: true, force: true }));

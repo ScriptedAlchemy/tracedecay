@@ -118,7 +118,7 @@ export class DaemonFixture {
     this.#daemon = child;
     const deadline = Date.now() + 120_000;
     while (Date.now() < deadline) {
-      if (child.exitCode !== null) throw new Error(`daemon exited early (${child.exitCode}):\n${this.#stderr}`);
+      if (child.exitCode !== null || child.signalCode !== null) throw new Error(`daemon exited early (${child.exitCode ?? child.signalCode}):\n${this.#stderr}`);
       const record = await this.readAuthority();
       if (record !== null && record.http_application_endpoint) return;
       await sleep(100);
@@ -140,8 +140,7 @@ export class DaemonFixture {
     const child = this.#daemon;
     if (child === null) return;
     this.#daemon = null;
-    if (child.exitCode === null) {
-      child.kill("SIGTERM");
+    if (child.exitCode === null && child.signalCode === null) {
       await new Promise<void>((resolve) => {
         const timer = setTimeout(() => {
           child.kill("SIGKILL");
@@ -151,6 +150,7 @@ export class DaemonFixture {
           clearTimeout(timer);
           resolve();
         });
+        child.kill("SIGTERM");
       });
     }
   }

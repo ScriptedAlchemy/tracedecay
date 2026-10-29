@@ -410,7 +410,7 @@ export function taxTotal(invoices: Invoice[]): number {
           Object.entries(fixture.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
         ),
         cwd: fixture.home,
-        stdio: ["ignore", "ignore", "pipe"],
+        stdio: ["ignore", "ignore", "pipe", "ipc"],
       },
     );
     let stderr = "";
@@ -432,13 +432,16 @@ export function taxTotal(invoices: Invoice[]): number {
       }
       const ping = await rawPost(url, new URL(url).host, JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }), `Bearer ${token}`);
       expect(ping.status).toBe(200);
-      child.kill("SIGTERM");
-      await once(child, "exit");
+      const exited = once(child, "exit");
+      child.disconnect();
+      expect(await exited).toEqual([0, null]);
       await expect(stat(tokenPath)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(fetch(url)).rejects.toThrow();
     } finally {
-      if (child.exitCode === null) {
+      if (child.exitCode === null && child.signalCode === null) {
+        const exited = once(child, "exit");
         child.kill("SIGKILL");
-        await once(child, "exit");
+        await exited;
       }
     }
   });

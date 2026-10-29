@@ -138,18 +138,24 @@ async function main(): Promise<void> {
   const assets = await loadAssets();
   const createServer = () => createExtensionServer({ bridge, assets });
   let tokenPath: string | null = null;
+  let listening: LoopbackHttpServer | null = null;
   const shutdown = async () => {
+    if (listening !== null) await listening.close();
     await bridge.close();
     if (tokenPath !== null) await rm(tokenPath, { force: true });
   };
-  process.once("SIGINT", () => void shutdown().finally(() => process.exit(0)));
-  process.once("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
+  const stop = () => void shutdown().then(() => process.exit(0), reportFatalError);
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  // A Node supervisor owns an IPC child's lifetime. Disconnect is a graceful
+  // boundary on Windows too, where child.kill() cannot deliver Unix signals.
+  if (process.connected) process.once("disconnect", stop);
   if (values.http !== undefined) {
     const [host, portText] = splitHostPort(values.http);
     const port = Number.parseInt(portText, 10);
     if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error(`invalid --http port: ${portText}`);
     const token = values.token ?? randomBytes(24).toString("base64url");
-    const listening = await serveLoopbackHttp(createServer, host, port, token);
+    listening = await serveLoopbackHttp(createServer, host, port, token);
     process.stderr.write(`tracedecay-chatgpt-extension listening on ${listening.url}\n`);
     if (values.token === undefined) {
       // The generated credential goes to an operator-readable file, never to
@@ -191,9 +197,11 @@ function invokedDirectly(): boolean {
   }
 }
 
+function reportFatalError(error: unknown): never {
+  process.stderr.write(`${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`);
+  process.exit(1);
+}
+
 if (invokedDirectly()) {
-  main().catch((error: unknown) => {
-    process.stderr.write(`${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`);
-    process.exit(1);
-  });
+  main().catch(reportFatalError);
 }

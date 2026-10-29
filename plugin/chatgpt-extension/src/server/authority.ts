@@ -108,6 +108,9 @@ export async function probeDaemon(record: DaemonAuthorityRecord, fetchImpl: type
     await fetchImpl(`${baseUrl}/`, { method: "GET", signal: AbortSignal.timeout(2_000), redirect: "manual" });
     return null;
   } catch (error) {
+    if (!processAlive(record.pid)) {
+      return { kind: "disconnected", code: "daemon_exited", message: `Daemon pid ${record.pid} recorded in ${record.profile_root} is no longer running; start it with \`tracedecay daemon run\`.` };
+    }
     return {
       kind: "disconnected",
       code: "daemon_unreachable",
