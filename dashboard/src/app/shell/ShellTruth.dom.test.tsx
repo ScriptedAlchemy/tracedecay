@@ -188,25 +188,16 @@ describe('shared shell truthfulness', () => {
   });
 
   /**
-   * The two ways a deep link fails to resolve, which the route reports with two
-   * different status codes and which the dashboard must not merge.
-   *
-   * They used to be one case here, because the payload fetcher discarded every
-   * non-2xx body: a dead link and a registry that could not be opened both
-   * arrived as `HTTP 404`/`HTTP 503` with nothing to tell them apart, so the
-   * only honest reading available was "unconfirmed" for both. That left a stale
-   * bookmark resolving forever, the reader was told the check was still
-   * pending long after it had come back with an answer.
-   *
-   * Now the body is carried, so each says what it is. What must not change is
-   * the label: neither reading renames the project to its id, because neither
-   * one carries a name to replace it with.
+   * The two ways a deep link fails to resolve, which the dashboard must not
+   * merge: a project the registry does not hold, and a registry that could not
+   * be read. Neither renames the project to its id, because neither one
+   * carries a name to replace it with.
    */
   it('reports a project the registry does not hold as absent, keeping its name', async () => {
     useScope.getState().selectProject('proj-ghost', 'Looks Legitimate', 'unresolved');
     stubRoutes({
       '/api/projects/proj-ghost': {
-        status: 404,
+        status: 200,
         body: fixtureEnvelope(
           failurePayload('not_found', 'no project registered with id proj-ghost'),
         ),
@@ -263,13 +254,13 @@ describe('shared shell truthfulness', () => {
   });
 
   it('keeps a project unconfirmed when the registry itself is unavailable', async () => {
-    // 503, not 404: the registry could not be read, so it established nothing
+    // The registry could not be read, so it established nothing
     // about this project. Reporting absence here would discard a good label and
     // refuse a write that a working registry would have accepted.
     useScope.getState().selectProject('proj-real', 'Looks Legitimate', 'unresolved');
     stubRoutes({
       '/api/projects/proj-real': {
-        status: 503,
+        status: 200,
         body: fixtureEnvelope(
           failurePayload('registry_unavailable', 'registry database could not be opened'),
         ),

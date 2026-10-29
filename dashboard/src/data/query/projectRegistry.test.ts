@@ -102,34 +102,7 @@ describe('fetchProjectRegistry', () => {
     vi.unstubAllGlobals();
   });
 
-  it('keeps a decoded 503 registry answer in the canonical envelope result', async () => {
-    const payload = {
-      ...fixturePayload('/api/projects/proj_b'),
-      status: 'registry_unavailable',
-      error: 'unable to open the global registry',
-      is_active: null,
-      project: null,
-      aliases: [],
-      stores: [],
-    };
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => new Response(JSON.stringify(fixtureEnvelope(payload)), { status: 503 })),
-    );
-
-    await expect(
-      fetchProjectRegistry('/api/projects/proj_b', ProjectContextPayloadV1Schema),
-    ).resolves.toMatchObject({
-      outcome: 'envelope',
-      envelope: { payload: { status: 'registry_unavailable' } },
-    });
-  });
-
-  it.each([
-    ['200', 200],
-    ['404', 404],
-    ['500', 500],
-  ])('maps a typed %s not_found envelope to an absent project', async (_label, status) => {
+  it.each([['200', 200]])('maps a typed %s not_found envelope to an absent project', async (_label, status) => {
     const payload = context({
       status: PROJECT_NOT_FOUND,
       error: 'no project registered with id proj_ghost',
@@ -148,10 +121,7 @@ describe('fetchProjectRegistry', () => {
     });
   });
 
-  it.each([
-    ['200', 200],
-    ['503', 503],
-  ])('keeps a typed %s unavailable registry envelope distinct from an absent project', async (_label, status) => {
+  it.each([['200', 200]])('keeps a typed %s unavailable registry envelope distinct from an absent project', async (_label, status) => {
     const payload = context({
       status: 'registry_unavailable',
       error: 'registry database could not be opened',

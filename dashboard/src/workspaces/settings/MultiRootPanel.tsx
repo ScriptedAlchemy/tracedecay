@@ -86,15 +86,6 @@ function CapabilityRefusal({
 
 function MultiRootBody({ reading }: { reading: MultiRootReading }) {
   switch (reading.state) {
-    // Older daemon: the bundle never mentioned the capability. Distinct from
-    // a daemon that mentioned it to decline, which has a reason.
-    case 'absent':
-      return (
-        <p className="td-value text-xs text-text-muted" data-multi-root="absent">
-          This daemon build reports no multi-root capability, so it holds no opinion about scope
-          sets.
-        </p>
-      );
     case 'unavailable':
       return (
         <div data-multi-root="unavailable">

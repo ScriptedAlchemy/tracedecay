@@ -1,13 +1,11 @@
 /**
  * `/api/capabilities`, and the multi-root capability inside it.
  *
- * The daemon has reported a typed multi-root capability on this route for as
- * long as the route has existed: `mod.rs::capabilities` builds it from
- * `state.authorized_scope_set` as the generated `MultiRootCapabilityV1`, which
- * is a two-state union, `mounted`, carrying the scope-set id, revision,
- * digest and root count, or `unavailable`, carrying the daemon's own sentence
- * about why. Nothing on this dashboard read it. The capability was answered on
- * every page load and dropped on the floor.
+ * The daemon reports a typed multi-root capability on this route:
+ * `mod.rs::capabilities` builds it from `state.authorized_scope_set` as the
+ * generated `MultiRootCapabilityV1`, which is a two-state union, `mounted`,
+ * carrying the scope-set id, revision, digest and root count, or
+ * `unavailable`, carrying the daemon's own sentence about why.
  *
  * What is deliberately NOT here is a federated query. `MultiRootQueryReadModelV1`
  * is generated, but no route serves it: there is no endpoint that runs a query
@@ -26,16 +24,12 @@ import { fetchPayload, type PayloadResult } from './payload.ts';
 const CAPABILITIES_URL = '/api/capabilities';
 
 /**
- * Only the members this dashboard reads, and `multi_root` is optional.
- *
- * A daemon predating the capability answers a bundle without the member at
- * all, and that is not a malformed response, it is an older daemon, which is
- * a different reading from "a scope set is not mounted" and must not be
- * flattened into it. `passthrough` keeps the rest of the bundle intact for the
- * fixture gate, which parses the same body against `CapabilitiesSchema`.
+ * Only the members this dashboard reads. `passthrough` keeps the rest of the
+ * bundle intact for the fixture gate, which parses the same body against
+ * `CapabilitiesSchema`.
  */
 const CapabilitiesReadSchema = z
-  .object({ multi_root: MultiRootCapabilityV1Schema.optional() })
+  .object({ multi_root: MultiRootCapabilityV1Schema })
   .passthrough();
 
 export type CapabilitiesRead = z.infer<typeof CapabilitiesReadSchema>;
@@ -54,16 +48,8 @@ export function useCapabilities() {
   });
 }
 
-/**
- * What may be said about multi-root, given a capability bundle.
- *
- * Four readings, and the two that look alike are the ones worth separating:
- * `absent` is a daemon that never mentioned the capability, `unavailable` is a
- * daemon that mentioned it to say no. Reporting the first as the second would
- * put a reason in the daemon's mouth.
- */
+/** What may be said about multi-root, given a capability bundle. */
 export type MultiRootReading =
-  | { state: 'absent' }
   | { state: 'unavailable'; reason: string }
   | {
       state: 'mounted';
@@ -77,8 +63,7 @@ export type MultiRootReading =
       federatedQueryMounted: false;
     };
 
-export function multiRootReading(capability: MultiRootCapabilityV1 | undefined): MultiRootReading {
-  if (!capability) return { state: 'absent' };
+export function multiRootReading(capability: MultiRootCapabilityV1): MultiRootReading {
   switch (capability.status) {
     case 'unavailable':
       return { state: 'unavailable', reason: capability.reason };
