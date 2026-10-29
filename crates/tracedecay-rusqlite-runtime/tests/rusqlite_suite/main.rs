@@ -31,7 +31,6 @@ mod work_placement_storage;
 mod work_product_graph_authority;
 mod work_product_query_authority;
 mod work_run_control_storage;
-mod work_storage;
 mod workflow_fan_out_census_storage;
 mod workflow_run_journal_storage;
 mod workflow_runtime_storage;

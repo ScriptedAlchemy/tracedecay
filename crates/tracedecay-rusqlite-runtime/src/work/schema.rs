@@ -472,15 +472,7 @@ AFTER DELETE ON work_product_graph_versions_v1 BEGIN
 END;
 ";
 
-/// `work_events_v1` shipped in `v0.1.0-beta.37`; retirement must therefore be
-/// journaled rather than erased from migration history.
-pub const RETIRE_WORK_EVENT_JOURNAL_V1: &str = "
-DROP TABLE IF EXISTS work_events_v1;
-DROP TABLE IF EXISTS work_owner_cursors_v1;
-";
-
 pub fn install_work_schema(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(WORK_SCHEMA_V1)?;
-    connection.execute_batch(RETIRE_WORK_EVENT_JOURNAL_V1)?;
     connection.execute_batch(WORK_PRODUCT_SCHEMA_V1)
 }
