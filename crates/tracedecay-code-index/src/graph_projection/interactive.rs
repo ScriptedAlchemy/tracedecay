@@ -27,10 +27,11 @@ use tracedecay_domain::{
     SanitizedCodeFileV1, SymbolOccurrenceId, repository_path_matches_scope,
 };
 use tracedecay_graph_db::{
-    GraphCancellation, GraphEntityId, GraphProjectionIdentity, GraphReadMeter, GraphRelation,
-    GraphRelationKind, MAX_VERIFIED_GENERATION_RELATIONS, NeverCancelled, RelationFanoutOverflow,
-    VerifiedGraphSnapshot,
+    GraphBudgetKind, GraphCancellation, GraphEntityId, GraphProjectionIdentity, GraphReadMeter,
+    GraphRelation, GraphRelationKind, MAX_VERIFIED_GENERATION_RELATIONS, NeverCancelled,
+    RelationFanoutOverflow, VerifiedGraphSnapshot,
 };
+use tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1;
 
 use super::warm_clock::{WarmClock, WarmOwner};
 use super::{
@@ -41,11 +42,13 @@ use super::{
 };
 use crate::lineage::LineageSymbolRecordV1;
 
+mod build_charge;
 mod carry;
 mod catalog;
 mod imports;
 mod models;
 
+use self::build_charge::CatalogBuildChargeV1;
 pub(super) use self::models::InteractiveCatalog;
 use self::models::{CatalogSymbol, source_key};
 pub use self::models::{
@@ -82,6 +85,15 @@ const CATALOG_RELEASED: &str =
 
 struct InteractiveCatalogBuildLease;
 
+/// Whether a catalog build stopped because resident memory refused it.
+fn is_resident_memory_refusal(error: &CodeGraphProjectionError) -> bool {
+    matches!(
+        error,
+        CodeGraphProjectionError::BudgetExhausted { budget, .. }
+            if budget == GraphBudgetKind::ResidentMemory.as_str()
+    )
+}
+
 /// The state a catalog build took over, restored when the build is cancelled.
 #[derive(Clone, Copy)]
 enum TakenOverCatalog {
@@ -113,6 +125,9 @@ pub(super) struct InteractiveCatalogCache {
     /// run by the last lease drop.
     park_release_on_reads_drain: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     clock: Arc<WarmClock>,
+    /// The process authority every build of this catalog reserves what it
+    /// holds from; `None` builds uncharged.
+    memory: Option<Arc<ProcessResidentMemoryV1>>,
 }
 
 /// One read's hold on the catalog cache, the serving engine, or both.
@@ -228,7 +243,7 @@ pub enum CodeGraphCatalogReleaseV1 {
 const SEMANTIC_NEIGHBOR_SEED_CHUNK: usize = 50_000;
 
 impl InteractiveCatalogCache {
-    pub(super) fn new(clock: Arc<WarmClock>) -> Self {
+    pub(super) fn new(clock: Arc<WarmClock>, memory: Option<Arc<ProcessResidentMemoryV1>>) -> Self {
         Self {
             state: RwLock::new(InteractiveCatalogState::Cold),
             build: Mutex::new(()),
@@ -238,6 +253,7 @@ impl InteractiveCatalogCache {
             engine_readers: std::sync::atomic::AtomicUsize::new(0),
             park_release_on_reads_drain: Mutex::new(None),
             clock,
+            memory,
         }
     }
 
@@ -1992,6 +2008,7 @@ impl CodeGraphInteractiveReader {
         &self,
         parent: Option<Arc<InteractiveCatalog>>,
         cancellation: &Arc<dyn GraphCancellation>,
+        charge: &mut CatalogBuildChargeV1,
     ) -> Result<InteractiveCatalog, CodeGraphProjectionError> {
         if let Some(parent) = parent {
             let carried = {
@@ -2002,6 +2019,7 @@ impl CodeGraphInteractiveReader {
                     &self.projection,
                     self.projection_node_count,
                     Arc::clone(cancellation),
+                    charge,
                 )
             };
             match carried {
@@ -2023,6 +2041,7 @@ impl CodeGraphInteractiveReader {
             &self.projection,
             self.projection_node_count,
             Arc::clone(cancellation),
+            charge,
         )
     }
 
@@ -2065,9 +2084,10 @@ impl CodeGraphInteractiveReader {
             };
             taken_over
         };
+        let mut charge = CatalogBuildChargeV1::new(self.catalog.memory.as_ref());
         let built = {
             let _span = tracing::trace_span!("code_graph.catalog.build").entered();
-            self.build_catalog(parent, &cancellation)
+            self.build_catalog(parent, &cancellation, &mut charge)
         };
         let result = built.and_then(|catalog| {
             if cancellation.is_cancelled() {
@@ -2111,6 +2131,12 @@ impl CodeGraphInteractiveReader {
                     }
                 };
                 Err(CodeGraphProjectionError::Cancelled)
+            }
+            // Memory refused the build, not the graph: the catalog is not
+            // resident for memory, and the next read that needs it retries.
+            Err(error) if is_resident_memory_refusal(&error) => {
+                *state = InteractiveCatalogState::Released;
+                Err(error)
             }
             Err(error) => {
                 *state = InteractiveCatalogState::Failed(error.clone());

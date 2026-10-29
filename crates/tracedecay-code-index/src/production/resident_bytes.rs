@@ -59,7 +59,7 @@ const SWISS_GROUP_WIDTH: usize = if cfg!(all(
 
 /// The pinned SwissTable capacity class, including its entry-size-dependent
 /// minimum allocation. Callers reserve this class before asking std to grow.
-pub(super) fn hash_table_capacity<T>(
+pub(crate) fn hash_table_capacity<T>(
     requested: usize,
 ) -> Result<usize, super::CodeIndexProductionErrorV1> {
     if requested == 0 {

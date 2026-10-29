@@ -66,8 +66,8 @@ export function toFailure(error: unknown): Failure {
   if (error instanceof ProtocolError) {
     const data = error.data;
     const code =
-      typeof data === "object" && data !== null && "code" in data && typeof data.code === "string"
-        ? data.code
+      typeof data === "object" && data !== null && "reason_code" in data && typeof data.reason_code === "string"
+        ? data.reason_code
         : `jsonrpc_${error.code}`;
     return { kind: classifyCode(code), code, message: error.message };
   }

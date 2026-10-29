@@ -66,6 +66,7 @@ lang-lean = ["tracedecay-code-extraction/lang-lean"]
 [dependencies]
 ast-grep-core = "0.50"
 flate2.workspace = true
+miniz_oxide.workspace = true
 base64.workspace = true
 hex.workspace = true
 ignore = "0.4"

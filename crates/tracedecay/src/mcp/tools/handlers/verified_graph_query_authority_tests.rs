@@ -2,6 +2,11 @@ use std::fs;
 
 use serde_json::json;
 use tempfile::TempDir;
+use tracedecay_contracts::retrieval::{
+    CommitContextSummaryV1, CommitSymbolEntryV1, GitContextComparisonV1,
+    GitContextSourceConsistencyV1,
+};
+use tracedecay_domain::GitOidV1;
 
 use super::dispatch_test_support::{
     SelectorProfile, dispatch_on_graph_authority, registered_lib_fixture, tool_json,
@@ -46,6 +51,7 @@ fn graph_handlers_that_await_query() -> &'static [&'static str] {
         // reaches the daemon transport, never the in-process graph query.
         "tracedecay_affected",
         "tracedecay_diff_context",
+        "tracedecay_pr_context",
         // `tracedecay_changelog` is git-first and never awaits the query
         // future; its typed coverage is asserted by
         // `changelog_reports_absent_query_port_as_typed_coverage`.
@@ -172,34 +178,186 @@ fn init_committed_git_fixture(root: &std::path::Path) {
         &["add", "."][..],
         &["commit", "-m", "fixture"][..],
     ] {
-        let output = std::process::Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .env("GIT_AUTHOR_NAME", "TraceDecay Test")
-            .env("GIT_AUTHOR_EMAIL", "test@tracedecay.invalid")
-            .env("GIT_COMMITTER_NAME", "TraceDecay Test")
-            .env("GIT_COMMITTER_EMAIL", "test@tracedecay.invalid")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .output()
-            .expect("git command should run");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        git_fixture_output(root, args);
     }
+}
+
+fn git_fixture_output(root: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .env("GIT_AUTHOR_NAME", "TraceDecay Test")
+        .env("GIT_AUTHOR_EMAIL", "test@tracedecay.invalid")
+        .env("GIT_COMMITTER_NAME", "TraceDecay Test")
+        .env("GIT_COMMITTER_EMAIL", "test@tracedecay.invalid")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .output()
+        .expect("git command should run");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("fixture git output is UTF-8")
+        .trim()
+        .to_owned()
+}
+
+#[tokio::test]
+async fn commit_context_reads_source_without_query_authority() {
+    let dir = TempDir::new().expect("authority isolation");
+    let profile = SelectorProfile::new(dir.path());
+    let project = dir.path().join("query-port-absent-commit-context");
+    fs::create_dir_all(project.join("src")).expect("fixture sources");
+    fs::write(project.join("src/lib.rs"), "pub fn original() {}\n").expect("initial source");
+    init_committed_git_fixture(&project);
+    let head = GitOidV1::new(git_fixture_output(&project, &["rev-parse", "HEAD"]))
+        .expect("pinned fixture HEAD");
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn original() {}\npub fn staged_change() {}\n",
+    )
+    .expect("staged source");
+    git_fixture_output(&project, &["add", "src/lib.rs"]);
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn original() {}\npub fn staged_change() {}\npub fn worktree_change() {}\n",
+    )
+    .expect("working-tree source");
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
+        &project,
+        "project.query-port-absent-commit-context",
+    )
+    .await
+    .expect("registered fixture");
+
+    let options = lower_level_ports_without_query(&cg);
+    for (args, comparison, consistency, expected_names) in [
+        (
+            json!({ "format": "json" }),
+            GitContextComparisonV1::HeadToWorktree {
+                head: Some(head.clone()),
+            },
+            GitContextSourceConsistencyV1::PerFileWorktreeCapture,
+            vec!["staged_change", "worktree_change"],
+        ),
+        (
+            json!({ "staged_only": true, "format": "json" }),
+            GitContextComparisonV1::Staged { head: Some(head) },
+            GitContextSourceConsistencyV1::ImmutableBlobs,
+            vec!["staged_change"],
+        ),
+    ] {
+        let result =
+            dispatch_on_graph_authority(&cg, "tracedecay_commit_context", args, options.clone())
+                .await
+                .expect("commit context must read source without a graph query");
+        let summary: CommitContextSummaryV1 =
+            serde_json::from_value(tool_json(&result)).expect("closed commit context contract");
+        assert_eq!(summary.comparison, Some(comparison));
+        assert!(summary.freshness.is_none());
+        let coverage = summary.source_coverage.expect("source coverage");
+        assert!(coverage.complete);
+        assert_eq!(coverage.gaps, Vec::new());
+        assert_eq!(coverage.consistency, consistency);
+        assert_eq!(summary.changed_files.len(), 1);
+        assert_eq!(summary.changed_files[0].file, "src/lib.rs");
+        assert_eq!(summary.changed_files[0].symbols, expected_names.len());
+        let mut names = summary
+            .symbols_by_role
+            .values()
+            .flatten()
+            .map(|entry| match entry {
+                CommitSymbolEntryV1::Symbol(symbol) => {
+                    assert_eq!(symbol.file, "src/lib.rs");
+                    symbol.name.as_str()
+                }
+                CommitSymbolEntryV1::ConfigSummary(_) => panic!("expected changed Rust functions"),
+            })
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        assert_eq!(names, expected_names);
+    }
+    cg.close();
+}
+
+#[tokio::test]
+async fn pr_context_brief_refuses_missing_request_controls_with_a_mounted_query_port() {
+    let dir = TempDir::new().expect("authority isolation");
+    let profile = SelectorProfile::new(dir.path());
+    let project = dir.path().join("pr-context-missing-controls");
+    fs::create_dir_all(project.join("src")).expect("fixture sources");
+    fs::write(project.join("src/lib.rs"), "pub fn original() {}\n").expect("initial source");
+    init_committed_git_fixture(&project);
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn original() {}\npub fn added() {}\n",
+    )
+    .expect("changed source");
+    git_fixture_output(&project, &["add", "src/lib.rs"]);
+    git_fixture_output(&project, &["commit", "-m", "add source"]);
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        profile.data_dir(),
+        &project,
+        "project.pr-context-missing-controls",
+    )
+    .await
+    .expect("registered fixture");
+
+    let options = verified_graph_options(&cg, ToolCallRegistryOptions::default());
+    assert!(options.verified_graph_query_port.is_some());
+    assert!(options.application_request_id.is_some());
+    assert!(options.application_deadline.is_some());
+    assert!(options.application_cancellation.is_some());
+    for (missing_control, expected_detail) in [
+        ("request_id", "the caller request identity is unavailable"),
+        ("deadline", "the caller deadline is unavailable"),
+        (
+            "cancellation",
+            "the caller cancellation signal is unavailable",
+        ),
+    ] {
+        let mut options = options.clone();
+        match missing_control {
+            "request_id" => options.application_request_id = None,
+            "deadline" => options.application_deadline = None,
+            "cancellation" => options.application_cancellation = None,
+            _ => unreachable!("only the declared controls are tested"),
+        }
+        let error = dispatch_on_graph_authority(
+            &cg,
+            "tracedecay_pr_context",
+            json!({ "base_ref": "HEAD~1", "head_ref": "HEAD", "format": "json" }),
+            options,
+        )
+        .await
+        .expect_err("a brief must refuse an absent caller control");
+        let (reason_code, retryable, detail) = error
+            .project_route_context()
+            .unwrap_or_else(|| panic!("{missing_control} must be typed, got {error}"));
+        assert_eq!(
+            reason_code, "verified-code-graph-read-unavailable",
+            "{missing_control}"
+        );
+        assert!(!retryable, "{missing_control}");
+        assert_eq!(detail, expected_detail, "{missing_control}");
+    }
+    cg.close();
 }
 
 /// The minimal arguments that carry each handler past its request-shape
 /// validation, which by contract precedes graph admission: `run_affected_tests`
 /// requires an explicit caller-scoped manifest, the file-seeded git-context
-/// reads require their changed files, and every other awaiting handler reaches
-/// the graph wait with empty arguments.
+/// reads require their changed files, and PR context needs valid Git refs.
+/// Every other awaiting handler reaches the graph wait with empty arguments.
 fn query_authority_probe_args(tool_name: &str) -> serde_json::Value {
     match tool_name {
         "tracedecay_run_affected_tests" => json!({ "changed_paths": ["src/lib.rs"] }),
         "tracedecay_affected" | "tracedecay_diff_context" => json!({ "files": ["src/lib.rs"] }),
+        "tracedecay_pr_context" => json!({ "base_ref": "HEAD", "head_ref": "HEAD" }),
         _ => json!({}),
     }
 }

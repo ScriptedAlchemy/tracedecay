@@ -267,14 +267,30 @@ fn a_failed_receipt_drain_is_reported_on_status_and_clears_when_the_spool_drains
     let home = tempfile::TempDir::new().unwrap();
     let home = home.path().canonicalize().unwrap();
     let project = init_git_project(&home);
-    let _daemon = spawn_tracedecay_daemon(&home);
+    let daemon = spawn_tracedecay_daemon(&home);
     tracedecay(&home, &project, &["init"]);
+    drop(daemon);
     let layout = default_profile_sharded_layout(&project, &home.join(".tracedecay")).unwrap();
     let receipts =
         hook_delivery_receipt_spool_root(&layout.data_root, NativeHostIdentityV1::CursorDesktop);
     drop(HookDeliveryReceiptWriterV1::open_within(&receipts, HOOK_SYNCHRONOUS_BUDGET).unwrap());
     let corrupt = receipts.join(format!("{:032x}.delivery.v1.json", 7));
     std::fs::write(&corrupt, b"not a delivery receipt").unwrap();
+
+    // Keep replay running while the dependent orchestrator is unmounted:
+    // otherwise the Stop can settle before its waiting status is observed.
+    let hold = home.join("hold-after-independent-owners");
+    let entered = PathBuf::from(format!("{}.entered", hold.display()));
+    std::fs::write(&hold, b"hold").unwrap();
+    let log = home.join("daemon.log");
+    let _daemon = spawn_tracedecay_daemon_logged(&home, &log, |command| {
+        command.env("TRACEDECAY_TEST_HOLD_AFTER_INDEPENDENT_OWNERS", &hold);
+    });
+    assert!(
+        latency_until(PROMPT_DRAIN, || entered.is_file()).is_some(),
+        "replay must mount before the orchestrator: {}",
+        std::fs::read_to_string(&log).unwrap()
+    );
 
     let failed = json!({
         "status": "failed",
@@ -297,12 +313,33 @@ fn a_failed_receipt_drain_is_reported_on_status_and_clears_when_the_spool_drains
     // the failure clears.
     std::fs::remove_file(&corrupt).unwrap();
     capture_stop(&home, &project, "after-repair");
-    let drained = json!({ "status": "drained" });
+    let repair_started = Instant::now();
+    // Status describes the last sweep, which may precede this receipt's publication.
+    assert!(
+        receipt_drain_latency(&receipts, PROMPT_DRAIN).is_some(),
+        "the receipt published after repair must drain within {PROMPT_DRAIN:?}"
+    );
+    // The stop's receipt settles, but its producer work still awaits this
+    // fixture's unmounted hook orchestrator.
+    let recovered = json!({
+        "status": "waiting",
+        "waiting": [{
+            "host": "cursor_desktop",
+            "spool": "pending_work",
+            "cause": "1 pending producer work obligation(s) remain unresolved; the first awaits the project's hook orchestrator",
+        }],
+    });
     assert_eq!(
-        await_hook_replay_status(&home, &project, &drained, PROMPT_DRAIN),
-        drained
+        await_hook_replay_status(
+            &home,
+            &project,
+            &recovered,
+            PROMPT_DRAIN.saturating_sub(repair_started.elapsed()),
+        ),
+        recovered
     );
     assert_eq!(published_receipts(&receipts), Vec::<PathBuf>::new());
+    std::fs::remove_file(&hold).unwrap();
 }
 
 #[test]
