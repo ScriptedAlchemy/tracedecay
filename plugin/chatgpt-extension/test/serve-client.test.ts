@@ -1,9 +1,9 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Client } from "@modelcontextprotocol/client";
+import { Client, ProtocolError } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DaemonFailure, ServeSession } from "../src/server/serve-client.js";
+import { DaemonFailure, ServeSession, toFailure } from "../src/server/serve-client.js";
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const NODE_BINARY = process.env.JS_BINARY__NODE_BINARY ?? process.execPath;
@@ -335,4 +335,18 @@ describe("response handle reassembly", () => {
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(await retrieveOffsets(serve, "cancelled")).toHaveLength(2);
   }, 15_000);
+});
+
+describe("JSON-RPC refusal classification", () => {
+  it("classifies a daemon refusal by its reason code", () => {
+    const refusal = new ProtocolError(-32603, "daemon client capacity reached", {
+      reason_code: "daemon_client_capacity_saturated",
+      retryable: true,
+      detail: "daemon client capacity reached",
+      kind: "daemon_client_capacity_saturated",
+      capacity: 1,
+    });
+
+    expect(toFailure(refusal)).toMatchObject({ kind: "unavailable", code: "daemon_client_capacity_saturated" });
+  });
 });
