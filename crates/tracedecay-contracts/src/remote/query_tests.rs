@@ -467,7 +467,7 @@ fn provenance(
         EvidenceAvailabilityV1::Unavailable,
         EvidenceAvailabilityV1::Unavailable,
         EvidenceAvailabilityV1::Unavailable,
-        RepositoryRemoteIdentityV1::Unknown,
+        RepositoryRemoteIdentityV1::Unavailable,
         EvidenceAvailabilityV1::Unavailable,
     )
     .unwrap();

@@ -221,7 +221,7 @@ fn repository_write_for(
             EvidenceAvailabilityV1::Unborn,
             EvidenceAvailabilityV1::Unavailable,
             EvidenceAvailabilityV1::Unknown,
-            RepositoryRemoteIdentityV1::Unknown,
+            RepositoryRemoteIdentityV1::Unavailable,
             EvidenceAvailabilityV1::Unknown,
         )
         .unwrap(),
