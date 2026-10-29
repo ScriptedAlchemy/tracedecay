@@ -834,7 +834,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 CodeIndexArrivalV1,
                 CodeIndexCadenceTriggerV1,
             )> = None;
-            // A retained revision-7 graph gets one verified-head attempt
+            // A retained graph gets one verified-head attempt
             // before ordinary source reconciliation owns any repair. A failed
             // verification falls through to one canonical replay of the same
             // sealed generation rather than repeating the head read forever.
@@ -1498,10 +1498,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .is_none();
-                let retained_text_uses_partitioned_manifest = retained_text
-                    .as_ref()
-                    .is_some_and(LatestCodeTextGenerationV1::uses_partitioned_manifest);
-                // A revision-7 owner can restore its retained persistent graph
+                // A retained owner can restore its retained persistent graph
                 // directly from the verified head. Give that recovery exactly
                 // one empty-slot *mount* pass before the dirty source capture
                 // creates its successor. Once the retained graph is Ready, this
@@ -1519,9 +1516,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     && serving_empty
                     && !retained_graph_head_recovery_attempted
                     && trigger == CodeIndexCadenceTriggerV1::Mount
-                    && retained_text.as_ref().is_some_and(|text| {
-                        text.uses_partitioned_manifest() && text.interactive_graph_store().is_err()
-                    });
+                    && retained_text
+                        .as_ref()
+                        .is_some_and(|text| text.interactive_graph_store().is_err());
                 let retained_text_metadata = retained_text
                     .as_ref()
                     .map(|text| text.metadata().clone())
@@ -1571,23 +1568,6 @@ impl CodeIndexSchedulerRegistryV1 {
                         // to reconcile_now and would otherwise extract again.
                         if let Some(outcome) =
                             scheduler.republish_unpublished_retained_generation()?
-                        {
-                            return Ok(outcome);
-                        }
-                        // Legacy graph recovery requires a decoded complete
-                        // generation in the serving slot before a dirty-tree
-                        // rebuild. Revision 7 deliberately leaves that slot
-                        // empty: the retained manifest owner validates and
-                        // seats Grafeo below without opening partition bytes.
-                        // Graph-off and deferred passes also fall through to
-                        // retained text reconciliation.
-                        if graph_activation_enabled
-                            && !graph_activation_deferred
-                            && serving_empty
-                            && text_serving_ready
-                            && !retained_text_uses_partitioned_manifest
-                            && let Some(outcome) =
-                                scheduler.seat_retained_generation_on_empty_serving()?
                         {
                             return Ok(outcome);
                         }
@@ -2063,10 +2043,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     && !published_pass
                     && !graph_already_serves
                     && !retained_graph_head_recovery_attempted
-                    && let Some(retained) = graph_text
-                        .as_ref()
-                        .filter(|retained| retained.uses_partitioned_manifest())
-                        .cloned()
+                    && let Some(retained) = graph_text.clone()
                 {
                     // Every outcome of this attempt schedules one successor.
                     // Stamp it before the recovery await, while the pass is
@@ -2224,7 +2201,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     // another retained-recovery Noop. The successor was
                     // stamped before this await.
                 }
-                // A recovered revision-7 verified head already serves its
+                // A recovered verified head already serves its
                 // native graph from the retained text owner, and that owner
                 // is the authority every graph route reads. Preparing the
                 // same generation again buys nothing but the O(store)
@@ -2235,14 +2212,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 // sealed slot unseated until an explicit complete-generation
                 // consumer asks for it, exactly as graph-only
                 // `sealed_decode_count() == 0` requires. A publication seats
-                // its own product as usual, and a legacy (non-partitioned)
-                // owner still takes the seat.
+                // its own product as usual.
                 if prepare_graph
                     && !published_pass
                     && graph_already_serves
-                    && graph_text
-                        .as_ref()
-                        .is_some_and(LatestCodeTextGenerationV1::uses_partitioned_manifest)
+                    && graph_text.is_some()
                     && !worker_complete_generation_requested.load(Ordering::Acquire)
                 {
                     prepare_graph = false;

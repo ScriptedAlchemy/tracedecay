@@ -1297,14 +1297,6 @@ pub fn plan_code_generation_retention_with_verification_budgeted_cancellable(
     })
 }
 
-/// Seals once wrote a read bundle (a manifest beside the generation and a
-/// catalog artifact beside the segments) that copied the graph store's
-/// symbol, file, and import records. The graph store is their only owner
-/// now, so any file of that shape is unreferenced and reclaimable.
-fn is_retired_read_bundle_file(file_name: &str) -> bool {
-    file_name.starts_with("read-bundle-") || file_name.starts_with(".read-bundle-")
-}
-
 fn generation_file_digest(file_name: &str) -> Option<&str> {
     file_name
         .strip_prefix("generation-")?
@@ -1362,7 +1354,6 @@ fn sweep_unreferenced_generation_segments(
     let manifest_directories =
         segment_manifest_directories(store_root, &mut remaining_entries, is_cancelled)?;
     let mut live_segments = BTreeSet::new();
-    let mut retired_read_bundle_manifests = Vec::new();
     let mut mark_root = |root: &Path,
                          replay_pool: bool|
      -> Result<(), CodeGenerationRetentionErrorV1> {
@@ -1397,14 +1388,6 @@ fn sweep_unreferenced_generation_segments(
                     })?
                     .to_owned()
             } else {
-                if path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(is_retired_read_bundle_file)
-                {
-                    retired_read_bundle_manifests.push(path);
-                    continue;
-                }
                 let Some(file_name) = generation_file_name(&path) else {
                     continue;
                 };
@@ -1468,18 +1451,6 @@ fn sweep_unreferenced_generation_segments(
 
     let mut found = false;
     let mut reclaimed = 0_u64;
-    for path in retired_read_bundle_manifests {
-        let metadata = path.symlink_metadata().map_err(deferred_if_absent)?;
-        found = true;
-        if !apply {
-            return Ok((true, false));
-        }
-        std::fs::remove_file(&path).map_err(storage)?;
-        reclaimed = reclaimed.saturating_add(metadata.len());
-        if let Some(parent) = path.parent() {
-            sync_directory(parent)?;
-        }
-    }
     let mut reclaimed_segments = 0_usize;
     for entry in entries {
         if is_cancelled() {
@@ -1545,7 +1516,6 @@ fn sweep_unreferenced_generation_segments(
             .and_then(|name| name.strip_suffix(".json"))
             .filter(|digest| is_lowercase_hex(digest, 64))
             .map(|digest| format!("sha256:{digest}"))
-            .or_else(|| is_retired_read_bundle_file(file_name).then(|| file_name.to_owned()))
         else {
             continue;
         };

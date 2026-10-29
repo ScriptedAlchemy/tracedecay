@@ -34,16 +34,6 @@ const GRAPH_ROW_SAMPLE_FILES_V1: usize = 256;
 pub struct CodeGraphBuildBoundV1 {
     /// The segment buffers and the largest window of decoded pages.
     pub decode_window_bytes: u64,
-    /// Retired graph-time resolution state; always zero for page builds.
-    pub resolution_file_bytes: u64,
-    /// Retired graph-time binding state; always zero for page builds.
-    pub binding_bytes: u64,
-    /// Retired graph-time bound set; always zero for page builds.
-    pub bound_set_bytes: u64,
-    /// Retired graph-time derived state; always zero for page builds.
-    pub derived_bytes: u64,
-    /// Page builds do not retain pending emission batches; always zero.
-    pub emit_batch_bytes: u64,
     /// At the emission peak: rows buffered in the spill and the entity
     /// identities it keeps.
     pub emit_spill_bytes: u64,
@@ -54,23 +44,16 @@ pub struct CodeGraphBuildBoundV1 {
 }
 
 impl CodeGraphBuildBoundV1 {
-    /// Page acquisition holds one bounded decode window. The other terms are
-    /// retained for the public receipt shape and are zero for page builds.
+    /// Page acquisition holds one bounded decode window.
     #[must_use]
     pub fn resolve_bytes(&self) -> u64 {
-        self.resolution_file_bytes
-            .saturating_add(self.binding_bytes)
-            .saturating_add(self.bound_set_bytes)
-            .saturating_add(self.decode_window_bytes.max(self.derived_bytes))
+        self.decode_window_bytes
     }
 
     /// Emission holds the spill and the page currently emitted as rows.
     #[must_use]
     pub fn emit_bytes(&self) -> u64 {
-        self.bound_set_bytes
-            .saturating_add(self.derived_bytes)
-            .saturating_add(self.emit_batch_bytes)
-            .saturating_add(self.emit_spill_bytes)
+        self.emit_spill_bytes
             .saturating_add(self.emit_window_bytes)
             .saturating_add(self.decode_window_bytes)
     }
@@ -260,11 +243,6 @@ pub(crate) fn layered_page_graph_build_bound<'a>(
         .saturating_mul(2);
     CodeGraphBuildBoundV1 {
         decode_window_bytes: decode_window,
-        resolution_file_bytes: 0,
-        binding_bytes: 0,
-        bound_set_bytes: 0,
-        derived_bytes: 0,
-        emit_batch_bytes: 0,
         emit_spill_bytes: emit_peak,
         emit_window_bytes: emit_window,
         store_bytes: identity_store.saturating_add(row_index_records),
@@ -551,11 +529,6 @@ impl CodeIndexPublishedGenerationV1 {
 
         Ok(CodeGraphBuildBoundV1 {
             decode_window_bytes: bytes(decode_window),
-            resolution_file_bytes: 0,
-            binding_bytes: 0,
-            bound_set_bytes: 0,
-            derived_bytes: 0,
-            emit_batch_bytes: 0,
             emit_spill_bytes: bytes(emit.0),
             emit_window_bytes: bytes(emit.1),
             store_bytes: bytes(store),

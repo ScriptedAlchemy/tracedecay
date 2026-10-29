@@ -25,7 +25,6 @@ use super::SCOPE_RETENTION_QUARANTINE_DIRECTORY;
 use super::generation_transactions::entry_exists;
 use super::journal::{
     BoundedJournalSpec, clear_journal, journal_path, load_journal, persist_journal,
-    remove_journal_file,
 };
 use super::locking::{
     acquire_scope_retention_lock, try_acquire_code_generation_store_lock_during_scope_retention,
@@ -54,12 +53,6 @@ pub(super) const SCOPE_RECEIPT_STORE: ReceiptStoreSpec = ReceiptStoreSpec {
     directory: SCOPE_RETENTION_RECEIPTS_DIRECTORY,
     label: "scope reconciliation receipt",
 };
-
-/// A binding-cleanup intent promised to remove one binding of the retired
-/// dense-embedding authority after a scope collection. Nothing can replay
-/// it, so it is an inert marker that recovery deletes.
-pub(super) const RETIRED_BINDING_CLEANUP_INTENT_FILE: &str =
-    ".code-index-scope-binding-cleanup-intent-v1.json";
 
 /// The scope's canonical project root, recorded by the scheduler that opened
 /// it. The scope directory name is only the root's hash, so without this
@@ -728,8 +721,7 @@ pub fn execute_scope_root_retention(
     })
 }
 
-/// Finish or undo an interrupted scope-reconciliation transaction, and
-/// delete a retired binding-cleanup intent.
+/// Finish or undo an interrupted scope-reconciliation transaction.
 #[tracing::instrument(name = "usecases.retention.recover_scope", level = "trace", skip_all)]
 pub fn recover_scope_root_retention(
     store_root: &Path,
@@ -738,7 +730,6 @@ pub fn recover_scope_root_retention(
         return Ok(());
     }
     let _pass_lock = acquire_scope_retention_lock(store_root)?;
-    remove_journal_file(store_root, RETIRED_BINDING_CLEANUP_INTENT_FILE)?;
     recover_pending_scope_transaction_unlocked(store_root)
 }
 
