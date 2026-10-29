@@ -1476,10 +1476,16 @@ fn connect_initialized_project_client(home_path: &Path, project_path: &Path) -> 
         "scope_prefix": null,
         "timings": false,
         "allow_init": false,
+        "allow_initialize_root_routing": false,
         "client_identity": {
             "profile_root": home_path.join(".tracedecay"),
             "global_db_path": home_path.join(".tracedecay/global.db")
-        }
+        },
+        "client_version": cli_build_version(),
+        "client_instance_id": "0000000000000000000000000000d001",
+        "tool_list_changed_capable": false,
+        "catalog_version": "",
+        "moved_store_adoption": "never"
     });
     writeln!(client, "{handshake}").expect("write daemon handshake");
     writeln!(

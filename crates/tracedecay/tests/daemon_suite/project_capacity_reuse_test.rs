@@ -45,7 +45,7 @@ async fn projects_past_the_server_cache_open_and_serve() {
         .canonicalize()
         .expect("canonical last project");
     tracedecay_project::product_runtime::register_fixture_product_runtime();
-    let handshake = tracedecay::daemon::handshake_for_current_client(
+    let handshake = crate::common::handshake_for_current_client(
         environment.profile(),
         Some(last.clone()),
         None,

@@ -74,6 +74,30 @@ static EMPTY_LCM_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 static EMPTY_GLOBAL_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 static EMPTY_GRAPH_DB_TEMPLATE: OnceCell<Vec<u8>> = OnceCell::const_new();
 
+/// The production handshake for `profile`, naming only this build's release.
+///
+/// A suite that drives a spawned `tracedecay` daemon runs in a test binary
+/// whose fixture runtime carries a different commit than the daemon's. The
+/// daemon refuses a client of another build, but a version that names only its
+/// release is the same identity as every build of that release.
+pub fn handshake_for_current_client(
+    profile: &ProfileRoot,
+    project_path: Option<PathBuf>,
+    scope_prefix: Option<String>,
+    timings: bool,
+    allow_init: bool,
+) -> tracedecay_domain::errors::Result<tracedecay_daemon_protocol::DaemonHandshake> {
+    let mut handshake = tracedecay::daemon::handshake_for_current_client(
+        profile,
+        project_path,
+        scope_prefix,
+        timings,
+        allow_init,
+    )?;
+    handshake.client_version = env!("CARGO_PKG_VERSION").to_owned();
+    Ok(handshake)
+}
+
 /// Registers this process's product runtime provider with the canonical test
 /// fixture provider, so an in-process daemon handshake has a truthful binary
 /// version to advertise.

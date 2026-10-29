@@ -9,10 +9,6 @@ use tracedecay_domain::errors::Result;
 
 /// How first-touch resolution treats a moved non-git store whose registry row
 /// no longer resolves at its recorded root.
-///
-/// Old daemons ignore the handshake field carrying this value and new daemons
-/// default a missing field to [`Self::Never`], so mixed-version pairs always
-/// degrade to the safe no-adoption behavior.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MovedStoreAdoption {
@@ -43,20 +39,14 @@ pub struct DaemonHandshake {
     pub scope_prefix: Option<String>,
     pub timings: bool,
     pub allow_init: bool,
-    #[serde(default)]
     pub allow_initialize_root_routing: bool,
     pub client_identity: DaemonClientIdentity,
     /// Version of the tracedecay binary that opened this connection.
-    #[serde(default)]
     pub client_version: String,
     /// Stable id for the connecting client process.
-    #[serde(default)]
     pub client_instance_id: String,
-    #[serde(default)]
     pub tool_list_changed_capable: bool,
-    #[serde(default)]
     pub catalog_version: String,
-    #[serde(default)]
     pub moved_store_adoption: MovedStoreAdoption,
 }
 
@@ -94,8 +84,8 @@ pub enum DaemonHandshakeRefusalReason {
 ///
 /// Without this frame the client's pending read ends in a raw
 /// `Connection reset by peer`, which hides version skew behind a transport
-/// error. Old daemons never send it; new clients treat an unparseable
-/// response line that parses as this frame as a typed refusal.
+/// error. Clients treat an unparseable response line that parses as this frame
+/// as a typed refusal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonHandshakeRefusal {
     pub protocol: String,
@@ -114,6 +104,16 @@ impl DaemonHandshakeRefusal {
         Self {
             protocol: DAEMON_HANDSHAKE_REFUSAL_PROTOCOL.to_owned(),
             refusal,
+            daemon_version: daemon_version.to_owned(),
+        }
+    }
+
+    /// The refusal frame for a client built from a different revision than
+    /// this daemon, or whose handshake identity this daemon cannot serve.
+    pub fn for_revision_skew(daemon_version: &str) -> Self {
+        Self {
+            protocol: DAEMON_HANDSHAKE_REFUSAL_PROTOCOL.to_owned(),
+            refusal: DaemonHandshakeRefusalReason::UnsupportedRevision,
             daemon_version: daemon_version.to_owned(),
         }
     }
@@ -142,11 +142,8 @@ impl DaemonHandshakeRefusal {
 }
 
 /// The client version to report as skewed, or `None` when the versions match.
-///
-/// Old clients send no version (empty string); that is indistinguishable from
-/// "same version before this field existed", so it never counts as skew.
 pub fn client_version_skew(client_version: &str, daemon_version: &str) -> Option<String> {
-    if client_version.is_empty() || versions_name_same_build(client_version, daemon_version) {
+    if versions_name_same_build(client_version, daemon_version) {
         return None;
     }
     Some(client_version.to_string())
@@ -318,13 +315,13 @@ mod handshake_refusal_tests {
 #[cfg(test)]
 mod decoding_tests {
     use super::{DaemonHandshake, MovedStoreAdoption};
-    use serde_json::json;
     use std::path::PathBuf;
 
-    /// Old clients omit the adoption field entirely; the daemon must default it
-    /// to `Never` so a mixed-version pair can never remap a moved store.
+    /// Every non-optional handshake field is required: a sender that omits one
+    /// is refused (as `unsupported_revision` on the wire) instead of decoded with
+    /// a default.
     #[test]
-    fn daemon_handshake_defaults_missing_moved_store_adoption_to_never() {
+    fn daemon_handshake_requires_every_field() {
         let handshake = DaemonHandshake {
             project_path: Some(PathBuf::from("/work/repo")),
             scope_prefix: None,
@@ -341,73 +338,45 @@ mod decoding_tests {
             catalog_version: String::new(),
             moved_store_adoption: MovedStoreAdoption::Never,
         };
-        let encoded = serde_json::json!({
-            "project_path": "/work/repo",
-            "scope_prefix": null,
-            "timings": false,
-            "allow_init": false,
-            "client_identity": handshake.client_identity,
-            "client_version": handshake.client_version,
-            "client_instance_id": handshake.client_instance_id,
-        })
-        .to_string();
-
-        let decoded = DaemonHandshake::from_line(&encoded).expect("legacy handshake should decode");
-        assert_eq!(decoded.moved_store_adoption, MovedStoreAdoption::Never);
-    }
-
-    #[test]
-    fn daemon_handshake_requires_client_identity() {
-        let encoded = serde_json::json!({
-            "project_path": "/work/repo",
-            "scope_prefix": null,
-            "timings": false,
-            "allow_init": false
-        })
-        .to_string();
-
-        let Err(error) = DaemonHandshake::from_line(&encoded) else {
-            panic!("a handshake without client identity must be refused");
-        };
-        assert!(
-            error
-                .to_string()
-                .contains("missing field `client_identity`"),
-            "unexpected refusal: {error}"
-        );
-    }
-
-    /// Handshake metadata is negotiated over a live daemon connection. Absent
-    /// capability claims must resolve to their fail-closed defaults.
-    #[test]
-    fn handshake_defaults_optional_metadata_when_fields_are_absent() {
-        let encoded = json!({
-            "project_path": "/work/repo",
-            "scope_prefix": null,
-            "timings": false,
-            "allow_init": false,
-            "client_identity": {
-                "profile_root": "/profiles/client",
-                "global_db_path": "/profiles/client/global.db"
-            }
-        })
-        .to_string();
-
-        let decoded =
-            DaemonHandshake::from_line(&encoded).expect("handshake with absent optional metadata");
-
-        assert!(!decoded.allow_initialize_root_routing);
-        assert_eq!(decoded.client_version, "");
-        assert_eq!(decoded.client_instance_id, "");
-        assert!(!decoded.tool_list_changed_capable);
-        assert_eq!(decoded.catalog_version, "");
+        let complete = serde_json::to_value(&handshake).expect("handshake value");
+        assert!(DaemonHandshake::from_line(&complete.to_string()).is_ok());
+        for field in [
+            "timings",
+            "allow_init",
+            "allow_initialize_root_routing",
+            "client_identity",
+            "client_version",
+            "client_instance_id",
+            "tool_list_changed_capable",
+            "catalog_version",
+            "moved_store_adoption",
+        ] {
+            let mut encoded = complete.clone();
+            encoded
+                .as_object_mut()
+                .expect("handshake object")
+                .remove(field);
+            let Err(error) = DaemonHandshake::from_line(&encoded.to_string()) else {
+                panic!("a handshake without `{field}` must be refused");
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("missing field `{field}`")),
+                "unexpected refusal for `{field}`: {error}"
+            );
+        }
     }
 
     #[cfg(unix)]
     #[test]
     fn client_version_skew_flags_only_real_mismatches() {
         assert_eq!(crate::client_version_skew("1.2.3", "1.2.3"), None);
-        assert_eq!(crate::client_version_skew("", "1.2.3"), None);
+        assert_eq!(
+            crate::client_version_skew("", "1.2.3"),
+            Some(String::new()),
+            "a client that reports no version is skewed"
+        );
         assert_eq!(
             crate::client_version_skew("1.3.0", "1.2.3"),
             Some("1.3.0".to_string())

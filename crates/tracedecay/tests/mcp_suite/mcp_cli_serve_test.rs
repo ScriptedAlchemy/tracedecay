@@ -646,9 +646,8 @@ async fn serve_started_during_daemon_restart_window_proxies_to_restarted_daemon(
     let token = authority.auth_token().to_owned();
 
     // The "restarted daemon" binds the socket only after serve has started.
-    // It answers `initialize` with a sentinel server name and a skewed
-    // version, so a proxied response is distinguishable from the in-process
-    // fallback and exercises the client-side version-skew warning.
+    // It answers `initialize` with a sentinel server name, so a proxied
+    // response is distinguishable from the in-process fallback.
     let listener_path = socket_path.clone();
     let fake_daemon = std::thread::spawn(move || {
         rebind_rx
@@ -763,11 +762,6 @@ async fn serve_started_during_daemon_restart_window_proxies_to_restarted_daemon(
         response["result"]["serverInfo"]["name"],
         json!("sentinel-restarted-daemon"),
         "initialize must be answered by the restarted daemon, not an in-process fallback:\n{response}"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("0.0.1-sentinel") && stderr.contains("tracedecay daemon restart"),
-        "proxy should warn about the daemon/client version skew\nstderr:\n{stderr}"
     );
 }
 

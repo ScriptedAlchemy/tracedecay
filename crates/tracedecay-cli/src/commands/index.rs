@@ -112,7 +112,10 @@ pub(crate) async fn handle_init(
 /// the transport differs would let init proceed on Windows without the
 /// scheduler it then requires.
 fn init_daemon_available(profile: &ProfileRoot) -> bool {
-    tracedecay_daemon_control::daemon_socket_connectable(profile)
+    tracedecay_daemon_control::daemon_socket_connectable(
+        profile,
+        crate::product_runtime::PRODUCT_BUILD_VERSION,
+    )
 }
 
 /// Maps explicit `tracedecay init` flags to the adoption request the daemon
@@ -1054,7 +1057,7 @@ mod init_bootstrap_tests {
                 global_db_path: profile_root.join("global.db"),
             },
             client_version: env!("CARGO_PKG_VERSION").to_string(),
-            client_instance_id: "commands-init-test".to_string(),
+            client_instance_id: "0000000000000000000000000000c002".to_string(),
             tool_list_changed_capable: false,
             catalog_version: String::new(),
             moved_store_adoption: tracedecay_project::project::MovedStoreAdoption::Never,

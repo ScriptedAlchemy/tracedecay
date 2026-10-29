@@ -483,7 +483,7 @@ async fn mount_one_production_composition_project(
 ) -> Result<()> {
     let handshake = DaemonHandshake {
         client_version: binary_version()?.to_owned(),
-        client_instance_id: format!("production-composition-harness-{index}"),
+        client_instance_id: format!("{index:032x}"),
         client_identity: client_identity.clone(),
         scope_prefix: scope_prefix.map(str::to_owned),
         project_path: Some(project_root),

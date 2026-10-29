@@ -180,7 +180,7 @@ async fn sigkill_after_the_seal_restarts_on_the_identical_sealed_generation() {
         initialize_tracedecay(environment.home(), &project),
     );
     tracedecay_project::product_runtime::register_fixture_product_runtime();
-    let handshake = tracedecay::daemon::handshake_for_current_client(
+    let handshake = crate::common::handshake_for_current_client(
         environment.profile(),
         Some(project.clone()),
         None,
@@ -252,7 +252,7 @@ async fn sigkill_during_the_seal_keeps_the_prior_generation_published() {
         initialize_tracedecay(environment.home(), &project),
     );
     tracedecay_project::product_runtime::register_fixture_product_runtime();
-    let handshake = tracedecay::daemon::handshake_for_current_client(
+    let handshake = crate::common::handshake_for_current_client(
         environment.profile(),
         Some(project.clone()),
         None,
