@@ -39,13 +39,13 @@ use tracedecay_store::runtime::GraphRecoveredGenerationDigestV1;
 use crate::generation::{
     GraphRowDigestSum, RowLanes, read_spilled_entity, recovered_digest_from_row_sum,
 };
-use crate::projection_read::{IdentityScope, query_identity_page};
+use crate::projection_read::{IdentityScope, query_identity_page_admitted};
 use crate::row_index::{ENTITY_ROW_OFFSETS_FILE, EntityRowOffsets, ROW_INDEX_FILE, RowIndex};
 use crate::schema::{
     ENTITY_ID_PROPERTY, ENTITY_LABEL, RELATION_ID_PROPERTY, RELATION_LABEL,
     entity_projection_label, relation_projection_label,
 };
-use crate::state::{latest_projection, load_entity, load_relation};
+use crate::state::latest_projection;
 use crate::traversal::{GraphTraversalDirection, TraversalRequest};
 use crate::verified_marker::marker_path;
 use crate::{
@@ -1005,9 +1005,10 @@ impl SealedLayer {
     /// differently from it: the rows it hides and the delta's own.
     pub(crate) fn layered_rows(&self) -> GraphLayeredRowsV1 {
         fn sorted<T: Ord + Clone>(ids: &HashSet<T>) -> Vec<T> {
-            let mut ids: Vec<T> = ids.iter().cloned().collect();
-            ids.sort_unstable();
-            ids
+            let mut sorted = Vec::with_capacity(ids.len());
+            sorted.extend(ids.iter().cloned());
+            sorted.sort_unstable();
+            sorted
         }
         GraphLayeredRowsV1 {
             base_generation: self.base_identity.generation.clone(),
@@ -1018,28 +1019,47 @@ impl SealedLayer {
         }
     }
 
+    pub(crate) fn layered_rows_allocation_bytes(&self) -> usize {
+        fn ids<T>(values: &HashSet<T>, len: impl Fn(&T) -> usize) -> usize {
+            values.iter().fold(
+                values.len().saturating_mul(std::mem::size_of::<T>()),
+                |bytes, id| bytes.saturating_add(len(id)),
+            )
+        }
+        self.base_identity
+            .generation
+            .as_str()
+            .len()
+            .saturating_add(ids(&self.hidden_entities, |id| id.as_str().len()))
+            .saturating_add(ids(&self.delta_entities, |id| id.as_str().len()))
+            .saturating_add(ids(&self.hidden_relations, |id| id.as_str().len()))
+            .saturating_add(ids(&self.delta_relations, |id| id.as_str().len()))
+    }
+
     /// The base's own row for `identity`, whether or not this layer hides
     /// or shadows it; `None` when the base never held it.
-    pub(crate) fn base_entity(
+    pub(crate) fn base_entity_admitted(
         &self,
         identity: &GraphEntityId,
         cancellation: Arc<dyn GraphCancellation>,
+        admit: &mut crate::state::ReadAllocationAdmission<'_>,
     ) -> Result<Option<GraphEntity>, GraphDbError> {
         self.proven_base()?
-            .entity(&self.base_namespace, identity, cancellation)
+            .entity_admitted(&self.base_namespace, identity, cancellation, admit)
     }
 
     /// The base's own relation for `identity`, whether or not this layer
     /// hides or shadows it; `None` when the base never held it.
-    pub(crate) fn base_relation(
+    pub(crate) fn base_relation_admitted(
         &self,
         projection: &GraphProjectionIdentity,
         identity: &GraphRelationId,
         cancellation: &dyn GraphCancellation,
+        admit: &mut crate::state::ReadAllocationAdmission<'_>,
     ) -> Result<Option<GraphGenerationRelation>, GraphDbError> {
         self.proven_base()?
             .read_intact(cancellation, |native| {
-                load_relation(native, &self.base_namespace, identity)
+                crate::state::load_relation_admitted(native, &self.base_namespace, identity, admit)
             })?
             .map(|stored| generation_relation(projection, stored.relation))
             .transpose()
@@ -1088,21 +1108,36 @@ impl LayeredReads<'_> {
         identity: &GraphEntityId,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<GraphEntity>, GraphDbError> {
+        self.entity_admitted(identity, cancellation, &mut None)
+    }
+
+    pub(crate) fn entity_admitted(
+        &self,
+        identity: &GraphEntityId,
+        cancellation: Arc<dyn GraphCancellation>,
+        admit: &mut crate::state::ReadAllocationAdmission<'_>,
+    ) -> Result<Option<GraphEntity>, GraphDbError> {
         if self.layer.delta_entities.contains(identity) {
-            return self.delta.entity(&self.namespace, identity, cancellation);
+            return self
+                .delta
+                .entity_admitted(&self.namespace, identity, cancellation, admit);
         }
         if self.layer.hidden_entities.contains(identity) {
             return Ok(None);
         }
-        self.layer
-            .proven_base()?
-            .entity(&self.layer.base_namespace, identity, cancellation)
+        self.layer.proven_base()?.entity_admitted(
+            &self.layer.base_namespace,
+            identity,
+            cancellation,
+            admit,
+        )
     }
 
-    pub(crate) fn relation(
+    pub(crate) fn relation_admitted(
         &self,
         identity: &GraphRelationId,
         cancellation: &dyn GraphCancellation,
+        admit: &mut crate::state::ReadAllocationAdmission<'_>,
     ) -> Result<Option<GraphGenerationRelation>, GraphDbError> {
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
@@ -1116,13 +1151,22 @@ impl LayeredReads<'_> {
         };
         database
             .read_intact(cancellation, |native| {
-                load_relation(native, namespace, identity)
+                crate::state::load_relation_admitted(native, namespace, identity, admit)
             })?
             .map(|stored| generation_relation(self.projection, stored.relation))
             .transpose()
     }
 
     fn entity_visible(&self, identity: &GraphEntityId) -> Result<bool, GraphDbError> {
+        self.entity_visible_admitted(identity, &NeverCancelled, &mut None)
+    }
+
+    fn entity_visible_admitted(
+        &self,
+        identity: &GraphEntityId,
+        cancellation: &dyn GraphCancellation,
+        admit: &mut crate::state::ReadAllocationAdmission<'_>,
+    ) -> Result<bool, GraphDbError> {
         if self.layer.delta_entities.contains(identity) {
             return Ok(true);
         }
@@ -1131,12 +1175,23 @@ impl LayeredReads<'_> {
         }
         self.layer
             .proven_base()?
-            .read_intact(&NeverCancelled, |native| {
-                Ok(load_entity(native, &self.layer.base_namespace, identity)?.is_some())
+            .read_intact(cancellation, |native| {
+                Ok(crate::state::load_entity_admitted(
+                    native,
+                    &self.layer.base_namespace,
+                    identity,
+                    admit,
+                )?
+                .is_some())
             })
     }
 
-    fn relation_visible(&self, identity: &GraphRelationId) -> Result<bool, GraphDbError> {
+    fn relation_visible_admitted(
+        &self,
+        identity: &GraphRelationId,
+        cancellation: &dyn GraphCancellation,
+        admit: &mut crate::state::ReadAllocationAdmission<'_>,
+    ) -> Result<bool, GraphDbError> {
         if self.layer.delta_relations.contains(identity) {
             return Ok(true);
         }
@@ -1145,8 +1200,14 @@ impl LayeredReads<'_> {
         }
         self.layer
             .proven_base()?
-            .read_intact(&NeverCancelled, |native| {
-                Ok(load_relation(native, &self.layer.base_namespace, identity)?.is_some())
+            .read_intact(cancellation, |native| {
+                Ok(crate::state::load_relation_admitted(
+                    native,
+                    &self.layer.base_namespace,
+                    identity,
+                    admit,
+                )?
+                .is_some())
             })
     }
 
@@ -1158,6 +1219,7 @@ impl LayeredReads<'_> {
         after: Option<&str>,
         limit: usize,
         cancellation: &dyn GraphCancellation,
+        admit: &mut crate::state::ReadAllocationAdmission<'_>,
     ) -> Result<Vec<String>, GraphDbError> {
         let (record_label, identity_property) = if entities {
             (ENTITY_LABEL, ENTITY_ID_PROPERTY)
@@ -1171,10 +1233,24 @@ impl LayeredReads<'_> {
                 relation_projection_label(namespace, &self.projection.projection)
             }
         };
-        let page = |database: &GraphDb, namespace: &GraphNamespace, after: Option<&str>| {
+        let page = |database: &GraphDb,
+                    namespace: &GraphNamespace,
+                    after: Option<&str>,
+                    held: usize,
+                    admit: &mut crate::state::ReadAllocationAdmission<'_>| {
             database.read_intact(cancellation, |native| {
                 let owner_label = owner(namespace);
-                query_identity_page(
+                let guarded = admit.is_some();
+                let mut row_admit = |bytes| match admit {
+                    Some(admit) => admit(held.saturating_add(bytes)),
+                    None => Ok(()),
+                };
+                let mut admission = if guarded {
+                    Some(&mut row_admit as &mut dyn FnMut(usize) -> Result<(), GraphDbError>)
+                } else {
+                    None
+                };
+                query_identity_page_admitted(
                     database,
                     native,
                     IdentityScope {
@@ -1185,10 +1261,18 @@ impl LayeredReads<'_> {
                     after,
                     limit,
                     cancellation,
+                    &mut admission,
                 )
             })
         };
-        let delta = page(self.delta, &self.namespace, after)?;
+        let delta = page(self.delta, &self.namespace, after, 0, admit)?;
+        let delta_bytes = delta
+            .capacity()
+            .saturating_mul(std::mem::size_of::<String>())
+            .saturating_add(delta.iter().map(String::capacity).sum::<usize>());
+        if let Some(admit) = admit {
+            admit(delta_bytes.saturating_add(limit.saturating_mul(std::mem::size_of::<String>())))?;
+        }
         let mut base = Vec::with_capacity(limit);
         let mut cursor = after.map(str::to_owned);
         loop {
@@ -1196,6 +1280,14 @@ impl LayeredReads<'_> {
                 self.layer.proven_base()?,
                 &self.layer.base_namespace,
                 cursor.as_deref(),
+                delta_bytes
+                    .saturating_add(
+                        base.capacity()
+                            .saturating_mul(std::mem::size_of::<String>()),
+                    )
+                    .saturating_add(base.iter().map(String::capacity).sum::<usize>())
+                    .saturating_add(cursor.as_ref().map_or(0, String::capacity)),
+                admit,
             )?;
             let exhausted = fetched.len() < limit;
             cursor = fetched.last().cloned();
@@ -1212,6 +1304,19 @@ impl LayeredReads<'_> {
                 break;
             }
         }
+        if let Some(admit) = admit {
+            admit(
+                delta_bytes
+                    .saturating_add(base.iter().map(String::capacity).sum::<usize>())
+                    .saturating_add(
+                        base.capacity()
+                            .saturating_mul(std::mem::size_of::<String>()),
+                    )
+                    .saturating_add(
+                        (delta.len() + base.len()).saturating_mul(std::mem::size_of::<String>()),
+                    ),
+            )?;
+        }
         let mut merged = delta.into_iter().chain(base).collect::<Vec<_>>();
         merged.sort_unstable();
         merged.dedup();
@@ -1219,9 +1324,10 @@ impl LayeredReads<'_> {
         Ok(merged)
     }
 
-    pub(crate) fn read_projection(
+    pub(crate) fn read_projection_admitted(
         &self,
         request: GraphProjectionReadRequest,
+        admit: &mut crate::state::ReadAllocationAdmission<'_>,
     ) -> Result<GraphProjectionPage, GraphDbError> {
         crate::projection::check_cancelled(request.cancellation.as_ref())?;
         if request.max_entities == 0 && request.max_relations == 0 {
@@ -1237,6 +1343,15 @@ impl LayeredReads<'_> {
             }
         }
         let cancellation = request.cancellation.as_ref();
+        if let Some(admit) = admit {
+            let rows = request
+                .max_entities
+                .saturating_add(request.max_relations)
+                .saturating_add(2);
+            admit(rows.saturating_mul(
+                crate::MAX_GRAPH_IDENTIFIER_BYTES + 2 * std::mem::size_of::<String>(),
+            ))?;
+        }
         let mut page = GraphProjectionPage {
             entities: Vec::new(),
             relations: Vec::new(),
@@ -1245,7 +1360,7 @@ impl LayeredReads<'_> {
         };
         if request.max_entities > 0 {
             if let Some(cursor) = &request.after_entity
-                && !self.entity_visible(cursor)?
+                && !self.entity_visible_admitted(cursor, cancellation, admit)?
             {
                 return Err(GraphDbError::invalid(
                     "entity cursor does not belong to the requested projection",
@@ -1256,16 +1371,37 @@ impl LayeredReads<'_> {
                 request.after_entity.as_ref().map(GraphEntityId::as_str),
                 request.max_entities.saturating_add(1),
                 cancellation,
+                admit,
             )?;
             let has_more = identities.len() > request.max_entities;
+            let mut held = identities
+                .capacity()
+                .saturating_mul(std::mem::size_of::<String>())
+                .saturating_add(identities.iter().map(String::capacity).sum::<usize>())
+                .saturating_add(
+                    identities
+                        .len()
+                        .saturating_mul(2 * std::mem::size_of::<GraphEntity>()),
+                );
             for identity in identities.into_iter().take(request.max_entities) {
                 crate::projection::check_cancelled(cancellation)?;
                 let identity = GraphEntityId::new(identity)?;
+                let guarded = admit.is_some();
+                let mut row_admit = |bytes| match admit {
+                    Some(admit) => admit(held.saturating_add(bytes)),
+                    None => Ok(()),
+                };
+                let mut admission = if guarded {
+                    Some(&mut row_admit as &mut dyn FnMut(usize) -> Result<(), GraphDbError>)
+                } else {
+                    None
+                };
                 let entity = self
-                    .entity(&identity, Arc::clone(&request.cancellation))?
+                    .entity_admitted(&identity, Arc::clone(&request.cancellation), &mut admission)?
                     .ok_or_else(|| GraphDbError::Corrupt {
                         message: "layered projection page named an unreadable entity".to_owned(),
                     })?;
+                held = held.saturating_add(entity.heap_allocation_bound());
                 page.entities.push(entity);
             }
             page.next_entity = has_more
@@ -1274,7 +1410,7 @@ impl LayeredReads<'_> {
         }
         if request.max_relations > 0 {
             if let Some(cursor) = &request.after_relation
-                && !self.relation_visible(cursor)?
+                && !self.relation_visible_admitted(cursor, cancellation, admit)?
             {
                 return Err(GraphDbError::invalid(
                     "relation cursor does not belong to the requested projection",
@@ -1285,17 +1421,39 @@ impl LayeredReads<'_> {
                 request.after_relation.as_ref().map(GraphRelationId::as_str),
                 request.max_relations.saturating_add(1),
                 cancellation,
+                admit,
             )?;
             let has_more = identities.len() > request.max_relations;
+            let mut held = identities
+                .capacity()
+                .saturating_mul(std::mem::size_of::<String>())
+                .saturating_add(identities.iter().map(String::capacity).sum::<usize>())
+                .saturating_add(
+                    identities
+                        .len()
+                        .saturating_mul(2 * std::mem::size_of::<GraphRelation>()),
+                );
             for identity in identities.into_iter().take(request.max_relations) {
                 crate::projection::check_cancelled(cancellation)?;
                 let identity = GraphRelationId::new(identity)?;
-                let relation = self.relation(&identity, cancellation)?.ok_or_else(|| {
-                    GraphDbError::Corrupt {
+                let guarded = admit.is_some();
+                let mut row_admit = |bytes| match admit {
+                    Some(admit) => admit(held.saturating_add(bytes)),
+                    None => Ok(()),
+                };
+                let mut admission = if guarded {
+                    Some(&mut row_admit as &mut dyn FnMut(usize) -> Result<(), GraphDbError>)
+                } else {
+                    None
+                };
+                let relation = self
+                    .relation_admitted(&identity, cancellation, &mut admission)?
+                    .ok_or_else(|| GraphDbError::Corrupt {
                         message: "layered projection page named an unreadable relation".to_owned(),
-                    }
-                })?;
-                page.relations.push(relation.storage_relation()?);
+                    })?;
+                let relation = relation.storage_relation()?;
+                held = held.saturating_add(relation.heap_allocation_bound());
+                page.relations.push(relation);
             }
             page.next_relation = has_more
                 .then(|| {

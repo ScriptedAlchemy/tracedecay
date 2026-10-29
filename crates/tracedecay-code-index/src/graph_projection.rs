@@ -25,6 +25,7 @@ use tracedecay_graph_db::{
     GraphRelationKind, GraphServingEnginePin, GraphWatermark, MAX_VERIFIED_GENERATION_RELATIONS,
     NeverCancelled, SourceGeneration, VerifiedGraphSnapshot,
 };
+use tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1;
 
 mod builder;
 mod interactive;
@@ -416,6 +417,25 @@ impl CodeGraphProjectionStore {
         snapshot: VerifiedGraphSnapshot,
         generation: CodeGenerationId,
     ) -> Result<Self, CodeGraphProjectionError> {
+        Self::open(snapshot, generation, None)
+    }
+
+    /// A store whose interactive catalog builds reserve what they hold from
+    /// `memory` while they run, and stop with a typed resident-memory
+    /// refusal instead of growing past it.
+    pub fn from_verified_snapshot_charged(
+        snapshot: VerifiedGraphSnapshot,
+        generation: CodeGenerationId,
+        memory: Arc<ProcessResidentMemoryV1>,
+    ) -> Result<Self, CodeGraphProjectionError> {
+        Self::open(snapshot, generation, Some(memory))
+    }
+
+    fn open(
+        snapshot: VerifiedGraphSnapshot,
+        generation: CodeGenerationId,
+        memory: Option<Arc<ProcessResidentMemoryV1>>,
+    ) -> Result<Self, CodeGraphProjectionError> {
         let projection = snapshot.projection().clone();
         let expected = code_graph_generation_id(
             &generation,
@@ -429,7 +449,10 @@ impl CodeGraphProjectionStore {
             snapshot: Arc::new(snapshot),
             projection,
             generation,
-            interactive_catalog: Arc::new(InteractiveCatalogCache::new(Arc::clone(&warm_clock))),
+            interactive_catalog: Arc::new(InteractiveCatalogCache::new(
+                Arc::clone(&warm_clock),
+                memory,
+            )),
             serving_engine: Arc::new(Mutex::new(None)),
             released: Arc::new(AtomicBool::new(false)),
             rewarm_failure: Arc::new(Mutex::new(None)),

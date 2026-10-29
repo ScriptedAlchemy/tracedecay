@@ -2,14 +2,15 @@
 //! it replaces, and serves exactly what a cold build of the same tree serves.
 
 use std::collections::BTreeSet;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracedecay_code_index::graph_projection::{
-    CodeGraphLayeredReportV1, CodeGraphProjectionStore, CodeGraphSemanticEdgeV1,
-    CodeGraphSymbolSummaryV1,
+    CodeGraphLayeredReportV1, CodeGraphProjectionError, CodeGraphProjectionStore,
+    CodeGraphSemanticEdgeV1, CodeGraphServingWarmthV1, CodeGraphSymbolSummaryV1,
 };
 use tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1;
 use tracedecay_code_index_runtime::CodeGraphReplayBindingV1;
@@ -19,10 +20,11 @@ use tracedecay_code_index_runtime::code_index_scheduler::{
 use tracedecay_daemon_identity::profile_identity;
 use tracedecay_domain::{CodeGenerationId, ProjectId, SymbolOccurrenceId};
 use tracedecay_graph_db::{
-    GraphGenerationRowSpill, GraphGenerationRows, GraphProjectorRevision, NeverCancelled,
-    VerifiedGraphSnapshot,
+    GraphCancellation, GraphGenerationRowSpill, GraphGenerationRows, GraphProjectorRevision,
+    NeverCancelled, VerifiedGraphSnapshot,
 };
 use tracedecay_runtime_core::path_safety::{plain_git_args, plain_host_path};
+use tracedecay_runtime_core::resident_memory::{ProcessResidentMemoryV1, ResidentMemoryPressureV1};
 
 use super::super::DaemonSessionRuntimeRegistryV1;
 
@@ -903,6 +905,315 @@ fn catalog_reads(
     )
 }
 
+fn charged_catalog_store(
+    snapshot: VerifiedGraphSnapshot,
+    generation: &CodeGenerationId,
+    limit: u64,
+) -> (CodeGraphProjectionStore, Arc<ProcessResidentMemoryV1>) {
+    let limit = NonZeroU64::new(limit).expect("nonzero catalog limit");
+    let memory = Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::new(ResidentMemoryPressureV1::with_sampler(
+            limit,
+            Arc::new(|| None),
+        )),
+    ));
+    let store = CodeGraphProjectionStore::from_verified_snapshot_charged(
+        snapshot,
+        generation.clone(),
+        Arc::clone(&memory),
+    )
+    .expect("charged catalog store");
+    store.warm_serving_engine().expect("warm serving engine");
+    (store, memory)
+}
+
+/// Measure a real build before choosing its admission limit. Its reservation
+/// must cover the measured heap, refuse without poisoning the cache, and be
+/// returned on both refusal and publication. Parent-backed runs must actually
+/// carry, so silently replacing the optimization with a scan fails the test.
+fn assert_catalog_build_accounts_for_its_peak(
+    snapshot: &VerifiedGraphSnapshot,
+    generation: &CodeGenerationId,
+    parent: Option<&CodeGraphProjectionStore>,
+) -> (u64, u64) {
+    // Prime the same cold or carried catalog path once before measurement.
+    // Process-level parser, tracing, and graph-read initialization may
+    // allocate on this thread only on the first call. Those allocations do
+    // not belong to each catalog build's memory reservation.
+    {
+        let primer =
+            CodeGraphProjectionStore::from_verified_snapshot(snapshot.clone(), generation.clone())
+                .expect("catalog primer");
+        primer.warm_serving_engine().expect("prime serving engine");
+        primer
+            .warm_interactive_catalog_with_cancellation(parent, Arc::new(NeverCancelled))
+            .expect("prime the exact catalog path");
+    }
+    let measured =
+        CodeGraphProjectionStore::from_verified_snapshot(snapshot.clone(), generation.clone())
+            .expect("measured catalog store");
+    measured.warm_serving_engine().expect("warm serving engine");
+    let (built, _, peak) = crate::thread_allocation::live_and_peak_during(|| {
+        measured.warm_interactive_catalog_with_cancellation(parent, Arc::new(NeverCancelled))
+    });
+    built.expect("measure the catalog build");
+    let peak = u64::try_from(peak).expect("positive catalog build peak");
+    let refusal_limit = peak / 10 * 9;
+    assert_eq!(
+        measured.interactive_catalog_scan_builds(),
+        usize::from(parent.is_none())
+    );
+    let (refused, memory) = charged_catalog_store(snapshot.clone(), generation, refusal_limit);
+    let (result, _, refused_peak) = crate::thread_allocation::live_and_peak_during(|| {
+        refused.warm_interactive_catalog_with_cancellation(parent, Arc::new(NeverCancelled))
+    });
+    let error = result.expect_err("a build cannot fit below its measured heap peak");
+    assert!(
+        matches!(
+            error,
+            CodeGraphProjectionError::BudgetExhausted { ref budget, .. }
+                if budget == tracedecay_graph_db::GraphBudgetKind::ResidentMemory.as_str()
+        ),
+        "typed resident-memory refusal: {error:?}"
+    );
+    assert!(
+        u64::try_from(refused_peak).expect("positive refusal peak") <= refusal_limit,
+        "refusal must precede allocation beyond the admitted heap"
+    );
+    assert_eq!(
+        memory.snapshot().used_bytes,
+        0,
+        "a refused build releases its reservation"
+    );
+    assert!(matches!(
+        refused.serving_warmth().expect("warmth"),
+        CodeGraphServingWarmthV1::Warming(_)
+    ));
+
+    let admitted_limit = peak.saturating_mul(4);
+    let (admitted, memory) = charged_catalog_store(snapshot.clone(), generation, admitted_limit);
+    admitted
+        .warm_interactive_catalog_with_cancellation(parent, Arc::new(NeverCancelled))
+        .expect("a bounded allowance for transient edits admits the build");
+    assert_eq!(
+        memory.snapshot().used_bytes,
+        0,
+        "publication releases the build reservation"
+    );
+    assert_eq!(
+        admitted.interactive_catalog_scan_builds(),
+        usize::from(parent.is_none())
+    );
+    assert_eq!(
+        admitted.interactive_catalog_differences(&measured),
+        Some(Vec::new())
+    );
+    (peak, admitted_limit)
+}
+
+struct CancelReservedCatalog {
+    memory: Arc<ProcessResidentMemoryV1>,
+    observed: AtomicBool,
+}
+
+impl GraphCancellation for CancelReservedCatalog {
+    fn is_cancelled(&self) -> bool {
+        let reserved = self.memory.snapshot().used_bytes > 0;
+        self.observed.fetch_or(reserved, Ordering::AcqRel);
+        reserved
+    }
+}
+
+/// A layered successor with much larger records must grow its reservation
+/// beyond the parent's retained size. Cancellation while it owns a charge
+/// must release that charge and leave the same store able to retry the carry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_growing_catalog_carry_accounts_for_its_peak_and_releases_on_cancellation() {
+    let temporary = tempfile::tempdir().expect("fixture directory");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let fixture = RefreshFixture::create(&root, MODULES);
+    let (source, base_generation, _, base_binding) = fixture.seal();
+    let (_scope, registry, database) = fixture.open_profile("catalog-carry-admission", 59).await;
+    let base_runtime = source
+        .retain(&registry, &database, &base_generation, base_binding)
+        .await
+        .expect("retain base");
+    let base = base_runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("base snapshot");
+    let parent = warmed_store(base, &base_generation, None);
+
+    let documentation = "Catalog growth must remain visible to memory admission. ".repeat(80);
+    let mut added = String::new();
+    for index in 0..64 {
+        added.push_str(&format!("/// {documentation}\npub fn growth_{index}() -> usize {{ crate::m003::value_003() + {index} }}\n"));
+    }
+    std::fs::write(fixture.project_root.join("src/growth.rs"), added)
+        .expect("growing catalog source");
+    fixture.commit("add documented symbols");
+    let (source, generation, _, binding) = fixture.seal();
+    let runtime = source
+        .retain(&registry, &database, &generation, binding)
+        .await
+        .expect("retain successor");
+    let snapshot = runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("successor snapshot");
+    assert!(
+        snapshot.layered_rows().is_some(),
+        "the fixture must exercise a layered carry"
+    );
+    let (peak, limit) =
+        assert_catalog_build_accounts_for_its_peak(&snapshot, &generation, Some(&parent));
+    assert!(
+        peak / 10 * 9
+            > parent
+                .interactive_catalog_bytes()
+                .expect("ready parent bytes"),
+        "the successor must outgrow the predecessor-only reservation"
+    );
+    let (cancelled, memory) = charged_catalog_store(snapshot, &generation, limit);
+    let cancellation = Arc::new(CancelReservedCatalog {
+        memory: Arc::clone(&memory),
+        observed: AtomicBool::new(false),
+    });
+    assert!(matches!(
+        cancelled.warm_interactive_catalog_with_cancellation(Some(&parent), cancellation.clone()),
+        Err(CodeGraphProjectionError::Cancelled)
+    ));
+    assert!(
+        cancellation.observed.load(Ordering::Acquire),
+        "cancel only after a reservation exists"
+    );
+    assert_eq!(
+        memory.snapshot().used_bytes,
+        0,
+        "cancellation releases the catalog reservation"
+    );
+    cancelled
+        .warm_interactive_catalog_with_cancellation(Some(&parent), Arc::new(NeverCancelled))
+        .expect("retry the cancelled carry");
+    assert_eq!(cancelled.interactive_catalog_scan_builds(), 0);
+    assert_eq!(memory.snapshot().used_bytes, 0);
+}
+
+/// Editing a few files changes many large shared-name and unresolved-call
+/// lookups. Every rebuilt list stays live until its lookup map is merged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_catalog_carry_accounts_for_many_rebuilt_lookup_lists() {
+    const SHARED_NAMES: usize = 32;
+    let temporary = tempfile::tempdir().expect("fixture directory");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let fixture = RefreshFixture::create(&root, MODULES);
+    let source = |module: usize, revision: usize| {
+        let mut source = module_source(MODULES, module, &module.to_string());
+        for name in 0..SHARED_NAMES {
+            source.push_str(&format!(
+                "pub fn shared_{name:03}() -> usize {{ missing_{name:03}() + {revision} }}\n"
+            ));
+        }
+        source
+    };
+    for module in 0..MODULES {
+        std::fs::write(
+            fixture.project_root.join(format!("src/m{module:03}.rs")),
+            source(module, 0),
+        )
+        .expect("shared-name module");
+    }
+    fixture.commit("populate shared lookup lists");
+    let (base_source, base_generation, _, base_binding) = fixture.seal();
+    let (_scope, registry, database) = fixture.open_profile("catalog-lookup-admission", 61).await;
+    let base_runtime = base_source
+        .retain(&registry, &database, &base_generation, base_binding)
+        .await
+        .expect("retain base");
+    let base = base_runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("base snapshot");
+    let parent = warmed_store(base, &base_generation, None);
+
+    for module in [3, 10, 20] {
+        std::fs::write(
+            fixture.project_root.join(format!("src/m{module:03}.rs")),
+            source(module, 1),
+        )
+        .expect("edit shared-name module");
+    }
+    fixture.commit("replace members of every shared lookup list");
+    let (source, generation, _, binding) = fixture.seal();
+    let runtime = source
+        .retain(&registry, &database, &generation, binding)
+        .await
+        .expect("retain successor");
+    let snapshot = runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("successor snapshot");
+    assert!(
+        snapshot.layered_rows().is_some(),
+        "exercise a layered carry"
+    );
+    assert_catalog_build_accounts_for_its_peak(&snapshot, &generation, Some(&parent));
+    let carried = warmed_store(snapshot.clone(), &generation, Some(&parent));
+    let scanned = warmed_store(snapshot, &generation, None);
+    assert_eq!(carried.interactive_catalog_scan_builds(), 0);
+    assert_eq!(scanned.interactive_catalog_scan_builds(), 1);
+    assert_eq!(
+        carried.interactive_catalog_differences(&scanned),
+        Some(Vec::new()),
+        "every lookup must match a cold scan after the bounded carry"
+    );
+}
+
+/// Many unique names and cross-file dependencies exercise the lookup-list
+/// capacities and the adjacency/ranking allocations made during finalization.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_catalog_scan_accounts_for_unique_names_and_file_dependency_finalization() {
+    const FILES: usize = 48;
+    let temporary = tempfile::tempdir().expect("fixture directory");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let fixture = RefreshFixture::create(&root, FILES);
+    for index in 0..FILES {
+        let calls = (1..=24)
+            .map(|offset| {
+                let target = (index + offset) % FILES;
+                format!("crate::m{target:03}::value_{target:03}()")
+            })
+            .collect::<Vec<_>>()
+            .join(" + ");
+        let source = module_source(FILES, index, &index.to_string())
+            + &format!("pub fn unique_fanout_{index}() -> usize {{ {calls} }}\n");
+        std::fs::write(
+            fixture.project_root.join(format!("src/m{index:03}.rs")),
+            source,
+        )
+        .expect("dependency-heavy module");
+    }
+    fixture.commit("populate distinct dependency pairs");
+    let (source, generation, _, binding) = fixture.seal();
+    let (_scope, registry, database) = fixture
+        .open_profile("catalog-finalization-admission", 60)
+        .await;
+    let runtime = source
+        .retain(&registry, &database, &generation, binding)
+        .await
+        .expect("retain graph");
+    let snapshot = runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("cold snapshot");
+    assert_catalog_build_accounts_for_its_peak(&snapshot, &generation, None);
+}
+
 /// Fails on a refresh whose interactive catalog is scanned from the whole
 /// projection instead of carried from the generation it replaces, and on a
 /// carried catalog that differs in any lookup, census, or dependency from
@@ -946,6 +1257,53 @@ async fn a_small_refresh_carries_its_catalog_from_the_generation_it_replaces() {
     let child = child_runtime
         .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
         .expect("publish the refresh");
+    let measured_carry =
+        CodeGraphProjectionStore::from_verified_snapshot(child.clone(), child_generation.clone())
+            .expect("measurement store");
+    measured_carry
+        .warm_serving_engine()
+        .expect("measurement engine");
+    let (result, _, peak) = crate::thread_allocation::live_and_peak_during(|| {
+        measured_carry
+            .warm_interactive_catalog_with_cancellation(Some(&base_store), Arc::new(NeverCancelled))
+    });
+    result.expect("measured carry");
+    let limit = u64::try_from(peak).expect("carry allocates") / 10 * 9;
+    let limit = std::num::NonZeroU64::new(limit).expect("carry limit");
+    let memory = Arc::new(
+        tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::with_pressure(
+            limit,
+            Arc::new(
+                tracedecay_runtime_core::resident_memory::ResidentMemoryPressureV1::with_sampler(
+                    limit,
+                    Arc::new(|| None),
+                ),
+            ),
+        ),
+    );
+    let refused = CodeGraphProjectionStore::from_verified_snapshot_charged(
+        child.clone(),
+        child_generation.clone(),
+        Arc::clone(&memory),
+    )
+    .expect("charged carry store");
+    refused.warm_serving_engine().expect("charged carry engine");
+    let (result, _, refused_peak) = crate::thread_allocation::live_and_peak_during(|| {
+        refused
+            .warm_interactive_catalog_with_cancellation(Some(&base_store), Arc::new(NeverCancelled))
+    });
+    println!(
+        "carry parent={} peak={peak} limit={limit} refused_peak={refused_peak} result={result:?}",
+        base_store
+            .interactive_catalog_bytes()
+            .expect("parent bytes"),
+    );
+    assert!(
+        matches!(result, Err(tracedecay_code_index::graph_projection::CodeGraphProjectionError::BudgetExhausted { .. })),
+        "an unaffordable incremental carry must be refused"
+    );
+    assert_eq!(memory.snapshot().used_bytes, 0);
+    assert!(u64::try_from(refused_peak).expect("carry refusal peak") <= limit.get());
     let carried_child = warmed_store(child.clone(), &child_generation, Some(&base_store));
     assert_eq!(
         carried_child.interactive_catalog_scan_builds(),

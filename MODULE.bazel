@@ -99,6 +99,13 @@ crate.annotation(
     version = "0.46.0",
 )
 
+crate.annotation(
+    crate = "grafeo-core",
+    patch_args = ["-p1"],
+    patches = ["//scripts:bazel/patches/grafeo-core-read-allocation.patch"],
+    version = "0.5.43",
+)
+
 # arborium grammar build scripts read `env!("CARGO_MANIFEST_DIR")`, which bakes
 # the compiling output base's absolute path into the build-script binary. The
 # action key does not include that path, so the disk cache served one output

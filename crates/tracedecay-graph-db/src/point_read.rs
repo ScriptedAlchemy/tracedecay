@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::state::{load_entity, load_relation};
+use crate::state::{ReadAllocationAdmission, load_entity_admitted, load_relation};
 use crate::{
     GraphCancellation, GraphDb, GraphDbError, GraphEntity, GraphEntityId, GraphNamespace,
     GraphRelation, GraphRelationId, GraphSnapshot,
@@ -14,11 +14,21 @@ impl GraphDb {
         identity: &GraphEntityId,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<GraphEntity>, GraphDbError> {
+        self.entity_admitted(namespace, identity, cancellation, &mut None)
+    }
+
+    pub(crate) fn entity_admitted(
+        &self,
+        namespace: &GraphNamespace,
+        identity: &GraphEntityId,
+        cancellation: Arc<dyn GraphCancellation>,
+        admit: &mut ReadAllocationAdmission<'_>,
+    ) -> Result<Option<GraphEntity>, GraphDbError> {
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
         let entity = self.read_intact(cancellation.as_ref(), |database| {
-            load_entity(database, namespace, identity)
+            load_entity_admitted(database, namespace, identity, admit)
         })?;
         if let Some(stored) = &entity {
             self.ensure_projection_readable(&stored.namespace, &stored.projection)?;

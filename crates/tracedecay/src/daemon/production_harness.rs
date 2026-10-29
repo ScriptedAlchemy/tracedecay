@@ -21,6 +21,8 @@ use super::*;
 use tokio::time::timeout;
 #[cfg(unix)]
 use tracedecay_application::pr_tracking::acquire_manual_branch_lifecycle;
+#[cfg(feature = "test-helpers")]
+use tracedecay_code_index::graph_projection::CodeGraphProjectionStore;
 use tracedecay_code_index_runtime::CodeIndexSchedulerRegistryV1;
 #[cfg(feature = "test-helpers")]
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexWorktreeSchedulerV1;
@@ -868,6 +870,46 @@ impl ProductionProjectCompositionHarnessV1 {
                 message: format!(
                     "project '{}' is not mounted in this production composition",
                     canonical_project_path.display()
+                ),
+            })
+    }
+
+    /// Retain the mounted text owner's graph store so a production journey can
+    /// hold its real read admission across several requests. Decoding a second
+    /// generation here would not retain the graph those requests actually use.
+    #[cfg(feature = "test-helpers")]
+    pub async fn published_code_graph_store_for_test(
+        &self,
+        project_root: &Path,
+    ) -> Result<Arc<CodeGraphProjectionStore>> {
+        let graph = self.server(project_root)?.cg().await;
+        let target = graph.configuration_runtime().configuration_target();
+        let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
+            graph.project_root(),
+            &target.project_id,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("production-composition code-index scope is invalid: {error:?}"),
+        })?;
+        let resources = self
+            .resources
+            .as_ref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "production-composition harness is shut down".to_owned(),
+            })?;
+        let serving = resources
+            .invocation
+            .code_index_schedulers
+            .latest_text_serving_for_scope(&scope)
+            .await
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "production-composition project has no published text owner".to_owned(),
+            })?;
+        serving
+            .interactive_graph_store()
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "production-composition published graph is unavailable: {error:?}"
                 ),
             })
     }

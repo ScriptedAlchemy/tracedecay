@@ -11,6 +11,7 @@ use crate::limits::{
     MAX_GRAPH_ENTITY_LABEL_BYTES, MAX_GRAPH_ENTITY_LABELS, MAX_GRAPH_IDENTIFIER_BYTES,
     MAX_GRAPH_PROPERTIES, MAX_GRAPH_PROPERTY_AGGREGATE_BYTES, MAX_GRAPH_PROPERTY_VALUE_BYTES,
 };
+use crate::state::ReadAllocationAdmission;
 use crate::{
     GraphCommit, GraphDbError, GraphEntity, GraphEntityId, GraphIdempotencyKey, GraphLabel,
     GraphNamespace, GraphProjectionId, GraphProperty, GraphPropertyName, GraphRelation,
@@ -923,6 +924,39 @@ pub(crate) fn nodes_with_label(store: &dyn GraphStore, label: &str) -> Vec<NodeI
     keys.iter()
         .flat_map(|key| store.nodes_by_label(key))
         .collect()
+}
+
+pub(crate) fn nodes_with_label_admitted(
+    store: &dyn GraphStore,
+    label: &str,
+    admit: &mut ReadAllocationAdmission<'_>,
+) -> Result<Vec<NodeId>, GraphDbError> {
+    if let Some(admit) = admit {
+        let bytes = store.label_allocation_bytes().ok_or_else(|| {
+            GraphDbError::unavailable("native graph label allocation metadata unavailable")
+        })?;
+        admit(bytes.saturating_mul(2))?;
+    }
+    let keys = label_keys(store, label);
+    let count = keys
+        .iter()
+        .map(|key| store.nodes_by_label_count(key))
+        .sum::<usize>();
+    if let Some(admit) = admit {
+        let key_bytes = keys
+            .iter()
+            .map(String::capacity)
+            .sum::<usize>()
+            .saturating_add(
+                keys.capacity()
+                    .saturating_mul(std::mem::size_of::<String>()),
+            );
+        admit(key_bytes.saturating_add(count.saturating_mul(3 * std::mem::size_of::<NodeId>())))?;
+    }
+    Ok(keys
+        .iter()
+        .flat_map(|key| store.nodes_by_label(key))
+        .collect())
 }
 
 /// How many nodes carry `label`. See [`nodes_with_label`].

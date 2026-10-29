@@ -23,6 +23,7 @@ use tracedecay_code_index::production::{
     CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
 };
 use tracedecay_runtime_core::native_runtime;
+use tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1;
 
 /// Test-only graph activation faults, keyed by worktree id. The worktree id
 /// is unique per test fixture, while generation ids are content-derived and
@@ -240,6 +241,9 @@ pub enum CodeGraphActivationAuthorityV1 {
         /// replaces it: the next refresh builds over its sealed graph, and
         /// a yielded engine reopens from it.
         seated: Arc<RwLock<Option<CodeGenerationId>>>,
+        /// The process authority each seated graph's catalog builds reserve
+        /// what they hold from.
+        resident_memory: Arc<ProcessResidentMemoryV1>,
     },
     #[cfg(any(test, feature = "test-helpers"))]
     Memory { policy: Arc<AtomicBool> },
@@ -369,9 +373,11 @@ impl CodeGraphActivationAuthorityV1 {
                 runtime,
                 project_database,
                 seated,
+                resident_memory,
                 ..
             } => {
                 let generation_id = latest.metadata().manifest().generation_id.clone();
+                let resident_memory = Arc::clone(resident_memory);
                 let retained = tracing::Instrument::instrument(
                     runtime.retain_code_graph_runtime(
                         project_id.clone(),
@@ -389,6 +395,7 @@ impl CodeGraphActivationAuthorityV1 {
                 let pending_catalog_warm = native_runtime::spawn_blocking(move || {
                     latest.activate_persistent_graph_generation(
                         retained,
+                        resident_memory,
                         cancellation,
                         require_current_head,
                     )
@@ -519,9 +526,11 @@ impl CodeGraphActivationAuthorityV1 {
                 runtime,
                 project_database,
                 seated,
+                resident_memory,
                 ..
             } => {
                 let generation_id = latest.generation().manifest().generation_id.clone();
+                let resident_memory = Arc::clone(resident_memory);
                 let retained = tracing::Instrument::instrument(
                     runtime.retain_code_graph_runtime(
                         project_id.clone(),
@@ -537,7 +546,12 @@ impl CodeGraphActivationAuthorityV1 {
                 .await
                 .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
                 let pending_catalog_warm = native_runtime::spawn_blocking(move || {
-                    latest.activate_persistent_graph(retained, predecessor, cancellation)
+                    latest.activate_persistent_graph(
+                        retained,
+                        resident_memory,
+                        predecessor,
+                        cancellation,
+                    )
                 })
                 .await
                 .map_err(|error| {
@@ -766,6 +780,7 @@ impl LatestCodeTextGenerationV1 {
     fn activate_persistent_graph_generation(
         &self,
         retained: Box<dyn CodeGraphSeatLeaseV1 + Send>,
+        resident_memory: Arc<ProcessResidentMemoryV1>,
         cancellation: Arc<AtomicBool>,
         require_current_head: bool,
     ) -> Result<Option<PendingInteractiveCatalogWarmV1>, CodeIndexSchedulerErrorV1> {
@@ -780,9 +795,10 @@ impl LatestCodeTextGenerationV1 {
             }
             .map_err(CodeGraphProjectionError::from)
         }?;
-        let store = Arc::new(CodeGraphProjectionStore::from_verified_snapshot(
+        let store = Arc::new(CodeGraphProjectionStore::from_verified_snapshot_charged(
             snapshot,
             generation_id.clone(),
+            resident_memory,
         )?);
         let graph_cancellation: Arc<dyn GraphCancellation> =
             Arc::new(SchedulerGraphCancellation(Arc::clone(&cancellation)));
@@ -825,6 +841,7 @@ impl LatestCompleteCodeIndexV1 {
     fn activate_persistent_graph(
         &self,
         retained: Box<dyn CodeGraphSeatLeaseV1 + Send>,
+        resident_memory: Arc<ProcessResidentMemoryV1>,
         predecessor: Option<Arc<CodeGraphProjectionStore>>,
         cancellation: Arc<AtomicBool>,
     ) -> Result<Option<PendingInteractiveCatalogWarmV1>, CodeIndexSchedulerErrorV1> {
@@ -848,9 +865,10 @@ impl LatestCompleteCodeIndexV1 {
                     refuse_spent_publication_budget(&self.text, error);
                 })
         }?;
-        let store = Arc::new(CodeGraphProjectionStore::from_verified_snapshot(
+        let store = Arc::new(CodeGraphProjectionStore::from_verified_snapshot_charged(
             snapshot,
             generation_id.clone(),
+            resident_memory,
         )?);
         let graph_cancellation: Arc<dyn GraphCancellation> =
             Arc::new(SchedulerGraphCancellation(Arc::clone(&cancellation)));
