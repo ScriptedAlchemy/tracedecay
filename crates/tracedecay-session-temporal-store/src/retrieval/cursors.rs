@@ -146,7 +146,6 @@ pub(super) struct PageBounds {
 pub(super) struct CandidateCursor {
     pub(super) clause: usize,
     pub(super) knowledge_at: i64,
-    #[serde(default)]
     pub(super) session_id: String,
     pub(super) stable_id: String,
     /// Whether the strict lexical clause has already answered, carried across
@@ -163,7 +162,6 @@ pub(super) struct CandidateCursor {
 pub(super) struct RecordCursor {
     pub(super) candidate: usize,
     pub(super) kind: i64,
-    #[serde(default)]
     pub(super) session_id: String,
     pub(super) stable_id: String,
 }
