@@ -1205,6 +1205,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_commit_during_a_pass_stays_visible_to_the_next_freshness_probe() {
+        let project = TempDir::new().expect("project");
+        let store = TempDir::new().expect("store");
+        init_fixture_repository(project.path());
+        commit_source(project.path(), "pub fn base_value() {}\n", "base");
+        std::fs::write(
+            project.path().join("src/lib.rs"),
+            "pub fn committed_mid_pass() {}\n",
+        )
+        .expect("dirty source");
+
+        let project_id = ProjectId::new("project.commit-mid-pass").expect("project id");
+        let canonical_project =
+            canonical_existing_identity(project.path()).expect("canonical project");
+        let scoped_store = scoped_code_index_store_root(store.path(), &canonical_project);
+        let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+            project_id,
+            &canonical_project,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        )
+        .expect("open scheduler");
+
+        // The pass captures the dirty worktree, then the same bytes are
+        // committed before it seals: the snapshot carries no commit, and the
+        // commit leaves every worktree file's stat unchanged.
+        let mut committed = false;
+        scheduler
+            .reconcile_now_with_capture(|scheduler, control| {
+                let captured = scheduler.capture_authoritative_snapshot(Some(control));
+                if !committed {
+                    committed = true;
+                    git(project.path(), &["add", "."]);
+                    git(project.path(), &["commit", "-qm", "commit mid pass"]);
+                }
+                captured
+            })
+            .expect("publish the pre-commit capture");
+        assert!(
+            scheduler
+                .latest_complete()
+                .expect("published generation")
+                .generation()
+                .snapshot()
+                .source_revision
+                .is_none(),
+            "the capture predates the commit"
+        );
+
+        assert!(
+            scheduler.request_fresh_now_background(),
+            "a commit that landed during the pass must read as moved, or the \
+             worktree never gets a generation at its new HEAD"
+        );
+    }
+
     fn init_fixture_repository(root: &Path) {
         git(root, &["init", "-q", "-b", "main"]);
         git(root, &["config", "user.name", "TraceDecay Test"]);
