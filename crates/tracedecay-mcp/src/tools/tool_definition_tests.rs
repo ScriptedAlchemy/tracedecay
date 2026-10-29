@@ -1,8 +1,8 @@
 use serde_json::json;
 use tracedecay_tool_catalog::OperationId;
 
-use super::*;
-use tracedecay_mcp::get_tool_definitions;
+use crate::get_tool_definitions;
+use crate::tools::binding::{INTERNAL_DAEMON_TOOL_NAMES, tool_accepts_registered_project_selector};
 
 #[test]
 fn terminal_application_definitions_project_canonical_request_schemas() {
@@ -51,7 +51,7 @@ fn terminal_application_definitions_project_canonical_request_schemas() {
         }
         assert_eq!(
             projected,
-            tracedecay_mcp::mcp_input_schema(canonical),
+            crate::mcp_input_schema(canonical),
             "{tool_name} must project its canonical executable request schema before MCP transport fields",
         );
     }
@@ -223,7 +223,7 @@ fn work_definitions_cover_the_canonical_operation_registry() {
             .expect("canonical Work operation must be executable");
         assert_eq!(
             definition.input_schema,
-            tracedecay_mcp::mcp_input_schema(binding.request_schema().body()),
+            crate::mcp_input_schema(binding.request_schema().body()),
             "{tool_name} must expose the exact executable request schema",
         );
     }
@@ -232,7 +232,7 @@ fn work_definitions_cover_the_canonical_operation_registry() {
 #[test]
 fn format_capable_tools_advertise_markdown_json_without_tables() {
     let tools = get_tool_definitions().expect("tool definitions");
-    for tool_name in tracedecay_mcp::format_capable_tool_names() {
+    for tool_name in crate::format_capable_tool_names() {
         let tool = tools
             .iter()
             .find(|tool| tool.name == *tool_name)
@@ -252,8 +252,7 @@ fn format_capable_tools_advertise_markdown_json_without_tables() {
 
 #[test]
 fn advertised_read_only_matches_canonical_execution_effect() {
-    let catalog =
-        tracedecay_mcp::tools::binding::mcp_dispatch_catalog().expect("MCP dispatch catalog");
+    let catalog = crate::tools::binding::mcp_dispatch_catalog().expect("MCP dispatch catalog");
     for tool in get_tool_definitions().expect("tool definitions") {
         if INTERNAL_DAEMON_TOOL_NAMES.contains(&tool.name.as_str()) {
             continue;
@@ -307,4 +306,46 @@ fn lcm_doctor_exposes_diagnostics_only() {
         doctor.annotations.as_ref().unwrap()["readOnlyHint"],
         json!(true)
     );
+}
+
+#[test]
+fn registered_project_selector_dispatch_policy_matches_tool_schemas() {
+    for tool in get_tool_definitions().expect("tool definitions") {
+        let properties = &tool.input_schema["properties"];
+        let schema_has_registered_project_selector = properties.get("project_selector").is_some();
+        assert_eq!(
+            tool_accepts_registered_project_selector(&tool.name),
+            schema_has_registered_project_selector,
+            "{} registered-project selector schema and dispatch policy should stay in lockstep",
+            tool.name
+        );
+        if schema_has_registered_project_selector {
+            for alias in ["project_id", "project_path", "project_root", "root"] {
+                assert!(properties.get(alias).is_none());
+            }
+            let selector = &properties["project_selector"];
+            assert_eq!(
+                selector["required"],
+                json!(["project_id"]),
+                "{} selector must require project_id",
+                tool.name
+            );
+            assert_eq!(
+                selector["additionalProperties"], false,
+                "{} selector must be a closed object",
+                tool.name
+            );
+            assert_eq!(
+                selector["properties"]
+                    .as_object()
+                    .unwrap_or_else(|| panic!("{} closed selector properties", tool.name))
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                vec!["project_id"],
+                "{} selector must expose exactly project_id",
+                tool.name
+            );
+        }
+    }
 }

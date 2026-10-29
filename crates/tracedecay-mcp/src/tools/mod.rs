@@ -816,3 +816,6 @@ mod tests {
         assert!(help.contains("\"repository_revision\":"));
     }
 }
+
+#[cfg(test)]
+mod tool_definition_tests;

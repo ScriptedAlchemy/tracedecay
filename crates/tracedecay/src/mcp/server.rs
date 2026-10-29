@@ -72,7 +72,7 @@ pub(crate) use hook_writes::*;
 pub(crate) use ledger::McpToolErrorAnalyticsRequest;
 pub(crate) use rmcp::RmcpInitializeResponseDecorator;
 #[cfg(test)]
-pub(crate) use rmcp::{RmcpSelectedProjectResponseAuthority, RmcpWorkDeliverySettlement};
+pub(crate) use rmcp::RmcpSelectedProjectResponseAuthority;
 pub(crate) use routing::*;
 use tracedecay_daemon_service::DaemonSessionRefreshService;
 use tracedecay_daemon_service::DaemonWorkflowIndexReadService;
@@ -1454,9 +1454,6 @@ mod host_admission_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod query_scope_tests;
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod staleness_banner_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 pub(crate) mod writer_test_support;

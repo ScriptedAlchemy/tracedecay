@@ -8,8 +8,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracedecay_runtime_core::path_safety::{canonical_existing_identity, same_canonical_path};
 
-use serde::{Deserialize, Serialize};
-
 use super::{
     AuthenticatedFirstRequest, BrokerStream, BrokerStreamTransport, DaemonAuthPreface,
     DaemonHandshake, JsonRpcResponse, McpMethod, Result, StoreAdministration, TraceDecayError,
@@ -275,16 +273,14 @@ pub(crate) struct DaemonPerClientPermit {
     _permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DaemonClientSaturationResponse {
     pub(crate) kind: DaemonClientSaturationKind,
     pub(crate) retryable: bool,
     pub(crate) capacity: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-// Variant names are the serialized wire contract (`*_capacity_reached`); renaming is not allowed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(clippy::enum_variant_names)]
 pub(crate) enum DaemonClientSaturationKind {
     ClientCapacityReached,
@@ -416,22 +412,45 @@ impl DaemonClientAdmission {
     }
 }
 
-impl DaemonClientSaturationResponse {
-    pub(crate) fn into_json_rpc_with_id(self, id: serde_json::Value) -> JsonRpcResponse {
-        let message = match self.kind {
-            DaemonClientSaturationKind::ClientCapacityReached => "daemon client capacity reached",
-            DaemonClientSaturationKind::PerClientCapacityReached => {
+impl DaemonClientSaturationKind {
+    /// The refusal's `reason_code`, identical on the JSON-RPC and invocation
+    /// wires so a client keys retry on one code whichever path it used.
+    fn reason_code(self) -> &'static str {
+        match self {
+            Self::ClientCapacityReached => "daemon_client_capacity_saturated",
+            Self::PerClientCapacityReached => "daemon_per_client_capacity_saturated",
+            Self::BulkCapacityReached => "daemon_bulk_capacity_saturated",
+        }
+    }
+
+    fn detail(self) -> &'static str {
+        match self {
+            Self::ClientCapacityReached => "daemon client capacity reached",
+            Self::PerClientCapacityReached => {
                 "daemon per-client capacity reached; retry after this client's active requests finish"
             }
-            DaemonClientSaturationKind::BulkCapacityReached => {
+            Self::BulkCapacityReached => {
                 "daemon bulk capacity reached; reserved capacity is limited to health and status"
             }
-        };
+        }
+    }
+}
+
+impl DaemonClientSaturationResponse {
+    pub(crate) fn into_json_rpc_with_id(self, id: serde_json::Value) -> JsonRpcResponse {
+        let reason_code = self.kind.reason_code();
+        let detail = self.kind.detail();
         JsonRpcResponse::error_with_data(
             id,
             ErrorCode::InternalError,
-            message.to_string(),
-            serde_json::to_value(self).ok(),
+            detail.to_string(),
+            Some(serde_json::json!({
+                "reason_code": reason_code,
+                "retryable": self.retryable,
+                "detail": detail,
+                "kind": reason_code,
+                "capacity": self.capacity,
+            })),
         )
     }
 }
@@ -441,16 +460,12 @@ fn invocation_saturation_response(
     saturation: &DaemonClientSaturationResponse,
 ) -> Option<super::DaemonInvocationResponse> {
     let request = parse_daemon_invocation_request(request_line)?.ok()?;
-    let code = match saturation.kind {
-        DaemonClientSaturationKind::ClientCapacityReached => "daemon_client_capacity_saturated",
-        DaemonClientSaturationKind::PerClientCapacityReached => {
-            "daemon_per_client_capacity_saturated"
-        }
-        DaemonClientSaturationKind::BulkCapacityReached => "daemon_bulk_capacity_saturated",
-    };
     Some(super::DaemonInvocationResponse::application_problem(
         request.request_id,
-        ApplicationProblem::saturated(code, "The owning TraceDecay daemon has no request capacity"),
+        ApplicationProblem::saturated(
+            saturation.kind.reason_code(),
+            "The owning TraceDecay daemon has no request capacity",
+        ),
     ))
 }
 

@@ -3220,3 +3220,9 @@ mod graph_shutdown_contract_tests;
 
 #[cfg(test)]
 mod project_memory_relation_graph_contract_tests;
+
+#[cfg(test)]
+mod mount_lifecycle_tests;
+
+#[cfg(test)]
+mod remote_mount_tests;

@@ -1,14 +1,18 @@
 //! Durable labels, properties, and identities for the code-graph projection.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::io::Write;
+use std::mem::size_of;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use flate2::Compression;
 use flate2::write::DeflateEncoder;
-use flate2::{Compression, Decompress, FlushDecompress, Status};
+use miniz_oxide::inflate::stream::{InflateState, inflate};
+use miniz_oxide::{DataFormat, MZFlush, MZStatus};
 use serde::Serialize;
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use tracedecay_domain::FileOccurrenceId;
 pub(super) use tracedecay_graph_db::graph_stable_identity as stable_identity;
 use tracedecay_graph_db::{
@@ -108,14 +112,69 @@ pub(super) fn deserialize_property<T>(
 where
     T: DeserializeOwned,
 {
+    decode_property(properties, name, |_| Ok(()), false)
+}
+
+pub(super) trait CatalogRecord: DeserializeOwned {
+    const PROPERTY: &'static str;
+}
+
+/// The serializer's canonical byte count, without retaining another record.
+pub(super) fn serialized_record_len(
+    value: &impl Serialize,
+) -> Result<usize, CodeGraphProjectionError> {
+    struct Count(usize);
+    impl Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.checked_add(bytes.len()).ok_or_else(|| {
+                std::io::Error::other("serialized code graph record size overflow")
+            })?;
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, value)
+        .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
+    Ok(count.0)
+}
+
+pub(super) fn deserialize_catalog_property<T: CatalogRecord>(
+    properties: &BTreeMap<GraphPropertyName, GraphProperty>,
+    admit: impl FnMut(usize) -> Result<(), CodeGraphProjectionError>,
+) -> Result<T, CodeGraphProjectionError> {
+    decode_property(properties, T::PROPERTY, admit, true)
+}
+
+fn decode_property<T: DeserializeOwned>(
+    properties: &BTreeMap<GraphPropertyName, GraphProperty>,
+    name: &str,
+    mut admit: impl FnMut(usize) -> Result<(), CodeGraphProjectionError>,
+    catalog: bool,
+) -> Result<T, CodeGraphProjectionError> {
     let property = properties
-        .get(&GraphPropertyName::new(name)?)
+        .iter()
+        .find_map(|(key, value)| (key.as_str() == name).then_some(value))
         .ok_or_else(|| {
             CodeGraphProjectionError::Corrupt(format!("code graph row is missing {name}"))
         })?;
     match property {
-        GraphProperty::String(stored) => serde_json::from_str(&expand_record(stored)?)
-            .map_err(|error| CodeGraphProjectionError::Corrupt(error.to_string())),
+        GraphProperty::String(stored) => {
+            let expanded = expanded_record_len(stored)?;
+            let scratch = json_scratch_bytes(expanded);
+            if catalog {
+                admit(expanded.saturating_add(scratch))?;
+            }
+            let json = expand_record(stored)?;
+            if catalog {
+                admit_catalog_json(json.as_bytes(), expanded, &mut admit)?;
+            }
+            serde_json::from_str(&json)
+                .map_err(|error| CodeGraphProjectionError::Corrupt(error.to_string()))
+        }
         GraphProperty::Bytes(stored) => {
             let corrupt = || {
                 CodeGraphProjectionError::Corrupt(format!(
@@ -125,16 +184,21 @@ where
             if stored.len() > MAX_GRAPH_PROPERTY_VALUE_BYTES {
                 return Err(corrupt());
             }
-            let mut decoder = Decompress::new(false);
-            let mut decoded = Vec::with_capacity(MAX_GRAPH_PROPERTY_AGGREGATE_BYTES + 1);
-            let status = decoder
-                .decompress_vec(stored, &mut decoded, FlushDecompress::Finish)
-                .map_err(|_| corrupt())?;
-            if status != Status::StreamEnd
-                || decoder.total_in() != stored.len() as u64
-                || decoded.len() > MAX_GRAPH_PROPERTY_AGGREGATE_BYTES
+            let capacity = MAX_GRAPH_PROPERTY_AGGREGATE_BYTES + 1;
+            admit(size_of::<InflateState>().saturating_add(capacity))?;
+            let mut decoder = InflateState::new_boxed(DataFormat::Raw);
+            let mut decoded = vec![0_u8; capacity];
+            let result = inflate(&mut decoder, stored, &mut decoded, MZFlush::Finish);
+            if result.status != Ok(MZStatus::StreamEnd)
+                || result.bytes_consumed != stored.len()
+                || result.bytes_written > MAX_GRAPH_PROPERTY_AGGREGATE_BYTES
             {
                 return Err(corrupt());
+            }
+            decoded.truncate(result.bytes_written);
+            drop(decoder);
+            if catalog {
+                admit_catalog_json(&decoded, capacity, &mut admit)?;
             }
             serde_json::from_slice(&decoded)
                 .map_err(|error| CodeGraphProjectionError::Corrupt(error.to_string()))
@@ -143,6 +207,26 @@ where
             "code graph row {name} has the wrong type"
         ))),
     }
+}
+
+fn admit_catalog_json(
+    json: &[u8],
+    buffer_bytes: usize,
+    admit: &mut impl FnMut(usize) -> Result<(), CodeGraphProjectionError>,
+) -> Result<(), CodeGraphProjectionError> {
+    let scratch = json_scratch_bytes(json.len());
+    admit(buffer_bytes.saturating_add(scratch))?;
+    let mut census = CatalogAllocationCensus::default();
+    let mut decoder = serde_json::Deserializer::from_slice(json);
+    CatalogCensusSeed(&mut census)
+        .deserialize(&mut decoder)
+        .and_then(|()| decoder.end())
+        .map_err(|error| CodeGraphProjectionError::Corrupt(error.to_string()))?;
+    admit(
+        buffer_bytes
+            .saturating_add(scratch)
+            .saturating_add(census.output_bytes()),
+    )
 }
 
 /// Leads a [`RECORD_TOKENS`] code in stored record text.
@@ -281,12 +365,28 @@ pub(super) fn compact_record(json: &str) -> String {
 
 /// Inverts [`compact_record`].
 pub(super) fn expand_record(stored: &str) -> Result<String, CodeGraphProjectionError> {
+    let mut out = String::with_capacity(expanded_record_len(stored)?);
+    visit_record_fragments(stored, |fragment| out.push_str(fragment))?;
+    Ok(out)
+}
+
+fn expanded_record_len(stored: &str) -> Result<usize, CodeGraphProjectionError> {
+    let mut bytes = 0_usize;
+    visit_record_fragments(stored, |fragment| {
+        bytes = bytes.saturating_add(fragment.len());
+    })?;
+    Ok(bytes)
+}
+
+fn visit_record_fragments(
+    stored: &str,
+    mut visit: impl FnMut(&str),
+) -> Result<(), CodeGraphProjectionError> {
     let malformed =
         || CodeGraphProjectionError::Corrupt("code graph record text is malformed".to_owned());
-    let mut out = String::with_capacity(stored.len() * 2);
     let mut rest = stored;
     while let Some(position) = rest.find([TOKEN_MARKER, DIGEST_MARKER]) {
-        out.push_str(&rest[..position]);
+        visit(&rest[..position]);
         let marker = rest[position..].chars().next().ok_or_else(malformed)?;
         let body = &rest[position + marker.len_utf8()..];
         if marker == TOKEN_MARKER {
@@ -296,7 +396,7 @@ pub(super) fn expand_record(stored: &str) -> Result<String, CodeGraphProjectionE
                 .position(|candidate| *candidate == code)
                 .and_then(|index| RECORD_TOKENS.get(index))
                 .ok_or_else(malformed)?;
-            out.push_str(token);
+            visit(token);
             rest = &body[1..];
         } else {
             let encoded = body.get(..DIGEST_TEXT_CHARS).ok_or_else(malformed)?;
@@ -307,12 +407,121 @@ pub(super) fn expand_record(stored: &str) -> Result<String, CodeGraphProjectionE
             if written != digest.len() {
                 return Err(malformed());
             }
-            out.push_str(&hex::encode(digest));
+            let mut hex = [0_u8; DIGEST_HEX_CHARS];
+            hex::encode_to_slice(digest, &mut hex).map_err(|_| malformed())?;
+            visit(std::str::from_utf8(&hex).map_err(|_| malformed())?);
             rest = &body[DIGEST_TEXT_CHARS..];
         }
     }
-    out.push_str(rest);
-    Ok(out)
+    visit(rest);
+    Ok(())
+}
+
+fn json_scratch_bytes(bytes: usize) -> usize {
+    // Vec::reserve grows to max(required, 2 * old_capacity, 8). Before
+    // growth old_capacity < required <= input length, so old + new <=
+    // 3 * input length. Include the byte Vec's minimum allocation.
+    bytes.saturating_mul(3).saturating_add(8)
+}
+
+#[derive(Default)]
+struct CatalogAllocationCensus {
+    strings: usize,
+    largest_string: usize,
+    sequence_bytes: usize,
+}
+
+impl CatalogAllocationCensus {
+    fn output_bytes(&self) -> usize {
+        // StoredSymbolRecord clones metadata.occurrence on conversion. The
+        // largest string also covers that one extra string.
+        self.strings
+            .saturating_add(self.largest_string)
+            .saturating_add(self.sequence_bytes)
+    }
+}
+
+struct CatalogCensusSeed<'a>(&'a mut CatalogAllocationCensus);
+
+impl<'de> DeserializeSeed<'de> for CatalogCensusSeed<'_> {
+    type Value = ();
+
+    fn deserialize<D>(self, decoder: D) -> Result<(), D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        decoder.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for CatalogCensusSeed<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a catalog record")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<(), E> {
+        self.0.strings = self.0.strings.saturating_add(value.len());
+        self.0.largest_string = self.0.largest_string.max(value.len());
+        Ok(())
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_i64<E>(self, _: i64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_u64<E>(self, _: u64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_f64<E>(self, _: f64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_unit<E>(self) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<(), A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut count = 0_usize;
+        while sequence
+            .next_element_seed(CatalogCensusSeed(self.0))?
+            .is_some()
+        {
+            count = count.saturating_add(1);
+        }
+        if count != 0 {
+            // The catalog schemas contain only derives (String) and unresolved
+            // references. JSON has no sequence hint, so Vec starts at four and
+            // doubles. Include the old buffer during its final reallocation.
+            let capacity = count
+                .max(4)
+                .checked_next_power_of_two()
+                .unwrap_or(usize::MAX);
+            let element =
+                size_of::<String>().max(size_of::<crate::chunks::CodeIndexUnresolvedReferenceV1>());
+            self.0.sequence_bytes = self.0.sequence_bytes.saturating_add(
+                capacity
+                    .saturating_add(capacity / 2)
+                    .saturating_mul(element),
+            );
+        }
+        Ok(())
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<(), A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        while map.next_key_seed(CatalogCensusSeed(self.0))?.is_some() {
+            map.next_value_seed(CatalogCensusSeed(self.0))?;
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn has_label(entity: &GraphEntity, label: &str) -> bool {
