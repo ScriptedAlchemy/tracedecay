@@ -11708,7 +11708,7 @@
       ]
     },
     "DoctorFindingFamilyV1": {
-      "description": "Stable Doctor finding families.\n\nThe initial list covers advisory findings from\nBrain, Explorer, Loom, Code, and Observatory, plus the legacy\n`core_doctor` checks (graph quick-check, temporal/migration health,\nconfiguration compatibility drift, code-index mount state, session ingest).\nEach family maps to one audited typed input surface. The set is kept small\nand honest; new families are added through a future versioned enum rather\nthan by widening the meaning of an existing variant.",
+      "description": "Stable Doctor finding families.\n\nThe initial list covers advisory findings from\nBrain, Explorer, Loom, Code, and Observatory, plus the daemon\ncore doctor checks (graph quick-check, temporal health, configuration\ndrift, code-index mount state, session ingest).\nEach family maps to one audited typed input surface. The set is kept small\nand honest; new families are added through a future versioned enum rather\nthan by widening the meaning of an existing variant.",
       "oneOf": [
         {
           "const": "advisory",

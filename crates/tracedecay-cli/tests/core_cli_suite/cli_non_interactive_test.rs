@@ -1964,13 +1964,6 @@ fn automation_config_set_writes_complete_canonical_project_setting_noninteractiv
         payload["effective"]["tasks"]["session_reflector"]["interval_secs"],
         1800
     );
-    for task in ["memory_curator", "session_reflector", "skill_writer"] {
-        assert!(
-            payload["effective"]["tasks"][task]
-                .get("stale_lock_secs")
-                .is_none()
-        );
-    }
     assert_eq!(
         payload["effective"]["tasks"]["memory_curator"]["cooldown_secs"],
         300

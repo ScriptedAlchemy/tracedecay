@@ -12,13 +12,12 @@ use super::registry::ConfigurationRegistry;
 use super::resolver::{ConfigurationResolutionV1, registry_default_candidate};
 use crate::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1, RegisteredGlobalDbWriteTx};
 use tracedecay_domain::configuration::{
-    ACCESS_RULES_SETTING_KEY, AUTOMATION_SETTINGS_SETTING_KEY, CandidateDispositionV1,
-    ChangePlanId, CodeIndexWorkerSelectionV1, ConfigurationAuditEvent, ConfigurationAuditEventId,
-    ConfigurationAuditEventKindV1, ConfigurationCandidateV1, ConfigurationIdempotencyKey,
-    ConfigurationLayerIdV1, ConfigurationReceiptId, ConfigurationRevisionId,
-    ConfigurationSnapshotV1, ConfigurationValueV1, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
-    LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY, ProtectedChange, ProtectedChangePlan,
-    ProtectedChangeSnapshotError, RETIRED_CORE_SETTING_KEYS_V1, RETIRED_PROFILE_SETTING_KEYS_V1,
+    ACCESS_RULES_SETTING_KEY, CandidateDispositionV1, ChangePlanId, CodeIndexWorkerSelectionV1,
+    ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationAuditEventKindV1,
+    ConfigurationCandidateV1, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
+    ConfigurationReceiptId, ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1,
+    INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
+    ProtectedChange, ProtectedChangePlan, ProtectedChangeSnapshotError,
     RedactedConfigurationChangeV1, RollbackModeV1, SOURCE_BINDINGS_SETTING_KEY,
     SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY, ScopeControlOperationV1, SettingKey,
     USER_CODE_INDEX_WORKERS_SETTING_KEY, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
@@ -332,12 +331,11 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
     }
 
     /// Converge a snapshot written by an earlier published registry onto the
-    /// current one: registry-added settings receive their typed defaults,
-    /// retired settings are dropped, and a never-overridden setting follows a
-    /// default that changed.
+    /// current one: registry-added settings receive their typed defaults and
+    /// a never-overridden setting follows a default that changed.
     ///
     /// This is exact schema convergence, not a runtime fallback: only the
-    /// closed sets of known additive keys and known retired keys are accepted.
+    /// closed set of known additive keys is accepted.
     /// The result is an immutable child revision, and the expected parent is
     /// checked under the store's write transaction.
     pub async fn converge_registered_registry_shape(
@@ -355,7 +353,6 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
                 SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
             ],
-            RETIRED_CORE_SETTING_KEYS_V1,
         )
         .await
     }
@@ -371,7 +368,6 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
         occurred_at: UtcMicros,
         registry: &ConfigurationRegistry,
         additive_keys: &[&str],
-        retired_keys: &[&str],
     ) -> Result<ConfigurationCurrentStateV1, ConfigurationError> {
         expected_revision_id
             .validate()
@@ -382,22 +378,12 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
             .iter()
             .map(|key| (*key).to_owned())
             .collect::<Vec<_>>();
-        let retired_keys = retired_keys
-            .iter()
-            .map(|key| (*key).to_owned())
-            .collect::<Vec<_>>();
         transact_config(self.db, |_| ConfigurationError::Unavailable, async move |transaction| {
             let current = current_state_from_transaction(&transaction).await?;
             if current.revision_id != expected_revision_id {
                 return Err(ConfigurationError::RevisionConflict);
             }
             let additive_keys = additive_keys
-                .iter()
-                .cloned()
-                .map(SettingKey::new)
-                .collect::<Result<std::collections::BTreeSet<_>, _>>()
-                .map_err(ConfigurationError::validation)?;
-            let retired_keys = retired_keys
                 .iter()
                 .cloned()
                 .map(SettingKey::new)
@@ -415,10 +401,6 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 .collect::<std::collections::BTreeSet<_>>();
             let missing_keys = expected_keys
                 .difference(&actual_keys)
-                .cloned()
-                .collect::<Vec<_>>();
-            let removals = actual_keys
-                .intersection(&retired_keys)
                 .cloned()
                 .collect::<Vec<_>>();
             // A setting nothing ever overrode still carries the default the
@@ -440,45 +422,16 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 })
                 .map(|definition| definition.key.clone())
                 .collect::<Vec<_>>();
-            // The old automation timeout was serialized even when null. Keep
-            // historical snapshots intact, and remove it from the current
-            // value under the same revision fence as other registry upgrades.
-            let retired_automation_values = current
-                .snapshot
-                .effective_values
-                .iter()
-                .filter(|(key, _)| key.as_str() == AUTOMATION_SETTINGS_SETTING_KEY)
-                .filter_map(|(key, value)| {
-                    if let ConfigurationValueV1::AutomationSettings(settings) = value {
-                        let mut settings = settings.clone();
-                        if settings.retire_lock_timeout() {
-                            return Some((
-                                key.clone(),
-                                ConfigurationValueV1::AutomationSettings(settings),
-                            ));
-                        }
-                    }
-                    None
-                })
-                .collect::<Vec<_>>();
-            if missing_keys.is_empty()
-                && removals.is_empty()
-                && stale_defaults.is_empty()
-                && retired_automation_values.is_empty()
-            {
+            if missing_keys.is_empty() && stale_defaults.is_empty() {
                 validate_snapshot_registry_completeness_with_registry(&current.snapshot, &registry)
                     .map_err(map_store_error)?;
                 return Ok(current);
             }
-            let surviving_keys = actual_keys
-                .difference(&retired_keys)
-                .cloned()
-                .collect::<std::collections::BTreeSet<_>>();
             if missing_keys.iter().any(|key| !additive_keys.contains(key))
-                || !surviving_keys.is_subset(&expected_keys)
+                || !actual_keys.is_subset(&expected_keys)
             {
                 return Err(ConfigurationError::ResetRequired {
-                    reason: "configuration snapshot registry drift is not a registered additive-default or retired-key upgrade"
+                    reason: "configuration snapshot registry drift is not a registered additive-default upgrade"
                         .to_owned(),
                 });
             }
@@ -496,8 +449,6 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 "tracedecay.configuration.registry-shape-convergence.v1",
                 &expected_revision_id,
                 &additions,
-                &removals,
-                &retired_automation_values,
             ))
             .map_err(ConfigurationError::validation)?;
             let next_revision_id: ConfigurationRevisionId = derived_identifier(
@@ -512,20 +463,9 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
             )?;
             let mut effective_values = current.snapshot.effective_values.clone();
             let mut provenance = current.snapshot.provenance.clone();
-            for key in &removals {
-                effective_values.remove(key);
-                provenance.remove(key);
-            }
             for (key, default_value) in additions {
                 effective_values.insert(key.clone(), default_value);
                 provenance.insert(key, default_provenance.clone());
-            }
-            for (key, value) in retired_automation_values {
-                // Preserve an operator's active settings and their provenance.
-                // A registry-default value has already adopted today's default.
-                if !stale_defaults.contains(&key) {
-                    effective_values.insert(key, value);
-                }
             }
             let snapshot = ConfigurationSnapshotV1::new(effective_values, provenance)
                 .map_err(ConfigurationError::validation)?;
@@ -758,19 +698,12 @@ impl<'db> ProfileConfigurationStore<'db> {
             }
         }
         let current = self.current_state().await?;
-        let carries_retired_key = current.snapshot.effective_values.keys().any(|key| {
-            RETIRED_PROFILE_SETTING_KEYS_V1
-                .iter()
-                .any(|retired| key.as_str() == *retired)
-        });
-        if !carries_retired_key
-            && registry.definitions().all(|definition| {
-                current
-                    .snapshot
-                    .effective_values
-                    .contains_key(&definition.key)
-            })
-        {
+        if registry.definitions().all(|definition| {
+            current
+                .snapshot
+                .effective_values
+                .contains_key(&definition.key)
+        }) {
             return Self::project(&self.profile_id, current, &registry);
         }
         let converged = match self
@@ -780,7 +713,6 @@ impl<'db> ProfileConfigurationStore<'db> {
                 occurred_at,
                 &registry,
                 PROFILE_ADDITIVE_SETTING_KEYS,
-                RETIRED_PROFILE_SETTING_KEYS_V1,
             )
             .await
         {

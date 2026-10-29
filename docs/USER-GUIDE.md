@@ -1253,25 +1253,12 @@ Network effects are separate from local indexing and retrieval. They can be
 disabled, unavailable, or denied without turning those states into successful
 local results. The available effects are described below.
 
-### Worldwide token counter (retired)
+### Token counter
 
-TraceDecay no longer has a worldwide token counter and makes no counter network
+There is no worldwide token counter and TraceDecay makes no counter network
 call. Token savings, costs, and usage stay local: `tracedecay current-counter`,
 `tracedecay reset-counter`, `tracedecay gain`, `tracedecay cost`, and the
-dashboard are unchanged.
-
-`tracedecay enable-upload-counter` and `tracedecay disable-upload-counter` no
-longer exist and fail as unknown subcommands. The `user.upload_enabled.v1`
-setting and the dashboard's `upload_enabled` field are gone, so a configuration
-read or patch that names them is refused. An older profile that still stores the
-opt-in, a pending upload amount, or flush timestamps loads normally: the next
-write erases them, and the pending amount is never uploaded.
-
-The hosted counter service was a Cloudflare Worker named `tracedecay-counter`,
-backed by Upstash Redis. Nothing in this repository deploys or operates it, so
-removing the client does not shut it down. Decommissioning it is a separate
-maintainer action: delete the Worker and its Redis store from the Cloudflare
-and Upstash accounts that host them. Its status is tracked on issue #3619.
+dashboard.
 
 ### Version check
 

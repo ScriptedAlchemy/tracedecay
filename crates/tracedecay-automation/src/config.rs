@@ -122,7 +122,6 @@ pub fn effective_config(
     project: Option<&AutomationConfigPatch>,
 ) -> Result<AutomationSettingsV1> {
     let mut config = global.clone();
-    config.retire_lock_timeout();
     if let Some(patch) = project {
         apply_patch(&mut config, patch);
     }
@@ -171,8 +170,7 @@ impl AdmittedAutomationConfig {
 }
 
 pub fn admit_config(config: &AutomationSettingsV1) -> Result<AdmittedAutomationConfig> {
-    let mut config = config.clone();
-    config.retire_lock_timeout();
+    let config = config.clone();
     if config.timeout_secs == 0 {
         return Err(config_error(
             "automation timeout_secs must be greater than zero",
@@ -630,45 +628,6 @@ fn parse_schedule_duration_secs(value: &str) -> Option<u64> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn effective_settings_retire_legacy_lock_timeout_and_patch_refuses_it() {
-        let mut stored = serde_json::to_value(AutomationSettingsV1::default()).unwrap();
-        stored["tasks"]["memory_curator"]["stale_lock_secs"] = serde_json::json!(3600);
-        stored["tasks"]["session_reflector"]["stale_lock_secs"] = serde_json::Value::Null;
-        stored["timeout_secs"] = serde_json::json!(137);
-        let stored: AutomationSettingsV1 = serde_json::from_value(stored).unwrap();
-        let historical_bytes = serde_json::to_vec(&stored).unwrap();
-        let effective = effective_config(&stored, None).unwrap();
-        assert_eq!(effective.timeout_secs, 137);
-        assert!(!effective.has_retired_lock_timeout());
-        let admitted = admit_config(&stored).unwrap();
-        assert_eq!(admitted.settings, effective);
-        assert!(!admitted.has_retired_lock_timeout());
-        for (task, every_secs) in [
-            (AgentTaskKind::MemoryCurator, 900),
-            (AgentTaskKind::SessionReflector, 900),
-            (AgentTaskKind::SkillWriter, 3600),
-        ] {
-            assert_eq!(
-                admitted.schedule(task),
-                Some(AutomationSchedule::Interval { every_secs })
-            );
-        }
-        assert!(stored.has_retired_lock_timeout());
-        assert_eq!(serde_json::to_vec(&stored).unwrap(), historical_bytes);
-        for task in ["memory_curator", "session_reflector", "skill_writer"] {
-            for value in [serde_json::Value::Null, serde_json::json!(3600)] {
-                let patch = serde_json::json!({ (task): { "stale_lock_secs": value } });
-                let error = serde_json::from_value::<AutomationConfigPatch>(patch).unwrap_err();
-                assert!(
-                    error
-                        .to_string()
-                        .contains("unknown field `stale_lock_secs`")
-                );
-            }
-        }
-    }
 
     #[test]
     fn session_evidence_budget_backoff_is_patchable_clearable_and_nonzero() {

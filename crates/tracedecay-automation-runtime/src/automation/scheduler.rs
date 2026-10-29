@@ -685,7 +685,6 @@ const USER_JOB_TASK_CONFIG: AutomationTaskSettingsV1 = AutomationTaskSettingsV1 
     interval_secs: None,
     cooldown_secs: None,
     min_idle_secs: None,
-    legacy_stale_lock_secs: None,
     session_evidence_budget_backoff_secs: None,
 };
 
