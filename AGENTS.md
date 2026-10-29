@@ -176,11 +176,11 @@ unauthorized external action after completing independent, authorized work.
 - Complete cutovers in one delivery slice: migrate every caller and datum,
   then delete compatibility façades, duplicate routes, old flags, dead aliases,
   and support code left from the move.
-- Add a V2/V3 contract, compatibility alias, deprecation path, or data
-  migration only after proving the prior shape shipped on `origin/master`, in
-  a published package, or in a live persisted format. Branch-local and
-  unreleased contracts change in place; a `V1` suffix alone is not release
-  evidence and does not justify compatibility shims.
+- Keep no legacy or backward-compatibility code. When a shape changes,
+  migrate every caller and delete the old one in the same slice. Old stores,
+  clients, and hosts are refused through the typed reset and refusal paths,
+  never shimmed: no compatibility aliases, deprecation paths, version floors
+  that branch to old behavior, or data migrations.
 - Keep boundaries explicit: use top-level explicit imports/reexports, avoid
   wildcard parent-child cycles and inline imports, maintain one generated wire
   authority, and do not hand-write duplicate DTOs.
