@@ -97,7 +97,9 @@ export class DaemonFixture {
   }
 
   static async create(): Promise<DaemonFixture> {
-    const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "tracedecay-chatgpt-ext-")));
+    // The profile suffix must still fit the native Unix socket path bound.
+    const tempRoot = process.platform === "win32" ? os.tmpdir() : "/tmp";
+    const root = await realpath(await mkdtemp(path.join(tempRoot, "tracedecay-chatgpt-ext-")));
     const fixture = new DaemonFixture(root);
     await mkdir(fixture.profileRoot, { recursive: true });
     await mkdir(path.join(fixture.home, ".config"), { recursive: true });

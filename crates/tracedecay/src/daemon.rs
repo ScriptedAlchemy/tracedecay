@@ -270,10 +270,9 @@ pub(crate) fn json_rpc_error_is_project_open_retryable(error: &serde_json::Value
         .is_some_and(project_open_retryable_reason)
 }
 
-/// True when a one-shot tool-call transport error should be retried by a
-/// journey (or any client riding out a transient open/retirement).
-///
-/// Keys only on typed reason codes, never on English detail prose.
+/// Identifies a transient tool-call transport refusal by typed reason code.
+/// A revoked response may follow a committed effect, so automatic replay also
+/// requires the tool's canonical read-only contract.
 pub fn tool_call_transport_error_is_retryable(error: &TraceDecayError) -> bool {
     matches!(
         error.project_route_context(),

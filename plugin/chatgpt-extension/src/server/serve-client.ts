@@ -65,10 +65,11 @@ export function toFailure(error: unknown): Failure {
   if (error instanceof DaemonFailure) return error.failure;
   if (error instanceof ProtocolError) {
     const data = error.data;
-    const code =
-      typeof data === "object" && data !== null && "code" in data && typeof data.code === "string"
-        ? data.code
-        : `jsonrpc_${error.code}`;
+    let code = `jsonrpc_${error.code}`;
+    if (typeof data === "object" && data !== null) {
+      if ("reason_code" in data && typeof data.reason_code === "string") code = data.reason_code;
+      else if ("code" in data && typeof data.code === "string") code = data.code;
+    }
     return { kind: classifyCode(code), code, message: error.message };
   }
   if (error instanceof SdkError) {
@@ -84,7 +85,7 @@ export function toFailure(error: unknown): Failure {
 export function classifyCode(code: string): FailureKind {
   if (code.includes("not_authorized") || code === "denied" || code.startsWith("authorization")) return "denied";
   if (code.includes("not_found") || code === "project_required") return "not_found";
-  if (code.includes("stale")) return "stale";
+  if (code.includes("stale") || code === "project_server_response_revoked") return "stale";
   if (code.includes("unavailable") || code.includes("warming") || code.includes("saturated")) return "unavailable";
   if (code.includes("invalid") || code.includes("malformed")) return "invalid_request";
   if (code.includes("disconnected") || code.includes("socket")) return "disconnected";
