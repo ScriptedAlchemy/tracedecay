@@ -10,14 +10,14 @@ use tracedecay_policy::{
 use crate::automation::backend::{
     AgentTaskKind, AgentTaskResponse, agent_task_contract, prompt_version, task_key,
 };
-use crate::automation::config::AutomationConfig;
+use crate::automation::config::AutomationSettingsV1;
 use crate::automation::lifecycle::AgentTaskRunContext;
 use crate::automation::run_ledger::{AutomationRunLedgerRecord, AutomationRunStatus};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 pub(super) fn evaluate_session_curation(
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     authority: &CurationApplyAuthorityV1,
     evidence_hash: Option<&str>,
     accepted_facts: &[Value],
@@ -33,7 +33,7 @@ pub(super) fn evaluate_session_curation(
 }
 
 pub(super) fn evaluate_skill_curation(
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     authority: &CurationApplyAuthorityV1,
     evidence_hash: Option<&str>,
     proposals: &[Value],
@@ -49,7 +49,7 @@ pub(super) fn evaluate_skill_curation(
 }
 
 fn evaluate_curation_output(
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     authority: &CurationApplyAuthorityV1,
     evidence_hash: Option<&str>,
     output: &[Value],
@@ -112,7 +112,7 @@ pub(super) fn combined_review_output(
 
 pub(super) fn unpersisted_rejected_parts(
     run: &AgentTaskRunContext<'_>,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     task: AgentTaskKind,
     reason: &str,
     budget_stage: Option<SessionRetrievalBudgetStageV1>,

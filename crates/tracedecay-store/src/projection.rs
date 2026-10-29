@@ -22,7 +22,6 @@ pub const SESSION_MESSAGE_PROJECTOR_VERSION_V5: &str = "claude-session-message-v
 /// immutable session-temporal effects bind the v6 output digests.
 pub const SESSION_MESSAGE_PROJECTOR_VERSION_V7: &str = "claude-session-message-v7";
 pub const SESSION_MESSAGE_PROJECTOR_VERSION: &str = SESSION_MESSAGE_PROJECTOR_VERSION_V7;
-pub const CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION: &str = SESSION_MESSAGE_PROJECTOR_VERSION;
 /// Immutable provider-usage row contract. Usage shares the canonical
 /// observation projection's checkpoint and rebuild transaction, but carries
 /// its own output version so an already-published message checkpoint can never

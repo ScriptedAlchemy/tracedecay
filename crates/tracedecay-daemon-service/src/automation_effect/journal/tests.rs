@@ -225,10 +225,7 @@ fn write_private_test_file(path: &std::path::Path, bytes: &[u8]) {
             .expect("private test file mode");
     }
     #[cfg(windows)]
-    drop(
-        tracedecay_runtime_core::windows_security::make_private_file(path)
-            .expect("private test file ACL"),
-    );
+    drop(tracedecay_private_fs::windows::make_private_file(path).expect("private test file ACL"));
 }
 
 async fn retained_external_authority(
@@ -324,18 +321,18 @@ async fn retained_disabled_user_job_run(
     tracedecay_automation_runtime::automation::jobs::UserJobAutomationRun,
 > {
     use tracedecay_automation_runtime::automation::config::{
-        AutomationBackend, AutomationConfig, AutomationHostMode,
+        AutomationBackendV1, AutomationHostModeV1, AutomationSettingsV1,
     };
     use tracedecay_automation_runtime::automation::jobs::{
         AutomationJob, JobDelivery, UserJobRunOptions,
         run_user_job_with_backend_for_retained_settlement,
     };
 
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        ..AutomationConfig::default()
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        ..AutomationSettingsV1::default()
     };
     let job = AutomationJob {
         id: job_id.to_owned(),
@@ -400,7 +397,7 @@ async fn fixed_task_lock_is_denied(
 
 async fn retained_repeated_memory_curator(
     cg: &tracedecay_project::project::TraceDecay,
-    config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
+    config: &tracedecay_automation_runtime::automation::config::AutomationSettingsV1,
     configuration_revision: &tracedecay_domain::configuration::ConfigurationRevisionId,
     run_id: &str,
 ) -> (
@@ -424,7 +421,7 @@ async fn retained_repeated_memory_curator(
 
 async fn retained_repeated_memory_curator_run(
     cg: &tracedecay_project::project::TraceDecay,
-    config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
+    config: &tracedecay_automation_runtime::automation::config::AutomationSettingsV1,
     configuration_revision: &tracedecay_domain::configuration::ConfigurationRevisionId,
     run_id: &str,
 ) -> tracedecay_automation_runtime::automation::runner::RetainedAutomationRun<
@@ -989,7 +986,7 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
     use tracedecay_automation_runtime::automation::AutomationRunControl;
     use tracedecay_automation_runtime::automation::backend::{AgentTaskKind, task_key};
     use tracedecay_automation_runtime::automation::config::{
-        AutomationBackend, AutomationConfig, AutomationHostMode,
+        AutomationBackendV1, AutomationHostModeV1, AutomationSettingsV1,
     };
     use tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger;
     use tracedecay_automation_runtime::automation::runner::{
@@ -1017,12 +1014,12 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
         .automation_project_context(None)
         .expect("compose project automation context");
     let dashboard_root = &cg.store_layout().dashboard_root;
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::Disabled,
-        host_mode: AutomationHostMode::Standalone,
+        backend: AutomationBackendV1::Disabled,
+        host_mode: AutomationHostModeV1::Standalone,
         model_id: None,
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
     let configuration_revision =
         ConfigurationRevisionId::new("configuration.reused-scheduler-skip")

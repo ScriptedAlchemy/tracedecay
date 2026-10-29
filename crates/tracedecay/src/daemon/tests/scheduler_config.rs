@@ -6,7 +6,7 @@ use super::*;
 
 #[cfg(unix)]
 use tracedecay_automation_runtime::automation::config::{
-    AutomationBackend, AutomationConfigPatch, AutomationTaskPatch,
+    AutomationBackendV1, AutomationConfigPatch, AutomationTaskPatch,
 };
 #[cfg(unix)]
 use tracedecay_runtime_core::cancellation::CancellationToken;
@@ -28,22 +28,22 @@ impl Drop for AutomationExitBarrierRelease {
 #[test]
 fn automation_scheduler_starts_when_any_task_has_interval() {
     use tracedecay_automation_runtime::automation::config::{
-        AutomationBackend, AutomationConfig, AutomationHostMode, AutomationTaskConfig,
+        AutomationBackendV1, AutomationHostModeV1, AutomationSettingsV1, AutomationTaskSettingsV1,
     };
 
-    let mut config = AutomationConfig {
+    let mut config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
+        backend: AutomationBackendV1::CodexAppServer,
         combine_due_tasks: false,
         tasks: tracedecay_domain::AutomationTaskSetV1::default(),
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
-    config.tasks.memory_curator = AutomationTaskConfig {
+    config.tasks.memory_curator = AutomationTaskSettingsV1 {
         enabled: true,
         schedule: Some("every:5m".to_string()),
         interval_secs: None,
         cooldown_secs: None,
-        ..AutomationTaskConfig::default()
+        ..AutomationTaskSettingsV1::default()
     };
 
     assert!(super::super::automation_scheduler_configured(
@@ -64,43 +64,43 @@ fn automation_scheduler_starts_when_any_task_has_interval() {
     ));
 
     config.tasks.memory_curator.enabled = false;
-    config.tasks.session_reflector = AutomationTaskConfig {
+    config.tasks.session_reflector = AutomationTaskSettingsV1 {
         enabled: true,
         schedule: Some("hourly".to_string()),
         interval_secs: None,
         cooldown_secs: None,
-        ..AutomationTaskConfig::default()
+        ..AutomationTaskSettingsV1::default()
     };
     assert!(super::super::automation_scheduler_configured(
         &tracedecay_automation::config::admit_config(&config).unwrap()
     ));
 
     config.tasks.session_reflector.enabled = false;
-    config.tasks.skill_writer = AutomationTaskConfig {
+    config.tasks.skill_writer = AutomationTaskSettingsV1 {
         enabled: true,
         schedule: Some("daily".to_string()),
         interval_secs: None,
         cooldown_secs: None,
-        ..AutomationTaskConfig::default()
+        ..AutomationTaskSettingsV1::default()
     };
     assert!(super::super::automation_scheduler_configured(
         &tracedecay_automation::config::admit_config(&config).unwrap()
     ));
 
     config.tasks.memory_curator.schedule = Some("every:5m".to_string());
-    config.backend = AutomationBackend::Disabled;
+    config.backend = AutomationBackendV1::Disabled;
     config.model_id = None;
     assert!(!super::super::automation_scheduler_configured(
         &tracedecay_automation::config::admit_config(&config).unwrap()
     ));
 
-    config.backend = AutomationBackend::CodexAppServer;
-    config.host_mode = AutomationHostMode::DelegatedHost;
+    config.backend = AutomationBackendV1::CodexAppServer;
+    config.host_mode = AutomationHostModeV1::DelegatedHost;
     assert!(!super::super::automation_scheduler_configured(
         &tracedecay_automation::config::admit_config(&config).unwrap()
     ));
 
-    config.host_mode = AutomationHostMode::Standalone;
+    config.host_mode = AutomationHostModeV1::Standalone;
     config.enabled = false;
     assert!(!super::super::automation_scheduler_configured(
         &tracedecay_automation::config::admit_config(&config).unwrap()
@@ -271,7 +271,7 @@ async fn daemon_scheduler_skips_stale_owner_key_after_rekey() {
         &handshake,
         AutomationConfigPatch {
             enabled: Some(true),
-            backend: Some(AutomationBackend::CodexAppServer),
+            backend: Some(AutomationBackendV1::CodexAppServer),
             memory_curator: AutomationTaskPatch {
                 enabled: Some(true),
                 schedule: Some(Some("every:5m".to_string())),
@@ -721,7 +721,7 @@ async fn profile_reconcile_broadcasts_to_cached_projects_without_opening_uncache
 #[tokio::test]
 async fn cached_project_reconciles_cli_enabled_automation_without_cache_probe() {
     use tracedecay_automation_runtime::automation::config::{
-        AutomationBackend, AutomationConfigPatch, AutomationTaskPatch,
+        AutomationBackendV1, AutomationConfigPatch, AutomationTaskPatch,
     };
 
     let dir = TempDir::new().expect("temp dir");
@@ -785,7 +785,7 @@ async fn cached_project_reconciles_cli_enabled_automation_without_cache_probe() 
         &handshake,
         AutomationConfigPatch {
             enabled: Some(true),
-            backend: Some(AutomationBackend::CodexAppServer),
+            backend: Some(AutomationBackendV1::CodexAppServer),
             memory_curator: AutomationTaskPatch {
                 enabled: Some(true),
                 schedule: Some(Some("every:5m".to_string())),
@@ -863,7 +863,7 @@ async fn cached_project_reconciles_cli_enabled_automation_without_cache_probe() 
 #[tokio::test]
 async fn disabled_scheduler_reconcile_cannot_acknowledge_an_owner_that_then_exits() {
     use tracedecay_automation_runtime::automation::config::{
-        AutomationBackend, AutomationConfigPatch, AutomationTaskPatch,
+        AutomationBackendV1, AutomationConfigPatch, AutomationTaskPatch,
     };
     use tracedecay_automation_runtime::automation::scheduler::{
         AutomationSchedulerControl, save_scheduler_control,
@@ -879,7 +879,7 @@ async fn disabled_scheduler_reconcile_cannot_acknowledge_an_owner_that_then_exit
     let dashboard_root = layout.dashboard_root;
     let scheduled = AutomationConfigPatch {
         enabled: Some(true),
-        backend: Some(AutomationBackend::CodexAppServer),
+        backend: Some(AutomationBackendV1::CodexAppServer),
         memory_curator: AutomationTaskPatch {
             enabled: Some(true),
             schedule: Some(Some("every:5m".to_string())),

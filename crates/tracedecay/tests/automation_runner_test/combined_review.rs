@@ -1077,7 +1077,7 @@ async fn combined_review_records_noop_fallbacks_for_both_tasks_when_backend_fail
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         timeout_secs: 1,
         ..scheduler_config(Some(3600), None)
     };

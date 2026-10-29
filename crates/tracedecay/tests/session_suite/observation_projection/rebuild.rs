@@ -386,7 +386,7 @@ async fn durable_projection_alias_survives_rebuild_without_rewriting_observation
                 (projector_version, observation_id, output_provider, output_message_id)
              VALUES (?1, ?2, 'claude', 'consolidated/source/message-alias')",
             rusqlite::params![
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
                 candidate.observation_id().as_str()
             ],
         )
@@ -984,7 +984,7 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
                 'consolidated/pinned/message-interrupted-rebuild-200'
              )",
             rusqlite::params![
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
                 aliased_observation.as_str(),
             ],
         )
@@ -1013,7 +1013,7 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
              SET output_message_id = 'consolidated/transient/message-interrupted-rebuild-200'
              WHERE projector_version = ?1 AND observation_id = ?2",
             rusqlite::params![
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
                 aliased_observation.as_str(),
             ],
         )
@@ -1024,7 +1024,7 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
              FROM observation_projection_rebuild_aliases
              WHERE projector_version = ?1 AND observation_id = ?2",
             rusqlite::params![
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
                 aliased_observation.as_str(),
             ],
             |row| row.get::<_, String>(0),
@@ -1040,7 +1040,7 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
              SET output_message_id = 'consolidated/pinned/message-interrupted-rebuild-200'
              WHERE projector_version = ?1 AND observation_id = ?2",
             rusqlite::params![
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
                 aliased_observation.as_str(),
             ],
         )
@@ -1061,7 +1061,7 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
             "SELECT generation, staged_through, state
              FROM observation_projection_rebuilds
              WHERE projector_version = ?1",
-            rusqlite::params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+            rusqlite::params![SESSION_MESSAGE_PROJECTOR_VERSION],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,

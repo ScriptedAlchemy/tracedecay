@@ -5,8 +5,8 @@ use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 #[cfg(test)]
 use super::admit_job;
 use super::{
-    AdmittedAutomationJob, AgentTaskKind, AutomationConfig, AutomationJob,
-    AutomationRunLedgerPublication, AutomationTrigger, JobRunContext, Result, TraceDecayError,
+    AdmittedAutomationJob, AgentTaskKind, AutomationJob, AutomationRunLedgerPublication,
+    AutomationSettingsV1, AutomationTrigger, JobRunContext, Result, TraceDecayError,
     UserJobAutomationRun, config_skip_reason, current_timestamp, job_schedule_decision,
     job_task_key, load_run_ledger_task_summary, try_acquire_job_task_lock,
 };
@@ -37,7 +37,7 @@ use super::{
 #[tracing::instrument(name = "automation.scheduler.job_gate", level = "trace", skip_all)]
 pub async fn evaluate_and_record_scheduler_skip(
     dashboard_root: &Path,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     executable: Option<&Path>,
     job: &AdmittedAutomationJob,
     run_id: &str,
@@ -99,7 +99,7 @@ pub async fn evaluate_and_record_scheduler_skip(
 #[cfg(test)]
 pub(super) async fn evaluate_and_record_scheduler_skip_at(
     dashboard_root: &Path,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     executable: Option<&Path>,
     job: &AutomationJob,
     run_id: &str,
@@ -172,7 +172,7 @@ async fn load_scheduler_summary(
 /// [`evaluate_and_record_scheduler_skip`] for the invariant this preserves.
 async fn record_scheduler_diagnostic(
     dashboard_root: &Path,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     executable: Option<&Path>,
     job: &AutomationJob,
     occurrence_run_id: &str,
@@ -200,7 +200,7 @@ async fn record_scheduler_diagnostic(
 /// `occurrence_run_id` was minted from, not one re-derived here.
 pub(super) async fn record_scheduler_lock_skip(
     dashboard_root: &Path,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     executable: Option<&Path>,
     job: &AutomationJob,
     occurrence_run_id: &str,

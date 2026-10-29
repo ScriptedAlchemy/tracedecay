@@ -6,18 +6,18 @@ async fn manual_memory_curator_runs_when_scheduling_and_task_are_disabled() {
     let cg = init_project(temp.path()).await;
     seed_duplicate_facts(&cg).await;
     let backend = JsonBackend::new(json!({"ops": []}));
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: false,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            memory_curator: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            memory_curator: AutomationTaskSettingsV1 {
                 enabled: false,
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
@@ -50,12 +50,12 @@ async fn manual_memory_curator_skips_when_backend_is_disabled() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     let backend = JsonBackend::new(json!({"ops": []}));
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: false,
-        backend: AutomationBackend::Disabled,
-        host_mode: AutomationHostMode::Standalone,
+        backend: AutomationBackendV1::Disabled,
+        host_mode: AutomationHostModeV1::Standalone,
         model_id: None,
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));

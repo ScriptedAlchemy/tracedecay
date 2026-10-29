@@ -9,7 +9,7 @@ use tracedecay_automation_runtime::automation::backend::AgentTaskBackend;
 use tracedecay_automation_runtime::automation::combined_effect::{
     DeferredLegTerminal, combined_dispatch_terminals,
 };
-use tracedecay_automation_runtime::automation::config::AutomationConfig;
+use tracedecay_automation_runtime::automation::config::AutomationSettingsV1;
 use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
     AdmittedAutomationEffectRequest, AutomationEffectAdmission, AutomationEffectAuthority,
     DeferredProblemSettlementRequest, DeferredRunSettlementRequest, DeferredSettlementRequest,
@@ -219,7 +219,7 @@ async fn settle<T: SettledRun>(
 
 pub(crate) async fn settle_memory_curator(
     cx: &AutomationProjectContext,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     mut options: MemoryCuratorAutomationOptions,
@@ -245,7 +245,7 @@ pub(crate) async fn settle_memory_curator(
 
 pub(crate) async fn settle_session_reflector(
     cx: &AutomationProjectContext,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     run_control: &AutomationRunControl,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
@@ -272,7 +272,7 @@ pub(crate) async fn settle_session_reflector(
 
 pub(crate) async fn settle_skill_writer(
     cx: &AutomationProjectContext,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     retrieval: &dyn AutomationSessionRetrieval,
@@ -299,7 +299,7 @@ pub(crate) async fn settle_skill_writer(
 /// so the admitted reservation is abandoned instead of settled.
 pub(crate) async fn settle_user_job(
     dashboard_root: &Path,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     backend: &dyn AgentTaskBackend,
     job: &AutomationJob,
     mut options: UserJobRunOptions,
@@ -449,7 +449,7 @@ fn deferred_request(terminal: DeferredLegTerminal) -> DeferredSettlementRequest 
 /// the daemon's combined scheduler effect does.
 pub(crate) async fn settle_combined_review(
     cx: &AutomationProjectContext,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     retrieval: &dyn AutomationSessionRetrieval,

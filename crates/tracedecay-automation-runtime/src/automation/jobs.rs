@@ -13,7 +13,7 @@ use super::backend::{
     AgentTaskRetryReport, BackendRetryPolicy, run_agent_task_with_retry_report,
 };
 use super::config::{
-    AutomationBackend, AutomationConfig, AutomationHostMode, ScheduleResolutionError,
+    AutomationBackendV1, AutomationHostModeV1, AutomationSettingsV1, ScheduleResolutionError,
 };
 use super::job_error;
 use super::job_webhook;
@@ -541,7 +541,7 @@ fn latest_terminal_job_record<'a>(
 /// caller's application settlement.
 pub async fn run_user_job_with_backend_for_retained_settlement(
     dashboard_root: &Path,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     backend: &dyn AgentTaskBackend,
     job: &AutomationJob,
     options: UserJobRunOptions,
@@ -561,7 +561,7 @@ pub async fn run_user_job_with_backend_for_retained_settlement(
 
 async fn run_retained_user_job(
     dashboard_root: &Path,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     backend: &dyn AgentTaskBackend,
     job: &AutomationJob,
     options: UserJobRunOptions,
@@ -797,14 +797,14 @@ async fn run_retained_user_job(
     })
 }
 
-fn config_skip_reason(config: &AutomationConfig) -> Option<AutomationSkipReasonV1> {
+fn config_skip_reason(config: &AutomationSettingsV1) -> Option<AutomationSkipReasonV1> {
     if !config.enabled {
         return Some(AutomationSkipReasonV1::AutomationDisabled);
     }
-    if config.host_mode == AutomationHostMode::DelegatedHost {
+    if config.host_mode == AutomationHostModeV1::DelegatedHost {
         return Some(AutomationSkipReasonV1::DelegatedHostMode);
     }
-    if config.backend == AutomationBackend::Disabled {
+    if config.backend == AutomationBackendV1::Disabled {
         return Some(AutomationSkipReasonV1::BackendDisabled);
     }
     None
@@ -812,7 +812,7 @@ fn config_skip_reason(config: &AutomationConfig) -> Option<AutomationSkipReasonV
 
 struct JobRunContext<'a> {
     dashboard_root: &'a Path,
-    config: &'a AutomationConfig,
+    config: &'a AutomationSettingsV1,
     /// The executable the job's backend spawns (`AgentTaskBackend::executable`).
     executable: Option<&'a Path>,
     job: &'a AutomationJob,

@@ -13,15 +13,15 @@ use super::managed_skills::{
     apply_managed_skill_update, create_managed_skill, default_managed_skill_targets,
     list_managed_skills,
 };
+use super::runner::CanonicalEvidenceHit;
 use super::skill_usage::{
-    SkillOverlapCandidate, SkillStaleRecommendation, SkillUsageSummary,
+    SkillOverlapCandidate, SkillStaleRecommendation, SkillUsageRecord,
     skill_improvement_recommendations as usage_skill_improvement_recommendations,
 };
 use tracedecay_automation::analytics::ToolFamilySignal;
 use tracedecay_automation::managed_skills::validate_managed_skill_update;
 use tracedecay_automation::text::truncate_chars_for_prompt;
 use tracedecay_domain::errors::Result;
-use tracedecay_lcm::LcmGrepHit;
 
 use super::{config_error, normalized_non_empty};
 
@@ -444,8 +444,8 @@ pub(crate) fn support_file_evidence(support: &ManagedSupportFile) -> Value {
 }
 
 pub(crate) fn skill_improvement_recommendations(
-    hits: &[LcmGrepHit],
-    usage_summaries: &[SkillUsageSummary],
+    hits: &[CanonicalEvidenceHit],
+    usage_summaries: &[SkillUsageRecord],
     stale_recommendations: &[SkillStaleRecommendation],
     underused_tool_families: &[ToolFamilySignal],
     overlap_candidates: &[SkillOverlapCandidate],
@@ -566,7 +566,7 @@ pub(crate) fn skill_improvement_recommendations(
     recommendations
 }
 
-fn hit_mentions_correction_or_failure(hit: &LcmGrepHit) -> bool {
+fn hit_mentions_correction_or_failure(hit: &CanonicalEvidenceHit) -> bool {
     let snippet = hit.snippet.to_ascii_lowercase();
     [
         "correction",
@@ -584,7 +584,7 @@ fn hit_mentions_correction_or_failure(hit: &LcmGrepHit) -> bool {
     .any(|needle| snippet.contains(needle))
 }
 
-fn hit_evidence_ref(hit: &LcmGrepHit) -> Value {
+fn hit_evidence_ref(hit: &CanonicalEvidenceHit) -> Value {
     json!({
         "kind": hit.kind,
         "provider": hit.provider,

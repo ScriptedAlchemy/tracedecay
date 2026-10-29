@@ -11,7 +11,7 @@
 //! counter. This module computes one: a content digest over
 //!
 //! * the **effective automation configuration revision**, the full
-//!   [`AutomationConfig`] the run executed under. A content digest is the
+//!   [`AutomationSettingsV1`] the run executed under. A content digest is the
 //!   configuration's revision: it changes exactly when the effective settings
 //!   change, and (unlike a monotonic revision counter) never advances for a
 //!   rewrite that leaves the settings identical. Backend kind, host mode,
@@ -45,7 +45,7 @@ use serde_json::{Value, json};
 use tracedecay_domain::canonical_sha256;
 
 use super::backend::AgentTaskFailureClass;
-use super::config::{AutomationBackend, AutomationConfig};
+use super::config::{AutomationBackendV1, AutomationSettingsV1};
 use super::config_error;
 use tracedecay_domain::errors::Result;
 
@@ -99,7 +99,10 @@ fn executable_digest_cache() -> &'static Mutex<HashMap<ExecutableDigestCacheKey,
 /// the backend spawns nothing (disabled, in-process, or unconfigured).
 /// Envelope hashing stays [`canonical_sha256`]; hasher failures are
 /// `config_error` results.
-pub fn backend_identity(config: &AutomationConfig, executable: Option<&Path>) -> Result<String> {
+pub fn backend_identity(
+    config: &AutomationSettingsV1,
+    executable: Option<&Path>,
+) -> Result<String> {
     // `canonical_sha256` is the crate's one identity primitive: key-ordered,
     // whitespace-free, and already used to derive the configuration identity
     // that curation decisions are bound to.
@@ -125,12 +128,12 @@ pub fn backend_identity(config: &AutomationConfig, executable: Option<&Path>) ->
 /// digest. A missing or unreadable executable stays a typed
 /// `path` + `unreadable` component so identity remains computable.
 fn backend_executable_identity(
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     executable: Option<&Path>,
 ) -> Option<Value> {
     match config.backend {
-        AutomationBackend::Disabled => None,
-        AutomationBackend::CodexAppServer => executable.map(|path| {
+        AutomationBackendV1::Disabled => None,
+        AutomationBackendV1::CodexAppServer => executable.map(|path| {
             opened_executable_identity(path).unwrap_or_else(|| {
                 json!({
                     "path": path.to_string_lossy(),

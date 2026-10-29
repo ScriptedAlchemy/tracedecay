@@ -9,7 +9,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
-use tracedecay_automation::config::AutomationConfig;
+use tracedecay_automation::config::AutomationSettingsV1;
 use tracedecay_domain::configuration::{
     ConfigurationLayerIdV1, ConfigurationValueV1, SettingKey,
     USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY, USER_WATCHER_DEBOUNCE_MS_SETTING_KEY, UserProfileId,
@@ -33,7 +33,7 @@ pub struct UserSettingsSnapshotV1 {
     pub extraction_timeout_secs: u64,
     pub installed_agents: Vec<String>,
     pub cached_latest_version: String,
-    pub automation: AutomationConfig,
+    pub automation: AutomationSettingsV1,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -122,7 +122,7 @@ impl UserSettingsDaemonClient for ProductionUserSettingsDaemonClient {
 struct UserMetadata {
     installed_agents: Vec<String>,
     cached_latest_version: String,
-    automation: AutomationConfig,
+    automation: AutomationSettingsV1,
 }
 
 fn read_user_metadata(profile_root: &Path) -> Result<UserMetadata, UserSettingsAuthorityError> {
@@ -254,7 +254,7 @@ mod tests {
             extraction_timeout_secs: 60,
             installed_agents: Vec::new(),
             cached_latest_version: String::new(),
-            automation: AutomationConfig::default(),
+            automation: AutomationSettingsV1::default(),
         }
     }
 

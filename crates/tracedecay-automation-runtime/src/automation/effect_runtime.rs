@@ -34,4 +34,4 @@ pub use settlement::{
     RetainedAutomationSettlementProjection, RetainedSettlementPairWaiter, RetainedSettlementWaiter,
     ReusedSchedulerSkipStartError, pinned_automation_configuration_digest,
 };
-pub use terminal::{AutomationSettledProblem, AutomationSettledTerminal, curate_receipt_outcome};
+pub use terminal::{AutomationSettledTerminal, curate_receipt_outcome};

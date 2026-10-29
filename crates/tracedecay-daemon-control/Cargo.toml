@@ -25,6 +25,7 @@ tracing.workspace = true
 # (`service/windows_task.rs`). `Win32_System_Ole` is not imported by name but
 # is required by the `windows` crate's VARIANT/TaskScheduler machinery.
 [target.'cfg(windows)'.dependencies]
+tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_System_Com",

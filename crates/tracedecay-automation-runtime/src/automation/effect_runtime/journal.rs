@@ -21,7 +21,8 @@ use tracedecay_private_fs::framed_log::{
 };
 
 use super::contract::contract_error;
-use super::terminal::{AutomationSettledProblem, AutomationSettledTerminal};
+use super::terminal::AutomationSettledTerminal;
+use tracedecay_contracts::retained_surfaces::AutomationRunProblemV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// Production builds keep the item crate-private. Test / `test-helpers` builds
@@ -102,18 +103,18 @@ pub struct DurableAutomationAdmission {
 pub enum AutomationRecoveryBinding {
     Memory {
         owner: FactOwnerV1,
-        recovery_problem: AutomationSettledProblem,
+        recovery_problem: AutomationRunProblemV1,
     },
     /// External effects have no canonical destination-side receipt store.
     /// Restart recovery must close them with this typed indeterminate problem
     /// and must never repeat the delivery or skill mutation.
     External {
-        recovery_problem: AutomationSettledProblem,
+        recovery_problem: AutomationRunProblemV1,
     },
 }
 
 impl DurableAutomationAdmission {
-    pub fn recovery_problem(&self) -> &AutomationSettledProblem {
+    pub fn recovery_problem(&self) -> &AutomationRunProblemV1 {
         match &self.recovery {
             AutomationRecoveryBinding::Memory {
                 recovery_problem, ..
@@ -1298,8 +1299,7 @@ pub fn replace_automation_file_atomically(
 ) -> std::io::Result<()> {
     #[cfg(windows)]
     {
-        let temporary_file =
-            tracedecay_runtime_core::windows_security::make_private_file(temporary)?;
+        let temporary_file = tracedecay_private_fs::windows::make_private_file(temporary)?;
         temporary_file.sync_all()?;
         drop(temporary_file);
     }
@@ -1310,7 +1310,7 @@ pub fn replace_automation_file_atomically(
     )
     .map_err(std::io::Error::other)?;
     #[cfg(windows)]
-    tracedecay_runtime_core::windows_security::validate_private_file(destination)?;
+    tracedecay_private_fs::windows::validate_private_file(destination)?;
     Ok(())
 }
 

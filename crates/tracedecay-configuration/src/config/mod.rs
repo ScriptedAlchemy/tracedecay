@@ -649,7 +649,7 @@ mod tests {
             Err(TraceDecayError::Config { .. })
         ));
         let mut noncanonical = resolved(BTreeMap::new());
-        let mut settings = tracedecay_automation::config::AutomationConfig::default();
+        let mut settings = tracedecay_automation::config::AutomationSettingsV1::default();
         settings.tasks.memory_curator.schedule = Some(" hourly ".to_owned());
         noncanonical.effective_values.insert(
             key,
@@ -705,7 +705,7 @@ mod tests {
         let key = SettingKey::new(AUTOMATION_SETTINGS_SETTING_KEY).unwrap();
         let task = tracedecay_automation::backend::AgentTaskKind::MemoryCurator;
         for schedule in ["every 10m", "after lunch"] {
-            let mut settings = tracedecay_automation::config::AutomationConfig::default();
+            let mut settings = tracedecay_automation::config::AutomationSettingsV1::default();
             settings.tasks.memory_curator.schedule = Some(schedule.to_owned());
             settings.tasks.memory_curator.interval_secs = Some(5);
             let mut snapshot = resolved(BTreeMap::from([(
@@ -766,7 +766,7 @@ mod tests {
         let key =
             SettingKey::new(tracedecay_domain::configuration::AUTOMATION_SETTINGS_SETTING_KEY)
                 .unwrap();
-        let mut settings = tracedecay_automation::config::AutomationConfig::default();
+        let mut settings = tracedecay_automation::config::AutomationSettingsV1::default();
         settings.tasks.memory_curator.schedule = Some("every 10m".to_owned());
         settings.tasks.memory_curator.interval_secs = Some(5);
         let snapshot = resolved(BTreeMap::from([(

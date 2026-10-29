@@ -7,7 +7,7 @@ pub use tracedecay_contracts::automation::{AgentTaskFailureClass, AgentTaskKind}
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
 use tracedecay_domain::errors::{ProjectOpenFailureKind, TraceDecayError};
 
-use crate::config::AutomationBackend;
+use crate::config::AutomationBackendV1;
 use crate::{AutomationError, Result, config_error};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -606,7 +606,7 @@ pub trait AgentTaskBackend: Send + Sync {
 /// the ambient process environment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentBackendAvailability {
-    pub backend: AutomationBackend,
+    pub backend: AutomationBackendV1,
     pub available: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executable: Option<String>,

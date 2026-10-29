@@ -796,16 +796,17 @@ pub(crate) async fn handle_tool_call(
                     },
                 })
                 .to_string();
-                let response = crate::mcp_server_test::run_client_connection_with_messages(
-                    server,
-                    vec![request],
-                )
-                .await
-                .into_iter()
-                .next()
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: format!("{name} returned no MCP response"),
-                })?;
+                let response =
+                    crate::mcp_server_test::support::run_client_connection_with_messages(
+                        server,
+                        vec![request],
+                    )
+                    .await
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| TraceDecayError::Config {
+                        message: format!("{name} returned no MCP response"),
+                    })?;
                 let response: Value =
                     serde_json::from_str(&response).map_err(|error| TraceDecayError::Config {
                         message: format!("{name} returned invalid MCP JSON: {error}"),

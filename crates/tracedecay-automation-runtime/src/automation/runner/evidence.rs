@@ -4,7 +4,7 @@ use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
 use tracedecay_domain::TemporalCoverageCountsV1;
 
-use tracedecay_lcm::{LcmGrepHit, LcmGrepSort, LcmScope};
+use tracedecay_lcm::{LcmGrepSort, LcmScope};
 
 use crate::automation::artifacts::sha256_json;
 use crate::automation::managed_skills::list_managed_skills;
@@ -80,35 +80,20 @@ pub(super) struct SerializedAutomationEvidence {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(super) struct CanonicalEvidenceHit {
-    pub(super) kind: String,
-    pub(super) provider: String,
-    pub(super) session_id: String,
-    pub(super) message_id: Option<String>,
-    pub(super) node_id: Option<String>,
-    pub(super) store_id: Option<i64>,
+pub(crate) struct CanonicalEvidenceHit {
+    pub(crate) kind: String,
+    pub(crate) provider: String,
+    pub(crate) session_id: String,
+    pub(crate) message_id: Option<String>,
+    pub(crate) node_id: Option<String>,
+    pub(crate) store_id: Option<i64>,
     pub(super) role: Option<String>,
-    pub(super) snippet: String,
+    pub(crate) snippet: String,
     pub(super) anchor_id: String,
     pub(super) stable_id: String,
     pub(super) knowledge_at_micros: i64,
     pub(super) normalized_score_micros: u64,
     pub(super) ordinal: Option<i64>,
-}
-
-impl CanonicalEvidenceHit {
-    fn compatibility_hit(&self) -> LcmGrepHit {
-        LcmGrepHit {
-            kind: self.kind.clone(),
-            provider: self.provider.clone(),
-            session_id: self.session_id.clone(),
-            message_id: self.message_id.clone(),
-            node_id: self.node_id.clone(),
-            store_id: self.store_id,
-            role: self.role.clone(),
-            snippet: self.snippet.clone(),
-        }
-    }
 }
 
 pub(super) struct OwnedToolUsageObservation {
@@ -866,12 +851,8 @@ pub(super) async fn build_skill_writer_evidence(
         }));
     let overlap_candidates =
         skill_overlap_candidates(&existing_skills, DEFAULT_SKILL_OVERLAP_LIMIT);
-    let compatibility_hits = hits
-        .iter()
-        .map(CanonicalEvidenceHit::compatibility_hit)
-        .collect::<Vec<_>>();
     let skill_improvement_recommendations = skill_improvement_recommendations(
-        &compatibility_hits,
+        &hits,
         &skill_usage_summaries,
         &stale_recommendations,
         &underused_tool_families,

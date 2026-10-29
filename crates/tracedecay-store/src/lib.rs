@@ -153,9 +153,9 @@ pub use observation::{
     build_scope_resolution_authorization_v1, observation_capture_access_policy_digest_v1,
 };
 pub use projection::{
-    CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ObservationProjection, ObservationProjectionStore,
-    PROJECTION_TERMINAL_RETRY_MICROS, PROVIDER_USAGE_PROJECTOR_VERSION, ProjectedObservation,
-    ProjectionBatchItem, ProjectionCheckpoint, ProjectionDrainBatch, ProjectionPersistOutcome,
+    ObservationProjection, ObservationProjectionStore, PROJECTION_TERMINAL_RETRY_MICROS,
+    PROVIDER_USAGE_PROJECTOR_VERSION, ProjectedObservation, ProjectionBatchItem,
+    ProjectionCheckpoint, ProjectionDrainBatch, ProjectionPersistOutcome,
     ProjectionPredecessorConvergence, ProjectionProvenance, ProjectionRebuildOutcome,
     ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
     SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,

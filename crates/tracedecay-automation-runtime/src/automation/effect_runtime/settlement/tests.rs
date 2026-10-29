@@ -224,10 +224,7 @@ fn write_private_test_file(path: &std::path::Path, bytes: &[u8]) {
             .expect("private test file mode");
     }
     #[cfg(windows)]
-    drop(
-        tracedecay_runtime_core::windows_security::make_private_file(path)
-            .expect("private test file ACL"),
-    );
+    drop(tracedecay_private_fs::windows::make_private_file(path).expect("private test file ACL"));
 }
 
 fn retained_external_authority(
@@ -349,17 +346,19 @@ async fn retained_disabled_user_job_run(
     job_id: &str,
 ) -> crate::automation::runner::RetainedAutomationRun<crate::automation::jobs::UserJobAutomationRun>
 {
-    use crate::automation::config::{AutomationBackend, AutomationConfig, AutomationHostMode};
+    use crate::automation::config::{
+        AutomationBackendV1, AutomationHostModeV1, AutomationSettingsV1,
+    };
     use crate::automation::jobs::{
         AutomationJob, JobDelivery, UserJobRunOptions,
         run_user_job_with_backend_for_retained_settlement,
     };
 
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        ..AutomationConfig::default()
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        ..AutomationSettingsV1::default()
     };
     let job = AutomationJob {
         id: job_id.to_owned(),
@@ -977,14 +976,13 @@ fn indexed_terminal_publishers_replace_a_held_journal_with_private_files() {
         ReservationResult::Execute { claim, .. } => claim,
         _ => panic!("fresh indexed reservation must execute"),
     };
-    tracedecay_runtime_core::windows_security::validate_private_file(&journal_path)
+    tracedecay_private_fs::windows::validate_private_file(&journal_path)
         .expect("private Reserved journal");
-    tracedecay_runtime_core::windows_security::validate_private_file(&pending_index_path)
+    tracedecay_private_fs::windows::validate_private_file(&pending_index_path)
         .expect("private pending index");
     let reserved_bytes = std::fs::read(&journal_path).expect("Reserved journal bytes");
-    let mut held_reader =
-        tracedecay_runtime_core::windows_security::open_private_file(&journal_path)
-            .expect("held Reserved journal reader");
+    let mut held_reader = tracedecay_private_fs::windows::open_private_file(&journal_path)
+        .expect("held Reserved journal reader");
 
     let terminal = AutomationSettledTerminal::Problem(admission.recovery_problem().clone());
     persist_terminal_blocking(&journal_path, &admission, terminal)
@@ -1006,13 +1004,13 @@ fn indexed_terminal_publishers_replace_a_held_journal_with_private_files() {
             .expect("Terminal journal")
             .is_terminal()
     );
-    tracedecay_runtime_core::windows_security::validate_private_file(&journal_path)
+    tracedecay_private_fs::windows::validate_private_file(&journal_path)
         .expect("private Terminal journal");
-    tracedecay_runtime_core::windows_security::validate_private_file(
+    tracedecay_private_fs::windows::validate_private_file(
         &terminal_sidecar_path(&journal_path).expect("terminal sidecar path"),
     )
     .expect("private terminal sidecar");
-    tracedecay_runtime_core::windows_security::validate_private_file(&pending_index_path)
+    tracedecay_private_fs::windows::validate_private_file(&pending_index_path)
         .expect("private retained pending index");
     drop(claim);
 }
@@ -2109,7 +2107,7 @@ fn retained_settlement_waiter_is_send_and_static() {
     assert_send_static::<
         super::RetainedSettlementWaiter<
             tracedecay_domain::errors::Result<(
-                super::AutomationSettledProblem,
+                super::AutomationRunProblemV1,
                 Option<AutomationRunLedgerRecord>,
             )>,
         >,

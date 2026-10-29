@@ -29,7 +29,7 @@ pub(super) async fn handle_automation_config_command(
     action: AutomationConfigAction,
 ) -> tracedecay_domain::errors::Result<()> {
     use tracedecay_automation_runtime::automation::config::{
-        AutomationBackend, AutomationConfigPatch,
+        AutomationBackendV1, AutomationConfigPatch,
     };
 
     let path = match &action {
@@ -54,7 +54,7 @@ pub(super) async fn handle_automation_config_command(
         }
         AutomationConfigAction::Enable { .. } => AutomationConfigPatch {
             enabled: Some(true),
-            backend: Some(AutomationBackend::CodexAppServer),
+            backend: Some(AutomationBackendV1::CodexAppServer),
             ..AutomationConfigPatch::default()
         },
         AutomationConfigAction::Disable { .. } => AutomationConfigPatch {
@@ -132,7 +132,7 @@ pub(crate) async fn load_canonical_automation_config(
     profile: &ProfileRoot,
     project_path: &std::path::Path,
 ) -> tracedecay_domain::errors::Result<
-    tracedecay_automation_runtime::automation::config::AutomationConfig,
+    tracedecay_automation_runtime::automation::config::AutomationSettingsV1,
 > {
     match crate::commands::current_project_setting(
         profile,
@@ -178,7 +178,7 @@ pub(crate) async fn apply_project_automation_patch(
     project_path: &std::path::Path,
     patch: tracedecay_automation_runtime::automation::config::AutomationConfigPatch,
 ) -> tracedecay_domain::errors::Result<
-    tracedecay_automation_runtime::automation::config::AutomationConfig,
+    tracedecay_automation_runtime::automation::config::AutomationSettingsV1,
 > {
     let resolved =
         crate::commands::resolve_project_scope(profile, project_path.to_path_buf()).await?;
@@ -266,7 +266,7 @@ fn parse_optional_u64(
 }
 
 fn print_automation_config(
-    effective: &tracedecay_automation_runtime::automation::config::AutomationConfig,
+    effective: &tracedecay_automation_runtime::automation::config::AutomationSettingsV1,
     codex: &tracedecay_domain::configuration::LcmSummarizerExecutableV1,
     json: bool,
     explain: bool,
@@ -275,9 +275,9 @@ fn print_automation_config(
         tracedecay_automation_runtime::automation::backend::backend_availability(effective, codex);
     let trace_decay_backend_calls = effective.enabled
         && effective.backend
-            == tracedecay_automation_runtime::automation::config::AutomationBackend::CodexAppServer
+            == tracedecay_automation_runtime::automation::config::AutomationBackendV1::CodexAppServer
         && effective.host_mode
-            == tracedecay_automation_runtime::automation::config::AutomationHostMode::Standalone;
+            == tracedecay_automation_runtime::automation::config::AutomationHostModeV1::Standalone;
     let payload = serde_json::json!({
         "source": "daemon_pinned_snapshot",
         "effective": effective,
@@ -285,7 +285,7 @@ fn print_automation_config(
         "explanation": {
             "trace_decay_backend_calls": trace_decay_backend_calls,
             "delegated_host": effective.host_mode
-                == tracedecay_automation_runtime::automation::config::AutomationHostMode::DelegatedHost,
+                == tracedecay_automation_runtime::automation::config::AutomationHostModeV1::DelegatedHost,
             "automatic_memory_apply": true,
             "automatic_skill_activation": true,
         },
@@ -323,12 +323,12 @@ fn print_automation_config(
 fn parse_automation_backend(
     value: &str,
 ) -> tracedecay_domain::errors::Result<
-    tracedecay_automation_runtime::automation::config::AutomationBackend,
+    tracedecay_automation_runtime::automation::config::AutomationBackendV1,
 > {
-    use tracedecay_automation_runtime::automation::config::AutomationBackend;
+    use tracedecay_automation_runtime::automation::config::AutomationBackendV1;
     match value {
-        "disabled" => Ok(AutomationBackend::Disabled),
-        "codex-app-server" => Ok(AutomationBackend::CodexAppServer),
+        "disabled" => Ok(AutomationBackendV1::Disabled),
+        "codex-app-server" => Ok(AutomationBackendV1::CodexAppServer),
         _ => Err(config_error(format!(
             "unknown automation backend '{value}' (expected disabled, codex-app-server)"
         ))),
@@ -338,12 +338,12 @@ fn parse_automation_backend(
 fn parse_automation_host_mode(
     value: &str,
 ) -> tracedecay_domain::errors::Result<
-    tracedecay_automation_runtime::automation::config::AutomationHostMode,
+    tracedecay_automation_runtime::automation::config::AutomationHostModeV1,
 > {
-    use tracedecay_automation_runtime::automation::config::AutomationHostMode;
+    use tracedecay_automation_runtime::automation::config::AutomationHostModeV1;
     match value {
-        "standalone" => Ok(AutomationHostMode::Standalone),
-        "delegated-host" => Ok(AutomationHostMode::DelegatedHost),
+        "standalone" => Ok(AutomationHostModeV1::Standalone),
+        "delegated-host" => Ok(AutomationHostModeV1::DelegatedHost),
         _ => Err(config_error(format!(
             "unknown automation host mode '{value}' (expected standalone, delegated-host)"
         ))),

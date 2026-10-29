@@ -1,8 +1,8 @@
 use tempfile::tempdir;
 use tracedecay_automation_runtime::automation::backend::{AgentTaskFailureClass, AgentTaskKind};
 use tracedecay_automation_runtime::automation::config::{
-    AutomationBackend, AutomationConfig, AutomationConfigPatch, AutomationTaskConfig,
-    AutomationTaskPatch, AutomationTaskSet, effective_config,
+    AutomationBackendV1, AutomationConfigPatch, AutomationSettingsV1, AutomationTaskPatch,
+    AutomationTaskSetV1, AutomationTaskSettingsV1, effective_config,
 };
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
@@ -21,7 +21,7 @@ use tracedecay_sessions::admission::HostAdmissionScope;
 use crate::support::{SeedSessionMessage, scheduler_record_for, seed_session_message_in_db};
 
 fn schedule_decision(
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     executable: Option<&std::path::Path>,
     task: AgentTaskKind,
     records: &[AutomationRunLedgerRecord],
@@ -39,7 +39,7 @@ fn schedule_decision(
 }
 
 fn host_receipt_decision(
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     executable: Option<&std::path::Path>,
     task: AgentTaskKind,
     records: &[AutomationRunLedgerRecord],
@@ -71,34 +71,34 @@ async fn scheduler_session_runtime(
     .expect("registered scheduler session runtime")
 }
 
-fn automation_config(schedule: Option<&str>, interval_secs: Option<u64>) -> AutomationConfig {
-    AutomationConfig {
+fn automation_config(schedule: Option<&str>, interval_secs: Option<u64>) -> AutomationSettingsV1 {
+    AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        tasks: AutomationTaskSet {
-            memory_curator: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        tasks: AutomationTaskSetV1 {
+            memory_curator: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: schedule.map(str::to_string),
                 interval_secs,
                 cooldown_secs: Some(300),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            session_reflector: AutomationTaskConfig {
+            session_reflector: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: schedule.map(str::to_string),
                 interval_secs,
                 cooldown_secs: Some(300),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            skill_writer: AutomationTaskConfig {
+            skill_writer: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: schedule.map(str::to_string),
                 interval_secs,
                 cooldown_secs: Some(300),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     }
 }
 
@@ -1318,7 +1318,7 @@ async fn load_session_activity_selects_newest_after_normalizing_mixed_timestamp_
 fn config_requires_interval_secs_for_configured_interval_schedule() {
     let patch = AutomationConfigPatch {
         enabled: Some(true),
-        backend: Some(AutomationBackend::CodexAppServer),
+        backend: Some(AutomationBackendV1::CodexAppServer),
         memory_curator: AutomationTaskPatch {
             enabled: Some(true),
             schedule: Some(Some("interval".to_string())),
@@ -1328,7 +1328,7 @@ fn config_requires_interval_secs_for_configured_interval_schedule() {
         ..AutomationConfigPatch::default()
     };
 
-    let err = effective_config(&AutomationConfig::default(), Some(&patch)).unwrap_err();
+    let err = effective_config(&AutomationSettingsV1::default(), Some(&patch)).unwrap_err();
     assert!(
         err.to_string()
             .contains("memory_curator interval_secs is required"),
@@ -1345,7 +1345,7 @@ fn config_validates_scheduler_idle_bound_and_rejects_retired_lock_timeout() {
         },
         ..AutomationConfigPatch::default()
     };
-    let error = effective_config(&AutomationConfig::default(), Some(&patch))
+    let error = effective_config(&AutomationSettingsV1::default(), Some(&patch))
         .unwrap_err()
         .to_string();
     assert!(
@@ -1378,7 +1378,7 @@ fn config_validates_scheduler_idle_bound_and_rejects_retired_lock_timeout() {
         ..AutomationConfigPatch::default()
     };
     let config =
-        effective_config(&AutomationConfig::default(), Some(&patch)).expect("nonzero bounds");
+        effective_config(&AutomationSettingsV1::default(), Some(&patch)).expect("nonzero bounds");
     assert_eq!(config.tasks.memory_curator.min_idle_secs, Some(600));
 }
 

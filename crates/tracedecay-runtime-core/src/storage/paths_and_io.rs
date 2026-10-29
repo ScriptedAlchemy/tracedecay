@@ -746,7 +746,7 @@ pub(super) fn open_lock_file(lock_path: &Path, private: bool) -> io::Result<fs::
 
     #[cfg(windows)]
     if private {
-        return crate::windows_security::open_or_create_private_lock_file(lock_path);
+        return tracedecay_private_fs::windows::open_or_create_private_lock_file(lock_path);
     }
 
     let mut options = fs::OpenOptions::new();

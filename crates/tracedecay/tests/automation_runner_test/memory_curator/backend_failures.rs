@@ -1,6 +1,6 @@
 use crate::support::{
-    AgentTaskFailureClass, AgentTaskKind, AtomicBool, AutomationBackend, AutomationConfig,
-    AutomationHostMode, AutomationRunStatus, AutomationTaskConfig, AutomationTaskSet,
+    AgentTaskFailureClass, AgentTaskKind, AtomicBool, AutomationBackendV1, AutomationHostModeV1,
+    AutomationRunStatus, AutomationSettingsV1, AutomationTaskSetV1, AutomationTaskSettingsV1,
     AutomationTrigger, FailingBackend, MalformedTextBackend, MemoryCuratorAutomationOptions,
     assert_noop_fallback_record, fact_exists, init_project, json, load_run_records,
     run_memory_curator, seed_duplicate_facts, tempdir, test_automation_run_control,
@@ -14,19 +14,19 @@ async fn memory_curator_runner_ledgers_malformed_backend_output() {
     let facts = seed_duplicate_facts(&cg).await;
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
     let backend = MalformedTextBackend::new(AgentTaskKind::MemoryCurator, "not json");
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            memory_curator: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            memory_curator: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
 
     let err = run_memory_curator(
@@ -79,20 +79,20 @@ async fn memory_curator_runner_records_noop_fallback_when_backend_run_task_fails
     let facts = seed_duplicate_facts(&cg).await;
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
     let backend = FailingBackend::new(AgentTaskKind::MemoryCurator);
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
         timeout_secs: 1,
-        tasks: AutomationTaskSet {
-            memory_curator: AutomationTaskConfig {
+        tasks: AutomationTaskSetV1 {
+            memory_curator: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
 
     let run = run_memory_curator(

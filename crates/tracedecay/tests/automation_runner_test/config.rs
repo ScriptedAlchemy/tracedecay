@@ -1,19 +1,19 @@
 use tracedecay_automation_runtime::automation::config::{
-    AutomationBackend, AutomationConfig, AutomationConfigPatch, AutomationHostMode,
+    AutomationBackendV1, AutomationConfigPatch, AutomationHostModeV1, AutomationSettingsV1,
     AutomationTaskPatch, effective_config,
 };
 
 #[test]
 fn effective_config_applies_typed_patch() {
-    let global = AutomationConfig {
+    let global = AutomationSettingsV1 {
         timeout_secs: 45,
         scheduler_tick_secs: 30,
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
     let patch = AutomationConfigPatch {
         enabled: Some(true),
-        backend: Some(AutomationBackend::CodexAppServer),
-        host_mode: Some(AutomationHostMode::DelegatedHost),
+        backend: Some(AutomationBackendV1::CodexAppServer),
+        host_mode: Some(AutomationHostModeV1::DelegatedHost),
         model_id: Some(Some("gpt-5.6-mini".to_owned())),
         memory_curator: AutomationTaskPatch {
             enabled: Some(true),
@@ -26,8 +26,8 @@ fn effective_config_applies_typed_patch() {
     let config = effective_config(&global, Some(&patch)).unwrap();
 
     assert!(config.enabled);
-    assert_eq!(config.backend, AutomationBackend::CodexAppServer);
-    assert_eq!(config.host_mode, AutomationHostMode::DelegatedHost);
+    assert_eq!(config.backend, AutomationBackendV1::CodexAppServer);
+    assert_eq!(config.host_mode, AutomationHostModeV1::DelegatedHost);
     assert_eq!(config.model_id.as_deref(), Some("gpt-5.6-mini"));
     assert_eq!(config.timeout_secs, 45);
     assert_eq!(config.scheduler_tick_secs, 30);
@@ -45,7 +45,7 @@ fn validation_rejects_zero_scheduler_tick_secs() {
         ..AutomationConfigPatch::default()
     };
 
-    let err = effective_config(&AutomationConfig::default(), Some(&patch)).unwrap_err();
+    let err = effective_config(&AutomationSettingsV1::default(), Some(&patch)).unwrap_err();
     assert!(err.to_string().contains("scheduler_tick_secs"));
 }
 
@@ -60,6 +60,6 @@ fn validation_rejects_invalid_task_schedule() {
         ..AutomationConfigPatch::default()
     };
 
-    let err = effective_config(&AutomationConfig::default(), Some(&patch)).unwrap_err();
+    let err = effective_config(&AutomationSettingsV1::default(), Some(&patch)).unwrap_err();
     assert!(err.to_string().contains("skill_writer schedule"));
 }

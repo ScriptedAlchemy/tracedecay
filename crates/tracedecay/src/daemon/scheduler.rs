@@ -111,7 +111,7 @@ fn log_scheduler_automation_replay(
 pub(super) fn scheduler_application_problem_log_fields(
     project_path: &Path,
     task: AgentTaskKind,
-    problem: &tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledProblem,
+    problem: &tracedecay_contracts::retained_surfaces::AutomationRunProblemV1,
 ) -> Vec<(&'static str, String)> {
     let mut fields = scheduler_project_task_fields(project_path, task);
     fields.extend([
@@ -2001,12 +2001,12 @@ async fn effective_automation_config_for_project(
 
 pub(super) fn automation_scheduler_configured(config: &AdmittedAutomationConfig) -> bool {
     use tracedecay_automation_runtime::automation::config::{
-        AutomationBackend, AutomationHostMode,
+        AutomationBackendV1, AutomationHostModeV1,
     };
 
     if !config.enabled
-        || config.host_mode == AutomationHostMode::DelegatedHost
-        || config.backend != AutomationBackend::CodexAppServer
+        || config.host_mode == AutomationHostModeV1::DelegatedHost
+        || config.backend != AutomationBackendV1::CodexAppServer
     {
         return false;
     }
@@ -2045,15 +2045,15 @@ async fn automation_scheduler_has_work(
     config: &AdmittedAutomationConfig,
 ) -> Result<bool> {
     use tracedecay_automation_runtime::automation::config::{
-        AutomationBackend, AutomationHostMode,
+        AutomationBackendV1, AutomationHostModeV1,
     };
 
     if automation_scheduler_configured(config) {
         return Ok(true);
     }
     if !config.enabled
-        || config.host_mode == AutomationHostMode::DelegatedHost
-        || config.backend != AutomationBackend::CodexAppServer
+        || config.host_mode == AutomationHostModeV1::DelegatedHost
+        || config.backend != AutomationBackendV1::CodexAppServer
     {
         return Ok(false);
     }
@@ -2082,7 +2082,7 @@ async fn run_user_jobs_scheduler_pass(
     profile_root: &Path,
     cg: &tracedecay_project::project::TraceDecay,
     configuration_digest: tracedecay_domain::ManifestDigest,
-    config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
+    config: &tracedecay_automation_runtime::automation::config::AutomationSettingsV1,
     backend: &tracedecay_automation_runtime::automation::backend::CodexAppServerBackend,
     first_error: &mut Option<TraceDecayError>,
 ) {

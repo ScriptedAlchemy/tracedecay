@@ -16,9 +16,9 @@ use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_store::{
-    AnchoredObservationWrite, CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ObservationPersistOutcome,
-    ObservationProjectionStatus, ObservationProjectionStore, ObservationStore, ObservationWrite,
-    ProjectionPersistOutcome, ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError,
+    AnchoredObservationWrite, ObservationPersistOutcome, ObservationProjectionStatus,
+    ObservationProjectionStore, ObservationStore, ObservationWrite, ProjectionPersistOutcome,
+    ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError,
     SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
     SESSION_MESSAGE_PROJECTOR_VERSION_V5, build_observation_resolution_authorization_v1,
     build_observation_retrieval_anchor,
@@ -435,10 +435,7 @@ async fn add_other_projector_owner(tmp: &TempDir, observation_id: &CanonicalObse
                       receipt_id, output_provider, output_message_id, output_digest, 0
                FROM observation_projection_provenance
                WHERE projector_version = ?1 AND observation_id = ?2",
-            rusqlite::params![
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
-                observation_id.as_str(),
-            ],
+            rusqlite::params![SESSION_MESSAGE_PROJECTOR_VERSION, observation_id.as_str(),],
         )
         .unwrap();
 }

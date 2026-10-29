@@ -694,7 +694,7 @@ fn scheduled_automation_patch(
     tracedecay_automation_runtime::automation::config::AutomationConfigPatch {
         enabled: Some(enabled),
         backend: Some(
-            tracedecay_automation_runtime::automation::config::AutomationBackend::CodexAppServer,
+            tracedecay_automation_runtime::automation::config::AutomationBackendV1::CodexAppServer,
         ),
         memory_curator: tracedecay_automation_runtime::automation::config::AutomationTaskPatch {
             enabled: Some(true),

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::canonical_text::default_true;
 
-use tracedecay_automation::config::AutomationConfig;
+use tracedecay_automation::config::AutomationSettingsV1;
 use tracedecay_runtime_core::storage::{append_lock_path, retry_transient_file_op};
 
 /// Keys canonical `user.*` configuration settings own, and state of the
@@ -78,8 +78,8 @@ pub struct UserConfig {
 
     /// Global defaults for self-improvement automation. Project/profile
     /// dashboard sidecars may override these values.
-    #[serde(default, skip_serializing_if = "AutomationConfig::is_default")]
-    pub automation: AutomationConfig,
+    #[serde(default, skip_serializing_if = "AutomationSettingsV1::is_default")]
+    pub automation: AutomationSettingsV1,
 
     /// Whether lifecycle hooks inject fact-store memory into agent context
     /// (session digests, prompt-gated recall, the Cursor memory rule).
@@ -103,7 +103,7 @@ impl Default for UserConfig {
             agent_catalog_profile: BTreeMap::new(),
             last_installed_version: String::new(),
             previous_version: String::new(),
-            automation: AutomationConfig::default(),
+            automation: AutomationSettingsV1::default(),
             memory_injection_enabled: true,
             extra: BTreeMap::new(),
         }
