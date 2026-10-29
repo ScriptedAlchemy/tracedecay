@@ -457,6 +457,26 @@ pub async fn run_context_scout_intent_pass(
             return ContextScoutIntentPassOutcomeV1::NoCandidate { model_outcome };
         }
     };
+    // A pending suggestion for this intent is owed whether or not this
+    // boundary's own hook has claimed it yet, so the claim race never decides
+    // between suppressing and superseding it with a re-judged copy.
+    if session.pending_intents.contains(&selected.intent) {
+        pass.owner
+            .record_intent_outcome(ContextScoutSuppressionV1::Duplicate)
+            .await;
+        record_withheld(
+            &pass,
+            "suppressed_duplicate",
+            selected.intent,
+            &provider_id,
+            None,
+        )
+        .await;
+        return ContextScoutIntentPassOutcomeV1::Suppressed {
+            reason: ContextScoutSuppressionV1::Duplicate,
+            model_outcome,
+        };
+    }
 
     let delivery_window =
         select_context_scout_delivery_window(&ContextScoutDeliverySelectionInputV1 {

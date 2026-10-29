@@ -3,7 +3,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use tracedecay_agent_hosts::agents::context_scout::address_registry::ContextScoutConfigurationPinV1;
+use tracedecay_agent_hosts::agents::context_scout::address_registry::{
+    AdmittedContextScoutHookV1, ContextScoutConfigurationPinV1,
+};
 use tracedecay_agent_hosts::agents::context_scout::intent_pass::ContextScoutIntentPassOutcomeV1;
 use tracedecay_agent_hosts::agents::context_scout::{
     ContextScoutDurableStoreOutcomeV1, ContextScoutSuppressionV1,
@@ -315,7 +317,52 @@ async fn mount_intent(
     (engine, entry)
 }
 
-async fn intent_pass_overlapping_a_claim_is_suppressed(record_delivery: bool) {
+/// Where the stop's own delivery of the tool boundary's suggestion stands
+/// when the stop's intent pass judges the session. A replayed stop admits
+/// without a host response, so its pass can run before any claim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StopDeliveryV1 {
+    Unclaimed,
+    Claimed,
+    Recorded,
+}
+
+async fn claim_stop_guidance(
+    fixture: &IntentJourneyFixture,
+    stop: &AdmittedContextScoutHookV1,
+    entry: &ContextScoutDurableQueueEntryV1,
+    record_delivery: bool,
+) {
+    let (guidance, claim) = fixture
+        .owner
+        .claim_ready_guidance_exact(
+            stop.envelope(),
+            entry.work.address,
+            entry.work.input_watermark,
+            1,
+            now_utc_micros(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(guidance.text, entry.envelope.candidate.suggestion_text);
+    if record_delivery {
+        let receipt = ContextScoutDeliveryReceiptV1 {
+            receipt_id: context_scout_delivery_receipt_id(
+                stop.envelope().event_id,
+                guidance.guidance_id,
+            ),
+            envelope_id: guidance.guidance_id,
+            delivered_at: now_utc_micros(),
+            outcome: ContextScoutDeliveryOutcomeV1::Attempted,
+        };
+        assert_eq!(
+            fixture.owner.record_delivery(&claim, &receipt).await,
+            ContextScoutDurableStoreOutcomeV1::Stored
+        );
+    }
+}
+
+async fn stop_intent_pass_suppresses_the_owed_suggestion(delivery: StopDeliveryV1) {
     let (fixture, graph, runtime) = registered_fixture().await;
     let sessions = runtime
         .registered_database_arc(HostAdmissionScope::Project)
@@ -331,33 +378,14 @@ async fn intent_pass_overlapping_a_claim_is_suppressed(record_delivery: bool) {
     let (started, release) = engine.hold_next_request();
     let claim_during_evaluation = async {
         started.await.unwrap();
-        let claimed_at = now_utc_micros();
-        let (guidance, claim) = fixture
-            .owner
-            .claim_ready_guidance_exact(
-                stop.envelope(),
-                entry.work.address,
-                entry.work.input_watermark,
-                1,
-                claimed_at,
+        if delivery != StopDeliveryV1::Unclaimed {
+            claim_stop_guidance(
+                &fixture,
+                &stop,
+                &entry,
+                delivery == StopDeliveryV1::Recorded,
             )
-            .await
-            .unwrap();
-        assert_eq!(guidance.text, entry.envelope.candidate.suggestion_text);
-        if record_delivery {
-            let receipt = ContextScoutDeliveryReceiptV1 {
-                receipt_id: context_scout_delivery_receipt_id(
-                    stop.envelope().event_id,
-                    guidance.guidance_id,
-                ),
-                envelope_id: guidance.guidance_id,
-                delivered_at: now_utc_micros(),
-                outcome: ContextScoutDeliveryOutcomeV1::Attempted,
-            };
-            assert_eq!(
-                fixture.owner.record_delivery(&claim, &receipt).await,
-                ContextScoutDurableStoreOutcomeV1::Stored
-            );
+            .await;
         }
         release.send(()).unwrap();
     };
@@ -371,15 +399,20 @@ async fn intent_pass_overlapping_a_claim_is_suppressed(record_delivery: bool) {
             reason: ContextScoutSuppressionV1::Duplicate,
             model_outcome: ContextScoutModelOutcomeV1::Succeeded,
         },
-        "the original suggestion is already claimed; delivered={record_delivery}"
+        "the tool boundary's suggestion is owed to the session: {delivery:?}"
     );
     assert_eq!(engine.requests(), 2);
+    if delivery == StopDeliveryV1::Unclaimed {
+        // The stop's later claim still delivers the suggestion the tool
+        // boundary judged, not a re-judged copy.
+        claim_stop_guidance(&fixture, &stop, &entry, false).await;
+    }
     let recent = fixture
         .owner
         .recent_exact(entry.work.address, 8)
         .await
         .unwrap();
-    if record_delivery {
+    if delivery == StopDeliveryV1::Recorded {
         assert_eq!(recent.pending, Vec::new());
         assert_eq!(recent.deliveries.len(), 1);
         assert_eq!(recent.deliveries[0].entry, *entry);
@@ -395,13 +428,27 @@ async fn intent_pass_overlapping_a_claim_is_suppressed(record_delivery: bool) {
 }
 
 #[tokio::test]
+async fn intent_pass_before_the_stop_claims_its_suggestion_is_suppressed() {
+    Box::pin(stop_intent_pass_suppresses_the_owed_suggestion(
+        StopDeliveryV1::Unclaimed,
+    ))
+    .await;
+}
+
+#[tokio::test]
 async fn intent_pass_with_an_already_claimed_suggestion_is_suppressed() {
-    Box::pin(intent_pass_overlapping_a_claim_is_suppressed(false)).await;
+    Box::pin(stop_intent_pass_suppresses_the_owed_suggestion(
+        StopDeliveryV1::Claimed,
+    ))
+    .await;
 }
 
 #[tokio::test]
 async fn intent_pass_with_a_delivery_during_evaluation_is_suppressed() {
-    Box::pin(intent_pass_overlapping_a_claim_is_suppressed(true)).await;
+    Box::pin(stop_intent_pass_suppresses_the_owed_suggestion(
+        StopDeliveryV1::Recorded,
+    ))
+    .await;
 }
 
 #[tokio::test]
