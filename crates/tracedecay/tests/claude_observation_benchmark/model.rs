@@ -279,8 +279,7 @@ pub(super) struct BenchmarkResult {
     pub(super) no_op_replay_database_storage_growth_bytes: u64,
     pub(super) no_op_replay_observation_count_delta: i64,
     pub(super) no_op_replay_totals: NoOpTotals,
-    /// Additive schema-2 field. Current acceptance validation requires it,
-    /// while historical schema-2 artifacts can still deserialize.
+    /// Acceptance validation requires it.
     #[serde(default)]
     pub(super) provider_observation_performance: Option<ProviderBenchmarkSuiteResult>,
     #[serde(default)]
