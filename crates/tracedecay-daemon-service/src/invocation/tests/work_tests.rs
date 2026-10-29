@@ -1,0 +1,1166 @@
+use super::{
+    Arc, DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationRequest,
+    DaemonInvocationService, DaemonWorkProposalRoutingAuthorityV1, DaemonWorkRuntimeRegistrar,
+    ManifestDigest, ProjectId, ResolvedScope, UtcMicros, WorkApplicationInvocationV1,
+    WorkApplicationOutcomeV1,
+};
+
+use crate::GRANT_HORIZON;
+use std::collections::{BTreeMap, BTreeSet};
+
+use tokio::sync::Mutex;
+use tracedecay_application::work::{
+    WorkTaskSessionAdmittedRetrievalPortV1, WorkTaskSessionEvidenceRetrievalV1,
+};
+use tracedecay_contracts::{
+    ApplicationOutcome, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
+    DisclosureClass, GenerateProposalRequest, PrepareWorkProductMutationRequestV1,
+    WorkGraphReadRequestV1, WorkProductAuthorizedRelationScopeV1, WorkProductChangeDraftV1,
+    WorkProductMutationRequestV1, WorkProductSelectionScopeV1,
+};
+use tracedecay_domain::{
+    ActorId, InitiativeId, MilestoneId, ProposalId, TaskId, WorkAuthority, WorkHierarchyV1,
+    WorkInitiativeV1, WorkItemInputV1, WorkItemV1, WorkMilestoneV1, WorkPlanId, WorkPlanV1,
+    WorkProposalDispositionV1, WorkProposalV1, WorkRouteDecisionV1, WorkScoreKindV1,
+    WorkShapeAssessmentV1, WorkSizingV1,
+};
+use tracedecay_lsp::LspSessionRegistry;
+use tracedecay_policy::work_loop::WorkProposalReasonV1;
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+
+fn product_task(
+    identity: &str,
+    task_id: TaskId,
+    created_at: UtcMicros,
+) -> (WorkInitiativeV1, WorkPlanV1, WorkMilestoneV1, WorkItemV1) {
+    let initiative_id =
+        InitiativeId::new(format!("initiative.work.{identity}")).expect("fixture initiative id");
+    let plan_id = WorkPlanId::new(format!("plan.work.{identity}")).expect("fixture plan id");
+    let milestone_id =
+        MilestoneId::new(format!("milestone.work.{identity}")).expect("fixture milestone id");
+    let initiative = WorkInitiativeV1::new(
+        initiative_id.clone(),
+        format!("Work initiative {identity}"),
+        created_at,
+    )
+    .expect("fixture initiative");
+    let plan = WorkPlanV1::new(
+        plan_id.clone(),
+        initiative_id.clone(),
+        format!("Work plan {identity}"),
+        created_at,
+    )
+    .expect("fixture plan");
+    let milestone = WorkMilestoneV1::new(
+        milestone_id.clone(),
+        plan_id.clone(),
+        format!("Work milestone {identity}"),
+        created_at,
+    )
+    .expect("fixture milestone");
+    let item = WorkItemV1::new(WorkItemInputV1 {
+        task_id,
+        hierarchy: WorkHierarchyV1::new(initiative_id, plan_id, milestone_id),
+        title: format!("Deliver Work task {identity}"),
+        dependencies: BTreeSet::new(),
+        informational_relations: BTreeSet::new(),
+        causal_candidates: BTreeSet::new(),
+        acceptance_criteria: Vec::new(),
+        effort: 1,
+        scheduled_at: None,
+        deadline: None,
+        created_at,
+        updated_at: created_at,
+    })
+    .expect("fixture Work item");
+    (initiative, plan, milestone, item)
+}
+
+#[tokio::test]
+async fn registered_work_services_dispatch_the_core_lifecycle() {
+    let profile = tempfile::tempdir().expect("profile root");
+    let project = tempfile::tempdir().expect("project root");
+    let project_id = ProjectId::new("project.work.core-invocation").expect("project id");
+    let host =
+        tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
+            profile.path(),
+            project.path(),
+            project_id.clone(),
+        )
+        .await
+        .expect("registered project runtime");
+    let database = host
+        .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
+        .expect("registered project database");
+    let actor = ActorId::new("actor.work.core-invocation").expect("actor id");
+    let scope = ResolvedScope::new(
+        project_id,
+        tracedecay_domain::RepositoryId::new("repository.work.core-invocation")
+            .expect("repository id"),
+        tracedecay_domain::WorktreeId::new("worktree.work.core-invocation").expect("worktree id"),
+        None,
+    )
+    .expect("resolved scope");
+    let grant_digest =
+        ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).expect("grant digest");
+    let capabilities = tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
+        .iter()
+        .map(|(_, capability, _)| CapabilityId::new(*capability).expect("capability"))
+        .collect();
+    let use_cases = tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
+        .iter()
+        .map(|(_, _, use_case)| UseCaseId::new(*use_case).expect("use case"))
+        .collect();
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.work.core-invocation").expect("grant id"),
+        1,
+        grant_digest.clone(),
+        actor.clone(),
+        UtcMicros(1),
+        UtcMicros(10_000),
+        scope.clone(),
+        capabilities,
+        use_cases,
+        DisclosureClass::Sensitive,
+    )
+    .expect("Work grant");
+    let authority = WorkAuthority::new(
+        scope.project_id.clone(),
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+        actor.clone(),
+        grant_digest,
+    )
+    .expect("Work authority");
+    let _registration_grant = grant.clone();
+    let _policy_digest =
+        ManifestDigest::new(format!("sha256:{}", "e".repeat(64))).expect("policy digest");
+    let _configuration_digest =
+        ManifestDigest::new(format!("sha256:{}", "f".repeat(64))).expect("configuration digest");
+    let service = DaemonInvocationService::default();
+    let (proposal_routing, configuration_digest) =
+        super::work_routing_fixtures::configured_work_proposal_routing(
+            project.path(),
+            scope.clone(),
+            &grant,
+        );
+    let policy_digest = mount_test_work_observability(
+        &service,
+        project.path(),
+        database.clone(),
+        &scope,
+        &configuration_digest,
+    )
+    .await;
+    DaemonWorkRuntimeRegistrar::new(&service)
+        .register(
+            project.path().to_path_buf(),
+            database,
+            authority,
+            actor,
+            grant,
+            policy_digest,
+            configuration_digest.clone(),
+            tracedecay_domain::configuration::safe_work_topology_policy_v1(),
+            proposal_routing,
+            denied_work_evidence_retrieval(),
+        )
+        .await
+        .expect("registered Work runtime");
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
+    let other_project = tempfile::tempdir().expect("other project root");
+    let unavailable = service
+        .invoke(
+            &registry,
+            Some(other_project.path()),
+            None,
+            None,
+            None,
+            DaemonInvocationRequest::work_application(
+                "request.work.other-project",
+                WorkApplicationInvocationV1::Views(WorkGraphReadRequestV1::current(
+                    WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                    UtcMicros(100),
+                )),
+                UtcMicros(100),
+                Deadline::new(UtcMicros(1_000)).expect("deadline"),
+                CancellationContext::active("cancel.request.work.other-project")
+                    .expect("cancellation"),
+            ),
+        )
+        .await;
+    assert!(matches!(
+        unavailable.outcome,
+        DaemonInvocationOutcome::Problem {
+            problem: DaemonInvocationProblem::Unavailable
+        }
+    ));
+    let task_id = tracedecay_domain::TaskId::new("task.work.core-invocation").expect("task id");
+    let proposal_digest =
+        ManifestDigest::new(format!("sha256:{}", "1".repeat(64))).expect("proposal digest");
+
+    macro_rules! invoke {
+        ($request_id:literal, $request:expr) => {
+            service
+                .invoke(
+                    &registry,
+                    Some(project.path()),
+                    None,
+                    None,
+                    None,
+                    DaemonInvocationRequest::work_application(
+                        $request_id,
+                        $request,
+                        UtcMicros(100),
+                        Deadline::new(UtcMicros(1_000)).expect("deadline"),
+                        CancellationContext::active(concat!("cancel.", $request_id))
+                            .expect("cancellation"),
+                    ),
+                )
+                .await
+                .outcome
+        };
+    }
+
+    let product_selection = WorkProductSelectionScopeV1::relations(
+        [WorkProductAuthorizedRelationScopeV1::Repository {
+            project_id: scope.project_id.clone(),
+            repository_id: scope.repository_id.clone(),
+        }]
+        .into_iter()
+        .collect(),
+    )
+    .expect("product selection");
+    let (initiative, plan, milestone, item) =
+        product_task("core-invocation", task_id.clone(), UtcMicros(10));
+    let prepared_create = invoke!(
+        "request.work.prepare-create",
+        WorkApplicationInvocationV1::PrepareGraphMutation(PrepareWorkProductMutationRequestV1 {
+            selection: product_selection.clone(),
+            change: WorkProductChangeDraftV1::CreateTask {
+                initiative,
+                plan,
+                milestone,
+                item: Box::new(item),
+            },
+            causation_event_id: None,
+            evidence: Vec::new(),
+        })
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome:
+            WorkApplicationOutcomeV1::PrepareGraphMutation(ApplicationOutcome::Evidence(packet)),
+        ..
+    } = prepared_create
+    else {
+        panic!("product task preparation must return Work evidence: {prepared_create:?}");
+    };
+    let prepared_create = packet.payload.expect("prepared product task mutation");
+    let created = invoke!(
+        "request.work.create",
+        WorkApplicationInvocationV1::MutateGraph(prepared_create.clone())
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome: WorkApplicationOutcomeV1::MutateGraph(ApplicationOutcome::Effect(effect)),
+        ..
+    } = created
+    else {
+        panic!("product task creation must return a Work effect: {created:?}");
+    };
+    let created = effect.payload.expect("created product task receipt");
+    assert!(!created.replayed());
+
+    let replayed = invoke!(
+        "request.work.create-replay",
+        WorkApplicationInvocationV1::MutateGraph(prepared_create)
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome: WorkApplicationOutcomeV1::MutateGraph(ApplicationOutcome::Effect(effect)),
+        ..
+    } = replayed
+    else {
+        panic!("replayed product task mutation must return a Work effect: {replayed:?}");
+    };
+    let replayed = effect.payload.expect("replayed product task receipt");
+    assert!(replayed.replayed());
+    assert_eq!(replayed.event(), created.event());
+
+    let generated = invoke!(
+        "request.work.generate-proposal",
+        WorkApplicationInvocationV1::GenerateProposal(GenerateProposalRequest {
+            selection: product_selection.clone(),
+            task_id: task_id.clone(),
+            proposal_id: ProposalId::new("proposal.work.generated-routing")
+                .expect("generated proposal id"),
+            live_git_evidence: None,
+            occurred_at: UtcMicros(100),
+        })
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome: WorkApplicationOutcomeV1::GenerateProposal(ApplicationOutcome::Evidence(packet)),
+        ..
+    } = generated
+    else {
+        panic!("proposal generation must return Work evidence: {generated:?}");
+    };
+    let generated = packet.payload.expect("generated proposal evidence");
+    assert_eq!(
+        generated.verified_graph_version.graph_version(),
+        created.verified_graph_version().graph_version(),
+        "proposal generation must bind the exact current Work graph"
+    );
+    let route_plan = generated
+        .decision
+        .route_plan
+        .as_ref()
+        .expect("the configured route remains in the explained decision");
+    assert_ne!(route_plan.ranked.len(), 0);
+    assert!(
+        !generated
+            .decision
+            .ordered_reason_codes
+            .contains(&WorkProposalReasonV1::NoEligibleRoutes)
+    );
+    assert_eq!(
+        generated.calibration.provenance.configuration_digest,
+        configuration_digest
+    );
+    assert_eq!(
+        generated
+            .calibration
+            .provenance
+            .configuration_revision
+            .as_ref()
+            .map(tracedecay_domain::ConfigurationRevisionId::as_str),
+        Some("configuration.revision.work-evidence-routing")
+    );
+
+    let proposal = WorkProposalV1::new(
+        ProposalId::new("proposal.work.core-invocation").expect("proposal id"),
+        task_id.clone(),
+        created.verified_graph_version().graph_version(),
+        WorkShapeAssessmentV1::new(WorkScoreKindV1::Ordinal, 1, 1, 1, 1).expect("proposal shape"),
+        WorkSizingV1::new(WorkScoreKindV1::Ordinal, 1, 1, 1, "explicit fixture work")
+            .expect("proposal sizing"),
+        Vec::new(),
+        WorkRouteDecisionV1::selected(
+            super::work_routing_fixtures::provider_route(),
+            Vec::new(),
+            BTreeSet::new(),
+            "no fallback in the core lifecycle".to_owned(),
+        )
+        .expect("proposal route"),
+        "Admit the explicitly declared Work task".to_owned(),
+        proposal_digest,
+        configuration_digest.clone(),
+    )
+    .expect("proposal");
+    let prepared_accept = invoke!(
+        "request.work.prepare-accept-proposal",
+        WorkApplicationInvocationV1::PrepareGraphMutation(PrepareWorkProductMutationRequestV1 {
+            selection: product_selection.clone(),
+            change: WorkProductChangeDraftV1::DecideProposal {
+                proposal,
+                disposition: WorkProposalDispositionV1::Accepted,
+            },
+            causation_event_id: None,
+            evidence: Vec::new(),
+        })
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome:
+            WorkApplicationOutcomeV1::PrepareGraphMutation(ApplicationOutcome::Evidence(packet)),
+        ..
+    } = prepared_accept
+    else {
+        panic!("proposal preparation must return Work evidence: {prepared_accept:?}");
+    };
+    let accepted = invoke!(
+        "request.work.accept-proposal",
+        WorkApplicationInvocationV1::MutateGraph(
+            packet.payload.expect("prepared proposal mutation")
+        )
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome: WorkApplicationOutcomeV1::MutateGraph(ApplicationOutcome::Effect(effect)),
+        ..
+    } = accepted
+    else {
+        panic!("proposal acceptance must return a Work effect: {accepted:?}");
+    };
+    let accepted = effect.payload.expect("accepted proposal receipt");
+
+    let prepared_admission = invoke!(
+        "request.work.prepare-admit",
+        WorkApplicationInvocationV1::PrepareGraphMutation(PrepareWorkProductMutationRequestV1 {
+            selection: product_selection.clone(),
+            change: WorkProductChangeDraftV1::AdmitExecution {
+                task_id: task_id.clone(),
+            },
+            causation_event_id: None,
+            evidence: Vec::new(),
+        })
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome:
+            WorkApplicationOutcomeV1::PrepareGraphMutation(ApplicationOutcome::Evidence(packet)),
+        ..
+    } = prepared_admission
+    else {
+        panic!("execution admission preparation must return Work evidence: {prepared_admission:?}");
+    };
+    let WorkProductMutationRequestV1::AdmitExecution(admission) =
+        packet.payload.expect("prepared execution admission")
+    else {
+        panic!("preparation must produce the canonical execution admission request");
+    };
+    assert_eq!(
+        admission.based_on_version,
+        accepted.verified_graph_version().graph_version().clone(),
+        "admission must fence the graph version that accepted its proposal"
+    );
+    let admitted = invoke!(
+        "request.work.admit",
+        WorkApplicationInvocationV1::AdmitExecution(admission.clone())
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome: WorkApplicationOutcomeV1::AdmitExecution(ApplicationOutcome::Effect(effect)),
+        ..
+    } = admitted
+    else {
+        panic!("execution admission must return a product mutation effect: {admitted:?}");
+    };
+    let admitted = effect.payload.expect("execution admission receipt");
+    assert!(!admitted.mutation.replayed());
+
+    // Committing the admission advances the Work head past the version the
+    // admission command itself pinned. A byte-identical resubmission is the
+    // same command, so it owes the retained receipt and the same licensed
+    // execution snapshot; answering `stale` there would make the admission
+    // non-idempotent and strand a caller that lost the first response.
+    let replayed_admission = invoke!(
+        "request.work.admit-replay",
+        WorkApplicationInvocationV1::AdmitExecution(admission)
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome: WorkApplicationOutcomeV1::AdmitExecution(ApplicationOutcome::Effect(effect)),
+        ..
+    } = replayed_admission
+    else {
+        panic!(
+            "replayed execution admission must return a product mutation effect: \
+             {replayed_admission:?}"
+        );
+    };
+    let replayed_admission = effect
+        .payload
+        .expect("replayed execution admission receipt");
+    assert!(replayed_admission.mutation.replayed());
+    assert_eq!(
+        replayed_admission.mutation.event(),
+        admitted.mutation.event()
+    );
+    assert_eq!(
+        replayed_admission.execution_snapshot, admitted.execution_snapshot,
+        "the replayed admission must license the identical execution snapshot"
+    );
+
+    let prepared_task_acceptance = invoke!(
+        "request.work.prepare-accept-task",
+        WorkApplicationInvocationV1::PrepareGraphMutation(PrepareWorkProductMutationRequestV1 {
+            selection: product_selection.clone(),
+            change: WorkProductChangeDraftV1::AcceptTask {
+                task_id: task_id.clone(),
+                evidence_by_criterion: BTreeMap::new(),
+            },
+            causation_event_id: None,
+            evidence: Vec::new(),
+        })
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome:
+            WorkApplicationOutcomeV1::PrepareGraphMutation(ApplicationOutcome::Evidence(packet)),
+        ..
+    } = prepared_task_acceptance
+    else {
+        panic!(
+            "task acceptance preparation must return Work evidence: {prepared_task_acceptance:?}"
+        );
+    };
+    let accepted_task = invoke!(
+        "request.work.accept-task",
+        WorkApplicationInvocationV1::MutateGraph(packet.payload.expect("prepared task acceptance"))
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome: WorkApplicationOutcomeV1::MutateGraph(ApplicationOutcome::Effect(effect)),
+        ..
+    } = accepted_task
+    else {
+        panic!("task acceptance must return a product mutation effect: {accepted_task:?}");
+    };
+    let accepted_task = effect.payload.expect("task acceptance receipt");
+
+    let read = invoke!(
+        "request.work.product-view",
+        WorkApplicationInvocationV1::Views(WorkGraphReadRequestV1::current(
+            product_selection.clone(),
+            UtcMicros(100),
+        ))
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome: WorkApplicationOutcomeV1::Views(ApplicationOutcome::Evidence(packet)),
+        ..
+    } = read
+    else {
+        panic!("product graph read must return Work evidence: {read:?}");
+    };
+    let graph = packet.payload.expect("product graph payload");
+    assert_eq!(
+        graph
+            .entries()
+            .last()
+            .expect("current product graph entry")
+            .verified_version(),
+        accepted_task.verified_graph_version(),
+        "the view must expose the exact version that accepted the task"
+    );
+    let item = graph
+        .entries()
+        .last()
+        .expect("current product graph entry")
+        .graph()
+        .items()
+        .iter()
+        .find(|item| item.task_id() == &task_id)
+        .expect("created task remains in the product graph");
+    assert!(item.is_execution_admitted());
+    assert!(item.is_accepted());
+
+    // An accepted proposal that abstained names no provider route, so there is
+    // no execution snapshot to admit. The refusal must say the request cannot
+    // be satisfied, not that the graph authority is unavailable after a delay:
+    // every authority here is mounted, and no wait produces a route the
+    // proposal never recommended.
+    let unrouted_task_id =
+        tracedecay_domain::TaskId::new("task.work.core-invocation-unrouted").expect("task id");
+    let (initiative, plan, milestone, item) = product_task(
+        "core-invocation-unrouted",
+        unrouted_task_id.clone(),
+        UtcMicros(10),
+    );
+    let prepared_unrouted = invoke!(
+        "request.work.prepare-create-unrouted",
+        WorkApplicationInvocationV1::PrepareGraphMutation(PrepareWorkProductMutationRequestV1 {
+            selection: product_selection.clone(),
+            change: WorkProductChangeDraftV1::CreateTask {
+                initiative,
+                plan,
+                milestone,
+                item: Box::new(item),
+            },
+            causation_event_id: None,
+            evidence: Vec::new(),
+        })
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome:
+            WorkApplicationOutcomeV1::PrepareGraphMutation(ApplicationOutcome::Evidence(packet)),
+        ..
+    } = prepared_unrouted
+    else {
+        panic!("unrouted task preparation must return Work evidence: {prepared_unrouted:?}");
+    };
+    let created_unrouted = invoke!(
+        "request.work.create-unrouted",
+        WorkApplicationInvocationV1::MutateGraph(packet.payload.expect("prepared unrouted task"))
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome: WorkApplicationOutcomeV1::MutateGraph(ApplicationOutcome::Effect(effect)),
+        ..
+    } = created_unrouted
+    else {
+        panic!("unrouted task creation must return a Work effect: {created_unrouted:?}");
+    };
+    let created_unrouted = effect.payload.expect("created unrouted task receipt");
+
+    let unrouted_proposal = WorkProposalV1::new(
+        ProposalId::new("proposal.work.core-invocation-unrouted").expect("proposal id"),
+        unrouted_task_id.clone(),
+        created_unrouted.verified_graph_version().graph_version(),
+        WorkShapeAssessmentV1::new(WorkScoreKindV1::Ordinal, 1, 1, 1, 1).expect("proposal shape"),
+        WorkSizingV1::new(WorkScoreKindV1::Ordinal, 1, 1, 1, "unrouted fixture work")
+            .expect("proposal sizing"),
+        Vec::new(),
+        WorkRouteDecisionV1::abstain("no provider route is eligible for this task")
+            .expect("proposal route"),
+        "Accept a task no configured route can execute".to_owned(),
+        ManifestDigest::new(format!("sha256:{}", "2".repeat(64))).expect("proposal digest"),
+        configuration_digest.clone(),
+    )
+    .expect("unrouted proposal");
+    let prepared_unrouted_accept = invoke!(
+        "request.work.prepare-accept-unrouted",
+        WorkApplicationInvocationV1::PrepareGraphMutation(PrepareWorkProductMutationRequestV1 {
+            selection: product_selection.clone(),
+            change: WorkProductChangeDraftV1::DecideProposal {
+                proposal: unrouted_proposal,
+                disposition: WorkProposalDispositionV1::Accepted,
+            },
+            causation_event_id: None,
+            evidence: Vec::new(),
+        })
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome:
+            WorkApplicationOutcomeV1::PrepareGraphMutation(ApplicationOutcome::Evidence(packet)),
+        ..
+    } = prepared_unrouted_accept
+    else {
+        panic!(
+            "unrouted proposal preparation must return Work evidence: \
+             {prepared_unrouted_accept:?}"
+        );
+    };
+    let accepted_unrouted = invoke!(
+        "request.work.accept-unrouted",
+        WorkApplicationInvocationV1::MutateGraph(
+            packet.payload.expect("prepared unrouted proposal")
+        )
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome: WorkApplicationOutcomeV1::MutateGraph(ApplicationOutcome::Effect(_)),
+        ..
+    } = accepted_unrouted
+    else {
+        panic!("unrouted proposal acceptance must return a Work effect: {accepted_unrouted:?}");
+    };
+    let prepared_unrouted_admission = invoke!(
+        "request.work.prepare-admit-unrouted",
+        WorkApplicationInvocationV1::PrepareGraphMutation(PrepareWorkProductMutationRequestV1 {
+            selection: product_selection,
+            change: WorkProductChangeDraftV1::AdmitExecution {
+                task_id: unrouted_task_id,
+            },
+            causation_event_id: None,
+            evidence: Vec::new(),
+        })
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome:
+            WorkApplicationOutcomeV1::PrepareGraphMutation(ApplicationOutcome::Evidence(packet)),
+        ..
+    } = prepared_unrouted_admission
+    else {
+        panic!(
+            "unrouted admission preparation must return Work evidence: \
+             {prepared_unrouted_admission:?}"
+        );
+    };
+    let unrouted_admission = invoke!(
+        "request.work.admit-unrouted",
+        WorkApplicationInvocationV1::AdmitExecution(
+            match packet.payload.expect("prepared unrouted admission") {
+                WorkProductMutationRequestV1::AdmitExecution(admission) => admission,
+                other => panic!("preparation must produce an execution admission: {other:?}"),
+            }
+        )
+    );
+    let DaemonInvocationOutcome::ApplicationProblem { problem } = unrouted_admission else {
+        panic!("admitting an abstained proposal must be refused: {unrouted_admission:?}");
+    };
+    assert_eq!(
+        problem,
+        tracedecay_contracts::ApplicationProblem::invalid_request(
+            "work.invalid_graph_operation",
+            "The Work graph request is invalid"
+        ),
+        "an unroutable admission is a request to correct, not an authority to retry"
+    );
+}
+
+/// The Task-family activity producer behind the dashboard's `task_activity`
+/// stream. A committed Work mutation must raise exactly one Task pulse against
+/// the registered project, and a projection read must raise none, the
+/// dispatcher's read arms never reach the effect path that publishes.
+#[tokio::test]
+async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
+    let fixture = RegisteredWorkFixture::start("task-activity").await;
+    let (database, project_id, scope) = (
+        fixture.database.clone(),
+        fixture.scope.project_id.clone(),
+        fixture.scope.clone(),
+    );
+
+    macro_rules! invoke {
+        ($request_id:literal, $request:expr) => {
+            fixture.invoke($request_id, $request).await
+        };
+    }
+
+    let product_selection = WorkProductSelectionScopeV1::relations(
+        [WorkProductAuthorizedRelationScopeV1::Repository {
+            project_id: scope.project_id.clone(),
+            repository_id: scope.repository_id.clone(),
+        }]
+        .into_iter()
+        .collect(),
+    )
+    .expect("product selection");
+    let task_id = TaskId::new("task.work.task-activity").expect("task id");
+    let (initiative, plan, milestone, item) = product_task("task-activity", task_id, UtcMicros(10));
+
+    // Preparing a product mutation reads the real graph authority but does
+    // not commit an event, so the activity lane must remain empty.
+    let prepared = invoke!(
+        "request.work.activity-prepare-create",
+        WorkApplicationInvocationV1::PrepareGraphMutation(PrepareWorkProductMutationRequestV1 {
+            selection: product_selection.clone(),
+            change: WorkProductChangeDraftV1::CreateTask {
+                initiative,
+                plan,
+                milestone,
+                item: Box::new(item),
+            },
+            causation_event_id: None,
+            evidence: Vec::new(),
+        })
+    );
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome:
+            WorkApplicationOutcomeV1::PrepareGraphMutation(ApplicationOutcome::Evidence(packet)),
+        ..
+    } = prepared
+    else {
+        panic!("product task preparation must return Work evidence: {prepared:?}");
+    };
+    let prepared = packet.payload.expect("prepared product task mutation");
+    assert!(
+        tracedecay_session_memory::event_lane::replay_after(&database, project_id.as_str(), None)
+            .await
+            .expect("activity replay")
+            .expect("activity replay present")
+            .records
+            .is_empty(),
+        "a prepared Work mutation must not publish task activity"
+    );
+
+    let created = invoke!(
+        "request.work.activity-create",
+        WorkApplicationInvocationV1::MutateGraph(prepared)
+    );
+    assert!(
+        matches!(
+            created,
+            DaemonInvocationOutcome::WorkApplication {
+                outcome: WorkApplicationOutcomeV1::MutateGraph(ApplicationOutcome::Effect(_)),
+                ..
+            }
+        ),
+        "product task creation must return a Work effect: {created:?}"
+    );
+
+    let replay =
+        tracedecay_session_memory::event_lane::replay_after(&database, project_id.as_str(), None)
+            .await
+            .expect("activity replay")
+            .expect("activity replay present");
+    assert_eq!(
+        replay.records.len(),
+        1,
+        "one committed Work mutation must publish exactly one pulse: {replay:?}"
+    );
+    let pulse = &replay.records[0].pulse;
+    assert_eq!(
+        pulse.family,
+        tracedecay_session_memory::event_lane::ActivityFamilyV1::Task
+    );
+    assert_eq!(pulse.project_id.as_deref(), Some(project_id.as_str()));
+    assert_eq!(pulse.units, 1);
+    // Only attempt mutations carry a detail: the canonical `task` payload
+    // admits attempt states and nothing else.
+    assert_eq!(pulse.detail, None);
+
+    // A canonical graph read after the mutation must not add a second pulse.
+    let view_after = invoke!(
+        "request.work.activity-view-after",
+        WorkApplicationInvocationV1::Views(WorkGraphReadRequestV1::current(
+            product_selection,
+            UtcMicros(100),
+        ))
+    );
+    assert!(
+        matches!(
+            view_after,
+            DaemonInvocationOutcome::WorkApplication {
+                outcome: WorkApplicationOutcomeV1::Views(ApplicationOutcome::Evidence(_)),
+                ..
+            }
+        ),
+        "product graph view must return Work evidence: {view_after:?}"
+    );
+    assert_eq!(
+        tracedecay_session_memory::event_lane::replay_after(&database, project_id.as_str(), None)
+            .await
+            .expect("activity replay")
+            .expect("activity replay present")
+            .records
+            .len(),
+        1,
+        "a product graph read must not publish task activity"
+    );
+}
+
+/// A profile that never created Work answers the views read, through the same
+/// daemon invocation path MCP, CLI and the dashboard use, with the typed
+/// absence under its authorized selection. A selection naming a project the
+/// caller is not scoped to is still the concealed denial.
+#[tokio::test]
+async fn a_views_read_before_any_task_is_absent_and_a_foreign_selection_stays_denied() {
+    let fixture = RegisteredWorkFixture::start("absent-view").await;
+
+    let absent = fixture
+        .invoke(
+            "request.work.absent-view",
+            WorkApplicationInvocationV1::Views(WorkGraphReadRequestV1::current(
+                WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                UtcMicros(100),
+            )),
+        )
+        .await;
+    let DaemonInvocationOutcome::WorkApplication {
+        outcome: WorkApplicationOutcomeV1::Views(ApplicationOutcome::Evidence(packet)),
+        ..
+    } = absent
+    else {
+        panic!("an authorized read of no graph must be answered: {absent:?}");
+    };
+    let mut wire = serde_json::to_value(packet.payload.expect("absent graph payload"))
+        .expect("serialize the views answer");
+    let owner = wire["authorized_scope"]
+        .as_object_mut()
+        .expect("authorized scope");
+    assert!(
+        owner
+            .remove("owner_brain_id")
+            .is_some_and(|id| id.is_string())
+    );
+    assert!(
+        owner
+            .remove("owner_profile_id")
+            .is_some_and(|id| id.is_string())
+    );
+    assert_eq!(
+        wire,
+        serde_json::json!({
+            "mode": "absent",
+            "authorized_scope": {"selection": {"selection": "profile_owned_no_git"}},
+            "selection_coverage": {"coverage": "complete", "covered_events": 0},
+        })
+    );
+
+    let foreign = fixture
+        .invoke(
+            "request.work.foreign-view",
+            WorkApplicationInvocationV1::Views(WorkGraphReadRequestV1::current(
+                WorkProductSelectionScopeV1::relations(
+                    [WorkProductAuthorizedRelationScopeV1::Project {
+                        project_id: ProjectId::new("project.work.someone-else")
+                            .expect("foreign project id"),
+                    }]
+                    .into_iter()
+                    .collect(),
+                )
+                .expect("foreign selection"),
+                UtcMicros(100),
+            )),
+        )
+        .await;
+    let DaemonInvocationOutcome::ApplicationProblem { problem } = foreign else {
+        panic!("a foreign selection must stay denied: {foreign:?}");
+    };
+    assert_eq!(
+        problem,
+        tracedecay_contracts::ApplicationProblem::not_found_or_not_authorized(
+            tracedecay_contracts::RetryDirective::Never
+        )
+    );
+}
+
+/// Project open mints the Work grant once and nothing renews it, so a Work
+/// runtime registered one horizon and one hour ago must still admit requests.
+#[tokio::test]
+async fn work_requests_admit_past_the_registration_horizon() {
+    let now = tracedecay_contracts::now_micros();
+    let horizon = i64::try_from(GRANT_HORIZON.as_micros()).expect("grant horizon");
+    let opened_at = UtcMicros(now.0 - horizon - 3_600_000_000);
+    let fixture = RegisteredWorkFixture::start_with_grant(
+        "registration-horizon",
+        opened_at,
+        UtcMicros(opened_at.0 + horizon),
+    )
+    .await;
+
+    let outcome = invoke_registered(
+        fixture.service.clone(),
+        Arc::clone(&fixture.registry),
+        fixture.project.path().to_path_buf(),
+        DaemonInvocationRequest::work_application(
+            "request.work.registration-horizon",
+            WorkApplicationInvocationV1::Views(WorkGraphReadRequestV1::current(
+                WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                now,
+            )),
+            now,
+            Deadline::new(UtcMicros(now.0 + 30_000_000)).expect("deadline"),
+            CancellationContext::active("cancel.request.work.registration-horizon")
+                .expect("cancellation"),
+        ),
+    )
+    .await;
+    assert!(
+        matches!(
+            outcome,
+            DaemonInvocationOutcome::WorkApplication {
+                outcome: WorkApplicationOutcomeV1::Views(ApplicationOutcome::Evidence(_)),
+                ..
+            }
+        ),
+        "a mounted Work runtime must keep serving past the registration horizon: {outcome:?}"
+    );
+}
+
+/// One registered project with the Work runtime mounted and an empty proposal
+/// route table, invoked through the production daemon invocation service.
+struct RegisteredWorkFixture {
+    _host: tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1,
+    _profile: tempfile::TempDir,
+    project: tempfile::TempDir,
+    database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    scope: ResolvedScope,
+    service: DaemonInvocationService,
+    registry: Arc<Mutex<LspSessionRegistry>>,
+}
+
+impl RegisteredWorkFixture {
+    async fn start(name: &str) -> Self {
+        // Workflow dispatch admits at the wall clock, not the request's
+        // observed time.
+        let expires_at = UtcMicros(tracedecay_contracts::now_micros().0 + 3_600_000_000);
+        Self::start_with_grant(name, UtcMicros(1), expires_at).await
+    }
+
+    async fn start_with_grant(name: &str, issued_at: UtcMicros, expires_at: UtcMicros) -> Self {
+        let profile = tempfile::tempdir().expect("profile root");
+        let project = tempfile::tempdir().expect("project root");
+        let project_id = ProjectId::new(format!("project.work.{name}")).expect("project id");
+        let host =
+            tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
+                profile.path(),
+                project.path(),
+                project_id.clone(),
+            )
+            .await
+            .expect("registered project runtime");
+        let database = host
+            .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
+            .expect("registered project database");
+        let actor = ActorId::new(format!("actor.work.{name}")).expect("actor id");
+        let scope = ResolvedScope::new(
+            project_id,
+            tracedecay_domain::RepositoryId::new(format!("repository.work.{name}"))
+                .expect("repository id"),
+            tracedecay_domain::WorktreeId::new(format!("worktree.work.{name}"))
+                .expect("worktree id"),
+            None,
+        )
+        .expect("resolved scope");
+        let grant_digest =
+            ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).expect("grant digest");
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new(format!("grant.work.{name}")).expect("grant id"),
+            1,
+            grant_digest.clone(),
+            actor.clone(),
+            issued_at,
+            expires_at,
+            scope.clone(),
+            tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
+                .iter()
+                .chain(&tracedecay_contracts::WORKFLOW_APPLICATION_OPERATION_IDS)
+                .map(|(_, capability, _)| CapabilityId::new(*capability).expect("capability"))
+                .collect(),
+            tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
+                .iter()
+                .chain(&tracedecay_contracts::WORKFLOW_APPLICATION_OPERATION_IDS)
+                .map(|(_, _, use_case)| UseCaseId::new(*use_case).expect("use case"))
+                .collect(),
+            DisclosureClass::Sensitive,
+        )
+        .expect("Work grant");
+        let authority = WorkAuthority::new(
+            scope.project_id.clone(),
+            scope.repository_id.clone(),
+            scope.worktree_id.clone(),
+            actor.clone(),
+            grant_digest,
+        )
+        .expect("Work authority");
+        let service = DaemonInvocationService::default();
+        let (proposal_routing, configuration_digest) =
+            empty_work_proposal_routing(scope.clone(), &grant);
+        let policy_digest = mount_test_work_observability(
+            &service,
+            project.path(),
+            database.clone(),
+            &scope,
+            &configuration_digest,
+        )
+        .await;
+        DaemonWorkRuntimeRegistrar::new(&service)
+            .register(
+                project.path().to_path_buf(),
+                database.clone(),
+                authority,
+                actor,
+                grant,
+                policy_digest.clone(),
+                configuration_digest.clone(),
+                tracedecay_domain::configuration::safe_work_topology_policy_v1(),
+                proposal_routing,
+                denied_work_evidence_retrieval(),
+            )
+            .await
+            .expect("registered Work runtime");
+        Self {
+            _host: host,
+            _profile: profile,
+            project,
+            database,
+            scope,
+            service,
+            registry: Arc::new(Mutex::new(LspSessionRegistry::default())),
+        }
+    }
+
+    async fn invoke(
+        &self,
+        request_id: &'static str,
+        request: WorkApplicationInvocationV1,
+    ) -> DaemonInvocationOutcome {
+        invoke_registered(
+            self.service.clone(),
+            Arc::clone(&self.registry),
+            self.project.path().to_path_buf(),
+            DaemonInvocationRequest::work_application(
+                request_id,
+                request,
+                UtcMicros(100),
+                Deadline::new(UtcMicros(1_000)).expect("deadline"),
+                CancellationContext::active(format!("cancel.{request_id}")).expect("cancellation"),
+            ),
+        )
+        .await
+    }
+}
+
+async fn invoke_registered(
+    service: DaemonInvocationService,
+    registry: Arc<Mutex<LspSessionRegistry>>,
+    project_root: std::path::PathBuf,
+    request: DaemonInvocationRequest,
+) -> DaemonInvocationOutcome {
+    service
+        .invoke(&registry, Some(&project_root), None, None, None, request)
+        .await
+        .outcome
+}
+
+struct DeniedWorkEvidenceRetrieval;
+
+impl WorkTaskSessionAdmittedRetrievalPortV1 for DeniedWorkEvidenceRetrieval {}
+
+pub(super) fn denied_work_evidence_retrieval() -> WorkTaskSessionEvidenceRetrievalV1 {
+    WorkTaskSessionEvidenceRetrievalV1::new(Arc::new(DeniedWorkEvidenceRetrieval))
+}
+
+pub(super) fn empty_work_proposal_routing(
+    scope: ResolvedScope,
+    grant: &CapabilityGrantSnapshot,
+) -> (DaemonWorkProposalRoutingAuthorityV1, ManifestDigest) {
+    let revision = tracedecay_domain::configuration::ConfigurationRevisionId::new(
+        "configuration.revision.work-empty-routing",
+    )
+    .expect("configuration revision");
+    let key = tracedecay_domain::configuration::SettingKey::new(
+        tracedecay_domain::configuration::WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
+    )
+    .expect("work executable bindings key");
+    // The runtime pin rejects a snapshot that omitted registry defaults
+    // such as `index.include.v1`. Resolve through the same core registry
+    // the daemon uses at project open, then overlay empty Work bindings.
+    let snapshot = tracedecay_project::config::resolver::resolve_configuration(
+        &tracedecay_project::config::registry::ConfigurationRegistry::core()
+            .expect("configuration registry defaults"),
+        &[tracedecay_project::config::resolver::ConfigurationLayerV1 {
+            layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
+                project_id: scope.project_id.clone(),
+            },
+            revision_id: revision.clone(),
+            entries: std::collections::BTreeMap::from([(
+                key,
+                tracedecay_domain::configuration::ConfigurationValueV1::WorkExecutableBindings(
+                    Vec::new(),
+                ),
+            )]),
+        }],
+    )
+    .expect("empty Work routing resolved through production defaults")
+    .snapshot;
+    let digest = snapshot.effective_behavior_digest.clone();
+    let configuration = tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
+        tracedecay_configuration::config::RuntimeConfigurationTarget {
+            profile_root: std::path::PathBuf::from("/profile"),
+            project_id: scope.project_id.clone(),
+            project_root: std::env::current_dir().expect("test project root"),
+        },
+        revision,
+        snapshot,
+    )
+    .expect("empty pinned Work routing configuration");
+    let routing =
+        DaemonWorkProposalRoutingAuthorityV1::mount(scope, &configuration, &digest, grant)
+            .expect("empty Work proposal routing");
+    (routing, digest)
+}
+
+pub(super) async fn mount_test_work_observability(
+    service: &DaemonInvocationService,
+    project_root: &std::path::Path,
+    database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    scope: &ResolvedScope,
+    configuration_digest: &ManifestDigest,
+) -> ManifestDigest {
+    let configuration_provenance_digest = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.test.work-observability-provenance.v1",
+        configuration_digest,
+    ))
+    .expect("configuration provenance digest");
+    let policy_digest = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.daemon.configuration-policy.v1",
+        &scope.scope_digest,
+        configuration_digest,
+        &configuration_provenance_digest,
+    ))
+    .expect("policy digest");
+    service
+        .mount_observability_producer(
+            project_root.to_path_buf(),
+            database,
+            scope.project_id.clone(),
+            configuration_digest.clone(),
+            policy_digest.clone(),
+        )
+        .await
+        .expect("mounted Work observability producer");
+    policy_digest
+}

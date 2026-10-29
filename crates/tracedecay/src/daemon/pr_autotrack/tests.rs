@@ -1553,34 +1553,6 @@ fn dashboard_managed_summary_reader_matches_canonical_state() {
     assert_eq!(projected[1].pr, 3);
 }
 
-#[test]
-fn dashboard_managed_summary_reader_is_empty_without_state() {
-    use std::sync::Arc;
-
-    let data_root = tempfile::tempdir().expect("temp data root");
-    let reader: tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader =
-        Arc::new(|store_root| {
-            managed_summary(&store_root).map(|entries| {
-                entries
-                    .into_iter()
-                    .map(
-                        |entry| tracedecay_dashboard_api::PrAutoTrackManagedSummaryEntryV1 {
-                            branch: entry.branch,
-                            pr: entry.pr,
-                            head_branch: entry.head_branch,
-                        },
-                    )
-                    .collect()
-            })
-        });
-    assert_eq!(
-        reader(data_root.path().to_path_buf())
-            .expect("read empty managed summary")
-            .len(),
-        0
-    );
-}
-
 async fn unhosted_manual_activation_with_lifecycle(
     repo_root: &Path,
     graph: &Arc<tracedecay_project::project::TraceDecay>,

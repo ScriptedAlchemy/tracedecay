@@ -1470,3 +1470,159 @@ mod store_file_identity_tests {
         assert_eq!(std::fs::read(replacement).unwrap(), b"replacement");
     }
 }
+
+#[cfg(test)]
+mod registry_tests {
+    use super::StoreTelemetrySamplingRegistry;
+
+    #[test]
+    fn graph_replay_release_backoff_widens_and_recovers() {
+        let registry = StoreTelemetrySamplingRegistry::default();
+        let project = std::path::Path::new("/project");
+
+        // No recorded state admits every attempt.
+        assert!(registry.graph_replay_release_attempt_admitted(project));
+        assert!(registry.graph_replay_release_attempt_admitted(project));
+
+        // Consecutive unhealthy attempts widen the skip window 1, 2, 4, and
+        // cap at GRAPH_REPLAY_RELEASE_BACKOFF_CAP_TICKS denied ticks.
+        for expected_skips in [1_usize, 2, 4, 8, 8] {
+            registry.record_graph_replay_release_unhealthy(project);
+            let mut denied = 0_usize;
+            while !registry.graph_replay_release_attempt_admitted(project) {
+                denied += 1;
+                assert!(denied <= 16, "the skip window must stay bounded");
+            }
+            assert_eq!(
+                denied, expected_skips,
+                "the skip window must double per consecutive failure and cap"
+            );
+        }
+
+        // A served attempt closes the window entirely.
+        registry.record_graph_replay_release_served(project, None);
+        assert!(registry.graph_replay_release_attempt_admitted(project));
+        assert_eq!(registry.graph_replay_release_cursor(project), None);
+
+        // The next failure after recovery starts from the narrowest window.
+        registry.record_graph_replay_release_unhealthy(project);
+        assert!(!registry.graph_replay_release_attempt_admitted(project));
+        assert!(registry.graph_replay_release_attempt_admitted(project));
+    }
+
+    #[test]
+    fn graph_replay_release_cursor_survives_failures_and_resets_on_wrap() {
+        let registry = StoreTelemetrySamplingRegistry::default();
+        let project = std::path::Path::new("/project");
+
+        registry
+            .record_graph_replay_release_served(project, Some("release-000000ff.json".to_owned()));
+        assert_eq!(
+            registry.graph_replay_release_cursor(project).as_deref(),
+            Some("release-000000ff.json")
+        );
+
+        // An unhealthy attempt keeps the cursor: consumed events are durably
+        // removed, so resuming from the same position loses nothing.
+        registry.record_graph_replay_release_unhealthy(project);
+        assert_eq!(
+            registry.graph_replay_release_cursor(project).as_deref(),
+            Some("release-000000ff.json")
+        );
+
+        // Reaching the end of the queue clears state so the next attempt
+        // starts from the front.
+        registry.record_graph_replay_release_served(project, None);
+        assert_eq!(registry.graph_replay_release_cursor(project), None);
+        assert!(registry.graph_replay_release_attempt_admitted(project));
+    }
+
+    #[test]
+    fn project_maintenance_state_is_pruned_with_the_active_set() {
+        let registry = StoreTelemetrySamplingRegistry::default();
+        let retained = std::path::Path::new("/retained");
+        let retired = std::path::Path::new("/retired");
+        registry.record_graph_replay_release_unhealthy(retained);
+        registry.record_graph_replay_release_unhealthy(retired);
+
+        registry.retain_project_maintenance_state(&std::collections::BTreeSet::from([
+            retained.to_path_buf()
+        ]));
+
+        assert!(
+            !registry.graph_replay_release_attempt_admitted(retained),
+            "the active project's backoff window must survive pruning"
+        );
+        assert!(
+            registry.graph_replay_release_attempt_admitted(retired),
+            "a retired project's backoff state must be dropped"
+        );
+    }
+
+    #[asupersync::test]
+    async fn shutdown_release_clears_retained_telemetry_handles() {
+        let temporary = tempfile::tempdir().expect("telemetry registry fixture root");
+        let database_path = temporary.path().join("project.db");
+        let other_database_path = temporary.path().join("other.db");
+        tracedecay_global_db::register_registered_schema_installer();
+        let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
+            &database_path,
+            "maintenance telemetry shutdown fixture",
+        )
+        .expect("telemetry fixture database authority");
+        let (database, _) = tracedecay_runtime_core::db::Database::publish_test_runtime(
+            &database_path,
+            &authority,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("telemetry fixture database");
+        let project_id = tracedecay_domain::ProjectId::new("project.maintenance-shutdown")
+            .expect("project identity");
+        let scope = tracedecay_contracts::ResolvedScope::new(
+            project_id,
+            tracedecay_domain::RepositoryId::new("repository.maintenance-shutdown")
+                .expect("repository identity"),
+            tracedecay_domain::WorktreeId::new("worktree.maintenance-shutdown")
+                .expect("worktree identity"),
+            None,
+        )
+        .expect("resolved scope");
+        let registry = StoreTelemetrySamplingRegistry::default();
+        assert!(registry.register_port(&database_path, &scope, || {
+            database.storage_telemetry_handle()
+        }));
+        assert!(registry.register_port(&other_database_path, &scope, || {
+            database.storage_telemetry_handle()
+        }));
+        assert!(registry.registered_port(&database_path, &scope).is_some());
+
+        registry.release_retained_handle(&database_path);
+        assert!(
+            registry.registered_port(&database_path, &scope).is_none(),
+            "project retirement must drop the exact maintenance-owned database client"
+        );
+        assert!(
+            registry
+                .registered_port(&other_database_path, &scope)
+                .is_some(),
+            "exact project retirement must preserve unrelated telemetry clients"
+        );
+        assert!(registry.register_port(&database_path, &scope, || {
+            database.storage_telemetry_handle()
+        }));
+
+        registry.release_retained_handles_for_shutdown();
+
+        assert!(
+            registry.registered_port(&database_path, &scope).is_none(),
+            "shutdown must drop maintenance-owned database clients"
+        );
+        assert!(
+            registry
+                .registered_port(&other_database_path, &scope)
+                .is_none(),
+            "shutdown must drop every maintenance-owned database client"
+        );
+    }
+}

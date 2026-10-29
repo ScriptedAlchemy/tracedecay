@@ -383,7 +383,6 @@ mod state_change_gate_tests {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
     use super::format_daemon_log_line;
     #[cfg(unix)]
     use std::io::{Read, Seek, SeekFrom, Write};
@@ -436,6 +435,47 @@ mod tests {
         assert_eq!(
             expected,
             "[tracedecay] event=retention_degraded pass=code_generations failure=registered_enrollment_inventory_unavailable"
+        );
+    }
+
+    #[test]
+    fn daemon_log_line_escapes_quotes_and_backslashes() {
+        let line = format_daemon_log_line(
+            "client_error",
+            &[("error", r#"failed at "step" \ retry"#.to_string())],
+        );
+
+        assert_eq!(
+            line,
+            r#"[tracedecay] event=client_error error="failed at \"step\" \\ retry""#
+        );
+    }
+
+    #[test]
+    fn daemon_log_line_escapes_control_characters() {
+        let line = format_daemon_log_line(
+            "client_error",
+            &[("error", "first\nsecond\rthird\tfourth".to_string())],
+        );
+
+        assert_eq!(
+            line,
+            r#"[tracedecay] event=client_error error="first\nsecond\rthird\tfourth""#
+        );
+    }
+
+    #[test]
+    fn retention_degraded_log_formats_the_pass_and_failure() {
+        let fields = [
+            ("pass", "code_generations".to_string()),
+            (
+                "failure",
+                "graph_replay_pool_busy: writer lease held".to_string(),
+            ),
+        ];
+        assert_eq!(
+            format_daemon_log_line("retention_degraded", &fields),
+            "[tracedecay] event=retention_degraded pass=code_generations failure=\"graph_replay_pool_busy: writer lease held\""
         );
     }
 }

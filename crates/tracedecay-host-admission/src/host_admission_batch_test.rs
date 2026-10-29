@@ -42,7 +42,7 @@ const BATCH_SIZE: usize = 8;
 
 /// An isolated authority per facade: nothing here is process-global, so a
 /// test that saturates its width cannot gate a sibling test.
-fn background_cpu_for_host_admission_test() -> Arc<ProcessBackgroundCpuV1> {
+pub(super) fn background_cpu_for_host_admission_test() -> Arc<ProcessBackgroundCpuV1> {
     Arc::new(ProcessBackgroundCpuV1::new(
         NonZeroUsize::new(4).expect("nonzero test CPU width"),
     ))

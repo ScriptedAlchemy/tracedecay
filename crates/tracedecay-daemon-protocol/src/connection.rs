@@ -537,3 +537,24 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod restart_tests {
+    #[cfg(unix)]
+    #[test]
+    fn transient_daemon_connect_errors_cover_restart_window_only() {
+        assert!(super::is_transient_daemon_connect_error(
+            std::io::ErrorKind::NotFound
+        ));
+        assert!(super::is_transient_daemon_connect_error(
+            std::io::ErrorKind::ConnectionRefused
+        ));
+        assert!(
+            super::is_transient_daemon_connect_error(std::io::ErrorKind::WouldBlock),
+            "unix-socket EAGAIN (listen backlog full) must ride the restart grace"
+        );
+        assert!(!super::is_transient_daemon_connect_error(
+            std::io::ErrorKind::PermissionDenied
+        ));
+    }
+}

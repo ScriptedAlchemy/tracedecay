@@ -111,6 +111,9 @@ pub struct ContextScoutIntentSessionStateV1 {
     pub delivered_dedupe_keys: BTreeSet<[u8; 32]>,
     /// Intents an intent-pass suggestion already delivered this session.
     pub delivered_intents: BTreeSet<ContextScoutIntentKindV1>,
+    /// Intents a suggestion still pending at the pass's own address owes the
+    /// session, whether or not a hook has claimed it yet.
+    pub pending_intents: BTreeSet<ContextScoutIntentKindV1>,
 }
 
 fn registered_context_scout_owners() -> &'static StdMutex<ProjectContextScoutOwnerRegistry> {
@@ -1051,6 +1054,13 @@ fn intent_session_state(
             .deliveries
             .iter()
             .filter_map(|delivery| delivery.entry.envelope.candidate.evidence.as_session())
+            .map(|evidence| evidence.decision.selected)
+            .collect(),
+        pending_intents: recent
+            .pending
+            .iter()
+            .filter(|entry| entry.work.address == intent_address)
+            .filter_map(|entry| entry.envelope.candidate.evidence.as_session())
             .map(|evidence| evidence.decision.selected)
             .collect(),
     }

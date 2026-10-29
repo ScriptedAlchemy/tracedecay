@@ -3,13 +3,17 @@ use tracedecay_domain::BrainId;
 
 use std::path::PathBuf;
 
-use super::*;
+use super::{
+    AdmittedRoot, Arc, DaemonInvocationOutcome, DaemonInvocationRequest, DaemonInvocationService,
+    DaemonLspInvocationOwner, DaemonLspOwnerRegistrar, DaemonLspSessionAccess, LspSessionId,
+    ProjectId, ResolvedScope, UtcMicros, admitted_root_fixture, canonicalize_lsp_roots,
+    lsp_delivery_attempt, now_millis, retain_lsp_delivery_attempt, unavailable_lsp_session_factory,
+};
 use tokio::sync::Mutex;
 use tracedecay_contracts::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     ObservabilityQueryPort,
 };
-use tracedecay_daemon_service::{DaemonInvocationService, *};
 use tracedecay_domain::{ActorId, UserProfileId, canonical_sha256};
 use tracedecay_lsp::{AuthorizedLspWorkspace, LSP_SESSION_TTL_MS, LspSessionRegistry};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -293,11 +297,8 @@ async fn linked_workspace_owner_requires_its_exact_registered_scope() {
         None,
     )
     .unwrap();
-    let capability =
-        CapabilityId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_CAPABILITY_ID_V1)
-            .unwrap();
-    let use_case =
-        UseCaseId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_USE_CASE_ID_V1).unwrap();
+    let capability = CapabilityId::new(crate::LSP_WORKSPACE_CAPABILITY_ID_V1).unwrap();
+    let use_case = UseCaseId::new(crate::LSP_WORKSPACE_USE_CASE_ID_V1).unwrap();
     let grant = CapabilityGrantSnapshot::new(
         CapabilityGrantId::new("grant.lsp.linked").unwrap(),
         1,

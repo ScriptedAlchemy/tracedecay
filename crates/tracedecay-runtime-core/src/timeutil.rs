@@ -267,4 +267,12 @@ mod tests {
             Some(1_781_075_460)
         );
     }
+
+    #[test]
+    fn nearest_rank_uses_descriptive_sample_labels() {
+        let samples = [10_u64, 20, 30, 40, 50];
+        assert_eq!(nearest_rank(&samples, 50), Some(30));
+        assert_eq!(nearest_rank(&samples, 95), Some(50));
+        assert_eq!(nearest_rank(&samples, 99), Some(50));
+    }
 }

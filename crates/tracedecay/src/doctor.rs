@@ -19,66 +19,6 @@ use tracedecay_automation_runtime::automation::effect_runtime::pending_automatio
 #[cfg(unix)]
 use tracedecay_daemon_service::logging::recent_watcher_events;
 
-/// Opens an isolated daemon-registered profile database so Doctor tests can
-/// exercise the read-only session-temporal health adapter against the real
-/// registered reader pool instead of an ad-hoc connection.
-#[cfg(test)]
-pub(crate) struct DoctorTestRuntime {
-    database: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
-    _registry: tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
-    _scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
-}
-
-#[cfg(test)]
-impl DoctorTestRuntime {
-    pub(crate) async fn open(profile_root: &Path, label: &str) -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
-
-        static NONCE: AtomicU64 = AtomicU64::new(1);
-
-        std::fs::create_dir_all(profile_root).expect("create Doctor test profile root");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            std::fs::set_permissions(profile_root, std::fs::Permissions::from_mode(0o700))
-                .expect("secure Doctor test profile root");
-        }
-        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(profile_root)
-            .expect("load Doctor test profile identity");
-        let nonce = NONCE.fetch_add(1, Ordering::Relaxed);
-        let scope =
-            tracedecay_runtime_core::db::enter_daemon_database_scope(profile_root, nonce, label)
-                .expect("enter Doctor test database scope");
-        let registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity)
-            .await
-            .expect("open Doctor test runtime registry");
-        // Mount the profile SESSIONS store: every production caller of
-        // `session_temporal_doctor_health` diagnoses a sessions store, which
-        // is the mount that binds the session relation graph the doctor's
-        // relation-health stage requires.
-        let database = registry
-            .profile_sessions()
-            .await
-            .expect("mount Doctor test profile session store");
-        // The relation graph opens as background work after the mount
-        // returns; diagnosing before it settles reports it unavailable.
-        registry
-            .settle_profile_session_graph()
-            .await
-            .expect("settle Doctor test profile session relation graph");
-        Self {
-            database,
-            _registry: registry,
-            _scope: scope,
-        }
-    }
-
-    pub(crate) fn database(&self) -> &tracedecay_global_db::RegisteredGlobalDb {
-        self.database.as_ref()
-    }
-}
-
 /// Sync cloud probes admitted by the CLI binary. Doctor never opens ureq
 /// itself, the composition root cannot depend on the CLI crate.
 #[derive(Clone, Copy)]
