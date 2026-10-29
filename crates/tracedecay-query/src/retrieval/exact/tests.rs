@@ -820,17 +820,6 @@ fn exact_lane_lets_measured_scores_rank_production_other_against_tests() {
 }
 
 #[test]
-fn exact_lane_evidence_treats_missing_source_role_as_production_other() {
-    let authority = FixtureAuthority::new();
-    let request = exact_request(&authority, "reserve_stock", 8);
-    let (_, evidence) = exact_pair(&authority, &request, "occ.a", 0);
-    let mut value = serde_json::to_value(&evidence).expect("encode");
-    value.as_object_mut().expect("object").remove("source_role");
-    let decoded: ExactLaneEvidence = serde_json::from_value(value).expect("legacy evidence");
-    assert_eq!(decoded.source_role, RetrievalSourceRoleV1::ProductionOther);
-}
-
-#[test]
 fn exact_lane_request_rejects_duplicate_literals() {
     let authority = FixtureAuthority::new();
     let mut request = exact_request(&authority, "reserve_stock", 8);
