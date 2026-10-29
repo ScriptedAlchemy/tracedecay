@@ -2,7 +2,7 @@ import { Client, InMemoryTransport, StreamableHTTPClientTransport, type CallTool
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import path from "node:path";
@@ -84,6 +84,31 @@ describe("native daemon authority", () => {
 });
 
 describe("embedded server entry", () => {
+  it("exits without retaining a token when its supervisor disconnects before startup", async () => {
+    const home = await mkdtemp(path.join(tmpdir(), "td-early-disconnect-"));
+    cleanups.push(() => rm(home, { recursive: true, force: true }));
+    const profileRoot = path.join(home, "profile");
+    await mkdir(profileRoot);
+    const child = spawn(NODE_BINARY, [path.join(PACKAGE_ROOT, "embedded", "server.mjs"), "--http", "127.0.0.1:0"], {
+      env: { ...process.env, HOME: home, USERPROFILE: home, TRACEDECAY_DATA_DIR: profileRoot },
+      stdio: ["ignore", "ignore", "pipe", "ipc"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
+    try {
+      const exited = once(child, "exit", { signal: AbortSignal.timeout(5_000) });
+      child.disconnect();
+      expect(await exited, stderr).toEqual([0, null]);
+      expect(await readdir(profileRoot)).toEqual([]);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        const exited = once(child, "exit");
+        child.kill("SIGKILL");
+        await exited;
+      }
+    }
+  });
+
   it("serves when launched through a symlinked path", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "td-explorer-link-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
