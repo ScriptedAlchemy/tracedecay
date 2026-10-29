@@ -12,32 +12,30 @@ use tracedecay_domain::{
     ObservationSourceIdentityV1, PayloadDigestV1, PayloadReferenceV1, ProjectionGenerationId,
     RetrievalAnchorId, RetrievalAnchorRecord, SanitizationReceiptV1, canonical_json_bytes,
     canonical_json_bytes_and_sha256, canonical_sha256, classify_observation_collision,
-    cline_native_source_successor_id, cline_task_native_observation_id, codex_rollout_siblings,
-    is_codex_rollout_source, is_replayed_occurrence, prove_cline_native_source_transition,
-    sha256_hex_suffix,
+    codex_rollout_siblings, is_codex_rollout_source, is_replayed_occurrence, sha256_hex_suffix,
 };
 use tracedecay_store::observation::{
     CursorAdvanceOutcome, ObservationCoverageReason, ObservationCursorAdvance,
     ObservationIdentityCollisionDispositionV1,
 };
 use tracedecay_store::{
-    AnchorDispositionReasonClassV1, AnchorDispositionStateV1, AnchoredObservationWrite,
-    BACKGROUND_BATCH_MAX_BYTES, BACKGROUND_BATCH_MAX_OPERATIONS, CommandDigestV1,
-    ConsistencyModeV1, CursorAdvanceLedgerDisagreementV1, CursorAdvanceLedgerIdentityV1,
-    DurabilityClassV1, FOREGROUND_BATCH_MAX_BYTES, IdempotencyIdentityV1,
-    ObservationBatchPersistOutcome, ObservationCommitReceipt, ObservationPersistOutcome,
-    ObservationProjectionStatus, ObservationProjectionStore, ObservationReadOperationV1,
-    ObservationReadResultV1, ObservationReplayRequest, ObservationStore, ObservationStoreError,
-    ObservationStoreResult, OperationPriorityV1, ProjectReadOperationV1, ProjectReadResultV1,
-    ProjectionCheckpoint, ProjectionPersistOutcome, ProjectionRebuildOutcome,
-    ProjectionStoreResult, RepositoryOperationEnvelopeV1, RepositoryProvenanceAttachmentV1,
-    RepositoryReadOperationV1, RepositoryReadResultV1, RepositoryWritePayloadV1,
-    RuntimeBatchCompatibilityV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
-    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeReadCoverageV1,
-    RuntimeReadOperationV1, RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestControlV1,
-    RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, RuntimeTransactionIdV1,
-    RuntimeTransactionScopeV1, StorageRuntimeErrorV1, StoreClientIdV1, StoreIdempotencyKeyV1,
-    StoreOperationIdV1, StoreOperationMetadataV1, StoredObservation, StoredObservationRowV1,
+    AnchoredObservationWrite, BACKGROUND_BATCH_MAX_BYTES, BACKGROUND_BATCH_MAX_OPERATIONS,
+    CommandDigestV1, ConsistencyModeV1, CursorAdvanceLedgerDisagreementV1,
+    CursorAdvanceLedgerIdentityV1, DurabilityClassV1, FOREGROUND_BATCH_MAX_BYTES,
+    IdempotencyIdentityV1, ObservationBatchPersistOutcome, ObservationCommitReceipt,
+    ObservationPersistOutcome, ObservationProjectionStatus, ObservationProjectionStore,
+    ObservationReadOperationV1, ObservationReadResultV1, ObservationReplayRequest,
+    ObservationStore, ObservationStoreError, ObservationStoreResult, OperationPriorityV1,
+    ProjectReadOperationV1, ProjectReadResultV1, ProjectionCheckpoint, ProjectionPersistOutcome,
+    ProjectionRebuildOutcome, ProjectionStoreResult, RepositoryOperationEnvelopeV1,
+    RepositoryProvenanceAttachmentV1, RepositoryReadOperationV1, RepositoryReadResultV1,
+    RepositoryWritePayloadV1, RuntimeBatchCompatibilityV1, RuntimeCancellationIdV1,
+    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1,
+    RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadRequestV1, RuntimeReadResultV1,
+    RuntimeRequestControlV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1,
+    RuntimeTransactionIdV1, RuntimeTransactionScopeV1, StorageRuntimeErrorV1, StoreClientIdV1,
+    StoreIdempotencyKeyV1, StoreOperationIdV1, StoreOperationMetadataV1, StoredObservation,
+    StoredObservationRowV1,
 };
 
 use tracedecay_runtime_core::db::engine::Error as EngineError;
@@ -493,9 +491,7 @@ impl GlobalDbObservationStore {
                         Box::new(write),
                     ));
                 }
-                if !preflight.accepts_pending_cline_alias(&write, &existing.anchor_id)?
-                    && !preflight.accepts_codex_rollout_sibling_alias(&write, &existing.anchor_id)
-                {
+                if !preflight.accepts_codex_rollout_sibling_alias(&write, &existing.anchor_id) {
                     return Err(ObservationStoreError::RetrievalAnchorAliasCollision {
                         alias: Box::new(alias.clone()),
                         existing_anchor_id: Box::new(existing.anchor_id),
@@ -672,7 +668,6 @@ struct ObservationPreflightSnapshot {
     stored_observations: HashMap<String, StoredObservation>,
     retrieval_aliases: HashMap<(String, String, String), RetrievalAnchorId>,
     alias_owners: HashMap<RetrievalAnchorId, CanonicalObservationIdV1>,
-    cline_supersessions: HashMap<RetrievalAnchorId, RetrievalAnchorId>,
     source_cursors:
         HashMap<(ObservationSourceIdentityV1, ObservationScopeV1), ObservationSourceCursorV1>,
 }
@@ -719,43 +714,6 @@ impl ObservationPreflightSnapshot {
         owner.retrieval_anchor_id() == existing_anchor
             && anchors_share_access(owner.retrieval_anchor(), write.retrieval_anchor())
             && codex_rollout_siblings(owner.observation(), write.observation())
-    }
-
-    fn accepts_pending_cline_alias(
-        &self,
-        write: &AnchoredObservationWrite,
-        existing_anchor: &RetrievalAnchorId,
-    ) -> ObservationStoreResult<bool> {
-        let Some(predecessor_id) = cline_task_native_observation_id(write.observation())
-            .map_err(|error| runtime_storage_error("derive Cline native source identity", error))?
-        else {
-            let Some(successor_id) = cline_native_source_successor_id(write.observation())
-                .map_err(|error| {
-                    runtime_storage_error("derive Cline native source identity", error)
-                })?
-            else {
-                return Ok(false);
-            };
-            let Some(successor) = self.stored_observation(&successor_id) else {
-                return Ok(false);
-            };
-            return Ok(successor.retrieval_anchor_id() == existing_anchor
-                && self.cline_supersessions.get(write.retrieval_anchor_id())
-                    == Some(existing_anchor)
-                && prove_cline_native_source_transition(
-                    write.observation(),
-                    successor.observation(),
-                )
-                .is_some());
-        };
-        let Some(predecessor) = self.stored_observation(&predecessor_id) else {
-            return Ok(false);
-        };
-        let prior_anchor = predecessor.retrieval_anchor();
-        Ok(prior_anchor.anchor_id() == existing_anchor
-            && anchors_share_access(prior_anchor, write.retrieval_anchor())
-            && prove_cline_native_source_transition(predecessor.observation(), write.observation())
-                .is_some())
     }
 
     fn source_cursor(
@@ -897,21 +855,6 @@ async fn load_observation_preflight(
         } else if seen_observation_ids.insert(observation_id.to_owned()) {
             observation_ids.push(observation.observation_id().clone());
         }
-        for counterpart in [
-            cline_task_native_observation_id(observation).map_err(|error| {
-                runtime_storage_error("derive Cline native source identity", error)
-            })?,
-            cline_native_source_successor_id(observation).map_err(|error| {
-                runtime_storage_error("derive Cline native source identity", error)
-            })?,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if seen_observation_ids.insert(counterpart.as_str().to_owned()) {
-                observation_ids.push(counterpart);
-            }
-        }
     }
     let (retrieval_aliases, alias_owners) =
         read_retrieval_aliases_from_snapshot(&snapshot, writes, &admission_refusals, OPERATION)
@@ -941,9 +884,6 @@ async fn load_observation_preflight(
     let stored_observations =
         read_stored_observations_from_snapshot(&snapshot, &observation_ids, OPERATION).await?;
     let source_cursors = read_source_cursors_from_snapshot(&snapshot, writes, OPERATION).await?;
-    let cline_supersessions =
-        read_cline_supersessions_from_snapshot(&snapshot, &stored_observations, writes, OPERATION)
-            .await?;
     snapshot
         .commit()
         .await
@@ -953,73 +893,8 @@ async fn load_observation_preflight(
         stored_observations,
         retrieval_aliases,
         alias_owners,
-        cline_supersessions,
         source_cursors,
     })
-}
-
-async fn read_cline_supersessions_from_snapshot(
-    snapshot: &DatabaseEngineReadSnapshot,
-    stored: &HashMap<String, StoredObservation>,
-    writes: &[AnchoredObservationWrite],
-    operation: &'static str,
-) -> ObservationStoreResult<HashMap<RetrievalAnchorId, RetrievalAnchorId>> {
-    let mut anchors = HashMap::new();
-    for write in writes {
-        if let Some(successor_id) = cline_native_source_successor_id(write.observation())
-            .map_err(|error| runtime_storage_error("derive Cline native source identity", error))?
-            && let Some(successor) = stored.get(successor_id.as_str())
-            && prove_cline_native_source_transition(write.observation(), successor.observation())
-                .is_some()
-        {
-            anchors.insert(
-                write.retrieval_anchor_id().clone(),
-                write.retrieval_anchor().owner().clone(),
-            );
-        }
-    }
-    if anchors.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let keys = serde_json::to_string(
-        &anchors
-            .keys()
-            .map(RetrievalAnchorId::as_str)
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|error| runtime_storage_error(operation, error))?;
-    let mut rows = snapshot.query(
-        "SELECT disposition.record_json FROM json_each(?1) AS requested
-         JOIN retrieval_anchor_dispositions AS disposition ON disposition.anchor_id = requested.value
-         WHERE disposition.sequence = (
-             SELECT MAX(current.sequence) FROM retrieval_anchor_dispositions AS current
-             WHERE current.anchor_id = disposition.anchor_id
-         )", tracedecay_runtime_core::db::engine::params![keys],
-    ).await.map_err(|error| runtime_storage_error(operation, error))?;
-    let mut supersessions = HashMap::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| runtime_storage_error(operation, error))?
-    {
-        let json = row
-            .get::<String>(0)
-            .map_err(|error| runtime_storage_error(operation, error))?;
-        let record: tracedecay_store::RetrievalAnchorDispositionRecordV1 =
-            serde_json::from_str(&json).map_err(|error| runtime_storage_error(operation, error))?;
-        record
-            .validate()
-            .map_err(|error| runtime_storage_error(operation, error))?;
-        if let Some(owner) = anchors.get(record.anchor_id())
-            && *record.owner() == tracedecay_domain::FactOwnerV1::from(owner.clone())
-            && record.state() == AnchorDispositionStateV1::Superseded
-            && record.reason_class() == AnchorDispositionReasonClassV1::Correction
-            && let Some(successor) = record.superseded_by()
-        {
-            supersessions.insert(record.anchor_id().clone(), successor.clone());
-        }
-    }
-    Ok(supersessions)
 }
 
 async fn read_admission_refusals_from_snapshot(

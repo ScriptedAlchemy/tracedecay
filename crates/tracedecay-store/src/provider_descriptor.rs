@@ -28,11 +28,6 @@ use crate::{
     codex_message_visible_text,
 };
 
-/// Provider that derives a stable record id from record content rather than
-/// carrying a provider-native one, so its identity material legitimately omits
-/// `native_record_id`.
-const SYNTHESIZED_RECORD_ID_PROVIDER: &str = "claude";
-
 /// Capture source naming Cursor records read from its transcript.
 const CURSOR_TRANSCRIPT_SOURCE: &str = "cursor_transcript";
 
@@ -106,15 +101,6 @@ pub const TOOL_CALL_ID_COVERAGE_KEY: &str = "tool_call_id_coverage";
 /// [`TOOL_CALL_ID_COVERAGE_KEY`] value: the host wrote no id for at least one
 /// of the record's tool calls, so that call is served without one.
 pub const TOOL_CALL_IDS_HOST_UNRECORDED: &str = "host_unrecorded";
-
-/// Whether `provider` synthesizes its own stable record id.
-///
-/// A record from such a provider is allowed to carry no native record id: the
-/// envelope's `stable_record_id` is the identity. Every other provider must
-/// carry one, and the projection rejects the record when it does not match.
-pub fn synthesizes_native_record_id(provider: &str) -> bool {
-    provider == SYNTHESIZED_RECORD_ID_PROVIDER
-}
 
 /// Tool-metadata normalizer for a record's capture `source`, if any.
 ///

@@ -4,7 +4,6 @@ mod codex_echo;
 mod rearm_tests;
 mod rebuild;
 mod schema;
-pub(crate) mod source_transition;
 pub(crate) mod state;
 mod transition;
 
@@ -23,7 +22,6 @@ pub(crate) use schema::OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL;
 pub(super) use schema::{
     ensure_observation_projection_performance_indexes, ensure_observation_projection_schema,
 };
-pub(crate) use source_transition::verify_native_source_supersession;
 pub(crate) use state::RearmedProjectionRetries;
 #[cfg(test)]
 pub(super) use state::verify_projection_rows;

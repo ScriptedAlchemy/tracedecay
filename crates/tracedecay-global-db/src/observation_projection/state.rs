@@ -755,7 +755,6 @@ pub(super) fn same_projection_lineage(
     owner: &DurableObservationV1,
 ) -> bool {
     (candidate.source() == owner.source() && candidate.scope() == owner.scope())
-        || tracedecay_domain::prove_cline_native_source_transition(owner, candidate).is_some()
         || tracedecay_domain::codex_rollout_siblings(owner, candidate)
 }
 

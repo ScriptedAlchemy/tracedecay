@@ -196,29 +196,23 @@ pub fn build_observation_retrieval_anchor(
     {
         let _span = tracing::trace_span!("store.observation.build_retrieval_anchor").entered();
         {
-            let aliases = observation
-                .identity()
-                .native_record_id()
-                .map(|native_record_id| {
-                    let locator = serde_json::json!({
-                        "owner": observation.scope(),
-                        "provider": observation.source().provider(),
-                        "session_id": observation.source().session_id(),
-                        "native_record_id": native_record_id,
-                    });
-                    let digest = PayloadReferenceV1::for_payload(&locator)
-                        .map_err(ObservationStoreError::Contract)?
-                        .digest()
-                        .as_str()
-                        .to_owned();
-                    let locator_digest = PrivacyDomainBoundLocatorDigest::new(digest)
-                        .map_err(ObservationStoreError::RetrievalAnchorContract)?;
-                    NativeAlias::new(NativeAliasKind::ProviderRecord, locator_digest)
-                        .map_err(ObservationStoreError::RetrievalAnchorContract)
-                })
-                .transpose()?
-                .into_iter()
-                .collect();
+            let locator = serde_json::json!({
+                "owner": observation.scope(),
+                "provider": observation.source().provider(),
+                "session_id": observation.source().session_id(),
+                "native_record_id": observation.identity().native_record_id(),
+            });
+            let digest = PayloadReferenceV1::for_payload(&locator)
+                .map_err(ObservationStoreError::Contract)?
+                .digest()
+                .as_str()
+                .to_owned();
+            let locator_digest = PrivacyDomainBoundLocatorDigest::new(digest)
+                .map_err(ObservationStoreError::RetrievalAnchorContract)?;
+            let aliases = vec![
+                NativeAlias::new(NativeAliasKind::ProviderRecord, locator_digest)
+                    .map_err(ObservationStoreError::RetrievalAnchorContract)?,
+            ];
             RetrievalAnchorRecord::new(RetrievalAnchorRecordParts {
                 target: RetrievalAnchorTarget::ExactObservation(
                     observation.observation_id().clone(),

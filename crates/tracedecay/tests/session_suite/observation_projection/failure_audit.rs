@@ -640,25 +640,29 @@ async fn divergent_output_collision_converges_as_a_skip_without_overwriting() {
     let store = runtime
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
-    let first = observation(
+    let first = shared_output_observation(
         "session-collision",
+        GENERATION,
         0,
         100,
         "receipt.collision-first",
-        conversational_payload("shared-message", "original collision canary"),
+        "shared-message",
+        "original collision canary",
     );
-    let second = observation(
+    let second = shared_output_observation(
         "session-collision",
+        GENERATION,
         100,
         200,
         "receipt.collision-second",
-        conversational_payload("shared-message", "divergent collision canary"),
+        "shared-message",
+        "divergent collision canary",
     );
     persist(&store, first.clone(), None).await;
     persist(
         &store,
         second.clone(),
-        Some(cursor("session-collision", 100)),
+        Some(shared_output_cursor("session-collision", GENERATION, 100)),
     )
     .await;
     store
@@ -698,12 +702,12 @@ async fn divergent_output_collision_converges_as_a_skip_without_overwriting() {
     );
     assert_eq!(counts_after.5, 0, "the projection queue must converge");
     assert_eq!(
-        search_session_messages(&tmp, "original collision", 10)
+        search_provider_session_messages(&tmp, SHARED_OUTPUT_PROVIDER, "original collision", 10)
             .await
             .len(),
         1
     );
-    let texts = projected_message_texts(&tmp).await;
+    let texts = shared_output_message_texts(&tmp).await;
     assert_eq!(texts.len(), 1);
     assert!(texts[0].contains("original collision canary"));
     assert!(!texts[0].contains("divergent collision canary"));
@@ -714,7 +718,7 @@ async fn divergent_output_collision_converges_as_a_skip_without_overwriting() {
         .rebuild_projection(2)
         .await
         .expect("rebuild must converge past divergent-output collisions");
-    let texts = projected_message_texts(&tmp).await;
+    let texts = shared_output_message_texts(&tmp).await;
     assert_eq!(texts.len(), 1);
     assert!(texts[0].contains("original collision canary"));
 }
@@ -726,27 +730,29 @@ async fn authority_reopen_accepts_historical_generation_after_supersession() {
     let store = runtime
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
-    let original = observation_in_generation(
+    let original = shared_output_observation(
         "session-authority-supersession",
         GENERATION,
         0,
         100,
         "receipt.authority-supersession-original",
-        conversational_payload("message-authority-supersession", "superseded body"),
+        "message-authority-supersession",
+        "superseded body",
     );
-    let replacement = observation_in_generation(
+    let replacement = shared_output_observation(
         "session-authority-supersession",
         GENERATION + 1,
         0,
         100,
         "receipt.authority-supersession-replacement",
-        conversational_payload("message-authority-supersession", "current body"),
+        "message-authority-supersession",
+        "current body",
     );
     persist(&store, original, None).await;
     persist(
         &store,
         replacement,
-        Some(cursor_in_generation(
+        Some(shared_output_cursor(
             "session-authority-supersession",
             GENERATION,
             100,
@@ -760,7 +766,7 @@ async fn authority_reopen_accepts_historical_generation_after_supersession() {
         .await
         .expect("historical provenance must validate against the current output owner");
     drop(reopened);
-    assert!(projected_message_texts(&tmp).await[0].contains("current body"));
+    assert!(shared_output_message_texts(&tmp).await[0].contains("current body"));
     assert_eq!(
         table_count(&tmp, "observation_projection_provenance").await,
         2

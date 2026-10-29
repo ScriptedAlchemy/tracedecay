@@ -84,11 +84,13 @@ fn observation(stage: &str) -> DurableObservationV1 {
         Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
     )
     .unwrap();
-    let identity = ObservationIdentityMaterialV1::new(
+    let identity = ObservationIdentityMaterialV1::for_native_record(
         source(stage),
         ObservationScopeV1::Profile,
         ObservationSourceGenerationV1::new(GENERATION).unwrap(),
         ObservationSourceRangeV1::new(0, 100).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
+        tracedecay_domain::ObservationId::new(format!("record.daemon-fault.{stage}")).unwrap(),
     )
     .unwrap();
 

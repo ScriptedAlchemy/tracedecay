@@ -162,7 +162,7 @@ pub use projection::{
 };
 pub use provider_descriptor::{
     TOOL_CALL_ID_COVERAGE_KEY, TOOL_CALL_IDS_HOST_UNRECORDED, ToolMetadataNormalizer,
-    synthesizes_native_record_id, tool_metadata_normalizer,
+    tool_metadata_normalizer,
 };
 pub use remote::{RemoteObservationReplayWriteV1, RemoteWriterFenceInstallV1};
 pub use retrieval_anchor::{

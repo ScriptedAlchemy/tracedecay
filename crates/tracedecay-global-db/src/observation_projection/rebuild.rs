@@ -779,9 +779,7 @@ async fn record_canonical_effect(
     if matches!(
         effect,
         ObservationProjection::Skipped(
-            ProjectionSkipReason::InvalidContract
-                | ProjectionSkipReason::NativeSourceSuperseded
-                | ProjectionSkipReason::SourceRecordRetired
+            ProjectionSkipReason::InvalidContract | ProjectionSkipReason::SourceRecordRetired
         )
     ) {
         return Ok(());
@@ -1046,8 +1044,6 @@ async fn activate_projection_rebuild_transaction(
     activate_rebuild_workflow_facts(transaction, &job.generation).await?;
     activate_rebuild_provider_usage(transaction, &job.generation).await?;
     activate_rebuild_dispositions(transaction, &job.generation).await?;
-    super::source_transition::activate_native_source_transitions(transaction, &job.generation)
-        .await?;
 
     transaction
         .execute(
@@ -1974,15 +1970,6 @@ async fn stage_rebuild_effect(
     observation: &DurableObservationV1,
     effect: &ObservationProjection,
 ) -> ProjectionStoreResult<()> {
-    if effect.skip_reason() == Some(ProjectionSkipReason::NativeSourceSuperseded) {
-        return stage_rebuild_disposition(
-            conn,
-            generation,
-            observation,
-            ProjectionSkipReason::NativeSourceSuperseded,
-        )
-        .await;
-    }
     stage_provider_usage_effects(conn, generation, sequence, observation).await?;
     match effect {
         ObservationProjection::Message(projection) => {
@@ -2003,19 +1990,7 @@ async fn stage_rebuild_effect(
         ObservationProjection::Skipped(reason) => {
             stage_rebuild_disposition(conn, generation, observation, *reason).await
         }
-    }?;
-    if effect
-        .skip_reason()
-        .is_none_or(|reason| reason == ProjectionSkipReason::NonConversationalRecord)
-    {
-        super::source_transition::settle_native_source_transition(
-            conn,
-            observation,
-            super::source_transition::SourceTransitionTarget::Staged(generation),
-        )
-        .await?;
     }
-    Ok(())
 }
 
 async fn activate_rebuild_provider_usage(

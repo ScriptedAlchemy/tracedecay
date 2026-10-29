@@ -89,12 +89,10 @@ fn observation_in_scope(
     body: &str,
     scope: ObservationScopeV1,
 ) -> DurableObservationV1 {
-    let payload = claude_records::canonical_envelope(
-        &claude_records::assistant_record(body),
-        source().session_id().as_str(),
-        start,
-        end,
-    );
+    let mut native = claude_records::assistant_record(body);
+    native["uuid"] = json!(format!("row.{generation}.{start}.{end}"));
+    let payload =
+        claude_records::canonical_envelope(&native, source().session_id().as_str(), start, end);
     let payload_reference = PayloadReferenceV1::for_payload(&payload).unwrap();
     let receipt = SanitizationReceiptV1::new(
         SanitizationReceiptRefV1::new(
@@ -107,11 +105,13 @@ fn observation_in_scope(
         Some(payload_reference),
     )
     .unwrap();
-    let identity = ObservationIdentityMaterialV1::new(
+    let identity = ObservationIdentityMaterialV1::for_native_record(
         source(),
         scope,
         ObservationSourceGenerationV1::new(generation).unwrap(),
         ObservationSourceRangeV1::new(start, end).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
+        ObservationId::new(payload["stable_record_id"].as_str().unwrap()).unwrap(),
     )
     .unwrap();
 
@@ -906,8 +906,9 @@ async fn persist_commits_receipt_observation_cursor_and_one_projection_queue_row
     let deltas = table_deltas(&before, &user_table_counts(&database_path));
     assert_eq!(
         deltas.len(),
-        7,
-        "receipt, observation, anchors, provenance, cursor, and queue must commit: {deltas:?}"
+        8,
+        "receipt, observation, anchors, native alias, provenance, cursor, and queue must \
+         commit: {deltas:?}"
     );
     assert!(
         deltas.values().all(|delta| *delta == 1),
@@ -2236,7 +2237,7 @@ async fn concurrent_exact_retry_commits_one_sequence_and_settles_one_receipt() {
     assert_eq!(replay[0].sequence(), committed.sequence());
     assert_eq!(replay[0].observation(), &candidate);
     let deltas = table_deltas(&counts_before, &user_table_counts(&database_path));
-    assert_eq!(deltas.len(), 7);
+    assert_eq!(deltas.len(), 8);
     assert!(deltas.values().all(|delta| *delta == 1));
 }
 

@@ -267,8 +267,8 @@ pub use observation::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationIdV1, CanonicalObservationRelationsV1,
     CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1,
-    CanonicalWorkflowSemanticKindV1, ClineNativeSourceTransition, ClineTranscriptStream,
-    DurableObservationV1, MAX_CANONICAL_OBSERVATION_FACTS_V1, MAX_OBSERVATION_RECORD_BYTES,
+    CanonicalWorkflowSemanticKindV1, ClineTranscriptStream, DurableObservationV1,
+    MAX_CANONICAL_OBSERVATION_FACTS_V1, MAX_OBSERVATION_RECORD_BYTES,
     MAX_OBSERVATION_STRUCTURE_DEPTH, MAX_OBSERVATION_STRUCTURE_VALUES,
     ObservationCollisionOutcomeV1, ObservationContractError, ObservationIdentityMaterialV1,
     ObservationOrderingDomainV1, ObservationPositionalOccurrenceV1, ObservationScopeV1,
@@ -277,9 +277,8 @@ pub use observation::{
     ProviderUsageContractDimensionV1, ProviderUsageCounterSemanticsV1, ProviderUsageCountersV1,
     ProviderUsageCursorV1, ProviderUsageModelV1, ProviderUsageObservationV1, ProviderUsageReadV1,
     ProviderUsageScopeV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    classify_observation_collision, cline_native_source_successor_id,
-    cline_task_native_observation_id, codex_rollout_siblings, is_codex_rollout_source,
-    is_replayed_occurrence, prove_cline_native_source_transition, tool_result_output_cut_state,
+    classify_observation_collision, cline_task_native_observation_id, codex_rollout_siblings,
+    is_codex_rollout_source, is_replayed_occurrence, tool_result_output_cut_state,
     tool_result_visible_text,
 };
 pub use remote::{

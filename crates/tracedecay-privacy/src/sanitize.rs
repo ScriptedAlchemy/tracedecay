@@ -7,8 +7,8 @@ use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{
     CanonicalClaudeSanitizationReceiptMaterialV1, ComponentVersion, DurableObservationV1,
     ObservationContractError, ObservationId, ObservationIdentityMaterialV1,
-    ObservationOrderingDomainV1, ObservationSourceIdentityV1, PayloadReferenceV1, RetentionClass,
-    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId,
+    ObservationSourceIdentityV1, PayloadReferenceV1, RetentionClass, SanitizationReceiptV1,
+    SanitizerDispositionV1, SensitivityV1, SessionId,
 };
 
 use super::detect::{
@@ -269,10 +269,8 @@ impl RecordSanitizerV1 {
                 .get("stable_record_id")
                 .and_then(Value::as_str)
                 .ok_or_else(invalid)?;
-            match identity.native_record_id() {
-                Some(native_record_id) if stable_record_id == native_record_id.as_str() => {}
-                None if canonical_provider.as_str() == "claude" => {}
-                Some(_) | None => return Err(invalid()),
+            if stable_record_id != identity.native_record_id().as_str() {
+                return Err(invalid());
             }
             let (protected_identity, identity_changed) = protect_observation_identity(&identity)?;
             identity = protected_identity;
@@ -462,31 +460,16 @@ fn protect_observation_identity(
     let generation = identity.generation();
     let position = identity.position();
     let ordering_domain = identity.ordering_domain();
-    let (identity, native_changed) = match identity.native_record_id() {
-        Some(native_record_id) => {
-            let (native_record_id, changed) = protected_observation_id(native_record_id.as_str())?;
-            (
-                ObservationIdentityMaterialV1::for_native_record(
-                    source,
-                    scope,
-                    generation,
-                    position,
-                    ordering_domain,
-                    native_record_id,
-                )?,
-                changed,
-            )
-        }
-        None if ordering_domain == ObservationOrderingDomainV1::FileBytes => (
-            ObservationIdentityMaterialV1::new(source, scope, generation, position)?,
-            false,
-        ),
-        None => {
-            return Err(PrivacySanitizerError::DomainContract(
-                ObservationContractError::InvalidNativeRecordIdentity,
-            ));
-        }
-    };
+    let (native_record_id, native_changed) =
+        protected_observation_id(identity.native_record_id().as_str())?;
+    let identity = ObservationIdentityMaterialV1::for_native_record(
+        source,
+        scope,
+        generation,
+        position,
+        ordering_domain,
+        native_record_id,
+    )?;
     Ok((
         identity,
         session_changed || source_key_changed || native_changed,
@@ -626,10 +609,10 @@ fn validate_canonical_structural_identity(
         .get("stable_record_id")
         .and_then(Value::as_str)
         .ok_or_else(invalid)?;
-    match identity.native_record_id() {
-        Some(native_record_id) if stable_record_id == native_record_id.as_str() => Ok(()),
-        None if identity.source().provider().as_str() == "claude" => Ok(()),
-        Some(_) | None => Err(invalid()),
+    if stable_record_id == identity.native_record_id().as_str() {
+        Ok(())
+    } else {
+        Err(invalid())
     }
 }
 

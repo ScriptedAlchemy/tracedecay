@@ -95,11 +95,13 @@ fn observation_in_generation(
 ) -> DurableObservationV1 {
     let payload = claude_records::canonical_envelope(&native, session_id, start, end);
     DurableObservationV1::new(
-        ObservationIdentityMaterialV1::new(
+        ObservationIdentityMaterialV1::for_native_record(
             source(session_id),
             ObservationScopeV1::Profile,
             ObservationSourceGenerationV1::new(generation).unwrap(),
             ObservationSourceRangeV1::new(start, end).unwrap(),
+            ObservationOrderingDomainV1::FileBytes,
+            ObservationId::new(payload["stable_record_id"].as_str().unwrap()).unwrap(),
         )
         .unwrap(),
         receipt(receipt_id, &payload),
@@ -164,6 +166,80 @@ fn canonical_observation_at(
             &format!("receipt.projection-{provider}.{ordinal}"),
             &payload,
         ),
+        RetentionClass::new("retention.projection-test").unwrap(),
+        payload,
+    )
+    .unwrap()
+}
+
+/// Provider of [`shared_output_observation`]: its output message id is the
+/// record's message relation, not its native record id.
+const SHARED_OUTPUT_PROVIDER: &str = "opencode";
+
+fn shared_output_source(session_id: &str) -> ObservationSourceIdentityV1 {
+    ObservationSourceIdentityV1::for_provider(
+        ProviderId::new(SHARED_OUTPUT_PROVIDER).unwrap(),
+        SessionId::new(session_id).unwrap(),
+    )
+    .unwrap()
+}
+
+fn shared_output_cursor(
+    session_id: &str,
+    generation: u64,
+    byte_offset: u64,
+) -> ObservationSourceCursorV1 {
+    ObservationSourceCursorV1::for_ordering(
+        shared_output_source(session_id),
+        ObservationScopeV1::Profile,
+        ObservationSourceGenerationV1::new(generation).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
+        byte_offset,
+    )
+    .unwrap()
+}
+
+/// One assistant record of `session_id` that projects to the output
+/// `message_id`. Each occurrence carries its own native record id, so records
+/// read across generations are distinct observations that own one output.
+fn shared_output_observation(
+    session_id: &str,
+    generation: u64,
+    start: u64,
+    end: u64,
+    receipt_id: &str,
+    message_id: &str,
+    text: &str,
+) -> DurableObservationV1 {
+    let range = ObservationSourceRangeV1::new(start, end).unwrap();
+    let record_id = ObservationId::new(format!("{message_id}.g{generation}.{start}")).unwrap();
+    let envelope = CanonicalObservationEnvelopeV1::new(
+        ProviderId::new(SHARED_OUTPUT_PROVIDER).unwrap(),
+        "message",
+        record_id.clone(),
+        CanonicalObservationRelationsV1::new(SessionId::new(session_id).unwrap())
+            .with_message_id(ObservationId::new(message_id).unwrap()),
+        vec![CanonicalObservationFactV1::Message {
+            role: CanonicalMessageRoleV1::Assistant,
+            content: json!(text),
+            model: Some("model.fixture".to_owned()),
+            timestamp: Some(1_750_000_000),
+        }],
+        CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::FileBytes, range),
+    )
+    .unwrap();
+    let payload = serde_json::to_value(envelope).unwrap();
+    DurableObservationV1::new(
+        ObservationIdentityMaterialV1::for_native_record(
+            shared_output_source(session_id),
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(generation).unwrap(),
+            range,
+            ObservationOrderingDomainV1::FileBytes,
+            record_id,
+        )
+        .unwrap(),
+        receipt(receipt_id, &payload),
         RetentionClass::new("retention.projection-test").unwrap(),
         payload,
     )
@@ -272,11 +348,14 @@ fn write(
     observation: DurableObservationV1,
     expected_cursor: Option<ObservationSourceCursorV1>,
 ) -> AnchoredObservationWrite {
-    let next_cursor = cursor_in_generation(
-        observation.source().session_id().as_str(),
-        observation.identity().generation().file_id(),
+    let next_cursor = ObservationSourceCursorV1::for_ordering(
+        observation.source().clone(),
+        observation.scope().clone(),
+        observation.identity().generation(),
+        observation.identity().ordering_domain(),
         observation.identity().position().end(),
-    );
+    )
+    .unwrap();
     anchored_write(ObservationWrite::new(observation, expected_cursor, next_cursor).unwrap())
 }
 
@@ -370,6 +449,15 @@ async fn search_session_messages(
     query: &str,
     limit: usize,
 ) -> Vec<TestSessionMessageSearchHit> {
+    search_provider_session_messages(tmp, "claude", query, limit).await
+}
+
+async fn search_provider_session_messages(
+    tmp: &TempDir,
+    provider: &str,
+    query: &str,
+    limit: usize,
+) -> Vec<TestSessionMessageSearchHit> {
     let conn = rusqlite::Connection::open(isolated_lcm_db_path(tmp)).unwrap();
     let fts_query = query
         .split_whitespace()
@@ -391,7 +479,7 @@ async fn search_session_messages(
                ON session.provider = message.provider
               AND session.session_id = message.session_id
              WHERE lcm_raw_messages_fts MATCH ?1
-               AND message.provider = 'claude'
+               AND message.provider = ?3
                AND session.project_key = 'user'
              ORDER BY bm25(lcm_raw_messages_fts)
              LIMIT ?2",
@@ -399,7 +487,7 @@ async fn search_session_messages(
         .unwrap();
     statement
         .query_map(
-            rusqlite::params![fts_query, i64::try_from(limit).unwrap()],
+            rusqlite::params![fts_query, i64::try_from(limit).unwrap(), provider],
             |row| {
                 Ok(TestSessionMessageSearchHit {
                     message: TestSessionMessage {
@@ -509,6 +597,10 @@ async fn projected_message_texts(tmp: &TempDir) -> Vec<String> {
     projected_message_texts_where(tmp, "WHERE provider = 'claude'").await
 }
 
+async fn shared_output_message_texts(tmp: &TempDir) -> Vec<String> {
+    projected_message_texts_where(tmp, "WHERE provider = 'opencode'").await
+}
+
 async fn projected_raw_store_ids(tmp: &TempDir) -> Vec<(String, i64)> {
     projected_raw_store_ids_for_provider(tmp, "claude").await
 }
@@ -574,4 +666,3 @@ mod failure_audit;
 mod message_ids;
 mod queue;
 mod rebuild;
-mod source_transition;

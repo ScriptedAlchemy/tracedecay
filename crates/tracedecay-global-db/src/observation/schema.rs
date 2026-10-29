@@ -261,7 +261,7 @@ mod tests {
         r#""},"retention_class":"transcript.fixture","payload":{"message":"safe"}}"#
     );
     const FRESH_UNIFIED_OBSERVATION_ID: &str =
-        "sha256:3fe143a02ab7fbca28e297944f24e997badda9ca9b1e40c7d2a6e4f965cebad5";
+        "sha256:4e5ae91609b4283d729be77ec99bd46b3ad77ffaa377d022d2698b3ec96187ab";
 
     async fn reopen(
         path: &std::path::Path,
@@ -278,11 +278,13 @@ mod tests {
 
     fn fresh_unified_observation() -> DurableObservationV1 {
         let payload = serde_json::json!({"message": "safe"});
-        let material = ObservationIdentityMaterialV1::new(
+        let material = ObservationIdentityMaterialV1::for_native_record(
             ObservationSourceIdentityV1::new(SessionId::new("session.fixture").unwrap()).unwrap(),
             ObservationScopeV1::Profile,
             ObservationSourceGenerationV1::new(7).unwrap(),
             ObservationSourceRangeV1::new(12, 34).unwrap(),
+            ObservationOrderingDomainV1::FileBytes,
+            tracedecay_domain::ObservationId::new("record.fixture").unwrap(),
         )
         .unwrap();
         DurableObservationV1::new(

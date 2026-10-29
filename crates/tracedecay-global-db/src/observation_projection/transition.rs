@@ -62,11 +62,6 @@ impl MessageTransitionState {
             same_lineage: same_projection_lineage(observation, latest_observation),
             same_generation: observation.identity().generation()
                 == latest_observation.identity().generation()
-                && tracedecay_domain::prove_cline_native_source_transition(
-                    latest_observation,
-                    observation,
-                )
-                .is_none()
                 && !tracedecay_domain::codex_rollout_siblings(latest_observation, observation),
             projector_owned,
         }

@@ -1451,31 +1451,6 @@ async fn validate_projection_authority_suffix_pages(
                 &row.get::<String>(1).map_err(audit_read_error)?,
             )
             .await?;
-            if disposition.as_ref().is_some_and(|value| {
-                value.reason == ProjectionSkipReason::NativeSourceSuperseded.as_str()
-            }) {
-                if !state.is_skip() {
-                    return Err(authority_violation(
-                        "superseded source retains projection outputs",
-                    ));
-                }
-                crate::observation_projection::verify_native_source_supersession(
-                    conn,
-                    &observation,
-                )
-                .await
-                .map_err(|error| {
-                    authority_violation(format!("invalid native source supersession: {error}"))
-                })?;
-                validate_skipped_projection_row(
-                    &observation,
-                    disposition
-                        .as_ref()
-                        .ok_or_else(|| authority_violation("source disposition disappeared"))?,
-                    ProjectionSkipReason::NativeSourceSuperseded,
-                )?;
-                continue;
-            }
             let skip_reason = match crate::observation_projection::derive_projection(&observation)
                 .map_err(|error| {
                 authority_violation(format!("invalid projection authority: {error}"))

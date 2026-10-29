@@ -114,7 +114,7 @@ fn reoffer(
             generation,
             identity.position(),
             identity.ordering_domain(),
-            identity.native_record_id().unwrap().clone(),
+            identity.native_record_id().clone(),
         )
         .unwrap(),
         original.receipt().clone(),
