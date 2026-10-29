@@ -806,8 +806,8 @@ impl DaemonSessionRuntimeRegistryV1 {
 }
 
 /// The reset `wipe --stale` applies to Hook V2 admission state refused at
-/// `root`: the profile's ledgers, or one project's ledgers and pre-ledger
-/// work. State anywhere else is reset with the whole profile.
+/// `root`: the profile's ledgers, or one project's ledgers. State anywhere
+/// else is reset with the whole profile.
 fn hook_admission_reset_required(profile_root: &Path, root: &Path) -> StoreResetRequiredV1 {
     let host_parent = root.parent();
     let scope_root = host_parent.and_then(Path::parent);
@@ -823,12 +823,9 @@ fn hook_admission_reset_required(profile_root: &Path, root: &Path) -> StoreReset
         {
             Some(ResettableStoreV1::ProfileHookAdmissions)
         }
-        (
-            Some(tracedecay_hooks::PROJECT_HOOK_ADMISSIONS_DIR)
-            | Some(tracedecay_hooks::PRE_LEDGER_PENDING_WORK_DIR),
-            Some(scope),
-            Some(project_id),
-        ) if profile_root_of_sharded_data_root(scope, project_id) == Some(profile_root) => {
+        (Some(tracedecay_hooks::PROJECT_HOOK_ADMISSIONS_DIR), Some(scope), Some(project_id))
+            if profile_root_of_sharded_data_root(scope, project_id) == Some(profile_root) =>
+        {
             Some(ResettableStoreV1::ProjectHookAdmissions {
                 project_id: project_id.to_owned(),
             })
