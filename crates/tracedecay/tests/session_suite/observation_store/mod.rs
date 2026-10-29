@@ -999,6 +999,64 @@ async fn drifted_observation_shape_refuses_admission_with_reset_required() {
     );
 }
 
+/// A `projection_queue` from before the revival columns existed refuses
+/// admission with the typed `ResetRequired` state at open, so no store reaches
+/// its first queue write without them.
+#[tokio::test]
+async fn projection_queue_without_revival_columns_refuses_admission_with_reset_required() {
+    let tmp = TempDir::new().unwrap();
+    let bootstrap = profile_runtime(&tmp).await;
+    let db_path = bootstrap
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    drop(bootstrap);
+
+    let raw_conn = rusqlite::Connection::open(&db_path).unwrap();
+    raw_conn.pragma_update(None, "foreign_keys", false).unwrap();
+    let dependents = raw_conn
+        .prepare(
+            "SELECT sql FROM sqlite_master
+             WHERE tbl_name = 'projection_queue' AND type IN ('index', 'trigger')
+               AND sql IS NOT NULL",
+        )
+        .unwrap()
+        .query_map((), |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    raw_conn
+        .execute_batch(
+            "DROP TABLE projection_queue;
+            CREATE TABLE projection_queue (
+                observation_id TEXT PRIMARY KEY,
+                observation_sequence INTEGER NOT NULL UNIQUE,
+                attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+                next_retry_at_micros INTEGER NOT NULL DEFAULT 0 CHECK(next_retry_at_micros >= 0),
+                last_error TEXT,
+                FOREIGN KEY(observation_id) REFERENCES observations(observation_id)
+            );",
+        )
+        .unwrap();
+    for sql in &dependents {
+        raw_conn.execute_batch(sql).unwrap();
+    }
+    drop(raw_conn);
+
+    let error = match HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay")).await {
+        Ok(_) => panic!("a queue without revival columns must refuse admission"),
+        Err(error) => error,
+    };
+    let (authority, reason) = error
+        .reset_required_context()
+        .unwrap_or_else(|| panic!("expected the typed ResetRequired state, got: {error}"));
+    assert_eq!(authority, "authority schema");
+    assert!(
+        reason.contains("projection_queue"),
+        "the refusal must name the drifted table: {reason}"
+    );
+}
+
 #[tokio::test]
 async fn exact_duplicate_returns_original_receipt_without_mutating_cursor_or_store() {
     let tmp = TempDir::new().unwrap();
