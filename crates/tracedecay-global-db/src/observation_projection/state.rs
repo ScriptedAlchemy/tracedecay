@@ -9,8 +9,7 @@ use tracedecay_domain::{
 use tracedecay_store::{
     EDITED_FILES_KEY, ObservationProjection, PROJECTION_TERMINAL_RETRY_MICROS,
     ProjectionCheckpoint, ProjectionStoreError, ProjectionStoreResult,
-    SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
-    SESSION_MESSAGE_PROJECTOR_VERSION_V5, SPAWNED_SESSIONS_KEY, SessionMessageProjection,
+    SESSION_MESSAGE_PROJECTOR_VERSION, SPAWNED_SESSIONS_KEY, SessionMessageProjection,
     SessionMessageRecord, SessionRecord, message_output_digest,
 };
 
@@ -628,15 +627,11 @@ pub(super) async fn has_other_projector_output_owner(
             "SELECT 1 FROM observation_projection_provenance
              WHERE output_provider = ?1 AND output_message_id = ?2
                AND projector_version <> ?3
-               AND projector_version <> ?4
-               AND projector_version <> ?5
              LIMIT 1",
             params![
                 message.provider.as_str(),
                 message.message_id.as_str(),
                 SESSION_MESSAGE_PROJECTOR_VERSION,
-                SESSION_MESSAGE_PROJECTOR_VERSION_V5,
-                SESSION_MESSAGE_PROJECTOR_VERSION_V4,
             ],
         )
         .await

@@ -40,7 +40,7 @@ pub use canonical_body::{
 pub use canonical_projection::{
     EDITED_FILES_KEY, SPAWNED_SESSIONS_KEY, TOOL_USE_ID_KEY, canonical_fact_text,
     derive_canonical_projection, message_metadata_with_envelope, session_project_fields,
-    stored_message_is_shipped_release_rendering, workflow_semantic_kind,
+    workflow_semantic_kind,
 };
 pub use codex_goal_context::{
     CodexGoalContext, CodexGoalContextCorrelation, CodexGoalContextSource,
@@ -155,10 +155,8 @@ pub use projection::{
     CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ObservationProjection, ObservationProjectionStore,
     PROJECTION_TERMINAL_RETRY_MICROS, PROVIDER_USAGE_PROJECTOR_VERSION, ProjectedObservation,
     ProjectionBatchItem, ProjectionCheckpoint, ProjectionDrainBatch, ProjectionPersistOutcome,
-    ProjectionPredecessorConvergence, ProjectionProvenance, ProjectionRebuildOutcome,
-    ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
-    SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
-    SESSION_MESSAGE_PROJECTOR_VERSION_V5, SESSION_MESSAGE_PROJECTOR_VERSION_V7,
+    ProjectionProvenance, ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError,
+    ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V7,
     SessionMessageProjection, WorkflowFactProjection, WorkflowFactRecord, durable_error_detail,
     error_chain_is_sqlite_disk_image_corrupt, message_output_digest,
 };

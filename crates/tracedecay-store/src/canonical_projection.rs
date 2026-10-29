@@ -10,46 +10,12 @@ use tracedecay_domain::{
 
 use crate::cursor_dispatch::{cursor_dispatch_model, dispatch_text, is_subagent_dispatch_tool};
 use crate::provider_descriptor::{
-    ProviderMessageSemantics, provider_message_semantics, synthesizes_native_record_id,
-    tool_metadata_normalizer,
+    provider_message_semantics, synthesizes_native_record_id, tool_metadata_normalizer,
 };
 use crate::{
     ObservationProjection, ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
     SessionMessageRecord, SessionRecord, WorkflowFactRecord,
 };
-
-/// Which projector rendering to derive.
-///
-/// Releases through v0.1.0-beta.37 wrote `ShippedRelease`. The reducer is
-/// otherwise unchanged; only Codex goal-context semantics were added after
-/// that tag.
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum CanonicalRendering {
-    Current,
-    ShippedRelease,
-}
-
-/// Codex goal-context semantics are the only post-release rendering. A shipped
-/// derivation withholds them. Every other field is this reducer.
-fn rendering_message_semantics(
-    rendering: CanonicalRendering,
-    provider: &str,
-    native_record_kind: &str,
-    role: &str,
-    content: &serde_json::Value,
-    has_native_item_identity: bool,
-) -> Option<ProviderMessageSemantics> {
-    match rendering {
-        CanonicalRendering::ShippedRelease => None,
-        CanonicalRendering::Current => provider_message_semantics(
-            provider,
-            native_record_kind,
-            role,
-            content,
-            has_native_item_identity,
-        ),
-    }
-}
 
 /// The `(project_key, project_path)` a session row in `scope` carries before
 /// any observation names its working directory. Every writer of a session row
@@ -64,35 +30,9 @@ pub fn session_project_fields(scope: &ObservationScopeV1) -> (String, String) {
     }
 }
 
+#[tracing::instrument(name = "store.projection.derive_canonical", level = "trace", skip_all)]
 pub fn derive_canonical_projection(
     observation: &DurableObservationV1,
-) -> ProjectionStoreResult<ObservationProjection> {
-    derive_canonical_projection_for(observation, CanonicalRendering::Current)
-}
-
-/// Whether the stored row is the message row a shipped release wrote for
-/// `observation`, as judged by `stores` against each released message.
-///
-/// A current-provenance row that still holds that rendering is an interrupted
-/// write. Any other body, including a derivation that does not complete, is not.
-pub fn stored_message_is_shipped_release_rendering(
-    observation: &DurableObservationV1,
-    stores: impl Fn(&SessionMessageRecord) -> bool,
-) -> bool {
-    let Ok(released) =
-        derive_canonical_projection_for(observation, CanonicalRendering::ShippedRelease)
-    else {
-        return false;
-    };
-    released
-        .message()
-        .is_some_and(|projection| stores(projection.message()))
-}
-
-#[tracing::instrument(name = "store.projection.derive_canonical", level = "trace", skip_all)]
-fn derive_canonical_projection_for(
-    observation: &DurableObservationV1,
-    rendering: CanonicalRendering,
 ) -> ProjectionStoreResult<ObservationProjection> {
     let envelope =
         CanonicalObservationEnvelopeV1::deserialize(observation.payload()).map_err(|_| {
@@ -115,7 +55,7 @@ fn derive_canonical_projection_for(
         ));
     }
 
-    let mut projected = canonical_message_fields_for(rendering, &envelope)?;
+    let mut projected = canonical_message_fields_for(&envelope)?;
     // A Claude row keeps its project id as its path, so the Session fact's
     // other fields stay masked off the row; only the transcript it was read
     // from is evidence the row should answer.
@@ -223,7 +163,6 @@ fn derive_canonical_projection_for(
         ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
     })?;
     let metadata_json = canonical_message_metadata_for(
-        rendering,
         &envelope,
         (!session_metadata.is_empty()).then_some(&session_metadata),
     )?;
@@ -502,7 +441,7 @@ fn canonical_message_metadata(
     envelope: &CanonicalObservationEnvelopeV1,
     session_metadata: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> ProjectionStoreResult<Option<String>> {
-    canonical_message_metadata_for(CanonicalRendering::Current, envelope, session_metadata)
+    canonical_message_metadata_for(envelope, session_metadata)
 }
 
 /// Message metadata holds only what the envelope does not: session, tool, and
@@ -510,22 +449,10 @@ fn canonical_message_metadata(
 /// row; [`message_metadata_with_envelope`] merges the two for readers that
 /// render the full record.
 fn canonical_message_metadata_for(
-    rendering: CanonicalRendering,
     envelope: &CanonicalObservationEnvelopeV1,
     session_metadata: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> ProjectionStoreResult<Option<String>> {
-    let mut metadata = match rendering {
-        // Released rows embedded the whole envelope.
-        CanonicalRendering::ShippedRelease => match serde_json::to_value(envelope) {
-            Ok(serde_json::Value::Object(envelope)) => envelope,
-            _ => {
-                return Err(ProjectionStoreError::Contract(
-                    ObservationContractError::CanonicalEncoding,
-                ));
-            }
-        },
-        CanonicalRendering::Current => serde_json::Map::new(),
-    };
+    let mut metadata = serde_json::Map::new();
     if let Some(session_metadata) = session_metadata {
         metadata.extend(session_metadata.clone());
     }
@@ -537,21 +464,7 @@ fn canonical_message_metadata_for(
     if let Some(normalize) = normalizer {
         normalize(&mut metadata, envelope.facts())?;
     }
-    let tool_use_id = match rendering {
-        CanonicalRendering::Current => host_tool_use_id(envelope),
-        // Released rows carried the first subagent dispatch id of a Cursor
-        // transcript record, including the capture fallback.
-        CanonicalRendering::ShippedRelease => normalizer.and_then(|_| {
-            envelope.facts().iter().find_map(|fact| match fact {
-                CanonicalObservationFactV1::ToolInvocation {
-                    invocation_id: Some(invocation_id),
-                    name,
-                    ..
-                } if is_subagent_dispatch_tool(name) => Some(invocation_id.as_str()),
-                _ => None,
-            })
-        }),
-    };
+    let tool_use_id = host_tool_use_id(envelope);
     if let Some(tool_use_id) = tool_use_id {
         metadata.insert(
             TOOL_USE_ID_KEY.to_owned(),
@@ -562,8 +475,7 @@ fn canonical_message_metadata_for(
         .facts()
         .iter()
         .find(|fact| matches!(fact, CanonicalObservationFactV1::Message { .. }))
-        && let Some(semantics) = rendering_message_semantics(
-            rendering,
+        && let Some(semantics) = provider_message_semantics(
             envelope.provider().as_str(),
             envelope.native_record_kind(),
             role.as_str(),
@@ -923,11 +835,10 @@ fn canonical_cursor_dispatch_message_fields(
 fn canonical_message_fields(
     envelope: &CanonicalObservationEnvelopeV1,
 ) -> ProjectionStoreResult<Option<CanonicalMessageFields>> {
-    canonical_message_fields_for(CanonicalRendering::Current, envelope)
+    canonical_message_fields_for(envelope)
 }
 
 fn canonical_message_fields_for(
-    rendering: CanonicalRendering,
     envelope: &CanonicalObservationEnvelopeV1,
 ) -> ProjectionStoreResult<Option<CanonicalMessageFields>> {
     let facts = envelope.facts();
@@ -950,12 +861,8 @@ fn canonical_message_fields_for(
         .find(|fact| matches!(fact, CanonicalObservationFactV1::Message { .. }))
     {
         let role = role.as_str();
-        let text = match rendering {
-            CanonicalRendering::Current => canonical_message_text(content)?,
-            CanonicalRendering::ShippedRelease => canonical_fact_text(content)?,
-        };
-        if let Some(semantics) = rendering_message_semantics(
-            rendering,
+        let text = canonical_message_text(content)?;
+        if let Some(semantics) = provider_message_semantics(
             envelope.provider().as_str(),
             envelope.native_record_kind(),
             role,

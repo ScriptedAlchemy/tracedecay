@@ -14,12 +14,7 @@ use crate::{SessionMessageRecord, SessionRecord};
 #[cfg(test)]
 mod tests;
 
-pub const SESSION_MESSAGE_PROJECTOR_VERSION_V4: &str = "claude-session-message-v4";
-pub const SESSION_MESSAGE_PROJECTOR_VERSION_V5: &str = "claude-session-message-v5";
 /// v7 renders a message whose content is a block array as its text blocks.
-/// v6 (shipped in v1.0.0-beta.66) stored the array's JSON; its stores are
-/// reset through the LCM schema version rather than rebuilt, because their
-/// immutable session-temporal effects bind the v6 output digests.
 pub const SESSION_MESSAGE_PROJECTOR_VERSION_V7: &str = "claude-session-message-v7";
 pub const SESSION_MESSAGE_PROJECTOR_VERSION: &str = SESSION_MESSAGE_PROJECTOR_VERSION_V7;
 pub const CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION: &str = SESSION_MESSAGE_PROJECTOR_VERSION;
@@ -502,26 +497,6 @@ pub struct ProjectionRebuildOutcome {
     projected_rows: usize,
     skipped_observations: usize,
     complete: bool,
-}
-
-/// Typed result of converging a retained predecessor projector generation.
-///
-/// `Current` means no predecessor-owned output remains. `RebuildRequired`
-/// reports the bounded rebuild attempt that is resumable across later drains
-/// and process restarts.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ProjectionPredecessorConvergence {
-    Current,
-    RebuildRequired(ProjectionRebuildOutcome),
-}
-
-impl ProjectionPredecessorConvergence {
-    pub fn rebuild(&self) -> Option<&ProjectionRebuildOutcome> {
-        match self {
-            Self::Current => None,
-            Self::RebuildRequired(rebuild) => Some(rebuild),
-        }
-    }
 }
 
 impl ProjectionRebuildOutcome {

@@ -1232,26 +1232,23 @@ pub(in super::super) enum ConvergedRendering {
 /// deterministic rendering, keeping the historical `message_created` flag the
 /// releases wrote.
 ///
-/// Reached only from the authority audit, which has already admitted the row
-/// as a shipped rendering: provenance still carries the digest of the output
-/// this store holds, or it carries this binary's digest while the mutable row
-/// is still that shipped rendering. A row that matches neither is refused
-/// before this write. The message row is a pure derivation of the durable
-/// observation, so rewriting it loses nothing;
-/// the digest is re-stamped last so an interrupted transaction leaves the
-/// released pairing intact.
+/// Reached only from the authority audit, which has already admitted the
+/// row's current provenance and recorded an interrupted write of this
+/// binary's rendering. The message row is a pure derivation of the durable
+/// observation, so rewriting it loses nothing; the digest is re-stamped last
+/// so an interrupted transaction leaves the existing pairing intact.
 ///
 /// When the LCM privacy sanitizer withholds this binary's rendering, that
 /// verdict *is* the current rendering: the output is retired to the disposition
 /// a fresh capture writes ([`retire_quarantined_projection`]). A sanitizer
 /// fault still fails the transaction so the store stays refused, named.
-pub(in super::super) async fn converge_released_output_rendering(
+pub(in super::super) async fn converge_projection_output(
     conn: &impl Executor,
     projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<ConvergedRendering> {
-    // A beta-era partial projection may retain current provenance and message
-    // rows after losing their shared session row. The immutable projection is
-    // the canonical insert authority; `apply_session` also preserves richer
+    // A partial projection may retain current provenance and message rows
+    // after losing their shared session row. The immutable projection is the
+    // canonical insert authority; `apply_session` also preserves richer
     // compatible session metadata when the row already exists.
     apply_session(conn, projection.session()).await?;
     match supersede_projected_message(conn, projection.message()).await {

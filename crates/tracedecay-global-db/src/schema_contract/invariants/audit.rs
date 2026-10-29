@@ -6,7 +6,6 @@ use tracedecay_privacy::sanitize_lcm_payload_text;
 use tracedecay_store::{
     ObservationProjection, ProjectionSkipReason, ProjectionStoreError,
     SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageProjection, WorkflowFactProjection,
-    stored_message_is_shipped_release_rendering,
 };
 
 use crate::observation_projection::state::canonical_message_location;
@@ -14,9 +13,7 @@ use crate::observation_projection::{ProjectionOutputAuthority, ProjectionRowsBat
 
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
-use super::released_rendering::{
-    ReleasedRenderingLedger, StoredProvenanceRendering, admit_provenance_row,
-};
+use super::projection_repair::{ProjectionRepairLedger, admit_provenance_row};
 use super::rows::{audit_read_error, authority_violation, decode_authority_observation};
 use super::{AUDIT_PAGE_ROWS, INCOMPLETE_EXHAUSTIVE_PASS, projection_checkpoint};
 const AUDIT_NAME: &str = "observation-authority";
@@ -598,7 +595,7 @@ struct ResolvedOutputAuthority<'a> {
     projection_rows: ProjectionRowsBatch,
     /// Released renderings this page found. Held here because every row that
     /// can produce one already reads its stored authority through this struct.
-    released: &'a ReleasedRenderingLedger,
+    released: &'a ProjectionRepairLedger,
 }
 
 impl ResolvedOutputAuthority<'_> {
@@ -672,12 +669,7 @@ async fn validate_message_projection_row(
     else {
         return Ok(false);
     };
-    admit_provenance_row(
-        provenance,
-        projection,
-        &resolved.projection_rows,
-        resolved.released,
-    )?;
+    admit_provenance_row(provenance, projection)?;
     resolved
         .ownership(&message.provider, &message.message_id)
         .validate()?;
@@ -705,157 +697,113 @@ async fn validate_message_projection_row(
     ) else {
         return Ok(false);
     };
-    // A released rendering's stored rows *are* the rendering the provenance
-    // pairs them with, and the write step that owns the transaction rewrites
-    // them; comparing them against this binary's fields would refuse exactly
-    // that.
-    if admit_provenance_row(
-        owner_provenance,
-        &owner_projection,
-        &resolved.projection_rows,
-        resolved.released,
-    )? == StoredProvenanceRendering::Current
-    {
-        // Convergence supersedes an existing output row, and reinserts a
-        // vanished one only where provenance still names this observation as
-        // its creator. A surviving body that disagrees with the deterministic
-        // output stays a hard failure. Session repair is only the uniquely
-        // owned current output whose session row is absent.
-        let owner_message = owner_projection.message();
-        let output_row_present = resolved
-            .projection_rows
-            .message(&owner_message.provider, &owner_message.message_id)
-            .is_some();
-        match verify_owner_output_rows(conn, resolved, &owner_projection).await {
-            Ok(()) => {
-                // Message equality is not the whole output. The row's hash and
-                // storage kind are not compared by the message record, so a
-                // matching message can still sit on stale storage columns.
-                // A compatible protected body retains its own rendering;
-                // backfill only its missing storage location below.
-                let stored_matches = match resolved
-                    .projection_rows
-                    .message(&owner_message.provider, &owner_message.message_id)
-                {
-                    Some(stored) => {
-                        crate::observation_projection::stored_row_matches(stored, owner_message)
-                            .map_err(|error| {
-                                authority_violation(format!(
-                                    "projection output rows disagree with deterministic output: \
-                                     {error}"
-                                ))
-                            })?
-                    }
-                    None => false,
-                };
-                // Once normalized, a location remains historical identity even
-                // when the provider's original symlink is moved or removed.
-                if resolved
-                    .projection_rows
-                    .storage_columns(&owner_message.provider, &owner_message.message_id)
-                    .is_some_and(|raw| raw.location_path.is_none())
-                    && let Some(location) =
-                        canonical_message_location(owner_message).map_err(|error| {
+    admit_provenance_row(owner_provenance, &owner_projection)?;
+    // Convergence supersedes an existing output row, and reinserts a
+    // vanished one only where provenance still names this observation as
+    // its creator. A surviving body that disagrees with the deterministic
+    // output stays a hard failure. Session repair is only the uniquely
+    // owned current output whose session row is absent.
+    let owner_message = owner_projection.message();
+    let output_row_present = resolved
+        .projection_rows
+        .message(&owner_message.provider, &owner_message.message_id)
+        .is_some();
+    match verify_owner_output_rows(conn, resolved, &owner_projection).await {
+        Ok(()) => {
+            // Message equality is not the whole output. The row's hash and
+            // storage kind are not compared by the message record, so a
+            // matching message can still sit on stale storage columns.
+            // A compatible protected body retains its own rendering;
+            // backfill only its missing storage location below.
+            let stored_matches = match resolved
+                .projection_rows
+                .message(&owner_message.provider, &owner_message.message_id)
+            {
+                Some(stored) => {
+                    crate::observation_projection::stored_row_matches(stored, owner_message)
+                        .map_err(|error| {
                             authority_violation(format!(
-                                "invalid projected message location: {error}"
+                                "projection output rows disagree with deterministic output: \
+                                 {error}"
                             ))
                         })?
-                {
-                    resolved
-                        .released
-                        .record_location(&owner_projection, location);
                 }
-                if stored_matches
-                    && owned_storage_columns_need_rewrite(
-                        &owner_projection,
-                        &resolved.projection_rows,
-                    )?
-                {
-                    resolved.released.record(&owner_projection);
-                }
-            }
-            Err(ProjectionStoreError::OutputCollision {
-                provider,
-                message_id,
-            }) if !output_row_present
-                && owner_provenance.message_created == 1
-                && provider == owner_message.provider
-                && message_id == owner_message.message_id
-                && owner_provenance.output_provider == provider
-                && owner_provenance.output_message_id == message_id =>
+                None => false,
+            };
+            // Once normalized, a location remains historical identity even
+            // when the provider's original symlink is moved or removed.
+            if resolved
+                .projection_rows
+                .storage_columns(&owner_message.provider, &owner_message.message_id)
+                .is_some_and(|raw| raw.location_path.is_none())
+                && let Some(location) =
+                    canonical_message_location(owner_message).map_err(|error| {
+                        authority_violation(format!("invalid projected message location: {error}"))
+                    })?
             {
-                // Provenance still says this observation created the row, and
-                // the row is gone. That is an interrupted write, not a retired
-                // output. Restore it from the immutable projection.
-                resolved.released.record(&owner_projection);
+                resolved
+                    .released
+                    .record_location(&owner_projection, location);
             }
-            Err(ProjectionStoreError::OutputCollision {
-                provider,
-                message_id,
-            }) if output_row_present
-                && provider == owner_projection.message().provider
-                && message_id == owner_projection.message().message_id
-                && resolved
-                    .projection_rows
-                    .message(&provider, &message_id)
-                    .is_some_and(|stored| {
-                        // A sanitizer fault is not a match; the row then
-                        // falls through to the named hard failure below.
-                        stored_message_is_shipped_release_rendering(
-                            &authority.canonical,
-                            |released| {
-                                crate::observation_projection::stored_row_matches(stored, released)
-                                    .is_ok_and(|matches| matches)
-                            },
-                        )
-                    }) =>
+            if stored_matches
+                && owned_storage_columns_need_rewrite(&owner_projection, &resolved.projection_rows)?
             {
-                // Provenance already carries this binary's digest, and the
-                // mutable row is still the rendering a shipped release wrote
-                // for this observation: the write that stamped the digest did
-                // not finish. Finish it on the released-rendering ledger. A
-                // body that matches neither rendering is tamper and falls
-                // through to the hard failure below.
                 resolved.released.record(&owner_projection);
-            }
-            Err(ProjectionStoreError::SessionOutputCollision {
-                provider,
-                session_id,
-                field: "row_missing",
-            }) if !output_row_present
-                && owner_provenance.message_created == 1
-                && provider == owner_projection.session().provider
-                && session_id == owner_projection.session().session_id
-                && owner_provenance.output_provider == owner_message.provider
-                && owner_provenance.output_message_id == owner_message.message_id =>
-            {
-                // The message batch is how sessions are loaded. A creator whose
-                // message row is gone therefore looks like a missing session
-                // even when the session row is still there. Restore both from
-                // the immutable projection.
-                resolved.released.record(&owner_projection);
-            }
-            Err(ProjectionStoreError::SessionOutputCollision {
-                provider,
-                session_id,
-                field: "row_missing",
-            }) if output_row_present
-                && provider == owner_projection.session().provider
-                && session_id == owner_projection.session().session_id =>
-            {
-                // The uniquely owned current output has no session row. The
-                // immutable owner projection is the exact insert authority;
-                // defer it to the write transaction's convergence ledger.
-                // Conflicting session fields remain hard errors.
-                resolved.released.record(&owner_projection);
-            }
-            Err(error) => {
-                return Err(authority_violation(format!(
-                    "projection output rows disagree with deterministic output: {error}"
-                )));
             }
         }
+        Err(ProjectionStoreError::OutputCollision {
+            provider,
+            message_id,
+        }) if !output_row_present
+            && owner_provenance.message_created == 1
+            && provider == owner_message.provider
+            && message_id == owner_message.message_id
+            && owner_provenance.output_provider == provider
+            && owner_provenance.output_message_id == message_id =>
+        {
+            // Provenance still says this observation created the row, and
+            // the row is gone. That is an interrupted write, not a retired
+            // output. Restore it from the immutable projection.
+            resolved.released.record(&owner_projection);
+        }
+        Err(ProjectionStoreError::SessionOutputCollision {
+            provider,
+            session_id,
+            field: "row_missing",
+        }) if !output_row_present
+            && owner_provenance.message_created == 1
+            && provider == owner_projection.session().provider
+            && session_id == owner_projection.session().session_id
+            && owner_provenance.output_provider == owner_message.provider
+            && owner_provenance.output_message_id == owner_message.message_id =>
+        {
+            // The message batch is how sessions are loaded. A creator whose
+            // message row is gone therefore looks like a missing session
+            // even when the session row is still there. Restore both from
+            // the immutable projection.
+            resolved.released.record(&owner_projection);
+        }
+        Err(ProjectionStoreError::SessionOutputCollision {
+            provider,
+            session_id,
+            field: "row_missing",
+        }) if output_row_present
+            && provider == owner_projection.session().provider
+            && session_id == owner_projection.session().session_id =>
+        {
+            // The uniquely owned current output has no session row. The
+            // immutable owner projection is the exact insert authority;
+            // defer it to the write transaction's convergence ledger.
+            // Conflicting session fields remain hard errors.
+            resolved.released.record(&owner_projection);
+        }
+        Err(error) => {
+            return Err(authority_violation(format!(
+                "projection output rows disagree with deterministic output: {error}"
+            )));
+        }
     }
+
     Ok(true)
 }
 
@@ -1150,7 +1098,7 @@ async fn resolve_output_authority<'a>(
     conn: &impl QueryExecutor,
     observations: &[&DurableObservationV1],
     effects: &[ObservationProjection],
-    released: &'a ReleasedRenderingLedger,
+    released: &'a ProjectionRepairLedger,
 ) -> tracedecay_domain::errors::Result<ResolvedOutputAuthority<'a>> {
     let outputs = requested_outputs(effects);
     let authorities = crate::observation_projection::read_output_authorities(conn, &outputs)
@@ -1191,7 +1139,7 @@ async fn resolve_output_authority<'a>(
 async fn validate_projection_effects(
     conn: &impl crate::observation_projection::SendProjectionDerive,
     observations: &[&DurableObservationV1],
-    released: &ReleasedRenderingLedger,
+    released: &ProjectionRepairLedger,
 ) -> tracedecay_domain::errors::Result<()> {
     let effects = derive_page_effects(conn, observations).await?;
     let resolved = resolve_output_authority(conn, observations, &effects, released).await?;
@@ -1373,7 +1321,7 @@ async fn validate_projection_authority_suffix_pages(
     conn: &impl crate::observation_projection::SendProjectionDerive,
     mut checkpoint: AuditCheckpoint,
     page_limit: Option<i64>,
-    released: &ReleasedRenderingLedger,
+    released: &ProjectionRepairLedger,
 ) -> tracedecay_domain::errors::Result<(AuditCheckpoint, i64, i64, i64, bool)> {
     let (provenance_rowid, provenance_audited) = count_suffix_rows(
         conn,
@@ -1654,7 +1602,7 @@ async fn validate_projection_authority_suffix_pages(
 pub(super) async fn validate_projection_authority_suffix(
     conn: &impl crate::observation_projection::SendProjectionDerive,
     checkpoint: AuditCheckpoint,
-    released: &ReleasedRenderingLedger,
+    released: &ProjectionRepairLedger,
 ) -> tracedecay_domain::errors::Result<(AuditCheckpoint, i64, i64, i64)> {
     let (checkpoint, provenance, dispositions, aliases, _) =
         validate_projection_authority_suffix_pages(conn, checkpoint, None, released).await?;
@@ -1664,7 +1612,7 @@ pub(super) async fn validate_projection_authority_suffix(
 pub(super) async fn validate_projection_authority_chunk(
     conn: &impl crate::observation_projection::SendProjectionDerive,
     checkpoint: AuditCheckpoint,
-    released: &ReleasedRenderingLedger,
+    released: &ProjectionRepairLedger,
 ) -> tracedecay_domain::errors::Result<(AuditCheckpoint, i64, i64, i64, bool)> {
     validate_projection_authority_suffix_pages(
         conn,
@@ -1756,7 +1704,7 @@ mod tests {
     };
 
     use super::{
-        AuditCheckpoint, BTreeSet, HashMap, ProjectionOutputOwnership, ReleasedRenderingLedger,
+        AuditCheckpoint, BTreeSet, HashMap, ProjectionOutputOwnership, ProjectionRepairLedger,
         ResolvedOutputAuthority, ensure_audit_checkpoint_schema,
         validate_projection_authority_suffix,
     };
@@ -2039,7 +1987,7 @@ mod tests {
         let (_, _, dispositions, _) = validate_projection_authority_suffix(
             &counting,
             AuditCheckpoint::default(),
-            &ReleasedRenderingLedger::default(),
+            &ProjectionRepairLedger::default(),
         )
         .await
         .unwrap();
@@ -2141,7 +2089,7 @@ mod tests {
         let (_, _, dispositions, _) = validate_projection_authority_suffix(
             &connection,
             AuditCheckpoint::default(),
-            &ReleasedRenderingLedger::default(),
+            &ProjectionRepairLedger::default(),
         )
         .await
         .unwrap();
@@ -2183,7 +2131,7 @@ mod tests {
         let error = validate_projection_authority_suffix(
             &connection,
             AuditCheckpoint::default(),
-            &ReleasedRenderingLedger::default(),
+            &ProjectionRepairLedger::default(),
         )
         .await
         .err()
@@ -2717,7 +2665,7 @@ mod tests {
         validate_projection_authority_suffix(
             &counting,
             AuditCheckpoint::default(),
-            &ReleasedRenderingLedger::default(),
+            &ProjectionRepairLedger::default(),
         )
         .await
         .expect("a batched audit of well-formed projections must converge");
@@ -3031,7 +2979,7 @@ mod tests {
             )
             .await
             .unwrap(),
-            released: &ReleasedRenderingLedger::default(),
+            released: &ProjectionRepairLedger::default(),
         };
 
         let contested = resolved

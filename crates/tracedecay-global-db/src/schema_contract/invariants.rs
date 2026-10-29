@@ -16,7 +16,7 @@ use tracedecay_runtime_core::db::{
 };
 
 mod audit;
-mod released_rendering;
+mod projection_repair;
 mod repair;
 mod rows;
 #[cfg(test)]
@@ -32,7 +32,7 @@ use audit::{
     read_audit_checkpoint, validate_projection_authority_chunk,
     validate_projection_authority_suffix, write_audit_checkpoint,
 };
-use released_rendering::ReleasedRenderingLedger;
+use projection_repair::ProjectionRepairLedger;
 use repair::{
     repair_committed_source_cursors, repair_projection_frontier,
     validate_observation_cursor_coverage,
@@ -513,7 +513,7 @@ async fn converge_authority_invariants(
                 provider,
                 "audit observation projection authority page",
                 async |conn| {
-                    let released = ReleasedRenderingLedger::default();
+                    let released = ProjectionRepairLedger::default();
                     let projected: BoxFuture<
                         '_,
                         tracedecay_domain::errors::Result<ProjectionPage>,
@@ -550,7 +550,7 @@ async fn converge_authority_invariants(
             provider,
             "audit observation projection authority suffix",
             async |conn| {
-                let released = ReleasedRenderingLedger::default();
+                let released = ProjectionRepairLedger::default();
                 let projected: BoxFuture<
                     '_,
                     tracedecay_domain::errors::Result<(AuditCheckpoint, i64, i64, i64)>,
@@ -836,7 +836,7 @@ pub async fn validate_authority_rows_exhaustive(
     // Doctor reads a snapshot, so released renderings are recorded and
     // dropped here rather than converged: they are admitted persisted state,
     // and schema convergence owns the transaction that rewrites them.
-    let released = ReleasedRenderingLedger::default();
+    let released = ProjectionRepairLedger::default();
     validate_projection_authority_suffix(conn, AuditCheckpoint::default(), &released).await?;
     if foreign_key_violation_exists_read_only(conn).await? {
         return Err(authority_violation(
