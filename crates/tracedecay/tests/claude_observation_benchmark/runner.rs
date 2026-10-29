@@ -1074,8 +1074,8 @@ async fn write_provider_hermes(home: &Path, project: &Path, repetition: usize) -
         .execute(
             "CREATE TABLE sessions (
                 id TEXT PRIMARY KEY, source TEXT NOT NULL, model TEXT,
-                parent_session_id TEXT, started_at REAL NOT NULL, cwd TEXT,
-                input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
+                parent_session_id TEXT, started_at REAL NOT NULL, ended_at REAL,
+                cwd TEXT, title TEXT, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
                 cache_read_tokens INTEGER DEFAULT 0, cache_write_tokens INTEGER DEFAULT 0,
                 reasoning_tokens INTEGER DEFAULT 0, model_config TEXT
             )",
@@ -1087,7 +1087,8 @@ async fn write_provider_hermes(home: &Path, project: &Path, repetition: usize) -
             "CREATE TABLE messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
                 role TEXT NOT NULL, content TEXT, tool_calls TEXT, tool_name TEXT,
-                timestamp REAL NOT NULL
+                timestamp REAL NOT NULL, reasoning TEXT,
+                active INTEGER NOT NULL DEFAULT 1
             )",
             (),
         )

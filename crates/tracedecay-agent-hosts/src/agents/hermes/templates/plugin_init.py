@@ -18,16 +18,12 @@ from . import schemas, tools
 
 logger = logging.getLogger(__name__)
 
-# Canonical profile-home resolver (hermes_constants), with the legacy
-# hermes_cli.config location as fallback; both guarded so the plugin still
-# imports outside a Hermes install.
+# Canonical profile-home resolver (hermes_constants); guarded so the plugin
+# still imports outside a Hermes install.
 try:
     from hermes_constants import get_hermes_home as _hermes_get_hermes_home
 except Exception:
-    try:
-        from hermes_cli.config import get_hermes_home as _hermes_get_hermes_home
-    except Exception:
-        _hermes_get_hermes_home = None
+    _hermes_get_hermes_home = None
 
 # Canonical config read/write path for provider save_config(); guarded for
 # use outside Hermes (raw-YAML fallback below).
@@ -97,30 +93,11 @@ FACT_STORE_EXACT_ROUTES = {
     if name.startswith(_FACT_STORE_ROUTE_PREFIX)
 }
 
-# Hermes' legacy fixed-action memory wire (`fact_add`, `fact_search`, ...)
-# still dispatches, translated onto the exact fact-store routes. It is not
-# advertised as schemas any more; the collapsed `fact_store(action=...)`
-# surface is.
-MEMORY_FACT_ACTIONS = {
-    "fact_add": "add",
-    "fact_search": "search",
-    "fact_probe": "probe",
-    "fact_related": "related",
-    "fact_reason": "reason",
-    "fact_contradict": "contradict",
-    "fact_update": "update",
-    "fact_remove": "remove",
-    "fact_list": "list",
+MEMORY_TOOL_MAP = {
+    "fact_store": {"resolve_action": True},
+    "fact_feedback": {"tracedecay_name": "tracedecay_fact_feedback"},
+    "memory_status": {"tracedecay_name": "tracedecay_memory_status"},
 }
-
-MEMORY_TOOL_MAP = {"fact_store": {"resolve_action": True}}
-for _hermes_name, _action in MEMORY_FACT_ACTIONS.items():
-    MEMORY_TOOL_MAP[_hermes_name] = {
-        "tracedecay_name": _FACT_STORE_ROUTE_PREFIX + _action,
-        "legacy_alias": True,
-    }
-MEMORY_TOOL_MAP["fact_feedback"] = {"tracedecay_name": "tracedecay_fact_feedback"}
-MEMORY_TOOL_MAP["memory_status"] = {"tracedecay_name": "tracedecay_memory_status"}
 
 # Canonical tools the memory provider must be able to describe. Reported at
 # register() time when this install's catalog does not advertise one, instead
@@ -2567,10 +2544,8 @@ class TracedecayMemoryProvider(MemoryProvider):
             logger.warning("tracedecay memory provider save_config failed: %s", exc)
 
     def get_tool_schemas(self):
-        # Collapsed surface (12 -> 3): fact_store(action=...) covers the nine
-        # fixed-action fact_* aliases, which remain dispatchable through
-        # handle_tool_call for compatibility with older transcripts/configs
-        # but no longer cost per-call schema footprint.
+        # Collapsed surface: fact_store(action=...) covers every fact-store
+        # operation without a per-action schema footprint.
         # A required canonical tool this catalog does not advertise is left
         # out (reported by register()) rather than described by a stand-in.
         described = (
@@ -2599,27 +2574,6 @@ class TracedecayMemoryProvider(MemoryProvider):
                 return tools.error_payload(
                     f"{tool_name} routes to {tracedecay_name}, which this install's tool catalog does not advertise"
                 )
-            resolved_action = next(
-                (
-                    action
-                    for action, route in FACT_STORE_EXACT_ROUTES.items()
-                    if route == tracedecay_name
-                ),
-                "",
-            )
-            if mapping.get("legacy_alias") and "fact_type" in tool_args:
-                # Hermes' legacy fixed-action provider wire calls the taxonomy
-                # field ``fact_type``.  Translate that compatibility field only
-                # for the fixed aliases; the canonical generic ``fact_store``
-                # surface remains category-shaped and is passed through as-is.
-                fact_type = tool_args.pop("fact_type")
-                category = tool_args.get("category")
-                if category is not None and str(category) != str(fact_type):
-                    return tools.error_payload(
-                        "fact_type and category must agree when both are provided"
-                    )
-                if category is None:
-                    tool_args["category"] = fact_type
         if "memory_scope" not in tool_args:
             category = str(tool_args.get("category") or "")
             if not self.project_root or (
@@ -2693,8 +2647,7 @@ def register(ctx):
         config=context_config,
         hermes_home=context_hermes_home,
     )
-    if callable(getattr(ctx, "register_context_engine", None)):
-        ctx.register_context_engine(context_engine)
+    ctx.register_context_engine(context_engine)
 
     # Direct tool registration is split by capability:
     #   - Code-graph / memory / transcript tools register UNCONDITIONALLY.

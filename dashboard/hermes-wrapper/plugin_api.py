@@ -9,15 +9,7 @@ It does not ship or reimplement any dashboard UI. The adapter:
 - lazily spawns ``tracedecay dashboard --port 0`` bound to 127.0.0.1 (or uses
   an externally managed server via ``TRACEDECAY_DASHBOARD_URL``),
 - returns the same-origin embed path from ``/dashboard-url`` and reverse-proxies
-  that mount at ``/embed`` so the Hermes iframe never points at loopback, and
-- retains compatibility API forwarding: ``/holographic/*`` -> upstream ``/api/plugins/holographic/*``,
-  ``/lcm/*`` -> upstream ``/api/plugins/hermes-lcm/*``,
-  ``/graph/*`` -> upstream ``/api/plugins/graph/*``, and
-  ``/savings/*`` -> upstream ``/api/plugins/savings/*``,
-  ``/analytics/*`` -> upstream ``/api/plugins/analytics/*``,
-  ``/automation/*`` -> upstream ``/api/automation/*``,
-- exposes upstream ``/api/capabilities`` at ``/capabilities`` so the UI (and
-  future Hermes-specific extensions) can feature-detect the backend.
+  that mount at ``/embed`` so the Hermes iframe never points at loopback.
 
 Auth: requests inherit the Hermes dashboard session-token middleware (this
 router is mounted under ``/api/plugins/...``); the upstream tracedecay server
@@ -41,7 +33,6 @@ import atexit
 import concurrent.futures
 import ctypes
 import importlib.util
-import json
 import logging
 import os
 import re
@@ -424,60 +415,6 @@ def _upstream() -> tuple[str, dict[str, str]]:
         return _upstream_origin
 
 
-def _proxy(method: str, upstream_path: str, request: Request, body: bytes | None) -> JSONResponse:
-    # Connection-level failures (reset/refused) on GETs are retried once
-    # after re-resolving the upstream: _upstream reaps a dead child and
-    # respawns it (then waits for readiness), so a mid-flight engine death
-    # heals transparently instead of surfacing a one-off 502. POSTs are never
-    # retried. Curation applies must not run twice.
-    attempts = 2 if method == "GET" else 1
-    last_exc: Exception | None = None
-    for attempt in range(attempts):
-        base, credential = _upstream()
-        query = request.url.query
-        url = f"{base}{upstream_path}" + (f"?{query}" if query else "")
-        parsed = urllib.parse.urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            raise HTTPException(status_code=502, detail="invalid upstream URL scheme")
-        headers = dict(credential)
-        if body:
-            headers["Content-Type"] = "application/json"
-        req = urllib.request.Request(
-            url,
-            data=body if method == "POST" else None,
-            method=method,
-            headers=headers,
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=_PROXY_TIMEOUT_SECONDS) as resp:  # noqa: S310, loopback/configured upstream only
-                payload = json.loads(resp.read().decode("utf-8"))
-                return JSONResponse(payload, status_code=resp.status)
-        except urllib.error.HTTPError as exc:
-            try:
-                payload = json.loads(exc.read().decode("utf-8"))
-            except Exception:
-                payload = {"detail": str(exc)}
-            return JSONResponse(payload, status_code=exc.code)
-        except Exception as exc:
-            last_exc = exc
-            if attempt + 1 < attempts:
-                logger.warning(
-                    "tracedecay dashboard proxy request failed (%s); retrying once", exc
-                )
-                continue
-            logger.exception("tracedecay dashboard proxy request failed")
-    raise HTTPException(status_code=502, detail=f"tracedecay dashboard unreachable: {last_exc}")
-
-
-class _DummyRequest:
-    """Minimal Request stand-in for proxy calls without an inbound query."""
-
-    class _URL:
-        query = ""
-
-    url = _URL()
-
-
 @router.get("/dashboard-url")
 def get_dashboard_url() -> JSONResponse:
     """Return the same-origin embed path for the Hermes iframe mount.
@@ -607,141 +544,4 @@ def _embed_once(
         status_code=resp.status,
         headers=outbound,
         media_type=media,
-    )
-
-
-@router.get("/capabilities")
-def get_capabilities() -> JSONResponse:
-    """Backend feature discovery (proxied from the tracedecay server).
-
-    Hermes-specific extensions added to this wrapper in later phases should
-    merge their own flags into this payload so the UI can feature-detect.
-    """
-    response = _proxy("GET", "/api/capabilities", _DummyRequest(), None)
-    try:
-        payload = json.loads(bytes(response.body).decode("utf-8"))
-        payload["mode"] = "hermes"
-        return JSONResponse(payload, status_code=response.status_code)
-    except Exception:
-        return response
-
-
-@router.get("/holographic")
-@router.get("/holographic/")
-def get_holographic_root(request: Request) -> JSONResponse:
-    """Holographic memory overview (proxied).
-
-    Forwards to upstream ``GET /api/plugins/holographic``. The dashboard
-    overview payload (provider status, facts, entities, association graph).
-    Query parameters (``q``, ``limit``, ``graph_limit``) pass through verbatim.
-    """
-    return _proxy("GET", "/api/plugins/holographic", request, None)
-
-
-@router.get("/holographic/{path:path}")
-def get_holographic(path: str, request: Request) -> JSONResponse:
-    """Catch-all GET proxy for the holographic memory API.
-
-    Maps ``/holographic/<path>`` to upstream
-    ``GET /api/plugins/holographic/<path>`` (e.g. ``projection``,
-    ``similarity``, ``fact/{id}``, ``oplog``), preserving the query
-    string.
-    """
-    return _proxy("GET", f"/api/plugins/holographic/{path}", request, None)
-
-
-@router.post("/holographic/{path:path}")
-async def post_holographic(path: str, request: Request) -> JSONResponse:
-    """Catch-all POST proxy for the holographic memory API.
-
-    Maps ``/holographic/<path>`` to upstream
-    ``POST /api/plugins/holographic/<path>``. Request bodies are forwarded
-    unmodified.
-
-    ``_proxy`` blocks (urllib + possible spawn/ready wait), so it runs on the
-    threadpool so a slow apply round-trip does not stall the event loop.
-    """
-    body = await request.body()
-    return await run_in_threadpool(
-        _proxy, "POST", f"/api/plugins/holographic/{path}", request, body
-    )
-
-
-@router.get("/lcm/{path:path}")
-def get_lcm(path: str, request: Request) -> JSONResponse:
-    """Catch-all GET proxy for the LCM session-store API.
-
-    Maps ``/lcm/<path>`` to upstream ``GET /api/plugins/hermes-lcm/<path>``
-    (e.g. ``overview``, ``search``, ``session/{id}``, ``node/{id}``,
-    ``timeline``, ``compression``), preserving the query string.
-    """
-    return _proxy("GET", f"/api/plugins/hermes-lcm/{path}", request, None)
-
-
-@router.post("/lcm/{path:path}")
-async def post_lcm(path: str, request: Request) -> JSONResponse:
-    """Catch-all POST proxy for the LCM session-store API.
-
-    Maps ``/lcm/<path>`` to upstream ``POST /api/plugins/hermes-lcm/<path>``,
-    forwarding the JSON request body unmodified. (The current LCM API is
-    read-only; this exists so future write endpoints proxy without changes.)
-    """
-    body = await request.body()
-    return await run_in_threadpool(
-        _proxy, "POST", f"/api/plugins/hermes-lcm/{path}", request, body
-    )
-
-
-@router.get("/graph/{path:path}")
-def get_graph(path: str, request: Request) -> JSONResponse:
-    return _proxy("GET", f"/api/plugins/graph/{path}", request, None)
-
-
-@router.post("/graph/{path:path}")
-async def post_graph(path: str, request: Request) -> JSONResponse:
-    body = await request.body()
-    return await run_in_threadpool(
-        _proxy, "POST", f"/api/plugins/graph/{path}", request, body
-    )
-
-
-@router.get("/savings/{path:path}")
-def get_savings(path: str, request: Request) -> JSONResponse:
-    """Catch-all GET proxy for the savings & cost API.
-
-    Maps ``/savings/<path>`` to upstream ``GET /api/plugins/savings/<path>``
-    (e.g. ``overview``, ``ledger``, ``sessions``, ``models``, ``pricing``),
-    preserving the query string.
-    """
-    return _proxy("GET", f"/api/plugins/savings/{path}", request, None)
-
-
-@router.post("/savings/{path:path}")
-async def post_savings(path: str, request: Request) -> JSONResponse:
-    """Catch-all POST proxy for the savings & cost API.
-
-    The current savings API is read-only; this exists so future write
-    endpoints proxy without changes (mirrors the LCM proxy).
-    """
-    body = await request.body()
-    return await run_in_threadpool(
-        _proxy, "POST", f"/api/plugins/savings/{path}", request, body
-    )
-
-
-@router.get("/analytics/{path:path}")
-def get_analytics(path: str, request: Request) -> JSONResponse:
-    return _proxy("GET", f"/api/plugins/analytics/{path}", request, None)
-
-
-@router.get("/automation/{path:path}")
-def get_automation(path: str, request: Request) -> JSONResponse:
-    return _proxy("GET", f"/api/automation/{path}", request, None)
-
-
-@router.post("/automation/{path:path}")
-async def post_automation(path: str, request: Request) -> JSONResponse:
-    body = await request.body()
-    return await run_in_threadpool(
-        _proxy, "POST", f"/api/automation/{path}", request, body
     )
