@@ -482,18 +482,13 @@ fn doctor_warns_on_missing_or_running_disabled_units() {
 #[test]
 fn schema_convergence_severity_tracks_typed_state() {
     for (state, issues, warnings) in [
-        (SchemaConvergenceStateV1::PendingSchemaMigration, 0, 1),
-        (
-            SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress,
-            0,
-            1,
-        ),
+        (SchemaConvergenceStateV1::Pending, 0, 1),
+        (SchemaConvergenceStateV1::Running, 0, 1),
         (SchemaConvergenceStateV1::Degraded, 1, 0),
         (SchemaConvergenceStateV1::Completed, 0, 0),
     ] {
         let status = serde_json::json!({"doctor_report": {"schema_convergences": [{
             "store": "profile-sessions", "stage": "registered_schema", "state": state,
-            "progress": {"unit": "pages", "done": 4, "remaining": 7},
             "started_at_micros": 42, "degraded_row": "observation_id=obs-7"
         }]}});
         let mut counters = DoctorCounters::new();

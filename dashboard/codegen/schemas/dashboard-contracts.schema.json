@@ -11912,8 +11912,8 @@
           "type": "string"
         },
         {
-          "const": "pending_schema_migration",
-          "description": "A store whose historical schema convergence has not completed: the\nmigrations whose cost scales with store size are still pending, still\nrunning, or stopped on a failure. The daemon serves while they run, so\nthis is the surface that says which store is still migrating and why.",
+          "const": "schema_convergence_incomplete",
+          "description": "A store whose background schema convergence (the authority-invariant\naudit and projection retry re-arming that follow admission) has not\ncompleted: it is still pending, still running, or stopped on a failure.\nThe daemon serves meanwhile, so this is the surface that says which\nstore has not converged and why.",
           "type": "string"
         },
         {
@@ -24856,16 +24856,6 @@
             "null"
           ]
         },
-        "progress": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SchemaConvergenceProgressV1"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "stage": {
           "$ref": "#/$defs/SchemaConvergenceStageV1"
         },
@@ -24884,65 +24874,10 @@
         "store",
         "stage",
         "state",
-        "progress",
         "started_at_micros",
         "degraded_row"
       ],
       "type": "object"
-    },
-    "SchemaConvergenceProgressV1": {
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "properties": {
-            "done": {
-              "format": "uint64",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "remaining": {
-              "format": "uint64",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "unit": {
-              "const": "rows",
-              "type": "string"
-            }
-          },
-          "required": [
-            "unit",
-            "done",
-            "remaining"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "done": {
-              "format": "uint64",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "remaining": {
-              "format": "uint64",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "unit": {
-              "const": "pages",
-              "type": "string"
-            }
-          },
-          "required": [
-            "unit",
-            "done",
-            "remaining"
-          ],
-          "type": "object"
-        }
-      ]
     },
     "SchemaConvergenceStageV1": {
       "enum": [
@@ -24952,8 +24887,8 @@
     },
     "SchemaConvergenceStateV1": {
       "enum": [
-        "pending_schema_migration",
-        "released_shape_convergence_in_progress",
+        "pending",
+        "running",
         "degraded",
         "completed"
       ],

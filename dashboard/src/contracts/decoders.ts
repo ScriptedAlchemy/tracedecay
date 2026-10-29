@@ -664,7 +664,6 @@ import type {
   SavingsSessionSummaryV1,
   SavingsSumV1,
   SchemaConvergenceFindingV1,
-  SchemaConvergenceProgressV1,
   SchemaConvergenceStageV1,
   SchemaConvergenceStateV1,
   SchemaId,
@@ -4226,7 +4225,7 @@ The storage family never reports a silent overage: each subclass names one
 observable retention/size condition Doctor surfaces over canonical size
 observability read models. The set is closed and grows only through a future
 versioned enum, never by widening an existing subclass. */
-export const DoctorStorageFindingKindV1Schema: z.ZodUnion<[z.ZodLiteral<"over_budget_store">, z.ZodLiteral<"orphan_store">, z.ZodLiteral<"incident_debris_present">, z.ZodLiteral<"retention_backlog">, z.ZodLiteral<"table_growth">, z.ZodLiteral<"pending_schema_migration">, z.ZodLiteral<"wal_checkpoint_pinned">]> = z.union([z.literal("over_budget_store"), z.literal("orphan_store"), z.literal("incident_debris_present"), z.literal("retention_backlog"), z.literal("table_growth"), z.literal("pending_schema_migration"), z.literal("wal_checkpoint_pinned")]);
+export const DoctorStorageFindingKindV1Schema: z.ZodUnion<[z.ZodLiteral<"over_budget_store">, z.ZodLiteral<"orphan_store">, z.ZodLiteral<"incident_debris_present">, z.ZodLiteral<"retention_backlog">, z.ZodLiteral<"table_growth">, z.ZodLiteral<"schema_convergence_incomplete">, z.ZodLiteral<"wal_checkpoint_pinned">]> = z.union([z.literal("over_budget_store"), z.literal("orphan_store"), z.literal("incident_debris_present"), z.literal("retention_backlog"), z.literal("table_growth"), z.literal("schema_convergence_incomplete"), z.literal("wal_checkpoint_pinned")]);
 
 export const DuplicateEffectOutcomeV1Schema: z.ZodEnum<{ "committed": "committed"; "not_applicable": "not_applicable"; "prevented": "prevented"; "unknown": "unknown" }> = z.enum(["committed", "not_applicable", "prevented", "unknown"]);
 
@@ -8930,33 +8929,21 @@ export const SavingsSumV1Schema: z.ZodObject<{
 
 export const SchemaConvergenceFindingV1Schema: z.ZodObject<{
   degraded_row: z.ZodType<string | null, unknown>;
-  progress: z.ZodType<SchemaConvergenceProgressV1 | null, unknown>;
   stage: z.ZodType<SchemaConvergenceStageV1, unknown>;
   started_at_micros: z.ZodType<number, unknown>;
   state: z.ZodType<SchemaConvergenceStateV1, unknown>;
   store: z.ZodType<string, unknown>;
 }, z.core.$strict> = z.object({
   degraded_row: z.string().nullable(),
-  progress: z.union([z.lazy(() => SchemaConvergenceProgressV1Schema), z.null()]),
   stage: z.lazy(() => SchemaConvergenceStageV1Schema),
   started_at_micros: z.number().int(),
   state: z.lazy(() => SchemaConvergenceStateV1Schema),
   store: z.string(),
 }).strict();
 
-export const SchemaConvergenceProgressV1Schema: z.ZodType<SchemaConvergenceProgressV1, unknown> = z.discriminatedUnion("unit", [z.object({
-  done: z.number().int().min(0),
-  remaining: z.number().int().min(0),
-  unit: z.literal("pages"),
-}).strict(), z.object({
-  done: z.number().int().min(0),
-  remaining: z.number().int().min(0),
-  unit: z.literal("rows"),
-}).strict()]);
-
 export const SchemaConvergenceStageV1Schema: z.ZodLiteral<"registered_schema"> = z.literal("registered_schema");
 
-export const SchemaConvergenceStateV1Schema: z.ZodEnum<{ "completed": "completed"; "degraded": "degraded"; "pending_schema_migration": "pending_schema_migration"; "released_shape_convergence_in_progress": "released_shape_convergence_in_progress" }> = z.enum(["completed", "degraded", "pending_schema_migration", "released_shape_convergence_in_progress"]);
+export const SchemaConvergenceStateV1Schema: z.ZodEnum<{ "completed": "completed"; "degraded": "degraded"; "pending": "pending"; "running": "running" }> = z.enum(["completed", "degraded", "pending", "running"]);
 
 /** Stable, canonical catalog identity for `SchemaId`. */
 export const SchemaIdSchema: z.ZodType<string, unknown> = z.string();

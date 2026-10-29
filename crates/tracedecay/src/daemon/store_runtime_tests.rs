@@ -622,7 +622,7 @@ async fn schema_convergence_is_reported_and_completes_after_admission() {
     assert_eq!(
         unconverged,
         vec![(shard_id.clone(), RegisteredSchemaConvergenceStatus::Running)],
-        "the shard still migrating must be the one reported"
+        "the shard still converging must be the one reported"
     );
     let convergence_observations = registry.registered_schema_convergence_observations();
     let [convergence] = convergence_observations.as_slice() else {
@@ -630,26 +630,26 @@ async fn schema_convergence_is_reported_and_completes_after_admission() {
     };
     assert_eq!(
         convergence.state,
-        tracedecay_contracts::storage::SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress
+        tracedecay_contracts::storage::SchemaConvergenceStateV1::Running
     );
     assert!(convergence.started_at_micros > 0);
     let report =
-        tracedecay_daemon_service::doctor_kernel::pending_schema_migration_read(&unconverged);
+        tracedecay_daemon_service::doctor_kernel::schema_convergence_incomplete_read(&unconverged);
     let tracedecay_contracts::doctor::DoctorStorageFamilyReadV1::Observed { findings } = report
     else {
-        panic!("a store mid-migration must be reported, not omitted: {report:?}");
+        panic!("a store mid-convergence must be reported, not omitted: {report:?}");
     };
     let [finding] = findings.as_slice() else {
         panic!("one outstanding shard is one finding: {findings:?}");
     };
     assert_eq!(
         finding.kind(),
-        tracedecay_contracts::doctor::DoctorStorageFindingKindV1::PendingSchemaMigration
+        tracedecay_contracts::doctor::DoctorStorageFindingKindV1::SchemaConvergenceIncomplete
     );
     assert_eq!(
         finding.finding().state(),
         tracedecay_contracts::doctor::DoctorEvidenceStateV1::Stale,
-        "a readable store behind its schema is stale, never healthy"
+        "a readable store still converging is stale, never healthy"
     );
 
     convergence_gate.release();

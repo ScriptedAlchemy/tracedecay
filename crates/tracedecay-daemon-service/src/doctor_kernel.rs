@@ -226,29 +226,28 @@ fn code_index_mount_state(staleness: Option<CodeIndexStalenessStateV1>) -> CodeI
     }
 }
 
-// === Pending schema migrations (Storage family) ==============================
+// === Incomplete schema convergence (Storage family) ==========================
 
-/// Report the shards whose historical schema convergence has not completed.
+/// Report the shards whose schema convergence has not completed.
 ///
-/// Convergence carries the migrations whose cost scales with store size, a
-/// full index rebuild, a whole-table rewrite, so on a large store it runs for
-/// minutes after the daemon is already serving. That is deliberate: it runs
-/// after the fail-closed admission checks and outside any caller's write
+/// Convergence runs the authority-invariant audit and re-arms projection
+/// retries. The audit pages every authority row, so on a large store it runs
+/// for minutes after the daemon is already serving. That is deliberate: it
+/// runs after the fail-closed admission checks and outside any caller's write
 /// lease, so it blocks neither admission nor retrieval. What it must not do is
-/// stay invisible. A shard still pending or running reads as `Stale`, the
-/// store is behind its current schema but readable, and one whose migration
-/// failed reads as `Degraded`, carrying the failure the convergence task
-/// recorded. An empty set is absent rather than a healthy claim, since a
+/// stay invisible. A shard still pending or running reads as `Stale`, and one
+/// whose convergence failed reads as `Degraded`, carrying the failure the
+/// convergence task recorded. An empty set is absent rather than a healthy claim, since a
 /// daemon with no mounted shard has converged nothing.
 #[must_use]
-pub fn pending_schema_migration_read(
+pub fn schema_convergence_incomplete_read(
     unconverged: &[(
         tracedecay_store::StoreShardIdV1,
         tracedecay_store_runtime::RegisteredSchemaConvergenceStatus,
     )],
 ) -> DoctorStorageFamilyReadV1 {
     use tracedecay_contracts::doctor::DoctorEvidenceStateV1;
-    use tracedecay_contracts::storage::{StoreKeyV1, pending_schema_migration_finding};
+    use tracedecay_contracts::storage::{StoreKeyV1, schema_convergence_incomplete_finding};
     use tracedecay_store_runtime::RegisteredSchemaConvergenceStatus;
 
     let mut findings = Vec::new();
@@ -257,17 +256,17 @@ pub fn pending_schema_migration_read(
             RegisteredSchemaConvergenceStatus::Pending => (
                 DoctorEvidenceStateV1::Stale,
                 "queued".to_owned(),
-                "schema migrations are queued and have not started",
+                "schema convergence is queued and has not started",
             ),
             RegisteredSchemaConvergenceStatus::Running => (
                 DoctorEvidenceStateV1::Stale,
                 "running".to_owned(),
-                "schema migrations are running; the store stays served meanwhile",
+                "schema convergence is running; the store stays served meanwhile",
             ),
             RegisteredSchemaConvergenceStatus::Degraded { message } => (
                 DoctorEvidenceStateV1::Degraded,
                 format!("stopped.{message}"),
-                "schema migrations stopped on a failure and left the store behind its schema",
+                "schema convergence stopped on a failure and left the store unaudited",
             ),
             // Filtered by the authority; a converged shard has nothing to report.
             RegisteredSchemaConvergenceStatus::Complete => continue,
@@ -275,7 +274,7 @@ pub fn pending_schema_migration_read(
         let Ok(store) = StoreKeyV1::new(format!("{shard:?}")) else {
             return DoctorStorageFamilyReadV1::Unknown;
         };
-        let Ok(finding) = pending_schema_migration_finding(&store, state, &detail, statement)
+        let Ok(finding) = schema_convergence_incomplete_finding(&store, state, &detail, statement)
         else {
             return DoctorStorageFamilyReadV1::Unknown;
         };

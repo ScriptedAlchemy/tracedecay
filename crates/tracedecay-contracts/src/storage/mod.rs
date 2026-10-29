@@ -31,13 +31,12 @@ pub mod telemetry;
 
 pub use compaction::{CompactionDecisionV1, CompactionPlacementV1, CompactionTriggerPolicyV1};
 pub use convergence::{
-    SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStageV1,
-    SchemaConvergenceStateV1,
+    SchemaConvergenceFindingV1, SchemaConvergenceStageV1, SchemaConvergenceStateV1,
 };
 pub use debris::{IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1};
 pub use findings::{
     code_generation_retention_finding, incident_debris_finding, orphan_store_finding,
-    over_budget_finding, pending_schema_migration_finding, retention_backlog_finding,
+    over_budget_finding, retention_backlog_finding, schema_convergence_incomplete_finding,
     table_growth_finding, wal_checkpoint_pinned_finding,
 };
 pub use identity::{

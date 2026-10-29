@@ -1754,7 +1754,7 @@ impl ProjectOpenInputs<'_> {
                 let unconverged = registry.unconverged_registered_schemas();
                 tracedecay_daemon_service::doctor_kernel::SchemaConvergenceDoctorReadV1 {
                     storage: tracedecay_contracts::doctor::merge_storage_reads(
-                        tracedecay_daemon_service::doctor_kernel::pending_schema_migration_read(
+                        tracedecay_daemon_service::doctor_kernel::schema_convergence_incomplete_read(
                             &unconverged,
                         ),
                         tracedecay_daemon_service::doctor_kernel::wal_checkpoint_pinned_read(

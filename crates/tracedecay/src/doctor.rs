@@ -8,9 +8,7 @@ use std::path::{Path, PathBuf};
 use tracedecay_contracts::project_open::{
     ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
 };
-use tracedecay_contracts::storage::{
-    SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStateV1,
-};
+use tracedecay_contracts::storage::{SchemaConvergenceFindingV1, SchemaConvergenceStateV1};
 use tracedecay_domain::errors::ProjectOpenFailureKind;
 
 use tracedecay_agent_hosts::agents::{self, DoctorCounters, HealthcheckContext};
@@ -449,17 +447,8 @@ fn render_schema_convergences(
     };
     let findings: Vec<SchemaConvergenceFindingV1> = serde_json::from_value(value.clone())?;
     for finding in &findings {
-        let progress = match finding.progress {
-            Some(SchemaConvergenceProgressV1::Rows { done, remaining }) => {
-                format!(", rows {done} done / {remaining} remaining")
-            }
-            Some(SchemaConvergenceProgressV1::Pages { done, remaining }) => {
-                format!(", pages {done} done / {remaining} remaining")
-            }
-            None => String::new(),
-        };
         let message = format!(
-            "Schema convergence: {} {} {}{progress}, started at {}",
+            "Schema convergence: {} {} {}, started at {}",
             finding.store.as_str(),
             finding.stage.as_str(),
             finding.state.as_str(),
@@ -471,8 +460,9 @@ fn render_schema_convergences(
                 Some(row) => dc.fail(&format!("{message}: {row}")),
                 None => dc.fail(&message),
             },
-            SchemaConvergenceStateV1::PendingSchemaMigration
-            | SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress => dc.warn(&message),
+            SchemaConvergenceStateV1::Pending | SchemaConvergenceStateV1::Running => {
+                dc.warn(&message);
+            }
         }
     }
     Ok(findings)
