@@ -19,9 +19,9 @@ use tracedecay_runtime_core::storage::retry_transient_file_op;
 
 use super::control::{
     HOST_BUNDLE_CONTROL_DIR, HOST_BUNDLE_LOCK_FILE, MAX_CONTROL_FILE_BYTES,
-    component_set_receipt_file, component_slug, is_safe_component, parse_receipt, receipt_file,
-    receipt_identity_from_file_name, receipt_schema_probe, superseded_identities,
-    validate_component_set_receipt, validate_receipt, writer_lock_file,
+    component_set_receipt_file, is_safe_component, parse_receipt, receipt_file,
+    receipt_identity_from_file_name, receipt_schema_probe, validate_component_set_receipt,
+    validate_receipt, writer_lock_file,
 };
 use super::model::HostBundleExecutionRequestV1;
 use super::planner::{
@@ -151,23 +151,6 @@ impl HostBundleWriterV1 {
             } else {
                 Err(HostBundleError::ReceiptCorrupted)
             };
-        }
-        // Only the component-set transaction can retire another identity's
-        // receipt during publication; writing here would leave two
-        // owners of one route.
-        for identity in superseded_identities(manifest.component) {
-            if self
-                .load_receipt(manifest.host, identity)?
-                .is_some_and(|receipt| receipt.operation != HostBundleLifecycleOpV1::Uninstall)
-            {
-                return Err(HostBundleError::OwnershipConflict(format!(
-                    "a {} receipt owns the {} route; run `tracedecay update --agent {}` to \
-                     migrate it",
-                    component_slug(identity),
-                    component_slug(manifest.component),
-                    manifest.host.descriptor().cli_id(),
-                )));
-            }
         }
         let owned_receipt = previous_receipt
             .as_ref()
@@ -586,14 +569,6 @@ impl HostBundleWriterV1 {
             &bytes,
             true,
         )
-    }
-
-    pub(super) fn remove_receipt(
-        &self,
-        host: HostKindV1,
-        component: HostComponentV1,
-    ) -> Result<(), HostBundleError> {
-        self.remove_control_file(&receipt_file(host, component))
     }
 
     pub(super) fn load_component_set_receipt(

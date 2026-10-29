@@ -471,7 +471,7 @@ fn component_assets(
     if host == HostKindV1::CursorDesktop
         && matches!(
             component,
-            HostComponentV1::Core | HostComponentV1::ContextMcp | HostComponentV1::OperatorMcp
+            HostComponentV1::Core | HostComponentV1::ContextMcp
         )
     {
         let files = super::cursor::rendered_plugin_files(tracedecay_bin, serve_args)
@@ -496,7 +496,7 @@ fn component_assets(
     if host == HostKindV1::Codex
         && matches!(
             component,
-            HostComponentV1::Core | HostComponentV1::ContextMcp | HostComponentV1::OperatorMcp
+            HostComponentV1::Core | HostComponentV1::ContextMcp
         )
     {
         let files = super::codex::rendered_global_plugin_files(tracedecay_bin, serve_args)
@@ -520,7 +520,7 @@ fn component_assets(
     if host == HostKindV1::ClaudeCode
         && matches!(
             component,
-            HostComponentV1::Core | HostComponentV1::ContextMcp | HostComponentV1::OperatorMcp
+            HostComponentV1::Core | HostComponentV1::ContextMcp
         )
     {
         let files = super::claude::rendered_plugin_files(tracedecay_bin, serve_args)
@@ -840,7 +840,6 @@ fn component_name(component: HostComponentV1) -> &'static str {
         HostComponentV1::Core => "core",
         HostComponentV1::Agent => "agent",
         HostComponentV1::ContextMcp => "context-mcp",
-        HostComponentV1::OperatorMcp => "operator-mcp",
     }
 }
 
@@ -1161,14 +1160,7 @@ mod tests {
         );
         assert_eq!(
             supported_components(HostKindV1::ClaudeCode),
-            vec![
-                HostComponentV1::Core,
-                HostComponentV1::ContextMcp,
-                HostComponentV1::OperatorMcp,
-            ]
-        );
-        assert!(
-            !default_components(HostKindV1::ClaudeCode).contains(&HostComponentV1::OperatorMcp)
+            vec![HostComponentV1::Core, HostComponentV1::ContextMcp,]
         );
     }
 
@@ -1176,10 +1168,7 @@ mod tests {
     fn shared_mcp_manifests_have_one_canonical_component_owner() {
         for (host, unsupported) in [
             (HostKindV1::Hermes, HostComponentV1::ContextMcp),
-            (HostKindV1::Hermes, HostComponentV1::OperatorMcp),
-            (HostKindV1::OpenCode, HostComponentV1::OperatorMcp),
             (HostKindV1::KimiCode, HostComponentV1::ContextMcp),
-            (HostKindV1::KimiCode, HostComponentV1::OperatorMcp),
         ] {
             assert_eq!(
                 verified_embedded_host_bundle(

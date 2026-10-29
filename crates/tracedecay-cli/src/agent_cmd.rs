@@ -17,8 +17,6 @@ use automation::{
     install_codex_daemon_automation, validate_codex_automation_flags,
     validate_codex_automation_project_path,
 };
-#[cfg(test)]
-mod mcp_identity_tests;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HostBundleCliOperation {
@@ -663,22 +661,6 @@ fn component_is_not_applicable(agent: &str, component: crate::cli::HostBundleCom
     })
 }
 
-/// The identity a `--component` selection writes. A retired identity the host
-/// still lists plans its canonical route, so `operator-mcp` writes
-/// `context-mcp` on the hosts that offered it and stays a refusal elsewhere.
-fn selected_host_component(
-    host: tracedecay_agent_hosts::agents::host_bundle::HostKindV1,
-    component: tracedecay_agent_hosts::agents::host_bundle::HostComponentV1,
-) -> tracedecay_agent_hosts::agents::host_bundle::HostComponentV1 {
-    if tracedecay_agent_hosts::agents::host_bundle_registry::supported_components(host)
-        .contains(&component)
-    {
-        tracedecay_agent_hosts::agents::host_bundle::canonical_component(component)
-    } else {
-        component
-    }
-}
-
 fn canonical_host_component_set_with_tracedecay_bin(
     agent: &str,
     component: Option<crate::cli::HostBundleComponentArg>,
@@ -696,7 +678,7 @@ fn canonical_host_component_set_with_tracedecay_bin(
     };
     let requested = component.map(host_bundle_component).map_or_else(
         || tracedecay_agent_hosts::agents::host_bundle_registry::default_components(host),
-        |component| vec![selected_host_component(host, component)],
+        |component| vec![component],
     );
     if requested.is_empty() {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
@@ -1219,9 +1201,6 @@ fn host_bundle_component(
         crate::cli::HostBundleComponentArg::ContextMcp => {
             tracedecay_agent_hosts::agents::host_bundle::HostComponentV1::ContextMcp
         }
-        crate::cli::HostBundleComponentArg::OperatorMcp => {
-            tracedecay_agent_hosts::agents::host_bundle::HostComponentV1::OperatorMcp
-        }
     }
 }
 
@@ -1564,12 +1543,12 @@ mod tests {
         ));
         assert!(!component_is_not_applicable(
             "claude",
-            crate::cli::HostBundleComponentArg::OperatorMcp
+            crate::cli::HostBundleComponentArg::ContextMcp
         ));
         assert!(
             canonical_host_component_set(
                 "claude",
-                Some(crate::cli::HostBundleComponentArg::OperatorMcp),
+                Some(crate::cli::HostBundleComponentArg::ContextMcp),
                 0,
             )
             .is_ok(),
@@ -2579,41 +2558,6 @@ mod tests {
         assert_eq!(
             std::fs::read(&prompt_path).unwrap(),
             b"concurrent prompt edit\n"
-        );
-    }
-
-    #[test]
-    fn opencode_non_owner_component_cannot_remove_context_registration() {
-        let home = tempfile::tempdir().unwrap();
-        let config_path = home.path().join(".config/opencode/opencode.json");
-        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        std::fs::write(&config_path, OPENCODE_CONTEXT_CONFIG).unwrap();
-        let integration = tracedecay_agent_hosts::agents::get_integration("opencode").unwrap();
-        let context = tracedecay_agent_hosts::agents::InstallContext {
-            profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
-            home: home.path().to_path_buf(),
-            tracedecay_bin: "tracedecay".to_string(),
-            project_root: None,
-            dashboard: true,
-            serve_args: Default::default(),
-        };
-
-        integration
-            .activate_deployed_host_component_registration(
-                &[tracedecay_agent_hosts::agents::host_bundle::HostComponentV1::OperatorMcp],
-                &context,
-            )
-            .unwrap();
-        integration
-            .deactivate_deployed_host_component_registration(
-                &[tracedecay_agent_hosts::agents::host_bundle::HostComponentV1::OperatorMcp],
-                &context,
-            )
-            .unwrap();
-
-        assert_eq!(
-            std::fs::read(&config_path).unwrap(),
-            OPENCODE_CONTEXT_CONFIG
         );
     }
 

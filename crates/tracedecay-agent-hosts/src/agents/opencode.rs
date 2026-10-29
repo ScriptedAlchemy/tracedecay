@@ -191,9 +191,6 @@ impl AgentIntegration for OpenCodeIntegration {
                 State::Missing
             };
         }
-        if component == HostComponentV1::OperatorMcp {
-            return State::Missing;
-        }
         let config_root = config_path.parent().unwrap_or(&ctx.home);
         if component == HostComponentV1::Agent {
             let assets = super::plugin_bundle::opencode_agent_files()
