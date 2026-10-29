@@ -702,10 +702,7 @@ mod goal_event_tests {
                 json!({
                     "timestamp": format!("{}-{}-{}T12:00:01.{:03}Z", date.0, date.1, date.2, ordinal),
                     "type": "event_msg",
-                    "payload": {
-                        "type": "user_message",
-                        "message": format!("{session_id}-message-{ordinal}")
-                    }
+                    "payload": crate::runtime::hosts::codex::user_message_payload(format!("{session_id}-message-{ordinal}"))
                 })
             }));
             std::fs::write(
@@ -848,7 +845,7 @@ mod goal_event_tests {
                         .filter(|fact| matches!(
                             fact,
                             CanonicalObservationFactV1::Message { content, .. }
-                                if content.as_str() == Some(expected.as_str())
+                                if content[0]["text"].as_str() == Some(expected.as_str())
                         ))
                         .count(),
                     1,
@@ -945,7 +942,7 @@ mod goal_event_tests {
                     matches!(
                         fact,
                         CanonicalObservationFactV1::Message { content, .. }
-                            if content.as_str() == Some(marker)
+                            if content[0]["text"].as_str() == Some(marker)
                     )
                 })
             }),
@@ -1122,7 +1119,7 @@ mod goal_event_tests {
                     json!({
                         "timestamp": format!("2026-08-29T12:00:{:02}.000Z", ordinal + 2),
                         "type": "event_msg",
-                        "payload": {"type": "user_message", "message": format!("live append {ordinal}")}
+                        "payload": crate::runtime::hosts::codex::user_message_payload(format!("live append {ordinal}"))
                     })
                 )
                 .as_bytes(),
@@ -1182,7 +1179,7 @@ mod goal_event_tests {
             json!({
                 "timestamp": format!("{year}-{month}-{day}T12:00:01.000Z"),
                 "type": "event_msg",
-                "payload": {"type": "user_message", "message": message}
+                "payload": crate::runtime::hosts::codex::user_message_payload(message)
             }),
         ];
         std::fs::write(

@@ -30,7 +30,7 @@ fn line(record: serde_json::Value) -> String {
 fn message(index: usize) -> String {
     line(json!({
         "type": "event_msg",
-        "payload": {"type": "user_message", "message": format!("message {index:04} {}", "x".repeat(64))}
+        "payload": crate::runtime::hosts::codex::user_message_payload(format!("message {index:04} {}", "x".repeat(64)))
     }))
 }
 
@@ -158,7 +158,7 @@ fn turn_context_without_cwd_keeps_the_current_one() {
         &meta,
     ));
     assert!(!state.observe_context_record(
-        &json!({"type": "event_msg", "payload": {"type": "user_message", "message": "hi"}}),
+        &json!({"type": "event_msg", "payload": crate::runtime::hosts::codex::user_message_payload("hi")}),
         Path::new("/tmp/rollout.jsonl"),
         &meta,
     ));

@@ -79,7 +79,7 @@ fn write_codex_rollout_at(
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:01.000Z",
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": "Investigate the billing pipeline regression"}
+            "payload": crate::common::codex_user_message_payload("Investigate the billing pipeline regression")
         }),
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:02.000Z",
@@ -116,7 +116,7 @@ async fn codex_archived_rollout_is_ingested() {
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:01.000Z",
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": "Archived rollout probe"}
+            "payload": crate::common::codex_user_message_payload("Archived rollout probe")
         }),
     );
     std::fs::write(&path, contents).unwrap();
@@ -168,7 +168,7 @@ async fn codex_session_records_the_rollout_location() {
             serde_json::json!({
                 "timestamp": "2026-01-01T00:00:01.000Z",
                 "type": "event_msg",
-                "payload": {"type": "user_message", "message": "First branch attribution marker"}
+                "payload": crate::common::codex_user_message_payload("First branch attribution marker")
             }),
             serde_json::json!({
                 "timestamp": "2026-01-01T00:00:02.000Z",
@@ -235,7 +235,7 @@ async fn codex_resumed_pass_scopes_appended_turns_by_the_prior_turn_context() {
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:01.000Z",
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": "First incremental branch marker"}
+            "payload": crate::common::codex_user_message_payload("First incremental branch marker")
         }),
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:02.500Z",
@@ -401,7 +401,7 @@ async fn codex_file_change_items_record_edit_times_and_call_ids() {
             serde_json::json!({
                 "timestamp": "2026-01-01T00:00:21.000Z",
                 "type": "event_msg",
-                "payload": {"type": "user_message", "message": "Port the checklist"}
+                "payload": crate::common::codex_user_message_payload("Port the checklist")
             }),
             serde_json::json!({
                 "timestamp": "2026-01-01T00:00:22.000Z",

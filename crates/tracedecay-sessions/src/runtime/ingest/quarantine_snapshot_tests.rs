@@ -85,8 +85,8 @@ pub(super) async fn provider_keeps_refused_source_contract(
 
 const KIRO_WORKSPACE_HASH: &str = "0123456789abcdef0123456789abcdef";
 
-fn kiro_chat(message: &str) -> String {
-    json!({"chat": [{"role": "human", "content": message}]}).to_string()
+fn kiro_execution(message: &str) -> String {
+    json!({"messages": [{"role": "user", "content": message}]}).to_string()
 }
 
 #[tokio::test]
@@ -105,11 +105,11 @@ async fn kiro_keeps_the_refused_source_contract() {
     );
     // Snapshots are swept in path order, so the refused one comes first; with
     // no id key the session id is the file stem.
-    let refused = workspace_dir.join("a-refused.chat");
-    write_settled(&refused, &kiro_chat("first turn"));
+    let refused = workspace_dir.join("a-refused");
+    write_settled(&refused, &kiro_execution("first turn"));
     write_settled(
-        &workspace_dir.join("b-healthy.chat"),
-        &kiro_chat("first turn"),
+        &workspace_dir.join("b-healthy"),
+        &kiro_execution("first turn"),
     );
     settle(&workspace_dir);
 
@@ -120,7 +120,7 @@ async fn kiro_keeps_the_refused_source_contract() {
         "a-refused",
         "b-healthy",
         || {
-            write_settled(&refused, &kiro_chat("rewritten turn"));
+            write_settled(&refused, &kiro_execution("rewritten turn"));
             settle(&workspace_dir);
         },
     )

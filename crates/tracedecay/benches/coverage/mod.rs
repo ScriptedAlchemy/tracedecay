@@ -319,7 +319,7 @@ pub(crate) fn seed_transcripts(isolation_root: &Path, repos: &[(String, std::pat
             json!({
                 "timestamp": "2026-09-12T00:00:01.000Z",
                 "type": "event_msg",
-                "payload": {"type": "user_message", "message": "bench sweep user message"},
+                "payload": user_message_payload("bench sweep user message"),
             }),
             json!({
                 "timestamp": "2026-09-12T00:00:02.000Z",
@@ -3866,4 +3866,21 @@ pub(crate) fn file_at(ctx: &QueryContext, i: usize) -> String {
     } else {
         ctx.seeds.sample_files[i % ctx.seeds.sample_files.len()].clone()
     }
+}
+
+/// Current Codex `item_completed/UserMessage` payload; the item id is derived
+/// from the text, so identical prompts share one message identity.
+fn user_message_payload(text: impl AsRef<str>) -> serde_json::Value {
+    let text = text.as_ref();
+    let id = text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    });
+    serde_json::json!({
+        "type": "item_completed",
+        "item": {
+            "type": "UserMessage",
+            "id": format!("user-item-{id:016x}"),
+            "content": [{"type": "text", "text": text}],
+        },
+    })
 }

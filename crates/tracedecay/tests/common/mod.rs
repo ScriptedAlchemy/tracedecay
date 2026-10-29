@@ -35,6 +35,23 @@ use tracedecay_runtime_core::test_executable::write_executable_script;
 use tracedecay_sessions::admission::{HostAdmissionOutcome, HostAdmissionScope};
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
+/// Current Codex `item_completed/UserMessage` payload; the item id is derived
+/// from the text, so identical prompts share one message identity.
+pub fn codex_user_message_payload(text: impl AsRef<str>) -> serde_json::Value {
+    let text = text.as_ref();
+    let id = text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    });
+    serde_json::json!({
+        "type": "item_completed",
+        "item": {
+            "type": "UserMessage",
+            "id": format!("user-item-{id:016x}"),
+            "content": [{"type": "text", "text": text}],
+        },
+    })
+}
+
 pub fn repository_root() -> &'static Path {
     repository_layout::repository_root()
 }
