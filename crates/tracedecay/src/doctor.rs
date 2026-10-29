@@ -1056,24 +1056,16 @@ fn check_inert_project_config(dc: &mut DoctorCounters, project_path: &Path) {
     }
 }
 
-/// Warnings name entries PR reconciliation will reset; the error names a
-/// state file that blocks reconciliation outright.
-fn pr_autotrack_state_findings(data_root: &Path) -> std::result::Result<Vec<String>, String> {
-    match tracedecay_application::pr_tracking::load_state(data_root) {
-        Ok(state) => Ok(state
-            .stale
-            .iter()
-            .map(|stale| {
-                format!(
-                    "{stale}; PR auto-tracking reconciliation drops this entry and re-tracks the PR if it is still open"
-                )
-            })
-            .collect()),
-        Err(error) => Err(format!(
-            "PR auto-tracking state {} is unreadable ({error}); reconciliation stays blocked until that file is removed, after which open PRs are re-tracked",
-            tracedecay_application::pr_tracking::state_path(data_root).display()
-        )),
-    }
+/// The error names a PR auto-tracking state file that blocks reconciliation.
+fn pr_autotrack_state_failure(data_root: &Path) -> Option<String> {
+    tracedecay_application::pr_tracking::load_state(data_root)
+        .err()
+        .map(|error| {
+            format!(
+                "PR auto-tracking state {} is unreadable ({error}); reconciliation stays blocked until that file is removed, after which open PRs are re-tracked",
+                tracedecay_application::pr_tracking::state_path(data_root).display()
+            )
+        })
 }
 
 /// Reports PR auto-tracking state for the project's persisted layout, when it
@@ -1084,13 +1076,8 @@ fn check_persisted_state_resets(dc: &mut DoctorCounters, profile_root: &Path, pr
     else {
         return;
     };
-    match pr_autotrack_state_findings(&layout.data_root) {
-        Ok(warnings) => {
-            for warning in warnings {
-                dc.warn(&warning);
-            }
-        }
-        Err(failure) => dc.fail(&failure),
+    if let Some(failure) = pr_autotrack_state_failure(&layout.data_root) {
+        dc.fail(&failure);
     }
 }
 

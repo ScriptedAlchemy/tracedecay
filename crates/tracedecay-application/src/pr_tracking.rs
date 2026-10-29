@@ -108,29 +108,10 @@ pub struct ManagedPr {
 }
 
 /// Durable managed-PR state keyed by collision-proof synthetic branch label.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PrAutotrackState {
-    pub managed: BTreeMap<String, ManagedPr>,
-    /// Persisted entries whose shape this build refuses to decode. They are
-    /// never serialized, so the next [`save_state`] is their reset.
-    #[serde(skip)]
-    pub stale: Vec<StaleManagedPr>,
-}
-
-/// A persisted managed-PR entry refused because its shape does not decode as
-/// [`ManagedPr`] (for example a retired shape that omits `head_sha`). The
-/// refusal is scoped to this entry; every other entry still loads.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("PR auto-tracking entry '{label}' has an undecodable shape: {detail}")]
-pub struct StaleManagedPr {
-    pub label: String,
-    pub detail: String,
-}
-
-#[derive(Deserialize)]
-struct PersistedPrAutotrackState {
     #[serde(default)]
-    managed: BTreeMap<String, serde_json::Value>,
+    pub managed: BTreeMap<String, ManagedPr>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -156,20 +137,7 @@ pub fn load_state(data_root: &Path) -> std::result::Result<PrAutotrackState, Tra
         }
         Err(error) => return Err(error.into()),
     };
-    let persisted: PersistedPrAutotrackState = serde_json::from_str(&content)?;
-    let mut state = PrAutotrackState::default();
-    for (label, entry) in persisted.managed {
-        match serde_json::from_value(entry) {
-            Ok(managed) => {
-                state.managed.insert(label, managed);
-            }
-            Err(error) => state.stale.push(StaleManagedPr {
-                label,
-                detail: error.to_string(),
-            }),
-        }
-    }
-    Ok(state)
+    Ok(serde_json::from_str(&content)?)
 }
 
 pub fn save_state(data_root: &Path, state: &PrAutotrackState) -> std::io::Result<()> {

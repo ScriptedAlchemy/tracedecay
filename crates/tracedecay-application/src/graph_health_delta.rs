@@ -45,8 +45,6 @@ pub enum HealthDeltaError {
         "the before point was measured under health definition {recorded}, not {HEALTH_DEFINITION}"
     )]
     DefinitionMismatch { recorded: String },
-    #[error("the before point predates recorded health definitions")]
-    DefinitionUnrecorded,
     #[error(transparent)]
     Graph(GraphQueryError),
     #[error("health-delta storage failed: {0}")]
@@ -185,7 +183,7 @@ fn health_delta_envelope(
                 )
             })
             .collect(),
-        definition: Some(HEALTH_DEFINITION.to_owned()),
+        definition: HEALTH_DEFINITION.to_owned(),
     };
     let coverage = if point.files_analyzed > 0
         && point.function_denominator > 0
@@ -348,10 +346,12 @@ fn verify_health_delta_point(
     if payload.scope_digest != scope.scope_digest.as_str() || stored.watermark != recomputed {
         return Err(HealthDeltaError::CorruptPoint);
     }
-    match payload.definition {
-        Some(recorded) if recorded == HEALTH_DEFINITION => Ok(stored),
-        Some(recorded) => Err(HealthDeltaError::DefinitionMismatch { recorded }),
-        None => Err(HealthDeltaError::DefinitionUnrecorded),
+    if payload.definition == HEALTH_DEFINITION {
+        Ok(stored)
+    } else {
+        Err(HealthDeltaError::DefinitionMismatch {
+            recorded: payload.definition,
+        })
     }
 }
 
@@ -731,69 +731,21 @@ mod tests {
         }
     }
 
-    fn unlabeled_release_cursor(scope: &HealthDeltaScopeV1, generation: &str) -> String {
-        let digest = canonical_sha256(&(
-            "tracedecay.health-delta.cursor.v1",
-            scope.scope_digest.as_str(),
-            generation,
-        ))
-        .expect("legacy cursor digest");
-        format!(
-            "{HEALTH_DELTA_CURSOR_PREFIX}{}",
-            sha256_hex_suffix(digest.as_str()).expect("legacy cursor hex")
-        )
-    }
-
     async fn record_point_under(
         db: &RegisteredGlobalDb,
         scope: &HealthDeltaScopeV1,
         point: &HealthDeltaPointV1,
         cursor: &str,
-        definition: Option<&str>,
+        definition: &str,
     ) {
         let mut envelope = health_delta_envelope(scope, point, cursor);
         let ObservabilityPayloadV1::HealthSnapshot(payload) = &mut envelope.payload else {
             panic!("health-delta envelopes carry a health snapshot");
         };
-        payload.definition = definition.map(str::to_owned);
+        payload.definition = definition.to_owned();
         record_health_delta_envelope(db, envelope)
             .await
             .expect("record point");
-    }
-
-    #[tokio::test]
-    async fn an_unlabeled_released_point_is_refused_and_never_reused_as_after() {
-        let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
-            "health-delta-unlabeled-point",
-        )
-        .await;
-        let scope = health_delta_scope(Some("project.first".to_owned()), Some("src"))
-            .expect("canonical scope");
-        let point = scored_point(
-            &scope,
-            2,
-            8706,
-            &[(HealthDimension::Modularity, 500_000, Some(2))],
-        );
-        let released = unlabeled_release_cursor(&scope, "generation.first");
-        record_point_under(&harness.registered, &scope, &point, &released, None).await;
-
-        let error = load_health_delta_point(&harness.registered, &scope, &released)
-            .await
-            .expect_err("an unlabeled before point must not be compared");
-        assert!(
-            matches!(error, HealthDeltaError::DefinitionUnrecorded),
-            "{error}"
-        );
-        let current = health_delta_cursor(&scope, "generation.first").expect("cursor");
-        assert_ne!(current, released);
-        assert!(
-            find_health_delta_point(&harness.registered, &scope, &current)
-                .await
-                .expect("read current generation")
-                .is_none(),
-            "the current definition must mint its own point at an observed generation"
-        );
     }
 
     #[tokio::test]
@@ -816,7 +768,7 @@ mod tests {
             &scope,
             &point,
             &cursor,
-            Some("health.2026-01-01"),
+            "health.2026-01-01",
         )
         .await;
 
