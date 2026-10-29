@@ -300,7 +300,10 @@ fn same_remote_clones(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let remote = dir.join("remote.git");
     let project = dir.join("repo");
     let clone = dir.join("repo-clone");
-    git(dir, &["init", "--bare", remote.to_str().unwrap()]);
+    git(
+        dir,
+        &["init", "--bare", "-b", "master", remote.to_str().unwrap()],
+    );
     git(
         dir,
         &["clone", remote.to_str().unwrap(), project.to_str().unwrap()],
@@ -530,7 +533,10 @@ async fn unrelated_histories_merge_adds_an_alias_and_keeps_the_id() {
 fn pushed_repository(dir: &Path, name: &str, file: &str) -> (PathBuf, PathBuf) {
     let remote = dir.join(format!("{name}.git"));
     let checkout = dir.join(name);
-    git(dir, &["init", "--bare", remote.to_str().unwrap()]);
+    git(
+        dir,
+        &["init", "--bare", "-b", "master", remote.to_str().unwrap()],
+    );
     git(
         dir,
         &[
@@ -855,7 +861,10 @@ async fn renamed_checkout_session_db_follows_registered_store() {
     let home = test_home(&dir);
     let profile = test_profile(&home);
 
-    git(dir.path(), &["init", "--bare", remote.to_str().unwrap()]);
+    git(
+        dir.path(),
+        &["init", "--bare", "-b", "master", remote.to_str().unwrap()],
+    );
     git(
         dir.path(),
         &[
@@ -919,7 +928,10 @@ async fn same_remote_repositories_share_one_persistent_identity() {
     let home = test_home(&dir);
     let profile = test_profile(&home);
 
-    git(dir.path(), &["init", "--bare", remote.to_str().unwrap()]);
+    git(
+        dir.path(),
+        &["init", "--bare", "-b", "master", remote.to_str().unwrap()],
+    );
     git(
         dir.path(),
         &["clone", remote.to_str().unwrap(), one.to_str().unwrap()],

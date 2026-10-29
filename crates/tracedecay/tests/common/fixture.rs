@@ -514,7 +514,6 @@ const GIT_FIXTURE_CONFIG: [&str; 10] = [
 /// revision in a cached target dir are ignored.
 const GIT_TEMPLATE_DIR_NAME: &str = "fixture-git-template-v1";
 const PRIMARY_TEMPLATE: &str = "primary";
-const ORIGIN_TEMPLATE: &str = "origin.git";
 
 static GIT_TEMPLATE_ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
 
@@ -632,30 +631,6 @@ impl GitFixture {
 
     pub fn head_sha(&self) -> String {
         self.capture(&["rev-parse", "HEAD"])
-    }
-
-    /// Adds a sibling bare `origin` and pushes `main` to it, returning the
-    /// canonical origin path.
-    pub fn with_bare_origin(&self) -> PathBuf {
-        let origin = self
-            .root
-            .parent()
-            .unwrap_or(&self.root)
-            .join(ORIGIN_TEMPLATE);
-        let seeded = git_template_root()
-            .is_some_and(|template| copy_tree(&template.join(ORIGIN_TEMPLATE), &origin).is_ok());
-        if !seeded {
-            self.run(&["init", "--bare", &origin.to_string_lossy()]);
-        }
-        let origin = canonical_existing_identity(&origin).unwrap_or_else(|err| {
-            panic!(
-                "failed to canonicalize fixture origin '{}': {err}",
-                origin.display()
-            )
-        });
-        self.run(&["remote", "add", "origin", &origin.to_string_lossy()]);
-        self.run(&["push", "origin", "main"]);
-        origin
     }
 
     /// Adds a linked worktree checked out on a new `branch`.
@@ -777,10 +752,6 @@ fn build_git_template(dest: &Path) -> io::Result<()> {
     fs::write(primary.join(".gitignore"), ".tracedecay/\n")?;
     run_template_git(&primary, &["add", "--all"])?;
     run_template_git(&primary, &["commit", "-m", "initial commit"])?;
-
-    let origin = dest.join(ORIGIN_TEMPLATE);
-    fs::create_dir_all(&origin)?;
-    run_template_git(&origin, &["init", "--bare"])?;
 
     fs::write(dest.join("READY"), b"ok")?;
     Ok(())
