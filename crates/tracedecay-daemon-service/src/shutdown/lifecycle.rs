@@ -379,6 +379,16 @@ impl Drop for DaemonActivity {
 mod tests {
     use super::*;
 
+    #[test]
+    fn daemon_lifecycle_rejects_new_work_after_draining() {
+        let lifecycle = DaemonLifecycle::default();
+        assert!(lifecycle.accepting());
+
+        lifecycle.begin_draining();
+
+        assert!(!lifecycle.accepting());
+    }
+
     #[tokio::test]
     async fn the_shutdown_coordinator_runs_off_tokio() {
         let lifecycle = DaemonLifecycle::default();

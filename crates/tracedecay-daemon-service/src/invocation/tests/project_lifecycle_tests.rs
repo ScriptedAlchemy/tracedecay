@@ -1,17 +1,17 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::{
+    AuthorizedDaemonLspWorkspace, DaemonInvocationOutcome, DaemonInvocationProblem,
+    DaemonInvocationRequest, DaemonInvocationService, DaemonLspInvocationOwner,
+    DaemonLspOwnerRegistrar, DaemonLspSessionAccess,
+};
 use tokio::sync::Mutex;
 use tracedecay_application::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_contracts::{
     AuthorizedRootAdmission, AuthorizedScopeSetAuthority, CancellationContext, CapabilityGrantId,
     CapabilityGrantSnapshot, Deadline, DisclosureClass, RegisteredRootLocatorV1, RequestContext,
     RequestId, ResolvedScope, SharedProfileStoreLocatorV1,
-};
-use tracedecay_daemon_service::{
-    AuthorizedDaemonLspWorkspace, DaemonInvocationOutcome, DaemonInvocationProblem,
-    DaemonInvocationRequest, DaemonInvocationService, DaemonLspInvocationOwner,
-    DaemonLspOwnerRegistrar, DaemonLspSessionAccess,
 };
 use tracedecay_domain::{
     ActorId, BrainId, ProjectId, RepositoryId, ScopeSetId, ScopeSetRevision, UserProfileId,
@@ -280,11 +280,8 @@ async fn recovery_quiescence_retires_only_the_selected_projects_lsp_owners() {
             problem: DaemonInvocationProblem::NotFoundOrNotAuthorized
         }
     ));
-    let capability =
-        CapabilityId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_CAPABILITY_ID_V1)
-            .expect("capability");
-    let use_case = UseCaseId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_USE_CASE_ID_V1)
-        .expect("use case");
+    let capability = CapabilityId::new(crate::LSP_WORKSPACE_CAPABILITY_ID_V1).expect("capability");
+    let use_case = UseCaseId::new(crate::LSP_WORKSPACE_USE_CASE_ID_V1).expect("use case");
     let scope = |suffix: &str, project: &ProjectId| {
         ResolvedScope::new(
             project.clone(),
