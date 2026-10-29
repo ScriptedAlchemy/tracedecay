@@ -1556,7 +1556,7 @@ fn global_table_retention_config(
     };
     tracedecay_maintenance::retention::RetentionConfig {
         // The root retention tree has no analytics-event window. Disabling
-        // this legacy table is the only mapping that does not invent policy.
+        // this table is the only mapping that does not invent policy.
         analytics_events_days: None,
         lcm_raw_messages_days,
     }

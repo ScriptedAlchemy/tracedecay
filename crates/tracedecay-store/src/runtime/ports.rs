@@ -24,9 +24,8 @@ pub enum RuntimeInterruptionV1 {
 ///
 /// Both identities must equal those carried by the request. Once
 /// `interruption` returns a decision, implementations must return that same
-/// decision on every later poll. Compatibility adapters poll immediately
-/// before and after each legacy call; those calls are not mid-call
-/// interruptible.
+/// decision on every later poll. Adapters poll immediately before and
+/// after each call; those calls are not mid-call interruptible.
 pub trait RuntimeRequestProbeV1: Send + Sync {
     fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1;
     fn deadline_identity(&self) -> &RuntimeDeadlineV1;
@@ -449,8 +448,8 @@ pub enum RuntimeReadResultV1 {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RuntimeReadCoverageV1 {
     Latest {
-        /// Canonical runtime watermark when one exists. Compatibility reads
-        /// may honestly serve latest state without inventing a commit position.
+        /// Canonical runtime watermark when one exists. Reads may honestly
+        /// serve latest state without inventing a commit position.
         observed: Option<ShardWatermarkV1>,
     },
     Complete {

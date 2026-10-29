@@ -2,7 +2,7 @@ import { decodeJsonBody, fetchJsonResponse, UNDECODABLE } from './responseBody.t
 import type { WireSchema } from './wireSchema.ts';
 import { readOnlyScopeRefusal, type ReadOnlyScopeRefusal } from '../scope/store.ts';
 
-/** Legacy payload routes publish the schema itself, not a DashboardEnvelope.
+/** Payload routes publish the schema itself, not a DashboardEnvelope.
  * Keep their canonical unavailable responses distinct from transport errors. */
 export type PayloadResult<T> =
   | { outcome: 'ok'; data: T }

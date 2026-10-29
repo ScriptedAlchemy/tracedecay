@@ -1043,7 +1043,7 @@ async fn capabilities_with_admitted_transport_report_the_typed_no_collection_sta
     assert_eq!(capabilities["multi_root"]["status"], "unavailable");
     assert_eq!(
         capabilities["multi_root"]["reason"],
-        "no default multi-root collection is configured; name an explicit collection"
+        "no multi-root collection was named; name an explicit collection"
     );
 }
 

@@ -998,9 +998,8 @@ impl McpServer {
     /// Resolves the raw-read counterfactual from the retained cache, falling
     /// back to bounded metadata reads for files owned by the current response.
     ///
-    /// The daemon code-index cutover intentionally stopped reading the legacy
-    /// graph database's file table, so a cache miss is not evidence that a
-    /// touched source file costs zero tokens.
+    /// A cache miss is not evidence that a touched source file costs zero
+    /// tokens.
     #[tracing::instrument(
         name = "mcp.server.accounting.raw_file_tokens",
         level = "trace",

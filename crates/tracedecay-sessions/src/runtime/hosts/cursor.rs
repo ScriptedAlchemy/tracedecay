@@ -1009,7 +1009,7 @@ fn cursor_transcript_authority_rank(path: &Path) -> (bool, std::time::SystemTime
 }
 
 /// Synthesizes the minimal hook-shaped event used by startup sweeps so their
-/// scope and location provenance match the legacy parser's behavior.
+/// scope and location provenance match hook-event provenance.
 fn cursor_sweep_event(parent_session_id: &str, project_root: &Path, user_scope: bool) -> Value {
     if user_scope {
         serde_json::json!({

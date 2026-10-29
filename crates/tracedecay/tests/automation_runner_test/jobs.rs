@@ -317,7 +317,7 @@ fn parse_schedule_accepts_five_field_cron_expressions() {
     assert!(!cron.matches(wednesday_0915 - 3_600)); // 08:15
     assert!(!cron.matches(wednesday_0915 + 4 * 86_400)); // Sunday 09:15
 
-    // Legacy shorthands keep working.
+    // Named shorthands resolve to intervals.
     assert_eq!(
         resolve_schedule(Some("hourly"), None).unwrap(),
         AutomationSchedule::Interval {

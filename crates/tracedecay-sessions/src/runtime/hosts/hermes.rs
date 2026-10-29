@@ -4,8 +4,8 @@
 //! per-profile `SQLite` store at `<profile>/state.db` (tables `sessions` +
 //! `messages`), where `<profile>` is `~/.hermes` for the default profile or
 //! `~/.hermes/profiles/<name>` for named profiles. A profile maps to exactly
-//! one ingest target only when provenance proves a real code project: a
-//! legacy `plugins.tracedecay.project_root` pin or the session row's `cwd`.
+//! one ingest target only when the session row's `cwd` proves a real code
+//! project.
 //! For projectless/gateway sessions, one completed turn may instead prove its
 //! project through structured tool-call routing (`project_path`,
 //! `project_root`, or a nested project selector). Only that turn is admitted to

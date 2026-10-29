@@ -267,8 +267,8 @@ tracedecay update (binary + plugins + daemon + health pass).",
 pub(crate) const UNINSTALL_LONG_ABOUT: &str = "\
 Removes tracedecay's MCP server registration, permissions, hooks, and prompt \
 rules from agent configuration through the same component-set lifecycle. Removes \
-every installed agent's integration when --agent is omitted. Project indexes under \
-.tracedecay/ are left intact. use `tracedecay wipe` to delete data.";
+every installed agent's integration when --agent is omitted. Project stores under \
+the TraceDecay profile are left intact. use `tracedecay wipe` to delete data.";
 
 pub(crate) const UNINSTALL_AFTER_HELP: &str = concat!(
     "\
@@ -643,10 +643,10 @@ Examples:
 Related: tracedecay projects (registry view), tracedecay wipe.";
 
 pub(crate) const WIPE_LONG_ABOUT: &str = "\
-Deletes .tracedecay stores (code graph, memory, sessions) for the current \
-folder, its parents, and its children. With --all, deletes the complete \
+Deletes the profile project stores (code graph, memory, sessions) registered \
+for the current folder, its parents, and its children. With --all, deletes the complete \
 profile-scoped database state, including global, user memory/session, project, \
-legacy, remote, Grafeo WAL, and host-admission stores. With --stale, deletes \
+remote, Grafeo WAL, and host-admission stores. With --stale, deletes \
 exactly the stores the running daemon reports as requiring reset (a persisted \
 shape this binary does not open) and nothing else; the daemon recreates each \
 one empty. Resetting the profile authority (global.db) drops the project \

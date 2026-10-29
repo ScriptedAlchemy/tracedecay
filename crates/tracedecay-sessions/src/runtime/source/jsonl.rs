@@ -875,7 +875,7 @@ fn rewritten_jsonl_generation(
 /// Bounded raw JSONL framing shared by skip and defer policies.
 ///
 /// The retained record buffer never exceeds `max_record_bytes`. Oversized
-/// frames are drained in-place so legacy callers can skip complete records and
+/// frames are drained in-place so callers can skip complete records and
 /// continue without allocating or parsing them.
 pub struct RawJsonlFrameReader<R> {
     reader: R,
