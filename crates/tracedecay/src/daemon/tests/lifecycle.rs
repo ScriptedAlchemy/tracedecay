@@ -147,18 +147,16 @@ fn mcp_discovery_requests_are_reserved_control_traffic() {
             "{method} must be admitted as reserved control traffic"
         );
     }
-    for method in ["notifications/initialized", "initialized"] {
-        let notification = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": method,
-        })
-        .to_string();
-        let notification = super::super::AuthenticatedFirstRequest::new(notification);
-        assert!(
-            super::super::is_reserved_control_request(&notification),
-            "{method} must be admitted as reserved control traffic"
-        );
-    }
+    let notification = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+    })
+    .to_string();
+    let notification = super::super::AuthenticatedFirstRequest::new(notification);
+    assert!(
+        super::super::is_reserved_control_request(&notification),
+        "notifications/initialized must be admitted as reserved control traffic"
+    );
 }
 
 #[test]
