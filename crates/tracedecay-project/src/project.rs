@@ -16,6 +16,8 @@ use tracedecay_runtime_core::db::{Database, DatabaseStorageTelemetryHandle};
 use tracedecay_runtime_core::storage::StoreLayout;
 use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
 
+#[cfg(all(test, unix))]
+mod adoption_tests;
 mod automation_context;
 #[cfg(test)]
 mod concrete_runtime_tests;

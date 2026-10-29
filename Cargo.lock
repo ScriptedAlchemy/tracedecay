@@ -6845,6 +6845,8 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "tempfile",
+ "tokio",
+ "tracedecay-daemon-identity",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-privacy",

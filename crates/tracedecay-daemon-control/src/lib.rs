@@ -121,3 +121,6 @@ pub fn handshake_for_current_client(
         moved_store_adoption: MovedStoreAdoption::Never,
     })
 }
+
+#[cfg(test)]
+mod tests;

@@ -1697,3 +1697,9 @@ mod host_admission_batch_test;
 #[cfg(test)]
 #[path = "host_admission_test.rs"]
 mod host_admission_test;
+
+#[cfg(test)]
+mod replay_cancellation_tests;
+
+#[cfg(test)]
+mod registered_authority_tests;

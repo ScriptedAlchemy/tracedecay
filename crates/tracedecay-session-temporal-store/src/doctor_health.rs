@@ -1466,3 +1466,6 @@ mod registered_tests {
         }));
     }
 }
+
+#[cfg(test)]
+mod tests;

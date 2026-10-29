@@ -448,3 +448,6 @@ pub fn project_code_index_generation_census_reader(
         })
     })
 }
+
+#[cfg(test)]
+mod ignored_dependency_admission_tests;

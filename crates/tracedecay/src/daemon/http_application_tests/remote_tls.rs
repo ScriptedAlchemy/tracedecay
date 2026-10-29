@@ -13,7 +13,6 @@ use tracedecay_contracts::{
     AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, PolicyDecisionRef,
     ResolvedScope,
 };
-use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{
     ActorId, BrainId, BrainNodeId, ComponentVersion, EnrollmentGrantV1, EntityId, ManifestDigest,
     ProjectId, RefId, RemoteCapabilityV1, RemoteCredentialFingerprintV1, RemoteRepositoryScopeV1,
@@ -531,39 +530,6 @@ async fn remote_tls_h2_only_handshake_is_rejected(
         connector.connect(server_name, stream).await.is_err(),
         "the HTTP/1.1-only listener must reject an HTTP/2-only ALPN offer"
     );
-}
-
-#[test]
-fn remote_tls_configuration_rejects_partial_and_wildcard_admission() {
-    let path = PathBuf::from("remote.pem");
-    let refusal = |listen: &str, key: Option<PathBuf>| {
-        match tracedecay_daemon_control::RemoteBrainTlsConfig::from_optional_parts(
-            Some(listen.parse().unwrap()),
-            Some(path.clone()),
-            key,
-        ) {
-            Err(TraceDecayError::Config { message }) => message,
-            Err(other) => panic!("unexpected refusal kind: {other:?}"),
-            Ok(_) => panic!("{listen} must be refused"),
-        }
-    };
-    assert_eq!(
-        refusal("127.0.0.1:7443", None),
-        "Remote Brain TLS listener requires --remote-listen, --remote-tls-cert, and --remote-tls-key together"
-    );
-    assert_eq!(
-        refusal("0.0.0.0:7443", Some(path.clone())),
-        "Remote Brain TLS listener requires an explicit interface address; wildcard addresses are refused"
-    );
-    let admitted = tracedecay_daemon_control::RemoteBrainTlsConfig::from_optional_parts(
-        Some("127.0.0.1:7443".parse().unwrap()),
-        Some(path.clone()),
-        Some(path.clone()),
-    )
-    .expect("explicit interface with both paths")
-    .expect("configured listener");
-    assert_eq!(admitted.listen(), "127.0.0.1:7443".parse().unwrap());
-    assert_eq!(admitted.private_key(), path.as_path());
 }
 
 #[tokio::test]

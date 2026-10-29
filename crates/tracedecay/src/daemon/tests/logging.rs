@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use tracedecay_runtime_core::logging::format_daemon_log_line;
 
 #[cfg(unix)]
@@ -56,44 +57,4 @@ fn scheduler_application_problem_log_excludes_hostile_payload() {
     assert!(line.contains("problem_kind=reset_required"));
     assert!(line.contains("problem_code=application.memory-automation-run.reset-required"));
     assert!(line.contains("committed_receipt_count=0"));
-}
-#[test]
-fn daemon_log_line_escapes_quotes_and_backslashes() {
-    let line = format_daemon_log_line(
-        "client_error",
-        &[("error", r#"failed at "step" \ retry"#.to_string())],
-    );
-
-    assert_eq!(
-        line,
-        r#"[tracedecay] event=client_error error="failed at \"step\" \\ retry""#
-    );
-}
-
-#[test]
-fn daemon_log_line_escapes_control_characters() {
-    let line = format_daemon_log_line(
-        "client_error",
-        &[("error", "first\nsecond\rthird\tfourth".to_string())],
-    );
-
-    assert_eq!(
-        line,
-        r#"[tracedecay] event=client_error error="first\nsecond\rthird\tfourth""#
-    );
-}
-
-#[test]
-fn retention_degraded_log_formats_the_pass_and_failure() {
-    let fields = [
-        ("pass", "code_generations".to_string()),
-        (
-            "failure",
-            "graph_replay_pool_busy: writer lease held".to_string(),
-        ),
-    ];
-    assert_eq!(
-        format_daemon_log_line("retention_degraded", &fields),
-        "[tracedecay] event=retention_degraded pass=code_generations failure=\"graph_replay_pool_busy: writer lease held\""
-    );
 }

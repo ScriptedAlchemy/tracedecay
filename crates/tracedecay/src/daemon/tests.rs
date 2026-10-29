@@ -10,7 +10,6 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::task::JoinHandle;
-use tracedecay_query::code_search;
 #[cfg(unix)]
 use tracedecay_runtime_core::native_runtime::NativeTask;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
@@ -477,52 +476,6 @@ where
         .expect("read handshake")
         .expect("handshake line");
     DaemonHandshake::from_line(&handshake).expect("parse handshake")
-}
-
-#[test]
-fn search_request_controls_distinguish_cancellation_and_timeout() {
-    let cancellation = tracedecay_contracts::CancellationSignal::active("cancellation.search-test")
-        .expect("cancellation");
-    let deadline =
-        tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(10)).expect("deadline");
-
-    assert_eq!(
-        super::mcp_search_request_termination(Some(&deadline), Some(&cancellation), 9),
-        None
-    );
-    assert_eq!(
-        super::mcp_search_request_termination(Some(&deadline), Some(&cancellation), 10),
-        Some(code_search::CodeIndexSearchUnavailableReasonV1::TimedOut)
-    );
-    cancellation.cancel(tracedecay_domain::UtcMicros(8));
-    assert_eq!(
-        super::mcp_search_request_termination(Some(&deadline), Some(&cancellation), 10),
-        Some(code_search::CodeIndexSearchUnavailableReasonV1::Cancelled)
-    );
-}
-
-#[test]
-fn an_unservable_search_reports_every_lane_down() {
-    let code_search::CodeIndexSearchOutcomeV1::Unavailable(unavailable) =
-        super::code_index_scope_unavailable(
-            tracedecay_code_index_runtime::mcp_admission::CodeIndexScopeUnavailableV1::AuthorityUnavailable,
-        )
-    else {
-        panic!("an unresolvable scope has no servable lane");
-    };
-
-    assert!(
-        !unavailable.coverage.any_servable(),
-        "a typed failure must only be returned when no lane could serve"
-    );
-    assert_eq!(
-        unavailable
-            .coverage
-            .degraded_or_fail(unavailable.reason)
-            .unwrap_err(),
-        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
-        "all lanes down must fail fast with the typed reason, never block"
-    );
 }
 
 #[cfg(unix)]

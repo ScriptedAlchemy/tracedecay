@@ -45,77 +45,6 @@ pub(super) async fn daemon_round_trip(
     responses
 }
 
-/// Old clients omit the adoption field entirely; the daemon must default it
-/// to `Never` so a mixed-version pair can never remap a moved store.
-#[test]
-fn daemon_handshake_defaults_missing_moved_store_adoption_to_never() {
-    let mut handshake = test_handshake_defaults();
-    handshake.project_path = Some(PathBuf::from("/work/repo"));
-    let encoded = serde_json::json!({
-        "project_path": "/work/repo",
-        "scope_prefix": null,
-        "timings": false,
-        "allow_init": false,
-        "client_identity": handshake.client_identity,
-        "client_version": handshake.client_version,
-        "client_instance_id": handshake.client_instance_id,
-    })
-    .to_string();
-
-    let decoded = DaemonHandshake::from_line(&encoded).expect("legacy handshake should decode");
-    assert_eq!(
-        decoded.moved_store_adoption,
-        tracedecay_project::project::MovedStoreAdoption::Never
-    );
-}
-
-#[test]
-fn daemon_handshake_requires_client_identity() {
-    let encoded = serde_json::json!({
-        "project_path": "/work/repo",
-        "scope_prefix": null,
-        "timings": false,
-        "allow_init": false
-    })
-    .to_string();
-
-    let Err(error) = DaemonHandshake::from_line(&encoded) else {
-        panic!("a handshake without client identity must be refused");
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("missing field `client_identity`"),
-        "unexpected refusal: {error}"
-    );
-}
-
-/// Handshake metadata is negotiated over a live daemon connection. Absent
-/// capability claims must resolve to their fail-closed defaults.
-#[test]
-fn handshake_defaults_optional_metadata_when_fields_are_absent() {
-    let encoded = json!({
-        "project_path": "/work/repo",
-        "scope_prefix": null,
-        "timings": false,
-        "allow_init": false,
-        "client_identity": {
-            "profile_root": "/profiles/client",
-            "global_db_path": "/profiles/client/global.db"
-        }
-    })
-    .to_string();
-
-    let decoded =
-        DaemonHandshake::from_line(&encoded).expect("handshake with absent optional metadata");
-
-    assert!(!decoded.allow_initialize_root_routing);
-    assert_eq!(decoded.client_version, "");
-    assert_eq!(decoded.client_instance_id, "");
-    assert!(!decoded.tool_list_changed_capable);
-    assert_eq!(decoded.catalog_version, "");
-}
-
 #[tokio::test]
 async fn portable_broker_rejects_missing_auth_before_routing() {
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
@@ -268,23 +197,6 @@ fn missing_index_classifier_matches_the_kind_not_the_message() {
     assert!(
         !super::super::is_missing_index_error(&lookalike),
         "a config error whose text names a missing index must not auto-initialize"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn client_version_skew_flags_only_real_mismatches() {
-    assert_eq!(
-        tracedecay_daemon_protocol::client_version_skew("1.2.3", "1.2.3"),
-        None
-    );
-    assert_eq!(
-        tracedecay_daemon_protocol::client_version_skew("", "1.2.3"),
-        None
-    );
-    assert_eq!(
-        tracedecay_daemon_protocol::client_version_skew("1.3.0", "1.2.3"),
-        Some("1.3.0".to_string())
     );
 }
 

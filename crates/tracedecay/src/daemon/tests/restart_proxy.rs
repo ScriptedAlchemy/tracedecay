@@ -139,24 +139,6 @@ fn terminal_repository_discovery_failures_are_not_project_open_retryable() {
 }
 
 #[cfg(unix)]
-#[test]
-fn transient_daemon_connect_errors_cover_restart_window_only() {
-    assert!(super::super::is_transient_daemon_connect_error(
-        std::io::ErrorKind::NotFound
-    ));
-    assert!(super::super::is_transient_daemon_connect_error(
-        std::io::ErrorKind::ConnectionRefused
-    ));
-    assert!(
-        super::super::is_transient_daemon_connect_error(std::io::ErrorKind::WouldBlock),
-        "unix-socket EAGAIN (listen backlog full) must ride the restart grace"
-    );
-    assert!(!super::super::is_transient_daemon_connect_error(
-        std::io::ErrorKind::PermissionDenied
-    ));
-}
-
-#[cfg(unix)]
 #[tokio::test]
 async fn connect_with_restart_grace_reconnects_once_daemon_rebinds() {
     let dir = TempDir::new().expect("temp dir");
