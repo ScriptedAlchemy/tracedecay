@@ -25879,7 +25879,7 @@
       "type": "object"
     },
     "SkillOutcomeVerdict": {
-      "description": "`adopted` means a use was recorded after activation. It is an adoption\nproxy, not evidence that the skill improved any task. `unknown` means no use was\nrecorded and neither task opportunity nor reliable host use telemetry\nexists, so it is never a failure. Snapshots written before that\ndistinction stored `unknown` as `ignored`.",
+      "description": "`adopted` means a use was recorded after activation. It is an adoption\nproxy, not evidence that the skill improved any task. `unknown` means no use was\nrecorded and neither task opportunity nor reliable host use telemetry\nexists, so it is never a failure.",
       "enum": [
         "adopted",
         "too_early",

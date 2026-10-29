@@ -646,7 +646,7 @@ pub(crate) const WIPE_LONG_ABOUT: &str = "\
 Deletes .tracedecay stores (code graph, memory, sessions) for the current \
 folder, its parents, and its children. With --all, deletes the complete \
 profile-scoped database state, including global, user memory/session, project, \
-legacy, remote, Grafeo WAL, and host-admission stores. With --stale, deletes \
+remote, Grafeo WAL, and host-admission stores. With --stale, deletes \
 exactly the stores the running daemon reports as requiring reset (a persisted \
 shape this binary does not open) and nothing else; the daemon recreates each \
 one empty. Resetting the profile authority (global.db) drops the project \

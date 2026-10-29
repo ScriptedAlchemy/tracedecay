@@ -551,22 +551,6 @@ async fn initialize_root_routing_fails_closed_without_pinned_configuration() {
     })
     .to_string();
 
-    let config_path = tracedecay_runtime_core::storage::resolve_layout(&project, profile.path())
-        .map_or_else(
-            |_| tracedecay_runtime_core::config::get_tracedecay_dir(&project),
-            |layout| layout.data_root,
-        )
-        .join("config.json");
-    std::fs::create_dir_all(config_path.parent().expect("legacy config parent"))
-        .expect("create legacy config parent");
-    let legacy_input = json!({
-        "version": 1,
-        "root_dir": project.display().to_string(),
-        "sync": { "auto_init": false }
-    })
-    .to_string();
-    std::fs::write(&config_path, &legacy_input).expect("write legacy config fixture");
-
     let mut routed_handshake = base_handshake.clone();
     let store_administration = test_store_administration_for_profile(profile.path());
     let _database_scope =
@@ -591,11 +575,6 @@ async fn initialize_root_routing_fails_closed_without_pinned_configuration() {
     assert!(
         routed_handshake.allow_init,
         "fresh git root without a published snapshot follows SyncConfig::default().auto_init"
-    );
-    assert_eq!(
-        std::fs::read_to_string(config_path).expect("legacy fixture remains readable"),
-        legacy_input,
-        "initialize routing must not rewrite legacy configuration input"
     );
 }
 

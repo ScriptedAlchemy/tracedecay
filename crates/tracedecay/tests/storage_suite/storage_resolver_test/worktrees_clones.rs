@@ -162,7 +162,7 @@ async fn linked_worktree_refuses_retired_local_enrollment_until_reset() {
     );
 
     // A leftover from before the working-tree cutover: a retired enrollment
-    // file inside the linked worktree. It is refused, never honored.
+    // file inside the linked worktree. It is ignored, never honored.
     let stale_project_id = "proj_local_linked_worktree";
     let stale_data_root = profile_root.join(format!("projects/{stale_project_id}"));
     fs::create_dir_all(&stale_data_root).unwrap();
@@ -177,21 +177,6 @@ async fn linked_worktree_refuses_retired_local_enrollment_until_reset() {
         global_db_path: Some(profile_root.join("global.db")),
     };
 
-    let refused = TraceDecay::resolve_store_layout_for_identity_with_options(&worktree, &options)
-        .await
-        .expect_err("a retired worktree-local layout is a typed reset");
-    assert_eq!(
-        refused
-            .reset_required_context()
-            .map(|(authority, _)| authority),
-        Some("project store"),
-        "{refused:?}"
-    );
-
-    let retired =
-        tracedecay_runtime_core::storage::retired_checkout_layout_dir(&profile_root, &worktree)
-            .expect("the refused layout is the one the reset deletes");
-    fs::remove_dir_all(retired).unwrap();
     let layout = TraceDecay::resolve_store_layout_for_identity_with_options(&worktree, &options)
         .await
         .expect("linked worktree must resolve its repository's store");

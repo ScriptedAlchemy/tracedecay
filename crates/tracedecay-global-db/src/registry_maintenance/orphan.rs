@@ -407,7 +407,7 @@ fn is_safe_relpath(path: &Path) -> bool {
 mod tests {
     use super::*;
 
-    const LEGACY_META: &str = r#"{"default_branch":"main","branches":{"main":{"db_file":"tracedecay.db","created_at":"0","last_synced_at":"3","gc_protected":false},"feature":{"parent":"main","created_at":"0","last_synced_at":"5","gc_protected":false}}}"#;
+    const BRANCH_META: &str = r#"{"default_branch":"main","branches":{"main":{"created_at":"0","last_synced_at":"3","gc_protected":false},"feature":{"parent":"main","created_at":"0","last_synced_at":"5","gc_protected":false}}}"#;
 
     #[test]
     fn reconstructed_graph_scopes_locate_every_branch_in_the_project_store() {
@@ -415,7 +415,7 @@ mod tests {
         let data_root = profile.path().join("projects/p");
         fs::create_dir_all(&data_root).unwrap();
         let branch_meta_path = data_root.join("branch-meta.json");
-        fs::write(&branch_meta_path, LEGACY_META).unwrap();
+        fs::write(&branch_meta_path, BRANCH_META).unwrap();
 
         let (_, scopes, issues) =
             reconstruct_graph_scopes(&branch_meta_path, "store", "project", profile.path());

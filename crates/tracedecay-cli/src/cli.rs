@@ -1198,8 +1198,7 @@ pub enum ProfileStorageAction {
     /// Reset a project store refused with ResetRequired. An incompatible graph
     /// database is deleted while its canonical store directory, session archive,
     /// and transcripts are preserved; the next open rebuilds from those transcripts.
-    /// With --project-root, a refused retired checkout-local .tracedecay directory
-    /// is deleted in full, including any data inside it. A canonical graph already
+    /// A canonical graph already
     /// at the current schema is preserved. Requires --yes and an exclusive
     /// maintenance lease; stop the daemon before resetting and restart it afterwards.
     #[command(name = "reset-project-store")]

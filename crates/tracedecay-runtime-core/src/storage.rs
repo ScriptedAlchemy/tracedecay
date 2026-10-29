@@ -229,47 +229,6 @@ pub fn classify_project_storage(
         .map(|layout| classify_layout_storage(project_root, layout))
 }
 
-/// Files only a retired binary wrote into a checkout's `.tracedecay/`
-/// directory: the working-tree enrollment marker and the repo-local config and
-/// graph store. Current identity lives under `.git/` and every store lives in
-/// the profile, so nothing reads these.
-const RETIRED_CHECKOUT_LAYOUT_FILES: [&str; 3] =
-    ["enrollment.json", "config.json", config::DB_FILENAME];
-
-/// The checkout-local `.tracedecay/` directory when it still carries the
-/// retired layout. The profile root is never a checkout layout, even when a
-/// project root is the directory that hosts it.
-pub fn retired_checkout_layout_dir(profile_root: &Path, project_root: &Path) -> Option<PathBuf> {
-    let dir = config::get_tracedecay_dir(project_root);
-    if profile_root == dir || dir.canonicalize().is_ok_and(|dir| dir == profile_root) {
-        return None;
-    }
-    RETIRED_CHECKOUT_LAYOUT_FILES
-        .iter()
-        .any(|name| dir.join(name).exists())
-        .then_some(dir)
-}
-
-/// Typed reset refusal for a checkout still carrying the retired
-/// checkout-local layout. It is never read or migrated; the scoped project
-/// store reset deletes the directory.
-pub fn refuse_retired_checkout_layout(
-    profile_root: &Path,
-    project_root: &Path,
-) -> tracedecay_domain::errors::Result<()> {
-    match retired_checkout_layout_dir(profile_root, project_root) {
-        None => Ok(()),
-        Some(dir) => Err(tracedecay_domain::errors::TraceDecayError::reset_required(
-            "project store",
-            format!(
-                "{} is the retired checkout-local layout; this binary never reads it and \
-                 the reset deletes it",
-                dir.display()
-            ),
-        )),
-    }
-}
-
 fn classify_layout_storage(project_root: &Path, layout: StoreLayout) -> ProjectStorageLocation {
     let graph_exists = layout.graph_db_path.exists();
     let manifest_exists = layout

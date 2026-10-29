@@ -2698,7 +2698,6 @@ fn wipe_all_is_schema_independent_and_removes_every_profile_database_root() {
         profile.join("user-memory.db"),
         profile.join("projects/orphan-project/tracedecay.db"),
         profile.join("projects/orphan-project/sessions.db"),
-        profile.join("stores/legacy-orphan/tracedecay.db"),
         profile.join(format!("remote/nodes/{}/remote.db", "a".repeat(64))),
     ];
     for database in &database_paths {
@@ -2756,7 +2755,7 @@ fn wipe_all_is_schema_independent_and_removes_every_profile_database_root() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     for named_state in [
         "user memory and sessions",
-        "project, legacy, and remote stores",
+        "project and remote stores",
         "Grafeo WAL and host-admission state",
     ] {
         assert!(
@@ -2774,7 +2773,7 @@ fn wipe_all_is_schema_independent_and_removes_every_profile_database_root() {
             );
         }
     }
-    for removed_root in ["projects", "stores", "remote"] {
+    for removed_root in ["projects", "remote"] {
         assert_namespace_absent(
             &profile.join(removed_root),
             "wipe --all left a fixed database root",
