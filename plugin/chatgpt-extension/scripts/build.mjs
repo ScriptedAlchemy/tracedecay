@@ -42,7 +42,16 @@ try {
       root: packageRoot,
       logLevel: "warn",
       performance: { buildCache: false },
-      tools: { rspack: { output: { asyncChunks: false } } },
+      tools: {
+        rspack: {
+          output: { asyncChunks: false },
+          resolve: {
+            // Package exports point at ignored SDK dist files, which may be
+            // stale or absent. Bundle the current workspace source instead.
+            alias: { "@tracedecay/sdk$": path.resolve(packageRoot, "../../sdks/typescript/src/index.ts") },
+          },
+        },
+      },
       lib: [
         {
           format: "esm",
