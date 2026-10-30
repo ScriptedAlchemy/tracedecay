@@ -91,7 +91,7 @@ build:dist --@rules_rust//rust/settings:extra_rustc_flag=-Cembed-bitcode=yes
 # Hosted CI: keep going past one failure so a run reports every red target.
 build:ci --keep_going
 build:ci --show_timestamps
-test:ci --test_summary=terse
+test:ci --test_summary=short
 # Suites spawn host tools such as ast-grep, node, and git.
 test:ci --test_env=PATH
 

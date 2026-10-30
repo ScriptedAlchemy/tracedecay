@@ -84,7 +84,6 @@ rust_test(
     compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/agent_suite/**", "tests/common/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates", "//tests:fixtures_claude-schemas", "//tests:fixtures_cursor-schemas"],
     data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/agent_suite/**", "tests/common/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:support"] + ["//tests:fixtures"] + ["//plugin:sources"],
     rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
-    runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay__test"},
 )
 
 rust_test(
@@ -101,7 +100,6 @@ rust_test(
     compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/automation_runner_test/**", "tests/common/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates"],
     data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/automation_runner_test/**", "tests/common/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:support"],
     rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
-    runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay__test"},
 )
 
 rust_test(
@@ -165,7 +163,6 @@ rust_test(
     compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/common/**", "tests/dashboard_api_test/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates"],
     data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/common/**", "tests/dashboard_api_test/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:support"],
     rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
-    runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay__test"},
 )
 
 rust_test(
@@ -182,7 +179,6 @@ rust_test(
     compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/common/**", "tests/fixtures/**", "tests/graph_suite/**", "vendor/**"], allow_empty = True) + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates"],
     data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/common/**", "tests/fixtures/**", "tests/graph_suite/**", "vendor/**"], allow_empty = True) + ["//tests:support"],
     rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
-    runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay__test"},
 )
 
 rust_test(
@@ -199,7 +195,6 @@ rust_test(
     compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/common/**", "tests/fixtures/**", "tests/hermes_suite/**", "vendor/**"], allow_empty = True) + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates", "//plugin:skills_managing-session-context", "//plugin:skills_managing-session-context_references"],
     data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/common/**", "tests/fixtures/**", "tests/hermes_suite/**", "vendor/**"], allow_empty = True) + ["//tests:support"],
     rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
-    runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay__test"},
 )
 
 rust_test(
@@ -301,7 +296,6 @@ rust_test(
     compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/common/**", "tests/fixtures/**", "tests/session_suite/**", "vendor/**"], allow_empty = True) + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates", "//tests:shared_fixtures"],
     data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/common/**", "tests/fixtures/**", "tests/session_suite/**", "vendor/**"], allow_empty = True) + ["//tests:support"] + ["//tests:fixtures"] + ["//scripts:run-session-temporal-benchmark.sh"],
     rustc_env = {"CARGO_TARGET_TMPDIR": "/tmp"},
-    runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay__test"},
 )
 
 rust_test(
@@ -475,7 +469,7 @@ rust_test(
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
         + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates", "//tests:fixtures_provider_normalization_claude", "//tests:fixtures_provider_normalization_codex", "//tests:fixtures_provider_normalization_cursor", "//tests:fixtures_remote_tls"],
     data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-    runfiles_env = {"TRACEDECAY_TEST_BIN": "//crates/tracedecay-cli:tracedecay__test", "TRACEDECAY_TEST_TYPESCRIPT_COMPILER": "//dashboard:typescript_compiler"},
+    runfiles_env = {"TRACEDECAY_TEST_TYPESCRIPT_COMPILER": "//dashboard:typescript_compiler"},
 )
 
 filegroup(
