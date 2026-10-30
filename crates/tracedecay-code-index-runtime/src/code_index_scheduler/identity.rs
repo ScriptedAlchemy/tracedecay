@@ -184,6 +184,16 @@ impl GitMetadataFingerprintV1 {
         self != other
     }
 
+    /// Whether HEAD and every branch ref are unchanged. The index is excluded:
+    /// opening the repository may refresh `.git/index` on its own, while a
+    /// commit, checkout, or ref update always moves HEAD or a ref.
+    pub fn same_refs_as(&self, other: &GitMetadataFingerprintV1) -> bool {
+        self.head == other.head
+            && self.packed_refs == other.packed_refs
+            && self.refs_heads == other.refs_heads
+            && self.head_contents == other.head_contents
+    }
+
     /// A stable, order-independent textual signature of this fingerprint.
     ///
     /// Used to persist a restore-time freshness witness: two fingerprints share

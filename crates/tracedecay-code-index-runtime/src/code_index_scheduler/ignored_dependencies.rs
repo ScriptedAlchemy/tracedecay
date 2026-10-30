@@ -259,6 +259,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     ) -> Result<CodeIndexIgnoredDependencyBuildV1, CodeIndexSchedulerErrorV1> {
         let source_control = self.reconcile_control();
         let began_under = source_control.expected_epoch();
+        let captured_under = super::identity::GitMetadataFingerprintV1::capture(&self.project_root);
         let _workers = self.ensure_worker_plan()?;
         let _worker_memory = match self.reserve_worker_memory() {
             Ok(reservation) => reservation,
@@ -350,6 +351,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.mark_reconciled(
             SourceContentManifestV1::for_snapshot(generation.snapshot()),
             began_under,
+            &captured_under,
         );
         let latest = self.bind_latest_complete(
             self.decoded_publication(&generation)
