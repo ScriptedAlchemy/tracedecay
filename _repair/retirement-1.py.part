@@ -1,0 +1,160 @@
+    n=re.sub(r'(?m)^\s*(?:pub(?:\([^\n]*\))?\s+)?(?:dashboard_)?pr_autotrack_reader:\s*(?:Option<)?(?:settings_api::|tracedecay_dashboard_api::)?PrAutoTrackManagedSummaryReader>?,\n','',n)
+    # Remaining references are named fields, arguments, or a one-line builder call.
+    n=re.sub(r'(?m)^.*(?:dashboard_)?pr_autotrack_reader[^\n]*\n','',n)
+    if n!=s:p.write_text(n)
+
+# CLI no longer accepts an apparently active feature-control subcommand.
+p='crates/tracedecay-cli/src/cli.rs';s=read(p)
+s=remove_item(s,'BranchAutotrackAction','enum')
+s=replace(s,'    /// Configure daemon auto-tracking of open PR branches\n    Autotrack {\n        #[command(subcommand)]\n        action: BranchAutotrackAction,\n    },\n','');write(p,s)
+p='crates/tracedecay-cli/src/commands/branch.rs';s=read(p)
+s=remove_item(s,'handle_branch_autotrack_action')
+s=replace(s,'            BranchAction::Autotrack { action } => {\n                handle_branch_autotrack_action(profile, action).await?;\n            }\n','');write(p,s)
+p='crates/tracedecay-cli/src/main.rs';s=read(p)
+s=replace(s,'                    BranchAction::List { .. }\n                    | BranchAction::Autotrack {\n                        action: BranchAutotrackAction::Status { .. },\n                    },','                    BranchAction::List { .. },');write(p,s)
+
+# Remove only the two feature-specific configuration controls.
+p='crates/tracedecay-configuration/src/config/model.rs';s=read(p)
+a=s.index('    /// Enable the daemon PR-branch auto-tracking mode');b=s.index('    /// Daemon retention/compaction',a);s=s[:a]+s[b:]
+a=s.index('impl SyncConfig {');b=end_brace(s,a);s=s[:a]+s[b:]
+s=re.sub(r'(?m)^.*auto_track_pr_(?:branches|poll_secs):.*\n','',s)
+# Remove the obsolete cadence constant and its description, which are at the start of this file.
+a=s.index('pub const MIN_AUTO_TRACK_PR_POLL_SECS:');a=s.rfind('\n\n',0,a)+2;b=s.index('\n',s.index('pub const MIN_AUTO_TRACK_PR_POLL_SECS:'))+1;s=s[:a]+s[b:];write(p,s)
+p='crates/tracedecay-configuration/src/config/mod.rs';s=read(p)
+s=re.sub(r'(?m)^\s*auto_track_pr_(?:branches|poll_secs): required_(?:bool|unsigned)\(\n\s*snapshot,\n\s*SYNC_AUTO_TRACK_PR_(?:BRANCHES|POLL_SECS)_SETTING_KEY,\n\s*\)\?,\n','',s);write(p,s)
+p='crates/tracedecay-global-db/src/configuration/registry.rs';s=read(p)
+for key in ['SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY','SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY']:
+    a=s.index('        (\n            '+key+',');b=s.index('\n        ),',a)+len('\n        ),');s=s[:a]+s[b:]
+s=re.sub(r'(?m)^.*auto_track_pr_(?:branches|poll_secs):.*\n','',s)
+s=replace(s,'/// Mirrors root `config::MIN_AUTO_TRACK_PR_POLL_SECS`.\npub const MIN_AUTO_TRACK_PR_POLL_SECS: u64 = 60;\n','');write(p,s)
+# Exact token removal from imports/exports/inventory. Historical SQL is untouched.
+for p in (R/'crates').rglob('*.rs'):
+    s=p.read_text();n=s
+    for key in ['SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY','SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY','MIN_AUTO_TRACK_PR_POLL_SECS']:
+        n=re.sub(r'(?m)^pub const '+key+r':[^\n]*\n','',n)
+        n=re.sub(r'\b'+key+r', ?', '',n)
+    if n!=s:p.write_text(n)
+
+# Retire the UI patch shape instead of accepting ignored fields.
+p='crates/tracedecay-api/src/configuration.rs';s=read(p)
+s=remove_item(s,'SyncSettingsPatch','struct')
+s=replace(s,'    #[serde(default, skip_serializing_if = "Option::is_none")]\n    pub sync: Option<SyncSettingsPatch>,\n','');write(p,s)
+p='crates/tracedecay-application/src/settings_control.rs';s=read(p)
+s=remove_item(s,'SyncSettingsPatchV1','struct')
+s=replace(s,'    #[serde(default)]\n    pub sync: Option<SyncSettingsPatchV1>,\n','')
+s=replace(s,'        auto_track_pr_poll_secs: patch\n            .sync\n            .as_ref()\n            .and_then(|sync| sync.auto_track_pr_poll_secs),\n','')
+a=s.index('        && patch.sync.as_ref().is_none_or(');b=s.index('        && patch.context_scout',a);s=s[:a]+s[b:]
+a=s.index('    if let Some(sync) = patch.sync {');b=end_brace(s,a);s=s[:a]+s[b:];write(p,s)
+p='crates/tracedecay-contracts/src/settings_preview.rs';s=read(p)
+s=replace(s,'    pub auto_track_pr_poll_secs: Option<u64>,\n','')
+s=replace(s,'/// Minimum accepted auto-track poll interval, mirrored from root runtime policy.\npub const MIN_AUTO_TRACK_PR_POLL_SECS_V1: u64 = 60;\n','')
+a=s.index('    if let Some(seconds) = patch.auto_track_pr_poll_secs');b=end_brace(s,a);s=s[:a]+s[b:]
+s=replace(s,'            auto_track_pr_poll_secs: Some(1),\n','')
+s=replace(s,'        assert!(\n            issues\n                .iter()\n                .any(|issue| issue.field == "auto_track_pr_poll_secs")\n        );\n','');write(p,s)
+
+p='crates/tracedecay-dashboard-api/src/settings_api.rs';s=read(p)
+for name,kind in [('SyncSettingsV1','struct'),('PrAutoTrackPayloadV1','struct'),('PrAutoTrackEntryV1','struct'),('PrAutoTrackManagedSummaryEntryV1','struct'),('pr_autotrack_payload','fn'),('map_managed_pr_autotrack_entries','fn'),('managed_pr_autotrack_projection_preserves_payload_fields','fn')]:s=remove_item(s,name,kind)
+a=s.index('/// Root-addressed read over the daemon-owned PR-autotrack');b=s.index('#[tracing::instrument',a);s=s[:a]+s[b:]
+s=s.replace('ProjectSettingsPatchV1, ProjectSettingsPreviewErrorV1, SyncSettingsPatchV1,','ProjectSettingsPatchV1, ProjectSettingsPreviewErrorV1,')
+s=s.replace('    sync: SyncSettingsV1,\n','').replace('    pr_autotrack: PrAutoTrackPayloadV1,\n','')
+s=replace(s,'        sync: SyncSettingsV1 {\n            auto_track_pr_branches: config.sync.auto_track_pr_branches,\n            auto_track_pr_poll_secs: config.sync.auto_track_pr_poll_secs,\n        },\n','')
+s=s.replace('settings_envelope(&state, None, None, None, pr_autotrack_payload(&state)?)','settings_envelope(&state, None, None, None)')
+s=re.sub(r'(?m)^\s*let pr_autotrack = pr_autotrack_payload\(&state\)\?;\n','',s)
+s=re.sub(r'(?m)^\s*pr_autotrack,\n','',s)
+a=s.index('        sync: patch.sync.map(');b=s.index('\n        }),',a)+len('\n        }),');s=s[:a]+s[b:]
+# The PathBuf import served the removed synchronous summary callback only.
+s=s.replace('use std::path::PathBuf;\n','');write(p,s)
+p='crates/tracedecay-dashboard-api/src/lib.rs';s=read(p)
+s=s.replace('PrAutoTrackManagedSummaryEntryV1, PrAutoTrackManagedSummaryReader, ','').replace('    PrAutoTrackManagedSummaryEntryV1, PrAutoTrackManagedSummaryReader,\n','');write(p,s)
+print('phase 2 complete')
+
+import json
+# Complete removals where the former callback body occupied several lines.
+p='crates/tracedecay-dashboard-api/src/test_transport.rs';s=read(p)
+s=s.replace('PrAutoTrackManagedSummaryReader, ', '')
+s=replace(s,'\n        self\n    }\n\n    /// Attaches the daemon-owned application runtime', '\n    /// Attaches the daemon-owned application runtime')
+write(p,s)
+p='crates/tracedecay/tests/dashboard_api_test/runtime.rs';s=read(p)
+a=s.index('                tracedecay_application::branch_activation::managed_summary(');b=s.index('            })),',a)+len('            })),');s=s[:a]+','+s[b:];write(p,s)
+p='crates/tracedecay-contracts/src/lib.rs';s=read(p).replace('MIN_AUTO_TRACK_PR_POLL_SECS_V1, ', '');write(p,s)
+p='crates/tracedecay-application/src/branch_activation/worktrees.rs';s=read(p).replace('pr_tracking.manual_branch_lifecycle','branch_activation.manual_branch_lifecycle').replace('crate::pr_tracking::','crate::branch_activation::')
+s=s.replace('        acquire_manual_branch_lifecycle, acquire_manual_branch_lifecycle_until,','        ManualBranchArtifactOwnershipV1, exact_ref_ownership,\n        acquire_manual_branch_lifecycle, acquire_manual_branch_lifecycle_until,');write(p,s)
+p='crates/tracedecay/src/daemon/branch_activation/tests.rs';s=read(p);s=remove_item(s,'spawned_loop_is_cancellable_and_joinable_without_a_tokio_runtime');s=s.replace('// ---- Reconcile: removal + idempotency (no index required) -------------------\n\n','');write(p,s)
+p='crates/tracedecay-api/tests/dashboard_presentations.rs';s=read(p)
+s=replace(s,'        "include": ["src/**"],\n        "sync": {"auto_track_pr_branches": true}','        "include": ["src/**"],\n        "telemetry": {"timings": true}')
+s=replace(s,'        project.sync.expect("sync patch").auto_track_pr_branches,','        project.telemetry.expect("telemetry patch").timings,')
+s+='''
+#[test]
+fn retired_autotrack_patches_are_refused_instead_of_ignored() {
+    for sync in [
+        json!({"auto_track_pr_branches": true}),
+        json!({"auto_track_pr_poll_secs": 300}),
+    ] {
+        let failure = parse_project_settings_patch(json!({
+            "expected_revision_id": "revision.project.1",
+            "idempotency_key": "configuration.idempotency.retired",
+            "sync": sync,
+        }))
+        .expect_err("retired fields must not appear to configure indexing");
+        assert_eq!(failure.0, StatusCode::BAD_REQUEST);
+        assert!(matches!(failure.1.0, DashboardConfigurationRefusalV1::Validation { .. }));
+    }
+}
+''';write(p,s)
+# Remove misleading old-state recovery advice. This diagnostic never resumes
+# the retired feature and never claims a recorded path is safe to delete.
+p='crates/tracedecay/src/doctor.rs';s=read(p)
+a,b=item_range(s,'pr_autotrack_state_failure')
+s=s[:a]+'''/// Reports recorded artifacts from the retired PR indexer without mutating or
+/// adopting them. A ledger is evidence to inspect, never deletion authority.
+fn retired_pr_artifacts_warning(data_root: &Path) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Inventory {
+        managed: std::collections::BTreeMap<String, RecordedArtifacts>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RecordedArtifacts {
+        pr: u64,
+        head_branch: String,
+        head_sha: String,
+        worktree: std::path::PathBuf,
+        tracking_ref: String,
+    }
+
+    let path = data_root.join("pr-autotrack.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => return Some(format!(
+            "Automatic PR indexing is retired; artifact inventory {} could not be read ({error}). No artifacts were changed. Inspect the inventory before any cleanup.",
+            path.display(),
+        )),
+    };
+    let inventory: Inventory = match serde_json::from_slice(&bytes) {
+        Ok(inventory) => inventory,
+        Err(error) => return Some(format!(
+            "Automatic PR indexing is retired; artifact inventory {} is invalid ({error}). No artifacts were changed and no ownership can be inferred. Preserve it for operator inspection.",
+            path.display(),
+        )),
+    };
+    let recorded = inventory.managed.into_iter().map(|(label, entry)| {
+        format!(
+            "PR {}: branch={label:?}, source_branch={:?}, worktree={:?}, tracking_ref={:?}, recorded_head={:?}",
+            entry.pr, entry.head_branch, entry.worktree, entry.tracking_ref, entry.head_sha,
+        )
+    }).collect::<Vec<_>>().join("; ");
+    Some(format!(
+        "Automatic PR indexing is retired; inventory {} records [{}]. These records are not a current ownership proof. No worktrees, refs, or project data were changed. Follow docs/PR-AUTOTRACK-RETIREMENT.md; preserve dirty, foreign, or leased artifacts. Explicit branch add remains available.",
+        path.display(), recorded,
+    ))
+}
+
+'''+s[b:]
+s=s.replace('/// Reports PR auto-tracking state for the project\'s persisted layout, when it\n/// has one.','/// Reports artifacts requiring operator review in an existing project layout.')
+s=s.replace('if let Some(failure) = pr_autotrack_state_failure(&layout.data_root) {\n        dc.fail(&failure);','if let Some(warning) = retired_pr_artifacts_warning(&layout.data_root) {\n        dc.warn(&warning);')
+write(p,s)
+p='crates/tracedecay/src/doctor/tests.rs';s=read(p);s=remove_item(s,'pr_autotrack_state_failure_names_a_blocking_state_file')
+s+='''
+#[test]

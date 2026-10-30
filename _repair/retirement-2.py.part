@@ -1,0 +1,189 @@
+fn retired_pr_inventory_reports_exact_records_without_touching_artifacts() {
+    let root = tempfile::tempdir().expect("profile");
+    assert_eq!(retired_pr_artifacts_warning(root.path()), None);
+    let worktree = root.path().join("pr-worktrees/pr-7");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    let dirty = worktree.join("uncommitted.txt");
+    std::fs::write(&dirty, "operator-owned edits").expect("dirty artifact");
+    let inventory = serde_json::json!({"managed": {
+        "tracedecay/autotrack/pr/7": {
+            "pr": 7,
+            "head_branch": "feature/example",
+            "head_sha": "1111111111111111111111111111111111111111",
+            "worktree": worktree,
+            "tracking_ref": "refs/tracedecay/pr/7"
+        }
+    }});
+    let bytes = serde_json::to_vec(&inventory).expect("inventory bytes");
+    let path = root.path().join("pr-autotrack.json");
+    std::fs::write(&path, &bytes).expect("inventory");
+    let warning = retired_pr_artifacts_warning(root.path()).expect("report retained artifacts");
+    for detail in ["tracedecay/autotrack/pr/7", "feature/example", "refs/tracedecay/pr/7", "1111111111111111111111111111111111111111", "not a current ownership proof"] {
+        assert!(warning.contains(detail), "missing inventory detail: {detail}");
+    }
+    assert!(warning.contains(&format!("{worktree:?}")));
+    assert_eq!(std::fs::read(&path).expect("retained inventory"), bytes);
+    assert_eq!(std::fs::read_to_string(&dirty).expect("retained edits"), "operator-owned edits");
+}
+
+#[test]
+fn retired_pr_inventory_never_guesses_ownership_from_invalid_state() {
+    let root = tempfile::tempdir().expect("profile");
+    let path = root.path().join("pr-autotrack.json");
+    std::fs::write(&path, "{not json").expect("invalid inventory");
+    let warning = retired_pr_artifacts_warning(root.path()).expect("report invalid state");
+    assert!(warning.contains("no ownership can be inferred"));
+    assert!(!warning.contains("re-tracked"));
+    assert_eq!(std::fs::read_to_string(&path).expect("unchanged evidence"), "{not json");
+    std::fs::remove_file(&path).expect("remove test fixture");
+    std::fs::create_dir(&path).expect("unreadable inventory fixture");
+    assert!(retired_pr_artifacts_warning(root.path()).expect("read refusal").contains("could not be read"));
+    assert!(path.is_dir());
+}
+''';write(p,s)
+# Canonical configuration lookup and mutation validation reject retired controls.
+p='crates/tracedecay-global-db/src/configuration/registry.rs';s=read(p);s+='''
+#[cfg(test)]
+mod retired_pr_settings_tests {
+    use super::*;
+
+    #[test]
+    fn automatic_pr_indexing_settings_have_no_live_definition_or_write() {
+        let registry = ConfigurationRegistry::core().expect("current registry");
+        for (raw, value) in [
+            ("sync.auto_track_pr_branches.v1", ConfigurationValueV1::Boolean(true)),
+            ("sync.auto_track_pr_poll_secs.v1", ConfigurationValueV1::Unsigned(300)),
+        ] {
+            let key = SettingKey::new(raw).expect("well-formed retired key");
+            assert!(registry.definition(&key).is_err());
+            assert!(registry.validate_value(&key, &value).is_err());
+        }
+        assert!(registry.definition(&SettingKey::new(SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY).expect("key")).is_ok());
+    }
+}
+''';write(p,s)
+# Authored frontend surface; generated artifacts are deliberately left to their generator.
+p='dashboard/src/workspaces/settings/settingsModel.ts';s=read(p)
+s=re.sub(r'(?m)^.*readonly auto_track_pr_.*\n','',s)
+s=replace(s,'  sync?: {\n    auto_track_pr_branches?: boolean;\n    auto_track_pr_poll_secs?: number;\n  };\n','')
+s=re.sub(r'(?m)^const MIN_AUTO_TRACK_PR_POLL_SECS[^\n]*\n','',s)
+s=re.sub(r'(?m)^.*const pollSecs = unsignedIntegerString\(.*\n','',s)
+s=s.replace('    pollSecs == null ||\n','')
+s=re.sub(r'(?m)^\s*auto_track_pr_(?:branches|poll_secs):.*\n','',s)
+a=s.index("  const sync: NonNullable<ProjectSettingsChangeSet['sync']>");b=s.index('  return ',a);s=s[:a]+s[b:]
+a=s.index('  const pollSecs = unsignedInteger(values.auto_track_pr_poll_secs);');b=s.index('  return ',a);s=s[:a]+s[b:]
+write(p,s)
+p='dashboard/src/workspaces/settings/settingsEditorMachine.ts';s=read(p)
+s=replace(s,'    left.telemetry_timings === right.telemetry_timings &&\n    left.auto_track_pr_branches === right.auto_track_pr_branches &&\n    left.auto_track_pr_poll_secs === right.auto_track_pr_poll_secs','    left.telemetry_timings === right.telemetry_timings');write(p,s)
+p='dashboard/src/workspaces/settings/settingsRows.ts';s=read(p)
+for field in ['auto_track_pr_branches','auto_track_pr_poll_secs']:
+ a=s.index("  'project.config.sync."+field+"': {");b=s.index('\n  },',a)+len('\n  },');s=s[:a]+s[b:]
+ s=s.replace("    case '"+field+"':\n",'')
+write(p,s)
+p='dashboard/src/workspaces/settings/SettingsPage.dom.test.tsx';s=read(p)
+s=re.sub(r'(?m)^.*(?:auto_track_pr|pr_autotrack)[^\n]*\n',lambda m: '' if 'const POLL_SECS' in m[0] or "'project." in m[0] else m[0],s)
+s=s.replace('POLL_SECS','MAX_FILE_SIZE').replace("await user.type(poll, '59');","await user.type(poll, '0');").replace('auto_track_pr_poll_secs must be at least 60 seconds','max_file_size must be at least 1 byte');write(p,s)
+p='dashboard/src/workspaces/settings/settingsModel.test.ts';s=read(p)
+s=s.replace("        auto_track_pr_poll_secs: '180',\n",'').replace('        sync: { auto_track_pr_poll_secs: 180 },\n','').replace("      auto_track_pr_poll_secs: '59',\n",'')
+s=s.replace("        {\n          field: 'auto_track_pr_poll_secs',\n          message: 'auto_track_pr_poll_secs must be at least 60 seconds',\n        },\n",'');write(p,s)
+p='dashboard/src/workspaces/settings/settingsRows.test.ts';s=read(p)
+s=s.replace("expect(keys).toContain('project.config.sync.auto_track_pr_poll_secs');", "expect(keys).not.toContain('project.config.sync.auto_track_pr_poll_secs');")
+s=s.replace("      'project.config.sync.auto_track_pr_poll_secs',\n",'');write(p,s)
+p='dashboard/stories/fixtures/data.ts';s=read(p)
+s=s.replace('      sync: { auto_track_pr_branches: true, auto_track_pr_poll_secs: 120 },\n','').replace('    pr_autotrack: { tracked: [] },\n','');write(p,s)
+# Test-only captured payloads are not release-history evidence; align the served shape.
+p='dashboard/src/test/fixtures/settings-patch.json';s=read(p);d=json.loads(s)
+def strip_retired(x):
+ if isinstance(x,dict):
+  x.pop('pr_autotrack',None)
+  if isinstance(x.get('sync'),dict) and set(x['sync'])=={'auto_track_pr_branches','auto_track_pr_poll_secs'}:x.pop('sync')
+  for v in x.values():strip_retired(v)
+ elif isinstance(x,list):
+  for v in x:strip_retired(v)
+strip_retired(d);write(p,json.dumps(d,indent=2,ensure_ascii=False)+'\n')
+print('phase 3 complete')
+
+p='crates/tracedecay-application/src/branch_activation/worktrees.rs';s=read(p)
+s=replace(s,'.expect("foreign tracking ref remains readable"),','.expect("foreign tracking ref remains readable") == ManualBranchArtifactOwnershipV1::Exact,')
+s=replace(s,'let repo = tempfile::tempdir().unwrap() == ManualBranchArtifactOwnershipV1::Exact;','let repo = tempfile::tempdir().unwrap();');write(p,s)
+p='crates/tracedecay/src/daemon/branch_activation.rs';s=read(p).replace('use tracedecay_domain::errors::TraceDecayError;\n','');write(p,s)
+p='crates/tracedecay-cli/src/cli/parse_tests.rs';s=read(p)
+s=s.replace('use super::{Cli, Commands, DaemonAction, ProfileStorageAction, RemoteAction};','use super::{BranchAction, Cli, Commands, DaemonAction, ProfileStorageAction, RemoteAction};')
+s+='''
+#[test]
+fn branch_selection_stays_explicit_after_automatic_pr_indexing_is_retired() {
+    for action in ["enable", "disable", "status"] {
+        let error = match Cli::try_parse_from(["tracedecay", "branch", "autotrack", action]) {
+            Ok(_) => panic!("retired automatic indexing must not be accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
+    }
+    let cli = Cli::try_parse_from([
+        "tracedecay", "branch", "add", "feature/requested", "--path", "/tmp/project",
+    ]).expect("explicit branch activation remains supported");
+    assert!(matches!(cli.command, Some(Commands::Branch {
+        action: BranchAction::Add { name, path }
+    }) if name.as_deref() == Some("feature/requested") && path.as_deref() == Some("/tmp/project")));
+}
+''';write(p,s)
+# Rename the owning test target together with its source; the generator will update BUILD.
+(R/'crates/tracedecay-application/tests/pr_tracking.rs').rename(R/'crates/tracedecay-application/tests/branch_activation.rs')
+p='crates/tracedecay/src/doctor/tests.rs';s=read(p)
+s=replace(s,'    let inventory = serde_json::json!({"managed": {','''    let foreign = root.path().join("pr-worktrees/pr-999");
+    std::fs::create_dir_all(&foreign).expect("unrecorded directory");
+    std::fs::write(foreign.join("keep.txt"), "foreign bytes").expect("foreign edits");
+    let inventory = serde_json::json!({"managed": {''')
+s=replace(s,'    assert!(warning.contains(&format!("{worktree:?}")));','''    assert!(warning.contains(&format!("{worktree:?}")));
+    assert!(!warning.contains("pr-999"), "a prefix is not an ownership record");
+    assert_eq!(std::fs::read_to_string(foreign.join("keep.txt")).expect("foreign artifact"), "foreign bytes");''')
+write(p,s)
+write('docs/PR-AUTOTRACK-RETIREMENT.md','''# Automatic PR indexing is retired
+
+TraceDecay no longer discovers every open pull request, fetches its head into a
+synthetic ref, or creates and reconciles a linked checkout in the background.
+There is no replacement poller, implicit all-PR queue, or automatic cleanup sweep.
+
+## Inspect a requested branch
+
+Use `tracedecay branch add <branch> --path <project>` to request an exact local
+branch head. This retains the existing branch lifecycle lease, scheduler
+admission, source provenance, and typed warming/unavailable results. Normal
+GitHub review and CI evidence, PR context, linked worktrees, and Work-managed
+execution remain supported. This retirement does not grant access to a fork or
+fetch arbitrary remote code on an agent's behalf.
+
+`branch autotrack` is no longer a CLI command. The configuration registry no
+longer advertises or accepts `sync.auto_track_pr_branches.v1` or
+`sync.auto_track_pr_poll_secs.v1`. The dashboard has no automatic-PR toggle,
+poll interval, or managed-PR summary. Retired project PATCH fields are rejected,
+not ignored. Incompatible persisted configuration follows the existing typed
+reset/refusal policy; there is no silent reinterpretation or new migration.
+
+## Existing artifacts are preserved
+
+Retiring the product is not permission to delete an existing checkout. Neither
+startup nor a setting change removes old `pr-worktrees`, synthetic refs, branch
+records, or shared project/session data. The old `pr-autotrack.json` writer is
+gone. No compatibility runtime reads that file to resume automatic indexing.
+
+Doctor reads an existing inventory only to report its exact recorded branch,
+source branch, worktree, tracking ref, and head. It explicitly distinguishes a
+record from a current ownership proof. An unreadable or invalid inventory is
+reported and preserved; a directory with a similar name is not discovered or
+claimed by a prefix sweep.
+
+Cleanup requires operator review and the existing daemon-owned branch
+lifecycle. Keep the recorded inventory until the corresponding routes and
+artifacts have been reconciled. Verify the repository, current HEAD and refs,
+worktree cleanliness, and active leases before any retirement. Preserve dirty,
+foreign, or currently leased artifacts. Do not force-remove a checkout or
+recursively delete a project store merely because its name contains a PR
+number. Doctor's inventory is not an automatic reclamation command and does
+not claim that an artifact is safe to remove.
+''')
+print('authored retirement complete')
+
+p='dashboard/src/workspaces/settings/settingsRows.test.ts'
+s=read(p).replace("filterEffectiveRows(rows, 'poll_secs')", "filterEffectiveRows(rows, 'max_file_size')").replace(".toEqual([\n    ]);", ".toEqual([\n      'project.config.max_file_size',\n    ]);")
+write(p,s)

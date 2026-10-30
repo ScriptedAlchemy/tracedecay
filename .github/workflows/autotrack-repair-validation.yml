@@ -1,0 +1,121 @@
+name: Isolated automatic PR indexing retirement
+on:
+  push:
+    branches: [work/pr-autotrack-retirement-validation-20261030]
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare the exact reviewed source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat _repair/retirement-*.py.part > /tmp/retirement.py
+          echo '695c3b7560985c2b75ad1eb23a014a9561d95bee64926dc59ea94ba00673cd3e  /tmp/retirement.py' | sha256sum --check
+          git checkout --detach 64a04ef4d4b542a03ebc419ddd10429f4f110a0c
+          python3 /tmp/retirement.py
+          rustup toolchain install 1.99.1 --profile minimal --component rustfmt
+          git add -A
+          git diff --cached --no-renames --name-only --diff-filter=AM -z | python3 -c 'import subprocess,sys; paths=[p.decode() for p in sys.stdin.buffer.read().split(b"\0") if p.endswith(b".rs")]; subprocess.run(["rustup","run","1.99.1","rustfmt","--edition","2024","--config","skip_children=true",*paths],check=True)'
+          git add -A
+          test "$(git write-tree)" = 9f22f3779d6b09d48d00403be4c3715c97c9e0cf
+          git diff --cached --check
+      - uses: ./.github/actions/setup-bazel
+        with:
+          cache-key: ci-linux-test-v2
+          cache-save: 'false'
+          tailscale-client-id: ${{ github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID || '' }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26'
+      - uses: ./.github/actions/setup-pnpm
+      - name: Regenerate through canonical owners
+        run: |
+          bazel run //scripts:gen_builds
+          pnpm --dir dashboard contracts:generate
+          pnpm --dir sdks/typescript build
+          pnpm --dir plugin/chatgpt-extension build
+      - name: Run native ownership and boundary suites
+        run: >-
+          bazel test --config=ci --nocache_test_results --test_output=errors
+          //crates/tracedecay-application:unit_test
+          //crates/tracedecay-application:branch_activation
+          //crates/tracedecay:unit_test
+          //crates/tracedecay:dashboard_api_test
+          //crates/tracedecay-cli:tracedecay_unit_test
+          //crates/tracedecay-api:dashboard_presentations
+          //crates/tracedecay-global-db:unit_test
+          //crates/tracedecay-configuration:unit_test
+          //crates/tracedecay-dashboard-api:unit_test
+          //crates/tracedecay-contracts:unit_test
+      - name: Check native Clippy
+        run: >-
+          bazel build --config=clippy
+          //crates/tracedecay-application:unit_test
+          //crates/tracedecay-application:branch_activation
+          //crates/tracedecay:unit_test
+          //crates/tracedecay:dashboard_api_test
+          //crates/tracedecay-cli:tracedecay_unit_test
+          //crates/tracedecay-api:dashboard_presentations
+          //crates/tracedecay-global-db:unit_test
+          //crates/tracedecay-configuration:unit_test
+          //crates/tracedecay-dashboard-api:unit_test
+          //crates/tracedecay-contracts:unit_test
+      - name: Validate frontend and generated output
+        run: |
+          pnpm --dir dashboard typecheck
+          pnpm --dir dashboard test
+          pnpm --dir sdks/typescript typecheck
+          pnpm --dir sdks/typescript test
+          pnpm --dir plugin/chatgpt-extension typecheck
+          pnpm --dir plugin/chatgpt-extension check:embedded
+          pnpm --dir dashboard contracts:check
+          bazel run //scripts:gen_builds -- --check
+          bazel build --config=ci //:rustfmt_check
+          git diff --check
+      - name: Export source and validation evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/autotrack-validation"
+          mkdir -p "$out/blobs"
+          git add -A
+          git diff --cached --binary > "$out/tested.patch"
+          EXPORT_ROOT="$out" python3 - <<'PY'
+          import json,os,pathlib,subprocess
+          out=pathlib.Path(os.environ['EXPORT_ROOT'])
+          entries=[]
+          fields=subprocess.check_output(['git','diff','--cached','--raw','--no-abbrev','--no-renames','-z']).split(b'\0')
+          for i in range(0,len(fields)-1,2):
+              mode_old,mode_new,old,new,status=fields[i].decode().split()
+              path=fields[i+1].decode()
+              entry={'path':path,'mode':mode_old[1:] if status=='D' else mode_new,'type':'blob','sha':None if status=='D' else new}
+              if status!='D':
+                  payload=subprocess.check_output(['git','show',':'+path])
+                  name=f'blobs/{len(entries)}'
+                  (out/name).write_bytes(payload)
+                  entry['file']=name
+              entries.append(entry)
+          tree=subprocess.check_output(['git','write-tree'],text=True).strip()
+          (out/'manifest.json').write_text(json.dumps({'base':'64a04ef4d4b542a03ebc419ddd10429f4f110a0c','tree':tree,'entries':entries},indent=2))
+          print('Exported source tree:',tree)
+          PY
+          cp -rL bazel-testlogs "$out/testlogs" 2>/dev/null || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: autotrack-validation
+          path: ${{ runner.temp }}/autotrack-validation
+          if-no-files-found: error
+          retention-days: 1

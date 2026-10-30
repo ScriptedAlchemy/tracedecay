@@ -1,0 +1,193 @@
+from pathlib import Path
+import re, subprocess
+R=Path.cwd()
+
+def read(p): return (R/p).read_text()
+def write(p,s): (R/p).parent.mkdir(parents=True,exist_ok=True); (R/p).write_text(s)
+def replace(s,a,b,count=1):
+    n=s.count(a)
+    assert n==count,(a[:100],n,count)
+    return s.replace(a,b)
+
+def end_brace(s,start):
+    # Local editing utility: find the balanced body while skipping Rust literals/comments.
+    p=s.index('{',start); depth=0; i=p
+    while i<len(s):
+        if s.startswith('//',i):
+            e=s.find('\n',i); i=len(s) if e<0 else e; continue
+        if s.startswith('/*',i):
+            n=1;i+=2
+            while n:
+                if s.startswith('/*',i):n+=1;i+=2
+                elif s.startswith('*/',i):n-=1;i+=2
+                else:i+=1
+            continue
+        m=re.match(r'(?:br|cr|r)(#*)"',s[i:])
+        if m:
+            q='"'+m[1]; e=s.find(q,i+m.end());assert e>=0;i=e+len(q);continue
+        if s[i]=='"':
+            i+=1
+            while s[i]!='"':
+                i+=2 if s[i]=='\\' else 1
+            i+=1;continue
+        if s[i]=="'":
+            m=re.match(r"'(?:\\(?:u\{[0-9a-fA-F]+\}|x[0-9a-fA-F]{2}|.)|[^'\\\n])'",s[i:])
+            if m:i+=len(m[0]);continue
+        if s[i]=='{':depth+=1
+        if s[i]=='}':
+            depth-=1
+            if depth==0:return i+1
+        i+=1
+    raise ValueError('unbalanced')
+
+def item_range(s, name, kind='fn', attrs=True):
+    m=re.search(r'(?m)^\s*(?:pub(?:\([^\n]*?\))?\s+)?(?:async\s+)?'+kind+r'\s+'+re.escape(name)+r'\b',s)
+    assert m,name
+    start=s.rfind('\n',0,m.start()+len(m[0])-len(m[0].lstrip()))+1
+    if attrs:
+        prev=s.rfind('\n\n',0,start)
+        proposed=prev+2 if prev>=0 else 0
+        pre=s[proposed:start]
+        # Attribute/docs before one item; never swallow a preceding use or body.
+        if pre.lstrip().startswith(('#[','///','//')):
+            start=proposed
+    end=end_brace(s,m.end())
+    return start,end
+
+def remove_item(s,name,kind='fn'):
+    a,b=item_range(s,name,kind);return s[:a]+s[b:].lstrip('\n')
+
+def extract_item(s,name,kind='fn'):
+    a,b=item_range(s,name,kind);return s[a:b]+'\n\n'
+
+# Replace the application PR-discovery owner with only the already-existing manual authority.
+p='crates/tracedecay-application/src/pr_tracking.rs';old=read(p)
+a=old.index('/// Bounded command control');b=old.index('/// A same-repository PR head')
+control=old[a:b]
+s='''//! Explicit branch worktree preparation and exact artifact ownership.
+
+use std::path::Path;
+use std::process::ExitStatus;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
+use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::git::{GitCommandBounds, GitCommandError};
+
+mod worktrees;
+pub use worktrees::{
+    ManualBranchActivation, ManualBranchActivationError, ManualBranchArtifactOwnershipV1,
+    ManualBranchArtifactsV1, ManualBranchLifecycleLeaseV1, acquire_manual_branch_lifecycle,
+    cleanup_owned_worktree, cleanup_owned_worktree_off_runtime,
+    manual_branch_artifact_ownership, manual_branch_artifact_ownership_off_runtime,
+    manual_branch_artifacts_match, manual_branch_artifacts_match_off_runtime,
+    manual_branch_source_owns_artifacts, prepare_manual_branch_worktree, resolve_branch_head,
+};
+
+const BRANCH_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const BRANCH_COMMAND_STDOUT_LIMIT: usize = 8 * 1024 * 1024;
+const BRANCH_COMMAND_STDERR_LIMIT: usize = 64 * 1024;
+
+'''+control
+for name,kind in [('pr_git_command','fn'),('run_git_with_control','fn'),('PrGitCommandError','enum'),('successful_git_with_control','fn'),('default_pr_command_control','fn'),('disable_git_credential_prompt','fn')]:s+=extract_item(old,name,kind)
+s+='#[cfg(test)]\nmod tests {\n    use super::*;\n\n'
+for name in ['worktree_path_arguments_are_spelled_plainly_for_git','git_commands_enforce_deadline_cancellation_and_output_limits']:s+=extract_item(old,name)
+s+='}\n'
+s=s.replace('PR_COMMAND_','BRANCH_COMMAND_').replace('Bounded command control shared by PR discovery and managed worktree changes.','Bounded command control for explicitly requested branch worktree changes.').replace('these PR commands','explicit branch commands')
+write('crates/tracedecay-application/src/branch_activation.rs',s)
+(R/p).unlink()
+
+p='crates/tracedecay-application/src/pr_tracking/worktrees.rs';s=read(p)
+s=remove_item(s,'ReconcileReport','struct')
+s=remove_item(s,'prepare_pr_worktree')
+a=s.index('#[derive(Clone, Debug, Eq, PartialEq)]\npub enum PrCleanupArtifact');b=s.index('fn remove_worktree(',a)
+s=s[:a]+s[b:]
+s=remove_item(s,'cleanup_pr_worktree_off_runtime')
+s=s.replace('PrCommandControlV1, PrGitCommandError, pr_label, pr_tracking_ref, run_git_with_control,','PrCommandControlV1, PrGitCommandError, run_git_with_control,')
+# The surviving exact-ref cleanup assertion must keep checking the actual Git ref.
+s=s.replace('cleanup_owned_worktree, prepare_manual_branch_worktree, ref_points_to, remove_worktree,','cleanup_owned_worktree, prepare_manual_branch_worktree, remove_worktree,')
+a=s.index('            ref_points_to(');b=s.index('.unwrap()',a)+len('.unwrap()')
+oldcall=s[a:b]
+newcall=oldcall.replace('ref_points_to(', 'exact_ref_ownership(').replace('.unwrap()', '.unwrap() == ManualBranchArtifactOwnershipV1::Exact')
+s=s[:a]+newcall+s[b:]
+# exact_ref_ownership is already reached via the tests' super imports; add explicitly later if needed.
+write('crates/tracedecay-application/src/branch_activation/worktrees.rs',s);(R/p).unlink();(R/p).parent.rmdir()
+
+# The application integration target keeps its historical filename/target, but now tests only branch activation.
+p='crates/tracedecay-application/tests/pr_tracking.rs';s=read(p)
+for n in ['missing_managed_pr_state_is_empty','managed_pr_state_round_trips_through_application_owner','malformed_managed_pr_state_is_a_typed_json_error','unreadable_managed_pr_state_is_a_typed_io_error']:s=remove_item(s,n)
+s=s[s.index('#[test]'):]
+write(p,s)
+
+# Keep the manual daemon adapter and its exact retirement path; delete automatic reconciliation.
+p='crates/tracedecay/src/daemon/pr_autotrack.rs';s=read(p)
+s=s[s.index('use std::collections'):]
+s=s.replace('use std::collections::{BTreeMap, BTreeSet};\n','')
+a=s.index('use tracedecay_application::pr_tracking::{');b=s.index('use tracedecay_domain::ProjectId;',a)
+s=s[:a]+'''use tracedecay_application::branch_activation::{
+    ManualBranchActivation, ManualBranchActivationError, ManualBranchArtifactOwnershipV1,
+    ManualBranchArtifactsV1, ManualBranchLifecycleLeaseV1, BranchCommandControlV1 as BranchCommandControl,
+    cleanup_owned_worktree, cleanup_owned_worktree_off_runtime, default_branch_command_control,
+    manual_branch_artifact_ownership_off_runtime, manual_branch_artifacts_match_off_runtime,
+    manual_branch_source_owns_artifacts, prepare_manual_branch_worktree, resolve_branch_head,
+};
+#[cfg(test)]
+use tracedecay_application::branch_activation::acquire_manual_branch_lifecycle;
+'''+s[b:]
+s=s.replace('use tracedecay_domain::ProjectId;\n','').replace('use tracedecay_runtime_core::logging::log_daemon_event;\n','')
+s=replace(s,'mod runtime;\npub(crate) use runtime::PrAutotrackTask;\npub(super) use runtime::spawn_with_administration;\n','')
+s=remove_item(s,'state_only')
+a=s.index('/// Maximum number of *new* PR branches');b=s.index('/// Activates an operator-requested',a)
+s=s[:a]+s[b:]
+s=s.replace('/// Activates an operator-requested branch head through the same worktree\n/// prep + scheduler mount path as [`track_pr`].','/// Activates one operator-requested branch through the retained scheduler.')
+for n in ['reconcile_project_with_administration','track_pr','remove_pr_store','pr_number_from_label','cleanup_failed_track','untrack_pr','sweep_orphan_pr_worktrees']:s=remove_item(s,n)
+s='//! Explicit branch activation through the daemon-owned lifecycle.\n\n'+s
+write('crates/tracedecay/src/daemon/branch_activation.rs',s);(R/p).unlink()
+
+p='crates/tracedecay/src/daemon/pr_autotrack/tests.rs';s=read(p)
+# Drop only automatic discovery/reconciliation tests and their exclusive fixtures.
+for n in ['reconcile_activates_a_pr_head_without_a_tokio_runtime','reconcile_preserves_closed_pr_when_scheduler_retirement_is_unavailable','cancelled_pr_teardown_preserves_artifacts_and_retries_exactly','reconcile_refuses_malformed_state_before_branch_mutation','reconcile_does_not_prepare_new_pr_without_scheduler_activation','init_repo_with_pr_11_head','assert_pr_11_head_reconciles','reconcile_is_idempotent_for_already_managed_pr','partial_discovery_suppresses_removals','dashboard_managed_summary_reader_matches_canonical_state']:s=remove_item(s,n)
+write('crates/tracedecay/src/daemon/branch_activation/tests.rs',s);(R/p).unlink()
+(R/'crates/tracedecay/src/daemon/pr_autotrack/runtime.rs').unlink()
+(R/'crates/tracedecay/src/daemon/pr_autotrack').rmdir()
+
+# Rename only the retained module/type authority, not unrelated hosted PR tracking.
+for p in (R/'crates').rglob('*.rs'):
+    if p.is_file():
+        s=p.read_text();n=s
+        n=n.replace('tracedecay_application::pr_tracking','tracedecay_application::branch_activation')
+        n=n.replace('pub mod pr_tracking;', 'pub mod branch_activation;')
+        n=n.replace('PrCommandControlV1','BranchCommandControlV1').replace('PrCommandControl','BranchCommandControl')
+        n=n.replace('PrGitCommandError','BranchGitCommandError').replace('PrStoreAdministration','BranchStoreAdministration')
+        n=n.replace('default_pr_command_control','default_branch_command_control').replace('pr_git_command','branch_git_command')
+        n=n.replace('application.pr_tracking.', 'application.branch_activation.')
+        n=n.replace('daemon.pr_autotrack.', 'daemon.branch_activation.')
+        n=n.replace('pr_autotrack::activate_manual','branch_activation::activate_manual').replace('pr_autotrack::cleanup_manual','branch_activation::cleanup_manual').replace('pr_autotrack::retire_worktree_mount','branch_activation::retire_worktree_mount')
+        n=n.replace('pub(crate) mod pr_autotrack;', 'pub(crate) mod branch_activation;').replace('mod pr_autotrack;', 'mod branch_activation;')
+        if n!=s:p.write_text(n)
+print('phase 1 complete')
+
+
+# Remove the loop from daemon composition and shutdown, not merely its default.
+p='crates/tracedecay/src/daemon/bootstrap.rs';s=read(p)
+a=s.index('    // PR-branch auto-tracking runs independently');b=s.index('    let engine = engine',a)
+s=s[:a]+s[b:]
+s=replace(s,'.with_maintenance_coordinator(maintenance)\n        .with_pr_autotrack_task(pr_autotrack_task)\n        .await;','.with_maintenance_coordinator(maintenance);')
+write(p,s)
+p='crates/tracedecay/src/daemon/engine.rs';s=read(p)
+s=remove_item(s,'with_pr_autotrack_task')
+s=replace(s,'    /// PR reconciliation task, retained so shutdown never leaves it writing.\n    pr_autotrack_task:\n        Arc<tokio::sync::Mutex<Option<crate::daemon::pr_autotrack::PrAutotrackTask>>>,\n','')
+write(p,s)
+p='crates/tracedecay/src/daemon/engine/shutdown.rs';s=read(p)
+a=s.index('        let pr_task = ');b=s.index('        vec![',a);s=s[:a]+s[b:]
+a=s.index('                ShutdownOwner::new(\n                    "pr_autotrack",');b=s.index('                ShutdownOwner::new("session_sync"',a);s=s[:a]+s[b:];write(p,s)
+p='crates/tracedecay/src/daemon/tests/scheduler_shutdown.rs';s=read(p)
+for n in ['pr_autotrack_is_cancelled_before_invocation_join','dropping_the_pr_autotrack_owner_aborts_its_parked_loop']:s=remove_item(s,n)
+write(p,s)
+
+# Remove exclusive dashboard reader adapters and fields.
+for p,n in [('crates/tracedecay/src/daemon/project_composition.rs','project_dashboard_pr_autotrack_reader'),('crates/tracedecay/src/mcp/server/construction.rs','with_dashboard_pr_autotrack_reader')]:write(p,remove_item(read(p),n))
+for p in (R/'crates').rglob('*.rs'):
+    if '/configuration/store/tests/fixtures/' in str(p):continue
+    s=p.read_text();n=s
+    # Typed fields can wrap once after the colon. Remove the whole declaration.
