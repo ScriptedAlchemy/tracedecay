@@ -68,6 +68,7 @@ def configure_fleet(
 build --config={profile}
 build --remote_executor=grpc://{host}:{port}
 build --remote_cache=grpc://{host}:{port}
+build --remote_cache_compression
 build --remote_instance_name=main
 build --remote_upload_local_results
 # Publish completed local actions before allowing dependent work to start.
