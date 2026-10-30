@@ -20,6 +20,8 @@ single_version_override(
         "//scripts:bazel/patches/rules-rust-rustfmt-runtime-inputs.patch",
         # No-link lint actions can use Rust metadata for executable targets.
         "//scripts:bazel/patches/rules-rust-clippy-metadata-inputs.patch",
+        # Windows link actions must not overwrite sealed metadata outputs.
+        "//scripts:bazel/patches/rules-rust-windows-metadata-outputs.patch",
     ],
     patch_strip = 1,
 )

@@ -1756,7 +1756,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         let mut store = self
             .publication
             .clone()
-            .with_reconcile_publication_fence(Arc::clone(&self.hints), control);
+            .with_reconcile_publication_fence(Arc::clone(&self.hints), control.clone());
         match store.commit(&mut pending.preparation, &pending.publication) {
             Ok(bytes) => {
                 let sealed =
@@ -1780,7 +1780,14 @@ impl CodeIndexWorktreeSchedulerV1 {
                 ) {
                     Err(CodeIndexSchedulerErrorV1::PreparedPublicationRefused { error })
                 } else {
-                    Err(CodeIndexProductionErrorV1::Publication(error).into())
+                    Err(discarded_construction_refusal(
+                        CodeIndexProductionErrorV1::Publication(error),
+                        &control,
+                        None,
+                        false,
+                        std::iter::empty(),
+                        self.resident_memory.admission_watermark_bytes(),
+                    ))
                 }
             }
         }
@@ -2083,7 +2090,18 @@ impl CodeIndexWorktreeSchedulerV1 {
             return Ok(None);
         }
         let began_under = control.expected_epoch();
-        let generation = self.commit_pending_publication(pending, control)?;
+        let generation = match self.commit_pending_publication(pending, control) {
+            Ok(generation) => generation,
+            Err(CodeIndexSchedulerErrorV1::Production(
+                CodeIndexProductionErrorV1::Publication(
+                    CodeIndexPublicationStoreErrorV1::CompareAndSwap,
+                ),
+            )) => {
+                self.latest_content_identity = None;
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
         self.latest_content_identity = Some(generation.snapshot().content_identity.clone());
         self.mark_reconciled_state(
             git_metadata.clone(),
@@ -2380,7 +2398,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 // only the durable write. Republish it without a second
                 // whole-store extract, isolated graph-off retries otherwise
                 // miss their deadline waiting on a cold parser warmup.
-                self.commit_pending_publication(pending, control.clone())?
+                self.commit_pending_publication(pending, control.clone())
             } else {
                 let _worker_memory = self.reserve_incremental_rebuild_memory()?;
                 let mut owner =
@@ -2425,7 +2443,22 @@ impl CodeIndexWorktreeSchedulerV1 {
                         std::iter::once(&_worker_memory).chain(&captured.retained_reservations),
                         self.resident_memory.admission_watermark_bytes(),
                     )
-                })?
+                })
+            };
+            let generation = match generation {
+                Ok(generation) => generation,
+                Err(CodeIndexSchedulerErrorV1::Production(
+                    CodeIndexProductionErrorV1::Publication(
+                        CodeIndexPublicationStoreErrorV1::CompareAndSwap,
+                    ),
+                )) => {
+                    // This retained metadata no longer names the incumbent.
+                    // Let the caller resolve the new publication; drained hints
+                    // remain owned by their restoration guard on this return.
+                    self.latest_content_identity = None;
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
             };
             self.require_reusable_publication(&generation)?;
             self.latest_content_identity = Some(snapshot_content_identity);
@@ -3070,10 +3103,17 @@ impl CodeIndexWorktreeSchedulerV1 {
                 Err(CodeIndexSchedulerErrorV1::Production(
                     CodeIndexProductionErrorV1::Interrupted(
                         tracedecay_code_index::production::CodeIndexInterruptionV1::Cancelled,
+                    )
+                    | CodeIndexProductionErrorV1::Publication(
+                        CodeIndexPublicationStoreErrorV1::CompareAndSwap,
                     ),
                 )) if retry < MAX_SUPERSEDED_RECONCILE_RETRIES
                     && !self.shutting_down.load(Ordering::Acquire) =>
                 {
+                    // Another publisher can move the incumbent without changing
+                    // this owner's source epoch. A fresh capture rebases its CAS
+                    // within the existing supersession bound.
+                    self.latest_content_identity = None;
                     stop_if_resident_memory(&control)?;
                     std::thread::sleep(SUPERSEDED_RECONCILE_RETRY_BACKOFF);
                     continue;

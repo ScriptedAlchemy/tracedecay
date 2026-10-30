@@ -229,6 +229,7 @@ async fn tokio_retirement_status(
 
 /// The receipt of a native owner aborted for retirement: its cancellation is
 /// the clean outcome.
+#[cfg(any(unix, test))]
 async fn aborted_native_retirement_status(task: NativeTask<()>) -> ProjectServerRetirementStatus {
     match task.wait().await {
         NativeTaskOutcome::Completed(()) | NativeTaskOutcome::Cancelled => {
@@ -305,6 +306,7 @@ pub(super) async fn track_native_retirement(
     track_project_server_retirement(retirements, owner, spawn_native_retirement(retirement)).await;
 }
 
+#[cfg(any(unix, test))]
 pub(super) async fn track_aborted_native_retirement_task(
     retirements: &tokio::sync::Mutex<Vec<ProjectServerRetirement>>,
     owner: StoreOwnerKey,
@@ -390,7 +392,7 @@ impl StoreAdministration {
 
     // pub(crate): daemon bootstrap tests register retirements from outside
     // branch_admin to exercise the shutdown join path.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) async fn track_project_server_retirement(
         &self,
         owner: StoreOwnerKey,

@@ -1,10 +1,14 @@
+#[cfg(unix)]
 use std::process::Command;
-use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::time::Duration;
+use std::time::Instant;
 
+#[cfg(unix)]
 use tracedecay_runtime_core::cancellation::CancellationToken;
-use tracedecay_runtime_core::git::{
-    GitCommandBounds, GitCommandError, bounded_command_output, bounded_git_output,
-};
+#[cfg(unix)]
+use tracedecay_runtime_core::git::bounded_command_output;
+use tracedecay_runtime_core::git::{GitCommandBounds, GitCommandError, bounded_git_output};
 
 #[test]
 fn read_only_git_output_enforces_deadline_and_byte_limit() {

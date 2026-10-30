@@ -7,7 +7,7 @@ use serde_json::Value as JsonValue;
 
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{ObservationOrderingDomainV1, ObservationSourceCursorV1};
-use tracedecay_private_fs::RewriteWitness;
+use tracedecay_private_fs::{ChangeClockReading, ChangeStamp, RewriteWitness};
 use tracedecay_runtime_core::db::engine::{Error as EngineError, FromValue, Row, Value};
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_store::{SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageRecord, SessionRecord};
@@ -23,9 +23,7 @@ use tracedecay_lcm::retrieval_content::{
 use super::super::registered_db::{SessionRegisteredDb, SessionStoreAccess};
 use super::super::shared::{durable_project_path_key, path_identity_key};
 use super::super::source::{
-    HostProviderCoverage, JsonlFileChangeToken, JsonlNativeFileIdentity,
-    jsonl_change_token_settled, jsonl_file_change_token_under, jsonl_native_file_identity,
-    jsonl_prefix_digest,
+    HostProviderCoverage, JsonlNativeFileIdentity, jsonl_native_file_identity, jsonl_prefix_digest,
 };
 use super::search::{
     SESSION_MESSAGE_SEARCH_MAX_FETCH, downrank_inventory_messages,
@@ -141,7 +139,7 @@ enum TranscriptProgress {
 struct TranscriptVersion {
     native_identity: JsonlNativeFileIdentity,
     size: u64,
-    change: JsonlFileChangeToken,
+    change: ChangeStamp,
 }
 
 /// The prefix verdict last proven for one transcript, with the version and
@@ -225,6 +223,7 @@ fn transcript_progress(
         .flat_map(|source| source.file_bytes.iter())
         .collect::<Vec<_>>();
     cursors.sort_unstable_by_key(|cursor| std::cmp::Reverse(cursor.byte_offset()));
+    let sampled_at = ChangeClockReading::now();
     let mut file = if cursors.is_empty() {
         None
     } else {
@@ -274,9 +273,9 @@ fn transcript_progress(
         .map(|native_identity| TranscriptVersion {
             native_identity,
             size: metadata.len(),
-            change: jsonl_file_change_token_under(&metadata, RewriteWitness::NATIVE),
+            change: RewriteWitness::native_path_stamp(path, &metadata, sampled_at),
         })
-        .filter(|version| jsonl_change_token_settled(version.change));
+        .filter(|version| version.change.is_settled());
     if let (Some(version), Some(previous)) = (version, previous)
         && previous.version == version
         && previous.checkpoints == checkpoints

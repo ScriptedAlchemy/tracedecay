@@ -1,30 +1,38 @@
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::Arc;
 
+#[cfg(unix)]
 use tracedecay_application::pr_tracking::{
     ManualBranchLifecycleLeaseV1, PrCommandControlV1, acquire_manual_branch_lifecycle,
     manual_branch_source_owns_artifacts,
 };
 
-use tracedecay_code_index_runtime::code_index_scheduler::{
-    CodeIndexSchedulerRegistryV1, branch_publication::BranchPublicationContextV1,
-};
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+#[cfg(unix)]
+use tracedecay_code_index_runtime::code_index_scheduler::branch_publication::BranchPublicationContextV1;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
+#[cfg(unix)]
 use tracedecay_runtime_core::branch::{
     BranchAddOutcome, BranchTrackingPreparation, prepare_branch_tracking_in_layout,
     rollback_prepared_branch_tracking,
 };
+#[cfg(unix)]
 use tracedecay_runtime_core::cancellation::CancellationToken;
+#[cfg(unix)]
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_runtime_core::path_safety::same_canonical_path;
 
 use super::{DaemonHandshake, StoreAdministration};
+#[cfg(unix)]
 use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 const BRANCH_ADD_TOOL_NAME: &str = "tracedecay_admin_branch_add";
 const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
 const PROJECT_PATH_UNAVAILABLE: &str = "project_path_unavailable";
+#[cfg(unix)]
 const BRANCH_TRACKING_FAILED: &str = "branch_tracking_failed";
 
 pub(super) struct BranchAddRequest {
@@ -84,6 +92,8 @@ pub(super) async fn branch_add_response(
             "code-index scheduler authority is unavailable for branch activation",
         );
     };
+    #[cfg(not(unix))]
+    let _ = schedulers;
     let Some(project_root) = handshake.project_path.as_deref() else {
         return typed_project_route_error(
             request.id.clone(),
@@ -435,6 +445,7 @@ pub(super) async fn activate_and_track_manual_branch_owned(
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn branch_publication_context(
     graph: &tracedecay_project::project::TraceDecay,
 ) -> Result<BranchPublicationContextV1, TraceDecayError> {
@@ -471,6 +482,7 @@ pub(super) fn typed_project_route_error(
     )
 }
 
+#[cfg(unix)]
 fn typed_tracking_error(id: serde_json::Value, error: &TraceDecayError) -> JsonRpcResponse {
     if let Some((reason_code, retryable, detail)) = error.project_route_context() {
         return typed_project_route_error(id, reason_code, retryable, detail);
@@ -478,6 +490,7 @@ fn typed_tracking_error(id: serde_json::Value, error: &TraceDecayError) -> JsonR
     typed_project_route_error(id, BRANCH_TRACKING_FAILED, true, &error.to_string())
 }
 
+#[cfg(unix)]
 fn branch_add_tool_result(outcome: &BranchAddOutcome) -> serde_json::Value {
     let name = branch_add_outcome_name(outcome);
     serde_json::json!({
@@ -488,6 +501,7 @@ fn branch_add_tool_result(outcome: &BranchAddOutcome) -> serde_json::Value {
     })
 }
 
+#[cfg(unix)]
 fn branch_add_outcome_name(outcome: &BranchAddOutcome) -> &'static str {
     match outcome {
         BranchAddOutcome::NotIndexed => "not_indexed",
@@ -498,6 +512,7 @@ fn branch_add_outcome_name(outcome: &BranchAddOutcome) -> &'static str {
 }
 
 /// Maps a branch-lifecycle admission failure to its typed project-route error.
+#[cfg(unix)]
 pub(super) fn lifecycle_route_error(
     error: tracedecay_application::pr_tracking::ManualBranchActivationError,
 ) -> TraceDecayError {

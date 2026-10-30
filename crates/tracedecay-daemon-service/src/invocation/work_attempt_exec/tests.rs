@@ -23,42 +23,55 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Mutex;
 
+#[cfg(unix)]
 use sha2::{Digest, Sha256};
+use tracedecay_domain::configuration::TopologyConcurrencyPolicyV1;
+#[cfg(unix)]
 use tracedecay_domain::configuration::{
-    ConfigurationLayerIdV1, ConfigurationValueV1, SettingKey, TopologyConcurrencyPolicyV1,
-    WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WorkExecutableBindingV1, WorkExecutableCapabilityV1,
+    ConfigurationLayerIdV1, ConfigurationValueV1, SettingKey, WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
+    WorkExecutableBindingV1, WorkExecutableCapabilityV1,
 };
 
+#[cfg(unix)]
 use tracedecay_configuration::config::work_executable_binding::PinnedWorkExecutableBindingResolver;
+#[cfg(unix)]
 use tracedecay_configuration::config::{PinnedRuntimeConfiguration, RuntimeConfigurationTarget};
+#[cfg(unix)]
 use tracedecay_global_db::configuration::registry::ConfigurationRegistry;
+#[cfg(unix)]
 use tracedecay_global_db::configuration::resolver::{ConfigurationLayerV1, resolve_configuration};
 
+#[cfg(unix)]
 use tracedecay_application::observability::{
     ObservabilityProducerIdentityV1, RegisteredObservabilityPortV1,
 };
 use tracedecay_contracts::{
     CancelWorkAttemptCommand, CancellationContext, CapabilityGrantSnapshot, Deadline,
-    DisclosureClass, ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
-    RequestId, ResolvedScope, WorkAttemptAdmissionKind, WorkAttemptCapacityV1,
+    DisclosureClass, RequestId, ResolvedScope, WorkAttemptAdmissionKind, WorkAttemptCapacityV1,
     WorkAttemptCapacityVerdictV1, WorkAttemptEffectDispatchOutcomeV1, WorkAttemptEffectHolderV1,
     WorkAttemptEffectReadPortV1, WorkAttemptEffectResolutionV1, WorkAttemptEffectServiceV1,
     WorkAttemptEffectStorageErrorV1, WorkAttemptEffectStoragePortV1, WorkAttemptInsertOutcome,
     WorkAttemptListPageV1, WorkAttemptService, WorkAttemptStatusRequestV1, WorkAttemptStorageError,
     WorkAttemptStoragePort, WorkAttemptStreamChannelV1, WorkAttemptStreamSummaryV1,
 };
+#[cfg(unix)]
+use tracedecay_contracts::{ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1};
 use tracedecay_domain::{
-    ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId,
-    EffectReconciliationOutcomeV1, ManifestDigest, NoProgressEscalationV1, ObservabilityPayloadV1,
-    ObservabilityTerminalResultV1, OperationActivationOutcomeV1, OperationStageV1, ProjectId,
-    ProposalId, ProviderId, RefId, RepositoryId, RunId, SessionId, TaskId, UtcMicros,
-    WorkApprovalPolicy, WorkAttemptIdentityV1, WorkAttemptProjectionBindingV1, WorkAttemptStateV1,
-    WorkAttemptV1, WorkAuthority, WorkCancellationStateV1, WorkEffectStateV1, WorkEgressPolicy,
+    ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ProjectId,
+    ProposalId, ProviderId, RefId, RepositoryId, RunId, TaskId, UtcMicros, WorkApprovalPolicy,
+    WorkAttemptIdentityV1, WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1,
+    WorkAuthority, WorkCancellationStateV1, WorkEffectStateV1, WorkEgressPolicy,
     WorkExecutableReference, WorkExecutionEnvelopeV1, WorkExecutionLimits, WorkExecutionSnapshot,
     WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1, WorkFilesystemPolicy,
     WorkGraphVersionV1, WorkLeaseFenceV1, WorkLeaseId, WorkProductEventSequenceV1,
     WorkProductSourceWatermarkV1, WorkProviderRouteId, WorkProviderRouteV1, WorkRecoveryStateV1,
-    WorkSandboxPolicy, WorkflowOperationRef, WorkflowStageClassV1, WorktreeId, canonical_sha256,
+    WorkSandboxPolicy, WorkflowOperationRef, WorktreeId,
+};
+#[cfg(unix)]
+use tracedecay_domain::{
+    EffectReconciliationOutcomeV1, ManifestDigest, NoProgressEscalationV1, ObservabilityPayloadV1,
+    ObservabilityTerminalResultV1, OperationActivationOutcomeV1, OperationStageV1, SessionId,
+    WorkflowStageClassV1, canonical_sha256,
 };
 use tracedecay_runtime_core::native_runtime;
 #[cfg(unix)]
@@ -70,6 +83,7 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 /// actually observed them.
 const CLAUDE_STREAM_JSON_ARGV: [&str; 4] =
     ["--print", "--output-format", "stream-json", "--verbose"];
+#[cfg(unix)]
 const CODEX_EXEC_JSON_ARGV: [&str; 3] = ["exec", "--json", "-"];
 
 // ---------------------------------------------------------------------------
@@ -85,6 +99,7 @@ use tracedecay_domain::test_fixtures::digest;
 /// `spawn_for_worktree`, it spawns the attempt with `NativeTask::spawn`, so
 /// `native_runtime::spawn_blocking` queues its work instead of running it
 /// inline as it does on a blocking-pool thread.
+#[cfg(unix)]
 fn without_tokio<F>(future: F)
 where
     F: std::future::Future<Output = ()> + Send + 'static,
@@ -104,6 +119,7 @@ where
     }
 }
 
+#[cfg(unix)]
 fn sha256_digest(bytes: &[u8]) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(bytes)))).unwrap()
 }
@@ -145,6 +161,7 @@ impl AttemptStore {
         self.inner.lock().unwrap().observed_states.clone()
     }
 
+    #[cfg(unix)]
     fn running_at(&self) -> Option<UtcMicros> {
         self.inner.lock().unwrap().running_at
     }
@@ -908,6 +925,7 @@ fn resolver_over(
 }
 
 /// The route the snapshot's Codex CLI fallback topology names.
+#[cfg(unix)]
 fn fallback_route() -> WorkProviderRouteV1 {
     WorkProviderRouteV1::new(
         id::<ProviderId>("provider.work.codex-cli"),
@@ -916,6 +934,7 @@ fn fallback_route() -> WorkProviderRouteV1 {
     .unwrap()
 }
 
+#[cfg(unix)]
 fn codex_cli_fallback(executable: WorkExecutableReference) -> WorkFallbackTopology {
     WorkFallbackTopology::CodexCli {
         route: fallback_route(),
@@ -925,6 +944,7 @@ fn codex_cli_fallback(executable: WorkExecutableReference) -> WorkFallbackTopolo
 
 /// A shell provider that consumes its stdin and exits cleanly. Used wherever
 /// a binding has to be *resolvable* for the gate to have a real choice.
+#[cfg(unix)]
 const CLEAN_PROVIDER: &str = "#!/bin/sh\ncat > /dev/null\nexit 0\n";
 
 // ---------------------------------------------------------------------------

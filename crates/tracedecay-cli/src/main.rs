@@ -37,6 +37,7 @@ mod global;
 mod hook_capture_cmd;
 mod hook_cmd;
 mod lsp_cmd;
+#[cfg(any(unix, test))]
 mod macos_codesign;
 mod monitor_cmd;
 mod process_allocator;

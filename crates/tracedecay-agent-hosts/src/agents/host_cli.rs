@@ -471,7 +471,7 @@ fn resolve_launch_command(program: &Path) -> Result<(PathBuf, Vec<OsString>)> {
     #[cfg(not(unix))]
     {
         let _ = program;
-        return Ok((program.to_path_buf(), Vec::new()));
+        Ok((program.to_path_buf(), Vec::new()))
     }
 
     #[cfg(unix)]

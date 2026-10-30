@@ -1,12 +1,15 @@
 import { Client, InMemoryTransport, StreamableHTTPClientTransport, type CallToolResult } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
-import { mkdtemp, rm, symlink } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { request as httpRequest } from "node:http";
+import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonBridge } from "../src/server/bridge.js";
+import { probeDaemon, readDaemonAuthority } from "../src/server/authority.js";
 import { createExtensionServer, serveLoopbackHttp } from "../src/server/main.js";
 import { DaemonFailure, ServeSession } from "../src/server/serve-client.js";
 
@@ -37,7 +40,75 @@ async function rejection(promise: Promise<unknown>): Promise<unknown> {
   throw new Error("expected the call to reject");
 }
 
+describe("native daemon authority", () => {
+  it("distinguishes a live unreachable process from an exited process with a stale HTTP endpoint", async () => {
+    const http = createHttpServer((_request, response) => response.writeHead(401).end());
+    http.listen(0, "127.0.0.1");
+    await once(http, "listening");
+    const address = http.address();
+    if (address === null || typeof address === "string") throw new Error("missing HTTP address");
+    const record = {
+      pid: process.pid, process_run_id: "probe-fixture", started_at_unix_secs: 1,
+      epoch: 1, version: "fixture", endpoint: null, http_application_endpoint: `127.0.0.1:${address.port}`,
+      auth_token: "isolated-fixture-token", profile_root: PACKAGE_ROOT,
+    };
+    try {
+      expect(await probeDaemon(record)).toBeNull();
+    } finally {
+      await new Promise<void>((resolve, reject) => http.close((error) => error ? reject(error) : resolve()));
+    }
+    expect(await probeDaemon(record)).toMatchObject({ kind: "disconnected", code: "daemon_unreachable" });
+    const child = spawn(NODE_BINARY, ["-e", ""], { stdio: "ignore" });
+    await once(child, "exit");
+    if (child.pid === undefined) throw new Error("probe child did not start");
+    expect(await probeDaemon({ ...record, pid: child.pid })).toMatchObject({ kind: "disconnected", code: "daemon_exited" });
+  });
+
+  it("reads the native private authority location and refuses an absent record", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "td-native-authority-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const record = {
+      pid: process.pid, process_run_id: "native-fixture", started_at_unix_secs: 1,
+      epoch: 1, version: "fixture", endpoint: null, http_application_endpoint: "127.0.0.1:1",
+      auth_token: "isolated-fixture-token", profile_root: root,
+    };
+    if (process.platform === "win32") {
+      await writeFile(path.join(root, "daemon-authority.json"), JSON.stringify(record));
+    }
+    expect(await readDaemonAuthority(root)).toMatchObject({ kind: "absent" });
+    const directory = process.platform === "win32" ? path.join(root, "daemon-authority") : root;
+    await mkdir(directory, { recursive: true });
+    await writeFile(path.join(directory, "daemon-authority.json"), JSON.stringify(record));
+    expect(await readDaemonAuthority(root)).toEqual({ kind: "available", record });
+  });
+});
+
 describe("embedded server entry", () => {
+  it("exits without retaining a token when its supervisor disconnects before startup", async () => {
+    const home = await mkdtemp(path.join(tmpdir(), "td-early-disconnect-"));
+    cleanups.push(() => rm(home, { recursive: true, force: true }));
+    const profileRoot = path.join(home, "profile");
+    await mkdir(profileRoot);
+    const child = spawn(NODE_BINARY, [path.join(PACKAGE_ROOT, "embedded", "server.mjs"), "--http", "127.0.0.1:0"], {
+      env: { ...process.env, HOME: home, USERPROFILE: home, TRACEDECAY_DATA_DIR: profileRoot },
+      stdio: ["ignore", "ignore", "pipe", "ipc"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
+    try {
+      const exited = once(child, "exit", { signal: AbortSignal.timeout(5_000) });
+      child.disconnect();
+      expect(await exited, stderr).toEqual([0, null]);
+      expect(await readdir(profileRoot)).toEqual([]);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        const exited = once(child, "exit");
+        child.kill("SIGKILL");
+        await exited;
+      }
+    }
+  });
+
   it("serves when launched through a symlinked path", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "td-explorer-link-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));

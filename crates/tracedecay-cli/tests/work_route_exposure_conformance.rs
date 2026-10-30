@@ -247,6 +247,7 @@ struct DashboardProcess {
     /// Everything the launcher wrote to stderr, so a dashboard that never
     /// becomes reachable can name its own cause instead of surfacing as a bare
     /// connection refusal at whichever request happened to be next.
+    #[cfg(unix)]
     diagnostics: std::sync::Arc<std::sync::Mutex<String>>,
 }
 
@@ -283,6 +284,7 @@ impl DashboardProcess {
         Self {
             process,
             base_url,
+            #[cfg(unix)]
             diagnostics,
         }
     }
@@ -292,6 +294,7 @@ impl DashboardProcess {
     /// The launcher exits as soon as it has printed the URL, so process
     /// liveness says nothing about whether the mount is reachable. Polling the
     /// bound address is the only real readiness signal.
+    #[cfg(unix)]
     fn wait_until_serving(&self, agent: &ureq::Agent, label: &str) {
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {

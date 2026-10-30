@@ -1,7 +1,9 @@
 //! Foreground daemon bootstrap: `run_foreground` entry points, the Unix
 //! accept/serve loop, socket preparation, and client-task draining.
 
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -137,22 +139,114 @@ async fn run_foreground_loopback(
         invocation: invocation.clone(),
         project_open_gates: Arc::clone(&project_open_gates),
     };
+    if !prepare_loopback_profile(&deletion_owners, catalog_prewarm).await? {
+        return Ok(());
+    }
+    let listener = bind_loopback_listener(&mut authority).await?;
+    let (http_application_registry, http_application_service) =
+        bind_loopback_http_application(&mut authority, &deletion_owners, remote_tls.as_ref())
+            .await?;
+    let lifecycle = DaemonLifecycle::default();
+    let maintenance = spawn_loopback_maintenance(&profile_root, &deletion_owners).await;
+    let lateness_canary = spawn_lateness_canary();
+    let spooled_hook_opener = hook_v2_replay_consumer::spawn_spooled_hook_opener(
+        hook_v2_replay_consumer::PortableSpoolOpenerOwners {
+            lifecycle: lifecycle.clone(),
+            store_administration: store_administration.clone(),
+            project_open_gates: Arc::clone(&project_open_gates),
+            invocation: invocation.clone(),
+            http_application_registry: http_application_registry.clone(),
+        },
+        profile.clone(),
+    );
+    let shutdown_signals = ShutdownSignals::listen()?;
+    log_daemon_event(
+        "daemon_ready",
+        &[(
+            "bootstrap_elapsed_ms",
+            bootstrap_started.elapsed().as_millis().to_string(),
+        )],
+    );
+    let clients = accept_loopback_clients(
+        &listener,
+        &authority,
+        &lifecycle,
+        &deletion_owners,
+        &http_application_registry,
+        shutdown_signals,
+    )
+    .await;
+    lifecycle.begin_draining();
+    tracedecay_daemon_service::shutdown::arm_shutdown_exit_bound();
+    drop(listener);
+    if let Some(opener) = spooled_hook_opener {
+        opener.abort();
+    }
+    if let Some(canary) = lateness_canary {
+        canary.abort();
+    }
+    cancel_retained_session_history(&store_administration).await;
+    let shutdown_deadline = Instant::now() + DAEMON_SHUTDOWN_COORDINATION_DEADLINE;
+    let endpoint_cleanup = authority.cleanup_owned_endpoint();
+    shutdown_loopback_owners(
+        lifecycle,
+        maintenance,
+        deletion_owners,
+        http_application_registry,
+        http_application_service,
+        clients,
+        shutdown_deadline,
+    )
+    .await;
+    endpoint_cleanup
+}
+
+#[cfg(not(unix))]
+async fn spawn_loopback_maintenance(
+    profile_root: &std::path::Path,
+    owners: &remote_deletion::RemoteDeletionRuntimeOwners,
+) -> maintenance::MaintenanceCoordinator {
+    let sync_config = tracedecay_configuration::SyncConfig::default();
+    maintenance::MaintenanceCoordinator::spawn(
+        profile_root.to_path_buf(),
+        owners.administration.clone(),
+        owners.invocation.code_index_schedulers.clone(),
+        sync_config.retention.clone(),
+        maintenance::BranchStoreGcCadenceV1 {
+            branch_gc_days: sync_config.branch_gc_days,
+        },
+    )
+    .await
+}
+
+#[cfg(not(unix))]
+async fn prepare_loopback_profile(
+    owners: &remote_deletion::RemoteDeletionRuntimeOwners,
+    catalog_prewarm: futures_util::future::BoxFuture<'static, std::result::Result<(), String>>,
+) -> Result<bool> {
     if let remote_deletion::RemoteDeletionBootMode::DeletionOnly(receipt) =
-        remote_deletion::resume_remote_account_deletion_for_boot(&deletion_owners).await?
+        remote_deletion::resume_remote_account_deletion_for_boot(owners).await?
     {
         log_catalog_prewarm_task(catalog_prewarm.await);
         log_daemon_event(
             "remote_account_deletion_resume",
             &[("outcome", format!("{:?}", receipt.status))],
         );
-        return Ok(());
+        return Ok(false);
     }
     let (worker_plan, catalog_prewarm) = tokio::join!(
-        install_profile_worker_plan(&store_administration, &invocation),
+        install_profile_worker_plan(&owners.administration, &owners.invocation),
         catalog_prewarm
     );
     worker_plan?;
     log_catalog_prewarm_task(catalog_prewarm);
+    Ok(true)
+}
+
+#[cfg(not(unix))]
+async fn bind_loopback_listener(
+    authority: &mut authority::DaemonAuthority,
+) -> Result<BrokerListener> {
     let (listener, endpoint) = tracing::Instrument::instrument(
         BrokerListener::bind(authority.endpoint()),
         tracing::trace_span!("daemon.bootstrap.listener_bind"),
@@ -161,24 +255,36 @@ async fn run_foreground_loopback(
     authority.publish_endpoint(&endpoint)?;
     log_daemon_event("daemon_listening", &[("endpoint", endpoint.to_string())]);
 
+    Ok(listener)
+}
+
+#[cfg(not(unix))]
+async fn bind_loopback_http_application(
+    authority: &mut authority::DaemonAuthority,
+    owners: &remote_deletion::RemoteDeletionRuntimeOwners,
+    remote_tls: Option<&RemoteBrainTlsConfig>,
+) -> Result<(
+    http_application::DaemonHttpApplicationRegistry,
+    http_application::DaemonHttpApplicationService,
+)> {
     let http_application_registry = http_application::DaemonHttpApplicationRegistry::default();
     install_http_application_cold_resolver(
         &http_application_registry,
-        store_administration.clone(),
-        invocation.clone(),
-        Arc::clone(&project_open_gates),
+        owners.administration.clone(),
+        owners.invocation.clone(),
+        Arc::clone(&owners.project_open_gates),
     )?;
     install_remote_http_application_router(
         &http_application_registry,
-        &store_administration,
-        &invocation,
+        &owners.administration,
+        &owners.invocation,
     )
     .await?;
     let http_application_service = tracing::Instrument::instrument(
         http_application::DaemonHttpApplicationService::bind_with_remote_tls(
             http_application_registry.clone(),
             authority.auth_token(),
-            remote_tls.as_ref(),
+            remote_tls,
         ),
         tracing::trace_span!("daemon.bootstrap.http_bind"),
     )
@@ -197,40 +303,21 @@ async fn run_foreground_loopback(
             &[("endpoint", format!("https://{endpoint}/remote/"))],
         );
     }
-    let lifecycle = DaemonLifecycle::default();
-    let sync_config = tracedecay_configuration::SyncConfig::default();
-    let maintenance = maintenance::MaintenanceCoordinator::spawn(
-        profile_root.clone(),
-        store_administration.clone(),
-        invocation.code_index_schedulers.clone(),
-        sync_config.retention.clone(),
-        maintenance::BranchStoreGcCadenceV1 {
-            branch_gc_days: sync_config.branch_gc_days,
-        },
-    )
-    .await;
-    let lateness_canary = spawn_lateness_canary();
-    let spooled_hook_opener = hook_v2_replay_consumer::spawn_spooled_hook_opener(
-        hook_v2_replay_consumer::PortableSpoolOpenerOwners {
-            lifecycle: lifecycle.clone(),
-            store_administration: store_administration.clone(),
-            project_open_gates: Arc::clone(&project_open_gates),
-            invocation: invocation.clone(),
-            http_application_registry: http_application_registry.clone(),
-        },
-        profile.clone(),
-    );
+    Ok((http_application_registry, http_application_service))
+}
+
+#[cfg(not(unix))]
+async fn accept_loopback_clients(
+    listener: &BrokerListener,
+    authority: &authority::DaemonAuthority,
+    lifecycle: &DaemonLifecycle,
+    owners: &remote_deletion::RemoteDeletionRuntimeOwners,
+    http_application_registry: &http_application::DaemonHttpApplicationRegistry,
+    mut shutdown_signals: ShutdownSignals,
+) -> ClientTasks {
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
     let per_client_admission = DaemonPerClientAdmission::default();
     let mut clients = ClientTasks::default();
-    let mut shutdown_signals = ShutdownSignals::listen()?;
-    log_daemon_event(
-        "daemon_ready",
-        &[(
-            "bootstrap_elapsed_ms",
-            bootstrap_started.elapsed().as_millis().to_string(),
-        )],
-    );
     loop {
         let stream = tokio::select! {
             accepted = listener.accept() => match accepted {
@@ -259,9 +346,9 @@ async fn run_foreground_loopback(
         let admission_class = permit.class();
         let auth_token = authority.auth_token().to_string();
         let client_lifecycle = lifecycle.clone();
-        let store_administration = store_administration.clone();
-        let project_open_gates = Arc::clone(&project_open_gates);
-        let invocation = invocation.clone();
+        let store_administration = owners.administration.clone();
+        let project_open_gates = Arc::clone(&owners.project_open_gates);
+        let invocation = owners.invocation.clone();
         let http_application_registry = http_application_registry.clone();
         let per_client_admission = per_client_admission.clone();
         let spawned = clients.spawn(
@@ -290,28 +377,23 @@ async fn run_foreground_loopback(
             log_client_spawn_refusal(error);
         }
     }
-    lifecycle.begin_draining();
-    tracedecay_daemon_service::shutdown::arm_shutdown_exit_bound();
-    drop(listener);
-    if let Some(opener) = spooled_hook_opener {
-        opener.abort();
-    }
-    if let Some(canary) = lateness_canary {
-        canary.abort();
-    }
-    cancel_retained_session_history(&store_administration).await;
-    let shutdown_deadline = Instant::now() + DAEMON_SHUTDOWN_COORDINATION_DEADLINE;
-    let endpoint_cleanup = authority.cleanup_owned_endpoint();
+    clients
+}
+
+#[cfg(not(unix))]
+async fn loopback_shutdown_owner_phases(
+    maintenance: maintenance::MaintenanceCoordinator,
+    store_administration: &StoreAdministration,
+    project_open_gates: &tokio::sync::Mutex<ProjectOpenGates>,
+    invocation: &DaemonInvocationState,
+    http_application_service: http_application::DaemonHttpApplicationService,
+) -> Vec<Vec<tracedecay_daemon_service::shutdown::ShutdownOwner>> {
     let maintenance_join = maintenance.clone();
-    let project_open = project_open_tasks(project_open_gates.as_ref()).await;
+    let project_open = project_open_tasks(project_open_gates).await;
     let session_refresh = Arc::clone(store_administration.session_temporal_refresh_schedulers());
     let replay_join = store_administration.clone();
-    let session_sync_join = store_administration.clone();
-    let memory_graph_reconciliation_join = store_administration.clone();
     let invocation_join = invocation.clone();
-    let git_transactions_join = Arc::clone(store_administration.git_index_transaction_services());
-    let native_integration_join = Arc::clone(store_administration.native_integration_services());
-    let owner_phases = vec![
+    let mut owner_phases = vec![
         vec![
             tracedecay_daemon_service::shutdown::ShutdownOwner::new(
                 "maintenance",
@@ -376,6 +458,19 @@ async fn run_foreground_loopback(
                 move |deadline| async move { invocation_join.shutdown(Some(deadline)).await },
             ),
         ],
+    ];
+    owner_phases.extend(loopback_store_shutdown_owner_phases(store_administration));
+    owner_phases
+}
+
+#[cfg(not(unix))]
+fn loopback_store_shutdown_owner_phases(
+    store_administration: &StoreAdministration,
+) -> Vec<Vec<tracedecay_daemon_service::shutdown::ShutdownOwner>> {
+    let session_sync_join = store_administration.clone();
+    let git_transactions_join = Arc::clone(store_administration.git_index_transaction_services());
+    let native_integration_join = Arc::clone(store_administration.native_integration_services());
+    vec![
         vec![tracedecay_daemon_service::shutdown::ShutdownOwner::new(
             "session_sync",
             || {},
@@ -407,7 +502,31 @@ async fn run_foreground_loopback(
                 },
             ),
         ],
-    ];
+    ]
+}
+
+#[cfg(not(unix))]
+async fn shutdown_loopback_owners(
+    lifecycle: DaemonLifecycle,
+    maintenance: maintenance::MaintenanceCoordinator,
+    owners: remote_deletion::RemoteDeletionRuntimeOwners,
+    http_application_registry: http_application::DaemonHttpApplicationRegistry,
+    http_application_service: http_application::DaemonHttpApplicationService,
+    clients: ClientTasks,
+    shutdown_deadline: Instant,
+) {
+    let store_administration = owners.administration;
+    let project_open_gates = owners.project_open_gates;
+    let invocation = owners.invocation;
+    let owner_phases = loopback_shutdown_owner_phases(
+        maintenance,
+        &store_administration,
+        project_open_gates.as_ref(),
+        &invocation,
+        http_application_service,
+    )
+    .await;
+    let memory_graph_reconciliation_join = store_administration.clone();
     let memory_graph_reconciliation =
         tracedecay_daemon_service::shutdown::ShutdownOwner::with_deadline_result(
             "memory_graph_reconciliation",
@@ -443,7 +562,6 @@ async fn run_foreground_loopback(
     log_background_shutdown_receipt(&shutdown.background);
     log_project_server_shutdown_receipt(&shutdown.project_servers);
     log_runtime_hazards();
-    endpoint_cleanup
 }
 
 fn log_client_drain_shutdown_receipt(
