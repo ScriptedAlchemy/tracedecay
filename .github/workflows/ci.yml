@@ -583,17 +583,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Tune Windows runner for build and test I/O
-        uses: ./.github/actions/tune-windows-runner
-        with:
-          redirect-temp: "true"
-
       - uses: ./.github/actions/setup-bazel
         id: bazel
         with:
           # The previous PDB-producing cache restored an 11 GiB archive.
           # Start a new generation for the changed compile/link configuration.
           cache-key: ci-windows-test-v2
+          windows-redirect-temp: "true"
           tailscale-client-id: >-
             ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
                 && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
