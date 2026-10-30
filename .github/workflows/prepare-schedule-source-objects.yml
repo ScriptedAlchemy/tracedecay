@@ -1,0 +1,68 @@
+name: Prepare reviewed schedule source objects
+on:
+  push:
+    branches: [work/prepare-schedule-source-objects-20261030]
+permissions: {}
+jobs:
+  prepare:
+    if: github.actor_id == '25274700'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 0b29eba61d6b0247b303e193d8103d714d8e7fe3
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reconstruct the reviewed source without publishing a branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp _repair/scheduled_jobs_tests.rs /tmp/scheduled_jobs_tests.rs
+          python3 -c 'import base64,gzip,pathlib; pathlib.Path("/tmp/schedule.patch").write_bytes(gzip.decompress(base64.b64decode(pathlib.Path("_repair/schedule.patch.gz.b64").read_text())))'
+          git checkout --detach 64a04ef4d4b542a03ebc419ddd10429f4f110a0c
+          git apply --index /tmp/schedule.patch
+          cp /tmp/scheduled_jobs_tests.rs crates/tracedecay-project/src/project/scheduled_jobs_tests.rs
+          git add crates/tracedecay-project/src/project/scheduled_jobs_tests.rs
+          test "$(git write-tree)" = 61afe5d91edcb7b79be66c0a2f9c2cc7f7da09c6
+          git diff --cached --check
+      - name: Prepare content-addressed blobs only
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64,hashlib,json,os,pathlib,subprocess,urllib.request
+          expected='61afe5d91edcb7b79be66c0a2f9c2cc7f7da09c6'
+          assert subprocess.check_output(['git','write-tree'],text=True).strip()==expected
+          fields=subprocess.check_output(['git','diff','--cached','--raw','--no-abbrev','--no-renames','-z']).split(b'\0')
+          entries=[]
+          for i in range(0,len(fields)-1,2):
+              old_mode,new_mode,old,new,status=fields[i].decode().split()
+              path=fields[i+1].decode()
+              assert path.startswith('crates/') and status in ('A','M') and new_mode=='100644'
+              data=subprocess.check_output(['git','show',':'+path])
+              digest=hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+              assert digest==new
+              request=urllib.request.Request(
+                  'https://api.github.com/repos/ScriptedAlchemy/tracedecay/git/blobs',
+                  data=json.dumps({'encoding':'base64','content':base64.b64encode(data).decode()}).encode(),
+                  headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28'},
+                  method='POST')
+              with urllib.request.urlopen(request,timeout=30) as response:
+                  result=json.load(response)
+              assert result['sha']==digest
+              entries.append({'path':path,'mode':new_mode,'type':'blob','sha':digest})
+          assert len(entries)==15
+          result={'base':'64a04ef4d4b542a03ebc419ddd10429f4f110a0c','tree':expected,'entries':entries}
+          pathlib.Path(os.environ['RUNNER_TEMP'],'schedule-source-objects.json').write_text(json.dumps(result,indent=2))
+          print(json.dumps(result))
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: schedule-source-objects
+          path: ${{ runner.temp }}/schedule-source-objects.json
+          if-no-files-found: error
+          retention-days: 1
