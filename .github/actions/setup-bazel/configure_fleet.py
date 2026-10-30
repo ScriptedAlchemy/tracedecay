@@ -65,6 +65,10 @@ build --config={profile}
 build --remote_executor=grpc://{host}:{port}
 build --remote_cache=grpc://{host}:{port}
 build --remote_instance_name=main
+build --remote_upload_local_results
+# Publish completed local actions before allowing dependent work to start.
+# A cancelled runner must not strand those results in an upload backlog.
+build --noremote_cache_async
 build --remote_timeout=600
 # Survive brief coordinator restarts; five retries expire in about 3s.
 build --remote_retries=10

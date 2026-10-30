@@ -11,9 +11,10 @@ private NativeLink coordinator through the official Tailscale action. GitHub
 supplies checkout, analysis, local compilation, test execution, artifacts, and
 check reporting; Ubuntu-main and
 Omarchy supply additional Linux compilation and test capacity. The Mac worker
-serves macOS actions; this CI integration does not send Linux actions to it. ARM Linux and macOS CI retain their existing hosted execution. The Mac currently has a
-newer Xcode/SDK than the macos-26 image; matching OS and CPU alone does not make
-native compilation compatible.
+serves macOS actions; this CI integration does not send Linux actions to it.
+ARM Linux retains hosted execution. macOS ARM64 selects the Darwin fleet profile;
+native compilation still requires compatible Xcode/SDK installations, not just
+matching OS and CPU architecture.
 
 Windows x86_64 CI enrolls through the same restricted identity and shares
 `Rustc` actions, including native linking, between the hosted runner and MINI.
@@ -50,6 +51,22 @@ compiler errors, failed tests, and remote execution timeouts still fail the buil
 BuildBuddy events upload asynchronously, so a reporting outage does not fail a
 successful build.
 A terminated runner can leave an incomplete report.
+
+Completed cacheable local actions upload their results synchronously to the shared
+cache. This avoids leaving completed outputs in a background upload queue when a
+new push cancels the runner. Cache reuse still requires matching action inputs,
+flags and toolchains, and retained output blobs. Cancellation during compilation
+or upload does not create a reusable result. Shared-cache entries are independent
+of GitHub run IDs and are not deleted when a workflow is cancelled. In contrast,
+the hosted-only disk cache is saved after builds and its save is skipped on
+cancellation; a cancelled VM's unsaved disk contents do not survive.
+
+Every Windows job using `setup-bazel`, including release jobs, verifies Defender
+real-time scanning is disabled (or its service is stopped) before building. The
+preflight is restricted to disposable GitHub-hosted runners, reports CPU/memory
+and free-space information in the job summary, and fails if scanning remains
+enabled or its effective state cannot be checked. It does not change persistent
+fleet machines. Windows test jobs also put temporary files on the workspace drive.
 
 CI checks Tailscale enrollment and TCP connectivity to the executor before
 selecting the private fleet. If either fails, it uses the hosted runner and

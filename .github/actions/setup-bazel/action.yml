@@ -21,6 +21,9 @@ inputs:
   cache-save:
     description: Whether this setup may save Bazelisk and repository caches.
     default: "true"
+  windows-redirect-temp:
+    description: Put Windows test temporary files on the runner workspace drive.
+    default: "false"
   tailscale-client-id:
     description: OIDC client for trusted Linux/macOS/Windows CI; empty keeps the hosted-only build.
     default: ""
@@ -39,6 +42,13 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Verify Windows build runner configuration
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        REDIRECT_TEMP: ${{ inputs.windows-redirect-temp }}
+      run: '& "$env:GITHUB_ACTION_PATH/tune_windows.ps1" -RedirectTemp:($env:REDIRECT_TEMP -eq "true")'
+
     # crate_universe's cargo checks out git dependencies under D:/b; asupersync
     # carries paths past MAX_PATH there, which libgit2 refuses without this.
     - name: Allow long git paths
