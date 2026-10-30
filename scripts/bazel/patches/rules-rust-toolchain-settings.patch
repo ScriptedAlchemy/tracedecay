@@ -1,0 +1,24 @@
+diff --git a/rust/extensions.bzl b/rust/extensions.bzl
+--- a/rust/extensions.bzl
++++ b/rust/extensions.bzl
+@@ -130,7 +130,7 @@
+ 
+         else:
+             extra_rustc_flags = toolchain.extra_rustc_flags if toolchain.extra_rustc_flags else toolchain.extra_rustc_flags_triples
+-            extra_exec_rustc_flags = toolchain.extra_exec_rustc_flags if toolchain.extra_rustc_flags else toolchain.extra_exec_rustc_flags_triples
++            extra_exec_rustc_flags = toolchain.extra_exec_rustc_flags if toolchain.extra_exec_rustc_flags else toolchain.extra_exec_rustc_flags_triples
+ 
+             rust_register_toolchains(
+                 hub_name = "rust_toolchains",
+@@ -146,7 +146,10 @@
+                 sha256s = toolchain.sha256s,
+                 extra_target_triples = toolchain.extra_target_triples,
+                 opt_level = toolchain.opt_level if toolchain.opt_level else None,
+-                strip_level = toolchain.strip_level if toolchain.strip_level else None,
++                strip_level = {
++                    triple: toolchain.strip_level
++                    for triple in depset(list(toolchain_triples.keys()) + list(toolchain.extra_target_triples)).to_list()
++                } if toolchain.strip_level else None,
+                 urls = toolchain.urls,
+                 versions = toolchain.versions,
+                 compact_windows_names = True,
