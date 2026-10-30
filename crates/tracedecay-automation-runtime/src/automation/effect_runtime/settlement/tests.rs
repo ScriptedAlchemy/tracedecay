@@ -47,6 +47,14 @@ impl crate::automation::backend::AgentTaskBackend for NeverAutomationBackend {
 
 use tracedecay_domain::test_fixtures::digest;
 
+/// Paces a test's wait loop. These loops probe the filesystem or a task lock
+/// with blocking calls; spinning on `yield_now` kept a runtime worker busy and
+/// starved the settlement work being awaited when the suite ran in parallel on
+/// a loaded CI host.
+async fn pause_before_next_poll() {
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+}
+
 fn exact_publication(seed: char, payload_len: u64) -> ExactRunPublication {
     serde_json::from_value(json!({
         "schema_version": 1,
@@ -2211,7 +2219,7 @@ async fn retained_projector_panic_finishes_recovery_before_releasing_task_lock()
             Instant::now() < deadline,
             "projector-panic recovery terminal did not become durable"
         );
-        tokio::task::yield_now().await;
+        pause_before_next_poll().await;
     }
     assert!(
         crate::automation::run_ledger::find_run_record_exact_bounded_blocking(
@@ -2239,7 +2247,7 @@ async fn retained_projector_panic_finishes_recovery_before_releasing_task_lock()
             Instant::now() < deadline,
             "projector-panic task lock was not released after durable recovery"
         );
-        tokio::task::yield_now().await;
+        pause_before_next_poll().await;
     }
 }
 
@@ -2309,7 +2317,7 @@ async fn assert_request_waiting_pair_abandoned_cleanly(
             std::time::Instant::now() < deadline,
             "request-waiting pair did not abandon both authorities before releasing its locks"
         );
-        tokio::task::yield_now().await;
+        pause_before_next_poll().await;
     }
     for (journal_path, admission) in fixture.journal_paths.iter().zip(&fixture.admissions) {
         assert!(!journal_path.exists(), "abandoned journal remained present");
@@ -2394,7 +2402,7 @@ async fn partial_pair_submit_abandons_the_closed_sibling_under_shared_guard_owne
             std::time::Instant::now() < deadline,
             "submitted first abandonment did not finish"
         );
-        tokio::task::yield_now().await;
+        pause_before_next_poll().await;
     }
     assert!(
         task_lock_is_denied(dashboard_root, &fixture.job_ids[0]).await,
