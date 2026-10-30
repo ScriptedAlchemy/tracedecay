@@ -20,10 +20,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cp _repair/scheduled_jobs_tests.rs /tmp/scheduled_jobs_tests.rs
           python3 -c 'import base64,gzip,pathlib; pathlib.Path("/tmp/schedule.patch").write_bytes(gzip.decompress(base64.b64decode(pathlib.Path("_repair/schedule.patch.gz.b64").read_text())))'
           git checkout --detach 64a04ef4d4b542a03ebc419ddd10429f4f110a0c
           git apply --index /tmp/schedule.patch
           test "$(git write-tree)" = 06a246422bddbb3f70d0f6df6fd036cd4e99821a
+          cp /tmp/scheduled_jobs_tests.rs crates/tracedecay-project/src/project/scheduled_jobs_tests.rs
+          git add crates/tracedecay-project/src/project/scheduled_jobs_tests.rs
+          test "$(git write-tree)" = 61afe5d91edcb7b79be66c0a2f9c2cc7f7da09c6
           git diff --cached --check
       - uses: ./.github/actions/setup-bazel
         with:
