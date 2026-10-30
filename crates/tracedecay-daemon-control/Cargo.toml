@@ -18,6 +18,10 @@ sha2.workspace = true
 tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity" }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol" }
 tracedecay-domain = { path = "../tracedecay-domain" }
+# Used only by `service/windows_task.rs`, but declared for every target: the
+# Bazel graph is generated from the Linux resolution and cannot carry a
+# Windows-only member dependency.
+tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
 tracing.workspace = true
 
@@ -25,7 +29,6 @@ tracing.workspace = true
 # (`service/windows_task.rs`). `Win32_System_Ole` is not imported by name but
 # is required by the `windows` crate's VARIANT/TaskScheduler machinery.
 [target.'cfg(windows)'.dependencies]
-tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_System_Com",
