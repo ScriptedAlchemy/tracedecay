@@ -10,6 +10,11 @@ common --show_progress_rate_limit=15
 build --experimental_remote_cache_ttl=0s
 # Cargo reads the unstable acquisition policy during repository evaluation.
 common --repo_env=RUSTC_BOOTSTRAP=1
+# Opt out of aspect_tools_telemetry's usage upload (and its per-build notice).
+common --repo_env=DO_NOT_TRACK=1
+# Python targets get only the __init__.py files the tree actually contains;
+# rules_python deprecated synthesizing them (bazel-contrib/rules_python#2945).
+build --incompatible_default_to_explicit_init_py
 # MODULE.bazel registers the pinned stable compiler.
 # Hosts can extend this repository profile with their private fleet settings.
 build --config=tracedecay
