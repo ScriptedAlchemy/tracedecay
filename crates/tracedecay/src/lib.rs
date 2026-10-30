@@ -39,7 +39,6 @@ pub mod dashboard;
 pub mod doctor;
 // Fixture surface for integration tests, assembled by the composition root.
 // Gated so a default or `production` build carries none of it.
-mod hooks;
 #[cfg(test)]
 mod host_admission_test;
 pub mod mcp;
