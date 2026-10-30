@@ -1124,11 +1124,12 @@ async fn scheduler_prefilter_config_skip_precedes_live_lock_and_is_exact() {
     let occurrence = "disabled-prefilter-occurrence";
 
     let backend = ContentBackend::new("unused");
+    let admitted_job = tracedecay_automation_runtime::automation::jobs::admit_job(&job).unwrap();
     let retained = run_user_job_with_backend_for_retained_settlement(
         &dashboard_root,
         &config,
         &backend,
-        &job,
+        &admitted_job,
         UserJobRunOptions {
             trigger: AutomationTrigger::Scheduler,
             run_id: Some(occurrence.to_owned()),
@@ -1214,11 +1215,12 @@ async fn scheduler_prefilter_live_lock_wins_over_not_due_summary() {
     assert_ne!(prefilter.run_id, occurrence);
 
     let backend = ContentBackend::new("unused");
+    let admitted_job = tracedecay_automation_runtime::automation::jobs::admit_job(&job).unwrap();
     let retained = run_user_job_with_backend_for_retained_settlement(
         &dashboard_root,
         &config,
         &backend,
-        &job,
+        &admitted_job,
         UserJobRunOptions {
             trigger: AutomationTrigger::Scheduler,
             run_id: Some(occurrence.to_owned()),
@@ -1275,11 +1277,12 @@ async fn retained_scheduler_runner_reacquires_after_due_prefilter() {
             .expect("the advisory prefilter must release its reservation lock");
 
     let backend = ContentBackend::new("unused");
+    let admitted_job = tracedecay_automation_runtime::automation::jobs::admit_job(&job).unwrap();
     let retained = run_user_job_with_backend_for_retained_settlement(
         &dashboard_root,
         &config,
         &backend,
-        &job,
+        &admitted_job,
         UserJobRunOptions {
             trigger: AutomationTrigger::Scheduler,
             run_id: Some(occurrence.to_owned()),
@@ -1414,11 +1417,12 @@ async fn retained_user_job_defers_ledger_and_keeps_exact_keyed_lock() {
     let config = enabled_job_config();
     let backend = ContentBackend::new("retained output");
 
+    let admitted_job = tracedecay_automation_runtime::automation::jobs::admit_job(&job).unwrap();
     let retained = run_user_job_with_backend_for_retained_settlement(
         &dashboard_root,
         &config,
         &backend,
-        &job,
+        &admitted_job,
         UserJobRunOptions {
             trigger: AutomationTrigger::Dashboard,
             run_id: Some("retained-job-run".to_owned()),

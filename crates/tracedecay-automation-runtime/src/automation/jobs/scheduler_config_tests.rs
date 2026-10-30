@@ -3,9 +3,8 @@ use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 use tracedecay_domain::errors::TraceDecayError;
 
 use super::{
-    AutomationJob, JOBS_SCHEMA_VERSION, JobDelivery,
-    job_schedule_decision as admitted_job_schedule_decision, jobs_configured_for_scheduler,
-    jobs_path, validate_job,
+    AutomationJob, JOBS_SCHEMA_VERSION, JobDelivery, ScheduledJobDefinitions,
+    job_schedule_decision as admitted_job_schedule_decision, jobs_path, validate_job,
 };
 use crate::automation::backend::{AgentTaskFailureClass, AgentTaskKind};
 use crate::automation::config::AutomationSettingsV1;
@@ -13,6 +12,16 @@ use crate::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, append_run_record,
     find_run_record_exact_bounded, load_run_records_for_task_key,
 };
+
+async fn jobs_configured_for_scheduler(
+    root: &std::path::Path,
+) -> tracedecay_domain::errors::Result<bool> {
+    Ok(ScheduledJobDefinitions::new(root)
+        .read()
+        .await?
+        .iter()
+        .any(super::job_is_schedulable))
+}
 
 fn job_schedule_decision(
     job: &AutomationJob,
@@ -140,10 +149,11 @@ async fn inactive_or_manual_invalid_job_does_not_block_schedulable_siblings() {
             "inactive or manual invalid siblings must not fail-close scheduled work"
         );
         assert_eq!(
-            super::load_admitted_jobs(root)
+            ScheduledJobDefinitions::new(root)
+                .read()
                 .await
                 .unwrap()
-                .into_iter()
+                .iter()
                 .map(|job| job.id.clone())
                 .collect::<Vec<_>>(),
             ["nightly"]

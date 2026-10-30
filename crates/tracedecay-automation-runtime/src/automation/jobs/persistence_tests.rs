@@ -3,7 +3,7 @@ use std::fs;
 use serde_json::{Value, json};
 use tracedecay_domain::errors::TraceDecayError;
 
-use super::{jobs_configured_for_scheduler, jobs_path, load_jobs, save_jobs};
+use super::{ScheduledJobDefinitions, jobs_path, load_jobs, save_jobs};
 
 async fn write_document(root: &std::path::Path, value: Value) -> Vec<u8> {
     let bytes = serde_json::to_vec(&value).expect("fixture document serializes");
@@ -51,7 +51,12 @@ async fn mixed_rows_refuse_complete_load_and_scheduler_admission() {
         fs::read(jobs_path(root.path())).expect("document remains readable"),
         original
     );
-    assert!(jobs_configured_for_scheduler(root.path()).await.is_err());
+    assert!(
+        ScheduledJobDefinitions::new(root.path())
+            .read()
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]

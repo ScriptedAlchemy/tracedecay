@@ -398,6 +398,8 @@ async fn execute_dashboard_automation_run(
             .ok_or_else(|| DashboardAutomationAuthorityErrorV1::NotFound {
                 detail: format!("automation job '{job_id}' was not found"),
             })?;
+            let job = tracedecay_automation_runtime::automation::jobs::admit_job(&job)
+                .map_err(automation_failed)?;
             let admission = tracedecay_daemon_service::automation_effect::prepare(
                 invocation_service,
                 cg,

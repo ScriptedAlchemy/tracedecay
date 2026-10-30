@@ -8,6 +8,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use tracedecay_automation_runtime::automation::jobs::{
+    AdmittedAutomationJob, ScheduledJobDefinitions,
+};
 use tracedecay_configuration::config::RuntimeTraceDecayConfig;
 use tracedecay_contracts::context_scout::ContextScoutAddressV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -25,6 +28,8 @@ mod diagnostics;
 pub mod facts;
 mod lifecycle;
 pub mod queries;
+#[cfg(test)]
+mod scheduled_jobs_tests;
 mod source_edit_runtime;
 
 pub use diagnostics::{BranchDiagnostics, TrackedBranchDiagnostic};
@@ -48,6 +53,7 @@ pub struct TraceDecay {
     pub store_runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     config: RuntimeTraceDecayConfig,
     configuration_runtime: Arc<tracedecay_configuration::ProjectConfigurationRuntime>,
+    scheduled_job_definitions: ScheduledJobDefinitions,
     project_root: PathBuf,
     store_layout: StoreLayout,
     open_options: TraceDecayOpenOptions,
@@ -74,6 +80,10 @@ pub struct TraceDecay {
 }
 
 impl TraceDecay {
+    pub async fn scheduled_jobs(&self) -> Result<Arc<[AdmittedAutomationJob]>> {
+        self.scheduled_job_definitions.read().await
+    }
+
     pub fn storage_telemetry_handle(&self) -> Result<DatabaseStorageTelemetryHandle> {
         self.db.storage_telemetry_handle()
     }

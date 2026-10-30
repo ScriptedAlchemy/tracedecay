@@ -183,6 +183,10 @@ impl TraceDecay {
             store_runtime_registry: runtime_registry,
             config,
             configuration_runtime,
+            scheduled_job_definitions:
+                tracedecay_automation_runtime::automation::jobs::ScheduledJobDefinitions::new(
+                    &store_layout.dashboard_root,
+                ),
             project_root: project_root.to_path_buf(),
             store_layout,
             open_options,
