@@ -46,7 +46,7 @@ mod tests {
         };
         let record: AutomationRunLedgerRecord = serde_json::from_value(json!({
             "schema_version": 2, "run_id": "run-combined.skill", "trigger": "manual_cli",
-            "task": "skill_writer", "backend": "codex_app_server", "status": "succeeded",
+            "task": "skill_writer", "task_key": "skill_writer", "backend": "codex_app_server", "status": "succeeded",
             "accepted_count": 0, "rejected_count": 0, "started_at": "0", "completed_at": "1",
             "completed_at_micros": 1_000_000, "output_hash": "sha256:output"
         }))

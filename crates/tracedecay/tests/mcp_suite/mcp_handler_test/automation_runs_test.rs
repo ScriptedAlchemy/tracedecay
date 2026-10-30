@@ -12,7 +12,7 @@ fn run_record(run_id: &str, completed_at: &str) -> AutomationRunLedgerRecord {
         run_id: run_id.to_owned(),
         trigger: AutomationTrigger::Scheduler,
         task: tracedecay_automation_runtime::automation::backend::AgentTaskKind::SessionReflector,
-        task_key: Some("session_reflector".to_owned()),
+        task_key: "session_reflector".to_owned(),
         backend: "codex_app_server".to_owned(),
         backend_identity: None,
         host_mode: Some("standalone".to_owned()),

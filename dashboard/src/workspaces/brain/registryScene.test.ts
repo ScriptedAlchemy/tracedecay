@@ -47,7 +47,7 @@ function scene() {
 }
 
 function pulse(projectId: string | null, family = 'tool_call_activity'): LiveActivityPulse {
-  return { eventId: 'e1', observationTime: '1', projectId, family, streamId: 'tool_call', at: 0 };
+  return { eventId: 'e1', observationTime: '1', projectId, family, streamId: 'tool_call', at: 0, detail: null };
 }
 
 describe('buildRegistryScene', () => {

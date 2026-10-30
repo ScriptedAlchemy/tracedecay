@@ -18,7 +18,9 @@ use super::backend::{
     AgentTaskRetryReport, BackendRetryPolicy, agent_task_contract, prompt_version,
     run_agent_task_with_retry_report, task_key,
 };
-use super::config::{AutomationBackend, AutomationConfig, AutomationHostMode, admit_config};
+use super::config::{
+    AutomationBackendV1, AutomationHostModeV1, AutomationSettingsV1, admit_config,
+};
 use super::config_error;
 use super::jobs::effect_receipt::ExternalAutomationEffectReceipt;
 use super::run_ledger::{
@@ -323,7 +325,7 @@ pub(crate) struct AgentTaskRunContext<'a> {
     /// Exact registered LCM session shard whose newest message timestamp is
     /// the scheduler activity signal.
     sessions_db: RegisteredGlobalDbLeaseV1,
-    config: &'a AutomationConfig,
+    config: &'a AutomationSettingsV1,
     /// The executable the run's backend spawns (`AgentTaskBackend::executable`),
     /// stamped into every terminal record's backend identity.
     executable: Option<PathBuf>,
@@ -344,7 +346,7 @@ impl<'a> AgentTaskRunContext<'a> {
         run_id: Option<String>,
         run_id_prefix: &'static str,
         trigger: AutomationTrigger,
-        config: &'a AutomationConfig,
+        config: &'a AutomationSettingsV1,
         executable: Option<&Path>,
         task: AgentTaskKind,
     ) -> Self {
@@ -497,13 +499,13 @@ impl<'a> AgentTaskRunContext<'a> {
 }
 
 pub(crate) fn task_skip_reason(
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     _task: AgentTaskKind,
 ) -> Option<AutomationSkipReasonV1> {
-    if config.host_mode == AutomationHostMode::DelegatedHost {
+    if config.host_mode == AutomationHostModeV1::DelegatedHost {
         return Some(AutomationSkipReasonV1::DelegatedHostMode);
     }
-    if config.backend == AutomationBackend::Disabled {
+    if config.backend == AutomationBackendV1::Disabled {
         return Some(AutomationSkipReasonV1::BackendDisabled);
     }
     None
@@ -513,7 +515,7 @@ pub(crate) fn task_skip_reason(
 type GatedTask = (SchedulerGate, Option<AutomationRunLedgerTaskSummary>);
 
 fn scheduler_gate_with_lock_retention<'a>(
-    config: &'a AutomationConfig,
+    config: &'a AutomationSettingsV1,
     executable: Option<&'a Path>,
     dashboard_root: &'a Path,
     sessions_db: &'a RegisteredGlobalDb,
@@ -584,7 +586,7 @@ fn scheduler_gate_with_lock_retention<'a>(
 }
 
 pub(crate) async fn task_run_gate(
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     executable: Option<&Path>,
     dashboard_root: &Path,
     sessions_db: &RegisteredGlobalDb,
@@ -604,7 +606,7 @@ pub(crate) async fn task_run_gate(
 }
 
 pub(crate) async fn task_run_gate_for_retained_settlement(
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     executable: Option<&Path>,
     dashboard_root: &Path,
     sessions_db: &RegisteredGlobalDb,
@@ -626,7 +628,7 @@ pub(crate) async fn task_run_gate_for_retained_settlement(
 }
 
 async fn task_run_gate_with_lock_retention(
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     executable: Option<&Path>,
     dashboard_root: &Path,
     sessions_db: &RegisteredGlobalDb,
@@ -816,7 +818,7 @@ pub(crate) fn failed_backend_fallback_report(record: &AutomationRunLedgerRecord)
     json!({
         "status": "failed",
         "run_id": record.run_id,
-        "task": record.task_key.as_deref().unwrap_or_else(|| task_key(record.task)),
+        "task": record.task_key,
         "fallback_status": record.fallback_status,
         "error": record.error,
         "proposed_ops": record.proposed_ops,
@@ -841,7 +843,7 @@ pub(crate) struct AgentRunFinalizer<'a> {
     dashboard_root: &'a Path,
     run_id: &'a str,
     trigger: AutomationTrigger,
-    config: &'a AutomationConfig,
+    config: &'a AutomationSettingsV1,
     executable: Option<&'a Path>,
     task: AgentTaskKind,
     started_at: &'a str,
@@ -860,7 +862,7 @@ impl<'a> AgentRunFinalizer<'a> {
         dashboard_root: &'a Path,
         run_id: &'a str,
         trigger: AutomationTrigger,
-        config: &'a AutomationConfig,
+        config: &'a AutomationSettingsV1,
         executable: Option<&'a Path>,
         task: AgentTaskKind,
         started_at: &'a str,
@@ -884,7 +886,7 @@ impl<'a> AgentRunFinalizer<'a> {
         dashboard_root: &'a Path,
         run_id: &'a str,
         trigger: AutomationTrigger,
-        config: &'a AutomationConfig,
+        config: &'a AutomationSettingsV1,
         executable: Option<&'a Path>,
         task: AgentTaskKind,
         started_at: &'a str,
@@ -1248,7 +1250,7 @@ impl<'a> AgentRunFinalizer<'a> {
             run_id: self.run_id.to_string(),
             trigger: self.trigger,
             task: self.task,
-            task_key: Some(task_key(self.task).to_string()),
+            task_key: task_key(self.task).to_string(),
             backend: self.config.backend.as_str().to_string(),
             // Stamped on every terminal record so a settled deterministic
             // failure can be re-admitted the moment the backend or
@@ -1330,7 +1332,7 @@ fn apply_retry_report(record: &mut AutomationRunLedgerRecord, retry_report: &Age
     record.backend_attempts = retry_report.attempts().to_vec();
 }
 
-fn task_disabled(config: &AutomationConfig, task: AgentTaskKind) -> bool {
+fn task_disabled(config: &AutomationSettingsV1, task: AgentTaskKind) -> bool {
     match task {
         AgentTaskKind::MemoryCurator => !config.tasks.memory_curator.enabled,
         AgentTaskKind::SessionReflector => !config.tasks.session_reflector.enabled,
@@ -1371,7 +1373,7 @@ mod recorded_failure_tests {
 
     #[test]
     fn retained_settlement_disposition_carries_exact_reused_scheduler_skip() {
-        let config = AutomationConfig::default();
+        let config = AutomationSettingsV1::default();
         let prior_record = AgentRunFinalizer::new_at(
             Path::new("/unused"),
             "prior_scheduler_skip",
@@ -1452,23 +1454,7 @@ mod recorded_failure_tests {
                 .is_none()
         );
 
-        let old_coordination = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(
-                root.path()
-                    .join("automation_locks/session_reflector.lock.lock"),
-            )
-            .expect("old publisher coordination");
-        assert!(matches!(
-            old_coordination.try_lock(),
-            Err(std::fs::TryLockError::WouldBlock)
-        ));
         drop(settlement_guard);
-        old_coordination
-            .try_lock()
-            .expect("settlement releases old publisher coordination");
-        old_coordination.unlock().expect("release old publisher");
         assert!(
             AutomationTaskLock::try_acquire(root.path(), AgentTaskKind::SessionReflector,)
                 .await

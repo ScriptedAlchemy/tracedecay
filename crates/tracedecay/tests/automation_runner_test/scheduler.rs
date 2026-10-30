@@ -1,17 +1,17 @@
 use tempfile::tempdir;
 use tracedecay_automation_runtime::automation::backend::{AgentTaskFailureClass, AgentTaskKind};
 use tracedecay_automation_runtime::automation::config::{
-    AutomationBackend, AutomationConfig, AutomationConfigPatch, AutomationTaskConfig,
-    AutomationTaskPatch, AutomationTaskSet, effective_config,
+    AutomationBackendV1, AutomationConfigPatch, AutomationSettingsV1, AutomationTaskPatch,
+    AutomationTaskSetV1, AutomationTaskSettingsV1, effective_config,
 };
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
 };
 use tracedecay_automation_runtime::automation::scheduler::{
-    AutomationSchedule, AutomationScheduleDecision, AutomationSchedulerControl, AutomationTaskLock,
-    SessionActivity, host_receipt_decision as admitted_host_receipt_decision,
-    load_scheduler_control, resolve_schedule, save_scheduler_control,
-    schedule_decision as admitted_schedule_decision, scheduler_control_path,
+    AutomationSchedule, AutomationScheduleDecision, AutomationSchedulerControl, SessionActivity,
+    host_receipt_decision as admitted_host_receipt_decision, load_scheduler_control,
+    resolve_schedule, save_scheduler_control, schedule_decision as admitted_schedule_decision,
+    scheduler_control_path,
 };
 use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 use tracedecay_domain::ProjectId;
@@ -21,7 +21,7 @@ use tracedecay_sessions::admission::HostAdmissionScope;
 use crate::support::{SeedSessionMessage, scheduler_record_for, seed_session_message_in_db};
 
 fn schedule_decision(
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     executable: Option<&std::path::Path>,
     task: AgentTaskKind,
     records: &[AutomationRunLedgerRecord],
@@ -39,7 +39,7 @@ fn schedule_decision(
 }
 
 fn host_receipt_decision(
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     executable: Option<&std::path::Path>,
     task: AgentTaskKind,
     records: &[AutomationRunLedgerRecord],
@@ -71,34 +71,34 @@ async fn scheduler_session_runtime(
     .expect("registered scheduler session runtime")
 }
 
-fn automation_config(schedule: Option<&str>, interval_secs: Option<u64>) -> AutomationConfig {
-    AutomationConfig {
+fn automation_config(schedule: Option<&str>, interval_secs: Option<u64>) -> AutomationSettingsV1 {
+    AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        tasks: AutomationTaskSet {
-            memory_curator: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        tasks: AutomationTaskSetV1 {
+            memory_curator: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: schedule.map(str::to_string),
                 interval_secs,
                 cooldown_secs: Some(300),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            session_reflector: AutomationTaskConfig {
+            session_reflector: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: schedule.map(str::to_string),
                 interval_secs,
                 cooldown_secs: Some(300),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            skill_writer: AutomationTaskConfig {
+            skill_writer: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: schedule.map(str::to_string),
                 interval_secs,
                 cooldown_secs: Some(300),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     }
 }
 
@@ -1318,7 +1318,7 @@ async fn load_session_activity_selects_newest_after_normalizing_mixed_timestamp_
 fn config_requires_interval_secs_for_configured_interval_schedule() {
     let patch = AutomationConfigPatch {
         enabled: Some(true),
-        backend: Some(AutomationBackend::CodexAppServer),
+        backend: Some(AutomationBackendV1::CodexAppServer),
         memory_curator: AutomationTaskPatch {
             enabled: Some(true),
             schedule: Some(Some("interval".to_string())),
@@ -1328,7 +1328,7 @@ fn config_requires_interval_secs_for_configured_interval_schedule() {
         ..AutomationConfigPatch::default()
     };
 
-    let err = effective_config(&AutomationConfig::default(), Some(&patch)).unwrap_err();
+    let err = effective_config(&AutomationSettingsV1::default(), Some(&patch)).unwrap_err();
     assert!(
         err.to_string()
             .contains("memory_curator interval_secs is required"),
@@ -1337,7 +1337,7 @@ fn config_requires_interval_secs_for_configured_interval_schedule() {
 }
 
 #[test]
-fn config_validates_scheduler_idle_bound_and_rejects_retired_lock_timeout() {
+fn config_validates_scheduler_idle_bound() {
     let patch = AutomationConfigPatch {
         memory_curator: AutomationTaskPatch {
             min_idle_secs: Some(Some(0)),
@@ -1345,29 +1345,13 @@ fn config_validates_scheduler_idle_bound_and_rejects_retired_lock_timeout() {
         },
         ..AutomationConfigPatch::default()
     };
-    let error = effective_config(&AutomationConfig::default(), Some(&patch))
+    let error = effective_config(&AutomationSettingsV1::default(), Some(&patch))
         .unwrap_err()
         .to_string();
     assert!(
         error.contains("memory_curator min_idle_secs must be greater than zero"),
         "zero min_idle_secs must retain its field-specific rejection: {error}"
     );
-
-    for value in [
-        serde_json::json!(0),
-        serde_json::json!(3600),
-        serde_json::Value::Null,
-    ] {
-        let error = serde_json::from_value::<AutomationConfigPatch>(serde_json::json!({
-            "memory_curator": { "stale_lock_secs": value }
-        }))
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("unknown field `stale_lock_secs`")
-        );
-    }
 
     // The active idle bound still accepts a nonzero value.
     let patch = AutomationConfigPatch {
@@ -1378,156 +1362,6 @@ fn config_validates_scheduler_idle_bound_and_rejects_retired_lock_timeout() {
         ..AutomationConfigPatch::default()
     };
     let config =
-        effective_config(&AutomationConfig::default(), Some(&patch)).expect("nonzero bounds");
+        effective_config(&AutomationSettingsV1::default(), Some(&patch)).expect("nonzero bounds");
     assert_eq!(config.tasks.memory_curator.min_idle_secs, Some(600));
-}
-
-#[cfg(any(unix, windows))]
-#[tokio::test]
-async fn task_lock_reclaims_stale_dead_pid_lock_file() {
-    let temp = tempdir().unwrap();
-    let lock_dir = temp.path().join("automation_locks");
-    std::fs::create_dir_all(&lock_dir).unwrap();
-    let lock_path = lock_dir.join("memory_curator.lock");
-    let dead_pid = reaped_task_lock_child_pid();
-    std::fs::write(&lock_path, format!("pid={dead_pid}\ncreated_at=100\n")).unwrap();
-
-    let lock = AutomationTaskLock::try_acquire(temp.path(), AgentTaskKind::MemoryCurator)
-        .await
-        .unwrap();
-
-    assert!(lock.is_some());
-    assert!(!lock_path.exists(), "a dead owner's lock file is retired");
-    drop(lock);
-}
-
-#[cfg(any(unix, windows))]
-#[tokio::test]
-async fn task_lock_reclaims_a_fresh_dead_pid_without_waiting_out_the_age_gate() {
-    let temp = tempdir().unwrap();
-    let lock_dir = temp.path().join("automation_locks");
-    std::fs::create_dir_all(&lock_dir).unwrap();
-    let lock_path = lock_dir.join("memory_curator.lock");
-    let dead_pid = reaped_task_lock_child_pid();
-    std::fs::write(
-        &lock_path,
-        format!("pid={dead_pid}\ncreated_at=200\ntoken={}\n", "a".repeat(64)),
-    )
-    .unwrap();
-
-    let lock = AutomationTaskLock::try_acquire(temp.path(), AgentTaskKind::MemoryCurator)
-        .await
-        .unwrap();
-
-    assert!(
-        lock.is_some(),
-        "a confirmed-dead owner must not block the next scheduler tick for stale_lock_secs"
-    );
-    assert!(!lock_path.exists(), "a dead owner's lock file is retired");
-    drop(lock);
-}
-
-#[tokio::test]
-async fn task_lock_keeps_live_pid_lock_file() {
-    let temp = tempdir().unwrap();
-    let lock_dir = temp.path().join("automation_locks");
-    std::fs::create_dir_all(&lock_dir).unwrap();
-    let lock_path = lock_dir.join("skill_writer.lock");
-    std::fs::write(
-        &lock_path,
-        format!("pid={}\ncreated_at=100\n", std::process::id()),
-    )
-    .unwrap();
-
-    let lock = AutomationTaskLock::try_acquire(temp.path(), AgentTaskKind::SkillWriter)
-        .await
-        .unwrap();
-
-    assert!(lock.is_none());
-    assert!(lock_path.exists());
-}
-
-#[cfg(any(unix, windows))]
-#[tokio::test]
-async fn task_lock_keeps_foreign_live_pid_past_stale_threshold() {
-    let temp = tempdir().unwrap();
-    let lock_dir = temp.path().join("automation_locks");
-    std::fs::create_dir_all(&lock_dir).unwrap();
-    let lock_path = lock_dir.join("session_reflector.lock");
-    let ready_path = temp.path().join("live-child-ready");
-    let mut child = spawn_task_lock_liveness_child(&ready_path);
-    let child_pid = child.id();
-    assert!(child.try_wait().unwrap().is_none());
-    std::fs::write(
-        &lock_path,
-        format!(
-            "pid={child_pid}\ncreated_at=100\ntoken={}\n",
-            "1".repeat(64)
-        ),
-    )
-    .unwrap();
-
-    let lock = AutomationTaskLock::try_acquire(temp.path(), AgentTaskKind::SessionReflector)
-        .await
-        .unwrap();
-
-    assert!(lock.is_none());
-    assert!(lock_path.exists());
-    child.kill().unwrap();
-    child.wait().unwrap();
-}
-
-#[cfg(any(unix, windows))]
-const TASK_LOCK_LIVENESS_CHILD_ENV: &str = "TRACEDECAY_TASK_LOCK_LIVENESS_CHILD";
-#[cfg(any(unix, windows))]
-const TASK_LOCK_LIVENESS_READY_ENV: &str = "TRACEDECAY_TASK_LOCK_LIVENESS_READY";
-
-#[cfg(any(unix, windows))]
-fn spawn_task_lock_liveness_child(ready_path: &std::path::Path) -> std::process::Child {
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "scheduler::task_lock_liveness_child",
-            "--nocapture",
-        ])
-        .env(TASK_LOCK_LIVENESS_CHILD_ENV, "1")
-        .env(TASK_LOCK_LIVENESS_READY_ENV, ready_path)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    for _ in 0..400 {
-        if ready_path.exists() {
-            return child;
-        }
-        if let Some(status) = child.try_wait().unwrap() {
-            panic!("task-lock liveness child exited before readiness: {status}");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-    panic!("task-lock liveness child did not publish readiness")
-}
-
-#[cfg(any(unix, windows))]
-fn reaped_task_lock_child_pid() -> u32 {
-    let temp = tempdir().unwrap();
-    let mut child = spawn_task_lock_liveness_child(&temp.path().join("child-ready"));
-    let pid = child.id();
-    assert!(child.try_wait().unwrap().is_none());
-    child.kill().unwrap();
-    child.wait().unwrap();
-    pid
-}
-
-#[cfg(any(unix, windows))]
-#[test]
-fn task_lock_liveness_child() {
-    if std::env::var_os(TASK_LOCK_LIVENESS_CHILD_ENV).is_some() {
-        let ready_path = std::env::var_os(TASK_LOCK_LIVENESS_READY_ENV).unwrap();
-        std::fs::write(ready_path, b"ready").unwrap();
-        std::thread::sleep(std::time::Duration::from_secs(60));
-    }
 }

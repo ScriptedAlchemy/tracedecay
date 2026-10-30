@@ -77,11 +77,11 @@ pub struct TemporalContextFrames {
     pub summary_omissions: Vec<SummaryOmission>,
 }
 
-/// Canonical ordered text admission for compatibility bindings that must
-/// preserve richer transport metadata around each context block.
+/// Canonical ordered text admission for bindings that must preserve richer
+/// transport metadata around each context block.
 ///
 /// The temporal context module owns the budget and UTF-8-safe slicing policy;
-/// callers only translate the admitted slice into their legacy response type.
+/// callers only translate the admitted slice into their response type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OrderedTextContextAdmission {
     pub content: Option<String>,

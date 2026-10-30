@@ -172,9 +172,13 @@ async fn a_failed_later_mount_releases_the_whole_composition_before_returning() 
     let refused = isolation.path().join("refused");
     initialize_project(&first);
     initialize_project(&refused);
-    let retired = refused.join(".tracedecay");
-    std::fs::create_dir(&retired).expect("retired checkout layout");
-    std::fs::write(retired.join("config.json"), "{}").expect("retired configuration");
+    let profile = isolation.path().join("profile");
+    let refused_graph = default_profile_sharded_layout(&refused, &profile)
+        .expect("the refused project resolves its exact store")
+        .graph_db_path;
+    std::fs::create_dir_all(refused_graph.parent().expect("refused store root"))
+        .expect("refused store root");
+    std::fs::write(&refused_graph, b"not a project graph database").expect("refused graph");
 
     let error = match ProductionProjectCompositionHarnessV1::open(
         isolation.path(),
@@ -184,17 +188,15 @@ async fn a_failed_later_mount_releases_the_whole_composition_before_returning() 
     {
         Ok(harness) => {
             harness.shutdown().await;
-            panic!("the retired checkout layout must refuse the second mount");
+            panic!("the unreadable graph database must refuse the second mount");
         }
         Err(error) => error,
     };
-    let (authority, reason) = error
-        .reset_required_context()
-        .unwrap_or_else(|| panic!("expected the retired-layout refusal: {error:?}"));
-    assert_eq!(authority, "project store");
-    assert!(reason.contains("retired checkout-local layout"), "{reason}");
+    assert!(
+        format!("{error:?}").contains("file is not a database"),
+        "expected the second mount to refuse its graph store: {error:?}"
+    );
 
-    let profile = isolation.path().join("profile");
     let first_layout = default_profile_sharded_layout(&first, &profile)
         .expect("the first mount enrolled its exact project identity");
     let stores = [
@@ -221,8 +223,7 @@ async fn a_failed_later_mount_releases_the_whole_composition_before_returning() 
         );
     }
 
-    std::fs::remove_file(retired.join("config.json")).expect("remove the fixture refusal");
-    std::fs::remove_dir(retired).expect("remove the empty retired fixture directory");
+    std::fs::remove_file(&refused_graph).expect("remove the fixture refusal");
     let harness = ProductionProjectCompositionHarnessV1::open(
         isolation.path(),
         [first.clone(), refused.clone()],

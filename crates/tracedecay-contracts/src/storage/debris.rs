@@ -8,8 +8,6 @@
 //! performs no filesystem effect: detection consumes already-listed file names,
 //! and retention deletes classified debris directly.
 
-use std::path::{Component, Path};
-
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::UtcMicros;
 
@@ -28,25 +26,6 @@ pub enum IncidentDebrisKindV1 {
     Recovered,
     /// A `recovery-*` sibling: a recovery working/scratch artifact.
     RecoveryScratch,
-    /// A file under `branches/`: the per-branch graph store layout
-    /// (`branches/<branch>.db` and its sidecars). Every tracked branch now
-    /// shares the project graph store and branch metadata rejects any other
-    /// database path, so no writer creates these; they are unowned old data.
-    RetiredBranchStore,
-}
-
-/// Store-relative directory of the retired per-branch graph store layout.
-pub const RETIRED_BRANCH_STORE_DIRECTORY: &str = "branches";
-
-/// Whether a store-relative path is exactly `branches/<file>`.
-#[must_use]
-pub fn is_retired_branch_store_path(relative: &Path) -> bool {
-    let mut components = relative.components();
-    matches!(
-        (components.next(), components.next(), components.next()),
-        (Some(Component::Normal(directory)), Some(Component::Normal(_)), None)
-            if directory == RETIRED_BRANCH_STORE_DIRECTORY
-    )
 }
 
 impl IncidentDebrisKindV1 {
@@ -89,9 +68,8 @@ pub struct IncidentDebrisArtifactV1 {
 }
 
 impl IncidentDebrisArtifactV1 {
-    /// Build an artifact by classifying `path`: a retired `branches/<file>`
-    /// path, otherwise its file name. Returns `Ok(None)` when the path is not
-    /// incident debris, so a directory scan can map over every sibling without
+    /// Build an artifact by classifying the file name of `path`. Returns
+    /// `Ok(None)` when the path is not incident debris, so a directory scan can map over every sibling without
     /// pre-filtering.
     pub fn classify_path(
         store: StoreKeyV1,
@@ -99,12 +77,8 @@ impl IncidentDebrisArtifactV1 {
         size_bytes: StorageByteSizeV1,
         observed_at: UtcMicros,
     ) -> Result<Option<Self>, ApplicationContractError> {
-        let kind = if is_retired_branch_store_path(Path::new(path.as_str())) {
-            Some(IncidentDebrisKindV1::RetiredBranchStore)
-        } else {
-            let file_name = path.as_str().rsplit('/').next().unwrap_or(path.as_str());
-            IncidentDebrisKindV1::classify(file_name)
-        };
+        let file_name = path.as_str().rsplit('/').next().unwrap_or(path.as_str());
+        let kind = IncidentDebrisKindV1::classify(file_name);
         Ok(kind.map(|kind| Self {
             store,
             path,
@@ -188,35 +162,6 @@ mod tests {
             "recovery-",
         ] {
             assert_eq!(IncidentDebrisKindV1::classify(name), None, "{name}");
-        }
-    }
-
-    #[test]
-    fn retired_branch_store_paths_classify_only_directly_under_branches() {
-        let classify = |path: &str| {
-            IncidentDebrisArtifactV1::classify_path(
-                store(),
-                RelativeArtifactPathV1::new(path).expect("valid"),
-                StorageByteSizeV1(1),
-                UtcMicros(1),
-            )
-            .expect("ok")
-            .map(|artifact| artifact.kind)
-        };
-        for path in ["branches/feature.db", "branches/feature.db-wal"] {
-            assert_eq!(
-                classify(path),
-                Some(IncidentDebrisKindV1::RetiredBranchStore),
-                "{path}"
-            );
-        }
-        for path in [
-            "tracedecay.db",
-            "branches",
-            "branches/nested/feature.db",
-            "code-generations-v1/branches.db",
-        ] {
-            assert_eq!(classify(path), None, "{path}");
         }
     }
 

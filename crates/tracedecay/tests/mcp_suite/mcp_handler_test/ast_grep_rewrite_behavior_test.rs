@@ -152,7 +152,7 @@ async fn ast_grep_rewrite_dry_run_then_apply_swaps_every_call_and_leaves_the_res
     )
     .await
     .expect("dry run");
-    assert_eq!(preview.semantic_error(), Some(false), "{preview:?}");
+    assert!(!preview.semantic_error(), "{preview:?}");
     assert!(preview.touched_files.is_empty(), "{preview:?}");
     let preview_json = edit_json(&preview);
     assert_eq!(preview_json["success"], json!(true), "{preview_json}");
@@ -200,7 +200,7 @@ async fn ast_grep_rewrite_dry_run_then_apply_swaps_every_call_and_leaves_the_res
     )
     .await
     .expect("apply");
-    assert_eq!(applied.semantic_error(), Some(false), "{applied:?}");
+    assert!(!applied.semantic_error(), "{applied:?}");
     assert_eq!(
         applied.touched_files,
         vec![CHECKOUT.to_owned()],
@@ -280,7 +280,7 @@ async fn ast_grep_rewrite_exact_retry_replays_and_a_different_input_conflicts() 
     )
     .await
     .expect("apply");
-    assert_eq!(first.semantic_error(), Some(false), "{first:?}");
+    assert!(!first.semantic_error(), "{first:?}");
     assert_eq!(first.touched_files, vec![CHECKOUT.to_owned()], "{first:?}");
     let first_json = edit_json(&first);
     assert_eq!(
@@ -313,7 +313,7 @@ async fn ast_grep_rewrite_exact_retry_replays_and_a_different_input_conflicts() 
     )
     .await
     .expect("exact retry");
-    assert_eq!(retry.semantic_error(), Some(false), "{retry:?}");
+    assert!(!retry.semantic_error(), "{retry:?}");
     assert!(retry.touched_files.is_empty(), "{retry:?}");
     let retry_json = edit_json(&retry);
     assert_eq!(retry_json["success"], json!(true), "{retry_json}");
@@ -363,7 +363,7 @@ async fn ast_grep_rewrite_exact_retry_replays_and_a_different_input_conflicts() 
     )
     .await
     .expect("a daemon refusal renders as a tool result");
-    assert_eq!(conflict.semantic_error(), Some(true), "{}", conflict.value);
+    assert!(conflict.semantic_error(), "{}", conflict.value);
     let problem = &conflict.value["structuredContent"]["problem"];
     assert_eq!(
         (
@@ -403,7 +403,7 @@ async fn ast_grep_rewrite_refuses_unmatched_patterns_paths_and_stale_previews() 
     )
     .await
     .expect("unmatched pattern");
-    assert_eq!(unmatched.semantic_error(), Some(true), "{unmatched:?}");
+    assert!(unmatched.semantic_error(), "{unmatched:?}");
     assert_eq!(
         unmatched.failure_message(),
         Some(NO_MATCH_MESSAGE),
@@ -458,7 +458,7 @@ async fn ast_grep_rewrite_refuses_unmatched_patterns_paths_and_stale_previews() 
     )
     .await
     .expect("extension without a parser");
-    assert_eq!(prose.semantic_error(), Some(true));
+    assert!(prose.semantic_error());
     let prose_json = edit_json(&prose);
     assert_eq!(prose_json["success"], json!(false), "{prose_json}");
     assert_eq!(
@@ -497,7 +497,7 @@ async fn ast_grep_rewrite_refuses_unmatched_patterns_paths_and_stale_previews() 
     )
     .await
     .expect("path outside the worktree is a tool result");
-    assert_eq!(escaped.semantic_error(), Some(true), "{escaped:?}");
+    assert!(escaped.semantic_error(), "{escaped:?}");
     let escaped_json = edit_json(&escaped);
     assert_eq!(escaped_json["success"], json!(false), "{escaped_json}");
     assert_eq!(escaped_json["failed"], json!(true), "{escaped_json}");
@@ -519,7 +519,7 @@ async fn ast_grep_rewrite_refuses_unmatched_patterns_paths_and_stale_previews() 
     )
     .await
     .expect("missing file is a tool result");
-    assert_eq!(missing.semantic_error(), Some(true));
+    assert!(missing.semantic_error());
     let missing_json = edit_json(&missing);
     assert_eq!(missing_json["success"], json!(false), "{missing_json}");
     assert_eq!(missing_json["failed"], json!(true), "{missing_json}");
@@ -542,7 +542,7 @@ async fn ast_grep_rewrite_refuses_unmatched_patterns_paths_and_stale_previews() 
     )
     .await
     .expect("directory is a tool result");
-    assert_eq!(directory.semantic_error(), Some(true));
+    assert!(directory.semantic_error());
     let directory_json = edit_json(&directory);
     assert_eq!(directory_json["success"], json!(false), "{directory_json}");
     assert_eq!(directory_json["failed"], json!(true), "{directory_json}");
@@ -595,7 +595,7 @@ async fn ast_grep_rewrite_refuses_unmatched_patterns_paths_and_stale_previews() 
     )
     .await
     .expect("stale apply returns a failed edit");
-    assert_eq!(stale.semantic_error(), Some(true), "{stale:?}");
+    assert!(stale.semantic_error(), "{stale:?}");
     let stale_json = edit_json(&stale);
     assert_eq!(stale_json["success"], json!(false), "{stale_json}");
     assert_eq!(stale_json["failed"], json!(true), "{stale_json}");

@@ -153,15 +153,11 @@ describe('DoctorInspector', () => {
     );
   });
 
-  it('renders every typed schema convergence state with progress and failure detail', async () => {
+  it('renders every typed schema convergence state with failure detail', async () => {
     const response = findingsEnvelope();
     response.payload.schema_convergences = [
-      convergence('pending_schema_migration', 1),
-      convergence('released_shape_convergence_in_progress', 2, {
-        unit: 'pages',
-        done: 4,
-        remaining: 7,
-      }),
+      convergence('pending', 1),
+      convergence('running', 2),
       {
         ...convergence('degraded', 3),
         degraded_row: 'observation_id=obs-7 projector=session_message',
@@ -172,11 +168,10 @@ describe('DoctorInspector', () => {
 
     renderDoctor();
 
-    expect(await screen.findByText('Pending schema migration')).toBeTruthy();
-    expect(screen.getByText('Released-shape convergence in progress')).toBeTruthy();
+    expect(await screen.findByText('Schema convergence pending')).toBeTruthy();
+    expect(screen.getByText('Schema convergence running')).toBeTruthy();
     expect(screen.getByText('Schema convergence degraded')).toBeTruthy();
     expect(screen.getByText('Schema convergence completed')).toBeTruthy();
-    expect(screen.getByText(/pages 4 done \/ 7 remaining/)).toBeTruthy();
     expect(screen.getByText(/observation_id=obs-7 projector=session_message/)).toBeTruthy();
   });
 });
@@ -184,13 +179,11 @@ describe('DoctorInspector', () => {
 function convergence(
   state: import('../../contracts/generated.ts').SchemaConvergenceStateV1,
   startedAt: number,
-  progress: import('../../contracts/generated.ts').SchemaConvergenceProgressV1 | null = null,
 ): import('../../contracts/generated.ts').SchemaConvergenceFindingV1 {
   return {
     store: 'profile-sessions',
     stage: 'registered_schema',
     state,
-    progress,
     started_at_micros: startedAt,
     degraded_row: null,
   };

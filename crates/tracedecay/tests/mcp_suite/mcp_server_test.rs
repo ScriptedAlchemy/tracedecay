@@ -18,6 +18,3 @@ mod retrieve_behavior_test;
 #[cfg(target_os = "linux")]
 mod server_release_test;
 pub(crate) mod support;
-
-// Backwards-compatible path for `crate::mcp_server_test::…` consumers.
-pub(crate) use support::run_client_connection_with_messages;

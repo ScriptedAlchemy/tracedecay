@@ -60,19 +60,19 @@ async fn memory_curator_empty_store_skips_without_a_backend_attempt_and_releases
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     let backend = JsonBackend::new(json!({"ops": []}));
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            memory_curator: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            memory_curator: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
 
@@ -146,19 +146,19 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
             }]
         }),
     ]);
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            memory_curator: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            memory_curator: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
@@ -181,10 +181,7 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
     assert_eq!(backend.calls(), 2);
     assert_eq!(run.ledger_record.schema_version, 2);
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
-    assert_eq!(
-        run.ledger_record.task_key.as_deref(),
-        Some("memory_curator")
-    );
+    assert_eq!(run.ledger_record.task_key, "memory_curator");
     assert_eq!(
         run.ledger_record.prompt_version.as_deref(),
         Some("memory_curator:v2")
@@ -629,19 +626,19 @@ async fn memory_curator_persists_transient_transient_success_retry_receipt() {
     let backend = TransientThenJsonBackend {
         calls: AtomicUsize::new(0),
     };
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            memory_curator: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            memory_curator: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
@@ -721,19 +718,19 @@ async fn memory_curator_runner_artifacts_block_handoff_without_validation_exampl
     let cg = init_project(temp.path()).await;
     seed_duplicate_facts(&cg).await;
     let backend = JsonBackend::new(json!({ "ops": [] }));
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            memory_curator: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            memory_curator: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
@@ -816,19 +813,19 @@ async fn memory_curator_quarantines_legacy_output_after_bounded_repair_exhaustio
         ]
     });
     let backend = SequentialJsonBackend::new(vec![invalid.clone(), invalid]);
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            memory_curator: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            memory_curator: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
@@ -888,19 +885,19 @@ async fn memory_curator_runner_auto_applies_validated_operations() {
             }
         ]
     }));
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            memory_curator: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            memory_curator: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
@@ -982,19 +979,19 @@ async fn memory_curator_stops_before_backend_or_apply_when_caller_is_interrupted
         .find(|fact| fact.fact_id().as_str() == facts.winner_id.as_str())
         .and_then(|fact| fact.payload().map(|payload| payload.tags().to_vec()))
         .expect("seeded winner must be available through canonical current-fact authority");
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            memory_curator: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            memory_curator: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
     let interrupted = Arc::new(AtomicBool::new(true));
     let run_control = test_automation_run_control(Arc::clone(&interrupted));

@@ -12,7 +12,9 @@ use tracedecay_automation_runtime::automation::backend::{
     AgentTaskBackend, AgentTaskContract, AgentTaskError, AgentTaskKind, AgentTaskRequest,
     AgentTaskResponse, CodexAppServerBackend, backend_availability,
 };
-use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationConfig};
+use tracedecay_automation_runtime::automation::config::{
+    AutomationBackendV1, AutomationSettingsV1,
+};
 use tracedecay_domain::configuration::LcmSummarizerExecutableV1;
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_session_memory::provider_pricing::{cost_of_usage, load_table};
@@ -21,7 +23,7 @@ use tracedecay_session_memory::provider_pricing::{cost_of_usage, load_table};
 /// configuration snapshot binds for the Scout model route.
 #[derive(Clone, Copy)]
 pub struct ContextScoutModelConfig<'a> {
-    pub automation: &'a AutomationConfig,
+    pub automation: &'a AutomationSettingsV1,
     pub codex: &'a LcmSummarizerExecutableV1,
 }
 
@@ -35,14 +37,14 @@ state, such as which value was expected or what caused a failure. Do not call to
 files, run commands, access credentials, mutate state.";
 
 pub fn context_scout_backend_from_automation_config(
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
 ) -> ContextScoutModelBackendV1 {
     if !config.enabled {
         return ContextScoutModelBackendV1::Disabled;
     }
     match config.backend {
-        AutomationBackend::Disabled => ContextScoutModelBackendV1::Disabled,
-        AutomationBackend::CodexAppServer => ContextScoutModelBackendV1::CodexAppServer,
+        AutomationBackendV1::Disabled => ContextScoutModelBackendV1::Disabled,
+        AutomationBackendV1::CodexAppServer => ContextScoutModelBackendV1::CodexAppServer,
     }
 }
 
@@ -442,23 +444,23 @@ mod tests {
             ContextScoutModelBackendV1::Disabled
         );
         assert_eq!(
-            context_scout_backend_from_automation_config(&AutomationConfig::default()),
+            context_scout_backend_from_automation_config(&AutomationSettingsV1::default()),
             ContextScoutModelBackendV1::CodexAppServer
         );
         assert_eq!(
-            context_scout_backend_from_automation_config(&AutomationConfig {
+            context_scout_backend_from_automation_config(&AutomationSettingsV1 {
                 enabled: false,
-                backend: AutomationBackend::CodexAppServer,
-                ..AutomationConfig::default()
+                backend: AutomationBackendV1::CodexAppServer,
+                ..AutomationSettingsV1::default()
             }),
             ContextScoutModelBackendV1::Disabled
         );
         assert_eq!(
-            context_scout_backend_from_automation_config(&AutomationConfig {
+            context_scout_backend_from_automation_config(&AutomationSettingsV1 {
                 enabled: true,
-                backend: AutomationBackend::Disabled,
+                backend: AutomationBackendV1::Disabled,
                 model_id: None,
-                ..AutomationConfig::default()
+                ..AutomationSettingsV1::default()
             }),
             ContextScoutModelBackendV1::Disabled
         );

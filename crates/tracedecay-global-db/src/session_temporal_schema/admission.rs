@@ -145,11 +145,6 @@ async fn validate_temporal_namespace_tables(
 }
 
 fn belongs_to_temporal_namespace(name: &str) -> bool {
-    // The legacy version table shares the temporal name prefix. It is a stamp,
-    // retired by the store-version ledger, and not temporal state.
-    if name.eq_ignore_ascii_case("session_temporal_schema_migrations") {
-        return false;
-    }
     [
         "session_agent_",
         "session_agents",

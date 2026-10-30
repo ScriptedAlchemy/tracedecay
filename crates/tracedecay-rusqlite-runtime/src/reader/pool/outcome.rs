@@ -50,7 +50,6 @@ pub struct ReaderPoolSnapshot {
     ///
     /// Saturates at `u64::MAX`; telemetry must never wrap a long-running
     /// process back to a smaller apparent workload.
-    #[serde(default)]
     pub snapshot_admissions: u64,
 }
 

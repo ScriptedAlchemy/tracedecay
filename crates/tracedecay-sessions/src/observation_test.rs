@@ -347,11 +347,13 @@ fn request_at_for_session(
         )
         .unwrap()
     });
-    let identity = ObservationIdentityMaterialV1::new(
+    let identity = ObservationIdentityMaterialV1::for_native_record(
         source,
         scope,
         generation,
         ObservationSourceRangeV1::new(start, end).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
+        tracedecay_domain::ObservationId::new(format!("record.{start}")).unwrap(),
     )
     .unwrap();
     CaptureObservationRequest::new(
@@ -619,12 +621,14 @@ async fn repository_provenance_context_refuses_cross_project_reuse() {
 #[test]
 fn request_accepts_only_bounded_parser_evidence_for_the_identity_range() {
     let identity = |start, end| {
-        ObservationIdentityMaterialV1::new(
+        ObservationIdentityMaterialV1::for_native_record(
             ObservationSourceIdentityV1::new(SessionId::new("session.frame-test").unwrap())
                 .unwrap(),
             ObservationScopeV1::Profile,
             ObservationSourceGenerationV1::new(1).unwrap(),
             ObservationSourceRangeV1::new(start, end).unwrap(),
+            ObservationOrderingDomainV1::FileBytes,
+            tracedecay_domain::ObservationId::new(format!("record.{start}")).unwrap(),
         )
         .unwrap()
     };

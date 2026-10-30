@@ -1092,14 +1092,12 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
     fn bind_text(
         &self,
         metadata: VerifiedSealedTextGenerationMetadataV1,
-        sealed_format_revision: u32,
     ) -> LatestCodeTextGenerationV1 {
         let generation_id = metadata.manifest().generation_id.clone();
         let mut progress_slot = CodeIndexBuildProgressSlotStateV1::default();
         let text_progress_owner_epoch = progress_slot.replace_generation(generation_id);
         LatestCodeTextGenerationV1::from_shared(super::serving::CodeTextGenerationSharedV1 {
             metadata: Arc::new(metadata),
-            sealed_format_revision,
             query_owners: Arc::new(RwLock::new(None)),
             graph_activation: Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending)),
             text_projection_build: Arc::new(CodeTextProjectionStateV1::new()),
@@ -1135,7 +1133,6 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
         let generation_id = generation.manifest().generation_id.clone();
         let text = self.bind_text(
             VerifiedSealedTextGenerationMetadataV1::from_published_generation(&generation),
-            tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1,
         );
         let latest = LatestCompleteCodeIndexV1 {
             generation,
@@ -1171,12 +1168,7 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
             })?;
         Ok(self
             .text_metadata_in(&pointer, generation_id)?
-            .map(|metadata| {
-                self.bind_text(
-                    metadata,
-                    tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1,
-                )
-            }))
+            .map(|metadata| self.bind_text(metadata)))
     }
 
     /// Whether a durable publication pointer names a sealed generation, read
@@ -2025,93 +2017,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         )))
     }
 
-    /// Seat the already-sealed active generation when the serving slot is empty.
-    ///
-    /// Quiet remounts persist a freshness witness through
-    /// [`Self::activate_retained_generation_from_frontier`]. A dirty remount
-    /// (cancelled mid-batch, uncommitted files, overflow) fails that witness
-    /// check, and falling through into a successor rebuild left restart
-    /// remounts warming with `last_reconcile_micros` unset and no
-    /// `code_index_serving_generation_seated` event. Historical convergence and
-    /// the dirty-tree rebuild stay later passes; this pass only makes the
-    /// retained artifact serve.
-    ///
-    /// Does not claim source freshness or persist a restore witness. It leaves
-    /// an overflow wake behind so the next pass must still observe the dirty
-    /// tree and publish its successor.
-    pub(super) fn seat_retained_generation_on_empty_serving(
-        &mut self,
-    ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
-        if let Some(outcome) = self.activate_retained_generation_from_frontier()? {
-            return Ok(Some(outcome));
-        }
-        if self.shutting_down.load(Ordering::Acquire) {
-            return Err(cancelled_code_index_reconcile());
-        }
-        let Some(pointer) = self
-            .publication
-            .read_publication_pointer()
-            .map_err(CodeIndexProductionErrorV1::Publication)?
-        else {
-            return Ok(None);
-        };
-        let decoded = self
-            .publication
-            .active_already_decoded()
-            .map_err(CodeIndexProductionErrorV1::Publication)?;
-        let configuration_changed = if let Some(generation) = decoded.as_ref() {
-            self.validate_generation_identity(generation.manifest(), generation.snapshot())?;
-            let compatibility = self.observe_generation_compatibility(generation);
-            if !compatibility.may_serve_while_rebuilding() {
-                self.request_background_reconcile();
-                return Ok(None);
-            }
-            !compatibility.is_reusable()
-        } else {
-            false
-        };
-        // Equal metadata is not currency. A quiet Noop is only honest when
-        // this pass decoded the generation and re-derived every sealed digest.
-        // Otherwise return None so the caller runs the content proof now;
-        // a later wake is not a substitute, because this empty-slot seat is
-        // the first branch and would keep swallowing the pass.
-        let content_matches = decoded.as_ref().is_some_and(|generation| {
-            self.retained_frontier_stat_sweep(&pointer)
-                && self.sources_match_manifest(&SourceContentManifestV1::for_snapshot(
-                    generation.snapshot(),
-                ))
-        });
-        if !retained_empty_seat_settles_source(decoded.is_some(), content_matches) {
-            return Ok(None);
-        }
-        let Some(generation) = decoded else {
-            return Ok(None);
-        };
-        let dirty = {
-            let hints = self
-                .hints
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            hints.overflow || !hints.paths.is_empty()
-        } || configuration_changed;
-        if dirty {
-            self.request_background_reconcile();
-        }
-        // Graph prepare decodes without the scheduler mutex. Joining
-        // `load_active_shared` here parked remount on the publication
-        // barrier while activation owned it, so the seated event never
-        // published and the dirty successor extract never started.
-        self.adopt_ignored_source_roster(generation.ignored_source_admissions());
-        let snapshot_content_identity = generation.snapshot().content_identity.clone();
-        self.latest_content_identity = Some(snapshot_content_identity.clone());
-        Ok(Some(CodeIndexReconcileOutcomeV1::Noop(
-            CodeIndexNoopEvidenceV1 {
-                snapshot_content_identity,
-                overflow_reconciled: false,
-            },
-        )))
-    }
-
     /// Witness + git/stat fence that does not read sealed generation bytes.
     /// `true` is the negative cache only: the metadata the witness recorded
     /// has not moved, and the caller still settles currency against the
@@ -2721,63 +2626,54 @@ impl CodeIndexWorktreeSchedulerV1 {
                     .ok()
                     .flatten()
             });
-        let (metadata, sealed_format_revision, preopened_source) =
-            if let Some(metadata) = partitioned_metadata {
-                (
-                    metadata,
-                    tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1,
-                    None,
+        let (metadata, preopened_source) = if let Some(metadata) = partitioned_metadata {
+            (metadata, None)
+        } else {
+            let source = text_artifact_store
+                .open_sealed_source_with_progress(
+                    &sealed_identity,
+                    &text_control,
+                    move |scanned, total| {
+                        let elapsed_micros = progress_state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .elapsed_micros();
+                        let snapshot = CodeIndexBuildProgressV1 {
+                            generation_id: progress_generation.as_str().to_owned(),
+                            daemon_incarnation: progress_daemon_incarnation,
+                            producer_incarnation: progress_producer_incarnation,
+                            progress_epoch: 0,
+                            sealed_source_digest: progress_digest.clone(),
+                            phase: CodeIndexBuildPhaseV1::SourceScan,
+                            committed_pages: 0,
+                            committed_chunks: 0,
+                            committed_imports: 0,
+                            committed_payload_bytes: 0,
+                            completed_files: 0,
+                            total_files: 0,
+                            completed_lexical_units: scanned,
+                            total_lexical_units: total,
+                            current_batch_pages: 0,
+                            current_batch_payload_bytes: 0,
+                            elapsed_micros,
+                            last_commit_latency_micros: None,
+                            files_per_second: None,
+                            lexical_units_per_second: None,
+                            estimated_remaining_seconds: None,
+                            last_progress_micros: now_micros().0,
+                            blocked_reason: None,
+                        };
+                        let _ = try_publish_build_progress(
+                            &progress_slot,
+                            &progress_generation,
+                            text_progress_owner_epoch,
+                            snapshot,
+                        );
+                    },
                 )
-            } else {
-                let source = text_artifact_store
-                    .open_sealed_source_with_progress(
-                        &sealed_identity,
-                        &text_control,
-                        move |scanned, total| {
-                            let elapsed_micros = progress_state
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .elapsed_micros();
-                            let snapshot = CodeIndexBuildProgressV1 {
-                                generation_id: progress_generation.as_str().to_owned(),
-                                daemon_incarnation: progress_daemon_incarnation,
-                                producer_incarnation: progress_producer_incarnation,
-                                progress_epoch: 0,
-                                sealed_source_digest: progress_digest.clone(),
-                                phase: CodeIndexBuildPhaseV1::SourceScan,
-                                committed_pages: 0,
-                                committed_chunks: 0,
-                                committed_imports: 0,
-                                committed_payload_bytes: 0,
-                                completed_files: 0,
-                                total_files: 0,
-                                completed_lexical_units: scanned,
-                                total_lexical_units: total,
-                                current_batch_pages: 0,
-                                current_batch_payload_bytes: 0,
-                                elapsed_micros,
-                                last_commit_latency_micros: None,
-                                files_per_second: None,
-                                lexical_units_per_second: None,
-                                estimated_remaining_seconds: None,
-                                last_progress_micros: now_micros().0,
-                                blocked_reason: None,
-                            };
-                            let _ = try_publish_build_progress(
-                                &progress_slot,
-                                &progress_generation,
-                                text_progress_owner_epoch,
-                                snapshot,
-                            );
-                        },
-                    )
-                    .ok()?;
-                (
-                    source.metadata().clone(),
-                    source.format_revision(),
-                    Some(source),
-                )
-            };
+                .ok()?;
+            (source.metadata().clone(), Some(source))
+        };
         if metadata.manifest().project_id != self.project_id
             || metadata.manifest().generation_id != generation_id
             || metadata.snapshot().repository != self.repository_id
@@ -2815,7 +2711,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         Some(RetainedTextGenerationRestoreV1::Servable(
             LatestCodeTextGenerationV1::from_shared(super::serving::CodeTextGenerationSharedV1 {
                 metadata,
-                sealed_format_revision,
                 query_owners: Arc::new(RwLock::new(None)),
                 graph_activation: Arc::new(RwLock::new(CodeGraphActivationStateV1::Pending)),
                 text_projection_build: Arc::new(CodeTextProjectionStateV1::new()),
@@ -3621,7 +3516,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// hint, observed-change marker, or cancellation epoch is minted for it.
     /// Fabricating that overflow made the restart's own verifying pass skip
     /// the sealed-digest witness a quiet tree would have satisfied and fall
-    /// into the full sealed-generation replay the revision-7 verified-head
+    /// into the full sealed-generation replay the verified-head
     /// recovery exists to avoid.
     pub fn request_fresh_for_query_background(&mut self) -> bool {
         let verdict = self.freshness_probe_verdict();
@@ -3877,8 +3772,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         let text = retained_text.cloned().unwrap_or_else(|| {
             LatestCodeTextGenerationV1::from_shared(super::serving::CodeTextGenerationSharedV1 {
                 metadata,
-                sealed_format_revision:
-                    tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1,
                 query_owners,
                 graph_activation: Arc::clone(&graph_activation),
                 text_projection_build,
@@ -4500,18 +4393,6 @@ fn changed_paths_between_trees(
     (!invalid_path).then_some(paths)
 }
 
-/// A quiet empty-slot seat may end the pass only when the generation was
-/// decoded and its sealed file digests still match the bytes on disk.
-///
-/// Equal stat metadata with no decoded generation is not currency. Callers
-/// that treat `false` as a settled Noop will skip the content proof.
-pub(crate) fn retained_empty_seat_settles_source(
-    generation_decoded: bool,
-    content_matches: bool,
-) -> bool {
-    generation_decoded && content_matches
-}
-
 pub(super) fn cancelled_code_index_reconcile() -> CodeIndexSchedulerErrorV1 {
     CodeIndexProductionErrorV1::Interrupted(
         tracedecay_code_index::production::CodeIndexInterruptionV1::Cancelled,
@@ -4661,21 +4542,5 @@ impl SchedulerWorkerRuntimeV1 {
             let _ = resident_memory;
             Err(CodeIndexSchedulerErrorV1::WorkerPlanNotInstalled)
         }
-    }
-}
-
-#[cfg(test)]
-mod retained_empty_seat_tests {
-    use super::retained_empty_seat_settles_source;
-
-    #[test]
-    fn equal_metadata_without_a_decoded_generation_does_not_settle_the_seat() {
-        assert!(
-            !retained_empty_seat_settles_source(false, true),
-            "a matching stat sweep is not a content proof"
-        );
-        assert!(!retained_empty_seat_settles_source(true, false));
-        assert!(!retained_empty_seat_settles_source(false, false));
-        assert!(retained_empty_seat_settles_source(true, true));
     }
 }

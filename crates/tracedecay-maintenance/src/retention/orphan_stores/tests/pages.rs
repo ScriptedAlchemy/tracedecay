@@ -61,7 +61,7 @@ async fn sweep_collects_orphan_store_and_retires_row() {
     assert!(!orphan_data_root.exists(), "orphan store must be collected");
     assert!(live_root.exists());
 
-    let live_data_root = profile_root.join("stores/store_live");
+    let live_data_root = profile_root.join("projects/store_live");
     assert!(live_data_root.exists(), "live store must be untouched");
 
     let remaining: Vec<_> = db
@@ -689,7 +689,7 @@ async fn sweep_unregistered_stores_aborts_when_directory_gets_registered_first()
 fn cancelled_content_census_stops_before_hashing_or_mutation() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
-    let data_root = profile_root.join("stores/cancelled-census");
+    let data_root = profile_root.join("projects/cancelled-census");
     std::fs::create_dir_all(&data_root).unwrap();
     std::fs::write(data_root.join("large.bin"), vec![7_u8; 512 * 1024]).unwrap();
 

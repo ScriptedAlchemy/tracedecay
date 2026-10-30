@@ -29,19 +29,12 @@ pub struct HostBundleInstallReceiptV1 {
     pub artifacts: Vec<HostBundleReceiptArtifactV1>,
     /// Directories below the install root that a lifecycle operation created
     /// and that still exist, sorted. Only these may be removed once empty; a
-    /// directory that existed before install is never listed. Receipts written
-    /// before this record existed list none, so their directories are kept.
-    #[serde(default)]
+    /// directory that existed before install is never listed.
     pub created_directories: Vec<String>,
     /// Host config structure a lifecycle operation created, sorted by path:
     /// facts only, never the operator's bytes. Uninstall removes exactly this
-    /// structure once TraceDecay's own entries are gone from it. `None` marks
-    /// a receipt written before creation was recorded: nothing proves what its
-    /// install created, so every config file and container it touched is
-    /// kept, and of its directories only those named in TraceDecay's own
-    /// namespace are removed once empty.
-    #[serde(default)]
-    pub created_config: Option<Vec<HostConfigCreationV1>>,
+    /// structure once TraceDecay's own entries are gone from it.
+    pub created_config: Vec<HostConfigCreationV1>,
 }
 
 /// Structure one lifecycle operation added to one host config file.

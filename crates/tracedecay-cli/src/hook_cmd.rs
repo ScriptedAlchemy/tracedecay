@@ -87,9 +87,6 @@ fn handle_hook_command_inner(
                 &profile, source, hook_name,
             ));
         }
-        if matches!(command, Commands::HookPreToolUse) {
-            return Ok(0);
-        }
         unreachable!("non-hook command passed to hook dispatcher")
     })
 }

@@ -6,11 +6,6 @@
  * the fixture bundle did not even carry the member, so the capability was
  * both unread and unrepresented, and the audit could not have caught either
  * from a screenshot.
- *
- * Four readings are pinned here. The pair that matters is `absent` against
- * `unavailable`: a daemon that never mentioned the capability and a daemon
- * that mentioned it to decline are different facts, and collapsing
- * them would attribute a reason to a daemon that gave none.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
@@ -84,8 +79,7 @@ describe('the multi-root capability the daemon reports', () => {
 });
 
 describe('the reading, as a function', () => {
-  it('separates a silent bundle from a declined one', () => {
-    expect(multiRootReading(undefined)).toEqual({ state: 'absent' });
+  it('reads a declined capability with the daemon\'s own reason', () => {
     expect(multiRootReading({ status: 'unavailable', reason: 'no scope set' })).toEqual({
       state: 'unavailable',
       reason: 'no scope set',

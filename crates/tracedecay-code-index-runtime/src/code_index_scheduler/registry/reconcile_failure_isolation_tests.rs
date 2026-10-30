@@ -132,12 +132,6 @@ impl Fixture {
         super::super::scoped_code_index_store_root(&self._root.path().join("store"), &canonical)
     }
 
-    /// The durable active pointer of this checkout's scope store.
-    fn active_pointer_path(&self) -> std::path::PathBuf {
-        self.scope_store_root()
-            .join("active-code-generation-v1.json")
-    }
-
     /// Block until the worker has had no pass in flight for `window`.
     ///
     /// A pass gives up its owner-pass guard before its graph tail (prepare,
@@ -994,60 +988,6 @@ async fn a_reproducing_reconcile_failure_parks_typed_and_converges_after_the_fix
         "`main`, `Gamma`, and `delta` are the fixture's symbols"
     );
     restarted.registry.shutdown().await;
-}
-
-/// The upgrade journey behind issue #1979, driven through the real worker.
-/// The daemon mounts cold over a store whose pointer a pre-beta.38 release
-/// sealed; its digest no longer matches the re-serialized entries. The worker
-/// must delete the derived store and rebuild it from source with no operator
-/// action, and status must never show a terminal park.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_pre_segment_bytes_pointer_is_reset_and_rebuilt_by_the_worker() {
-    let fixture = Fixture::mount("project.reconcile-upgrade-pointer-reset").await;
-    let sealed = wait_for_latest_generation(&fixture).await;
-    let pointer_path = fixture.active_pointer_path();
-    assert!(
-        pointer_path.exists(),
-        "the initial build must publish a durable pointer for {sealed}"
-    );
-    fixture.registry.shutdown().await;
-    super::super::tests::downgrade_pointer_to_pre_segment_bytes_shape(&pointer_path);
-
-    let upgraded = Fixture::remount(fixture, "project.reconcile-upgrade-pointer-reset").await;
-    let rebuilt = wait_for_latest_generation(&upgraded).await;
-    let freshness = upgraded
-        .registry
-        .dashboard_freshness(&upgraded.project)
-        .await
-        .expect("mounted freshness");
-    assert!(
-        freshness.parked.is_none(),
-        "a corrupt derived publication is rebuilt, never parked: {freshness:?}"
-    );
-    let wire = serde_json::to_value(&freshness).expect("freshness wire");
-    assert!(
-        wire["progress"]["blocked_reason"].is_null(),
-        "status must not carry a terminal reason after the rebuild: {wire}"
-    );
-    assert!(
-        matches!(
-            upgraded
-                .registry
-                .notify_hook_overflow(&upgraded.project)
-                .await,
-            CodeIndexDemandAdmissionV1::Queued
-        ),
-        "hooks are admitted again on the rebuilt store"
-    );
-    let pointer: tracedecay_code_index_retention::code_index_generations::DurablePublicationPointerV1 =
-        serde_json::from_slice(&fs::read(&pointer_path).expect("rebuilt pointer"))
-            .expect("rebuilt pointer decodes");
-    assert_eq!(pointer.generation_id, rebuilt);
-    assert!(
-        pointer.generation_index[0].segment_bytes > 0,
-        "the rebuilt pointer is in the current shape"
-    );
-    upgraded.registry.shutdown().await;
 }
 
 /// A corrupt publication authority gets exactly one automatic reset and

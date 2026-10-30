@@ -19,15 +19,6 @@ const EDITED: usize = 9;
 const DELETED: usize = 12;
 const EDITED_TEXT: &str = "editedmidomega question about the ledger";
 
-#[derive(Clone, Copy)]
-enum UserRecordShape {
-    /// `event_msg`/`user_message`: no native id, so identity follows content.
-    ContentAddressed,
-    /// `event_msg`/`item_completed` carrying a `UserMessage` `item.id`, so the
-    /// edit keeps its message id.
-    NativeItemId,
-}
-
 fn record_token(index: usize) -> String {
     format!("tidepool{index:03}")
 }
@@ -36,7 +27,7 @@ fn record_text(index: usize) -> String {
     format!("{} question about the ledger", record_token(index))
 }
 
-fn rollout_records(project: &Path, shape: UserRecordShape) -> Vec<Value> {
+fn rollout_records(project: &Path) -> Vec<Value> {
     let mut records = vec![json!({
         "timestamp": "2026-10-02T10:00:00.000Z",
         "type": "session_meta",
@@ -46,22 +37,15 @@ fn rollout_records(project: &Path, shape: UserRecordShape) -> Vec<Value> {
         let timestamp = format!("2026-10-02T10:00:{:02}.{index:03}Z", index % 60);
         let text = record_text(index);
         records.push(if index % 2 == 1 {
-            match shape {
-                UserRecordShape::ContentAddressed => json!({
-                    "timestamp": timestamp,
-                    "type": "event_msg",
-                    "payload": {"type": "user_message", "message": text},
-                }),
-                UserRecordShape::NativeItemId => json!({
-                    "timestamp": timestamp,
-                    "type": "event_msg",
-                    "payload": {"type": "item_completed", "item": {
-                        "type": "UserMessage",
-                        "id": format!("user-item-{index:04}"),
-                        "content": [{"type": "text", "text": text}],
-                    }},
-                }),
-            }
+            json!({
+                "timestamp": timestamp,
+                "type": "event_msg",
+                "payload": {"type": "item_completed", "item": {
+                    "type": "UserMessage",
+                    "id": format!("user-item-{index:04}"),
+                    "content": [{"type": "text", "text": text}],
+                }},
+            })
         } else {
             json!({
                 "timestamp": timestamp,
@@ -223,7 +207,8 @@ async fn session_event_count(
     })
 }
 
-async fn in_place_edit_supersedes_every_read_path(shape: UserRecordShape) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn in_place_edit_of_a_native_id_record_supersedes_every_read_path() {
     let root = test_temp_dir();
     let isolation = root.path().join("composition");
     let transcripts = composed_transcript_home(&isolation);
@@ -234,7 +219,7 @@ async fn in_place_edit_supersedes_every_read_path(shape: UserRecordShape) {
     let sessions = transcripts.join(".codex/sessions/2026/10/02");
     std::fs::create_dir_all(&sessions).expect("Codex sessions directory");
     let rollout = sessions.join(format!("rollout-2026-10-02T10-00-00-{SESSION_ID}.jsonl"));
-    let mut records = rollout_records(&project, shape);
+    let mut records = rollout_records(&project);
     write_rollout(&rollout, &records);
 
     let harness = crate::support::seeded_composition::open_for_session_retrieval(
@@ -381,14 +366,4 @@ async fn in_place_edit_supersedes_every_read_path(shape: UserRecordShape) {
     assert_eq!(grep_count(&harness, &project, &record_token(1)).await, 1);
     assert_eq!(grep_count(&harness, &project, "editedmidomega").await, 1);
     harness.shutdown().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn in_place_edit_of_a_content_addressed_record_supersedes_every_read_path() {
-    in_place_edit_supersedes_every_read_path(UserRecordShape::ContentAddressed).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn in_place_edit_of_a_native_id_record_supersedes_every_read_path() {
-    in_place_edit_supersedes_every_read_path(UserRecordShape::NativeItemId).await;
 }

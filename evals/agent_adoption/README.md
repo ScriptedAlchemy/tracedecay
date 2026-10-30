@@ -523,7 +523,7 @@ TRACEDECAY_AGENT_EVALS=1 HOSTS=claude \
 * **Codex 0.144+** `codex exec --json`: `item.started` / `item.completed`
   envelopes normalize `command_execution`, `mcp_tool_call`,
   `collab_tool_call` (`spawn_agent`), and `agent_message`. Lifecycle pairs are
-  deduplicated by `item.id`. Legacy `msg.type` events remain accepted.
+  deduplicated by `item.id`.
 
 Host-specific MCP tool names collapse to canonical form, e.g.
 `mcp__plugin_tracedecay_graph__tracedecay_context` → `tracedecay_context`.

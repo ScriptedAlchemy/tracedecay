@@ -4608,7 +4608,7 @@ async fn edit_during_text_projection_seals_its_successor_before_the_projection_f
             let pointer = active_pointer();
             let projected = |generation_id: &str| {
                 pointer.generation_index.iter().any(|entry| {
-                    entry.generation_id == generation_id && entry.text_artifact().is_some()
+                    entry.generation_id == generation_id && entry.text_artifact.is_some()
                 })
             };
             // Superseded text owners cancel at their publication fence;
@@ -4628,7 +4628,7 @@ async fn edit_during_text_projection_seals_its_successor_before_the_projection_f
         final_pointer
             .generation_index
             .iter()
-            .map(|entry| (&entry.generation_id, entry.text_artifact().is_some()))
+            .map(|entry| (&entry.generation_id, entry.text_artifact.is_some()))
             .collect::<Vec<_>>()
     );
     let latest = scheduler
@@ -10812,7 +10812,7 @@ async fn reopened_current_text_generation_resolves_publication_identity_without_
     // A 5s `changed()` cut-off reports a late seat as a lost wake. The
     // registry signal has no such wall-clock bound; the ceiling only
     // distinguishes a seat that never arrives.
-    let current = wait_until_serving_seat(
+    wait_until_serving_seat(
         &registry,
         fixture.path(),
         SERVING_SEAT_FAILURE_CEILING,
@@ -10827,10 +10827,6 @@ async fn reopened_current_text_generation_resolves_publication_identity_without_
         },
     )
     .await;
-    assert!(
-        current.uses_partitioned_manifest(),
-        "the retained text owner is the partitioned generation authority"
-    );
     assert!(
         registry
             .latest_complete_serving_for_scope(&scope)
@@ -11486,7 +11482,7 @@ fn moved_git_metadata_keeps_the_sealed_generation_until_bytes_move() {
 /// cancellation epoch, because nothing was observed to move. The fabricated
 /// overflow made the graph-on restart's own verifying pass skip the
 /// sealed-digest witness a quiet tree satisfies and fall into the full sealed
-/// replay (`sealed_decode_count` 1) that the revision-7 verified-head recovery
+/// replay (`sealed_decode_count` 1) that the verified-head recovery
 /// exists to avoid. Proven movement still posts the observed change.
 #[test]
 fn unverified_restart_probe_requests_a_pass_without_fabricating_an_observed_change() {

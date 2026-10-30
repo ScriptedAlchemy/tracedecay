@@ -8,14 +8,11 @@ use std::path::{Path, PathBuf};
 use tracedecay_contracts::project_open::{
     ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
 };
-use tracedecay_contracts::storage::{
-    SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStateV1,
-};
+use tracedecay_contracts::storage::{SchemaConvergenceFindingV1, SchemaConvergenceStateV1};
 use tracedecay_domain::errors::ProjectOpenFailureKind;
 
 use tracedecay_agent_hosts::agents::{self, DoctorCounters, HealthcheckContext};
 use tracedecay_application::advisory::github_runtime;
-use tracedecay_automation_runtime::automation::effect_runtime::pending_automation_effect_resets_blocking;
 #[cfg(unix)]
 use tracedecay_daemon_service::logging::recent_watcher_events;
 
@@ -75,7 +72,8 @@ pub async fn run_doctor(
     check_binary(&mut dc, build_version);
 
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let daemon_listening = tracedecay_daemon_control::daemon_socket_connectable(profile);
+    let daemon_listening =
+        tracedecay_daemon_control::daemon_socket_connectable(profile, build_version);
     let independent = launch_independent_doctor_checks(
         profile,
         build_version,
@@ -133,6 +131,7 @@ fn launch_independent_doctor_checks(
     let version_for_service = build_version.to_owned();
     let profile_for_reset = profile.clone();
     let version_for_reset = build_version.to_owned();
+    let version_for_watcher = build_version.to_owned();
     let project_for_files = project_path.to_path_buf();
     let profile_root_for_files = profile.data_dir().to_path_buf();
     let profile_for_watcher = profile.clone();
@@ -165,7 +164,7 @@ fn launch_independent_doctor_checks(
             }
         }),
         watcher: spawn_doctor_check(move || {
-            collect_quiet(|dc| check_watcher(dc, &profile_for_watcher))
+            collect_quiet(|dc| check_watcher(dc, &profile_for_watcher, &version_for_watcher))
         }),
         hosts: spawn_doctor_check(move || {
             collect_quiet(|dc| check_host_integrations(dc, &profile_for_hosts, &project_for_hosts))
@@ -389,7 +388,7 @@ fn check_reset_required_stores(
     // Gate on the socket accepting, not a one-second initialize answer: the
     // reset census probe owns its own deadline, and a daemon busy attaching
     // stores still answers it there.
-    if !tracedecay_daemon_control::daemon_socket_connectable(profile) {
+    if !tracedecay_daemon_control::daemon_socket_connectable(profile, build_version) {
         return false;
     }
     match tracedecay_daemon_control::daemon_reset_required_stores(profile, build_version) {
@@ -450,17 +449,8 @@ fn render_schema_convergences(
     };
     let findings: Vec<SchemaConvergenceFindingV1> = serde_json::from_value(value.clone())?;
     for finding in &findings {
-        let progress = match finding.progress {
-            Some(SchemaConvergenceProgressV1::Rows { done, remaining }) => {
-                format!(", rows {done} done / {remaining} remaining")
-            }
-            Some(SchemaConvergenceProgressV1::Pages { done, remaining }) => {
-                format!(", pages {done} done / {remaining} remaining")
-            }
-            None => String::new(),
-        };
         let message = format!(
-            "Schema convergence: {} {} {}{progress}, started at {}",
+            "Schema convergence: {} {} {}, started at {}",
             finding.store.as_str(),
             finding.stage.as_str(),
             finding.state.as_str(),
@@ -472,8 +462,9 @@ fn render_schema_convergences(
                 Some(row) => dc.fail(&format!("{message}: {row}")),
                 None => dc.fail(&message),
             },
-            SchemaConvergenceStateV1::PendingSchemaMigration
-            | SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress => dc.warn(&message),
+            SchemaConvergenceStateV1::Pending | SchemaConvergenceStateV1::Running => {
+                dc.warn(&message);
+            }
         }
     }
     Ok(findings)
@@ -977,10 +968,14 @@ fn check_binary(dc: &mut DoctorCounters, build_version: &str) {
 /// bounded scheduler reconciliation. Absent telemetry is reported as info, not
 /// a failure, activation comes from each project's pinned configuration.
 #[tracing::instrument(name = "doctor.check.watcher", level = "trace", skip_all)]
-fn check_watcher(dc: &mut DoctorCounters, profile: &tracedecay_runtime_core::config::ProfileRoot) {
+fn check_watcher(
+    dc: &mut DoctorCounters,
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
+    build_version: &str,
+) {
     dc.section("Watcher");
 
-    if !tracedecay_daemon_control::daemon_reachable(profile) {
+    if !tracedecay_daemon_control::daemon_reachable(profile, build_version) {
         dc.info("Daemon not running, watcher inactive; sync happens on hook/read events");
         return;
     }
@@ -1057,72 +1052,29 @@ fn check_inert_project_config(dc: &mut DoctorCounters, project_path: &Path) {
     }
 }
 
-/// Warnings name entries PR reconciliation will reset; the error names a
-/// state file that blocks reconciliation outright.
-fn pr_autotrack_state_findings(data_root: &Path) -> std::result::Result<Vec<String>, String> {
-    match tracedecay_application::pr_tracking::load_state(data_root) {
-        Ok(state) => Ok(state
-            .stale
-            .iter()
-            .map(|stale| {
-                format!(
-                    "{stale}; PR auto-tracking reconciliation drops this entry and re-tracks the PR if it is still open"
-                )
-            })
-            .collect()),
-        Err(error) => Err(format!(
-            "PR auto-tracking state {} is unreadable ({error}); reconciliation stays blocked until that file is removed, after which open PRs are re-tracked",
-            tracedecay_application::pr_tracking::state_path(data_root).display()
-        )),
-    }
+/// The error names a PR auto-tracking state file that blocks reconciliation.
+fn pr_autotrack_state_failure(data_root: &Path) -> Option<String> {
+    tracedecay_application::pr_tracking::load_state(data_root)
+        .err()
+        .map(|error| {
+            format!(
+                "PR auto-tracking state {} is unreadable ({error}); reconciliation stays blocked until that file is removed, after which open PRs are re-tracked",
+                tracedecay_application::pr_tracking::state_path(data_root).display()
+            )
+        })
 }
 
-/// Reports PR auto-tracking state and refused automation effect journals for
-/// the project's persisted layout, when it has one.
+/// Reports PR auto-tracking state for the project's persisted layout, when it
+/// has one.
 fn check_persisted_state_resets(dc: &mut DoctorCounters, profile_root: &Path, project_path: &Path) {
     let Ok(Some(layout)) =
         tracedecay_runtime_core::storage::resolve_persisted_layout(project_path, profile_root)
     else {
         return;
     };
-    for findings in [
-        pr_autotrack_state_findings(&layout.data_root),
-        automation_effect_reset_findings(&layout.dashboard_root),
-    ] {
-        match findings {
-            Ok(warnings) => {
-                for warning in warnings {
-                    dc.warn(&warning);
-                }
-            }
-            Err(failure) => dc.fail(&failure),
-        }
+    if let Some(failure) = pr_autotrack_state_failure(&layout.data_root) {
+        dc.fail(&failure);
     }
-}
-
-/// One warning per refused automation effect journal, named by its run id,
-/// that project-open recovery resets; the error names an unreadable journal
-/// directory.
-fn automation_effect_reset_findings(
-    dashboard_root: &Path,
-) -> std::result::Result<Vec<String>, String> {
-    let resets = pending_automation_effect_resets_blocking(dashboard_root)
-        .map_err(|error| format!("Automation effect journals could not be read: {error}"))?;
-    Ok(resets
-        .into_iter()
-        .map(|reset| match reset.run_id {
-            Some(run_id) => format!(
-                "Automation run {} requires reset: its effect journal shape is refused ({}); project-open recovery removes the journal and the run id can run again",
-                run_id.as_str(),
-                reset.reason
-            ),
-            None => format!(
-                "Automation effect journal {} requires reset: its shape is refused ({}); project-open recovery removes it",
-                reset.journal.display(),
-                reset.reason
-            ),
-        })
-        .collect())
 }
 
 /// Check the profile `config.toml` and the GitHub review sources it names.

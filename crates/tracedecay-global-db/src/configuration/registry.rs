@@ -7,11 +7,10 @@ use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, ANALYZER_SETTINGS_SETTING_KEY, AUTOMATION_SETTINGS_SETTING_KEY,
     AnalyzerSettingsV1, CONFIGURATION_SETTING_KEYS_V1, CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
     CodeIndexWorkerSelectionV1, ConfigurationValueKindV1, ConfigurationValueV1,
-    ContextScoutSettingsV1, DeprecationStateV1, INDEX_EXCLUDE_SETTING_KEY,
-    INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
-    INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
-    INDEX_TRACK_CALL_SITES_SETTING_KEY, LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
-    LcmSummarizerExecutablesV1, PROFILE_SETTING_KEYS_V1,
+    ContextScoutSettingsV1, INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY,
+    INDEX_INCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY,
+    INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
+    LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY, LcmSummarizerExecutablesV1, PROFILE_SETTING_KEYS_V1,
     PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY, RestartRequirementV1, SOURCE_BINDINGS_SETTING_KEY,
     SYNC_AUTO_INIT_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY,
@@ -65,10 +64,6 @@ pub enum ConfigurationRegistryError {
         pattern: String,
         message: String,
     },
-    #[error(
-        "setting {key} contains retired stale_lock_secs; task locks no longer accept an age override"
-    )]
-    RetiredAutomationLockTimeout { key: SettingKey },
     #[error("setting {key} cannot be written in layer {layer:?}")]
     InvalidLayer {
         key: SettingKey,
@@ -98,7 +93,6 @@ impl ConfigurationRegistry {
             sensitivity: SettingSensitivityV1::Sensitive,
             scope: SettingScopeV1::Project,
             restart_requirement: RestartRequirementV1::None,
-            deprecation: DeprecationStateV1::Active,
         })?;
         registry.register(SettingDefinitionV1 {
             key: setting_key(ACCESS_RULES_SETTING_KEY)?,
@@ -108,7 +102,6 @@ impl ConfigurationRegistry {
             sensitivity: SettingSensitivityV1::Sensitive,
             scope: SettingScopeV1::Project,
             restart_requirement: RestartRequirementV1::None,
-            deprecation: DeprecationStateV1::Active,
         })?;
         register_project_stored_user_profile_settings(&mut registry)?;
         registry.register(SettingDefinitionV1 {
@@ -119,7 +112,6 @@ impl ConfigurationRegistry {
             sensitivity: SettingSensitivityV1::Sensitive,
             scope: SettingScopeV1::Project,
             restart_requirement: RestartRequirementV1::AnalyzerRestart,
-            deprecation: DeprecationStateV1::Active,
         })?;
         registry.register(SettingDefinitionV1 {
             key: setting_key(WORK_TOPOLOGY_POLICY_SETTING_KEY)?,
@@ -131,7 +123,6 @@ impl ConfigurationRegistry {
             sensitivity: SettingSensitivityV1::Sensitive,
             scope: SettingScopeV1::Project,
             restart_requirement: RestartRequirementV1::DaemonRestart,
-            deprecation: DeprecationStateV1::Active,
         })?;
         registry.register(SettingDefinitionV1 {
             key: setting_key(WORK_EXECUTABLE_BINDINGS_SETTING_KEY)?,
@@ -141,7 +132,6 @@ impl ConfigurationRegistry {
             sensitivity: SettingSensitivityV1::Sensitive,
             scope: SettingScopeV1::Project,
             restart_requirement: RestartRequirementV1::DaemonRestart,
-            deprecation: DeprecationStateV1::Active,
         })?;
         registry.register(SettingDefinitionV1 {
             key: setting_key(PROJECT_WORK_EXPERTISE_CONSENT_SETTING_KEY)?,
@@ -153,7 +143,6 @@ impl ConfigurationRegistry {
             sensitivity: SettingSensitivityV1::Sensitive,
             scope: SettingScopeV1::Project,
             restart_requirement: RestartRequirementV1::None,
-            deprecation: DeprecationStateV1::Active,
         })?;
         registry.register(SettingDefinitionV1 {
             key: setting_key(CONTEXT_SCOUT_SETTINGS_SETTING_KEY)?,
@@ -165,7 +154,6 @@ impl ConfigurationRegistry {
             sensitivity: SettingSensitivityV1::Sensitive,
             scope: SettingScopeV1::Project,
             restart_requirement: RestartRequirementV1::None,
-            deprecation: DeprecationStateV1::Active,
         })?;
         registry.register(SettingDefinitionV1 {
             key: setting_key(AUTOMATION_SETTINGS_SETTING_KEY)?,
@@ -175,7 +163,6 @@ impl ConfigurationRegistry {
             sensitivity: SettingSensitivityV1::Sensitive,
             scope: SettingScopeV1::Project,
             restart_requirement: RestartRequirementV1::None,
-            deprecation: DeprecationStateV1::Active,
         })?;
         // On-demand LCM summarization launches a host CLI only through this
         // explicit binding; the unconfigured default keeps compaction pending
@@ -190,7 +177,6 @@ impl ConfigurationRegistry {
             sensitivity: SettingSensitivityV1::Sensitive,
             scope: SettingScopeV1::Project,
             restart_requirement: RestartRequirementV1::None,
-            deprecation: DeprecationStateV1::Active,
         })?;
         registry.register(SettingDefinitionV1 {
             key: setting_key(PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1)?,
@@ -202,7 +188,6 @@ impl ConfigurationRegistry {
             sensitivity: SettingSensitivityV1::Public,
             scope: SettingScopeV1::Project,
             restart_requirement: RestartRequirementV1::None,
-            deprecation: DeprecationStateV1::Active,
         })?;
         register_project_settings(&mut registry)?;
         let expected = CONFIGURATION_SETTING_KEYS_V1
@@ -329,29 +314,6 @@ impl ConfigurationRegistry {
                 });
             }
         }
-        Ok(())
-    }
-
-    /// [`Self::validate_value`] plus the checks that gate only a new write.
-    ///
-    /// Stored snapshots are revalidated with `validate_value` on every read,
-    /// so a rule that may tighten across releases must not live there: an
-    /// `index.exclude.v1` pattern an earlier release accepted has to keep
-    /// loading (the runtime pin leaves it unapplied and reports it as a
-    /// setting finding) while a new write of it is refused.
-    pub fn validate_written_value(
-        &self,
-        key: &SettingKey,
-        value: &ConfigurationValueV1,
-    ) -> Result<(), ConfigurationRegistryError> {
-        self.validate_value(key, value)?;
-        if let ConfigurationValueV1::AutomationSettings(settings) = value
-            && settings.has_retired_lock_timeout()
-        {
-            return Err(ConfigurationRegistryError::RetiredAutomationLockTimeout {
-                key: key.clone(),
-            });
-        }
         if let ConfigurationValueV1::StringList(patterns) = value
             && matches!(
                 key.as_str(),
@@ -417,7 +379,6 @@ fn register_project_stored_user_profile_settings(
         sensitivity: SettingSensitivityV1::Sensitive,
         scope: SettingScopeV1::UserProfile,
         restart_requirement: RestartRequirementV1::None,
-        deprecation: DeprecationStateV1::Active,
     })
 }
 
@@ -449,7 +410,6 @@ fn register_profile_scalar_settings(
             sensitivity: SettingSensitivityV1::Public,
             scope: SettingScopeV1::UserProfile,
             restart_requirement,
-            deprecation: DeprecationStateV1::Active,
         })?;
     }
     Ok(())
@@ -466,7 +426,6 @@ fn code_index_worker_definition() -> Result<SettingDefinitionV1, ConfigurationRe
         sensitivity: SettingSensitivityV1::Public,
         scope: SettingScopeV1::UserProfile,
         restart_requirement: RestartRequirementV1::DaemonRestart,
-        deprecation: DeprecationStateV1::Active,
     })
 }
 
@@ -692,7 +651,6 @@ fn register_project_settings(
             sensitivity,
             scope: SettingScopeV1::Project,
             restart_requirement,
-            deprecation: DeprecationStateV1::Active,
         })?;
     }
     Ok(())
@@ -744,135 +702,19 @@ mod proximity_threshold_tests {
 }
 
 #[cfg(test)]
-mod retired_automation_setting_tests {
-    use super::{ConfigurationRegistry, ConfigurationRegistryError};
-    use tracedecay_domain::configuration::{
-        AUTOMATION_SETTINGS_SETTING_KEY, AutomationSettingsV1, ConfigurationValueV1, SettingKey,
-    };
-
-    #[test]
-    fn historical_lock_timeout_loads_but_new_writes_refuse_it() {
-        let registry = ConfigurationRegistry::core().unwrap();
-        let key = SettingKey::new(AUTOMATION_SETTINGS_SETTING_KEY).unwrap();
-        for timeout in [serde_json::Value::Null, serde_json::json!(3600)] {
-            let mut stored = serde_json::to_value(AutomationSettingsV1::default()).unwrap();
-            stored["tasks"]["memory_curator"]["stale_lock_secs"] = timeout;
-            let settings = serde_json::from_value(stored).unwrap();
-            let value = ConfigurationValueV1::AutomationSettings(Box::new(settings));
-            assert!(registry.validate_value(&key, &value).is_ok());
-            assert!(matches!(
-                registry.validate_written_value(&key, &value),
-                Err(ConfigurationRegistryError::RetiredAutomationLockTimeout { .. })
-            ));
-        }
-        assert!(
-            registry
-                .validate_written_value(
-                    &key,
-                    &ConfigurationValueV1::AutomationSettings(Box::default())
-                )
-                .is_ok()
-        );
-    }
-}
-
-#[cfg(test)]
 mod index_path_pattern_tests {
     use super::*;
 
-    /// A stored pattern an earlier release never compiled must keep loading
-    /// while a new write of it is refused.
     #[test]
-    fn a_malformed_index_pattern_loads_but_cannot_be_written() {
+    fn a_malformed_index_pattern_is_refused() {
         let registry = ConfigurationRegistry::core().expect("registry");
         let key = SettingKey::new(INDEX_EXCLUDE_SETTING_KEY).expect("key");
         let value = ConfigurationValueV1::StringList(vec!["src/[abc".to_owned()]);
 
-        assert!(registry.validate_value(&key, &value).is_ok());
         assert!(matches!(
-            registry.validate_written_value(&key, &value),
+            registry.validate_value(&key, &value),
             Err(ConfigurationRegistryError::InvalidPathPattern { .. })
         ));
-    }
-}
-
-#[cfg(test)]
-mod released_setting_keys_tests {
-    use super::*;
-    use tracedecay_domain::configuration::RETIRED_CORE_SETTING_KEYS_V1;
-
-    /// Every setting key a published release persisted, as literals so that
-    /// removing a key constant cannot silently shrink this history. Append a
-    /// key here when it first ships; never delete one.
-    const RELEASED_SETTING_KEYS: &[&str] = &[
-        "analyzer.settings.v1",
-        "automation.settings.v1",
-        "context_scout.settings.v1",
-        "diagnostics.prewarm.v1",
-        "feedback.proximity.risk_threshold",
-        "index.exclude.v1",
-        "index.extract_docstrings.v1",
-        "index.git_ignore.v1",
-        "index.include.v1",
-        "index.max_file_size.v1",
-        "index.native_graph_activation.v1",
-        "index.track_call_sites.v1",
-        "lcm.summarizer_executables.v1",
-        "scope.access_rules.v1",
-        "scope.source_bindings.v1",
-        "semantic.runtime.v1",
-        "sync.auto_init.v1",
-        "sync.auto_track_pr_branches.v1",
-        "sync.auto_track_pr_poll_secs.v1",
-        "sync.auto_watch.v1",
-        "sync.backstop_interval_mins.v1",
-        "sync.branch_gc_days.v1",
-        "sync.full_sync_escalation_files.v1",
-        "sync.max_concurrent_syncs.v1",
-        "sync.orphan_db_gc_days.v1",
-        "sync.read_cooldown_secs.v1",
-        "sync.read_refresh.v1",
-        "sync.session_start_stale_threshold_secs.v1",
-        "sync.session_start_sync.v1",
-        "sync.watch_debounce_ms.v1",
-        "sync.watch_linked_worktrees.v1",
-        "sync.watch_max_delay_ms.v1",
-        "sync.watch_max_projects.v1",
-        "telemetry.timings.v1",
-        "user.code_index_workers.v1",
-        "user.extraction_timeout_secs.v1",
-        "user.upload_enabled.v1",
-        "user.watcher_debounce_ms.v1",
-        "user.work_expertise_consent.v1",
-        "work.executable_bindings.v1",
-        "work.expertise_consent.v1",
-        "work.topology_policy.v1",
-    ];
-
-    /// A released key that is neither registered nor retired would turn every
-    /// persisted snapshot carrying it into a configuration reset on open. A
-    /// key the profile store took over is retired from project snapshots.
-    #[test]
-    fn every_released_setting_key_is_registered_or_retired() {
-        let core = ConfigurationRegistry::core().expect("core registry");
-        let profile = ConfigurationRegistry::profile().expect("profile registry");
-        for raw_key in RELEASED_SETTING_KEYS {
-            let key = SettingKey::new(*raw_key).expect("key");
-            let in_core = core.definition(&key).is_ok();
-            let in_profile = profile.definition(&key).is_ok();
-            let retired = RETIRED_CORE_SETTING_KEYS_V1.contains(raw_key);
-            assert!(
-                !(in_core && (in_profile || retired)) && (in_core || in_profile || retired),
-                "released setting {raw_key} must be exactly one of core-registered or retired \
-                 from core (core: {in_core}, profile: {in_profile}, retired: {retired})"
-            );
-        }
-        for raw_key in RETIRED_CORE_SETTING_KEYS_V1 {
-            assert!(
-                RELEASED_SETTING_KEYS.contains(raw_key),
-                "retired setting {raw_key} must record a released key"
-            );
-        }
     }
 }
 

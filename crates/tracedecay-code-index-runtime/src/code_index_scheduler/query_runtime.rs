@@ -771,7 +771,7 @@ where
             // Graph activation state is owned per sealed generation and shared by
             // every handle bound to it, so the text owner answers for its own
             // generation when no decoded complete generation accompanies it. A
-            // clean restart whose retained revision-7 head recovered serves graph
+            // clean restart whose retained head recovered serves graph
             // reads from exactly that owner and deliberately leaves the sealed
             // seat empty; resolving the lane only through the seat reported the
             // recovered graph as `retriever_unavailable` until the next publish.

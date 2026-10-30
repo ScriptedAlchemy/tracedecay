@@ -34,7 +34,6 @@ pub const DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS: i64 = 30;
 pub use tracedecay_lcm::{GitScopeFilter, MAX_SESSIONS_FOR_LIMIT};
 pub const GIT_HISTORY_SEQUENCE_FRONTIER_KEY: &str = "git_history_change_sequence_frontier";
 pub const GIT_HISTORY_ROWID_FRONTIER_KEY: &str = "git_history_session_rowid_frontier";
-const LEGACY_ACTIVITY_FRONTIER_KEY: &str = "auto_backfill_activity_watermark";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -976,7 +975,6 @@ pub async fn ensure_git_correlation_receipt_schema_in_transaction(
     conn.execute_batch(rows::GIT_EVIDENCE_ROWS_SCHEMA).await?;
     backfill::history_progress::install_final_schema(conn).await?;
     backfill::history_failures::install_final_schema(conn).await?;
-    migrate_activity_frontier(conn).await?;
     schema_version::record_version(
         conn,
         GIT_CORRELATION_COMPONENT,
@@ -984,53 +982,6 @@ pub async fn ensure_git_correlation_receipt_schema_in_transaction(
     )
     .await
     .map_err(|error| GitCorrelationError::Db(error.to_string()))?;
-    Ok(())
-}
-
-/// The history pass once walked sessions by activity time, so a session
-/// imported behind that cursor was never visited. Positions recorded on that
-/// axis mean nothing on the change-sequence axis; rescanning from the start
-/// is the only safe conversion. That rescan re-derives every failure it can
-/// still reach, so legacy failure receipts are dropped rather than kept for
-/// sessions the change-sequence axis never revisits.
-async fn migrate_activity_frontier(
-    conn: &(impl Executor + ?Sized),
-) -> Result<(), GitCorrelationError> {
-    for (table, reset) in [
-        (
-            "git_history_index_progress",
-            "UPDATE git_history_index_progress SET change_sequence = 0;",
-        ),
-        (
-            "git_history_index_failures",
-            "DELETE FROM git_history_index_failures;",
-        ),
-    ] {
-        let mut legacy = conn
-            .query(
-                "SELECT 1 FROM pragma_table_info(?1) WHERE name = 'activity_timestamp'",
-                params![table],
-            )
-            .await?;
-        if legacy.next().await?.is_some() {
-            drop(legacy);
-            conn.execute_batch(&format!(
-                "ALTER TABLE {table} RENAME COLUMN activity_timestamp TO change_sequence;
-                 {reset}"
-            ))
-            .await?;
-        }
-    }
-    if read_meta_value(conn, LEGACY_ACTIVITY_FRONTIER_KEY)
-        .await?
-        .is_some()
-    {
-        conn.execute(
-            "DELETE FROM git_correlation_meta WHERE key IN (?1, ?2)",
-            params![LEGACY_ACTIVITY_FRONTIER_KEY, GIT_HISTORY_ROWID_FRONTIER_KEY],
-        )
-        .await?;
-    }
     Ok(())
 }
 

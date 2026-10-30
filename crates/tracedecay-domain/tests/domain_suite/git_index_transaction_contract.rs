@@ -401,49 +401,66 @@ fn snapshot_without_complete_native_identity_is_read_only() {
     assert!(!state.is_mutation_eligible());
 }
 
-fn legacy_fixture(name: &str) -> serde_json::Value {
-    let path = format!("tests/fixtures/git_index_legacy/{name}.json");
-    serde_json::from_str(&std::fs::read_to_string(path).expect("legacy fixture"))
-        .expect("legacy fixture is JSON")
-}
-
 #[test]
-fn records_stored_before_commit_index_removal_still_decode() {
-    let mut input = legacy_fixture("stage_preview_input");
-    let mut preview = legacy_fixture("stage_preview");
-    let mut receipt = legacy_fixture("stage_receipt");
+fn removed_commit_fields_and_missing_receipt_flags_are_refused() {
+    let snapshot = snapshot();
+    let snapshot_digest =
+        GitIndexPreviewV1::repository_snapshot_digest(&snapshot).expect("snapshot digest");
+    let preview_id = GitIndexPreviewId::new("git-preview.removed.fixture").expect("preview id");
+    let reference = hunk(&preview_id, snapshot_digest.clone());
+    let input = GitIndexPreviewInputV1::new_hunk_selection(
+        preview_id.clone(),
+        GitIndexTransactionOperationV1::StageHunks,
+        snapshot.clone(),
+        vec![reference.clone()],
+        UtcMicros(10),
+        UtcMicros(20),
+    )
+    .expect("input");
+    let preview = GitIndexPreviewV1::new(
+        preview_id,
+        GitIndexTransactionOperationV1::StageHunks,
+        snapshot,
+        snapshot_digest,
+        vec![reference],
+        Some(oid('e')),
+        GitIndexPreviewDispositionV1::Applicable,
+        UtcMicros(10),
+        UtcMicros(20),
+    )
+    .expect("preview");
+    let receipt = GitIndexTransactionReceiptV1::new(
+        GitIndexReceiptId::new("git-index-receipt.removed").expect("receipt id"),
+        GitIndexTransactionId::new("git-index-transaction.removed").expect("transaction id"),
+        &preview,
+        digest('1'),
+        Some(oid('e')),
+        Some(oid('a')),
+        GitIndexReceiptOutcomeV1::Committed,
+        UtcMicros(11),
+    )
+    .expect("receipt");
 
-    let decoded_input: GitIndexPreviewInputV1 =
-        serde_json::from_value(input.clone()).expect("legacy input decodes");
-    let decoded_preview: GitIndexPreviewV1 =
-        serde_json::from_value(preview.clone()).expect("legacy preview decodes");
-    let decoded_receipt: GitIndexTransactionReceiptV1 =
-        serde_json::from_value(receipt.clone()).expect("legacy receipt decodes");
-    assert_eq!(
-        serde_json::json!(decoded_input.compute_input_digest().expect("input digest")),
-        input["input_digest"]
-    );
-    assert_eq!(
-        serde_json::json!(
-            decoded_preview
-                .compute_preview_digest()
-                .expect("preview digest")
-        ),
-        preview["preview_digest"]
-    );
-    assert_eq!(
-        serde_json::json!(
-            decoded_receipt
-                .compute_receipt_digest()
-                .expect("receipt digest")
-        ),
-        receipt["receipt_digest"]
-    );
+    let mut input_value = serde_json::to_value(&input).expect("input value");
+    let mut preview_value = serde_json::to_value(&preview).expect("preview value");
+    let mut receipt_value = serde_json::to_value(&receipt).expect("receipt value");
+    serde_json::from_value::<GitIndexPreviewInputV1>(input_value.clone()).expect("input decodes");
+    serde_json::from_value::<GitIndexPreviewV1>(preview_value.clone()).expect("preview decodes");
+    serde_json::from_value::<GitIndexTransactionReceiptV1>(receipt_value.clone())
+        .expect("receipt decodes");
 
-    input["commit_intent"] = serde_json::json!({ "message": "legacy" });
-    preview["commit_intent_digest"] = serde_json::json!(digest('9'));
-    receipt["created_commit"] = serde_json::json!(oid('9'));
-    assert!(serde_json::from_value::<GitIndexPreviewInputV1>(input).is_err());
-    assert!(serde_json::from_value::<GitIndexPreviewV1>(preview).is_err());
-    assert!(serde_json::from_value::<GitIndexTransactionReceiptV1>(receipt).is_err());
+    receipt_value
+        .as_object_mut()
+        .expect("receipt object")
+        .remove("final_snapshot_captured");
+    assert!(
+        serde_json::from_value::<GitIndexTransactionReceiptV1>(receipt_value.clone()).is_err(),
+        "a receipt without final_snapshot_captured is refused, not defaulted"
+    );
+    input_value["commit_intent"] = serde_json::json!(null);
+    preview_value["commit_intent_digest"] = serde_json::json!(null);
+    receipt_value["created_commit"] = serde_json::json!(null);
+    assert!(serde_json::from_value::<GitIndexPreviewInputV1>(input_value).is_err());
+    assert!(serde_json::from_value::<GitIndexPreviewV1>(preview_value).is_err());
+    assert!(serde_json::from_value::<GitIndexTransactionReceiptV1>(receipt_value).is_err());
 }

@@ -132,7 +132,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "eval-helpers", "full", "lang-dockerfile", "lang-markdown", "lite", "medium", "test-helpers"],
     compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/code_index_suite/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
-    data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/code_index_suite/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//crates/tracedecay-code-extraction:fixtures"],
+    data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/code_index_suite/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//crates/tracedecay-code-extraction:fixtures"],
 )
 
 rust_test(
@@ -147,7 +147,7 @@ rust_test(
     rustc_flags = perf_rustc_flags(2),
     crate_features = ["default", "eval-helpers", "full", "lang-dockerfile", "lang-markdown", "lite", "medium", "test-helpers"],
     compile_data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
-    data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["assets/**", "data/**", "fixtures/**", "resources/**", "tests/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
 )
 
 rust_test(
@@ -304,11 +304,5 @@ genrule(
     tools = ["//:rustfmt_toolchain"],
     toolchains = ["//:rustfmt_toolchain"],
     tags = ["manual"],
-    visibility = ["//visibility:public"],
-)
-
-filegroup(
-    name = "tests_fixtures_partitioned_pre_paging",
-    srcs = glob(["tests/fixtures/partitioned_pre_paging/**"]),
     visibility = ["//visibility:public"],
 )

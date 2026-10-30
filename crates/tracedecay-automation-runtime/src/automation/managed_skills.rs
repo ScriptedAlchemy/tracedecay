@@ -10,10 +10,6 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_private_fs::FileLease;
 use tracedecay_private_fs::framed_log::DirectorySyncPolicy;
 
-/// Typed reset authority for the profile's `agent_managed` skill and usage
-/// records.
-pub(crate) const MANAGED_SKILL_STORE_AUTHORITY: &str = "managed skill store";
-
 pub use tracedecay_automation::managed_skills::validate_managed_support_files;
 pub use tracedecay_automation::managed_skills::{
     MAX_MANAGED_SKILL_BODY_BYTES, MAX_MANAGED_SUPPORT_FILE_BYTES, MAX_MANAGED_SUPPORT_FILES,
@@ -589,9 +585,7 @@ fn load_managed_skill_unlocked(
 }
 
 /// A stored record that fails to parse or validate is one typed `Config`
-/// failure naming the file, whichever check rejected it. The released
-/// summary-only shape (metadata without `routing_description`) is a typed
-/// reset instead: this binary never derives routing from a summary.
+/// failure naming the file, whichever check rejected it.
 fn decode_managed_skill_record(path: &Path, bytes: &[u8]) -> Result<ManagedSkill> {
     let invalid = |e: &dyn std::fmt::Display| {
         config_error(format!(
@@ -599,31 +593,9 @@ fn decode_managed_skill_record(path: &Path, bytes: &[u8]) -> Result<ManagedSkill
             path.display()
         ))
     };
-    let skill: ManagedSkill = serde_json::from_slice(bytes).map_err(|error| {
-        if is_summary_only_record(bytes) {
-            TraceDecayError::reset_required(
-                MANAGED_SKILL_STORE_AUTHORITY,
-                format!(
-                    "managed skill record '{}' is the released summary-only shape",
-                    path.display()
-                ),
-            )
-        } else {
-            invalid(&error)
-        }
-    })?;
+    let skill: ManagedSkill = serde_json::from_slice(bytes).map_err(|error| invalid(&error))?;
     validate_managed_skill(&skill).map_err(|e| invalid(&e))?;
     Ok(skill)
-}
-
-fn is_summary_only_record(bytes: &[u8]) -> bool {
-    serde_json::from_slice::<serde_json::Value>(bytes)
-        .ok()
-        .and_then(|record| {
-            let metadata = record.get("metadata")?.as_object()?;
-            Some(metadata.contains_key("summary") && !metadata.contains_key("routing_description"))
-        })
-        .unwrap_or(false)
 }
 
 #[tracing::instrument(name = "automation.managed_skill.list", level = "trace", skip_all)]
@@ -666,34 +638,10 @@ fn list_managed_skills_unlocked(profile_root: &Path) -> Result<Vec<ManagedSkill>
                 path.display()
             ))
         })?;
-        match decode_managed_skill_record(&path, &bytes) {
-            Ok(skill) => skills.push(skill),
-            Err(refusal) if refusal.reset_required_context().is_some() => {
-                reset_refused_skill_dir(&root, &entry.path(), &refusal)?;
-            }
-            Err(error) => return Err(error),
-        }
+        skills.push(decode_managed_skill_record(&path, &bytes)?);
     }
     skills.sort_by(|a, b| a.metadata.id.cmp(&b.metadata.id));
     Ok(skills)
-}
-
-/// The complete-store scan owns a refused record: its skill directory is
-/// deleted (nothing kept) so one released record cannot fail every listing.
-fn reset_refused_skill_dir(root: &Path, dir: &Path, refusal: &TraceDecayError) -> Result<()> {
-    std::fs::remove_dir_all(dir).map_err(|error| {
-        config_error(format!(
-            "failed to reset refused managed skill '{}': {error}",
-            dir.display()
-        ))
-    })?;
-    sync_directory(root)?;
-    tracing::warn!(
-        managed_skill = %dir.display(),
-        refusal = %refusal,
-        "reset refused managed skill record"
-    );
-    Ok(())
 }
 
 pub async fn set_managed_skill_state(

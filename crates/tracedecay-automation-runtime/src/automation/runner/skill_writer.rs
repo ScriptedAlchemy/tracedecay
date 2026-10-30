@@ -8,7 +8,7 @@ use crate::automation::backend::{
     AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskResponse,
     runtime_failure_class,
 };
-use crate::automation::config::AutomationConfig;
+use crate::automation::config::AutomationSettingsV1;
 use crate::automation::host_io::HostIo;
 use crate::automation::lifecycle::{
     AgentTaskRunContext, AutomationRunLedgerPublication, AutomationRunPublication,
@@ -128,7 +128,7 @@ pub(super) fn validate_skill_writer_decision(output: &Value, proposals: &[Value]
 /// retrieval authority instead of silently reopening the production route.
 pub async fn run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
     cg: &AutomationProjectContext,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     retrieval: &dyn AutomationSessionRetrieval,
@@ -153,7 +153,7 @@ pub async fn run_skill_writer_with_backend_and_retrieval_for_retained_settlement
 
 async fn run_skill_writer_with_backend_and_retrieval_publication(
     cg: &AutomationProjectContext,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     retrieval: &dyn AutomationSessionRetrieval,
@@ -199,7 +199,7 @@ pub(super) struct SkillWriterStoreRuntime<'a> {
 async fn run_skill_writer_for_store_with_publication(
     runtime: SkillWriterStoreRuntime<'_>,
     retrieval: &dyn AutomationSessionRetrieval,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     backend: &dyn AgentTaskBackend,
     options: SkillWriterAutomationOptions,
     prebuilt_evidence: Option<SkillWriterEvidenceBundle>,
@@ -223,7 +223,7 @@ async fn run_skill_writer_for_store_with_publication(
 fn run_skill_writer_for_store_with_publication_inner<'a>(
     runtime: SkillWriterStoreRuntime<'a>,
     retrieval: &'a dyn AutomationSessionRetrieval,
-    config: &'a AutomationConfig,
+    config: &'a AutomationSettingsV1,
     backend: &'a dyn AgentTaskBackend,
     options: SkillWriterAutomationOptions,
     prebuilt_evidence: Option<SkillWriterEvidenceBundle>,
@@ -675,7 +675,7 @@ pub(super) async fn finalize_skill_writer_success(
     finalizer: &AgentRunFinalizer<'_>,
     profile_root: &std::path::Path,
     project_root: Option<&std::path::Path>,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     authority: &CurationApplyAuthorityV1,
     activation_policy: &'static str,
     output: ProposedSkillOutput<'_>,
@@ -1004,7 +1004,7 @@ pub(super) async fn skipped_skill_writer_run(
 
 pub(super) fn rejected_skill_writer_run(
     run: &AgentTaskRunContext<'_>,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     reason: &str,
     budget_stage: Option<SessionRetrievalBudgetStageV1>,
     evidence_hash: Option<String>,

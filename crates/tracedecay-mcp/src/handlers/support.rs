@@ -84,7 +84,7 @@ pub fn rendered_tool_result<F: FnOnce() -> String>(
 pub fn owner_envelope_result(envelope: &HttpJsonEnvelope<Value>) -> Result<ToolResult> {
     let payload = serde_json::to_value(envelope)?;
     match envelope {
-        HttpJsonEnvelope::Success(_) => Ok(json_result(&payload).with_semantic_error(false)),
+        HttpJsonEnvelope::Success(_) => Ok(json_result(&payload)),
         HttpJsonEnvelope::Problem(problem) => {
             problem_tool_result(&payload.to_string(), &problem.application.problem)
         }

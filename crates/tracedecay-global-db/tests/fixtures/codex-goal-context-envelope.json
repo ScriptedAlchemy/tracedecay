@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "provider": "codex",
+  "native_record_kind": "response_item",
+  "stable_record_id": "record.codex-goal-context",
+  "relations": {
+    "session_id": "codex-goal-context-session",
+    "thread_id": "codex-goal-context-session",
+    "message_id": "record.codex-goal-context"
+  },
+  "facts": [
+    {
+      "kind": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "<codex_internal_context source=\"goal\"><objective>ensure all provider session messages are ingested</objective>\nToken budget: 12000\nTokens remaining: 11000</codex_internal_context>"
+        }
+      ],
+      "timestamp": 1767225602
+    }
+  ],
+  "evidence": {
+    "ordering_domain": "file_bytes",
+    "range": {
+      "start": 0,
+      "end": 1
+    },
+    "native_timestamp": 1767225602
+  }
+}

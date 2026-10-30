@@ -290,50 +290,34 @@ fn claude_api_error_placeholder_records_no_provider_usage() {
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0
     });
-    for native in [
-        json!({
-            "type": "assistant",
-            "uuid": "api-error-uuid",
-            "isApiErrorMessage": true,
-            "apiErrorStatus": 529,
-            "timestamp": "2026-08-01T00:00:00.000Z",
-            "message": {
-                "id": "msg_api_error",
-                "role": "assistant",
-                "model": "<synthetic>",
-                "content": [{"type": "text", "text": "API Error: overloaded"}],
-                "usage": placeholder_usage.clone()
-            }
-        }),
-        // Older placeholder shape: synthetic model without the explicit flag.
-        json!({
-            "type": "assistant",
-            "uuid": "synthetic-model-uuid",
-            "timestamp": "2026-08-01T00:00:00.000Z",
-            "message": {
-                "id": "msg_synthetic_model",
-                "role": "assistant",
-                "model": "<synthetic>",
-                "content": [{"type": "text", "text": "API Error: overloaded"}],
-                "usage": placeholder_usage.clone()
-            }
-        }),
-    ] {
-        let record_id = claude::stable_record_id(&native, "claude-error-session", 0).unwrap();
-        let envelope = claude::normalize(
-            &native,
-            "claude-error-session",
-            None,
-            record_id,
-            ObservationSourceRangeV1::new(0, 128).unwrap(),
-        )
-        .unwrap();
-        assert!(
-            provider_usage_facts(&envelope).is_empty(),
-            "placeholder record must not produce usage facts: {:?}",
-            envelope.facts()
-        );
-    }
+    let native = json!({
+        "type": "assistant",
+        "uuid": "api-error-uuid",
+        "isApiErrorMessage": true,
+        "apiErrorStatus": 529,
+        "timestamp": "2026-08-01T00:00:00.000Z",
+        "message": {
+            "id": "msg_api_error",
+            "role": "assistant",
+            "model": "<synthetic>",
+            "content": [{"type": "text", "text": "API Error: overloaded"}],
+            "usage": placeholder_usage
+        }
+    });
+    let record_id = claude::stable_record_id(&native, "claude-error-session", 0).unwrap();
+    let envelope = claude::normalize(
+        &native,
+        "claude-error-session",
+        None,
+        record_id,
+        ObservationSourceRangeV1::new(0, 128).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        provider_usage_facts(&envelope).is_empty(),
+        "placeholder record must not produce usage facts: {:?}",
+        envelope.facts()
+    );
 
     let billed = json!({
         "type": "assistant",

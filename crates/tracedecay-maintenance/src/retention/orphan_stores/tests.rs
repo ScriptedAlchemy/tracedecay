@@ -103,7 +103,7 @@ async fn seed_store(
     project_root: &Path,
     created_at: i64,
 ) -> PathBuf {
-    let data_root = profile_root.join("stores").join(store_id);
+    let data_root = profile_root.join("projects").join(store_id);
     std::fs::create_dir_all(&data_root).unwrap();
     // A real (schema-empty) SQLite file, not raw bytes: the durable-memory
     // guard opens this file through `sqlite_read_snapshot` before any
@@ -140,7 +140,7 @@ async fn seed_store(
             tracedecay_runtime_core::db::engine::params![
                 store_id,
                 project_id,
-                format!("stores/{store_id}"),
+                format!("projects/{store_id}"),
                 created_at
             ],
         )
@@ -193,7 +193,7 @@ fn live_root_is_never_collected() {
         live.clone(),
         None,
         None,
-        PathBuf::from("/profile/stores/live"),
+        PathBuf::from("/profile/projects/live"),
         0,
         4096,
     )];
@@ -218,7 +218,7 @@ fn live_registered_alias_keeps_the_store_out_of_every_collectable_bucket() {
         dead,
         None,
         None,
-        PathBuf::from("/profile/stores/aliased"),
+        PathBuf::from("/profile/projects/aliased"),
         0,
         4096,
     );
@@ -251,7 +251,7 @@ fn an_owner_root_spelled_through_a_symlink_keeps_its_vanished_store_live() {
         real.join("retired-checkout"),
         None,
         None,
-        PathBuf::from("/profile/stores/owned"),
+        PathBuf::from("/profile/projects/owned"),
         0,
         4096,
     )];

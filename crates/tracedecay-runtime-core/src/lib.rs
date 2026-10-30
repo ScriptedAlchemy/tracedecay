@@ -79,11 +79,6 @@
 #![allow(clippy::missing_fields_in_debug)]
 #![allow(clippy::single_match_else)]
 #![allow(clippy::large_futures)]
-// The kernel was extracted from a single crate where every intra-crate item
-// was reachable through crate-restricted visibility. Crossing the crate
-// boundary promoted those to `pub`; the root shims re-export them, so this
-// public API is an artifact of the split, not new API.
-#![allow(unreachable_pub)]
 #![allow(rustdoc::broken_intra_doc_links)]
 #![allow(rustdoc::private_intra_doc_links)]
 
@@ -140,8 +135,6 @@ pub mod tracedecay;
 pub mod weak_registry;
 pub use asupersync::{Cx, signal};
 pub use operation_task_owner::RuntimeOperationTaskOwnerV1;
-#[cfg(windows)]
-pub use tracedecay_private_fs::windows as windows_security;
 pub mod worktree;
 
 /// Ports the kernel exposes so the root crate can inject subsystems that stay

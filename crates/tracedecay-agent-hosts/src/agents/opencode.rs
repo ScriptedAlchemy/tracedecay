@@ -45,9 +45,6 @@ const OPENCODE_PLUGIN_MARKER: &str = "TraceDecayPlugin";
 pub(crate) const OPENCODE_PLUGIN_RELATIVE: &str = "plugins/tracedecay.ts";
 /// Native V2 location of the managed MCP server inside `opencode.json`.
 const MCP_SERVER_POINTER: &str = "/mcp/servers/tracedecay";
-/// Where the V1 installer registered the same server; removed on the next
-/// install so one config never names the server twice.
-const LEGACY_MCP_SERVER_KEY: &str = "tracedecay";
 
 impl AgentIntegration for OpenCodeIntegration {
     fn name(&self) -> &'static str {
@@ -149,18 +146,11 @@ impl AgentIntegration for OpenCodeIntegration {
         use super::host_bundle::{HostBundleRegistrationStateV1 as State, HostComponentV1};
 
         let config_path = opencode_config_path(&ctx.home, &ctx.profile);
-        let config = if matches!(
-            component,
-            HostComponentV1::Core | HostComponentV1::ContextMcp
-        ) {
+        let config = if component == HostComponentV1::ContextMcp {
             match std::fs::read(&config_path) {
                 Ok(config_bytes) => {
                     match serde_json::from_slice::<serde_json::Value>(&config_bytes) {
                         Ok(config) => Some(config),
-                        Err(error) if component == HostComponentV1::Core => {
-                            tracing::warn!(path = %config_path.display(), %error, "Cannot inspect retired OpenCode LSP registration; Core artifacts remain independent of MCP config");
-                            None
-                        }
                         Err(_) => return State::Corrupt,
                     }
                 }
@@ -191,9 +181,6 @@ impl AgentIntegration for OpenCodeIntegration {
                 State::Missing
             };
         }
-        if component == HostComponentV1::OperatorMcp {
-            return State::Missing;
-        }
         let config_root = config_path.parent().unwrap_or(&ctx.home);
         if component == HostComponentV1::Agent {
             let assets = super::plugin_bundle::opencode_agent_files()
@@ -213,12 +200,9 @@ impl AgentIntegration for OpenCodeIntegration {
             .is_ok_and(|contents| contents.contains(OPENCODE_PLUGIN_MARKER));
         let prompt_current = std::fs::read_to_string(opencode_prompt_path(&ctx.home, &ctx.profile))
             .is_ok_and(|contents| contents.contains(PROMPT_RULE_MARKER));
-        let legacy_lsp = config
-            .as_ref()
-            .is_some_and(|config| config.pointer("/lsp/tracedecay").is_some());
-        if plugin_current && prompt_current && !legacy_lsp {
+        if plugin_current && prompt_current {
             State::Current
-        } else if !plugin_path.exists() && !prompt_current && !legacy_lsp {
+        } else if !plugin_path.exists() && !prompt_current {
             State::Missing
         } else {
             State::Repairable
@@ -292,8 +276,6 @@ impl AgentIntegration for OpenCodeIntegration {
                 &ctx.tracedecay_bin,
                 &ctx.serve_args,
             )?;
-        } else if core {
-            remove_legacy_lsp_registration(&opencode_config_path(&ctx.home, &ctx.profile))?;
         }
         if core {
             let prompt = opencode_prompt_path(&ctx.home, &ctx.profile);
@@ -319,8 +301,6 @@ impl AgentIntegration for OpenCodeIntegration {
         let context_mcp = components.contains(&HostComponentV1::ContextMcp);
         if context_mcp {
             uninstall_mcp_server(&opencode_config_path(&ctx.home, &ctx.profile))?;
-        } else if core {
-            remove_legacy_lsp_registration(&opencode_config_path(&ctx.home, &ctx.profile))?;
         }
         if core {
             let prompt = opencode_prompt_path(&ctx.home, &ctx.profile);
@@ -403,9 +383,6 @@ fn local_config_has_tracedecay(project_root: &Path) -> bool {
 
 fn config_has_tracedecay(config: &Value) -> bool {
     config.pointer(MCP_SERVER_POINTER).is_some()
-        || config
-            .pointer(&format!("/mcp/{LEGACY_MCP_SERVER_KEY}"))
-            .is_some()
 }
 
 // Config path resolution
@@ -697,9 +674,7 @@ fn install_mcp_server(
 }
 
 /// Merge TraceDecay's registration into the config parsed from the bytes
-/// observed under the write lock, returning the replacement value. A V1-era
-/// `mcp.tracedecay` entry is folded into the native `mcp.servers` map, while
-/// the retired `lsp.tracedecay` registration is removed.
+/// observed under the write lock, returning the replacement value.
 fn merge_mcp_registration(
     config_path: &Path,
     mut config: serde_json::Value,
@@ -716,12 +691,6 @@ fn merge_mcp_registration(
         .ok_or_else(|| TraceDecayError::Config {
             message: format!("{} must contain a JSON object", config_path.display()),
         })?;
-    if let Some(lsp) = config_object
-        .get_mut("lsp")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        lsp.remove("tracedecay");
-    }
     let mcp = config_object
         .entry("mcp")
         .or_insert_with(|| json!({}))
@@ -729,7 +698,6 @@ fn merge_mcp_registration(
         .ok_or_else(|| TraceDecayError::Config {
             message: format!("{}.mcp must be a JSON object", config_path.display()),
         })?;
-    mcp.remove(LEGACY_MCP_SERVER_KEY);
     let servers = mcp
         .entry("servers")
         .or_insert_with(|| json!({}))
@@ -781,14 +749,13 @@ enum OpenCodeRegistrationRemoval {
     Rewritten,
 }
 
-/// Remove TraceDecay's MCP server and retired custom-LSP entry from
-/// `opencode.json`.
+/// Remove TraceDecay's MCP server from `opencode.json`.
 fn uninstall_mcp_server(config_path: &Path) -> Result<()> {
     if !config_path.exists() {
         return Ok(());
     }
     let outcome = update_text_file_transactionally(config_path, |existing: &str| {
-        strip_registration_entries(config_path, existing, true, true)
+        strip_registration_entries(config_path, existing)
     })?;
     match outcome {
         OpenCodeRegistrationRemoval::NoEntry => {
@@ -813,57 +780,25 @@ fn uninstall_mcp_server(config_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Remove only the retired custom-LSP entry during an explicit Core lifecycle.
-///
-/// Core stages `opencode.json` only to remove the key prior releases wrote.
-/// Unparseable operator config is left untouched; MCP lifecycle edits remain strict.
-fn remove_legacy_lsp_registration(config_path: &Path) -> Result<()> {
-    if !config_path.exists() {
-        return Ok(());
-    }
-    update_text_file_transactionally(config_path, |existing: &str| {
-        if let Err(error) = JsonConfigDialect::Json.parse_for_edit(config_path, existing) {
-            tracing::warn!(path = %config_path.display(), %error, "Skipped retired OpenCode LSP cleanup; operator config is unparseable");
-            return Ok(((), TextFileMutation::Unchanged));
-        }
-        strip_registration_entries(config_path, existing, false, true)
-            .map(|(_, mutation)| ((), mutation))
-    })?;
-    Ok(())
-}
-
-/// Strip TraceDecay's selected native or V1-era registrations from the config
-/// bytes observed under the write lock, deciding between a rewrite and
+/// Strip TraceDecay's native registration from the config bytes observed
+/// under the write lock, deciding between a rewrite and
 /// removal of an emptied file. Containers the install created are pruned by
 /// the creation ledger when they empty.
 fn strip_registration_entries(
     config_path: &Path,
     existing: &str,
-    remove_mcp: bool,
-    remove_lsp: bool,
 ) -> Result<(OpenCodeRegistrationRemoval, TextFileMutation)> {
     let mut config = JsonConfigDialect::Json.parse_for_edit(config_path, existing)?;
     // Uninstall drops only what TraceDecay wrote. A plugin registration the
     // host recorded through `opencode plugin add` is not ours to remove.
     let host_plugin_before = plugin_cli::host_owned_plugin_registration(&config);
-    let removed_legacy_mcp = remove_mcp
-        && config
-            .get_mut("mcp")
-            .and_then(serde_json::Value::as_object_mut)
-            .is_some_and(|mcp| mcp.remove(LEGACY_MCP_SERVER_KEY).is_some());
-    let removed_native_mcp = remove_mcp
-        && config
-            .get_mut("mcp")
-            .and_then(serde_json::Value::as_object_mut)
-            .and_then(|mcp| mcp.get_mut("servers"))
-            .and_then(serde_json::Value::as_object_mut)
-            .is_some_and(|servers| servers.remove("tracedecay").is_some());
-    let removed_lsp = remove_lsp
-        && config
-            .get_mut("lsp")
-            .and_then(serde_json::Value::as_object_mut)
-            .is_some_and(|lsp| lsp.remove("tracedecay").is_some());
-    if !removed_legacy_mcp && !removed_native_mcp && !removed_lsp {
+    let removed_native_mcp = config
+        .get_mut("mcp")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|mcp| mcp.get_mut("servers"))
+        .and_then(serde_json::Value::as_object_mut)
+        .is_some_and(|servers| servers.remove("tracedecay").is_some());
+    if !removed_native_mcp {
         return Ok((
             OpenCodeRegistrationRemoval::NoEntry,
             TextFileMutation::Unchanged,
@@ -901,19 +836,6 @@ fn doctor_check_config(dc: &mut DoctorCounters, home: &Path, profile: &ProfileRo
     }
 
     let config = load_json_file(&config_path);
-    if config
-        .pointer(&format!("/mcp/{LEGACY_MCP_SERVER_KEY}"))
-        .is_some()
-    {
-        dc.fail(
-            "V1-era `mcp.tracedecay` registration still present, run `tracedecay install --agent opencode`",
-        );
-    }
-    if config.pointer("/lsp/tracedecay").is_some() {
-        dc.fail(
-            "retired `lsp.tracedecay` registration still present, run `tracedecay install --agent opencode`",
-        );
-    }
     let Some(mcp_entry) = config
         .pointer(MCP_SERVER_POINTER)
         .filter(|entry| entry.is_object())
@@ -1020,137 +942,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&config).unwrap(), "{not-json");
     }
 
-    #[test]
-    fn existing_core_with_legacy_lsp_requires_activation() {
-        use crate::agents::host_bundle::{HostBundleRegistrationStateV1 as State, HostComponentV1};
-
-        let home = tempfile::tempdir().unwrap();
-        let profile = ProfileRoot::under_home(home.path());
-        let config = opencode_config_path(home.path(), &profile);
-        install_opencode_plugin(
-            &opencode_plugin_path(home.path(), &profile),
-            "/usr/bin/tracedecay",
-        )
-        .unwrap();
-        install_prompt_rules(&opencode_prompt_path(home.path(), &profile)).unwrap();
-        std::fs::write(&config, serde_json::to_vec(&json!({
-            "lsp": {"tracedecay": {"command": ["old-tracedecay", "lsp"]}, "operator": {"command": ["operator-lsp"]}},
-            "mcp": {"servers": {"docs": {"type": "remote", "url": "https://mcp.example.com"}}}
-        })).unwrap()).unwrap();
-        let ctx = HealthcheckContext {
-            home: home.path().to_path_buf(),
-            profile: profile.clone(),
-            project_path: home.path().to_path_buf(),
-            catalog_profiles: Default::default(),
-        };
-        assert_eq!(
-            OpenCodeIntegration.host_component_registration(HostComponentV1::Core, &ctx),
-            State::Repairable
-        );
-        remove_legacy_lsp_registration(&config).unwrap();
-        assert_eq!(
-            OpenCodeIntegration.host_component_registration(HostComponentV1::Core, &ctx),
-            State::Current
-        );
-        let config = crate::agents::load_json_file_strict(&config).unwrap();
-        assert!(config["lsp"].get("tracedecay").is_none());
-        assert_eq!(
-            config["lsp"]["operator"]["command"],
-            json!(["operator-lsp"])
-        );
-        assert_eq!(config["mcp"]["servers"]["docs"]["type"], "remote");
-    }
-
-    #[test]
-    fn legacy_mcp_registration_remains_detectable_for_migration() {
-        let home = tempfile::tempdir().unwrap();
-        let profile = ProfileRoot::under_home(home.path());
-        let config = opencode_config_path(home.path(), &profile);
-        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-        std::fs::write(
-            &config,
-            serde_json::to_vec(&json!({
-                "mcp": {
-                    "tracedecay": {
-                        "type": "local",
-                        "command": ["tracedecay", "serve"]
-                    }
-                }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        assert!(OpenCodeIntegration.has_tracedecay(home.path(), &profile));
-
-        let project = tempfile::tempdir().unwrap();
-        std::fs::write(
-            project.path().join("opencode.json"),
-            std::fs::read(&config).unwrap(),
-        )
-        .unwrap();
-        assert!(local_config_has_tracedecay(project.path()));
-    }
-
-    #[test]
-    fn doctor_reports_retired_lsp_registration() {
-        let home = tempfile::tempdir().unwrap();
-        let profile = ProfileRoot::under_home(home.path());
-        let config = opencode_config_path(home.path(), &profile);
-        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-        for (mcp, legacy_mcp) in [
-            (
-                json!({
-                    "servers": {
-                        "tracedecay": {
-                            "type": "local",
-                            "command": ["tracedecay", "serve"]
-                        }
-                    }
-                }),
-                false,
-            ),
-            (
-                json!({
-                    "tracedecay": {
-                        "type": "local",
-                        "command": ["tracedecay", "serve"]
-                    }
-                }),
-                true,
-            ),
-            (Value::Null, false),
-        ] {
-            std::fs::write(
-                &config,
-                serde_json::to_vec(&json!({
-                    "mcp": mcp,
-                    "lsp": {
-                        "tracedecay": {
-                            "command": ["tracedecay", "lsp"]
-                        }
-                    }
-                }))
-                .unwrap(),
-            )
-            .unwrap();
-
-            let mut counters = DoctorCounters::new();
-            doctor_check_config(&mut counters, home.path(), &profile);
-
-            assert!(counters.checks.iter().any(|check| {
-                check.level == crate::agents::DoctorCheckLevelV1::Issue
-                    && check.message.contains("lsp.tracedecay")
-            }));
-            assert_eq!(
-                counters.checks.iter().any(|check| {
-                    check.level == crate::agents::DoctorCheckLevelV1::Issue
-                        && check.message.contains("mcp.tracedecay")
-                }),
-                legacy_mcp
-            );
-        }
-    }
-
     /// The profile's `$XDG_CONFIG_HOME` is honored only inside the home being
     /// resolved: otherwise a managed-skill export sweep handed a sandbox home
     /// resolves OpenCode to the operator's real `~/.config/opencode` and
@@ -1182,20 +973,19 @@ mod tests {
     }
 
     #[test]
-    fn mcp_registration_migrates_v1_entries_and_preserves_operator_lsp_servers() {
+    fn mcp_registration_replaces_its_entry_and_preserves_operator_lsp_servers() {
         let home = tempfile::tempdir().unwrap();
         let config_path = home.path().join("opencode.json");
         std::fs::write(
             &config_path,
             serde_json::to_vec_pretty(&json!({
                 "mcp": {
-                    "tracedecay": {"type": "local", "command": ["old-tracedecay", "serve"]},
                     "servers": {
+                        "tracedecay": {"type": "local", "command": ["old-tracedecay", "serve"]},
                         "docs": {"type": "remote", "url": "https://mcp.example.com"}
                     }
                 },
                 "lsp": {
-                    "tracedecay": {"command": ["old-tracedecay", "lsp", "bridge", "--stdio"]},
                     "operator": {"command": ["operator-lsp"]}
                 },
                 "plugins": ["opencode-acme-plugin"]
@@ -1216,9 +1006,7 @@ mod tests {
             config["mcp"]["servers"]["tracedecay"],
             json!({"type": "local", "command": ["/usr/bin/tracedecay", "serve"]})
         );
-        assert!(config["mcp"].get("tracedecay").is_none());
         assert_eq!(config["mcp"]["servers"]["docs"]["type"], "remote");
-        assert!(config["lsp"].get("tracedecay").is_none());
         assert_eq!(
             config["lsp"]["operator"]["command"],
             json!(["operator-lsp"])

@@ -22,8 +22,6 @@ import {
   runIsTerminal,
   runStateKind,
   searchLane,
-  SEMANTIC_UNREGISTERED_DETAIL,
-  semanticLane,
   type ExplorerLaneReadModel,
 } from './laneModel.ts';
 
@@ -534,22 +532,6 @@ describe('laneFromTransport', () => {
     });
     expect(laneStateKind(locked)).toBe('locked');
     expect(laneStateDetail(locked)).toBe('read-only for non-active projects');
-  });
-});
-
-describe('semanticLane', () => {
-  it('is a standing typed absence, not an unavailable source and not an empty answer', () => {
-    const lane = semanticLane();
-    expect(lane.state).toBe('unregistered');
-    expect(lane.lane).toBe('semantic');
-    // Rendered with the taxonomy's unavailable chip, but the detail names the
-    // contract fact: there is no source to have declined.
-    expect(laneStateKind(lane)).toBe('unavailable');
-    expect(laneStateDetail(lane)).toBe(SEMANTIC_UNREGISTERED_DETAIL);
-    expect(laneHits(lane)).toEqual([]);
-    expect(laneAnswered(lane)).toBe(false);
-    expect(lanePending(lane)).toBe(false);
-    expect(laneEvidence(lane)).toBe('unknown');
   });
 });
 

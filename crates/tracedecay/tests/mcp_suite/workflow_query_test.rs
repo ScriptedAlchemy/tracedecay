@@ -214,12 +214,14 @@ async fn call_md(cg: &TraceDecay, tool: &str, mut args: Value) -> String {
         },
     })
     .to_string();
-    let response =
-        crate::mcp_server_test::run_client_connection_with_messages(server.clone(), vec![request])
-            .await
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| panic!("{tool} should return one MCP response"));
+    let response = crate::mcp_server_test::support::run_client_connection_with_messages(
+        server.clone(),
+        vec![request],
+    )
+    .await
+    .into_iter()
+    .next()
+    .unwrap_or_else(|| panic!("{tool} should return one MCP response"));
     server.shutdown().await;
     let response: Value = serde_json::from_str(&response)
         .unwrap_or_else(|error| panic!("{tool} should return MCP JSON: {error}"));

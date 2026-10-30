@@ -97,7 +97,7 @@ pub(super) struct RunLedgerRowProjection {
     pub(super) status: AutomationRunStatus,
     pub(super) trigger: AutomationTrigger,
     pub(super) task: AgentTaskKind,
-    pub(super) task_key: Option<String>,
+    pub(super) task_key: String,
     /// True when the row's `error` field is exactly the session-evidence
     /// budget-exhausted token. The projection compares while
     /// streaming instead of capturing the field: failed runs carry
@@ -1105,6 +1105,7 @@ impl RecordFields {
             (self.run_id, "run_id"),
             (self.trigger, "trigger"),
             (self.task, "task"),
+            (self.task_key, "task_key"),
             (self.backend, "backend"),
             (self.status, "status"),
             (self.accepted_count, "accepted_count"),
@@ -1302,10 +1303,9 @@ impl<'a> JsonRangeReader<'a> {
                         return self.fail("duplicate task_key field");
                     }
                     task_key_seen = true;
-                    task_key = self.read_optional_string_bounded(
-                        PROJECTED_TEXT_MAX_BYTES,
-                        "automation task key",
-                    )?;
+                    task_key = Some(
+                        self.read_string_bounded(PROJECTED_TEXT_MAX_BYTES, "automation task key")?,
+                    );
                 }
                 "error" => {
                     if error_seen {
@@ -1384,7 +1384,8 @@ impl<'a> JsonRangeReader<'a> {
             trigger: trigger
                 .ok_or_else(|| config_error("automation ledger row is missing trigger"))?,
             task: task.ok_or_else(|| config_error("automation ledger row is missing task"))?,
-            task_key,
+            task_key: task_key
+                .ok_or_else(|| config_error("automation ledger row is missing task_key"))?,
             session_evidence_budget_exhausted_error,
             started_at: started_at
                 .ok_or_else(|| config_error("automation ledger row is missing started_at"))?,
@@ -1411,11 +1412,13 @@ impl<'a> JsonRangeReader<'a> {
                 "run_id" => reader.validate_string("automation run identity"),
                 "trigger" => reader.validate_enum("automation run trigger", parse_trigger),
                 "task" => reader.validate_enum("automation task kind", parse_task),
-                "task_key" | "host_mode" | "prompt_version" | "model" | "evidence_hash"
-                | "input_hash" | "output_hash" | "error" | "fallback_status" => {
+                "host_mode" | "prompt_version" | "model" | "evidence_hash" | "input_hash"
+                | "output_hash" | "error" | "fallback_status" => {
                     reader.validate_optional_string(key)
                 }
-                "backend" | "started_at" | "completed_at" => reader.validate_string(key),
+                "task_key" | "backend" | "started_at" | "completed_at" => {
+                    reader.validate_string(key)
+                }
                 "response_schema" | "proposed_ops" | "applied_ops" | "rejected_ops"
                 | "validation_report" | "report_ref" => reader.validate_optional_json_value(2),
                 "strict_json" | "error_retryable" => reader.validate_optional_bool(key),
@@ -1982,19 +1985,6 @@ impl<'a> JsonRangeReader<'a> {
         Ok(())
     }
 
-    fn read_optional_string_bounded(
-        &mut self,
-        limit: usize,
-        label: &str,
-    ) -> Result<Option<String>> {
-        if self.peek_byte()? == Some(b'n') {
-            self.skip_literal(b"null")?;
-            Ok(None)
-        } else {
-            self.read_string_bounded(limit, label).map(Some)
-        }
-    }
-
     fn read_string_bounded(&mut self, limit: usize, label: &str) -> Result<String> {
         self.read_string(Some(limit), label)?
             .ok_or_else(|| config_error(format!("failed to capture {label}")))
@@ -2417,7 +2407,7 @@ mod tests {
     fn ledger_line(run_id: &str, status: &str, completed_at: i64) -> String {
         format!(
             "{{\"schema_version\":2,\"run_id\":\"{run_id}\",\"trigger\":\"scheduler\",\
-             \"task\":\"memory_curator\",\"backend\":\"codex_app_server\",\"status\":\"{status}\",\
+             \"task\":\"memory_curator\",\"task_key\":\"memory_curator\",\"backend\":\"codex_app_server\",\"status\":\"{status}\",\
              \"accepted_count\":0,\"rejected_count\":0,\"started_at\":\"{completed_at}\",\
              \"completed_at\":\"{completed_at}\",\"completed_at_micros\":{}}}",
             completed_at.saturating_mul(1_000_000),
@@ -2479,7 +2469,7 @@ mod tests {
     #[test]
     fn rejects_schema_v1_rfc3339_row() {
         let line = "{\"schema_version\":1,\"run_id\":\"target\",\"trigger\":\"manual_cli\",\
-                    \"task\":\"memory_curator\",\"backend\":\"codex_app_server\",\"status\":\"succeeded\",\
+                    \"task\":\"memory_curator\",\"task_key\":\"memory_curator\",\"backend\":\"codex_app_server\",\"status\":\"succeeded\",\
                     \"accepted_count\":0,\"rejected_count\":0,\"started_at\":\"1970-01-01T00:00:01Z\",\
                     \"completed_at\":\"1970-01-01T00:00:02Z\"}";
         let (_temp, path) = write_ledger(&[line.to_owned()]);
@@ -2488,7 +2478,7 @@ mod tests {
             read_exact_run_record_bounded(&path, "target")
                 .unwrap_err()
                 .to_string(),
-            "automation run ledger persisted shape requires reset: a row predates schema v2 (the released v1 wrote RFC3339 timestamps)"
+            "automation run ledger persisted shape requires reset: a row has retired schema version 1"
         );
     }
 
@@ -2501,7 +2491,7 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             format!(
-                "config error: automation run ledger '{}' contains malformed JSON at byte 240: automation ledger row must be a JSON object",
+                "config error: automation run ledger '{}' contains malformed JSON at byte 268: automation ledger row must be a JSON object",
                 malformed_path.display()
             )
         );
@@ -2562,7 +2552,7 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             format!(
-                "config error: automation run ledger '{}' contains malformed JSON at byte 155: automation run status exceeds its 32-byte bound",
+                "config error: automation run ledger '{}' contains malformed JSON at byte 183: automation run status exceeds its 32-byte bound",
                 huge_status_path.display()
             )
         );
@@ -2586,7 +2576,7 @@ mod tests {
 
     #[test]
     fn escaped_identity_and_crlf_preserve_exact_digest_span() {
-        let raw = "  {\"schema_version\":2,\"run_\\u0069d\":\"tar\\u0067et\",\"trigger\":\"scheduler\",\"task\":\"memory_curator\",\"backend\":\"codex_app_server\",\"status\":\"running\",\"accepted_count\":0,\"rejected_count\":0,\"started_at\":\"1\",\"completed_at\":\"1\",\"payload\":\"large\"}  \r\n";
+        let raw = "  {\"schema_version\":2,\"run_\\u0069d\":\"tar\\u0067et\",\"trigger\":\"scheduler\",\"task\":\"memory_curator\",\"task_key\":\"memory_curator\",\"backend\":\"codex_app_server\",\"status\":\"running\",\"accepted_count\":0,\"rejected_count\":0,\"started_at\":\"1\",\"completed_at\":\"1\",\"payload\":\"large\"}  \r\n";
         let temp = tempfile::TempDir::new().expect("temp dir");
         let path = temp.path().join(super::super::RUN_LEDGER_FILENAME);
         std::fs::write(&path, raw).expect("ledger");
@@ -2626,7 +2616,7 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             format!(
-                "config error: automation run ledger '{}' contains malformed JSON at byte 2097357: invalid JSON number",
+                "config error: automation run ledger '{}' contains malformed JSON at byte 2097385: invalid JSON number",
                 path.display()
             )
         );
@@ -2655,7 +2645,7 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             format!(
-                "config error: automation run ledger '{}' contains malformed JSON at byte 393: invalid JSON number",
+                "config error: automation run ledger '{}' contains malformed JSON at byte 449: invalid JSON number",
                 path.display()
             )
         );
@@ -2679,7 +2669,7 @@ mod tests {
                         "\"started_at\":\"1\"",
                         "\"started_at\":\"1970-01-01T00:00:01Z\"",
                     ),
-                "automation run ledger persisted shape requires reset: a row predates schema v2 (the released v1 wrote RFC3339 timestamps)",
+                "automation run ledger persisted shape requires reset: a row has retired schema version 1",
             ),
             (
                 unrelated.clone().replace(
@@ -2733,8 +2723,10 @@ mod tests {
     #[test]
     fn exact_lookup_rejects_lifecycle_identity_mutation() {
         let queued = ledger_line("target", "queued", 1);
-        let terminal = ledger_line("target", "succeeded", 2)
-            .replace("\"task\":\"memory_curator\"", "\"task\":\"skill_writer\"");
+        let terminal = ledger_line("target", "succeeded", 2).replace(
+            "\"task\":\"memory_curator\",\"task_key\":\"memory_curator\"",
+            "\"task\":\"skill_writer\",\"task_key\":\"skill_writer\"",
+        );
         let (_temp, path) = write_ledger(&[queued, terminal]);
 
         assert_eq!(

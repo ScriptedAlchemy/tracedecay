@@ -103,21 +103,6 @@ describe("runAutomaticCurator", () => {
     expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
   });
 
-  it("rejects the retired run terminal in place of the receipt", async () => {
-    const { state: _state, ...identity } = startedReceipt("request.dashboard.success");
-    respond({
-      run: {
-        ...identity,
-        terminal: {
-          status: "completed",
-          summary: { reviewed_count: 0, accepted_count: 0, rejected_count: 0, skipped_count: 0 },
-        },
-        committed_receipts: [],
-      },
-    });
-    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
-  });
-
   it("rejects success and admitted-problem envelopes from another HTTP binding", async () => {
     const success = curatorSuccess(startedReceipt("request.dashboard.success"));
     success.value.binding_id = "binding.http.fact_store_get.v1";
@@ -550,12 +535,6 @@ describe("the generated scheduler contract", () => {
     expect(parsed.tasks[0]?.last_scheduler_run).toBeNull();
   });
 
-  it("rejects the retired pending-review scheduler shape", () => {
-    const parsed = AutomationSchedulerStatusV1Schema.safeParse(
-      scheduler({ legacy_queue: { count: 0 } }),
-    );
-    expect(parsed.success).toBe(false);
-  });
 });
 
 describe("automatic outcome payload", () => {
@@ -620,35 +599,6 @@ describe("automatic outcome payload", () => {
     expect(parsed.facts[1]?.verdict).toBe("quarantined");
     expect(parsed.facts[2]?.verdict).toBe("unavailable");
     expect(parsed.snapshot.facts_refreshed_at).toBeNull();
-  });
-
-  it("rejects the retired proposal and applied-at fact outcome shape", () => {
-    const parsed = AutomationOutcomesPayloadSchema.safeParse({
-      generated_at: 1_700_000_000,
-      skills: [],
-      facts: [
-        {
-          proposal_id: "apply-1",
-          run_id: "run-1",
-          fact_id: "fact-1",
-          applied_at: 1_699_000_000,
-          days_since_applied: 1,
-          retrieval_count: 2,
-          access_count: 1,
-          helpful_count: 1,
-          unhelpful_count: 0,
-          still_exists: true,
-          verdict: "recalled_and_helpful",
-        },
-      ],
-      snapshot: {
-        available: true,
-        skills_refreshed_at: null,
-        facts_refreshed_at: 1_700_000_000,
-      },
-      error: "",
-    });
-    expect(parsed.success).toBe(false);
   });
 
   it("rejects producer-impossible fact state, identity, and telemetry combinations", () => {

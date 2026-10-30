@@ -1098,33 +1098,9 @@ mod need_provenance_tests {
         );
     }
 
-    /// The held-out Student-t gate was deleted with the dense lane it governed,
-    /// and schema 1 cannot express a replacement. A workload declaring a
-    /// methodology, a practical-effect bound, a policy freeze, or the retired
-    /// single-variant decision-policy slice is refused rather than trusted as
-    /// activation authority.
+    /// The packaged matrix holds only the always-on baseline profile.
     #[test]
-    fn a_workload_declaring_a_qualification_methodology_is_refused() {
-        for field in [
-            "methodology_version",
-            "practical_effect_ppm",
-            "policy_freeze",
-            "decision_policy",
-        ] {
-            let mut json = serde_json::to_value(workload()).expect("serialize workload");
-            json[field] = serde_json::json!("held_out_student_t_v1");
-            let error = serde_json::from_value::<CandidateWorkloadV1>(json)
-                .expect_err("schema 1 carries no qualification methodology")
-                .to_string();
-            assert!(error.contains(field), "{error}");
-        }
-    }
-
-    /// Nothing is left to qualify: the packaged matrix holds only the always-on
-    /// baseline, so there is no candidate profile a paired held-out effect could
-    /// be measured against.
-    #[test]
-    fn the_packaged_matrix_has_no_candidate_profile_to_qualify() {
+    fn the_packaged_matrix_holds_only_the_baseline_profile() {
         assert_eq!(
             workload()
                 .profile_matrix

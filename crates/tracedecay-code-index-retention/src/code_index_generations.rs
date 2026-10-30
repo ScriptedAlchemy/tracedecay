@@ -112,9 +112,6 @@ use generation_scan::{read_generation_format_revision, read_generation_metadata}
 use scope_quarantine::ScopeQuarantineAuthority;
 
 pub const MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1: usize = 32;
-/// Persisted-receipt value of the retired superseded-generation rollback
-/// reserve; see `CodeGenerationRetentionReceiptV1::rollback_floor`.
-const RECEIPT_ROLLBACK_FLOOR: usize = 0;
 pub const MAX_DURABLE_GENERATION_INDEX_BYTES_V1: u64 = 8 * 1024 * 1024 * 1024;
 pub const MAX_DURABLE_GENERATION_INDEX_TTL_MICROS_V1: i64 = 7 * 24 * 60 * 60 * 1_000_000;
 pub const MAX_DURABLE_PUBLICATION_POINTER_BYTES_V1: u64 = 512 * 1024;
@@ -144,7 +141,7 @@ const GENERATION_SEGMENTS_DIRECTORY: &str = "code-generation-segments-v1";
 const RECEIPTS_DIRECTORY: &str = "code-generation-retention-receipts-v1";
 const QUARANTINE_DIRECTORY: &str = ".code-generation-retention-quarantine-v1";
 const STORE_LOCK_FILE: &str = ".code-generation-retention.lock";
-const RECEIPT_SCHEMA: &str = "tracedecay.code-generation-retention-receipt.v1";
+const RECEIPT_SCHEMA: &str = "tracedecay.code-generation-retention-receipt.v2";
 const TRANSACTION_FILE: &str = ".code-generation-retention-transaction-v1.json";
 const TRANSACTION_SCHEMA: &str = "tracedecay.code-generation-retention-transaction.v1";
 /// Write context for the durable index rewrite that precedes every unlink.
@@ -217,33 +214,6 @@ pub struct DurableCodeTextArtifactDescriptorV1 {
     pub content_key: ManifestDigest,
 }
 
-/// A text artifact descriptor published before artifacts carried a content
-/// key. Every such artifact predates the current format, so it is never
-/// opened or adopted; the slot stays in the durable index, byte for byte, only
-/// until its generation seals a current artifact or leaves the index.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct RetiredCodeTextArtifactDescriptorV1 {
-    pub generation_id: CodeGenerationId,
-    pub artifact_file: String,
-    pub artifact_digest: ManifestDigest,
-    pub artifact_size_bytes: u64,
-}
-
-/// What a durable index entry records about its generation's text artifact.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(untagged)]
-pub enum DurableTextArtifactSlotV1 {
-    Current(DurableCodeTextArtifactDescriptorV1),
-    Retired(RetiredCodeTextArtifactDescriptorV1),
-}
-
-impl From<DurableCodeTextArtifactDescriptorV1> for DurableTextArtifactSlotV1 {
-    fn from(descriptor: DurableCodeTextArtifactDescriptorV1) -> Self {
-        Self::Current(descriptor)
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DurableGenerationCardinalityV1 {
@@ -259,7 +229,6 @@ pub struct DurableGenerationIndexEntryV1 {
     pub snapshot_content_identity: String,
     pub sealed_at_micros: i64,
     pub size_bytes: u64,
-    #[serde(default)]
     pub segment_bytes: u64,
     pub generation_file: String,
     pub state_digest: String,
@@ -267,22 +236,9 @@ pub struct DurableGenerationIndexEntryV1 {
     pub source_reference: Option<String>,
     pub source_revision: Option<String>,
     pub source_tree: Option<String>,
+    pub cardinality: DurableGenerationCardinalityV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cardinality: Option<DurableGenerationCardinalityV1>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text_artifact: Option<DurableTextArtifactSlotV1>,
-}
-
-impl DurableGenerationIndexEntryV1 {
-    /// The generation's current-format text artifact; a retired descriptor
-    /// names nothing a reader may open.
-    #[must_use]
-    pub fn text_artifact(&self) -> Option<&DurableCodeTextArtifactDescriptorV1> {
-        match self.text_artifact.as_ref()? {
-            DurableTextArtifactSlotV1::Current(descriptor) => Some(descriptor),
-            DurableTextArtifactSlotV1::Retired(_) => None,
-        }
-    }
+    pub text_artifact: Option<DurableCodeTextArtifactDescriptorV1>,
 }
 
 /// Apply the durable exact-generation history bounds in canonical oldest-first
@@ -419,7 +375,7 @@ impl<'entries> GenerationIndexByteAccountingV1<'entries> {
         let total = total
             .saturating_add(entry.size_bytes)
             .saturating_add(entry.segment_bytes);
-        match entry.text_artifact() {
+        match entry.text_artifact.as_ref() {
             Some(artifact) if self.artifacts_seen.insert(artifact.artifact_file.as_str()) => {
                 total.saturating_add(artifact.artifact_size_bytes)
             }
@@ -446,12 +402,9 @@ pub struct DurablePublicationPointerV1 {
     pub sealed_at_micros: i64,
     pub generation_file: String,
     pub state_digest: String,
-    #[serde(default)]
     pub generation_index: Vec<DurableGenerationIndexEntryV1>,
-    #[serde(default)]
     pub generation_index_truncated: bool,
-    #[serde(default)]
-    pub generation_index_digest: Option<String>,
+    pub generation_index_digest: String,
 }
 
 #[derive(Debug, Error)]
@@ -666,16 +619,9 @@ pub struct CodeGenerationRetentionReceiptV1 {
     pub schema: String,
     pub receipt_digest: String,
     /// `None` records an unpublished-store sweep (crash debris collected from
-    /// a store whose pointer was never written). Canonical serialization is
-    /// transparent over `Some`, so receipts written before this field became
-    /// optional keep their exact digests.
+    /// a store whose pointer was never written).
     pub active_generation_id: Option<CodeGenerationId>,
     pub vector_readable_sources: BTreeSet<CodeGenerationId>,
-    /// Always zero. The superseded-generation rollback reserve was never
-    /// configurable in production; the field stays in the persisted receipt
-    /// and its digest material so durable receipts written before the
-    /// parameter was removed still verify.
-    pub rollback_floor: usize,
     pub deleted_generations: Vec<CodeGenerationRetentionGenerationV1>,
     pub reclaimed_bytes: u64,
     pub completed_at_micros: i64,
@@ -704,7 +650,6 @@ struct CodeGenerationRetentionReceiptMaterialV1<'a> {
     schema: &'static str,
     active_generation_id: Option<&'a CodeGenerationId>,
     vector_readable_sources: &'a BTreeSet<CodeGenerationId>,
-    rollback_floor: usize,
     deleted_generations: &'a [CodeGenerationRetentionGenerationV1],
     reclaimed_bytes: u64,
     completed_at_micros: i64,
@@ -1297,14 +1242,6 @@ pub fn plan_code_generation_retention_with_verification_budgeted_cancellable(
     })
 }
 
-/// Seals once wrote a read bundle (a manifest beside the generation and a
-/// catalog artifact beside the segments) that copied the graph store's
-/// symbol, file, and import records. The graph store is their only owner
-/// now, so any file of that shape is unreferenced and reclaimable.
-fn is_retired_read_bundle_file(file_name: &str) -> bool {
-    file_name.starts_with("read-bundle-") || file_name.starts_with(".read-bundle-")
-}
-
 fn generation_file_digest(file_name: &str) -> Option<&str> {
     file_name
         .strip_prefix("generation-")?
@@ -1362,7 +1299,6 @@ fn sweep_unreferenced_generation_segments(
     let manifest_directories =
         segment_manifest_directories(store_root, &mut remaining_entries, is_cancelled)?;
     let mut live_segments = BTreeSet::new();
-    let mut retired_read_bundle_manifests = Vec::new();
     let mut mark_root = |root: &Path,
                          replay_pool: bool|
      -> Result<(), CodeGenerationRetentionErrorV1> {
@@ -1397,14 +1333,6 @@ fn sweep_unreferenced_generation_segments(
                     })?
                     .to_owned()
             } else {
-                if path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(is_retired_read_bundle_file)
-                {
-                    retired_read_bundle_manifests.push(path);
-                    continue;
-                }
                 let Some(file_name) = generation_file_name(&path) else {
                     continue;
                 };
@@ -1468,18 +1396,6 @@ fn sweep_unreferenced_generation_segments(
 
     let mut found = false;
     let mut reclaimed = 0_u64;
-    for path in retired_read_bundle_manifests {
-        let metadata = path.symlink_metadata().map_err(deferred_if_absent)?;
-        found = true;
-        if !apply {
-            return Ok((true, false));
-        }
-        std::fs::remove_file(&path).map_err(storage)?;
-        reclaimed = reclaimed.saturating_add(metadata.len());
-        if let Some(parent) = path.parent() {
-            sync_directory(parent)?;
-        }
-    }
     let mut reclaimed_segments = 0_usize;
     for entry in entries {
         if is_cancelled() {
@@ -1545,7 +1461,6 @@ fn sweep_unreferenced_generation_segments(
             .and_then(|name| name.strip_suffix(".json"))
             .filter(|digest| is_lowercase_hex(digest, 64))
             .map(|digest| format!("sha256:{digest}"))
-            .or_else(|| is_retired_read_bundle_file(file_name).then(|| file_name.to_owned()))
         else {
             continue;
         };
@@ -2253,10 +2168,10 @@ fn pointer_without_collected_generations(
     // this latch means: an absent entry stops proving the revision was never
     // indexed. Readers treat a truncated index as an ordinary miss.
     rewritten.generation_index_truncated = true;
-    rewritten.generation_index_digest = Some(durable_generation_index_digest(
+    rewritten.generation_index_digest = durable_generation_index_digest(
         &rewritten.generation_index,
         rewritten.generation_index_truncated,
-    )?);
+    )?;
     validate_durable_generation_index(&rewritten)?;
     Ok(Some(rewritten))
 }
@@ -2268,7 +2183,7 @@ fn validate_durable_generation_index(
         &pointer.generation_index,
         pointer.generation_index_truncated,
     )?;
-    if pointer.generation_index_digest.as_deref() != Some(expected_digest.as_str()) {
+    if pointer.generation_index_digest != expected_digest {
         return Err(CodeGenerationRetentionErrorV1::UnsafeState(
             "publication-pointer generation index digest does not match its entries".to_owned(),
         ));
@@ -2283,7 +2198,7 @@ fn validate_durable_generation_index(
                     .to_owned(),
             ));
         }
-        if let Some(artifact) = entry.text_artifact() {
+        if let Some(artifact) = entry.text_artifact.as_ref() {
             validate_text_artifact_descriptor(artifact)?;
             if artifact.generation_id.as_str() != entry.generation_id {
                 return Err(CodeGenerationRetentionErrorV1::UnsafeState(
@@ -2421,7 +2336,6 @@ fn build_receipt(
         schema: RECEIPT_SCHEMA,
         active_generation_id: plan.active_generation_id.as_ref(),
         vector_readable_sources: &plan.vector_readable_sources,
-        rollback_floor: RECEIPT_ROLLBACK_FLOOR,
         deleted_generations: &deleted_generations,
         reclaimed_bytes,
         completed_at_micros: completed_at.0,
@@ -2434,7 +2348,6 @@ fn build_receipt(
         receipt_digest,
         active_generation_id: plan.active_generation_id.clone(),
         vector_readable_sources: plan.vector_readable_sources.clone(),
-        rollback_floor: RECEIPT_ROLLBACK_FLOOR,
         deleted_generations,
         reclaimed_bytes,
         completed_at_micros: completed_at.0,

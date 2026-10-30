@@ -4342,46 +4342,4 @@ mod tests {
             "retained encoding memory must not scale with the full {published_bytes}-byte stream"
         );
     }
-
-    fn historical_fixture_root() -> std::path::PathBuf {
-        std::path::PathBuf::from("tests/fixtures/partitioned_pre_paging")
-    }
-
-    /// The archival carrier was sealed at revision seven, which named a
-    /// manifest both with and without its census and is therefore retired.
-    /// Every decoding reader refuses it with the typed rebuild error rather
-    /// than admitting either shape.
-    #[test]
-    fn archival_carrier_revision_is_refused_for_rebuild() {
-        let manifest = std::fs::read(historical_fixture_root().join("manifest.json"))
-            .expect("historical manifest");
-        let envelope: serde_json::Value =
-            serde_json::from_slice(&manifest).expect("historical manifest json");
-        let revision = u32::try_from(
-            envelope["generation"]["format_revision"]
-                .as_u64()
-                .expect("historical format revision"),
-        )
-        .expect("historical format revision fits u32");
-        assert!(
-            revision < SEALED_GENERATION_FORMAT_REVISION_V1,
-            "the archival carrier must stay behind the revision this build serves"
-        );
-        let Err(error) = parse_partitioned_manifest(&manifest) else {
-            panic!("a retired manifest revision must be refused, never migrated")
-        };
-
-        assert!(
-            matches!(
-                error,
-                CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(refused)
-                    if refused == revision
-            ),
-            "unexpected error: {error}"
-        );
-        assert!(
-            error.to_string().contains("will be rebuilt from source"),
-            "a retired revision must tell the operator it rebuilds: {error}"
-        );
-    }
 }

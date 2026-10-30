@@ -73,7 +73,6 @@ pub enum HostComponentV1 {
     Core,
     Agent,
     ContextMcp,
-    OperatorMcp,
 }
 
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
@@ -133,19 +132,15 @@ impl HostKindV1 {
     }
 
     pub fn descriptor(self) -> HostDescriptorV1 {
-        use HostComponentV1::{Agent, ContextMcp, Core, OperatorMcp};
+        use HostComponentV1::{Agent, ContextMcp, Core};
 
         let (cli_id, slug, components) = match self {
-            HostKindV1::ClaudeCode => {
-                ("claude", "claude-code", vec![Core, ContextMcp, OperatorMcp])
+            HostKindV1::ClaudeCode => ("claude", "claude-code", vec![Core, ContextMcp]),
+            HostKindV1::CursorDesktop => {
+                ("cursor", "cursor-desktop", vec![Core, Agent, ContextMcp])
             }
-            HostKindV1::CursorDesktop => (
-                "cursor",
-                "cursor-desktop",
-                vec![Core, Agent, ContextMcp, OperatorMcp],
-            ),
             HostKindV1::CursorCloud => ("cursor", "cursor-cloud", vec![]),
-            HostKindV1::Codex => ("codex", "codex", vec![Core, ContextMcp, OperatorMcp]),
+            HostKindV1::Codex => ("codex", "codex", vec![Core, ContextMcp]),
             HostKindV1::Devin => ("devin", "devin", vec![ContextMcp]),
             HostKindV1::Zed => ("zed", "zed", vec![ContextMcp]),
             HostKindV1::Antigravity => ("antigravity", "antigravity", vec![ContextMcp]),

@@ -13,20 +13,10 @@
  */
 import { matchedFieldNames, matchWindow } from '../../ui/search/terms.ts';
 
-/**
- * The four Explorer lanes. Three are backed by a coordinator source and can
- * deliver rows; `semantic` is the lane the product contract names for
- * semantic/graph retrieval, for which no production authority is registered
- * today. It is a lane so its absence is rendered as a typed state beside the
- * lanes that answer, never as a missing column a reader could mistake for
- * "nothing to say".
- */
-export type LaneId = 'code' | 'sessions' | 'knowledge' | 'semantic';
+/** The Explorer lanes. Each is backed by a coordinator source that can deliver rows. */
+export type LaneId = 'code' | 'sessions' | 'knowledge';
 
-/** The lanes a coordinator source answers for, the only lanes rows come from. */
-export type SourceLaneId = Exclude<LaneId, 'semantic'>;
-
-export const SOURCE_LANE_IDS: readonly SourceLaneId[] = ['code', 'sessions', 'knowledge'];
+export const SOURCE_LANE_IDS: readonly LaneId[] = ['code', 'sessions', 'knowledge'];
 
 export interface LaneSpec {
   readonly id: LaneId;
@@ -75,16 +65,6 @@ export const LANES: readonly LaneSpec[] = [
     textClass: 'text-state-ready',
     facetLabel: 'Category',
   },
-  {
-    id: 'semantic',
-    label: 'Semantic',
-    searches: 'nothing: no semantic retrieval authority is registered with the coordinator',
-    browseLabel: 'nothing: no semantic index is served',
-    countLabel: 'Semantic matches',
-    railClass: 'bg-state-locked',
-    textClass: 'text-state-locked',
-    facetLabel: 'Basis',
-  },
 ];
 
 interface Signal {
@@ -99,7 +79,7 @@ interface Signal {
 
 export interface Hit {
   readonly key: string;
-  readonly lane: SourceLaneId;
+  readonly lane: LaneId;
   /** 1-based position in the named response collection. */
   readonly rank: number;
   readonly orderLabel: string;

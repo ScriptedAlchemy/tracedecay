@@ -79,7 +79,11 @@ fn refresh_daemon_service_after_update(
             );
             print_daemon_transport_location(&socket_path);
         }
-        None if daemon_control::daemon_reachable(profile) => {
+        None if daemon_control::daemon_reachable(
+            profile,
+            crate::product_runtime::PRODUCT_BUILD_VERSION,
+        ) =>
+        {
             eprintln!(
                 "  \x1b[33mwarning:\x1b[0m a TraceDecay daemon is running without an installed service; \
                  it keeps serving the previous version until its `tracedecay daemon run` process is restarted."
@@ -496,7 +500,7 @@ fn restored_daemon_pending_resets(
     operation: &str,
     expected_version: &str,
 ) -> Vec<StoreResetRequiredV1> {
-    if !daemon_control::daemon_reachable(profile) {
+    if !daemon_control::daemon_reachable(profile, crate::product_runtime::PRODUCT_BUILD_VERSION) {
         eprintln!(
             "No reachable TraceDecay daemon after {operation}; the profile's persisted shape is \
              checked on the daemon's next open."

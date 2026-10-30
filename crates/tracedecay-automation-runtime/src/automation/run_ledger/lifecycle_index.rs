@@ -65,7 +65,7 @@ const RUN_LEDGER_INDEX_CAPACITY: usize = 64;
 pub(super) struct LifecycleRow<'a> {
     task: AgentTaskKind,
     trigger: AutomationTrigger,
-    task_key: Option<&'a str>,
+    task_key: &'a str,
     status: AutomationRunStatus,
     completion: (i64, i64),
 }
@@ -76,7 +76,7 @@ impl<'a> LifecycleRow<'a> {
         Ok(Self {
             task: row.task,
             trigger: row.trigger,
-            task_key: row.task_key.as_deref(),
+            task_key: &row.task_key,
             status: row.status,
             completion: (completed_at, completed_at_micros),
         })
@@ -91,7 +91,7 @@ impl<'a> LifecycleRow<'a> {
         Ok(Self {
             task: record.task,
             trigger: record.trigger,
-            task_key: record.task_key.as_deref(),
+            task_key: &record.task_key,
             status: record.status,
             completion,
         })
@@ -99,7 +99,6 @@ impl<'a> LifecycleRow<'a> {
 
     fn effective_task_key(&self) -> &'a str {
         self.task_key
-            .unwrap_or_else(|| canonical_task_key(self.task))
     }
 }
 
@@ -498,7 +497,7 @@ mod tests {
     fn ledger_line(run_id: &str, status: &str, completed_at: i64) -> String {
         format!(
             "{{\"schema_version\":2,\"run_id\":\"{run_id}\",\"trigger\":\"scheduler\",\
-             \"task\":\"memory_curator\",\"backend\":\"codex_app_server\",\"status\":\"{status}\",\
+             \"task\":\"memory_curator\",\"task_key\":\"memory_curator\",\"backend\":\"codex_app_server\",\"status\":\"{status}\",\
              \"accepted_count\":0,\"rejected_count\":0,\"started_at\":\"{completed_at}\",\
              \"completed_at\":\"{completed_at}\",\"completed_at_micros\":{}}}",
             completed_at.saturating_mul(1_000_000),

@@ -138,11 +138,7 @@ impl BranchGenerationCardinalityBoundsV1 {
         self,
         entry: &tracedecay_code_index_retention::code_index_generations::DurableGenerationIndexEntryV1,
     ) -> bool {
-        let Some(cardinality) = entry.cardinality.as_ref() else {
-            // Older persisted entries did not carry the authenticated summary.
-            // They remain readable through the ordinary decode-and-validate path.
-            return true;
-        };
+        let cardinality = &entry.cardinality;
         usize::try_from(cardinality.file_count).is_ok_and(|count| count <= self.maximum_files)
             && usize::try_from(cardinality.chunk_count)
                 .is_ok_and(|count| count <= self.maximum_chunks)
@@ -582,10 +578,7 @@ mod tests {
     use tracedecay_query::code_search;
 
     use super::*;
-    use crate::code_index_branch_diff::{
-        CodeIndexRevisionPairRequestV1, bounded_diff, diff_symbols, generation_symbols,
-        revision_pair_layout_inputs,
-    };
+    use crate::code_index_branch_diff::{bounded_diff, diff_symbols, generation_symbols};
     use crate::code_index_scheduler::{
         CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
     };
@@ -850,26 +843,6 @@ mod tests {
             "authenticated cardinality admission must not read sealed bytes"
         );
         drop(active_decode);
-        clear_generation_cardinality(&scoped_store, &large_revision);
-        assert!(matches!(
-            revision_pair_layout_inputs(
-                &registry,
-                &scope,
-                CodeIndexRevisionPairRequestV1 {
-                    base_reference: reference.clone(),
-                    base_revision: large_revision.clone(),
-                    base_tree: large_tree.clone(),
-                    head_reference: reference.clone(),
-                    head_revision: large_revision.clone(),
-                    head_tree: large_tree.clone(),
-                    file_filter: None,
-                    kind_filter: None,
-                    control: control.clone(),
-                },
-            )
-            .await,
-            Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable)
-        ));
         let started = std::time::Instant::now();
         let outcome = bounded_diff(
             large_generation.generation(),
@@ -1291,40 +1264,14 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&pointer_path).expect("read pointer"))
                 .expect("decode publication pointer");
         pointer.generation_index_truncated = true;
-        pointer.generation_index_digest = Some(
+        pointer.generation_index_digest =
             durable_generation_index_digest(&pointer.generation_index, true)
-                .expect("digest truncated publication index"),
-        );
+                .expect("digest truncated publication index");
         std::fs::write(
             &pointer_path,
             serde_json::to_vec(&pointer).expect("encode truncated pointer"),
         )
         .expect("write truncated publication pointer");
-    }
-
-    fn clear_generation_cardinality(scoped_store: &Path, revision: &GitOidV1) {
-        let pointer_path = scoped_store.join("active-code-generation-v1.json");
-        let mut pointer: DurablePublicationPointerV1 =
-            serde_json::from_slice(&std::fs::read(&pointer_path).expect("read pointer"))
-                .expect("decode publication pointer");
-        pointer
-            .generation_index
-            .iter_mut()
-            .find(|entry| entry.source_revision.as_deref() == Some(revision.as_str()))
-            .expect("revision entry")
-            .cardinality = None;
-        pointer.generation_index_digest = Some(
-            durable_generation_index_digest(
-                &pointer.generation_index,
-                pointer.generation_index_truncated,
-            )
-            .expect("digest generation index"),
-        );
-        std::fs::write(
-            &pointer_path,
-            serde_json::to_vec(&pointer).expect("encode pointer"),
-        )
-        .expect("write pointer");
     }
 
     async fn settled_pair(

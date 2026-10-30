@@ -63,7 +63,7 @@ async fn run_scope_set_compare_and_swap() {
         project_path: Some(alpha.clone()),
         allow_init: true,
         client_identity,
-        client_instance_id: "mcp-scope-set-cas".to_owned(),
+        client_instance_id: super::client_instance_id_for_label("mcp-scope-set-cas"),
         ..test_handshake_defaults()
     };
     // Both roots must be registered before the call. A selector the daemon

@@ -78,9 +78,8 @@ pub struct GenerationCensusStatistics {
     pub symbol_count: u64,
     pub edge_count: u64,
     /// References the generic name resolver dropped for multiple matching definitions.
-    /// Excludes module-specific resolution. `None` means the count was not measured.
-    #[serde(default)]
-    pub ambiguous_name_drops: Option<u64>,
+    /// Excludes module-specific resolution.
+    pub ambiguous_name_drops: u64,
 }
 
 /// Freshness of the exact graph generation whose census is reported.

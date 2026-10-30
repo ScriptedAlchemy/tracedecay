@@ -790,32 +790,8 @@ async fn zeroblob_content_is_covered_without_materializing_payload() {
     let path = dir.path().join("state.db");
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute_batch(
-            "PRAGMA journal_mode = DELETE;
-             CREATE TABLE sessions (
-                    id TEXT PRIMARY KEY,
-                    model TEXT,
-                    parent_session_id TEXT,
-                    cwd TEXT,
-                    input_tokens INTEGER,
-                    output_tokens INTEGER,
-                    cache_read_tokens INTEGER,
-                    cache_write_tokens INTEGER,
-                    reasoning_tokens INTEGER
-                );
-             CREATE TABLE messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    content TEXT,
-                    tool_name TEXT,
-                    tool_calls TEXT,
-                    timestamp REAL NOT NULL,
-                    reasoning TEXT,
-                    active INTEGER NOT NULL DEFAULT 1
-                );",
-        )
-        .unwrap();
+        conn.execute_batch("PRAGMA journal_mode = DELETE;").unwrap();
+        conn.execute_batch(TEST_STATE_DB_SCHEMA_SQL).unwrap();
         // Generate the hostile value inside SQLite, never as a Rust String/Vec.
         let hostile_bytes = MAX_HERMES_VALUE_BYTES.saturating_add(1);
         conn.execute(
@@ -843,9 +819,7 @@ async fn zeroblob_content_is_covered_without_materializing_payload() {
     }
 
     let conn = open_read_only_strict(&path).await.unwrap();
-    let message_cols = message_columns(&conn).await.unwrap();
-    let session_cols = table_columns(&conn, "sessions").await.unwrap();
-    let select_sql = select_new_messages_sql(&message_cols, &session_cols);
+    let select_sql = select_new_messages_sql();
     let page = read_new_rows_strict(&conn, &select_sql, StoredCursor::default())
         .await
         .unwrap();
@@ -885,32 +859,8 @@ async fn page_byte_budget_stops_collection_before_unbounded_growth() {
     initialize_owned_store_before_foreign_fixture(dir.path()).await;
     let path = dir.path().join("state.db");
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch(
-        "PRAGMA journal_mode = DELETE;
-         CREATE TABLE sessions (
-                id TEXT PRIMARY KEY,
-                model TEXT,
-                parent_session_id TEXT,
-                cwd TEXT,
-                input_tokens INTEGER,
-                output_tokens INTEGER,
-                cache_read_tokens INTEGER,
-                cache_write_tokens INTEGER,
-                reasoning_tokens INTEGER
-            );
-         CREATE TABLE messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT,
-                tool_name TEXT,
-                tool_calls TEXT,
-                timestamp REAL NOT NULL,
-                reasoning TEXT,
-                active INTEGER NOT NULL DEFAULT 1
-            );",
-    )
-    .unwrap();
+    conn.execute_batch("PRAGMA journal_mode = DELETE;").unwrap();
+    conn.execute_batch(TEST_STATE_DB_SCHEMA_SQL).unwrap();
     conn.execute(
         "INSERT INTO sessions (id, model) VALUES ('sess-page', 'model')",
         (),
@@ -933,9 +883,7 @@ async fn page_byte_budget_stops_collection_before_unbounded_growth() {
     drop(conn);
 
     let conn = open_read_only_strict(&path).await.unwrap();
-    let message_cols = message_columns(&conn).await.unwrap();
-    let session_cols = table_columns(&conn, "sessions").await.unwrap();
-    let select_sql = select_new_messages_sql(&message_cols, &session_cols);
+    let select_sql = select_new_messages_sql();
     let page = read_new_rows_strict(&conn, &select_sql, StoredCursor::default())
         .await
         .unwrap();
@@ -963,20 +911,8 @@ async fn utf8_byte_gate_rejects_multibyte_text_before_materialization() {
     initialize_owned_store_before_foreign_fixture(dir.path()).await;
     let path = dir.path().join("state.db");
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch(
-        "PRAGMA journal_mode = DELETE;
-         CREATE TABLE sessions (
-                id TEXT PRIMARY KEY, model TEXT, parent_session_id TEXT, cwd TEXT,
-                input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER,
-                cache_write_tokens INTEGER, reasoning_tokens INTEGER
-            );
-         CREATE TABLE messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
-                role TEXT NOT NULL, content TEXT, tool_name TEXT, tool_calls TEXT,
-                timestamp REAL NOT NULL, reasoning TEXT, active INTEGER NOT NULL DEFAULT 1
-            );",
-    )
-    .unwrap();
+    conn.execute_batch("PRAGMA journal_mode = DELETE;").unwrap();
+    conn.execute_batch(TEST_STATE_DB_SCHEMA_SQL).unwrap();
     conn.execute(
         "INSERT INTO sessions (id, model) VALUES ('sess-utf8', 'model')",
         (),
@@ -994,9 +930,7 @@ async fn utf8_byte_gate_rejects_multibyte_text_before_materialization() {
     drop(conn);
 
     let conn = open_read_only_strict(&path).await.unwrap();
-    let message_cols = message_columns(&conn).await.unwrap();
-    let session_cols = table_columns(&conn, "sessions").await.unwrap();
-    let select_sql = select_new_messages_sql(&message_cols, &session_cols);
+    let select_sql = select_new_messages_sql();
     let page = read_new_rows_strict(&conn, &select_sql, StoredCursor::default())
         .await
         .unwrap();
@@ -1009,56 +943,12 @@ async fn utf8_byte_gate_rejects_multibyte_text_before_materialization() {
     );
 }
 
-fn write_minimal_legacy_state_db(path: &std::path::Path, rows: usize) {
-    let mut conn = rusqlite::Connection::open(path).unwrap();
-    conn.execute_batch(
-        "PRAGMA journal_mode = DELETE;
-         CREATE TABLE sessions (id TEXT PRIMARY KEY);
-         CREATE TABLE messages (
-             id INTEGER PRIMARY KEY AUTOINCREMENT,
-             session_id TEXT NOT NULL,
-             role TEXT NOT NULL,
-             content TEXT,
-             timestamp REAL NOT NULL
-         );
-         INSERT INTO sessions (id) VALUES ('legacy-session');",
-    )
-    .unwrap();
-    let transaction = conn.transaction().unwrap();
-    for index in 0..rows {
-        transaction
-            .execute(
-                "INSERT INTO messages (session_id, role, content, timestamp)
-                 VALUES ('legacy-session', 'user', ?1, ?2)",
-                rusqlite::params![format!("legacy row {index}"), index as f64],
-            )
-            .unwrap();
-    }
-    transaction.commit().unwrap();
-}
-
 fn write_usage_state_db(path: &std::path::Path, rows: usize) {
     let mut conn = rusqlite::Connection::open(path).unwrap();
+    conn.execute_batch("PRAGMA journal_mode = DELETE;").unwrap();
+    conn.execute_batch(TEST_STATE_DB_SCHEMA_SQL).unwrap();
     conn.execute_batch(
-        "PRAGMA journal_mode = DELETE;
-         CREATE TABLE sessions (
-             id TEXT PRIMARY KEY,
-             model TEXT,
-             input_tokens INTEGER,
-             output_tokens INTEGER,
-             cache_read_tokens INTEGER,
-             cache_write_tokens INTEGER,
-             reasoning_tokens INTEGER
-         );
-         CREATE TABLE messages (
-             id INTEGER PRIMARY KEY AUTOINCREMENT,
-             session_id TEXT NOT NULL,
-             role TEXT NOT NULL,
-             content TEXT,
-             timestamp REAL NOT NULL,
-             active INTEGER NOT NULL DEFAULT 1
-         );
-         INSERT INTO sessions (id, model, input_tokens, output_tokens)
+        "INSERT INTO sessions (id, model, input_tokens, output_tokens)
          VALUES ('usage-session', 'hermes-model', 10, 5);",
     )
     .unwrap();
@@ -1113,10 +1003,7 @@ async fn batched_page_is_byte_identical_to_reference_projection() {
     write_usage_state_db(&path, 3);
 
     let conn = open_read_only_strict(&path).await.unwrap();
-    let select_sql = select_new_messages_sql(
-        &message_columns(&conn).await.unwrap(),
-        &table_columns(&conn, "sessions").await.unwrap(),
-    );
+    let select_sql = select_new_messages_sql();
     let page = read_new_rows_strict(&conn, &select_sql, StoredCursor::default())
         .await
         .unwrap();
@@ -1181,46 +1068,36 @@ async fn explain_query_plan(
 }
 
 #[tokio::test]
-async fn active_and_legacy_batch_queries_keep_primary_key_seek_plans() {
-    for active_schema in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        initialize_owned_store_before_foreign_fixture(dir.path()).await;
-        let path = dir.path().join("state.db");
-        if active_schema {
-            write_usage_state_db(&path, 3);
-        } else {
-            write_minimal_legacy_state_db(&path, 3);
-        }
+async fn batch_queries_keep_primary_key_seek_plans() {
+    let dir = tempfile::tempdir().unwrap();
+    initialize_owned_store_before_foreign_fixture(dir.path()).await;
+    let path = dir.path().join("state.db");
+    write_usage_state_db(&path, 3);
 
-        let conn = open_read_only_strict(&path).await.unwrap();
-        let select_sql = select_new_messages_sql(
-            &message_columns(&conn).await.unwrap(),
-            &table_columns(&conn, "sessions").await.unwrap(),
-        );
-        let admission_plan =
-            explain_query_plan(&conn, select_sql.admission_sql().to_string(), vec![0]).await;
-        let payload_plan =
-            explain_query_plan(&conn, select_sql.payload_sql(2), vec![1, 1, 2, 1]).await;
+    let conn = open_read_only_strict(&path).await.unwrap();
+    let select_sql = select_new_messages_sql();
+    let admission_plan =
+        explain_query_plan(&conn, select_sql.admission_sql().to_string(), vec![0]).await;
+    let payload_plan = explain_query_plan(&conn, select_sql.payload_sql(2), vec![1, 1, 2, 1]).await;
 
-        assert!(
-            admission_plan
-                .iter()
-                .any(|step| step.contains("SEARCH m USING INTEGER PRIMARY KEY (rowid>?)")),
-            "admission must seek from the cursor for active_schema={active_schema}: {admission_plan:?}"
-        );
-        assert!(
-            admission_plan
-                .iter()
-                .any(|step| step.contains("CORRELATED SCALAR SUBQUERY")),
-            "frontier lookup must remain inside the single admission execution: {admission_plan:?}"
-        );
-        assert!(
-            payload_plan
-                .iter()
-                .any(|step| step.contains("SEARCH m USING INTEGER PRIMARY KEY (rowid=?)")),
-            "payload batches must seek admitted ids for active_schema={active_schema}: {payload_plan:?}"
-        );
-    }
+    assert!(
+        admission_plan
+            .iter()
+            .any(|step| step.contains("SEARCH m USING INTEGER PRIMARY KEY (rowid>?)")),
+        "admission must seek from the cursor: {admission_plan:?}"
+    );
+    assert!(
+        admission_plan
+            .iter()
+            .any(|step| step.contains("CORRELATED SCALAR SUBQUERY")),
+        "frontier lookup must remain inside the single admission execution: {admission_plan:?}"
+    );
+    assert!(
+        payload_plan
+            .iter()
+            .any(|step| step.contains("SEARCH m USING INTEGER PRIMARY KEY (rowid=?)")),
+        "payload batches must seek admitted ids: {payload_plan:?}"
+    );
 }
 
 #[tokio::test]
@@ -1239,10 +1116,7 @@ async fn full_page_executes_one_admission_query_and_bounded_payload_batches() {
     })
     .await
     .unwrap();
-    let select_sql = select_new_messages_sql(
-        &message_columns(&conn).await.unwrap(),
-        &table_columns(&conn, "sessions").await.unwrap(),
-    );
+    let select_sql = select_new_messages_sql();
 
     OBSERVED_HERMES_READ_QUERIES.store(0, Ordering::Relaxed);
     let page = read_new_rows_strict(&conn, &select_sql, StoredCursor::default())
@@ -1295,7 +1169,7 @@ async fn hermes_reader_is_immutable_policy_bound_and_never_creates_files() {
     assert!(!missing.exists());
 
     let path = dir.path().join(URI_SPECIAL_STATE_DB);
-    write_minimal_legacy_state_db(&path, 1);
+    write_usage_state_db(&path, 1);
     let before = std::fs::read(&path).unwrap();
     let wal = sqlite_sidecar(&path, "-wal");
     let shm = sqlite_sidecar(&path, "-shm");
@@ -1317,7 +1191,7 @@ async fn hermes_reader_is_immutable_policy_bound_and_never_creates_files() {
                     .unwrap(),
                 conn.execute(
                     "INSERT INTO messages (session_id, role, content, timestamp)
-                     VALUES ('legacy-session', 'user', 'write probe', 2.0)",
+                     VALUES ('usage-session', 'user', 'write probe', 2.0)",
                     [],
                 )
                 .is_err(),
@@ -1374,7 +1248,7 @@ async fn hermes_reader_supports_non_utf8_database_paths() {
     let path = dir
         .path()
         .join(std::ffi::OsString::from_vec(b"state-\xff.db".to_vec()));
-    write_minimal_legacy_state_db(&path, 1);
+    write_usage_state_db(&path, 1);
 
     let conn = open_read_only_strict(&path)
         .await
@@ -1421,17 +1295,14 @@ async fn corrupt_and_incomplete_state_databases_fail_closed() {
 }
 
 #[tokio::test]
-async fn legacy_schema_paginates_without_gaps_or_duplicates() {
+async fn schema_paginates_without_gaps_or_duplicates() {
     let dir = tempfile::tempdir().unwrap();
     initialize_owned_store_before_foreign_fixture(dir.path()).await;
     let path = dir.path().join("state.db");
-    write_minimal_legacy_state_db(&path, CHUNK_ROWS + 3);
+    write_usage_state_db(&path, CHUNK_ROWS + 3);
 
     let conn = open_read_only_strict(&path).await.unwrap();
-    let select_sql = select_new_messages_sql(
-        &message_columns(&conn).await.unwrap(),
-        &table_columns(&conn, "sessions").await.unwrap(),
-    );
+    let select_sql = select_new_messages_sql();
     let first = read_new_rows_strict(&conn, &select_sql, StoredCursor::default())
         .await
         .unwrap();
@@ -1458,10 +1329,7 @@ async fn multi_page_session_emits_one_usage_checkpoint_and_a_later_frontier_upda
     write_usage_state_db(&path, CHUNK_ROWS + 3);
 
     let conn = open_read_only_strict(&path).await.unwrap();
-    let select_sql = select_new_messages_sql(
-        &message_columns(&conn).await.unwrap(),
-        &table_columns(&conn, "sessions").await.unwrap(),
-    );
+    let select_sql = select_new_messages_sql();
     let first = read_new_rows_strict(&conn, &select_sql, StoredCursor::default())
         .await
         .unwrap();
@@ -1510,10 +1378,7 @@ async fn multi_page_session_emits_one_usage_checkpoint_and_a_later_frontier_upda
     drop(writer);
 
     let conn = open_read_only_strict(&path).await.unwrap();
-    let select_sql = select_new_messages_sql(
-        &message_columns(&conn).await.unwrap(),
-        &table_columns(&conn, "sessions").await.unwrap(),
-    );
+    let select_sql = select_new_messages_sql();
     let updated = read_new_rows_strict(
         &conn,
         &select_sql,
@@ -1552,9 +1417,7 @@ async fn multi_page_session_emits_one_usage_checkpoint_and_a_later_frontier_upda
 async fn unreadable_state_db_is_a_counted_source_failure_not_a_clean_sweep() {
     let dir = tempfile::tempdir().unwrap();
     initialize_owned_store_before_foreign_fixture(dir.path()).await;
-    // The pin resolver is a root-registered port and stays unwired in this
-    // crate's tests, so the project qualifies as a candidate destination by
-    // being a git worktree instead of carrying a config pin.
+    // The project qualifies as a candidate destination by being a git worktree.
     let project_root = dir.path().join("project");
     std::fs::create_dir_all(&project_root).unwrap();
     let init = std::process::Command::new(tracedecay_runtime_core::git::try_git_program().unwrap())

@@ -261,7 +261,7 @@ fn assert_handoff_identity(
     );
     assert_eq!(
         identity.native_record_id(),
-        Some(&ObservationId::new(record_id).unwrap())
+        &ObservationId::new(record_id).unwrap()
     );
 
     let envelope = envelope(row);

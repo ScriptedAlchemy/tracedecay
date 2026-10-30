@@ -46,7 +46,7 @@ invariants.
    (`apply = true`) and requires explicit owner authorization.
 5. Emit no payload body bytes anywhere (logs, reports, metrics, errors).
 
-**Non-goals** (inherit the contract §14): age/content retention policy,
+**Non-goals** (inherit the contract §13): age/content retention policy,
 cross-store/cross-profile GC, soft-delete/undo/body recovery, cross-message
 dedup, reaping summary nodes / lifecycle state / maintenance debt.
 
@@ -57,7 +57,7 @@ dedup, reaping summary nodes / lifecycle state / maintenance debt.
 GC adds a *destructive* capability to a module that today has none. Every
 non-destructive building block already exists and is battle-tested by the read
 path and the doctor diagnostics. Reusing them is a hard requirement, not a
-convenience, they encode the path/ref/symlink safety the contract §13 demands.
+convenience, they encode the path/ref/symlink safety the contract §12 demands.
 
 | Need | Primitive | Location | Notes for GC |
 |---|---|---|---|
@@ -271,7 +271,7 @@ CREATE TABLE IF NOT EXISTS lcm_gc_meta (
 );
 ```
 
-Monotonic safety (contract §11, §13): the schema guard skips DBs written by a
+Monotonic safety (contract §12): the schema guard skips DBs written by a
 newer release, and the `IF NOT EXISTS` DDL is idempotent. **No existing column or
 row is altered**, payloads without a mark are `live` until the first observed-
 unreferenced scan. This honors GP-2 ("no new column" on the payload table) while
@@ -511,7 +511,7 @@ concurrent ingest. `grace_seconds` clamps up to 300.
   its own txn. A run that hits the cap stops reaping and leaves the remainder for
   the next scheduled run (reported as `deferred`). This bounds lock hold time and
   matches the existing `SQLITE_IN_BATCH_SIZE=500` chunking in `doctor.rs`.
-- **Two processes GC-ing the same store** (contract §12): only one holds the reap
+- **Two processes GC-ing the same store** (contract §11): only one holds the reap
   `BEGIN IMMEDIATE` at a time; the loser observes the row/mark already gone and
   no-ops (idempotent). The store's existing writer-lock model applies; GC adds no
   new cross-process lock.
@@ -533,7 +533,7 @@ concurrent ingest. `grace_seconds` clamps up to 300.
 Dry-run (`apply = false`) is the **default** and is mandatory before any
 destructive view in the dashboard (contract §10.6). The report enumerates
 exactly what *would* be removed, refs, counts, byte totals, ages, and **never**
-body bytes, snippet text, or message content (contract §13). Hashes shown are
+body bytes, snippet text, or message content (contract §12). Hashes shown are
 the `content_hash` already stored in `lcm_external_payloads`, never re-derived
 body digests in a way that implies we read bodies into reports.
 
@@ -588,15 +588,15 @@ cadence is `retention.interval_hours` (daily by default); the grace windows in
   candidate counts and the last run status, but it has no `gc` mode, no `apply`
   flag, and no destructive alias.
 
-**Per-store, not global.** Each resolved project store (user-level shard,
-explicit local store, or legacy local store) is GC'd independently against its
-own DB (contract §14). There is no cross-store coordination.
+**Per-store, not global.** Each resolved project store (user-level shard or
+explicit local store) is GC'd independently against its
+own DB (contract §13). There is no cross-store coordination.
 
 ---
 
 ## 13. Safety invariants (consolidated checklist)
 
-Mapped to the contract §13 and this doc. Implementation and tests assert each.
+Mapped to the contract §12 and this doc. Implementation and tests assert each.
 
 1. **Never log/preview/report/stream body bytes.** Reports carry refs, counts,
    byte totals, and the `content_hash` already in the DB, nothing more (§11).
@@ -635,8 +635,7 @@ Mapped to the contract §13 and this doc. Implementation and tests assert each.
 ## 14. Status / health fields the reaper produces (for `t_0ab1c041`)
 
 The reaper writes `lcm_gc_meta` and the existing doctor/status queries already
-compute the candidate sets. Additive fields only (contract §11: no rename/remove
-of existing fields):
+compute the candidate sets. Fields are additive:
 
 - `LcmPayloadStatus` (`types.rs:517`) gains: `last_gc_at: Option<i64>`,
   `last_gc_dry_run_at: Option<i64>`, `bytes_reclaimable: i64` (sum of orphan +
@@ -697,7 +696,7 @@ To make GC deterministic and assertable without sleeping for grace periods:
    missing files, dangling placeholders, and concurrent-write files (open fd
    held during reap), covering every invariant in §13.
 
-See the contract §16 test handoff for the state-transition and crash-order cases
+See the contract §15 test handoff for the state-transition and crash-order cases
 these hooks support.
 
 ---

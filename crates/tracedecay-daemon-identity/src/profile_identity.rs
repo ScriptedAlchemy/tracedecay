@@ -264,9 +264,7 @@ fn validate_private_profile_root(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     #[cfg(windows)]
-    use tracedecay_runtime_core::windows_security::{
-        validate_private_directory, validate_private_file,
-    };
+    use tracedecay_private_fs::windows::{validate_private_directory, validate_private_file};
 
     use super::*;
 

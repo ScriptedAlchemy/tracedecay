@@ -234,11 +234,16 @@ const FIXTURE_PROVIDER: ProductRuntimeProvider = ProductRuntimeProvider {
 /// provider, so every in-process read across a suite observes one identical
 /// runtime regardless of test order. The fixture bypasses [`validated`] only
 /// because it is a constant.
+///
+/// Its build version names only the release, not a commit: the daemon refuses
+/// a client of another build, and a version without build metadata is the same
+/// identity as every build of that release, which lets a test process drive a
+/// spawned `tracedecay` daemon.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn register_fixture_product_runtime() -> &'static RegisteredProductRuntime {
     PRODUCT_RUNTIME.get_or_init(|| RegisteredProductRuntime {
         provider: FIXTURE_PROVIDER,
-        build_version: compose_build_version(PACKAGE_VERSION, FIXTURE_FULL_SHA, false),
+        build_version: PACKAGE_VERSION.to_owned(),
     })
 }
 

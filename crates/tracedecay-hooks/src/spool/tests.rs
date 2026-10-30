@@ -1253,55 +1253,6 @@ fn a_tail_cut_inside_the_committed_extent_is_corruption() {
     );
 }
 
-/// Released builds persisted a per-append intent in metadata (its frame as a
-/// JSON byte array) under the same metadata version. That metadata still
-/// opens: the torn tail it described is recovered from the records file, and
-/// the next metadata write drops the retired field.
-#[test]
-fn released_metadata_with_an_append_intent_opens_and_drops_it() {
-    let root = TestDir::new("recovery-released-intent");
-    let (mut spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
-    let first = spool
-        .append(envelope(1, 9), &binding(), UtcMicros(10))
-        .unwrap();
-    spool.commit().unwrap();
-    let payload = canonical_json_bytes(&envelope(2, 9)).unwrap();
-    let frame = encode_frame(2, UtcMicros(10), [9; 32], &payload).unwrap();
-    let mut persisted: serde_json::Value =
-        serde_json::from_slice(&fs::read(meta_path(&root.0)).unwrap()).unwrap();
-    persisted["append_intent"] = serde_json::json!({
-        "sequence": 2,
-        "file_offset": first.framed_len,
-        "framed_len": frame.len(),
-        "frame": frame,
-    });
-    fs::write(meta_path(&root.0), serde_json::to_vec(&persisted).unwrap()).unwrap();
-    let torn_len = 100.min(frame.len() - 1);
-    write_torn_frame(&root.0, &frame, torn_len);
-
-    let (mut spool, report) = HookSpoolV1::open(&root.0, config(), UtcMicros(20)).unwrap();
-    assert_eq!(report.corrupted_at_offset, None);
-    assert_eq!(report.truncated_partial_tail_bytes, torn_len as u64);
-    assert_eq!(report.next_sequence, 2);
-    assert!(
-        spool
-            .acknowledge(
-                HookSpoolAckV1 {
-                    sequence: first.sequence,
-                    receipt_id: [21; 16],
-                    disposition: HookSpoolAckDispositionV1::Committed,
-                },
-                UtcMicros(20),
-            )
-            .unwrap()
-    );
-    let rewritten: serde_json::Value =
-        serde_json::from_slice(&fs::read(meta_path(&root.0)).unwrap()).unwrap();
-    assert_eq!(rewritten.get("append_intent"), None);
-    assert_eq!(rewritten["committed_through"], 1);
-    assert_eq!(rewritten["next_sequence"], 2);
-}
-
 /// Writer processes loop the hook sequence (bounded open, append, commit)
 /// and print each event only after its commit returns, the point a hook
 /// acknowledges its host. Killing them all mid-stream lands inside appends,

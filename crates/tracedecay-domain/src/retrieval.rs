@@ -789,8 +789,6 @@ pub struct CompactCandidate {
     pub logical_copy_evidence_anchor: Option<RetrievalAnchorId>,
     pub evidence_role: EvidenceRole,
     /// Source-role evidence for the same-symbol definition/reference order.
-    /// Absent historical candidates deserialize as a non-definition hit.
-    #[serde(default)]
     pub source_role: RetrievalSourceRoleV1,
     pub retriever: RetrieverKind,
     pub retriever_revision: ComponentRevision,
@@ -1011,9 +1009,7 @@ pub struct FusedCandidate {
     pub logical_evidence_id: LogicalEvidenceId,
     pub occurrences: Vec<OccurrenceProvenance>,
     pub exact_class: ExactClass,
-    /// Strongest source role across the fused occurrences. Absent historical
-    /// candidates deserialize as a non-definition hit.
-    #[serde(default)]
+    /// Strongest source role across the fused occurrences.
     pub source_role: RetrievalSourceRoleV1,
     pub utility_micros: u64,
     pub contributions: Vec<CandidateContribution>,

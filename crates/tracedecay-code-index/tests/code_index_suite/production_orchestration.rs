@@ -44,7 +44,7 @@ use tracedecay_domain::{
     ProviderEvaluationStateV1, RefId, RelationEdgeKindV1, RepositoryDirtyStateV1, RepositoryId,
     SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
     SensitivityLevelV1, SnapshotFileDispositionV1, SymbolOccurrenceId,
-    TestAttributionEvidenceClassV1, TreeId, UtcMicros, WorktreeId, sha256_hex_suffix,
+    TestAttributionEvidenceClassV1, TreeId, UtcMicros, WorktreeId,
 };
 use tracedecay_graph_db::{GraphDbError, GraphNamespace, GraphProjectorRevision};
 
@@ -2379,7 +2379,7 @@ fn published_generation_validation_is_amortized_per_loaded_generation() {
 }
 
 #[test]
-fn sealed_manifest_authenticates_source_commitments_and_refuses_missing_history() {
+fn sealed_manifest_authenticates_source_commitments() {
     let store = SharedPublicationStore::default();
     let mut owner =
         CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("production owner");
@@ -2393,7 +2393,7 @@ fn sealed_manifest_authenticates_source_commitments_and_refuses_missing_history(
     let sealed = PartitionedSealV1::of(&generation);
     let envelope = sealed.envelope();
 
-    let mut tampered = envelope.clone();
+    let mut tampered = envelope;
     tampered["generation"]["manifest"]["source_commitments"]["full_replay_digest"] =
         serde_json::json!(format!("sha256:{}", "f".repeat(64)));
     assert!(
@@ -2403,17 +2403,6 @@ fn sealed_manifest_authenticates_source_commitments_and_refuses_missing_history(
             .to_string()
             .contains("seal")
     );
-
-    let mut historical = envelope;
-    historical["generation"]["manifest"]
-        .as_object_mut()
-        .expect("generation manifest")
-        .remove("source_commitments")
-        .expect("current manifest carries source commitments");
-    assert!(matches!(
-        sealed.restore(&reseal_manifest(historical)),
-        Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable)
-    ));
 }
 
 /// Corruption of chunk evidence must still be caught by the very first
@@ -3730,100 +3719,44 @@ fn partitioned_text_metadata_exposes_commitments_without_payload_reads() {
     );
 }
 
-/// Bytes the unmodified pre-paging writer emitted (see the fixture README and
-/// `provenance.json`), sealed at the retired manifest revision seven. That
-/// revision named two payload shapes, a manifest with its census and one
-/// without, so every reader that authenticates or decodes a manifest refuses
-/// the carrier with the typed rebuild error instead of picking a shape, and
-/// refuses it before reading a single segment byte. Only retention's
-/// descriptor projection abstains, because a store that still holds a retired
-/// generation must stay plannable while the daemon rebuilds past it.
+/// Live encoder bytes relabelled to the previous manifest revision, resealed
+/// so they pass outer authentication and reach the revision gate.
+fn relabel_to_previous_revision(manifest: &[u8]) -> Vec<u8> {
+    let mut retired: serde_json::Value =
+        serde_json::from_slice(manifest).expect("partitioned manifest JSON");
+    retired["generation"]
+        .as_object_mut()
+        .expect("generation payload")
+        .insert(
+            "format_revision".to_owned(),
+            serde_json::json!(SEALED_GENERATION_FORMAT_REVISION_V1 - 1),
+        );
+    retired["state_digest"] = serde_json::json!(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(
+            serde_json::to_vec(&retired["generation"]).expect("retired payload bytes")
+        ))
+    ));
+    serde_json::to_vec(&retired).expect("retired manifest bytes")
+}
+
+/// Every reader that authenticates or decodes a manifest refuses a retired
+/// revision with the typed rebuild error, before reading a single segment
+/// byte. Only retention's descriptor projection abstains, because a store that
+/// still holds a retired generation must stay plannable while the daemon
+/// rebuilds past it.
 #[test]
-fn retired_partitioned_carrier_is_refused_by_every_manifest_reader() {
-    let fixture = std::path::Path::new("tests/fixtures/partitioned_pre_paging");
-    let manifest = std::fs::read(fixture.join("manifest.json")).expect("historical manifest");
-    let historical: serde_json::Value =
-        serde_json::from_slice(&manifest).expect("historical manifest json");
-    let retired = u32::try_from(
-        historical["generation"]["format_revision"]
-            .as_u64()
-            .expect("historical format revision"),
-    )
-    .expect("historical format revision fits u32");
-    assert!(
-        retired < SEALED_GENERATION_FORMAT_REVISION_V1,
-        "the archival carrier must stay behind the revision this build serves"
-    );
-    let expected =
-        std::fs::read(fixture.join("expected-generation.json")).expect("historical generation");
-    let provenance: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(fixture.join("provenance.json")).expect("fixture provenance"),
-    )
-    .expect("provenance JSON");
-    assert_eq!(
-        hex::encode(Sha256::digest(&manifest)),
-        provenance["manifest_sha256"],
-        "manifest bytes are the exported historical bytes"
-    );
-    assert_eq!(
-        hex::encode(Sha256::digest(&expected)),
-        provenance["expected_generation_sha256"],
-        "expected generation bytes are the exported historical bytes"
-    );
-    // No reader inventories a retired manifest, so the segment bytes shipped
-    // beside it are proven against the export's provenance directly rather
-    // than through the manifest's descriptors. The codec's own historical-row
-    // tests are what prove the descriptors still address these bytes; this
-    // only proves the fixture ships the export's segments and no others.
-    assert_eq!(
-        std::fs::read_dir(fixture.join("segments"))
-            .expect("historical segment directory")
-            .map(|entry| {
-                let path = entry.expect("segment entry").path();
-                let bytes = std::fs::read(&path).expect("historical segment bytes");
-                (
-                    format!("sha256:{}", hex::encode(Sha256::digest(&bytes))),
-                    bytes.len() as u64,
-                )
-            })
-            .collect::<BTreeSet<_>>(),
-        provenance["referenced_segments"]
-            .as_array()
-            .expect("referenced segments")
-            .iter()
-            .map(|segment| {
-                (
-                    segment["digest"]
-                        .as_str()
-                        .expect("segment digest")
-                        .to_owned(),
-                    segment["bytes"].as_u64().expect("segment size"),
-                )
-            })
-            .collect::<BTreeSet<_>>(),
-        "the fixture ships exactly the segments the historical export referenced"
-    );
+fn retired_partitioned_revision_is_refused_by_every_manifest_reader() {
+    let (_, current, _) = partitioned_codec_fixture();
+    let manifest = relabel_to_previous_revision(&current);
+    let retired = SEALED_GENERATION_FORMAT_REVISION_V1 - 1;
 
     let segment_reads = Cell::new(0_usize);
-    let read = |request: SealedGenerationSegmentReadV1<'_>, buffer: &mut Vec<u8>| {
+    let read = |_: SealedGenerationSegmentReadV1<'_>, _: &mut Vec<u8>| {
         segment_reads.set(segment_reads.get() + 1);
-        let (digest, offset, length) = match request {
-            SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => (digest, 0, size_bytes),
-            SealedGenerationSegmentReadV1::Range {
-                digest,
-                offset,
-                length,
-                ..
-            } => (digest, offset, length),
-        };
-        let name = sha256_hex_suffix(digest.as_str()).expect("sha256 segment digest");
-        let bytes = std::fs::read(fixture.join("segments").join(format!("{name}.json")))
-            .expect("historical segment bytes");
-        let start = usize::try_from(offset).expect("segment offset");
-        let end = start + usize::try_from(length).expect("segment length");
-        buffer.clear();
-        buffer.extend_from_slice(&bytes[start..end]);
-        Ok(())
+        Err(CodeIndexProductionErrorV1::Contract(
+            "a retired manifest must not request segments".to_owned(),
+        ))
     };
 
     for refusal in [
@@ -3941,8 +3874,7 @@ fn a_retired_parent_manifest_yields_no_reuse_instead_of_refusing_the_child() {
         "the fixture child must reuse a segment from its readable parent"
     );
 
-    let retired_parent = std::fs::read("tests/fixtures/partitioned_pre_paging/manifest.json")
-        .expect("historical manifest");
+    let retired_parent = relabel_to_previous_revision(&parent_manifest);
     let (manifest, segments, published_file_segments) = encode(Some(&retired_parent));
     assert_eq!(
         published_file_segments,
@@ -3985,90 +3917,6 @@ fn a_retired_parent_manifest_yields_no_reuse_instead_of_refusing_the_child() {
         .expect("the child decodes from its own segments"),
         PartitionedSealV1::of(&child),
         "no reuse must restore the same typed generation"
-    );
-}
-
-/// Revision seven named two manifest payloads: the one the writer emitted
-/// before the census became required, and the same payload carrying it. The
-/// revision is refused before its payload is parsed, so both shapes reach the
-/// one typed refusal and no reader has to tell them apart. The archival
-/// carrier above is the census-less shape as a real writer produced it; these
-/// are live encoder bytes relabelled to the revision that admitted both.
-#[test]
-fn both_retired_manifest_census_shapes_reach_the_typed_refusal() {
-    let (_, manifest, _) = partitioned_codec_fixture();
-    CodeIndexPublishedGenerationV1::partitioned_text_metadata(&manifest)
-        .expect("the current revision opens");
-    let previous = SEALED_GENERATION_FORMAT_REVISION_V1 - 1;
-
-    for census in [true, false] {
-        let mut retired: serde_json::Value =
-            serde_json::from_slice(&manifest).expect("partitioned manifest JSON");
-        let payload = retired["generation"]
-            .as_object_mut()
-            .expect("generation payload");
-        payload.insert("format_revision".to_owned(), serde_json::json!(previous));
-        if !census {
-            payload
-                .remove("statistics")
-                .expect("a sealed manifest carries a census to remove");
-        }
-        retired["state_digest"] = serde_json::json!(format!(
-            "sha256:{}",
-            hex::encode(Sha256::digest(
-                serde_json::to_vec(&retired["generation"]).expect("retired payload bytes")
-            ))
-        ));
-        let retired = serde_json::to_vec(&retired).expect("retired manifest bytes");
-
-        let Err(error) = CodeIndexPublishedGenerationV1::partitioned_text_metadata(&retired) else {
-            panic!("a retired manifest revision must be refused, never migrated")
-        };
-        assert!(
-            matches!(
-                error,
-                CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
-                    if revision == previous
-            ),
-            "the previous revision with census={census} reached the wrong rejection: {error}"
-        );
-    }
-}
-
-/// Revision 10 stored generation-bound symbol occurrence lists on each file
-/// segment descriptor. The current writer emits generation-independent
-/// symbol identities (revision 11), so a revision-10 carrier must be refused
-/// before its payload is parsed, never migrated in place.
-#[test]
-fn prior_partitioned_symbol_occurrence_revision_reaches_the_typed_refusal() {
-    let (_, manifest, _) = partitioned_codec_fixture();
-    CodeIndexPublishedGenerationV1::partitioned_text_metadata(&manifest)
-        .expect("the current revision opens");
-    let previous = SEALED_GENERATION_FORMAT_REVISION_V1 - 1;
-    let mut retired: serde_json::Value =
-        serde_json::from_slice(&manifest).expect("partitioned manifest JSON");
-    let payload = retired["generation"]
-        .as_object_mut()
-        .expect("generation payload");
-    payload.insert("format_revision".to_owned(), serde_json::json!(previous));
-    retired["state_digest"] = serde_json::json!(format!(
-        "sha256:{}",
-        hex::encode(Sha256::digest(
-            serde_json::to_vec(&retired["generation"]).expect("retired payload bytes")
-        ))
-    ));
-    let retired = serde_json::to_vec(&retired).expect("retired manifest bytes");
-
-    let Err(error) = CodeIndexPublishedGenerationV1::partitioned_text_metadata(&retired) else {
-        panic!("a prior partitioned revision must be refused, never migrated")
-    };
-    assert!(
-        matches!(
-            error,
-            CodeIndexProductionErrorV1::SupersededSealedGenerationRevision(revision)
-                if revision == previous
-        ),
-        "the previous revision reached the wrong rejection: {error}"
     );
 }
 

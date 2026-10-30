@@ -213,15 +213,10 @@ async fn deferred_query_authority_wakes_after_pre_mount_subscribe_on_partitioned
         .await
         .expect("initial mount");
     let sealed = wait_for_initial_generation(&first, fixture.path()).await;
-    let partitioned = first
+    first
         .retained_text_owner_for_root(fixture.path())
         .await
-        .expect("retained text owner")
-        .uses_partitioned_manifest();
-    assert!(
-        partitioned,
-        "fixture must retain a partitioned generation so remount takes the Noop path"
-    );
+        .expect("fixture must retain a text owner so remount takes the Noop path");
     first.shutdown().await;
 
     let restarted = CodeIndexSchedulerRegistryV1::new(1);

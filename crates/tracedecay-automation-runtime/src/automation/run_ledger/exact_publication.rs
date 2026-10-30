@@ -1794,6 +1794,7 @@ mod tests {
             "run_id": run_id,
             "trigger": AutomationTrigger::Dashboard,
             "task": AgentTaskKind::SkillWriter,
+            "task_key": "skill_writer",
             "backend": "codex_app_server",
             "status": AutomationRunStatus::Skipped,
             "accepted_count": 0,
@@ -2023,7 +2024,7 @@ mod tests {
         let publication = stage_run_record_exact(temp.path(), &record).expect("stage");
         let spool = spool_path(temp.path(), &record.run_id, &publication).expect("spool path");
 
-        tracedecay_runtime_core::windows_security::validate_private_file(&spool)
+        tracedecay_private_fs::windows::validate_private_file(&spool)
             .expect("published spool must retain the canonical private Windows ACL");
     }
 

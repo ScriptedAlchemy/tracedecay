@@ -222,10 +222,7 @@ impl AgentIntegration for KimiIntegration {
         }
         let mcp_current =
             kimi_user_mcp_is_current(&code_home, &ctx.catalog_profiles.serve_args(self.id()));
-        if matches!(
-            component,
-            HostComponentV1::ContextMcp | HostComponentV1::OperatorMcp
-        ) {
+        if component == HostComponentV1::ContextMcp {
             return State::Missing;
         }
         let events = manifest

@@ -217,10 +217,6 @@ mod tests {
             "a current row must not carry a state generation"
         );
         assert!(DiagnosticRecordStateKindV1::parse("archived").is_none());
-        assert!(
-            DiagnosticRecordStateKindV1::parse("superseded").is_none(),
-            "retired superseded rows must be refused, not reinterpreted"
-        );
     }
 
     #[test]

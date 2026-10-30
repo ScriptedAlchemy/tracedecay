@@ -18,6 +18,10 @@ sha2.workspace = true
 tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity" }
 tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol" }
 tracedecay-domain = { path = "../tracedecay-domain" }
+# Used only by `service/windows_task.rs`, but declared for every target: the
+# Bazel graph is generated from the Linux resolution and cannot carry a
+# Windows-only member dependency.
+tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
 tracing.workspace = true
 

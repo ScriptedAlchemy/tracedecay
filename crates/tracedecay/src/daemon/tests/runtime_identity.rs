@@ -694,7 +694,7 @@ fn active_text_artifact_file(scope: &Path) -> Option<String> {
         .generation_index
         .iter()
         .find(|entry| entry.generation_id == pointer.generation_id)
-        .and_then(|entry| entry.text_artifact())
+        .and_then(|entry| entry.text_artifact.as_ref())
         .map(|descriptor| descriptor.artifact_file.clone())
 }
 

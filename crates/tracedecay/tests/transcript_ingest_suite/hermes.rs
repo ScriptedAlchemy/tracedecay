@@ -944,46 +944,6 @@ async fn sweep_skips_rewound_rows_and_surfaces_reasoning_only_turns() {
 }
 
 #[tokio::test]
-async fn sweep_reads_legacy_stores_without_active_or_reasoning_columns() {
-    let tmp = TempDir::new().unwrap();
-    let (hermes_home, project) = setup(&tmp);
-    let state_db = write_hermes_profile(&hermes_home, "test", Some(&project)).await;
-
-    // Rebuild `messages` with the pre-v12 shape (no active, no reasoning).
-    let conn = open_state_db(&state_db);
-    conn.execute("DROP TABLE messages", ()).unwrap();
-    conn.execute(
-        "CREATE TABLE messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL REFERENCES sessions(id),
-            role TEXT NOT NULL,
-            content TEXT,
-            tool_calls TEXT,
-            tool_name TEXT,
-            timestamp REAL NOT NULL
-        )",
-        (),
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO messages (session_id, role, content, timestamp)
-         VALUES (?1, 'user', 'legacy schema prompt', 1780629300.0)",
-        rusqlite::params![SESSION_ID],
-    )
-    .unwrap();
-    drop(conn);
-
-    let db = open_project_session_db(&project).await.unwrap();
-    let stats = ingest_hermes_home(&db, &hermes_home, &project).await;
-    assert_eq!(stats.messages_upserted, 1);
-    let turn = db
-        .get_session_message("hermes", &format!("{SESSION_ID}:1"))
-        .await
-        .expect("legacy-store rows should ingest");
-    assert!(turn.text.contains("legacy schema prompt"));
-}
-
-#[tokio::test]
 async fn unpinned_profile_never_maps_to_its_own_home_store() {
     let tmp = TempDir::new().unwrap();
     let (hermes_home, unrelated_project) = setup(&tmp);

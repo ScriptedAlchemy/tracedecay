@@ -17,7 +17,7 @@ fn record(run_id: &str, status: AutomationRunStatus) -> AutomationRunLedgerRecor
         run_id: run_id.to_string(),
         trigger: AutomationTrigger::ManualCli,
         task: AgentTaskKind::MemoryCurator,
-        task_key: Some("memory_curator".to_string()),
+        task_key: "memory_curator".to_string(),
         backend: "fake".to_string(),
         backend_identity: None,
         host_mode: Some("standalone".to_string()),
@@ -212,6 +212,7 @@ async fn run_ledger_loads_records_without_optional_fields() {
         "run_id": "minimal-run",
         "trigger": "manual_cli",
         "task": "memory_curator",
+        "task_key": "memory_curator",
         "backend": "codex_app_server",
         "model": "minimal-model",
         "status": "succeeded",
@@ -240,145 +241,13 @@ async fn run_ledger_loads_records_without_optional_fields() {
 }
 
 #[tokio::test]
-async fn run_ledger_locked_read_resets_schema_v1_rfc3339_rows() {
-    let temp = tempdir().unwrap();
-    let dashboard_root = temp.path().join("dashboard");
-    let current = serde_json::json!({
-        "schema_version": 2,
-        "run_id": "schema-v2-row",
-        "trigger": "manual_cli",
-        "task": "memory_curator",
-        "backend": "codex_app_server",
-        "status": "succeeded",
-        "accepted_count": 1,
-        "rejected_count": 0,
-        "started_at": "1782277200",
-        "completed_at": "1782277201",
-        "completed_at_micros": 1_782_277_201_000_000_i64
-    });
-    tokio::fs::create_dir_all(&dashboard_root).await.unwrap();
-    tokio::fs::write(run_ledger_path(&dashboard_root), format!("{current}\n"))
-        .await
-        .unwrap();
-    let loaded = load_run_records(&dashboard_root, 10).await.unwrap();
-    assert_eq!(loaded.len(), 1);
-    assert_eq!(loaded[0].run_id, "schema-v2-row");
-    assert_eq!(loaded[0].completed_at_micros, Some(1_782_277_201_000_000));
-
-    let schema_v1 = serde_json::json!({
-        "schema_version": 1,
-        "run_id": "schema-v1-row",
-        "trigger": "manual_cli",
-        "task": "memory_curator",
-        "backend": "codex_app_server",
-        "status": "succeeded",
-        "accepted_count": 1,
-        "rejected_count": 0,
-        "started_at": "2026-06-24T05:00:00Z",
-        "completed_at": "2026-06-24T05:00:01Z"
-    });
-    tokio::fs::write(
-        run_ledger_path(&dashboard_root),
-        format!("{current}\n{schema_v1}\n"),
-    )
-    .await
-    .unwrap();
-
-    let refusal = find_run_record(&dashboard_root, "schema-v1-row")
-        .await
-        .unwrap_err();
-    assert_eq!(
-        refusal.reset_required_context(),
-        Some((
-            "automation run ledger",
-            "a row predates schema v2 (the released v1 wrote RFC3339 timestamps)"
-        ))
-    );
-
-    assert_eq!(
-        load_run_records(&dashboard_root, 10).await.unwrap(),
-        Vec::<AutomationRunLedgerRecord>::new()
-    );
-    assert!(
-        !run_ledger_path(&dashboard_root).exists(),
-        "the locked read deletes the retired ledger"
-    );
-    let after_reset = record("after-reset", AutomationRunStatus::Succeeded);
-    append_run_record(&dashboard_root, &after_reset)
-        .await
-        .unwrap();
-    assert_eq!(
-        load_run_records(&dashboard_root, 10).await.unwrap(),
-        [after_reset]
-    );
-}
-
-#[tokio::test]
-async fn run_ledger_resets_only_the_row_with_an_unregistered_skip_reason() {
-    for alias in [
-        "task_disabled",
-        "no_skill_writer_evidence",
-        "session_cursor_manifest_participants_limit_exceeded",
-        "session_evidence_budget_exhausted_candidates",
-        "shipped_fact_proposal_history_retired",
-    ] {
-        let temp = tempdir().unwrap();
-        let dashboard_root = temp.path().join("dashboard");
-        let mut known = record("registered-skip", AutomationRunStatus::Skipped);
-        known.trigger = AutomationTrigger::Scheduler;
-        known.task = AgentTaskKind::SkillWriter;
-        known.task_key = Some("skill_writer".to_owned());
-        known.error = Some("skill_writer_disabled".to_owned());
-        let mut retired = known.clone();
-        retired.run_id = "retired-skip".to_owned();
-        retired.error = Some(alias.to_owned());
-        retired.started_at = "1782277300".to_owned();
-        retired.completed_at = "1782277301".to_owned();
-        retired.completed_at_micros = Some(1_782_277_301_000_000);
-        let known_line = serde_json::to_string(&known).unwrap();
-        tokio::fs::create_dir_all(&dashboard_root).await.unwrap();
-        tokio::fs::write(
-            run_ledger_path(&dashboard_root),
-            format!(
-                "{known_line}\n{}\n",
-                serde_json::to_string(&retired).unwrap()
-            ),
-        )
-        .await
-        .unwrap();
-
-        let summary = load_run_ledger_task_summary(
-            &dashboard_root,
-            AgentTaskKind::SkillWriter,
-            "skill_writer",
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            summary
-                .latest_logical_activity()
-                .map(|record| (record.run_id.as_str(), record.error.as_deref())),
-            Some(("registered-skip", Some("skill_writer_disabled"))),
-            "{alias}"
-        );
-        assert_eq!(
-            tokio::fs::read_to_string(run_ledger_path(&dashboard_root))
-                .await
-                .unwrap(),
-            format!("{known_line}\n"),
-            "only the {alias} row is deleted"
-        );
-    }
-}
-
-#[tokio::test]
 async fn run_ledger_task_summary_reads_registered_skip_reasons() {
     let temp = tempdir().unwrap();
     let dashboard_root = temp.path().join("dashboard");
     let mut skipped = record("registered-skip", AutomationRunStatus::Skipped);
     skipped.trigger = AutomationTrigger::Scheduler;
     skipped.task = AgentTaskKind::SkillWriter;
-    skipped.task_key = Some("skill_writer".to_owned());
+    skipped.task_key = "skill_writer".to_owned();
     skipped.error = Some("skill_writer_disabled".to_owned());
     append_run_record(&dashboard_root, &skipped).await.unwrap();
 

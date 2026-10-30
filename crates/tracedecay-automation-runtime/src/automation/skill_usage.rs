@@ -51,8 +51,6 @@ pub struct SkillUsageLedger {
     pub imported_analytics_events: BTreeSet<String>,
 }
 
-pub type SkillUsageSummary = SkillUsageRecord;
-
 impl Default for SkillUsageLedger {
     fn default() -> Self {
         Self {
@@ -218,7 +216,7 @@ pub async fn list_skill_usage_records(profile_root: &Path) -> Result<Vec<SkillUs
 pub async fn summarize_skill_usage(
     profile_root: &Path,
     skills: &[ManagedSkill],
-) -> Result<Vec<SkillUsageSummary>> {
+) -> Result<Vec<SkillUsageRecord>> {
     let mut ledger = load_skill_usage_ledger(profile_root).await?;
     Ok(skills
         .iter()
@@ -229,7 +227,7 @@ pub async fn summarize_skill_usage(
 pub async fn summarize_skill_usage_for(
     profile_root: &Path,
     skill: &ManagedSkill,
-) -> Result<SkillUsageSummary> {
+) -> Result<SkillUsageRecord> {
     Ok(summarize_skill(
         skill,
         load_skill_usage_ledger(profile_root)
@@ -274,7 +272,7 @@ fn ledger_skill_id(raw: &str) -> Result<String> {
     }
 }
 
-fn summarize_skill(skill: &ManagedSkill, record: Option<SkillUsageRecord>) -> SkillUsageSummary {
+fn summarize_skill(skill: &ManagedSkill, record: Option<SkillUsageRecord>) -> SkillUsageRecord {
     let mut record = record.unwrap_or_else(|| new_usage_record(skill.metadata.id.clone(), 0));
     merge_skill_metadata(&mut record, skill);
     record

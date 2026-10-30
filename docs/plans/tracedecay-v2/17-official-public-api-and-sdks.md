@@ -111,27 +111,21 @@ when their syntax is idiomatic to the surface.
 ### Compatibility and lifecycle behavior
 
 Each accepted operation proves semantic and lifecycle parity across CLI, MCP,
-HTTP, Rust, and TypeScript. Compatibility with an older shape is tested when
-actual independent release evidence establishes that public protocol shape;
-the documented release support policy governs its conformance.
-Conformance covers supported syntax,
+HTTP, Rust, and TypeScript. Conformance covers supported syntax,
 protocol/capability range, required authorization, paging or stream shape,
 retry class, cancellation support, reconnect/resume behavior, stable errors,
 and explicit transport limitations through callable adapters. A generated or
 manually maintained matrix is optional implementation evidence, not a product
 requirement or acceptance artifact.
 
-After the first evidenced publication, additive changes within a major
-protocol version preserve compatibility and breaking changes negotiate a new
-major version with an actionable error. Before publication, a transient
-request/response API changes in place. Persisted V2 state accepts only its
-exact final shape; any other shape returns `ResetRequired` and requires
+A transient request/response API changes in place. Persisted V2 state accepts
+only its exact final shape; any other shape returns `ResetRequired` and requires
 explicit reset or recreation, never a reader or conversion.
 The policy retains the full required/optional field, default, nullability, open
 object, union/enum, numeric narrowing, identifier, error, stream-event, cursor,
 operation rename/removal, retry-class, and capability-removal behavior.
 Unknown fields, enums, errors, and events are handled consistently for the
-negotiated version; retired identifiers and codes remain reserved.
+negotiated version.
 
 Cancellation retains typed requested, accepted, before-start,
 publication-suppressed, upstream-acknowledged, execution-stopped,
@@ -199,12 +193,6 @@ provider execution, work mutation, or an arbitrary daemon/LSP method.
 - Choose public names and request/response shapes at the daemon application
   boundary for every supported operation, including all daemon-API base families and
   the accepted work/workflow additions.
-- Preserve names proven by an actual independent public release as
-  compatibility aliases that delegate to the canonical operation. Pure
-  source-only and branch-era callable names are replaced in place. A
-  compatibility name may translate syntax but
-  owns no readiness, scoring, routing, scheduling, provider selection,
-  storage, or lifecycle logic.
 - Define pagination cursors, stream events, cancellation and retry classes,
   structured errors, version negotiation, and unavailable/partial outcomes in
   the operation that uses them. Schema/OpenAPI generation is package input,

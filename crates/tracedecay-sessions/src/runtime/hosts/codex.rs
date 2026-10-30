@@ -12,8 +12,7 @@
 //! * `event_msg` with `payload.type == "item_completed"` and
 //!   `payload.item.type == "UserMessage"`, a current Codex user prompt
 //!   (`payload.item.content`). The stable item id is retained as message
-//!   identity. Legacy `payload.type == "user_message"` records remain
-//!   supported through `payload.message`.
+//!   identity.
 //! * `event_msg` with `payload.type == "agent_message"`, a real assistant reply
 //!   (`payload.message`).
 //! * `event_msg` with `payload.type == "token_count"`, provider usage captured
@@ -50,6 +49,24 @@ mod meta;
 mod observation;
 #[cfg(test)]
 mod tests;
+
+/// Current Codex `item_completed/UserMessage` payload; the item id is derived
+/// from the text, so identical prompts share one message identity.
+#[cfg(test)]
+pub(crate) fn user_message_payload(text: impl AsRef<str>) -> serde_json::Value {
+    let text = text.as_ref();
+    let id = text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    });
+    serde_json::json!({
+        "type": "item_completed",
+        "item": {
+            "type": "UserMessage",
+            "id": format!("user-item-{id:016x}"),
+            "content": [{"type": "text", "text": text}],
+        },
+    })
+}
 
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque};

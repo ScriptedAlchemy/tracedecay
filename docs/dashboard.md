@@ -49,14 +49,11 @@ without the token. A request to `/api/**` without the token gets
 `401 dashboard_request_unauthenticated`; a request whose `Host` or `Origin`
 does not name the bound listener gets `403`.
 
-## Code graph plugin API
+## Code graph API
 
-The legacy `/legacy` frontend's Code Graph tab reads a project-local, bounded
-API over the indexed code graph (`nodes`, `edges`, `files` in
-`.tracedecay/tracedecay.db`), mounted in
-`crates/tracedecay-dashboard-api/src/lib.rs` (see `graph_api`). Under the
-Hermes wrapper the same routes are reverse-proxied at
-`/api/plugins/tracedecay/graph/*`.
+The SPA code workspace reads a project-local, bounded API over the indexed code
+graph, mounted in `crates/tracedecay-dashboard-api/src/lib.rs` (see
+`graph_api`).
 
 | Route | Description |
 |---|---|
@@ -68,9 +65,7 @@ Hermes wrapper the same routes are reverse-proxied at
 | `GET /path?from=&to=&max_depth=` | Undirected BFS shortest path between two node ids (depth default 6, max 10; visited-set capped at 20k). Returns `found`, ordered `path` ids, hydrated `nodes`, and the `edges` along the route. |
 
 `GET /api/capabilities` advertises `features.graph: true` and lists `graph`
-in `dashboards`; hosts can feature-detect via
-`window.__HERMES_PLUGIN_SDK__.capabilities`. Full legacy-frontend history
-(views, wiring, tests) lives in git history under `docs/archive/graph-explorer.md`.
+in `dashboards`.
 
 ## Hermes plugin and LCM diagnostics
 

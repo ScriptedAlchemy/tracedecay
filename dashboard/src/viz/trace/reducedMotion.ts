@@ -111,8 +111,8 @@ export function useReducedMotion(): {
     if (typeof window.matchMedia !== 'function') return;
     const media = window.matchMedia(QUERY);
     const onChange = () => setSystemReduced(media.matches);
-    // Safari < 14 only has the deprecated form; both are guarded so a missing
-    // one never throws during render of an otherwise working surface.
+    // Guarded so a missing listener API never throws during render of an
+    // otherwise working surface.
     media.addEventListener?.('change', onChange);
     return () => media.removeEventListener?.('change', onChange);
   }, []);

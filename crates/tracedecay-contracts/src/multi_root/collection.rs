@@ -12,30 +12,20 @@ use super::AuthorizedScopeSet;
 
 /// Selects the collection a read surface must resolve.
 ///
-/// The default collection never outranks an explicit target: when both are
-/// present the explicit target wins unconditionally, and the default is only
-/// consulted when the caller named nothing.
+/// Only an explicit target selects a collection; an unnamed request resolves
+/// to the typed no-collection state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MultiRootCollectionSelectorV1 {
     explicit_target: Option<ScopeSetId>,
-    default_collection: Option<ScopeSetId>,
 }
 
 impl MultiRootCollectionSelectorV1 {
-    pub fn new(
-        explicit_target: Option<ScopeSetId>,
-        default_collection: Option<ScopeSetId>,
-    ) -> Self {
-        Self {
-            explicit_target,
-            default_collection,
-        }
+    pub fn new(explicit_target: Option<ScopeSetId>) -> Self {
+        Self { explicit_target }
     }
 
     pub fn target(&self) -> Option<&ScopeSetId> {
-        self.explicit_target
-            .as_ref()
-            .or(self.default_collection.as_ref())
+        self.explicit_target.as_ref()
     }
 }
 
@@ -44,7 +34,7 @@ impl MultiRootCollectionSelectorV1 {
 pub enum MultiRootCollectionUnavailableV1 {
     /// The read surface has no daemon application transport at all.
     TransportNotAdmitted,
-    /// No explicit target was named and no default collection is configured.
+    /// No explicit target was named.
     NoCollectionNamed,
     /// The named collection has no persisted scope set for this project.
     CollectionNotPersisted { scope_set_id: ScopeSetId },
@@ -60,8 +50,7 @@ impl MultiRootCollectionUnavailableV1 {
                 "the daemon application transport is not admitted for this dashboard".to_owned()
             }
             Self::NoCollectionNamed => {
-                "no default multi-root collection is configured; name an explicit collection"
-                    .to_owned()
+                "no multi-root collection was named; name an explicit collection".to_owned()
             }
             Self::CollectionNotPersisted { scope_set_id } => format!(
                 "multi-root collection {} names no persisted scope set for this project",

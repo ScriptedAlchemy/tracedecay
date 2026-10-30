@@ -15,7 +15,7 @@ Each result reports four measures that are never blended into one number:
 
 The grader normalizes BOTH host transcript formats behind a single event model:
   * Claude Code `--output-format stream-json` (JSONL of assistant/user/result events)
-  * Codex `codex exec --json` (JSONL of {"msg": {...}} events)
+  * Codex `codex exec --json` (JSONL of `thread.*` / `turn.*` / `item.*` events)
 
 so every downstream check runs on one shape: an ordered list of tool calls plus
 the agent's final answer text.
@@ -367,8 +367,6 @@ def _detect_format(lines: list[str]) -> str:
         except json.JSONDecodeError:
             continue
         if isinstance(obj, dict):
-            if "msg" in obj and isinstance(obj["msg"], dict):
-                return "codex"
             if str(obj.get("type") or "").startswith(
                 ("thread.", "turn.", "item.")
             ):
@@ -472,10 +470,7 @@ def parse_codex(lines: list[str], host: str) -> Transcript:
         item_envelope = outer_type in ("item.started", "item.completed") and isinstance(
             obj.get("item"), dict
         )
-        if item_envelope:
-            msg = obj["item"]
-        else:
-            msg = obj.get("msg") if isinstance(obj.get("msg"), dict) else obj
+        msg = obj["item"] if item_envelope else obj
         t = msg.get("type") or outer_type
         item_id = str(msg.get("id") or "") if item_envelope else ""
         completed_item = outer_type == "item.completed" and item_envelope
@@ -497,7 +492,7 @@ def parse_codex(lines: list[str], host: str) -> Transcript:
             timeline.append({"kind": "tool", "call": tc})
             seq += 1
 
-        if t in ("mcp_tool_call_begin", "mcp_tool_call", "tool_call"):
+        if t in ("mcp_tool_call", "tool_call"):
             inv = msg.get("invocation") or msg
             tool = inv.get("tool") or inv.get("name")
             server = inv.get("server")
@@ -513,18 +508,9 @@ def parse_codex(lines: list[str], host: str) -> Transcript:
             blob = "\n".join(_string_leaves(msg.get("result")))
             if blob.strip():
                 timeline.append({"kind": "ctx", "text": blob})
-        elif t in ("exec_command_begin", "exec_command", "command_execution"):
+        elif t in ("exec_command", "command_execution"):
             cmd = msg.get("command") or msg.get("cmd") or ""
             _add_tool(tool_call(seq, "Bash", {"command": cmd}))
-        elif t in ("function_call",):
-            raw = msg.get("name") or ""
-            args = msg.get("arguments") or {}
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except json.JSONDecodeError:
-                    args = {"_raw": args}
-            _add_tool(tool_call(seq, raw, args))
         elif t == "collab_tool_call":
             raw = msg.get("tool") or msg.get("name") or ""
             args = msg.get("arguments") or msg.get("input")
@@ -1894,8 +1880,8 @@ def split_learned_variant(base: str) -> tuple[str, Optional[str]]:
 def parse_transcript_base(base: str) -> Optional[tuple[str, str, str, str]]:
     """Split a basename into (scenario_id, host, condition, model).
 
-    Accepts legacy `<id>__<host>[__<condition>]` and matrix
-    `<id>__<host>__<model>[__<condition>][__qhints][__r<N>]` shapes. Scenario
+    Accepts the matrix `<id>__<host>__<model>[__<condition>][__qhints][__r<N>]`
+    shape. Scenario
     ids use single underscores, so `__` separators are unambiguous; a trailing
     `r<N>` is the repetition index, and `qhints` only keeps hints-on transcripts
     apart from hints-off ones (the run meta records the setting).
@@ -1905,17 +1891,14 @@ def parse_transcript_base(base: str) -> Optional[tuple[str, str, str, str]]:
         parts.pop()
     if len(parts) >= 3 and parts[-1] == "qhints":
         parts.pop()
-    if len(parts) < 2:
+    if len(parts) < 3:
         return None
     condition = "full"
     if parts[-1] in CONDITIONS:
         condition = parts.pop()
-    if parts[-1] in KNOWN_HOSTS:
-        return "__".join(parts[:-1]), parts[-1], condition, ""
     if len(parts) >= 3 and parts[-2] in KNOWN_HOSTS:
         return "__".join(parts[:-2]), parts[-2], condition, parts[-1]
-    # tolerant fallback: assume 2-part id__host
-    return "__".join(parts[:-1]), parts[-1], condition, ""
+    return None
 
 
 def load_scenarios(scenarios_dir: str) -> dict[str, dict]:

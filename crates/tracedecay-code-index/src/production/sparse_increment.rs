@@ -241,7 +241,7 @@ impl SparseBuildV1<'_> {
             .manifest()
             .source_commitments
             .as_ref()
-            .ok_or(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable)?
+            .ok_or_else(super::missing_source_commitments)?
             .full_replay_digest
             .clone();
         manifest.source_commitments = Some(
@@ -500,7 +500,7 @@ fn edited_chunk_changes(
         .manifest()
         .source_commitments
         .as_ref()
-        .ok_or(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable)?
+        .ok_or_else(super::missing_source_commitments)?
         .full_replay_digest
         .clone();
     let carried_files = present_files.saturating_sub(edited.len());
@@ -629,15 +629,10 @@ fn successor_statistics(
         source_total_bytes,
         symbol_count,
         edge_count,
-        ambiguous_name_drops: parent
-            .ambiguous_name_drops
-            .map(|total| {
-                grow(
-                    shrink(total, resolution.ambiguous_before)?,
-                    resolution.ambiguous_after,
-                )
-            })
-            .transpose()?,
+        ambiguous_name_drops: grow(
+            shrink(parent.ambiguous_name_drops, resolution.ambiguous_before)?,
+            resolution.ambiguous_after,
+        )?,
     })
 }
 

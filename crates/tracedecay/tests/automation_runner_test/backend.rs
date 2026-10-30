@@ -17,7 +17,9 @@ use tracedecay_automation_runtime::automation::backend::{
     CODEX_EXECUTABLE_UNCONFIGURED, CodexAppServerBackend, agent_task_failure_disposition,
     backend_availability, run_agent_task_with_retry, run_agent_task_with_retry_report,
 };
-use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationConfig};
+use tracedecay_automation_runtime::automation::config::{
+    AutomationBackendV1, AutomationSettingsV1,
+};
 use tracedecay_automation_runtime::ports::codex_app_server::SummaryConfig as AutomationSummaryConfig;
 use tracedecay_contracts::automation::SessionFactProposal;
 use tracedecay_domain::configuration::LcmSummarizerExecutableV1;
@@ -736,11 +738,11 @@ fn codex_app_server_backend_from_automation_config_uses_the_pinned_model() {
     register_runtime_ports();
     let fake = FakeCodexAppServer::new_with_behavior("json");
     let backend = CodexAppServerBackend::from_automation_config(
-        &AutomationConfig {
-            backend: AutomationBackend::CodexAppServer,
+        &AutomationSettingsV1 {
+            backend: AutomationBackendV1::CodexAppServer,
             model_id: Some("configured-model".to_owned()),
             timeout_secs: fake_codex_response_timeout_secs(),
-            ..AutomationConfig::default()
+            ..AutomationSettingsV1::default()
         },
         &fake.executable_with_model("executable-model"),
     );
@@ -769,11 +771,11 @@ fn codex_app_server_backend_uses_configured_executable_model_when_unpinned() {
     register_runtime_ports();
     let fake = FakeCodexAppServer::new_with_behavior("json");
     let backend = CodexAppServerBackend::from_automation_config(
-        &AutomationConfig {
-            backend: AutomationBackend::CodexAppServer,
+        &AutomationSettingsV1 {
+            backend: AutomationBackendV1::CodexAppServer,
             model_id: None,
             timeout_secs: fake_codex_response_timeout_secs(),
-            ..AutomationConfig::default()
+            ..AutomationSettingsV1::default()
         },
         &fake.executable_with_model("executable-model"),
     );
@@ -837,9 +839,9 @@ fn codex_app_server_backend_propagates_empty_output_errors_and_reaps_child() {
 #[test]
 fn backend_availability_reports_configured_codex_executable_status() {
     let fake = FakeCodexAppServer::new();
-    let config = AutomationConfig {
-        backend: AutomationBackend::CodexAppServer,
-        ..AutomationConfig::default()
+    let config = AutomationSettingsV1 {
+        backend: AutomationBackendV1::CodexAppServer,
+        ..AutomationSettingsV1::default()
     };
     let available = backend_availability(&config, &fake.executable());
 
@@ -874,9 +876,9 @@ fn backend_availability_reports_configured_codex_executable_status() {
 fn unconfigured_codex_backend_settles_unavailable_without_spawning() {
     register_runtime_ports();
     let backend = CodexAppServerBackend::from_automation_config(
-        &AutomationConfig {
-            backend: AutomationBackend::CodexAppServer,
-            ..AutomationConfig::default()
+        &AutomationSettingsV1 {
+            backend: AutomationBackendV1::CodexAppServer,
+            ..AutomationSettingsV1::default()
         },
         &LcmSummarizerExecutableV1::Unconfigured,
     );

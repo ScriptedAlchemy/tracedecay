@@ -705,10 +705,10 @@ async fn project_scope_protects_another_installations_committed_package() {
     );
 }
 
-/// #4b A project package whose manifest has no `materialized_by` field has an
-/// unknown author and must not be removed by another installation.
+/// #4b A project package whose manifest is gone has an unknown author and
+/// must not be removed by another installation.
 #[tokio::test]
-async fn project_scope_legacy_manifestless_package_is_not_removed() {
+async fn project_scope_manifestless_package_is_not_removed() {
     let (_temp, root) = canonical_tempdir();
     let project = root.join("project");
     let profile_root = root.join("profile");
@@ -719,20 +719,10 @@ async fn project_scope_legacy_manifestless_package_is_not_removed() {
 
     let scope = MaterializationScope::project(MaterializationHost::Claude, project);
     materialize_skill(&host_io(), &scope, &skill, INSTALL).unwrap();
-    let dir = scope.skills_dir().join("code-slop-cleanup");
-    let manifest = dir.join(".tracedecay-materialization.json");
-
-    // Legacy shape: strip `materialized_by` but keep the manifest otherwise
-    // valid (serde default makes the field optional).
-    let mut json: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
-    json.as_object_mut().unwrap().remove("materialized_by");
-    std::fs::write(&manifest, serde_json::to_string_pretty(&json).unwrap()).unwrap();
-
-    assert_eq!(
-        remove_materialized_skill(&host_io(), &scope, "code-slop-cleanup", INSTALL_B).unwrap(),
-        RemoveAction::SkippedForeign
-    );
+    let manifest = scope
+        .skills_dir()
+        .join("code-slop-cleanup")
+        .join(".tracedecay-materialization.json");
 
     std::fs::remove_file(&manifest).unwrap();
     assert_eq!(

@@ -104,7 +104,7 @@ struct ProjectRoute {
 fn project_route(environment: &common::IsolatedHome, project: &Path) -> ProjectRoute {
     ProjectRoute {
         profile: environment.profile().clone(),
-        handshake: tracedecay::daemon::handshake_for_current_client(
+        handshake: crate::common::handshake_for_current_client(
             environment.profile(),
             Some(project.to_path_buf()),
             None,

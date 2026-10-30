@@ -11,8 +11,6 @@ use tracedecay_contracts::{
 
 use super::journal::DurableAutomationAdmission;
 
-pub type AutomationSettledProblem = AutomationRunProblemV1;
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(
     tag = "kind",
@@ -27,7 +25,7 @@ pub enum AutomationSettledTerminal {
         scope: ResolvedScope,
         outcome: Box<ApplicationOutcome<AutomationRunResultV1>>,
     },
-    Problem(AutomationSettledProblem),
+    Problem(AutomationRunProblemV1),
 }
 
 /// The `fact_store_curate` outcome for a settled run: the same effect
@@ -43,10 +41,8 @@ pub fn curate_receipt_outcome(
 impl AutomationSettledTerminal {
     pub fn into_outcome(
         self,
-    ) -> std::result::Result<
-        ApplicationOutcome<RetainedSurfaceResultV1>,
-        Box<AutomationSettledProblem>,
-    > {
+    ) -> std::result::Result<ApplicationOutcome<RetainedSurfaceResultV1>, Box<AutomationRunProblemV1>>
+    {
         match self {
             Self::Outcome { outcome, .. } => Ok(curate_receipt_outcome(*outcome)),
             Self::Problem(problem) => Err(Box::new(problem)),
@@ -93,7 +89,7 @@ impl AutomationSettledTerminal {
         effect.payload.as_ref()
     }
 
-    pub fn problem(&self) -> Option<&AutomationSettledProblem> {
+    pub fn problem(&self) -> Option<&AutomationRunProblemV1> {
         match self {
             Self::Outcome { .. } => None,
             Self::Problem(problem) => Some(problem),

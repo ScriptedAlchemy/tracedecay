@@ -229,9 +229,8 @@ const SEALED_STORE_FORM_LAYERED: &str = "layered";
 #[derive(Debug, Deserialize, Serialize)]
 struct SealedStoreReceiptV1 {
     version: u32,
-    /// Always [`SEALED_STORE_FORM_COMPACT`] for stores this revision builds;
-    /// receipts written by earlier revisions may name a replay-form store,
-    /// which reopens and proves exactly like a compact one.
+    /// [`SEALED_STORE_FORM_COMPACT`] or [`SEALED_STORE_FORM_LAYERED`]; any
+    /// other form is refused.
     form: String,
     namespace: String,
     projection: String,

@@ -732,22 +732,18 @@ pub(super) fn resolve_edit(
                 .flat_map(|(_, before, _)| before.artifacts.unresolved_references.iter().map(site)),
         )
         .collect::<HashSet<_>>();
-    let mut before_selection = Vec::new();
-    if parent.statistics().ambiguous_name_drops.is_some() {
-        before_selection.extend(
-            selection
-                .iter()
-                .filter(|(index, _)| !edited_indices.contains(index))
-                .cloned(),
-        );
-        before_selection.extend(edited.iter().map(|(index, before, _)| {
-            (
-                *index,
-                (0..before.artifacts.unresolved_references.len()).collect(),
-            )
-        }));
-        before_selection.sort_by_key(|(index, _)| *index);
-    }
+    let mut before_selection = selection
+        .iter()
+        .filter(|(index, _)| !edited_indices.contains(index))
+        .cloned()
+        .collect::<Vec<_>>();
+    before_selection.extend(edited.iter().map(|(index, before, _)| {
+        (
+            *index,
+            (0..before.artifacts.unresolved_references.len()).collect(),
+        )
+    }));
+    before_selection.sort_by_key(|(index, _)| *index);
     let units = selection
         .iter()
         .chain(&before_selection)

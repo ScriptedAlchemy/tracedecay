@@ -273,7 +273,7 @@ pub(crate) fn print_flash_warning(all: bool, targets: &[ProjectStorageLocation])
             "\x1b[1;31mThis will wipe \x1b[5mALL\x1b[25;1;31m profile-scoped database state:\x1b[0m"
         );
         eprintln!("  \x1b[31m✗\x1b[0m global registry, user memory and sessions");
-        eprintln!("  \x1b[31m✗\x1b[0m project, legacy, and remote stores");
+        eprintln!("  \x1b[31m✗\x1b[0m project and remote stores");
         eprintln!("  \x1b[31m✗\x1b[0m Grafeo WAL and host-admission state");
         eprintln!("  \x1b[31m✗\x1b[0m agent-managed skills and their usage records");
         eprintln!("  \x1b[31m✗\x1b[0m hook analytics and maintenance inventories");
@@ -458,12 +458,6 @@ mod gather_tests {
             .status()
             .unwrap();
         assert!(status.success());
-        fs::create_dir_all(unenrolled.join(".tracedecay")).unwrap();
-        fs::write(
-            unenrolled.join(".tracedecay/enrollment.json"),
-            r#"{"project_id":"proj_legacy","storage_mode":"profile_sharded"}"#,
-        )
-        .unwrap();
 
         let out = gather_local_projects_from(profile, &cwd);
 
@@ -477,7 +471,7 @@ mod gather_tests {
         );
         assert!(
             !out.contains(&unenrolled),
-            "a retired enrollment file is not an identity, got {out:?}"
+            "a repository without an identity marker is not detected, got {out:?}"
         );
     }
 

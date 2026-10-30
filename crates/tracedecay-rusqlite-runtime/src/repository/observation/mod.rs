@@ -10,7 +10,7 @@ use tracedecay_domain::{
     CanonicalObservationIdV1, DurableObservationV1, ObservationCollisionOutcomeV1,
     ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1,
     ProjectionGenerationId, SanitizationReceiptV1, classify_observation_collision,
-    is_canonical_payload_revision_replay,
+    is_replayed_occurrence,
 };
 use tracedecay_store::{
     AnchoredObservationWrite, CanonicalBodyError, CursorAdvanceLedgerDisagreementV1,
@@ -81,9 +81,8 @@ impl ObservationExecutor {
             let stored_observation =
                 decode_stored_observation_on_savepoint(savepoint, stored_observation)?;
             let collision = classify_observation_collision(&stored_observation, observation);
-            let canonical_revision =
-                is_canonical_payload_revision_replay(&stored_observation, observation);
-            if canonical_revision
+            let replayed_occurrence = is_replayed_occurrence(&stored_observation, observation);
+            if replayed_occurrence
                 || (collision == ObservationCollisionOutcomeV1::ExactDuplicate
                     && stored_observation.identity() != observation.identity())
             {
@@ -95,8 +94,8 @@ impl ObservationExecutor {
                     identity.ordering_domain(),
                     write.expected_cursor().cloned(),
                     identity.position(),
-                    if canonical_revision {
-                        ObservationCoverageReason::CanonicalPayloadRevision
+                    if replayed_occurrence {
+                        ObservationCoverageReason::ReplayedOccurrence
                     } else {
                         ObservationCoverageReason::DuplicateObservation
                     },

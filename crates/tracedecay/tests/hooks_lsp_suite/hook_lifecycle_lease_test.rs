@@ -48,17 +48,12 @@ fn native_hook_commands() -> Vec<(&'static str, Vec<u8>)> {
     .to_vec();
 
     vec![
-        ("hook-prompt-submit", claude_stop.clone()),
         ("hook-stop", claude_stop.clone()),
         ("hook-claude-session-start", claude_stop.clone()),
         ("hook-claude-post-tool-use", claude_stop.clone()),
         ("hook-claude-subagent-start", claude_stop),
-        ("hook-kiro-pre-tool-use", kiro_prompt.clone()),
         ("hook-kiro-prompt-submit", kiro_prompt.clone()),
-        ("hook-kiro-post-tool-use", kiro_prompt),
-        ("hook-cursor-subagent-start", cursor_edit.clone()),
         ("hook-cursor-post-tool-use", cursor_edit.clone()),
-        ("hook-cursor-before-submit-prompt", cursor_edit.clone()),
         ("hook-cursor-pre-compact", cursor_edit.clone()),
         ("hook-cursor-after-file-edit", cursor_edit.clone()),
         ("hook-cursor-session-start", cursor_edit.clone()),
@@ -168,14 +163,6 @@ fn native_host_hooks_do_not_create_a_missing_profile() {
         assert_eq!(output.stdout, expected_stdout, "{hook}: {output:?}");
         assert!(output.stderr.is_empty(), "{hook}: {output:?}");
     }
-
-    let home = temp.path().join("no-input");
-    std::fs::create_dir_all(&home).unwrap();
-    let output = run_hook(&home, "hook-pre-tool-use", None);
-    assert!(output.status.success(), "{output:?}");
-    assert!(output.stdout.is_empty(), "{output:?}");
-    assert!(output.stderr.is_empty(), "{output:?}");
-    assert!(!home.join(".tracedecay").exists());
 }
 
 #[test]

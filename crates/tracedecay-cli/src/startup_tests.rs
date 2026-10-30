@@ -151,20 +151,11 @@ fn default_component_set_adoption_requires_confirmation() {
     }
 }
 
-/// Help offers one MCP component; scripts that spell the retired one still
-/// parse.
+/// Help offers the MCP component.
 #[test]
-fn component_help_lists_one_mcp_choice_and_keeps_the_retired_spelling() {
+fn component_help_lists_the_mcp_choice() {
     let help = Cli::command().render_long_help().to_string();
     assert!(help.contains("context-mcp"), "{help}");
-    assert!(!help.contains("operator-mcp"), "{help}");
-
-    let cli = Cli::try_parse_from(["tracedecay", "update-plugin", "--component", "operator-mcp"])
-        .expect("the retired component spelling still parses");
-    assert_eq!(
-        cli.component,
-        Some(super::HostBundleComponentArg::OperatorMcp)
-    );
 }
 
 #[test]
@@ -694,32 +685,14 @@ fn post_update_full_reinstall_advances_both_version_markers() {
 }
 
 #[test]
-fn retired_worldwide_counter_commands_are_refused_by_the_parser() {
-    for retired in ["enable-upload-counter", "disable-upload-counter"] {
-        let error = Cli::try_parse_from(["tracedecay", retired])
-            .err()
-            .expect("a retired subcommand must not parse");
-        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
-    }
-}
-
-#[test]
 fn claude_and_kiro_hooks_skip_startup_maintenance() {
     // Claude and Kiro lifecycle hooks are agent-invoked hot-path
     // commands, exactly like the Cursor/Codex hooks already in the
     // skip-list. They must skip the pre-command startup maintenance so they
     // stay fast on every tool-use/prompt/stop event (#84).
-    assert!(should_skip_startup_maintenance(&Commands::HookPreToolUse));
-    assert!(should_skip_startup_maintenance(&Commands::HookPromptSubmit));
     assert!(should_skip_startup_maintenance(&Commands::HookStop));
     assert!(should_skip_startup_maintenance(
-        &Commands::HookKiroPreToolUse
-    ));
-    assert!(should_skip_startup_maintenance(
         &Commands::HookKiroPromptSubmit
-    ));
-    assert!(should_skip_startup_maintenance(
-        &Commands::HookKiroPostToolUse
     ));
 }
 
@@ -734,7 +707,7 @@ fn every_hook_subcommand_skips_startup_maintenance() {
         .filter(|name| name.starts_with("hook-"))
         .collect();
     assert!(
-        hooks.len() > 30,
+        hooks.len() > 20,
         "hook subcommands were not enumerated: {hooks:?}"
     );
     for hook in &hooks {
@@ -830,24 +803,6 @@ fn query_commands_accept_json_output() {
             action: crate::cli::BranchAction::List { json: true, .. }
         }
     ));
-}
-
-#[test]
-fn the_beta_83_claude_plugin_flag_serves_the_full_tool_list() {
-    for flag in ["--full-tool-list", "--claude-code-tool-search"] {
-        let cli = Cli::try_parse_from(["tracedecay", "serve", flag])
-            .unwrap_or_else(|error| panic!("{flag} must parse: {error}"));
-        assert!(
-            matches!(
-                cli.command,
-                Some(Commands::Serve {
-                    full_tool_list: true,
-                    ..
-                })
-            ),
-            "{flag} must select the full tool list"
-        );
-    }
 }
 
 #[test]

@@ -82,8 +82,7 @@ fn schema_convergence_status(findings: &[SchemaConvergenceFindingV1]) -> StatusS
     } else if findings.iter().any(|finding| {
         matches!(
             finding.state,
-            SchemaConvergenceStateV1::PendingSchemaMigration
-                | SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress
+            SchemaConvergenceStateV1::Pending | SchemaConvergenceStateV1::Running
         )
     }) {
         StatusSchemaConvergenceStateV1::InProgress
@@ -1170,8 +1169,7 @@ mod tests {
     };
     use tracedecay_contracts::retrieval::{StatusCodeIndexFreshnessV1, StatusRetrievalServingV1};
     use tracedecay_contracts::storage::{
-        SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStageV1,
-        SchemaConvergenceStateV1,
+        SchemaConvergenceFindingV1, SchemaConvergenceStageV1, SchemaConvergenceStateV1,
     };
 
     #[test]
@@ -1537,14 +1535,8 @@ mod tests {
     #[test]
     fn status_preserves_each_schema_convergence_state() {
         for (state, expected) in [
-            (
-                SchemaConvergenceStateV1::PendingSchemaMigration,
-                "in_progress",
-            ),
-            (
-                SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress,
-                "in_progress",
-            ),
+            (SchemaConvergenceStateV1::Pending, "in_progress"),
+            (SchemaConvergenceStateV1::Running, "in_progress"),
             (SchemaConvergenceStateV1::Degraded, "degraded"),
             (SchemaConvergenceStateV1::Completed, "completed"),
         ] {
@@ -1552,10 +1544,6 @@ mod tests {
                 store: "profile-sessions".to_owned(),
                 stage: SchemaConvergenceStageV1::RegisteredSchema,
                 state,
-                progress: Some(SchemaConvergenceProgressV1::Rows {
-                    done: 3,
-                    remaining: 7,
-                }),
                 started_at_micros: 42,
                 degraded_row: (state == SchemaConvergenceStateV1::Degraded)
                     .then(|| "observation_id=obs-7".to_owned()),
@@ -1568,8 +1556,6 @@ mod tests {
             let rendered = render_status_md(&serde_json::json!({"schema_convergence": value}));
             assert!(rendered.contains(state.as_str()));
             assert!(rendered.contains("profile-sessions"));
-            assert!(rendered.contains(r#""done":3"#));
-            assert!(rendered.contains(r#""remaining":7"#));
             if state == SchemaConvergenceStateV1::Degraded {
                 assert!(rendered.contains("observation_id=obs-7"));
             }
@@ -1602,7 +1588,7 @@ mod tests {
                 source_total_bytes: 1_024,
                 symbol_count: 12,
                 edge_count: 7,
-                ambiguous_name_drops: Some(0),
+                ambiguous_name_drops: 0,
             },
         };
         let value = graph_statistics_value(Some(&observed)).expect("observed census serializes");

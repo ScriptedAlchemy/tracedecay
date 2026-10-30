@@ -386,10 +386,10 @@ impl McpServer {
                 request.client_info_name(),
                 request.requested_protocol_version(),
             )),
-            // Some clients send the initialized notification with an id (or
-            // via the alternate method name); both stay compatibility no-ops.
-            // Hook events were consumed by the early notification dispatch
-            // above and can never reach this match with a response due.
+            // Some clients send the initialized notification with an id; it
+            // stays a no-op. Hook events were consumed by the early
+            // notification dispatch above and can never reach this match with
+            // a response due.
             McpMethod::InitializedAck | McpMethod::HookEvent | McpMethod::Cancelled => None,
             McpMethod::ToolsList => Some(self.handle_tools_list(id)),
             McpMethod::ToolsCall => Some(
@@ -998,9 +998,8 @@ impl McpServer {
     /// Resolves the raw-read counterfactual from the retained cache, falling
     /// back to bounded metadata reads for files owned by the current response.
     ///
-    /// The daemon code-index cutover intentionally stopped reading the legacy
-    /// graph database's file table, so a cache miss is not evidence that a
-    /// touched source file costs zero tokens.
+    /// A cache miss is not evidence that a touched source file costs zero
+    /// tokens.
     #[tracing::instrument(
         name = "mcp.server.accounting.raw_file_tokens",
         level = "trace",

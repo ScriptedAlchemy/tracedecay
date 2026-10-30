@@ -61,7 +61,7 @@ fn write_codex_rollout_with_compaction(
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:21.000Z",
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": "Map the release automation state"}
+            "payload": crate::common::codex_user_message_payload("Map the release automation state")
         }),
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:22.000Z",
@@ -88,7 +88,7 @@ fn write_codex_rollout_with_compaction(
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:24.000Z",
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": "Continue after compaction"}
+            "payload": crate::common::codex_user_message_payload("Continue after compaction")
         }),
     );
     std::fs::write(&path, contents).unwrap();
@@ -354,7 +354,7 @@ async fn repeated_codex_compactions_remain_native_evidence_until_daemon_effect()
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:31.000Z",
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": "First compacted prompt"}
+            "payload": crate::common::codex_user_message_payload("First compacted prompt")
         }),
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:32.000Z",
@@ -365,7 +365,7 @@ async fn repeated_codex_compactions_remain_native_evidence_until_daemon_effect()
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:34.000Z",
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": "Second compacted prompt"}
+            "payload": crate::common::codex_user_message_payload("Second compacted prompt")
         }),
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:35.000Z",

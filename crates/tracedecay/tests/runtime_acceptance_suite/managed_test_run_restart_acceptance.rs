@@ -53,7 +53,7 @@ fn write_codex_session(home: &Path, project: &Path) {
         json!({"timestamp": "2026-09-28T16:00:00.000Z", "type": "session_meta",
                "payload": {"id": SESSION, "cwd": project, "model": "gpt-5.6"}}),
         json!({"timestamp": "2026-09-28T16:00:01.000Z", "type": "event_msg",
-               "payload": {"type": "user_message", "message": "Run the affected greeting tests"}}),
+               "payload": crate::common::codex_user_message_payload("Run the affected greeting tests")}),
     ];
     let rollout: Vec<String> = records.iter().map(Value::to_string).collect();
     std::fs::write(
@@ -130,7 +130,7 @@ async fn a_session_attributed_test_run_survives_a_physical_daemon_restart_on_loo
         .expect("run tracedecay init");
     assert!(initialized.status.success(), "init failed: {initialized:?}");
     await_published_code_index(environment.home(), &project);
-    let handshake = tracedecay::daemon::handshake_for_current_client(
+    let handshake = crate::common::handshake_for_current_client(
         environment.profile(),
         Some(project.clone()),
         None,

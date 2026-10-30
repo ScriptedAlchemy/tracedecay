@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 use tracedecay_automation_runtime::automation::config::{
-    AutomationBackend, AutomationConfigPatch, AutomationTaskPatch,
+    AutomationBackendV1, AutomationConfigPatch, AutomationTaskPatch,
 };
 use tracedecay_automation_runtime::automation::run_ledger::load_run_records;
 use tracedecay_automation_runtime::automation::scheduler::{
@@ -72,7 +72,7 @@ async fn paused_tick_scenario() {
         &handshake,
         AutomationConfigPatch {
             enabled: Some(true),
-            backend: Some(AutomationBackend::CodexAppServer),
+            backend: Some(AutomationBackendV1::CodexAppServer),
             memory_curator: AutomationTaskPatch {
                 enabled: Some(true),
                 schedule: Some(Some("every:1m".to_string())),

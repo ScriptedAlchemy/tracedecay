@@ -147,18 +147,16 @@ fn mcp_discovery_requests_are_reserved_control_traffic() {
             "{method} must be admitted as reserved control traffic"
         );
     }
-    for method in ["notifications/initialized", "initialized"] {
-        let notification = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": method,
-        })
-        .to_string();
-        let notification = super::super::AuthenticatedFirstRequest::new(notification);
-        assert!(
-            super::super::is_reserved_control_request(&notification),
-            "{method} must be admitted as reserved control traffic"
-        );
-    }
+    let notification = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+    })
+    .to_string();
+    let notification = super::super::AuthenticatedFirstRequest::new(notification);
+    assert!(
+        super::super::is_reserved_control_request(&notification),
+        "notifications/initialized must be admitted as reserved control traffic"
+    );
 }
 
 #[test]
@@ -292,21 +290,6 @@ fn daemon_per_client_admission_is_fair_and_reconnects_after_release() {
     );
     drop(second);
     drop(other);
-}
-
-#[test]
-fn daemon_per_client_admission_leaves_legacy_clients_compatible() {
-    let admission = super::super::DaemonPerClientAdmission::new(1);
-    let mut legacy = test_handshake_defaults();
-    legacy.client_instance_id.clear();
-
-    assert!(admission.try_admit(&legacy).is_ok());
-    assert!(admission.try_admit(&legacy).is_ok());
-    assert_eq!(
-        admission.tracked_client_count(),
-        0,
-        "an absent stable instance id cannot be used as a fair identity"
-    );
 }
 
 #[test]

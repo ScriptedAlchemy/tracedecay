@@ -29,7 +29,7 @@ pub fn require_component_capabilities(
     component: HostComponentV1,
 ) -> Result<(), HostBundleError> {
     use HostCapabilityV1::{Cli, Hooks, Lsp, Mcp, NativeDiagnostics};
-    use HostComponentV1::{Agent, ContextMcp, Core, OperatorMcp};
+    use HostComponentV1::{Agent, ContextMcp, Core};
 
     let required: &[HostCapabilityV1] = match (host, component) {
         (HostKindV1::ClaudeCode, Core) => &[Lsp, Hooks],
@@ -61,7 +61,7 @@ pub fn require_component_capabilities(
             return Err(HostBundleError::UnsupportedCapability);
         }
         (HostKindV1::Zed | HostKindV1::Antigravity | HostKindV1::Vibe, ContextMcp) => &[Mcp],
-        (HostKindV1::Zed | HostKindV1::Antigravity | HostKindV1::Vibe, Agent | OperatorMcp) => {
+        (HostKindV1::Zed | HostKindV1::Antigravity | HostKindV1::Vibe, Agent) => {
             return Err(HostBundleError::UnsupportedCapability);
         }
         // Pi's Core deploys the extension that carries both the tool bridge
@@ -79,7 +79,7 @@ pub fn require_component_capabilities(
         // requiring `Hooks` would refuse the component against the same
         // capability matrix every other host is judged by.
         (HostKindV1::ChatGpt, Core) => &[Mcp],
-        (_, ContextMcp | OperatorMcp) => &[Mcp],
+        (_, ContextMcp) => &[Mcp],
         (HostKindV1::CursorDesktop, Agent) => &[NativeDiagnostics],
         (HostKindV1::OpenCode, Agent) => &[Cli],
         (_, Agent) => return Err(HostBundleError::UnsupportedCapability),

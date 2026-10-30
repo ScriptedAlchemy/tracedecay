@@ -52,11 +52,11 @@ async fn memory_curator_resumes_from_the_durable_next_page_cursor() {
     let cg = init_project(temp.path()).await;
     let facts = seed_duplicate_facts(&cg).await;
     let backend = ReviewFactRecordingBackend::new();
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        ..AutomationConfig::default()
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        ..AutomationSettingsV1::default()
     };
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
     let options = || MemoryCuratorAutomationOptions {

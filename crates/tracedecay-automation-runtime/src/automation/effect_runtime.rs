@@ -21,8 +21,7 @@ pub use input::{
 };
 pub use recovery_index::{
     AutomationEffectRecoveryPreparation, AutomationEffectRecoveryReport,
-    PendingAutomationEffectReset, PreparedAutomationEffectRecovery, add_pending_blocking,
-    effect_authority_digest, pending_automation_effect_resets_blocking,
+    PreparedAutomationEffectRecovery, add_pending_blocking, effect_authority_digest,
     prepare_reserved_automation_effect_recovery, reconcile_prepared_automation_effects_for_project,
     recovered_partial_terminal, remove_pending_blocking,
 };
@@ -34,4 +33,4 @@ pub use settlement::{
     RetainedAutomationSettlementProjection, RetainedSettlementPairWaiter, RetainedSettlementWaiter,
     ReusedSchedulerSkipStartError, pinned_automation_configuration_digest,
 };
-pub use terminal::{AutomationSettledProblem, AutomationSettledTerminal, curate_receipt_outcome};
+pub use terminal::{AutomationSettledTerminal, curate_receipt_outcome};

@@ -698,7 +698,7 @@ pub struct LogicalCopyRecordV1 {
     pub proof: CopyProofV1,
     /// When the copy edge became visible to the authoritative store/projection.
     pub knowledge_at: UtcMicros,
-    /// Independent represented-world validity; legacy rows default to unknown.
+    /// Independent represented-world validity.
     pub valid_time: TemporalValidityV1,
 }
 
@@ -725,10 +725,8 @@ impl<'de> Deserialize<'de> for LogicalCopyRecordV1 {
             occurrence_id: MessageOccurrenceIdV1,
             copied_from_occurrence_id: MessageOccurrenceIdV1,
             proof: CopyProofV1,
-            #[serde(default)]
-            knowledge_at: Option<UtcMicros>,
-            #[serde(default)]
-            valid_time: Option<TemporalValidityV1>,
+            knowledge_at: UtcMicros,
+            valid_time: TemporalValidityV1,
         }
 
         let wire = Wire::deserialize(deserializer)?;
@@ -736,10 +734,8 @@ impl<'de> Deserialize<'de> for LogicalCopyRecordV1 {
             occurrence_id: wire.occurrence_id,
             copied_from_occurrence_id: wire.copied_from_occurrence_id,
             proof: wire.proof,
-            // Legacy copy wires omit bitemporal fields; preserve unknown validity
-            // and a zero knowledge watermark rather than inventing provider time.
-            knowledge_at: wire.knowledge_at.unwrap_or(UtcMicros(0)),
-            valid_time: wire.valid_time.unwrap_or(TemporalValidityV1::Unknown),
+            knowledge_at: wire.knowledge_at,
+            valid_time: wire.valid_time,
         };
         record.validate().map_err(serde::de::Error::custom)?;
         Ok(record)

@@ -411,7 +411,7 @@ mod tests {
     #[test]
     fn inspection_requires_identity_but_no_conclusion_or_caller_digest() {
         let mut args = json!({
-            "original_operation": "use-case.application.source-edit.rollback",
+            "original_operation": "use-case.application.source-edit.str-replace",
             "effect_id": "effect.source-edit.retained",
             "idempotency_key": "source-edit.original",
             "attempt_idempotency_key": "source-edit.inspect",

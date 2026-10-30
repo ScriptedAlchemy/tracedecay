@@ -1,14 +1,14 @@
 use super::super::managed_skills::{ManagedSkillSource, ManagedSkillState};
-use super::{SkillImprovementRecommendation, SkillStaleRecommendation, SkillUsageSummary};
+use super::{SkillImprovementRecommendation, SkillStaleRecommendation, SkillUsageRecord};
 
 pub fn stale_skill_recommendations(
-    summaries: &[SkillUsageSummary],
+    summaries: &[SkillUsageRecord],
 ) -> Vec<SkillStaleRecommendation> {
     summaries.iter().map(stale_skill_recommendation).collect()
 }
 
 pub fn skill_improvement_recommendations(
-    summaries: &[SkillUsageSummary],
+    summaries: &[SkillUsageRecord],
 ) -> Vec<SkillImprovementRecommendation> {
     summaries
         .iter()
@@ -16,7 +16,7 @@ pub fn skill_improvement_recommendations(
         .collect()
 }
 
-fn stale_skill_recommendation(summary: &SkillUsageSummary) -> SkillStaleRecommendation {
+fn stale_skill_recommendation(summary: &SkillUsageRecord) -> SkillStaleRecommendation {
     let evidence = usage_evidence(summary);
     if summary.pinned {
         return keep_recommendation(
@@ -55,7 +55,7 @@ fn stale_skill_recommendation(summary: &SkillUsageSummary) -> SkillStaleRecommen
     )
 }
 
-fn skill_improvement_recommendation(summary: &SkillUsageSummary) -> SkillImprovementRecommendation {
+fn skill_improvement_recommendation(summary: &SkillUsageRecord) -> SkillImprovementRecommendation {
     let evidence = usage_evidence(summary);
     if summary.pinned {
         return no_improvement_recommendation(
@@ -102,7 +102,7 @@ fn skill_improvement_recommendation(summary: &SkillUsageSummary) -> SkillImprove
 }
 
 fn keep_recommendation(
-    summary: &SkillUsageSummary,
+    summary: &SkillUsageRecord,
     reason: impl Into<String>,
     evidence: Vec<String>,
 ) -> SkillStaleRecommendation {
@@ -116,7 +116,7 @@ fn keep_recommendation(
 }
 
 fn no_improvement_recommendation(
-    summary: &SkillUsageSummary,
+    summary: &SkillUsageRecord,
     reason: impl Into<String>,
     evidence: Vec<String>,
 ) -> SkillImprovementRecommendation {
@@ -130,7 +130,7 @@ fn no_improvement_recommendation(
     }
 }
 
-fn usage_evidence(summary: &SkillUsageSummary) -> Vec<String> {
+fn usage_evidence(summary: &SkillUsageRecord) -> Vec<String> {
     let mut evidence = vec![
         format!("state={}", optional_state_key(summary.state)),
         format!("pinned={}", summary.pinned),

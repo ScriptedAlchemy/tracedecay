@@ -33,27 +33,14 @@ import {
   sessionHits,
   type Hit,
   type LaneId,
-  type SourceLaneId,
 } from './model.ts';
 
 /** Which coordinator source answers for each source lane. */
-const LANE_SOURCE_ID: Record<SourceLaneId, ExplorerSourceIdV1> = {
+const LANE_SOURCE_ID: Record<LaneId, ExplorerSourceIdV1> = {
   code: 'code_graph',
   sessions: 'sessions',
   knowledge: 'knowledge',
 };
-
-/**
- * Why the semantic lane has no rows, stated as the contract fact it is.
- *
- * `ExplorerSourceIdV1` names three sources and none of them is semantic
- * retrieval; the dense retrieval path was retired from the daemon. The lane
- * is still drawn, because a reader comparing four authorities must see that
- * the fourth did not answer for a reason, not find three columns and infer
- * the fourth was never asked.
- */
-export const SEMANTIC_UNREGISTERED_DETAIL =
-  'no semantic retrieval source is registered with the query coordinator';
 
 /**
  * One lane's condition, as a closed union.
@@ -160,10 +147,6 @@ export type ExplorerLaneReadModel =
   | { readonly state: 'unsupported_schema'; readonly lane: LaneId }
   /** The run reached a terminal state without ever naming this source. */
   | { readonly state: 'unanswered'; readonly lane: LaneId }
-  /** No production authority exists for this lane at all: the coordinator
-   * names no such source, so there is nothing to ask and nothing to poll.
-   * Distinct from `unavailable`, which is a registered source declining. */
-  | { readonly state: 'unregistered'; readonly lane: LaneId; readonly detail: string }
   /** The transport reported a domain state that carries no lane-level reading.
    * The state is kept verbatim rather than folded into an error. */
   | {
@@ -172,11 +155,6 @@ export type ExplorerLaneReadModel =
       readonly domainState: DashboardDomainStateV1;
       readonly detail: string | null;
     };
-
-/** The semantic lane's standing condition. */
-export function semanticLane(): ExplorerLaneReadModel {
-  return { state: 'unregistered', lane: 'semantic', detail: SEMANTIC_UNREGISTERED_DETAIL };
-}
 
 /**
  * The lane's condition when the current scope will not accept the query run.
@@ -239,7 +217,7 @@ function narrowPageRows(page: ExplorerResultPageV1): Record<string, unknown>[] {
 
 /** Row grammar for the lane, so no caller picks the wrong normaliser. */
 function hitsForLane(
-  lane: SourceLaneId,
+  lane: LaneId,
   rows: readonly Record<string, unknown>[],
   terms: readonly string[],
 ): Hit[] {
@@ -280,7 +258,7 @@ export function runIsTerminal(state: ExplorerRunStateV1): boolean {
  * or cross-source rank.
  */
 export function laneFromSourceProgress(
-  lane: SourceLaneId,
+  lane: LaneId,
   source: ExplorerSourceProgressV1,
   terms: readonly string[],
 ): ExplorerLaneReadModel {
@@ -420,7 +398,7 @@ export function laneFromTransport(
  * query's results to the text on screen.
  */
 export function searchLane(
-  lane: SourceLaneId,
+  lane: LaneId,
   result: EnvelopeResult<ExplorerQueryRunV1> | undefined,
   submittedQuery: string,
   terms: readonly string[],
@@ -448,7 +426,7 @@ export function searchLane(
  * it is holding, not how much there is.
  */
 export function browseLane<T>(
-  lane: SourceLaneId,
+  lane: LaneId,
   result: EnvelopeResult<T> | undefined,
   isPending: boolean,
   rowsOf: (data: T) => readonly Record<string, unknown>[],
@@ -532,10 +510,6 @@ export function laneStateKind(read: ExplorerLaneReadModel): DomainStateKind {
       return 'unsupported_schema';
     case 'unanswered':
       return 'unknown';
-    // No registered source is the taxonomy's `unavailable`: the lane is
-    // inaccessible for a stated reason. The detail carries what kind.
-    case 'unregistered':
-      return 'unavailable';
     case 'indeterminate':
       return 'unknown';
     default: {
@@ -599,7 +573,6 @@ export function laneStateDetail(read: ExplorerLaneReadModel): string | undefined
     case 'unsupported_schema':
       return undefined;
     case 'locked':
-    case 'unregistered':
       return read.detail;
     case 'unanswered':
       return 'the run never named this source';
@@ -643,7 +616,6 @@ export function laneEvidence(read: ExplorerLaneReadModel | undefined): EvidenceQ
     case 'locked':
     case 'unsupported_schema':
     case 'unanswered':
-    case 'unregistered':
     case 'indeterminate':
       return 'unknown';
     default: {

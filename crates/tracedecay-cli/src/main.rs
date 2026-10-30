@@ -871,19 +871,13 @@ impl CommandFamily {
             | Commands::Reinstall { .. }
             | Commands::UpdatePlugin { .. }
             | Commands::Uninstall { .. } => Self::Agent,
-            Commands::HookPreToolUse
-            | Commands::HookPromptSubmit
-            | Commands::HookStop
+            Commands::HookStop
             | Commands::HookClaudeSessionStart
             | Commands::HookClaudePostToolUse
             | Commands::HookClaudePostCompact
             | Commands::HookClaudeSubagentStart
-            | Commands::HookKiroPreToolUse
             | Commands::HookKiroPromptSubmit
-            | Commands::HookKiroPostToolUse
-            | Commands::HookCursorSubagentStart
             | Commands::HookCursorPostToolUse
-            | Commands::HookCursorBeforeSubmitPrompt
             | Commands::HookCursorPreCompact
             | Commands::HookCursorAfterFileEdit
             | Commands::HookCursorSessionStart
@@ -1596,19 +1590,13 @@ async fn dispatch_hook_command(
     command: Commands,
 ) -> tracedecay_domain::errors::Result<CommandOutcome> {
     let code = match command {
-        hook_command @ (Commands::HookPreToolUse
-        | Commands::HookPromptSubmit
-        | Commands::HookStop
+        hook_command @ (Commands::HookStop
         | Commands::HookClaudeSessionStart
         | Commands::HookClaudePostToolUse
         | Commands::HookClaudePostCompact
         | Commands::HookClaudeSubagentStart
-        | Commands::HookKiroPreToolUse
         | Commands::HookKiroPromptSubmit
-        | Commands::HookKiroPostToolUse
-        | Commands::HookCursorSubagentStart
         | Commands::HookCursorPostToolUse
-        | Commands::HookCursorBeforeSubmitPrompt
         | Commands::HookCursorPreCompact
         | Commands::HookCursorAfterFileEdit
         | Commands::HookCursorSessionStart

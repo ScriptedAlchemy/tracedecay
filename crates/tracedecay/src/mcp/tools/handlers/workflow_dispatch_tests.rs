@@ -123,7 +123,7 @@ async fn workflow_read_preserves_results_and_refuses_wrong_operations_and_fields
         assert_eq!(tool_json(&mcp), http);
         assert_eq!(http["value"]["request_id"], request_id.as_str());
         assert_eq!(executor.invocation_count(), invocations);
-        assert_eq!(mcp.semantic_error(), Some(expected_problem.is_some()));
+        assert_eq!(mcp.semantic_error(), expected_problem.is_some());
         if let Some(code) = expected_problem {
             assert_eq!(http["value"]["problem"]["code"], code);
         } else {

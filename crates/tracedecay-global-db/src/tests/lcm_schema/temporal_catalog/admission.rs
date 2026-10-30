@@ -135,14 +135,12 @@ async fn temporal_schema_malformed_marker_requires_reset_without_mutation() {
     let raw_db = TestConnection::open(&db_path);
     let conn = (*raw_db).clone();
     conn.execute_batch(
-        "CREATE TABLE session_temporal_schema_migrations (
-            name TEXT PRIMARY KEY,
-            incompatible_version TEXT NOT NULL,
-            applied_at INTEGER NOT NULL
+        "CREATE TABLE tracedecay_schema_version (
+            component TEXT PRIMARY KEY,
+            version INTEGER NOT NULL
          );
-         INSERT INTO session_temporal_schema_migrations (
-            name, incompatible_version, applied_at
-         ) VALUES ('session-temporal', 'older-shape', 91);",
+         INSERT INTO tracedecay_schema_version (component, version)
+         VALUES ('session-temporal', 'older-shape');",
     )
     .await
     .unwrap();
@@ -159,7 +157,7 @@ async fn temporal_schema_malformed_marker_requires_reset_without_mutation() {
     assert_eq!(authority, "session temporal");
     assert!(reason.contains("version"), "unexpected reason: {reason}");
     assert_eq!(
-        row_count(&db_path, "session_temporal_schema_migrations").await,
+        row_count(&db_path, "tracedecay_schema_version").await,
         1,
         "typed refusal must preserve malformed marker rows"
     );

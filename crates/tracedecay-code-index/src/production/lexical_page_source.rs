@@ -1276,7 +1276,7 @@ impl VerifiedSealedTextGenerationMetadataV1 {
         sources: SealedGenerationSourcesV1,
     ) -> Result<Self, CodeIndexProductionErrorV1> {
         if manifest.source_commitments.is_none() {
-            return Err(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable);
+            return Err(super::missing_source_commitments());
         }
         snapshot
             .validate()
@@ -1342,7 +1342,7 @@ impl VerifiedSealedTextGenerationMetadataV1 {
         self.manifest
             .source_commitments
             .as_ref()
-            .ok_or(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable)
+            .ok_or_else(super::missing_source_commitments)
     }
 
     pub fn snapshot(&self) -> &SanitizedCodeSnapshotV1 {

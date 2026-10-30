@@ -1827,7 +1827,7 @@ impl CodeIndexPublishedGenerationV1 {
             .manifest
             .source_commitments
             .as_ref()
-            .ok_or(CodeIndexProductionErrorV1::SourceCommitmentsUnavailable)?;
+            .ok_or_else(missing_source_commitments)?;
         let expected_seal = expected_seal_digest(&self.manifest)
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
         if expected_seal != self.manifest.seal.expected_digest {
@@ -2085,8 +2085,6 @@ pub enum CodeIndexProductionErrorV1 {
         "sealed generation format revision {0} predates this build; the generation will be rebuilt from source"
     )]
     SupersededSealedGenerationRevision(u32),
-    #[error("sealed code generation predates authenticated source commitments and must be rebuilt")]
-    SourceCommitmentsUnavailable,
     /// A digest-verified sealed row no longer satisfies this build's row
     /// contract (an older writer shape). The bytes are authentic, so this is
     /// a superseded revision to rebuild from source, not corruption.
@@ -2096,6 +2094,14 @@ pub enum CodeIndexProductionErrorV1 {
     Contract(String),
     #[error("code-index parallel worker runtime failed: {0}")]
     Parallelism(#[from] crate::parallelism::CodeIndexParallelismErrorV1),
+}
+
+/// Every sealed manifest carries the source commitments its seal
+/// authenticates; only the planner holds a manifest without them.
+pub(crate) fn missing_source_commitments() -> CodeIndexProductionErrorV1 {
+    CodeIndexProductionErrorV1::Contract(
+        "sealed code generation manifest carries no source commitments".to_owned(),
+    )
 }
 
 /// Slot lookup for one publish attempt.

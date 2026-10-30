@@ -36,10 +36,8 @@ struct Replay {
     hook_name: &'static str,
     /// The session the host payload names, which the row must carry.
     session: &'static str,
-    /// JSON piped to stdin; `None` for the legacy Claude `preToolUse` contract
-    /// which reads `TOOL_INPUT` from the environment instead.
+    /// JSON piped to stdin.
     stdin: Option<Value>,
-    tool_input_env: Option<Value>,
 }
 
 fn replays(root: &str) -> Vec<Replay> {
@@ -55,7 +53,6 @@ fn replays(root: &str) -> Vec<Replay> {
                 "hook_event_name": "SessionStart",
                 "source": "startup",
             })),
-            tool_input_env: None,
         },
         Replay {
             subcommand: "hook-claude-post-tool-use",
@@ -75,19 +72,6 @@ fn replays(root: &str) -> Vec<Replay> {
                 "permission_mode": "default",
                 "duration_ms": 1,
             })),
-            tool_input_env: None,
-        },
-        Replay {
-            subcommand: "hook-pre-tool-use",
-            agent: "claude",
-            hook_name: "preToolUse",
-            session: "claude-s1",
-            stdin: None,
-            tool_input_env: Some(json!({
-                "session_id": "claude-s1",
-                "subagent_type": "Explore",
-                "prompt": "explore the codebase and find where the parser is defined",
-            })),
         },
         Replay {
             subcommand: "hook-codex-session-start",
@@ -97,7 +81,6 @@ fn replays(root: &str) -> Vec<Replay> {
             stdin: Some(
                 json!({ "hook_event_name": "SessionStart", "session_id": "codex-s1", "cwd": root }),
             ),
-            tool_input_env: None,
         },
         Replay {
             subcommand: "hook-codex-user-prompt-submit",
@@ -110,7 +93,6 @@ fn replays(root: &str) -> Vec<Replay> {
                 "hook_event_name": "UserPromptSubmit",
                 "prompt": "fix the failing test",
             })),
-            tool_input_env: None,
         },
         Replay {
             subcommand: "hook-codex-post-tool-use",
@@ -127,7 +109,6 @@ fn replays(root: &str) -> Vec<Replay> {
                 "tool_input": { "command": "cargo build" },
                 "tool_response": "Finished",
             })),
-            tool_input_env: None,
         },
         // Capture-only callbacks are decoded by the production native decoder,
         // so their payloads must carry the host's documented Stop shape rather
@@ -148,7 +129,6 @@ fn replays(root: &str) -> Vec<Replay> {
                 "stop_hook_active": false,
                 "last_assistant_message": "done",
             })),
-            tool_input_env: None,
         },
         Replay {
             subcommand: "hook-cursor-session-start",
@@ -158,7 +138,6 @@ fn replays(root: &str) -> Vec<Replay> {
             stdin: Some(
                 json!({ "hook_event_name": "sessionStart", "conversation_id": "cursor-s1", "cwd": root }),
             ),
-            tool_input_env: None,
         },
         Replay {
             subcommand: "hook-cursor-post-tool-use",
@@ -170,7 +149,6 @@ fn replays(root: &str) -> Vec<Replay> {
                 "cwd": root,
                 "tool_name": "Read",
             })),
-            tool_input_env: None,
         },
         Replay {
             subcommand: "hook-cursor-stop",
@@ -186,23 +164,6 @@ fn replays(root: &str) -> Vec<Replay> {
                 "loop_count": 1,
                 "cwd": root,
             })),
-            tool_input_env: None,
-        },
-        Replay {
-            subcommand: "hook-kiro-pre-tool-use",
-            agent: "kiro",
-            hook_name: "preToolUse",
-            session: "kiro-s1",
-            stdin: Some(json!({
-                "hook_event_name": "preToolUse",
-                "session_id": "kiro-s1",
-                "cwd": root,
-                "tool_name": "delegate",
-                "tool_input": {
-                    "task": "explore the codebase and find where the parser is defined",
-                },
-            })),
-            tool_input_env: None,
         },
         Replay {
             subcommand: "hook-kiro-prompt-submit",
@@ -215,21 +176,6 @@ fn replays(root: &str) -> Vec<Replay> {
                 "hook_event_name": "userPromptSubmit",
                 "prompt": "add a feature",
             })),
-            tool_input_env: None,
-        },
-        Replay {
-            subcommand: "hook-kiro-post-tool-use",
-            agent: "kiro",
-            hook_name: "postToolUse",
-            session: "kiro-s1",
-            stdin: Some(json!({
-                "hook_event_name": "postToolUse",
-                "session_id": "kiro-s1",
-                "cwd": root,
-                "tool_name": "fsWrite",
-                "file_path": format!("{root}/src/lib.rs"),
-            })),
-            tool_input_env: None,
         },
         Replay {
             subcommand: "hook-pi-event",
@@ -243,7 +189,6 @@ fn replays(root: &str) -> Vec<Replay> {
                 "cwd": root,
                 "reason": "startup",
             })),
-            tool_input_env: None,
         },
         Replay {
             subcommand: "hook-pi-event",
@@ -256,7 +201,6 @@ fn replays(root: &str) -> Vec<Replay> {
                 "session_id": "pi-s1",
                 "cwd": root,
             })),
-            tool_input_env: None,
         },
         Replay {
             subcommand: "hook-kimi-event",
@@ -272,7 +216,6 @@ fn replays(root: &str) -> Vec<Replay> {
                 "tool_call_id": "kimi-call-1",
                 "tool_output": "Finished",
             })),
-            tool_input_env: None,
         },
         Replay {
             subcommand: "hook-kimi-event",
@@ -285,7 +228,6 @@ fn replays(root: &str) -> Vec<Replay> {
                 "cwd": root,
                 "stop_hook_active": false,
             })),
-            tool_input_env: None,
         },
         Replay {
             subcommand: "hook-opencode-event",
@@ -298,7 +240,6 @@ fn replays(root: &str) -> Vec<Replay> {
                 "type": "session.execution.succeeded",
                 "data": { "sessionID": "ses_opencode_s1" },
             })),
-            tool_input_env: None,
         },
     ]
 }
@@ -314,9 +255,6 @@ fn run_replay(home: &Path, project_root: &Path, replay: &Replay) {
             .stderr(Stdio::piped());
         c
     };
-    if let Some(tool_input) = &replay.tool_input_env {
-        command.env("TOOL_INPUT", tool_input.to_string());
-    }
     let mut child = command
         .spawn()
         .unwrap_or_else(|e| panic!("spawn {}: {e}", replay.subcommand));
@@ -336,17 +274,6 @@ fn run_replay(home: &Path, project_root: &Path, replay: &Replay) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
-    // Research-shaped pre-tool payloads must reach the host as an allow: no
-    // permission decision on stdout, nothing for the model on stderr.
-    if replay.hook_name == "preToolUse" {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            matches!(stdout.trim(), "" | "{}") && output.stderr.is_empty(),
-            "{} must not refuse research\nstdout: {stdout}\nstderr: {}",
-            replay.subcommand,
-            String::from_utf8_lossy(&output.stderr),
-        );
-    }
 }
 
 fn read_jsonl_rows(path: &Path) -> Vec<Value> {
@@ -436,11 +363,10 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
                     && str_field(row, "hook_name") == replay.hook_name
             })
             .collect();
-        // The capture-only fast path and the retired Claude pre-tool callback
-        // never reach a response handler, so they record the invocation
-        // themselves: a host firing a hook is adoption evidence whatever the
-        // capture outcome, and a silent callback is indistinguishable from a
-        // broken install.
+        // The capture-only fast path never reaches a response handler, so it
+        // records the invocation itself: a host firing a hook is adoption
+        // evidence whatever the capture outcome, and a silent callback is
+        // indistinguishable from a broken install.
         assert_eq!(
             matched.len(),
             1,

@@ -18,7 +18,7 @@ use tracedecay_automation_runtime::automation::run_ledger::{
     append_run_record,
 };
 
-use crate::mcp_server_test::run_client_connection_with_messages;
+use crate::mcp_server_test::support::run_client_connection_with_messages;
 use crate::mcp_server_test::support::{jsonrpc_request, response_with_id};
 use crate::support::{
     TestEnv, TestTraceDecay, close_test_graph, init_test_project, real_mcp_server, refusal_problem,
@@ -115,7 +115,7 @@ fn record(
         run_id: run_id.to_owned(),
         trigger,
         task,
-        task_key: Some(task_key.to_owned()),
+        task_key: task_key.to_owned(),
         backend: "codex_app_server".to_owned(),
         backend_identity: None,
         host_mode: Some("standalone".to_owned()),

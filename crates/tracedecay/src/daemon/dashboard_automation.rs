@@ -7,7 +7,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 use tracedecay_automation_runtime::automation::backend::CodexAppServerBackend;
-use tracedecay_automation_runtime::automation::config::AutomationConfig;
+use tracedecay_automation_runtime::automation::config::AutomationSettingsV1;
 use tracedecay_automation_runtime::automation::host_io::HostIo;
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkill, ManagedSkillExt, ManagedSkillReadError, apply_managed_skill_update,
@@ -47,13 +47,13 @@ type DashboardAutomationProjectResolver =
 const USER_JOB_REQUEST_TIMEOUT_SECS: u64 = 120;
 
 struct DashboardAutomationRequestRuntime {
-    config: AutomationConfig,
+    config: AutomationSettingsV1,
     backend: CodexAppServerBackend,
 }
 
 impl DashboardAutomationRequestRuntime {
     fn new(
-        configured: &AutomationConfig,
+        configured: &AutomationSettingsV1,
         codex: &tracedecay_domain::configuration::LcmSummarizerExecutableV1,
     ) -> Self {
         let mut config = configured.clone();
@@ -62,7 +62,7 @@ impl DashboardAutomationRequestRuntime {
         Self { config, backend }
     }
 
-    fn execution(&self) -> (&AutomationConfig, &CodexAppServerBackend) {
+    fn execution(&self) -> (&AutomationSettingsV1, &CodexAppServerBackend) {
         (&self.config, &self.backend)
     }
 }
@@ -623,9 +623,7 @@ fn automation_terminal_run(
 }
 
 fn automation_problem(
-    problem: Box<
-        tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledProblem,
-    >,
+    problem: Box<tracedecay_contracts::retained_surfaces::AutomationRunProblemV1>,
 ) -> DashboardAutomationAuthorityErrorV1 {
     DashboardAutomationAuthorityErrorV1::AutomationProblem(problem)
 }
@@ -633,13 +631,13 @@ fn automation_problem(
 #[cfg(test)]
 mod tests {
     use super::DashboardAutomationRequestRuntime;
-    use tracedecay_automation_runtime::automation::config::AutomationConfig;
+    use tracedecay_automation_runtime::automation::config::AutomationSettingsV1;
 
     #[test]
     fn dashboard_user_job_caps_backend_calls_for_the_wall_budget() {
-        let configured = AutomationConfig {
+        let configured = AutomationSettingsV1 {
             timeout_secs: 300,
-            ..AutomationConfig::default()
+            ..AutomationSettingsV1::default()
         };
 
         let runtime = DashboardAutomationRequestRuntime::new(

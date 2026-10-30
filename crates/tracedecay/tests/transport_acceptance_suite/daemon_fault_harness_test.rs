@@ -84,11 +84,13 @@ fn observation(stage: &str) -> DurableObservationV1 {
         Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
     )
     .unwrap();
-    let identity = ObservationIdentityMaterialV1::new(
+    let identity = ObservationIdentityMaterialV1::for_native_record(
         source(stage),
         ObservationScopeV1::Profile,
         ObservationSourceGenerationV1::new(GENERATION).unwrap(),
         ObservationSourceRangeV1::new(0, 100).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
+        tracedecay_domain::ObservationId::new(format!("record.daemon-fault.{stage}")).unwrap(),
     )
     .unwrap();
 
@@ -475,7 +477,7 @@ async fn assert_daemon_crash_stage(
             profile_root: profile_root.clone(),
         },
         client_version: env!("CARGO_PKG_VERSION").to_string(),
-        client_instance_id: "daemon-fault-harness".to_string(),
+        client_instance_id: "0000000000000000000000000000c003".to_string(),
         tool_list_changed_capable: false,
         catalog_version: String::new(),
         moved_store_adoption: tracedecay_project::project::MovedStoreAdoption::Never,

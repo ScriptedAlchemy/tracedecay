@@ -106,8 +106,6 @@ pub struct ExactLaneEvidence {
     /// it never constructs it.
     pub admission_proof: ExactAdmissionProof,
     /// Source-role evidence for the same-symbol definition/reference order.
-    /// Absent historical evidence deserializes as a non-definition hit.
-    #[serde(default)]
     pub source_role: tracedecay_domain::RetrievalSourceRoleV1,
     /// The share of the query's literal specificity (each literal weighs the
     /// inverse of the rows it matched) that `matched_literals` carry, in

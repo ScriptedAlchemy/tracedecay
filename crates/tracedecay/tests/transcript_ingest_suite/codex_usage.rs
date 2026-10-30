@@ -39,7 +39,7 @@ async fn codex_usage_preserves_cache_only_total_only_and_reasoning_counters() {
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:41.000Z",
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": "Usage edge prompt one"}
+            "payload": crate::common::codex_user_message_payload("Usage edge prompt one")
         }),
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:42.000Z",
@@ -56,7 +56,7 @@ async fn codex_usage_preserves_cache_only_total_only_and_reasoning_counters() {
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:44.000Z",
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": "Usage edge prompt two"}
+            "payload": crate::common::codex_user_message_payload("Usage edge prompt two")
         }),
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:45.000Z",
@@ -224,7 +224,7 @@ async fn codex_tool_loop_usage_retains_native_reports_and_duplicate_evidence() {
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:01.000Z",
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": "First turn prompt"}
+            "payload": crate::common::codex_user_message_payload("First turn prompt")
         }),
         // Tool-loop call 1 reports BEFORE the reply; then a duplicate report
         // of the same call (cumulative total unchanged) that must be skipped.
@@ -240,7 +240,7 @@ async fn codex_tool_loop_usage_retains_native_reports_and_duplicate_evidence() {
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:04.000Z",
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": "Second turn prompt"}
+            "payload": crate::common::codex_user_message_payload("Second turn prompt")
         }),
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:05.000Z",

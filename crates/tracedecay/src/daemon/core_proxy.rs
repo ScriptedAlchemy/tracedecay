@@ -12,7 +12,6 @@ use asupersync::io::AsyncWriteExt;
 use asupersync::time::wall_now;
 use serde::{Deserialize, Serialize};
 
-use super::binary_version;
 #[cfg(unix)]
 use super::connect_with_restart_grace;
 use super::repeat_reads::RepeatReads;
@@ -25,7 +24,7 @@ use super::{
     json_rpc_error_is_project_open_retryable, next_daemon_response_line, write_daemon_preamble,
 };
 use tracedecay_contracts::catalog_composition::CatalogProfileName;
-use tracedecay_daemon_protocol::{DAEMON_TOOL_RESPONSE_GRACE, version_skew_action};
+use tracedecay_daemon_protocol::DAEMON_TOOL_RESPONSE_GRACE;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::JsonRpcRequest;
 use tracedecay_mcp::server::attach_stateless_request_context;
@@ -588,11 +587,11 @@ pub(crate) async fn resolve_daemon_initialize_route(
                 identity,
             ) => {
                 // An initialize route has no retained configuration authority.
-                // Never revive legacy-file fallback here, but a fresh repo with
-                // no published snapshot follows the schema default (auto-init
-                // enabled), not fail-closed: treating a missing snapshot as
-                // "disabled" contradicted the config default and left explicit
-                // initialize-roots repos unable to open at all.
+                // A fresh repo with no published snapshot follows the schema
+                // default (auto-init enabled), not fail-closed: treating a
+                // missing snapshot as "disabled" contradicted the config
+                // default and left explicit initialize-roots repos unable to
+                // open at all.
                 let allow_init = tracedecay_project::config::cached_sync_config(
                     profile.data_dir(),
                     &identity.worktree_root,
@@ -694,18 +693,6 @@ async fn write_proxy_request_result(
         Ok(responses) => {
             let metadata =
                 proxy_initialize_metadata_for_request(request.parsed.as_ref(), &responses);
-            // Skew is a warning. A process with no registered product runtime
-            // has no version to compare, and that must not drop the response
-            // the daemon already produced.
-            if let Ok(version) = binary_version()
-                && let Some(warning) = daemon_version_skew_warning_for_request(
-                    request.parsed.as_ref(),
-                    &responses,
-                    version,
-                )
-            {
-                log_daemon_event("core_proxy_warning", &[("warning", warning)]);
-            }
             for response in responses {
                 writer.write_line(&response).await?;
                 if !response.ends_with('\n') {
@@ -979,11 +966,7 @@ where
 }
 
 /// Extracts the daemon's advertised version from a proxied `initialize`
-/// response (`result.serverInfo.version`, which daemons have always sent).
-///
-/// This works against daemons older than the handshake version field, so a
-/// freshly-updated client can still detect a stale daemon left running by a
-/// non-systemd setup or a plain `tracedecay upgrade`.
+/// response (`result.serverInfo.version`).
 #[cfg(test)]
 pub(crate) fn proxy_initialize_metadata(
     request_line: &str,
@@ -1026,22 +1009,6 @@ fn proxy_initialize_metadata_for_request(
         }
     }
     metadata
-}
-
-fn daemon_version_skew_warning_for_request(
-    request: Option<&JsonRpcRequest>,
-    responses: &[String],
-    client_version: &str,
-) -> Option<String> {
-    let daemon_version = proxy_initialize_metadata_for_request(request, responses).daemon_version?;
-    if tracedecay_daemon_protocol::versions_name_same_build(&daemon_version, client_version) {
-        return None;
-    }
-    let action = version_skew_action(&daemon_version, client_version);
-    Some(format!(
-        "TraceDecay daemon is version {daemon_version} but this client is {client_version}, \
-         {action}"
-    ))
 }
 
 fn daemon_proxy_error_response(

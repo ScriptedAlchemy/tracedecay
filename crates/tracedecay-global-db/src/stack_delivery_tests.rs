@@ -1,5 +1,3 @@
-use tracedecay_runtime_core::db::engine::Executor;
-
 use crate::{
     GitHubStackDeliveryStateV1, GitHubStackSignalAppendOutcomeV1, GitHubStackSignalRecordV1,
     MAX_GITHUB_STACK_ACTIVE_PENDING_V1, tests::harness::RegisteredGlobalDbHarness,
@@ -207,54 +205,4 @@ async fn settling_a_recipient_promotes_only_its_oldest_deferred_row() {
         Some(GitHubStackDeliveryStateV1::Deferred),
         "another recipient's backlog is untouched"
     );
-}
-
-#[asupersync::test]
-async fn staged_rows_from_an_older_daemon_return_to_pending_on_open() {
-    let harness = RegisteredGlobalDbHarness::open("github-stack-delivery-legacy-staging").await;
-    let record = signal("signal.github-stack-legacy-staged", 10);
-    harness
-        .registered
-        .append_github_stack_signal(
-            record.clone(),
-            vec![RECIPIENT.to_owned(), "actor.other".to_owned()],
-        )
-        .await
-        .expect("append durable signal");
-    harness
-        .registered
-        .acknowledge_github_stack_host_delivery(PROJECT_ID, &record.signal_id, "actor.other")
-        .await
-        .expect("settle one recipient");
-    harness
-        .registered
-        .transact(async move |transaction| {
-            transaction
-                .execute_batch(
-                    "DROP TRIGGER github_stack_delivery_recipients_settlement_guard;
-                     UPDATE github_stack_delivery_recipients SET state = 'host_pending'
-                     WHERE state = 'pending';",
-                )
-                .await
-                .map_err(|error| error.to_string())
-        })
-        .await
-        .expect("stage job")
-        .expect("stage a row as the retired daemon did");
-
-    let harness = harness.restart().await;
-    assert_eq!(
-        state(&harness, &record.signal_id, RECIPIENT).await,
-        Some(GitHubStackDeliveryStateV1::Pending)
-    );
-    assert_eq!(
-        state(&harness, &record.signal_id, "actor.other").await,
-        Some(GitHubStackDeliveryStateV1::Settled),
-        "another recipient's receipt is kept"
-    );
-    harness
-        .registered
-        .acknowledge_github_stack_host_delivery(PROJECT_ID, &record.signal_id, RECIPIENT)
-        .await
-        .expect("normalized row settles through the current guard");
 }

@@ -811,7 +811,15 @@ async fn lazy_preparation_retains_only_its_measured_memory_charge() {
     let path = temp.path().join("lazy-memory.jsonl");
     std::fs::write(
         &path,
-        b"{\"timestamp\":\"2026-01-01T00:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"measured\"}}\n",
+        format!(
+            "{}\n",
+            json!({
+                "timestamp": "2026-01-01T00:00:00Z",
+                "type": "event_msg",
+                "payload": crate::runtime::hosts::codex::user_message_payload("measured"),
+            })
+        )
+        .as_bytes(),
     )
     .expect("JSONL fixture");
     let page = super::build_shared_jsonl_page(
@@ -1104,10 +1112,7 @@ fn write_rollout(path: &Path, cwd: &Path) -> u64 {
         json!({
             "timestamp": "2026-01-01T00:00:01.000Z",
             "type": "event_msg",
-            "payload": {
-                "type": "user_message",
-                "message": "seam contract message"
-            }
+            "payload": crate::runtime::hosts::codex::user_message_payload("seam contract message")
         }),
     ];
     let contents = lines
@@ -1447,10 +1452,7 @@ async fn cursor_cas_lost_on_a_partially_covered_window_replays_the_tail() {
         json!({
             "timestamp": "2026-01-01T00:00:02.000Z",
             "type": "event_msg",
-            "payload": {
-                "type": "user_message",
-                "message": "tail that the peer did not cover"
-            }
+            "payload": crate::runtime::hosts::codex::user_message_payload("tail that the peer did not cover")
         })
     )
     .unwrap();
@@ -1878,7 +1880,7 @@ async fn a_refusal_memo_cannot_authorize_uncovered_bytes_or_hide_an_in_place_rew
             json!({
                 "timestamp": "2026-01-01T00:00:02.000Z",
                 "type": "event_msg",
-                "payload": {"type": "user_message", "message": "later valid message"}
+                "payload": crate::runtime::hosts::codex::user_message_payload("later valid message")
             })
         );
         std::fs::OpenOptions::new()
@@ -1994,7 +1996,7 @@ async fn an_unchanged_resumed_rollout_does_not_rebuild_its_prior_context() {
     let appended = json!({
         "timestamp": "2026-01-01T00:00:02.000Z",
         "type": "event_msg",
-        "payload": {"type": "user_message", "message": "appended message"}
+        "payload": crate::runtime::hosts::codex::user_message_payload("appended message")
     })
     .to_string()
         + "\n";
@@ -2045,7 +2047,7 @@ fn catch_up_rollout_line(index: usize, cwd: &Path, word: &str) -> String {
         _ => json!({
             "timestamp": "2026-01-01T00:00:01.000Z",
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": format!("{word}-{index:05} {pad}")}
+            "payload": crate::runtime::hosts::codex::user_message_payload(format!("{word}-{index:05} {pad}"))
         }),
     };
     let pad = CATCH_UP_RECORD_BYTES - 1 - record("").to_string().len();
@@ -2243,7 +2245,7 @@ fn session_cwd_rollout_line(index: usize, cwd: &Path, word: &str) -> String {
         _ => json!({
             "timestamp": "2026-01-01T00:00:01.000Z",
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": format!("{word}-{index:05} {pad}")}
+            "payload": crate::runtime::hosts::codex::user_message_payload(format!("{word}-{index:05} {pad}"))
         }),
     };
     let pad = CATCH_UP_RECORD_BYTES - 1 - record("").to_string().len();
@@ -2388,7 +2390,7 @@ async fn batch_refusal_reuses_pre_context_switch_frames() {
         json!({
             "timestamp": "2026-01-01T00:00:01.000Z",
             "type": "event_msg",
-            "payload": { "type": "user_message", "message": "belongs to A" }
+            "payload": crate::runtime::hosts::codex::user_message_payload("belongs to A")
         }),
         json!({
             "timestamp": "2026-01-01T00:00:02.000Z",
@@ -2492,7 +2494,7 @@ fn write_undecodable_tail_rollout(path: &Path, cwd: &Path) -> u64 {
         json!({
             "timestamp": "2026-01-01T00:00:01.000Z",
             "type": "event_msg",
-            "payload": { "type": "user_message", "message": "scope gate message" }
+            "payload": crate::runtime::hosts::codex::user_message_payload("scope gate message")
         }),
         // Complete line, valid UTF-8, unbalanced JSON. It names neither
         // `session_meta` nor `turn_context`, so it cannot move the rollout cwd.
@@ -2614,7 +2616,7 @@ fn write_message_rollout(path: &Path, cwd: &Path, frames: usize) -> Vec<u64> {
         json!({
             "timestamp": "2026-01-01T00:00:01.000Z",
             "type": "event_msg",
-            "payload": { "type": "user_message", "message": format!("turn {index}") }
+            "payload": crate::runtime::hosts::codex::user_message_payload(format!("turn {index}"))
         })
     });
     for frame in std::iter::once(meta).chain(messages) {
@@ -2677,7 +2679,7 @@ async fn an_out_of_scope_rollout_is_covered_past_in_one_cursor_write() {
         json!({
             "timestamp": "2026-01-01T00:00:02.000Z",
             "type": "event_msg",
-            "payload": { "type": "user_message", "message": "appended turn" }
+            "payload": crate::runtime::hosts::codex::user_message_payload("appended turn")
         })
     );
     std::fs::OpenOptions::new()
@@ -2762,10 +2764,7 @@ async fn exact_hook_prepares_an_in_scope_window_concurrently() {
             &json!({
                 "timestamp": "2026-01-01T00:00:01.000Z",
                 "type": "event_msg",
-                "payload": {
-                    "type": "user_message",
-                    "message": format!("{index}:{}", "x".repeat(256 * 1024))
-                }
+                "payload": crate::runtime::hosts::codex::user_message_payload(format!("{index}:{}", "x".repeat(256 * 1024)))
             })
             .to_string(),
         );
@@ -3075,7 +3074,7 @@ async fn refusal_warnings_latch_per_pass_and_recur_for_new_uncovered_records() {
         json!({
             "timestamp": "2026-01-01T00:00:02.000Z",
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": "new refusal"}
+            "payload": crate::runtime::hosts::codex::user_message_payload("new refusal")
         })
     );
     std::fs::OpenOptions::new()

@@ -27,7 +27,7 @@ use super::DashboardState;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_automation_runtime::automation::backend;
 use tracedecay_automation_runtime::automation::config::{
-    AdmittedAutomationConfig, AutomationConfig, AutomationConfigPatch, effective_config,
+    AdmittedAutomationConfig, AutomationConfigPatch, AutomationSettingsV1, effective_config,
 };
 use tracedecay_global_db::configuration::contracts::types::DirectConfigurationMutation;
 
@@ -183,7 +183,7 @@ fn raw_automation_config(
     state: &DashboardState,
 ) -> tracedecay_domain::errors::Result<(
     ConfigurationRevisionId,
-    Arc<AutomationConfig>,
+    Arc<AutomationSettingsV1>,
     LcmSummarizerExecutableV1,
 )> {
     let pinned = state.cached_runtime_configuration()?;
@@ -196,7 +196,7 @@ fn raw_automation_config(
 
 fn config_payload(
     configuration_revision_id: &ConfigurationRevisionId,
-    effective: &AutomationConfig,
+    effective: &AutomationSettingsV1,
     codex: &LcmSummarizerExecutableV1,
     application_outcome: Option<&ApplicationOutcome<Value>>,
 ) -> std::result::Result<Value, DashboardConfigurationRouteErrorV1> {

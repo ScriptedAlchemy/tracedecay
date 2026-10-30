@@ -468,8 +468,8 @@ pub(crate) async fn cleanup_manual_branch_activation(
 
 /// Retires only the manual artifacts proven by a persisted graph-source entry
 /// before branch metadata removal commits. The source's exact worktree,
-/// synthetic ref, and OID are the ownership proof; a legacy entry without
-/// that proof is intentionally left untouched rather than guessing at Git
+/// synthetic ref, and OID are the ownership proof; an entry without that
+/// proof is refused with a typed activation error rather than guessing at Git
 /// artifacts. The lifecycle lease returns only after synchronous Git teardown
 /// finishes, so request cancellation cannot admit a concurrent replacement
 /// while the blocking worker still owns those artifacts.
@@ -583,21 +583,9 @@ async fn reconcile_project_with_administration(
     let mut state = load_state(data_root)?;
     let mut report = ReconcileReport {
         skipped_forks: discovery.skipped_forks.clone(),
-        reset_stale: std::mem::take(&mut state.stale),
         ..Default::default()
     };
-    let mut state_dirty = !report.reset_stale.is_empty();
-    for stale in &report.reset_stale {
-        log_daemon_event(
-            "pr_autotrack",
-            &[
-                ("project", repo_root.display().to_string()),
-                ("action", "reset_stale".to_string()),
-                ("branch", stale.label.clone()),
-                ("reason", stale.detail.clone()),
-            ],
-        );
-    }
+    let mut state_dirty = false;
 
     // Desired label → discovered PR.
     let desired: BTreeMap<String, &DiscoveredPr> = discovery

@@ -30,7 +30,7 @@ Definitions:
   row still count as a *missed* opportunity); without it the denominator is the
   rows actually present in ``results.jsonl``.
 * A row "triggered" when it passed. Passing is read from the ``pass`` field
-  (the boolean score.py emits); ``passed`` is accepted as a fallback alias.
+  (the boolean score.py emits).
 
 Usage:
 
@@ -94,14 +94,9 @@ def row_triggered(row: dict) -> bool:
     cli_attempts = row.get("tool_cmd_attempts") or 0
     if used_mcp or (isinstance(cli_attempts, int) and cli_attempts > 0):
         return True
-    for key in ("pass", "passed"):
-        if key in row:
-            return bool(row.get(key))
+    if "pass" in row:
+        return bool(row["pass"])
     return False
-
-
-# Backwards-compatible alias.
-row_passed = row_triggered
 
 
 def aggregate(results: list[dict], corpus: list[dict] | None = None, reps: int | None = None) -> dict:
@@ -170,7 +165,7 @@ def aggregate(results: list[dict], corpus: list[dict] | None = None, reps: int |
         if b not in buckets:
             buckets[b] = blank()
             order.append(b)
-        if row_passed(row):
+        if row_triggered(row):
             buckets[b]["triggered"] += 1
 
     for name in order:

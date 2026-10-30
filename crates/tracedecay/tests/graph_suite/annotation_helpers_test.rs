@@ -1,16 +1,9 @@
 //! Annotation emission behavior, asserted end-to-end through the real
 //! `JavaExtractor` / `KotlinExtractor` production path.
 //!
-//! These tests previously drove the crate-private `emit_annotation_usage` and
-//! `scan_children_for_annotation_kinds` helpers through a hand-rolled
-//! `AnnotationEmitterState` mock, reached by `#[path]`-including a *copy* of
-//! `crates/tracedecay-code-extraction/src/annotations.rs` into this test
-//! binary (with a `crate::types` shim in `main.rs` to make the copy compile).
-//! The two extractors are the only production callers of those helpers, so
-//! driving the extractors covers the same emission logic, node kind, name,
-//! signature, `attrs_start_line`, `Annotates` edge, and the unresolved ref,
-//! without the mock, and without a source copy that can silently drift from
-//! the crate it was copied out of.
+//! These tests drive the Java and Kotlin extractors and assert the annotation
+//! node kind, name, signature, `attrs_start_line`, `Annotates` edge, and the
+//! unresolved ref.
 
 use tracedecay_code_extraction::{JavaExtractor, KotlinExtractor, LanguageExtractor};
 use tracedecay_domain::code_intelligence::{Edge, EdgeKind, ExtractionResult, Node, NodeKind};

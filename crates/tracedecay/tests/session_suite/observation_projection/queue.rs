@@ -248,7 +248,7 @@ async fn queued_projection_commits_search_effect_provenance_checkpoint_and_repla
     assert_eq!(projected.checkpoint().last_sequence(), sequence);
     assert_eq!(
         projected.checkpoint().projector_version(),
-        CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION
+        SESSION_MESSAGE_PROJECTOR_VERSION
     );
     assert_eq!(
         store
@@ -275,7 +275,7 @@ async fn queued_projection_commits_search_effect_provenance_checkpoint_and_repla
     assert_eq!(projection_counts(&tmp).await, (1, 1, 1, 1, 0, 0));
     let provenance = projection_provenance_rows(&tmp).await;
     assert_eq!(provenance.len(), 1);
-    assert_eq!(provenance[0].0, CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION);
+    assert_eq!(provenance[0].0, SESSION_MESSAGE_PROJECTOR_VERSION);
     assert_eq!(provenance[0].1, candidate.observation_id().as_str());
     assert_eq!(
         provenance[0].2,
@@ -294,7 +294,7 @@ async fn queued_projection_commits_search_effect_provenance_checkpoint_and_repla
             "UPDATE observation_projection_provenance SET retrieval_anchor_id = NULL
          WHERE projector_version = ?1 AND observation_id = ?2",
             rusqlite::params![
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
                 candidate.observation_id().as_str()
             ],
         )
@@ -343,7 +343,7 @@ async fn queued_projection_commits_search_effect_provenance_checkpoint_and_repla
             "UPDATE observation_projection_provenance SET retrieval_anchor_id = NULL
          WHERE projector_version = ?1 AND observation_id = ?2",
             rusqlite::params![
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
                 candidate.observation_id().as_str()
             ],
         )

@@ -365,7 +365,7 @@ impl ClineLikeSource {
 /// Captures bounded Cline-family snapshots through the daemon-owned observation authority.
 ///
 /// This deliberately re-reads complete snapshots and derives a new source generation
-/// from their content hash; it neither consults nor advances legacy parse offsets.
+/// from their content hash; it neither consults nor advances append-only parse offsets.
 /// `max_new_bytes` is one logical source-byte budget for the complete sweep.
 #[tracing::instrument(name = "sessions.hosts.cline_like.capture", level = "trace", skip_all)]
 pub async fn capture_cline_like_snapshot_observations(

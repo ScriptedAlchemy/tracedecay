@@ -1066,7 +1066,7 @@ fn daemon_reachable_requires_an_initialize_answer() {
     let root = TempDir::new().expect("profile temp dir");
     let missing = profile_with_data_dir(&root.path().join("missing"));
     assert!(
-        !super::daemon_reachable(&missing),
+        !super::daemon_reachable(&missing, env!("CARGO_PKG_VERSION")),
         "a missing socket is not a running daemon"
     );
 
@@ -1081,10 +1081,43 @@ fn daemon_reachable_requires_an_initialize_answer() {
         authority.auth_token().to_owned(),
     );
     assert!(
-        super::daemon_reachable(&ready),
+        super::daemon_reachable(&ready, env!("CARGO_PKG_VERSION")),
         "initialize naming tracedecay is the reachability proof"
     );
     server.join().expect("join initialize server");
+}
+
+/// A daemon of another build refuses the probe's handshake with its typed
+/// frame instead of answering initialize. That is still a `TraceDecay` process
+/// that owns the profile, so it is reachable and reported as a version mismatch.
+#[cfg(unix)]
+#[test]
+fn daemon_reachable_counts_a_typed_handshake_refusal_as_a_version_mismatch() {
+    let root = TempDir::new().expect("profile temp dir");
+    let refused = profile_with_data_dir(&root.path().join("refused"));
+    let refused_socket = refused.data_dir().join("daemon.sock");
+    let authority = seed_socket_authority(&refused_socket);
+    let listener = UnixListener::bind(&refused_socket).expect("bind refusing socket");
+    let token = authority.auth_token().to_owned();
+    let server = std::thread::spawn(move || {
+        let mut stream = accept_readiness_probe(&listener);
+        let mut reader =
+            std::io::BufReader::new(stream.try_clone().expect("clone readiness stream"));
+        read_auth_preface(&mut reader, &token);
+        let refusal =
+            tracedecay_daemon_protocol::DaemonHandshakeRefusal::for_revision_skew("9.9.9+newer");
+        writeln!(stream, "{}", refusal.to_line().expect("refusal line")).expect("write refusal");
+    });
+    let socket = super::default_socket_path(refused.data_dir()).expect("socket path");
+    let proof = super::probe::probe_daemon_process_with_timeout(
+        &refused,
+        &socket,
+        env!("CARGO_PKG_VERSION"),
+        std::time::Duration::from_secs(5),
+    );
+    assert!(proof.names_tracedecay(), "{proof:?}");
+    assert!(!proof.version_matches(), "{proof:?}");
+    server.join().expect("join refusing server");
 }
 
 #[cfg(unix)]
@@ -1094,14 +1127,14 @@ fn daemon_socket_connectable_separates_a_slow_daemon_from_no_daemon() {
 
     let missing = profile_with_data_dir(&root.path().join("missing"));
     assert!(
-        !super::daemon_socket_connectable(&missing),
+        !super::daemon_socket_connectable(&missing, env!("CARGO_PKG_VERSION")),
         "a missing socket has no listener to broker through"
     );
 
     let stale = profile_with_data_dir(&root.path().join("stale"));
     bind_stale_socket(&stale.data_dir().join("daemon.sock"));
     assert!(
-        !super::daemon_socket_connectable(&stale),
+        !super::daemon_socket_connectable(&stale, env!("CARGO_PKG_VERSION")),
         "a socket file whose listener is gone has no listener to broker through"
     );
 
@@ -1112,11 +1145,11 @@ fn daemon_socket_connectable_separates_a_slow_daemon_from_no_daemon() {
     let _authority = seed_socket_authority(&silent_socket);
     let _listener = UnixListener::bind(&silent_socket).expect("bind silent socket");
     assert!(
-        !super::daemon_reachable(&silent),
+        !super::daemon_reachable(&silent, env!("CARGO_PKG_VERSION")),
         "the identity proof is still absent while the daemon is starting"
     );
     assert!(
-        super::daemon_socket_connectable(&silent),
+        super::daemon_socket_connectable(&silent, env!("CARGO_PKG_VERSION")),
         "a daemon that has not answered initialize yet is still a running daemon"
     );
 }

@@ -34,10 +34,9 @@ GC, diagnostics, and any future delete APIs converge on one model.
 - When a payload becomes collectable, the safe order of removal, and the grace window
   before an orphan/unreferenced payload is reaped.
 - Required behavior of any delete path (existing or future), idempotency, missing-file and
-  dangling-reference handling, and compatibility with payloads created before this
-  contract.
+  dangling-reference handling.
 
-**Out of scope (non-goals, §13)**
+**Out of scope (non-goals, §12)**
 
 - Age/content-based retention policy ("delete payloads older than N").
 - Cross-storage-root or cross-profile GC.
@@ -54,8 +53,8 @@ has the full map.
   `payload_<sha256(provider\0session_id\0message_id\0content_hash)>.payload` and writes it
   under `payload_dir(storage_root)` = `<storage_root>/lcm-payloads`
   (`payload.rs:64`). User-level project stores resolve the root to
-  `~/.tracedecay/projects/<project-id>`; explicit local/legacy stores resolve to
-  `<project>/.tracedecay` (or legacy `.tracedecay` fallback).
+  `~/.tracedecay/projects/<project-id>`; explicit local stores resolve to
+  `<project>/.tracedecay`.
 - **Schema.** `lcm_external_payloads` is keyed by `payload_ref` (PK) with
   `UNIQUE(provider, message_id, payload_ref)` and `FOREIGN KEY(provider, session_id)
   REFERENCES sessions ON DELETE CASCADE` (`crates/tracedecay-lcm/src/schema.rs:432-446`). There is
@@ -339,28 +338,7 @@ The full algorithm is `t_bbd369f2`'s to design, but it MUST satisfy this contrac
 8. **Metrics:** emit counts and bytes reaped, orphans remaining, missing remaining, errors;
    record `last_gc_at` and last error. (Surface fields are specified by `t_0ab1c041`.)
 
-## 11. Compatibility & migration
-
-- **Existing payloads are valid as-is.** Payloads created before this contract already have a
-  metadata row + file + reference; they are `live`. No data migration is required to honor the
-  contract, it is enforced *forward* by routing deletes through the deleter (§6.1) and adding
-  GC.
-- **Existing orphans are the first GC candidates.** Files orphaned by past owner-maintenance runs,
-  pre-contract crashes, or inline-conversions are simply collected on the first GC pass after
-  the grace period. No special one-off reclaim is needed.
-- **Tombstone markers are forward-compatible.** `is_external_payload_placeholder` already
-  accepts the `[gc'd …]` prefixes, and `ensure_current_raw_payload_ref` already treats them as
-  valid references; only the *write* of the tombstone and the `PayloadGc'd` error branch are
-  new.
-- **Optional future schema revision** (`unreferenced_since`/`gc_state`, GP-3) is
-  additive and backfill-initialized to `live`; the migration guard keeps it
-  monotonic-safe against DBs written by newer releases. The current owner GC
-  uses the side-table two-scan rule.
-- **No breaking change to `lcm_doctor`/`lcm_status` response shapes** is required; the GC task
-  may *add* fields (e.g., `last_gc_at`, `bytes_reclaimable`) but must not remove or rename
-  existing ones.
-
-## 12. Edge cases
+## 11. Edge cases
 
 - **Concurrent ingest during GC scan**, guarded by the grace period plus the reap-time
   referenced-ness re-check under `BEGIN IMMEDIATE` (§10.3). A payload written between scan and
@@ -381,7 +359,7 @@ The full algorithm is `t_bbd369f2`'s to design, but it MUST satisfy this contrac
   time; the loser observes the row already gone and no-ops (idempotent). The store's existing
   writer lock model applies.
 
-## 13. Security invariants (non-negotiable)
+## 12. Security invariants (non-negotiable)
 
 - **Never log, preview, report, or stream payload body bytes.** Reports carry refs, counts,
   byte totals, and the hashes already stored in `lcm_external_payloads`, nothing more.
@@ -393,13 +371,12 @@ The full algorithm is `t_bbd369f2`'s to design, but it MUST satisfy this contrac
   recoverability comes from per-ref transactions and crash-convergent pending deletes,
   never from a secondary copy of the database.
 
-## 14. Non-goals
+## 13. Non-goals
 
 - Age- or content-based retention policy (delete payloads older/larger than N). This contract
   defines the *mechanical* lifetime only; age-based retention can layer on top later and would
   convert `live` payloads into `unreferenced` via a policy pass.
-- Cross-project-store GC. Each resolved project store (user-level shard, explicit local store,
-  or legacy local store) is GC'd independently against its own DB.
+- Cross-project-store GC. Each resolved project store (user-level shard or explicit local store) is GC'd independently against its own DB.
 - Soft-delete, undo, archive, or restoration of reaped bodies. Reap is hard and permanent,
   consistent with memory fact deletion being hard-delete. The tombstone is informational only.
 - Cross-message / cross-owner payload deduplication. The owner-hash includes `message_id`; no
@@ -408,7 +385,7 @@ The full algorithm is `t_bbd369f2`'s to design, but it MUST satisfy this contrac
   daemon/authorized owner maintenance paths. This contract is strictly about payload
   files + `lcm_external_payloads`.
 
-## 15. Decision rationale summary
+## 14. Decision rationale summary
 
 | # | Decision | Primary rationale | Rejected alternative |
 |---|---|---|---|
@@ -422,11 +399,11 @@ The full algorithm is `t_bbd369f2`'s to design, but it MUST satisfy this contrac
 | MF-1 | Distinct `PayloadGc'd` error for tombstones | Distinguishes intentional reap from unexpected loss in ops/telemetry | Reuse `PayloadMissing` (ambiguous) |
 | §7 | Session/message delete: recommend drop row + leave files for GC | Simplest, crash-safe; FK cascade does the DB work | Force every delete through the synchronous deleter (over-engineered for the common case) |
 
-## 16. Handoff to child tasks
+## 15. Handoff to child tasks
 
 - **GC workflow:** implement/use `delete_external_payload` + the daemon/authorized owner
   reaper per §6 and §10. This contract is its spec; cite §6.1 (D-1..D-4), §6.2, §6.3, §9,
-  §10, §13.
+  §10, §12.
 - **Dashboard/Doctor visibility:** surface `live`/`unreferenced`/`missing`/`orphan`/
   `tombstoned` counts and bytes, `last_gc_at`, and last error. Doctor and status remain
   read-only; any destructive cleanup control must use a separate owner endpoint with a
@@ -434,6 +411,6 @@ The full algorithm is `t_bbd369f2`'s to design, but it MUST satisfy this contrac
   and `missing_payload_refs` (error) versus `orphan`/`unreferenced` counts (warning).
 - **`t_f0e07c5c` (tests):** cover the state transitions in §5, the safe removal order (§6.2 incl.
   crash-between-commit-and-remove), idempotency (§8), symlink/path-traversal reap rejection
-  (§10.1-2, §13), missing vs tombstoned error distinction (§9 MF-1), and inline-conversion/
+  (§10.1-2, §12), missing vs tombstoned error distinction (§9 MF-1), and inline-conversion/
   re-externalization orphaning (§2). The reserved `[gc'd …]` tombstone prefix
   (`payload.rs:104`) is the marker to assert against.

@@ -469,9 +469,6 @@ async fn test_replace_symbol_documented_fn_keeps_single_doc_comment() {
     let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
 
-    // A leading item keeps `foo` off row 0 so its extracted attrs_start_line is
-    // non-zero and survives the DB round-trip (a stored 0 is treated as a
-    // pre-v7 sentinel and falls back to start_line).
     fs::write(
         project.join("src/main.rs"),
         "pub const N: u32 = 0;\n/// Doc for foo.\nfn foo() {\n    let _ = 1;\n}\n",

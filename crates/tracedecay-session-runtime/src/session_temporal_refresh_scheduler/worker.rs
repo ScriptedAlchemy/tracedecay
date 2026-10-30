@@ -48,62 +48,29 @@ fn history_allows_summary_convergence(outcome: Option<SessionHistoricalIngestOut
         .is_some_and(SessionHistoricalIngestOutcome::needs_another_pass)
 }
 
-/// Consecutive history-priority passes after which the one-shot
-/// predecessor-range rewrite takes one bounded page of its own.
-///
-/// This is the horizon the rewrite buys under perpetually pending history:
-/// one `LCM_SCAN_PAGE_ROWS`-row page every eighth pass, so an N-row store
-/// converges in `ceil(N / LCM_SCAN_PAGE_ROWS) * 8` worker passes (about 3,800
-/// for the 244k-row profile in #843) while history keeps seven of every eight
-/// passes. It is a fairness ratio, not a deadline; a terminal history window
-/// resets it and admits the full convergence page, which also runs the rewrite.
-const HISTORY_PRIORITY_PASSES_BEFORE_RANGE_REWRITE: u32 = 8;
-
 /// What a pass may spend its historical-work admission on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LcmConvergenceAdmission {
     /// Historical continuation owns the pass outright.
     Deferred,
-    /// The pass takes the shared admission permit for one bounded page.
-    Admitted(LcmConvergencePage),
-}
-
-/// Which bounded page an admitted pass runs under the shared permit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum LcmConvergencePage {
-    /// Historical continuation still owns the next window, but the one-shot
-    /// predecessor-range rewrite runs alone for one bounded page.
-    PredecessorRangeRewrite,
-    /// The raw frontier is terminal for now, so derived convergence runs.
-    Full,
+    /// The raw frontier is terminal for now, so derived convergence takes the
+    /// shared admission permit for one bounded page.
+    Admitted,
 }
 
 /// Decides what one pass owes retained LCM convergence.
 ///
 /// Deferring derived summaries to historical continuation is deliberate: a
 /// model call placed between source windows delays both project and profile
-/// readiness. The one-shot predecessor-range rewrite lives behind the same
-/// convergence page but is bounded SQL with no model call, so a profile whose
-/// history perpetually needs another pass would otherwise never repair a
-/// range persisted before the policy-anchor role filter. Every
-/// `HISTORY_PRIORITY_PASSES_BEFORE_RANGE_REWRITE`-th such pass therefore
-/// spends its admission, the same permit and bounded budget one history page
-/// takes, on the rewrite alone, which caps the rewrite's starvation at that
-/// many passes per page while leaving history the other passes.
+/// readiness.
 fn lcm_convergence_admission(
     outcome: Option<SessionHistoricalIngestOutcome>,
-    history_priority_passes: &mut u32,
 ) -> LcmConvergenceAdmission {
     if history_allows_summary_convergence(outcome) {
-        *history_priority_passes = 0;
-        return LcmConvergenceAdmission::Admitted(LcmConvergencePage::Full);
+        LcmConvergenceAdmission::Admitted
+    } else {
+        LcmConvergenceAdmission::Deferred
     }
-    *history_priority_passes = history_priority_passes.saturating_add(1);
-    if *history_priority_passes >= HISTORY_PRIORITY_PASSES_BEFORE_RANGE_REWRITE {
-        *history_priority_passes = 0;
-        return LcmConvergenceAdmission::Admitted(LcmConvergencePage::PredecessorRangeRewrite);
-    }
-    LcmConvergenceAdmission::Deferred
 }
 
 /// Typed deferral reported when the daemon-wide historical-ingest admission
@@ -245,7 +212,6 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
     let mut retry_attempt = 0u32;
     let mut summary_retry_attempt = 0u32;
     let mut summary_recheck = false;
-    let mut history_priority_passes = 0u32;
     let mut history_release = None;
     let mut granted_history_admission = None;
     let mut projection_joins: Vec<SessionProjectionJoin> = Vec::new();
@@ -422,21 +388,16 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             } else {
                 history_outcome.clone()
             };
-            let mut convergence_admission =
-                lcm_convergence_admission(convergence_outcome, &mut history_priority_passes);
-            let history_needs_another_pass = !matches!(
-                convergence_admission,
-                LcmConvergenceAdmission::Admitted(LcmConvergencePage::Full)
-            );
+            let mut convergence_admission = lcm_convergence_admission(convergence_outcome);
+            let history_needs_another_pass =
+                !matches!(convergence_admission, LcmConvergenceAdmission::Admitted);
             // Finish the temporal generation before spending the next pass on
             // derived summaries. In particular, waiting for summary admission
             // must not strand a live hook's partially published projection.
             // The bounded predecessor rewrite retains its history fairness
             // turn; it performs no model call.
-            if matches!(
-                convergence_admission,
-                LcmConvergenceAdmission::Admitted(LcmConvergencePage::Full)
-            ) && projection_still_unpublished(&report)
+            if matches!(convergence_admission, LcmConvergenceAdmission::Admitted)
+                && projection_still_unpublished(&report)
                 && (projection_published_work(&report)
                     || (!projection_joins.is_empty() && report.discovery_advanced))
             {
@@ -453,7 +414,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     // settle without delaying live projection joins.
                     (false, false, None)
                 }
-                LcmConvergenceAdmission::Admitted(convergence_page) => {
+                LcmConvergenceAdmission::Admitted => {
                     // Queue through the semaphore's fair async admission even when a
                     // permit appears immediately available. A retrying profile must
                     // not use `try_acquire` to jump ahead of profiles already waiting
@@ -501,19 +462,12 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                                         >,
                                     > + Send,
                             >,
-                        > = match convergence_page {
-                            LcmConvergencePage::PredecessorRangeRewrite => Box::pin(
-                                crate::lcm_summary_convergence::run_predecessor_range_rewrite_page(
-                                    database.clone(),
-                                ),
+                        > = Box::pin(
+                            crate::lcm_summary_convergence::run_summary_convergence_page(
+                                database.clone(),
+                                crate::lcm_summary_convergence::LCM_SUMMARY_CONVERGENCE_PAGE_LIMIT,
                             ),
-                            LcmConvergencePage::Full => Box::pin(
-                                crate::lcm_summary_convergence::run_summary_convergence_page(
-                                    database.clone(),
-                                    crate::lcm_summary_convergence::LCM_SUMMARY_CONVERGENCE_PAGE_LIMIT,
-                                ),
-                            ),
-                        };
+                        );
                         tokio::pin!(page);
                         let Some((result, recheck)) = live_projection
                             .wait_for(&mut page, &mut projection_joins, &mut report, false)
@@ -532,7 +486,6 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                                 !page.sessions.is_empty()
                                     || page.backfill_rows_scanned > 0
                                     || page.parked_rows_requeued > 0
-                                    || page.predecessor_range_rows_rewritten > 0
                                     || page.relation_receipts_processed > 0,
                                 page.has_more,
                                 page.next_retry_delay,
@@ -2262,7 +2215,6 @@ mod tests {
     use tracedecay_domain::SessionId;
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
     use tracedecay_runtime_core::db::engine::params;
-    use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
     use tracedecay_store::{SessionRefreshReceiptRequestV1, SessionRefreshTerminalStateV1};
 
     #[tokio::test]
@@ -2787,176 +2739,9 @@ mod tests {
 
     #[test]
     fn a_terminal_history_window_releases_the_full_convergence_page() {
-        let mut passes = 7;
         assert_eq!(
-            lcm_convergence_admission(Some(SessionHistoricalIngestOutcome::Complete), &mut passes),
-            LcmConvergenceAdmission::Admitted(LcmConvergencePage::Full)
+            lcm_convergence_admission(Some(SessionHistoricalIngestOutcome::Complete)),
+            LcmConvergenceAdmission::Admitted
         );
-        assert_eq!(
-            passes, 0,
-            "a released pass must not carry priority debt forward"
-        );
-    }
-
-    /// A profile whose history perpetually needs another window must still
-    /// converge the one-shot predecessor-range rewrite: the fix for #843 moved
-    /// that rewrite behind this scheduler, so a permanently prioritized
-    /// history lane would leave a pre-fix widened range in place forever.
-    #[tokio::test]
-    async fn perpetually_pending_history_cannot_starve_the_range_rewrite() {
-        let harness = RegisteredGlobalDbHarness::open("lcm-range-rewrite-fairness").await;
-        let database = harness.registered.clone();
-        let session_id = "range-rewrite-fairness-session";
-        seed_pre_fix_widened_range(&database, session_id).await;
-        assert!(
-            rewrite_has_work(&database).await,
-            "the seeded store must owe the rewrite a pass"
-        );
-
-        // One bounded page per admitted pass, so the whole rewrite may need
-        // several; the bound is generous enough to prove convergence rather
-        // than to pin the page count.
-        const PASS_BOUND: u32 = HISTORY_PRIORITY_PASSES_BEFORE_RANGE_REWRITE * 4;
-        let pending = Some(SessionHistoricalIngestOutcome::Pending {
-            made_progress: true,
-        });
-        let mut history_priority_passes = 0u32;
-        let mut admitted_rewrites = 0u32;
-        let mut passes = 0u32;
-        while rewrite_has_work(&database).await {
-            passes = passes.saturating_add(1);
-            assert!(
-                passes <= PASS_BOUND,
-                "a perpetually pending history lane starved the range rewrite for \
-                 {passes} passes"
-            );
-            let admission =
-                lcm_convergence_admission(pending.clone(), &mut history_priority_passes);
-            assert_ne!(
-                admission,
-                LcmConvergenceAdmission::Admitted(LcmConvergencePage::Full),
-                "historical continuation must keep priority over derived summaries"
-            );
-            if admission
-                == LcmConvergenceAdmission::Admitted(LcmConvergencePage::PredecessorRangeRewrite)
-            {
-                admitted_rewrites = admitted_rewrites.saturating_add(1);
-                crate::lcm_summary_convergence::run_predecessor_range_rewrite_page(
-                    database.clone(),
-                )
-                .await
-                .expect("bounded predecessor-range rewrite page");
-            }
-        }
-        assert!(
-            admitted_rewrites > 0 && passes >= HISTORY_PRIORITY_PASSES_BEFORE_RANGE_REWRITE,
-            "the rewrite must converge through admitted passes, not by skipping priority"
-        );
-        assert_eq!(
-            persisted_range(&database, session_id).await,
-            Some((2, 2)),
-            "the admitted pages must narrow the pre-fix interval off the policy anchor"
-        );
-    }
-
-    /// Ingests one policy anchor plus two conversational rows, then models a
-    /// store written before the policy-anchor role filter: the interval starts
-    /// at the anchor and the rewrite journal has never run.
-    async fn seed_pre_fix_widened_range(database: &RegisteredGlobalDbLeaseV1, session_id: &str) {
-        let session = SessionRecord {
-            provider: "claude".to_string(),
-            session_id: session_id.to_string(),
-            project_key: "project.range-rewrite-fairness".to_string(),
-            project_path: "/tmp/range-rewrite-fairness".to_string(),
-            title: None,
-            started_at: Some(1),
-            ended_at: None,
-            transcript_path: None,
-            metadata_json: None,
-            parent_session_id: None,
-            is_subagent: false,
-            agent_id: None,
-            parent_tool_use_id: None,
-        };
-        let messages = ["system", "user", "user"]
-            .into_iter()
-            .enumerate()
-            .map(|(index, role)| {
-                let ordinal = index as i64 + 1;
-                SessionMessageRecord {
-                    provider: "claude".to_string(),
-                    message_id: format!("{session_id}-message-{ordinal}"),
-                    session_id: session_id.to_string(),
-                    role: role.to_string(),
-                    timestamp: Some(ordinal),
-                    ordinal,
-                    text: format!("durable conversational context {ordinal}"),
-                    kind: Some("message".to_string()),
-                    model: None,
-                    tool_names: None,
-                    source_path: None,
-                    source_offset: None,
-                    metadata_json: None,
-                }
-            })
-            .collect::<Vec<_>>();
-        assert!(database.upsert_session(&session).await);
-        let storage_root = database.db_path().parent().unwrap();
-        for message in &messages {
-            database
-                .lcm_ingest_raw_message(storage_root, message)
-                .await
-                .unwrap();
-        }
-        let transaction = database
-            .begin_write_transaction()
-            .await
-            .expect("write transaction");
-        transaction
-            .execute(
-                "UPDATE lcm_raw_predecessor_ranges SET from_store_id = 1
-                 WHERE provider = 'claude' AND session_id = ?1",
-                params![session_id],
-            )
-            .await
-            .expect("widen the persisted interval");
-        transaction
-            .execute(
-                "DELETE FROM lcm_gc_meta WHERE key = 'predecessor_range_role_filter_v1'",
-                (),
-            )
-            .await
-            .expect("clear the rewrite journal");
-        transaction.commit().await.expect("commit pre-fix store");
-    }
-
-    async fn rewrite_has_work(database: &RegisteredGlobalDbLeaseV1) -> bool {
-        let snapshot = database.read_snapshot().await.expect("read snapshot");
-        tracedecay_lcm::summary_convergence::predecessor_range_rewrite_has_work(&snapshot)
-            .await
-            .expect("journaled rewrite frontier")
-    }
-
-    async fn persisted_range(
-        database: &RegisteredGlobalDbLeaseV1,
-        session_id: &str,
-    ) -> Option<(i64, i64)> {
-        let snapshot = database.read_snapshot().await.expect("read snapshot");
-        let mut rows = snapshot
-            .query(
-                "SELECT from_store_id, to_store_id
-                 FROM lcm_raw_predecessor_ranges
-                 WHERE provider = 'claude' AND session_id = ?1
-                 ORDER BY to_store_id DESC
-                 LIMIT 1",
-                params![session_id],
-            )
-            .await
-            .expect("persisted interval");
-        let row = rows.next().await.expect("interval row")?;
-        Some((
-            row.get::<i64>(0).expect("from store id"),
-            row.get::<i64>(1).expect("to store id"),
-        ))
     }
 }

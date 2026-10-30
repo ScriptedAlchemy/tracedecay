@@ -39,11 +39,6 @@ fn classify_sealed_generation_decode_error(
     sealed_state_digest: &ManifestDigest,
 ) -> GraphDbError {
     match error {
-        CodeIndexProductionErrorV1::SourceCommitmentsUnavailable => {
-            GraphDbError::SourceCommitmentsUnavailable {
-                sealed_state_digest: sealed_state_digest.as_str().to_owned(),
-            }
-        }
         // A row shape or an envelope revision this build no longer reads is
         // the same typed state to replay: the sealed bytes are intact, this
         // build just cannot derive a graph from them, so replay reports

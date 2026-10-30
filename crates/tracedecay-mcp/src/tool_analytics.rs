@@ -39,9 +39,8 @@ pub struct McpToolAnalyticsEvent<'a> {
     pub mcp_instance_id: Option<&'a str>,
     /// Bounded, sanitized (no argument bodies) reason for a `outcome ==
     /// "error"` call, e.g. a structural edit-tool failure message or a
-    /// dispatch error's `Display` text. `None` falls back to a generic
-    /// marker so pre-existing callers that have not been migrated to supply
-    /// a real reason keep working.
+    /// dispatch error's `Display` text. `None` records the generic
+    /// `tool_dispatch_error` marker.
     pub failure_reason: Option<&'a str>,
     /// What the call cost its stores, when its read was metered.
     pub cost: Option<&'a tracedecay_contracts::RequestCostReceiptV1>,

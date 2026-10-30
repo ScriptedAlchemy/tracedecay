@@ -233,7 +233,7 @@ async fn foreign_brain_profile_session_authority_fails_before_store_mutation() {
         serde_json::json!({
             "timestamp": "2026-08-22T00:00:01.000Z",
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": "must not persist"},
+            "payload": crate::common::codex_user_message_payload("must not persist"),
         }),
     );
     std::fs::write(
@@ -471,7 +471,7 @@ fn write_codex_rollout_fixture(home: &Path, project: &Path, session: &str) {
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:01.000Z",
             "type": "event_msg",
-            "payload": {"type": "user_message", "message": "Investigate the rotation backlog"}
+            "payload": crate::common::codex_user_message_payload("Investigate the rotation backlog")
         }),
         serde_json::json!({
             "timestamp": "2026-01-01T00:00:02.000Z",
