@@ -6,8 +6,6 @@ use super::{
     TranscriptPersistenceError,
 };
 
-#[cfg(test)]
-mod codex_response_echo;
 pub mod harness;
 #[cfg(test)]
 mod hook_route_analytics;

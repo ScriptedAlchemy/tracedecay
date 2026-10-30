@@ -50,7 +50,6 @@ pub enum AutomationEffectRecoveryPreparation {
 
 pub struct PreparedAutomationEffectRecovery {
     dashboard_root: PathBuf,
-    reset_journals: usize,
 }
 
 #[tracing::instrument(
@@ -72,209 +71,23 @@ pub async fn prepare_reserved_automation_effect_recovery(
         ))
     })??;
     let recovery_root = dashboard_root.to_path_buf();
-    let (reset_journals, indexed) =
-        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-            let reset_journals = reset_refused_shapes_blocking(&recovery_root)?;
-            Ok::<_, TraceDecayError>((reset_journals, indexed_recovery_blocking(&recovery_root)?))
-        })
-        .await
-        .map_err(|error| {
-            contract_error(format!("automation recovery index reader failed: {error}"))
-        })??;
+    let indexed = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        indexed_recovery_blocking(&recovery_root)
+    })
+    .await
+    .map_err(|error| {
+        contract_error(format!("automation recovery index reader failed: {error}"))
+    })??;
     if indexed.is_empty() {
-        let report = reset_report(reset_journals);
-        return Ok(AutomationEffectRecoveryPreparation::Complete(report));
+        return Ok(AutomationEffectRecoveryPreparation::Complete(
+            AutomationEffectRecoveryReport::default(),
+        ));
     }
     Ok(AutomationEffectRecoveryPreparation::Pending(
         PreparedAutomationEffectRecovery {
             dashboard_root: dashboard_root.to_path_buf(),
-            reset_journals,
         },
     ))
-}
-
-fn reset_report(reset_journals: usize) -> AutomationEffectRecoveryReport {
-    AutomationEffectRecoveryReport {
-        inspected: reset_journals,
-        reset_required: reset_journals,
-        ..AutomationEffectRecoveryReport::default()
-    }
-}
-
-/// Resets every refused persisted shape recovery can reach: a refused pending
-/// index is rebuilt from its journals, and under a current index each refused
-/// journal it does not reference is retired. Returns the number of discarded
-/// journals.
-#[tracing::instrument(
-    name = "daemon.automation.effect.reset_refused_shapes",
-    level = "trace",
-    skip_all
-)]
-fn reset_refused_shapes_blocking(dashboard_root: &Path) -> Result<usize> {
-    let path = index_path(dashboard_root);
-    match with_index_lock(&path, || read_index(&path)) {
-        Ok(index) => retire_unreferenced_refused_journals_blocking(dashboard_root, &index),
-        Err(error) if error.reset_required_context().is_some() => {
-            rebuild_unsupported_index_blocking(dashboard_root, &error)
-        }
-        Err(error) => Err(error),
-    }
-}
-
-/// No current writer produces or indexes a refused shape, so a refused journal
-/// outside the index is settled history that can neither replay nor recover.
-/// Left in place it would refuse every reuse of its run id forever. Referenced
-/// refused journals are discarded by per-entry recovery instead.
-fn retire_unreferenced_refused_journals_blocking(
-    dashboard_root: &Path,
-    index: &PendingIndex,
-) -> Result<usize> {
-    let mut retired = 0;
-    for journal_path in journal_files(dashboard_root)? {
-        let referenced = index
-            .entries
-            .iter()
-            .any(|entry| Some(entry.journal_file.as_str()) == journal_file_name(&journal_path));
-        if referenced || journal::refused_journal_shape_blocking(&journal_path)?.is_none() {
-            continue;
-        }
-        if matches!(
-            discard_if_refused_blocking(&journal_path)?,
-            journal::JournalShapeProbe::Discarded(_)
-        ) {
-            retired += 1;
-        }
-    }
-    Ok(retired)
-}
-
-/// Rebuilds a pending index whose persisted shape is refused from the journals
-/// beside it, discarding journals whose own shape is refused. Journals are read
-/// before the index lock is taken, preserving the journal -> index lock order
-/// used by reservation. Returns the number of discarded journals.
-fn rebuild_unsupported_index_blocking(
-    dashboard_root: &Path,
-    refusal: &TraceDecayError,
-) -> Result<usize> {
-    let path = index_path(dashboard_root);
-    let mut entries = Vec::new();
-    let mut discarded = 0;
-    for journal_path in journal_files(dashboard_root)? {
-        match discard_if_refused_blocking(&journal_path)? {
-            journal::JournalShapeProbe::Current(record) if !record.is_terminal() => {
-                entries.push(entry_for(&journal_path, &record.admission().scope)?);
-            }
-            journal::JournalShapeProbe::Discarded(_) => discarded += 1,
-            journal::JournalShapeProbe::Current(_) | journal::JournalShapeProbe::Missing => {}
-        }
-    }
-    entries.sort_by(|left, right| left.journal_file.cmp(&right.journal_file));
-    let rebuilt_entries = entries.len();
-    let bytes = encode_pending_index(&PendingIndex {
-        schema_version: INDEX_SCHEMA_VERSION,
-        entries,
-    })?;
-    with_index_lock(&path, || match read_index(&path) {
-        Err(error) if error.reset_required_context().is_some() => {
-            write_pending_index(&path, &bytes)
-        }
-        other => other.map(|_| ()),
-    })?;
-    tracing::warn!(
-        event = "automation_pending_index_reset",
-        index = %path.display(),
-        reason = %refusal,
-        rebuilt_entries,
-        discarded_journals = discarded,
-    );
-    Ok(discarded)
-}
-
-/// Discards the journal when its persisted shape is refused, logging the reset
-/// with the run id its admission names when that run id owns the filename.
-fn discard_if_refused_blocking(journal_path: &Path) -> Result<journal::JournalShapeProbe> {
-    let claimed_run_id = journal::refused_journal_shape_blocking(journal_path)?
-        .and_then(|refused| refused.claimed_run_id);
-    let probe = journal::read_or_discard_unsupported_record_blocking(journal_path)?;
-    if let journal::JournalShapeProbe::Discarded(refusal) = &probe {
-        tracing::warn!(
-            event = "automation_effect_journal_reset",
-            journal = %journal_path.display(),
-            run_id = verified_run_id(journal_path, claimed_run_id)
-                .as_ref()
-                .map(RunId::as_str),
-            reason = %refusal,
-        );
-    }
-    Ok(probe)
-}
-
-fn verified_run_id(journal_path: &Path, claimed: Option<RunId>) -> Option<RunId> {
-    claimed.filter(|run_id| {
-        automation_journal_filename(run_id)
-            .is_ok_and(|expected| Some(expected.as_str()) == journal_file_name(journal_path))
-    })
-}
-
-fn journal_file_name(journal_path: &Path) -> Option<&str> {
-    journal_path.file_name().and_then(|name| name.to_str())
-}
-
-/// Every digest-named journal in the automation directory, sorted.
-fn journal_files(dashboard_root: &Path) -> Result<Vec<PathBuf>> {
-    let root = automation_root(dashboard_root);
-    let listing = match std::fs::read_dir(&root) {
-        Ok(listing) => listing,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(contract_error(format!(
-                "automation journal directory listing failed: {error}"
-            )));
-        }
-    };
-    let mut journals = Vec::new();
-    for listed in listing {
-        let listed = listed.map_err(|error| {
-            contract_error(format!(
-                "automation journal directory listing failed: {error}"
-            ))
-        })?;
-        if let Some(name) = listed.file_name().to_str()
-            && validate_journal_filename(name).is_ok()
-        {
-            journals.push(root.join(name));
-        }
-    }
-    journals.sort();
-    Ok(journals)
-}
-
-/// A refused effect journal that project-open recovery will retire.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PendingAutomationEffectReset {
-    pub journal: PathBuf,
-    /// Present only when the run id the admission names digests to the
-    /// journal's filename.
-    pub run_id: Option<RunId>,
-    pub reason: String,
-}
-
-/// Read-only listing of the refused journals the next recovery resets, for
-/// Doctor. It takes no journal lock and removes nothing.
-pub fn pending_automation_effect_resets_blocking(
-    dashboard_root: &Path,
-) -> Result<Vec<PendingAutomationEffectReset>> {
-    let mut resets = Vec::new();
-    for journal in journal_files(dashboard_root)? {
-        if let Some(refused) = journal::refused_journal_shape_blocking(&journal)? {
-            resets.push(PendingAutomationEffectReset {
-                run_id: verified_run_id(&journal, refused.claimed_run_id),
-                reason: refused.reason,
-                journal,
-            });
-        }
-    }
-    Ok(resets)
 }
 
 /// Opens receipt authority only for reserved memory effects; failures defer that
@@ -291,10 +104,7 @@ where
     F: Fn(RunId, FactReadControl) -> Fut + Sync,
     Fut: Future<Output = Result<ProjectMemoryAutomationRunReceiptsV1>> + Send,
 {
-    let PreparedAutomationEffectRecovery {
-        dashboard_root,
-        reset_journals,
-    } = preparation;
+    let PreparedAutomationEffectRecovery { dashboard_root } = preparation;
     let tracedecay_domain::FactOwnerV1::Project { project_id } = owner else {
         return Err(contract_error(
             "automation recovery requires a project owner",
@@ -309,7 +119,7 @@ where
     let operation =
         retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
             .map_err(contract_error)?;
-    let mut report = reset_report(reset_journals);
+    let mut report = AutomationEffectRecoveryReport::default();
     let indexed_root = dashboard_root.clone();
     let indexed_scope = scope.clone();
     let indexed = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
@@ -341,6 +151,7 @@ where
             Ok(EntryRecoveryOutcome::AlreadyTerminal) => report.already_terminal += 1,
             Ok(EntryRecoveryOutcome::Deferred) => report.deferred += 1,
             Ok(EntryRecoveryOutcome::Cancelled) => break,
+            Err(error) if error.reset_required_context().is_some() => return Err(error),
             Err(error) => {
                 tracing::warn!(
                     event = "automation_effect_recovery_deferred",
@@ -387,13 +198,7 @@ where
     })
     .await
     .map_err(|error| contract_error(format!("automation recovery reader failed: {error}")))?;
-    let record = match record {
-        Err(error) if error.reset_required_context().is_some() => {
-            return discard_unsupported_journal(dashboard_root, &indexed.path).await;
-        }
-        record => record?,
-    };
-    let Some(record) = record else {
+    let Some(record) = record? else {
         remove_pending_async(dashboard_root, &indexed.path).await?;
         return Ok(EntryRecoveryOutcome::AlreadyTerminal);
     };
@@ -731,27 +536,6 @@ fn automation_journal_filename(run_id: &RunId) -> Result<String> {
         "{}.json",
         key.as_str().trim_start_matches("sha256:")
     ))
-}
-
-async fn discard_unsupported_journal(
-    dashboard_root: &Path,
-    journal_path: &Path,
-) -> Result<EntryRecoveryOutcome> {
-    let root = dashboard_root.to_path_buf();
-    let path = journal_path.to_path_buf();
-    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-        match discard_if_refused_blocking(&path)? {
-            journal::JournalShapeProbe::Discarded(_) => {
-                remove_pending_blocking(&root, &path)?;
-                Ok(EntryRecoveryOutcome::ResetRequired)
-            }
-            journal::JournalShapeProbe::Missing | journal::JournalShapeProbe::Current(_) => {
-                Ok(EntryRecoveryOutcome::Deferred)
-            }
-        }
-    })
-    .await
-    .map_err(|error| contract_error(format!("automation journal reset failed to join: {error}")))?
 }
 
 async fn remove_pending_async(dashboard_root: &Path, journal_path: &Path) -> Result<()> {
@@ -1127,7 +911,6 @@ mod tests {
     fn prepared_recovery(dashboard_root: &Path) -> PreparedAutomationEffectRecovery {
         PreparedAutomationEffectRecovery {
             dashboard_root: dashboard_root.to_path_buf(),
-            reset_journals: 0,
         }
     }
 

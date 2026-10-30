@@ -8,8 +8,8 @@ use super::{
 };
 use crate::automation::backend::AgentTaskKind;
 use crate::automation::config::{
-    AutomationBackend, AutomationConfig, AutomationHostMode, AutomationTaskConfig,
-    AutomationTaskSet,
+    AutomationBackendV1, AutomationHostModeV1, AutomationSettingsV1, AutomationTaskSetV1,
+    AutomationTaskSettingsV1,
 };
 use crate::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationTrigger, load_run_records,
@@ -49,7 +49,7 @@ fn session_reflector_malformed_output_projection_is_payload_free() {
 #[test]
 fn pre_epoch_completion_clock_fails_before_ledger_mutation() {
     let temp = tempfile::TempDir::new().expect("temp dir");
-    let config = AutomationConfig::default();
+    let config = AutomationSettingsV1::default();
     let completion_time = std::time::UNIX_EPOCH
         .checked_sub(std::time::Duration::from_micros(1))
         .expect("pre-epoch instant");
@@ -76,7 +76,7 @@ fn pre_epoch_completion_clock_fails_before_ledger_mutation() {
 #[test]
 fn terminal_clock_is_fresh_and_posteffect_failure_stays_typed() {
     let temp = tempfile::TempDir::new().expect("temp dir");
-    let config = AutomationConfig::default();
+    let config = AutomationSettingsV1::default();
     let preflight = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
     let finalizer = super::AgentRunFinalizer::new_at(
         temp.path(),
@@ -209,7 +209,7 @@ async fn append_skip(
     task: AgentTaskKind,
     reason: &str,
 ) -> AutomationRunLedgerRecord {
-    let config = AutomationConfig::default();
+    let config = AutomationSettingsV1::default();
     let sessions = test_sessions_db(dashboard_root).await;
     let mut run = AgentTaskRunContext::new(
         dashboard_root.to_path_buf(),
@@ -290,20 +290,20 @@ async fn manual_trigger_skips_always_persist() {
     assert_eq!(records.len(), 2, "manual skips must always be recorded");
 }
 
-fn scheduler_enabled_config() -> AutomationConfig {
-    AutomationConfig {
+fn scheduler_enabled_config() -> AutomationSettingsV1 {
+    AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            memory_curator: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            memory_curator: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("hourly".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     }
 }
 
@@ -311,18 +311,18 @@ fn scheduler_enabled_config() -> AutomationConfig {
 async fn on_demand_triggers_bypass_only_scheduler_enablement() {
     let temp = tempfile::TempDir::new().expect("temp dir");
     let sessions = test_sessions_db(temp.path()).await;
-    let disabled = AutomationConfig {
+    let disabled = AutomationSettingsV1 {
         enabled: false,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            memory_curator: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            memory_curator: AutomationTaskSettingsV1 {
                 enabled: false,
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
 
     for trigger in [
@@ -397,11 +397,11 @@ async fn concurrent_on_demand_runs_share_the_canonical_task_lock() {
 async fn scheduler_trigger_still_obeys_global_enablement() {
     let temp = tempfile::TempDir::new().expect("temp dir");
     let sessions = test_sessions_db(temp.path()).await;
-    let disabled = AutomationConfig {
+    let disabled = AutomationSettingsV1 {
         enabled: false,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        ..AutomationConfig::default()
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        ..AutomationSettingsV1::default()
     };
 
     let (gate, _) = task_run_gate(
@@ -424,12 +424,12 @@ async fn scheduler_trigger_still_obeys_global_enablement() {
 async fn on_demand_trigger_does_not_bypass_backend_or_host_admission() {
     let temp = tempfile::TempDir::new().expect("temp dir");
     let sessions = test_sessions_db(temp.path()).await;
-    let unavailable = AutomationConfig {
+    let unavailable = AutomationSettingsV1 {
         enabled: false,
-        backend: AutomationBackend::Disabled,
-        host_mode: AutomationHostMode::Standalone,
+        backend: AutomationBackendV1::Disabled,
+        host_mode: AutomationHostModeV1::Standalone,
         model_id: None,
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
     let (gate, _) = task_run_gate(
         &unavailable,
@@ -446,9 +446,9 @@ async fn on_demand_trigger_does_not_bypass_backend_or_host_admission() {
         SchedulerGate::Skip(AutomationSkipReasonV1::BackendDisabled)
     ));
 
-    let delegated = AutomationConfig {
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::DelegatedHost,
+    let delegated = AutomationSettingsV1 {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::DelegatedHost,
         ..unavailable
     };
     let (gate, _) = task_run_gate(
@@ -470,7 +470,7 @@ async fn on_demand_trigger_does_not_bypass_backend_or_host_admission() {
 /// The shortest valid interval schedule: a post-gate skip is a cadence
 /// terminal, so a repeat scheduler run can only be gated in after the
 /// interval elapses. Tests wait out one real second between runs.
-fn every_second_config() -> AutomationConfig {
+fn every_second_config() -> AutomationSettingsV1 {
     let mut config = scheduler_enabled_config();
     config.tasks.memory_curator.schedule = Some("every 1s".to_string());
     config
@@ -589,7 +589,7 @@ async fn page_cursor_transitions_bypass_reason_only_skip_deduplication() {
 async fn append_path_relies_solely_on_caller_computed_repeat_flag() {
     let temp = tempfile::TempDir::new().expect("temp dir");
     let root = temp.path();
-    let config = AutomationConfig::default();
+    let config = AutomationSettingsV1::default();
     let task = AgentTaskKind::MemoryCurator;
     let sessions = test_sessions_db(root).await;
 

@@ -96,18 +96,18 @@ async fn session_reflector_runner_skips_when_task_is_disabled() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     let backend = SessionJsonBackend::new(json!({"facts": []}));
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            session_reflector: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            session_reflector: AutomationTaskSettingsV1 {
                 enabled: false,
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
@@ -155,19 +155,19 @@ async fn session_reflector_interrupts_validation_before_near_match_or_apply() {
             "reason": "bounded evidence describes the cancellation boundary"
         }]
     }));
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            session_reflector: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            session_reflector: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
 
     let error = run_session_reflector(
@@ -209,24 +209,24 @@ async fn project_runners_keep_distinct_budget_stages_in_terminal_reports_and_led
         "Session reflection does not warrant a managed skill mutation.",
         "insufficient_repeated_evidence",
     ));
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            session_reflector: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            session_reflector: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            skill_writer: AutomationTaskConfig {
+            skill_writer: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
     let reflector_retrieval = StructuralBudgetRefusalRetrieval::new(
         tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
@@ -327,24 +327,24 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
             "Rejected evidence must not produce a managed skill mutation.",
             "no_action",
         ));
-        let config = AutomationConfig {
+        let config = AutomationSettingsV1 {
             enabled: true,
-            backend: AutomationBackend::CodexAppServer,
-            host_mode: AutomationHostMode::Standalone,
-            tasks: AutomationTaskSet {
-                session_reflector: AutomationTaskConfig {
+            backend: AutomationBackendV1::CodexAppServer,
+            host_mode: AutomationHostModeV1::Standalone,
+            tasks: AutomationTaskSetV1 {
+                session_reflector: AutomationTaskSettingsV1 {
                     enabled: true,
                     schedule: Some("manual".to_string()),
-                    ..AutomationTaskConfig::default()
+                    ..AutomationTaskSettingsV1::default()
                 },
-                skill_writer: AutomationTaskConfig {
+                skill_writer: AutomationTaskSettingsV1 {
                     enabled: true,
                     schedule: Some("manual".to_string()),
-                    ..AutomationTaskConfig::default()
+                    ..AutomationTaskSettingsV1::default()
                 },
-                ..AutomationTaskSet::default()
+                ..AutomationTaskSetV1::default()
             },
-            ..AutomationConfig::default()
+            ..AutomationSettingsV1::default()
         };
 
         let reflector = settle_session_reflector(
@@ -397,24 +397,24 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
         "No retained evidence supports a managed skill mutation.",
         "insufficient_repeated_evidence",
     ));
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            session_reflector: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            session_reflector: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            skill_writer: AutomationTaskConfig {
+            skill_writer: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
     let reflector = settle_session_reflector(
         &automation_project_context(&cg),
@@ -592,19 +592,19 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
             }
         ]
     }));
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            session_reflector: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            session_reflector: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
@@ -864,19 +864,19 @@ async fn session_reflector_runner_auto_applies_validated_facts() {
             }
         ]
     }));
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            session_reflector: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            session_reflector: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
@@ -987,19 +987,19 @@ async fn session_reflector_runner_reports_partial_terminal_effects_for_duplicate
             }
         ]
     }));
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            session_reflector: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            session_reflector: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
@@ -1052,19 +1052,19 @@ async fn session_reflector_records_terminal_quarantine_without_an_admitted_fact(
             "reason": "The fixture deliberately omits trust"
         }]
     }));
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            session_reflector: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            session_reflector: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
@@ -1236,19 +1236,19 @@ async fn session_reflector_rejects_unsupported_source_role_and_time_filters_with
     };
     let standalone = run_session_reflector(
         &cg,
-        &AutomationConfig {
+        &AutomationSettingsV1 {
             enabled: true,
-            backend: AutomationBackend::CodexAppServer,
-            host_mode: AutomationHostMode::Standalone,
-            tasks: AutomationTaskSet {
-                session_reflector: AutomationTaskConfig {
+            backend: AutomationBackendV1::CodexAppServer,
+            host_mode: AutomationHostModeV1::Standalone,
+            tasks: AutomationTaskSetV1 {
+                session_reflector: AutomationTaskSettingsV1 {
                     enabled: true,
                     schedule: Some("manual".to_string()),
-                    ..AutomationTaskConfig::default()
+                    ..AutomationTaskSettingsV1::default()
                 },
-                ..AutomationTaskSet::default()
+                ..AutomationTaskSetV1::default()
             },
-            ..AutomationConfig::default()
+            ..AutomationSettingsV1::default()
         },
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &backend,
@@ -1267,19 +1267,19 @@ async fn session_reflector_rejects_unsupported_source_role_and_time_filters_with
 
     let delegated = run_session_reflector(
         &cg,
-        &AutomationConfig {
+        &AutomationSettingsV1 {
             enabled: true,
-            backend: AutomationBackend::CodexAppServer,
-            host_mode: AutomationHostMode::DelegatedHost,
-            tasks: AutomationTaskSet {
-                session_reflector: AutomationTaskConfig {
+            backend: AutomationBackendV1::CodexAppServer,
+            host_mode: AutomationHostModeV1::DelegatedHost,
+            tasks: AutomationTaskSetV1 {
+                session_reflector: AutomationTaskSettingsV1 {
                     enabled: true,
                     schedule: Some("manual".to_string()),
-                    ..AutomationTaskConfig::default()
+                    ..AutomationTaskSettingsV1::default()
                 },
-                ..AutomationTaskSet::default()
+                ..AutomationTaskSetV1::default()
             },
-            ..AutomationConfig::default()
+            ..AutomationSettingsV1::default()
         },
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         &backend,
@@ -1380,19 +1380,19 @@ async fn session_reflector_replays_recent_sessions_without_keyword_matches() {
         "session-replay-1-message-001",
         "Always pass the offline flag to cargo nextest on this machine.",
     );
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            session_reflector: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            session_reflector: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
 
     let run = settle_session_reflector(
@@ -1495,19 +1495,19 @@ async fn session_reflector_replay_respects_include_summaries_false() {
     )
     .await
     .expect("summary fixture should publish through production constructor");
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            session_reflector: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            session_reflector: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
     let retrieval = StaticAutomationSessionRetrieval::message(
         "session-reflect-1",
@@ -1542,19 +1542,19 @@ async fn session_reflector_runner_ledgers_malformed_backend_output() {
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
     let backend = MalformedTextBackend::new(AgentTaskKind::SessionReflector, "not json");
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            session_reflector: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            session_reflector: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
 
     let err = run_session_reflector(
@@ -1584,7 +1584,7 @@ async fn session_reflector_runner_ledgers_malformed_backend_output() {
         .unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].task, AgentTaskKind::SessionReflector);
-    assert_eq!(records[0].task_key.as_deref(), Some("session_reflector"));
+    assert_eq!(records[0].task_key, "session_reflector");
     assert_eq!(records[0].status, AutomationRunStatus::Failed);
     assert_eq!(records[0].model.as_deref(), Some("fixture-model"));
     assert!(records[0].evidence_hash.is_some());
@@ -1608,19 +1608,19 @@ async fn session_reflector_runner_ledgers_missing_facts_array() {
     seed_session_evidence(&cg).await;
     let output = json!({"summary": "no facts"});
     let backend = SessionJsonBackend::new(output.clone());
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        tasks: AutomationTaskSet {
-            session_reflector: AutomationTaskConfig {
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        tasks: AutomationTaskSetV1 {
+            session_reflector: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
 
     let err = run_session_reflector(
@@ -1684,20 +1684,20 @@ async fn session_reflector_runner_records_noop_fallback_when_backend_run_task_fa
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
     let backend = FailingBackend::new(AgentTaskKind::SessionReflector);
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
         timeout_secs: 1,
-        tasks: AutomationTaskSet {
-            session_reflector: AutomationTaskConfig {
+        tasks: AutomationTaskSetV1 {
+            session_reflector: AutomationTaskSettingsV1 {
                 enabled: true,
                 schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
+                ..AutomationTaskSettingsV1::default()
             },
-            ..AutomationTaskSet::default()
+            ..AutomationTaskSetV1::default()
         },
-        ..AutomationConfig::default()
+        ..AutomationSettingsV1::default()
     };
 
     let run = run_session_reflector(

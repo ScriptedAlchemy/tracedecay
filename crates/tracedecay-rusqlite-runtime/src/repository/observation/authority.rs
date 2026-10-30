@@ -6,14 +6,13 @@
 
 use rusqlite::{OptionalExtension, params};
 use tracedecay_domain::{
-    AnchorSourceGeneration, DurableObservationV1, EvidenceAvailabilityV1, FactOwnerV1,
+    AnchorSourceGeneration, DurableObservationV1, EvidenceAvailabilityV1,
     GenerationBoundRepositoryProvenanceV1, ObservationSourceCursorV1, RepositoryProvenanceV1,
     RetrievalAnchorRecord, RetrievalAnchorRecordParts, RetrievalAnchorTarget,
-    codex_rollout_siblings, prove_cline_native_source_transition,
+    codex_rollout_siblings,
 };
 use tracedecay_store::{
-    AnchorDispositionReasonClassV1, AnchorDispositionStateV1, AnchoredObservationWrite,
-    ObservationCursorAdvance, RepositoryProvenanceAttachmentV1, RetrievalAnchorDispositionRecordV1,
+    AnchoredObservationWrite, ObservationCursorAdvance, RepositoryProvenanceAttachmentV1,
 };
 
 use super::super::support::{CachedStatements, decode, encode, invalid, same_json};
@@ -255,37 +254,10 @@ fn shared_alias_is_valid(
         super::decode_stored_observation(connection, anchor_json.as_str())?;
     let current_observation: DurableObservationV1 =
         super::decode_stored_observation(connection, current_json.as_str())?;
-    if codex_rollout_siblings(&current_observation, &candidate_observation) {
-        return Ok(true);
-    }
-    if prove_cline_native_source_transition(&current_observation, &candidate_observation).is_some()
-    {
-        // Pending successor: leave current alias and predecessor availability
-        // unchanged until derived output promotion commits.
-        return Ok(true);
-    }
-    if prove_cline_native_source_transition(&candidate_observation, &current_observation).is_none()
-    {
-        return Ok(false);
-    }
-    let Some(disposition_json) = connection
-        .query_row_cached(
-            "SELECT record_json FROM retrieval_anchor_dispositions
-             WHERE anchor_id = ?1 ORDER BY sequence DESC LIMIT 1",
-            [anchor.anchor_id().as_str()],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
-    else {
-        return Ok(false);
-    };
-    let disposition: RetrievalAnchorDispositionRecordV1 = decode(disposition_json)?;
-    disposition.validate().map_err(invalid)?;
-    Ok(disposition.anchor_id() == anchor.anchor_id()
-        && *disposition.owner() == FactOwnerV1::from(anchor.owner().clone())
-        && disposition.state() == AnchorDispositionStateV1::Superseded
-        && disposition.reason_class() == AnchorDispositionReasonClassV1::Correction
-        && disposition.superseded_by() == Some(current.anchor_id()))
+    Ok(codex_rollout_siblings(
+        &current_observation,
+        &candidate_observation,
+    ))
 }
 
 /// Hydrating projection of one provenance row: the shared repository capture

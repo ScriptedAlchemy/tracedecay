@@ -10,7 +10,7 @@ use super::automation_config_api::effective_automation_config;
 use super::util::{JsonError, internal_error};
 use tracedecay_automation_runtime::automation::backend::{AgentTaskKind, task_key};
 use tracedecay_automation_runtime::automation::config::{
-    AdmittedAutomationConfig, AutomationConfig,
+    AdmittedAutomationConfig, AutomationSettingsV1,
 };
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunLedgerTaskSummary, load_run_ledger_task_summary,
@@ -205,7 +205,7 @@ fn task_status(
 }
 
 fn scheduler_status_label(
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     paused: bool,
 ) -> AutomationSchedulerAvailabilityV1 {
     if paused {
@@ -215,12 +215,12 @@ fn scheduler_status_label(
         return AutomationSchedulerAvailabilityV1::AutomationDisabled;
     }
     if config.host_mode
-        == tracedecay_automation_runtime::automation::config::AutomationHostMode::DelegatedHost
+        == tracedecay_automation_runtime::automation::config::AutomationHostModeV1::DelegatedHost
     {
         return AutomationSchedulerAvailabilityV1::DelegatedHost;
     }
     if config.backend
-        == tracedecay_automation_runtime::automation::config::AutomationBackend::Disabled
+        == tracedecay_automation_runtime::automation::config::AutomationBackendV1::Disabled
     {
         return AutomationSchedulerAvailabilityV1::BackendDisabled;
     }
@@ -233,7 +233,7 @@ mod tests {
     use super::*;
     use tracedecay_automation_runtime::automation::backend::AgentTaskFailureClass;
     use tracedecay_automation_runtime::automation::config::{
-        AutomationBackend, AutomationTaskConfig,
+        AutomationBackendV1, AutomationTaskSettingsV1,
     };
     use tracedecay_automation_runtime::automation::run_ledger::{
         AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, run_ledger_path,
@@ -310,15 +310,15 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut config = AutomationConfig {
+        let mut config = AutomationSettingsV1 {
             enabled: true,
-            backend: AutomationBackend::CodexAppServer,
-            ..AutomationConfig::default()
+            backend: AutomationBackendV1::CodexAppServer,
+            ..AutomationSettingsV1::default()
         };
-        config.tasks.memory_curator = AutomationTaskConfig {
+        config.tasks.memory_curator = AutomationTaskSettingsV1 {
             enabled: true,
             schedule: Some("daily".to_string()),
-            ..AutomationTaskConfig::default()
+            ..AutomationTaskSettingsV1::default()
         };
 
         let status = task_status(

@@ -32,16 +32,14 @@ use super::{
 /// by-handle file index. Timestamps only supplement it.
 ///
 /// The persisted shape is platform-neutral, so one journal row means the same
-/// thing wherever it is read, and every field defaults. Both parts must be
-/// nonzero, and the inode/file index must not be the unsupported `u64::MAX`
-/// sentinel. Anything else is the absence of a provable identity, including a
-/// row written before this fence. Identity unknown fails closed to a full
+/// thing wherever it is read. Both parts must be nonzero, and the inode/file
+/// index must not be the unsupported `u64::MAX` sentinel. Anything else is the
+/// absence of a provable identity. Identity unknown fails closed to a full
 /// re-proof, [`super::scope_roots::validate_scope_transaction`] refuses such
-/// a row by name at the journal read, rather than letting a bare deserialize
-/// error surface as unsafe state or letting timestamps alone authorize a
-/// destructive rename.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
+/// a row by name at the journal read rather than letting timestamps alone
+/// authorize a destructive rename.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ScopeDirectoryIdentityV1 {
     modified_secs: i64,
     modified_nanos: u32,
@@ -626,18 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn a_journal_row_without_a_durable_file_id_is_not_an_identity() {
-        // The shape of a row written before the durable file-id fence. It has
-        // to deserialize so the journal read can name its refusal, instead of
-        // failing as a bare serde error surfacing as unsafe state.
-        let legacy: ScopeDirectoryIdentityV1 =
-            serde_json::from_str(r#"{"modified_secs":7,"modified_nanos":11,"created_100ns":13}"#)
-                .expect("a row missing the durable file id still deserializes");
-        assert!(
-            !legacy.has_durable_file_id(),
-            "an absent file id must not read as an identity every unproven directory shares"
-        );
-
+    fn a_real_directory_has_a_durable_file_id() {
         let fixture = tempfile::TempDir::new().expect("create identity fixture");
         let directory =
             Dir::open_ambient_dir(fixture.path(), ambient_authority()).expect("open the fixture");
@@ -650,21 +637,20 @@ mod tests {
 
     #[test]
     fn durable_file_id_requires_a_complete_nonsentinel_persisted_pair() {
-        let nonzero_device_zero_inode: ScopeDirectoryIdentityV1 =
-            serde_json::from_str(r#"{"device":17,"inode":0}"#).unwrap();
-        assert!(!nonzero_device_zero_inode.has_durable_file_id());
-
-        let zero_device_nonzero_inode: ScopeDirectoryIdentityV1 =
-            serde_json::from_str(r#"{"device":0,"inode":41}"#).unwrap();
-        assert!(!zero_device_nonzero_inode.has_durable_file_id());
-
-        let sentinel_inode: ScopeDirectoryIdentityV1 =
-            serde_json::from_str(r#"{"device":17,"inode":18446744073709551615}"#).unwrap();
-        assert!(!sentinel_inode.has_durable_file_id());
-
-        let valid: ScopeDirectoryIdentityV1 =
-            serde_json::from_str(r#"{"device":17,"inode":41}"#).unwrap();
-        assert!(valid.has_durable_file_id());
+        let identity = |device: u64, inode: u64| -> ScopeDirectoryIdentityV1 {
+            serde_json::from_value(serde_json::json!({
+                "modified_secs": 7,
+                "modified_nanos": 11,
+                "created_100ns": 13,
+                "device": device,
+                "inode": inode,
+            }))
+            .unwrap()
+        };
+        assert!(!identity(17, 0).has_durable_file_id());
+        assert!(!identity(0, 41).has_durable_file_id());
+        assert!(!identity(17, u64::MAX).has_durable_file_id());
+        assert!(identity(17, 41).has_durable_file_id());
     }
 
     const SCOPE_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

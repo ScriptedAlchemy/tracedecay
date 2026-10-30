@@ -196,13 +196,13 @@ impl RegisteredSchemaConvergenceMaintenance {
             .cloned()
     }
 
-    /// Every shard whose historical convergence has not completed.
+    /// Every shard whose schema convergence has not completed.
     ///
-    /// Convergence carries the migrations whose cost scales with the store, so
-    /// on a large store it can be pending, running, or degraded for a long
-    /// while after the daemon starts serving. Reporting that is what makes the
-    /// daemon's own answer honest: an operator sees which shard is still
-    /// migrating and why, instead of a healthy claim or a crash loop.
+    /// Convergence runs the authority-invariant audit, whose cost scales with
+    /// the store, so on a large store it can be pending, running, or degraded
+    /// for a long while after the daemon starts serving. Reporting that is what
+    /// makes the daemon's own answer honest: an operator sees which shard has
+    /// not converged and why, instead of a healthy claim or a crash loop.
     pub(super) fn unconverged(&self) -> Vec<(StoreShardIdV1, RegisteredSchemaConvergenceStatus)> {
         lock_registered_schema_convergence_statuses(&self.statuses)
             .iter()
@@ -223,12 +223,11 @@ impl RegisteredSchemaConvergenceMaintenance {
                 let (stage, started_at_micros) = metadata.get(store)?;
                 let (state, degraded_row) = match status {
                     RegisteredSchemaConvergenceStatus::Pending => {
-                        (SchemaConvergenceStateV1::PendingSchemaMigration, None)
+                        (SchemaConvergenceStateV1::Pending, None)
                     }
-                    RegisteredSchemaConvergenceStatus::Running => (
-                        SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress,
-                        None,
-                    ),
+                    RegisteredSchemaConvergenceStatus::Running => {
+                        (SchemaConvergenceStateV1::Running, None)
+                    }
                     RegisteredSchemaConvergenceStatus::Complete => {
                         (SchemaConvergenceStateV1::Completed, None)
                     }
@@ -240,7 +239,6 @@ impl RegisteredSchemaConvergenceMaintenance {
                     store: format!("{:?}", store.scope),
                     stage: *stage,
                     state,
-                    progress: None,
                     started_at_micros: *started_at_micros,
                     degraded_row,
                 })
@@ -806,8 +804,8 @@ impl DaemonSessionRuntimeRegistryV1 {
 }
 
 /// The reset `wipe --stale` applies to Hook V2 admission state refused at
-/// `root`: the profile's ledgers, or one project's ledgers and pre-ledger
-/// work. State anywhere else is reset with the whole profile.
+/// `root`: the profile's ledgers, or one project's ledgers. State anywhere
+/// else is reset with the whole profile.
 fn hook_admission_reset_required(profile_root: &Path, root: &Path) -> StoreResetRequiredV1 {
     let host_parent = root.parent();
     let scope_root = host_parent.and_then(Path::parent);
@@ -823,12 +821,9 @@ fn hook_admission_reset_required(profile_root: &Path, root: &Path) -> StoreReset
         {
             Some(ResettableStoreV1::ProfileHookAdmissions)
         }
-        (
-            Some(tracedecay_hooks::PROJECT_HOOK_ADMISSIONS_DIR)
-            | Some(tracedecay_hooks::PRE_LEDGER_PENDING_WORK_DIR),
-            Some(scope),
-            Some(project_id),
-        ) if profile_root_of_sharded_data_root(scope, project_id) == Some(profile_root) => {
+        (Some(tracedecay_hooks::PROJECT_HOOK_ADMISSIONS_DIR), Some(scope), Some(project_id))
+            if profile_root_of_sharded_data_root(scope, project_id) == Some(profile_root) =>
+        {
             Some(ResettableStoreV1::ProjectHookAdmissions {
                 project_id: project_id.to_owned(),
             })

@@ -367,73 +367,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_process_local_surface_survives_restart_with_reused_legacy_inputs() {
-        let collisions = [
-            (GlobalRequestSurface::Cli, "request.cli.100.42.1"),
-            (GlobalRequestSurface::Http, "request.http.100.1"),
-            (
-                GlobalRequestSurface::DashboardSettings,
-                "request.dashboard.settings.100.1",
-            ),
-            (
-                GlobalRequestSurface::DashboardStorageTelemetry,
-                "request.dashboard.storage-telemetry.100000000",
-            ),
-            (GlobalRequestSurface::McpFallback, "request.mcp.100.1"),
-            (
-                GlobalRequestSurface::ManagedTestRun,
-                "request.managed-test-run.1",
-            ),
-            (
-                GlobalRequestSurface::FeedbackObservation,
-                "request.feedback-observe.100000000",
-            ),
-            (
-                GlobalRequestSurface::ProjectOpenFeedbackCycle,
-                "request.project-open.cycle.100000000",
-            ),
-            (
-                GlobalRequestSurface::ProjectOpenGithubDiscovery,
-                "request.project-open.github-discovery.commit-a",
-            ),
-            (
-                GlobalRequestSurface::DaemonDoctor,
-                "request.daemon.doctor.42.100000000.0",
-            ),
-            (
-                GlobalRequestSurface::DaemonStorageTelemetry,
-                "request.daemon.storage-telemetry.42.100000000.0",
-            ),
-            (
-                GlobalRequestSurface::LspFeedbackDiagnostics,
-                "lsp-feedback-diagnostics-1",
-            ),
-            (GlobalRequestSurface::LspFeedbackGet, "lsp-feedback-get-1"),
-            (
-                GlobalRequestSurface::LspFeedbackExpand,
-                "lsp-feedback-expand-1",
-            ),
-            (GlobalRequestSurface::SessionRefresh, "mcp.session-refresh"),
-            (
-                GlobalRequestSurface::AutomationSessionRetrieval,
-                "automation.session-evidence",
-            ),
-            (
-                GlobalRequestSurface::McpSessionRetrieval,
-                "mcp.message-search",
-            ),
+    fn every_process_local_surface_mints_a_fresh_identity_after_restart() {
+        let surfaces = [
+            GlobalRequestSurface::Cli,
+            GlobalRequestSurface::Http,
+            GlobalRequestSurface::DashboardSettings,
+            GlobalRequestSurface::DashboardStorageTelemetry,
+            GlobalRequestSurface::McpFallback,
+            GlobalRequestSurface::ManagedTestRun,
+            GlobalRequestSurface::FeedbackObservation,
+            GlobalRequestSurface::ProjectOpenFeedbackCycle,
+            GlobalRequestSurface::ProjectOpenGithubDiscovery,
+            GlobalRequestSurface::DaemonDoctor,
+            GlobalRequestSurface::DaemonStorageTelemetry,
+            GlobalRequestSurface::LspFeedbackDiagnostics,
+            GlobalRequestSurface::LspFeedbackGet,
+            GlobalRequestSurface::LspFeedbackExpand,
+            GlobalRequestSurface::SessionRefresh,
+            GlobalRequestSurface::AutomationSessionRetrieval,
+            GlobalRequestSurface::McpSessionRetrieval,
         ];
 
-        for (index, (surface, legacy)) in collisions.into_iter().enumerate() {
+        for (index, surface) in surfaces.into_iter().enumerate() {
             let first = ProcessUniqueIdentityAuthority::from_instance_nonce([1; 16]);
             let second_nonce = u8::try_from(index + 2).unwrap();
             let second = ProcessUniqueIdentityAuthority::from_instance_nonce([second_nonce; 16]);
-            let legacy_first_process = legacy.to_owned();
-            let legacy_restarted_process = legacy.to_owned();
-            assert_eq!(
-                legacy_first_process, legacy_restarted_process,
-                "the pre-fix pair reused {legacy}"
-            );
             assert_ne!(
                 first.mint_string(surface.prefix()).unwrap(),
                 second.mint_string(surface.prefix()).unwrap(),

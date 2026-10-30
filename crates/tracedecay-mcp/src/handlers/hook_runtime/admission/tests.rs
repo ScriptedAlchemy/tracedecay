@@ -6,7 +6,7 @@ use super::super::test_support::*;
 use super::super::*;
 use super::*;
 
-mod legacy_continuity;
+mod lifecycle_policy;
 mod tool_dispatch;
 
 #[test]
@@ -357,7 +357,6 @@ fn a_ledger_with_a_commit_in_flight_keeps_its_writer_fence() {
     let stage = |root: &std::path::Path, envelope: &tracedecay_hooks::HookEventEnvelopeV2| {
         ledgers
             .with_ledger(
-                Some(root),
                 hook_v2_admission_ledger_root(root, host),
                 host,
                 now,
@@ -407,55 +406,6 @@ fn a_ledger_with_a_commit_in_flight_keeps_its_writer_fence() {
         tracedecay_hooks::HookAdmissionDecisionV1::Conflict
     );
     c_in_flight.commit.wait().unwrap();
-}
-
-#[test]
-fn pre_ledger_pending_work_is_refused_for_reset_not_adopted() {
-    let data_root = tempfile::tempdir().unwrap();
-    let now = UtcMicros(1_000);
-    let host = tracedecay_domain::NativeHostIdentityV1::ClaudeCode;
-    let provider = admission_test_envelope(34, 7);
-    let pre_ledger_root = data_root.path().join("hook-v2-pending-work").join("claude");
-    {
-        let (mut spool, _) = tracedecay_hooks::HookSpoolV1::open(
-            &pre_ledger_root,
-            tracedecay_hooks::HookSpoolConfigV1::stock(host),
-            now,
-        )
-        .unwrap();
-        spool
-            .append(provider.clone(), &admission_test_binding(7), now)
-            .unwrap();
-        spool.commit().unwrap();
-    }
-
-    let pending = hook_v2_pending_work_envelopes(data_root.path(), host, now);
-    assert!(
-        matches!(
-            pending,
-            Err(HookV2AdmissionLedgerUnavailable::Ledger(
-                tracedecay_hooks::HookAdmissionLedgerError::ResetRequired
-            ))
-        ),
-        "pre-ledger pending work is a reset refusal, not an empty drain: {pending:?}"
-    );
-    assert!(record_hook_v2_admission(data_root.path(), &provider, now).is_none());
-    assert!(pre_ledger_root.is_dir());
-    assert_eq!(
-        tracedecay_hooks::hook_admission_reset_required_roots(data_root.path()),
-        vec![pre_ledger_root.clone()]
-    );
-
-    std::fs::remove_dir_all(&pre_ledger_root).unwrap();
-    let admitted = record_hook_v2_admission(data_root.path(), &provider, now).unwrap();
-    assert_eq!(
-        admitted.decision,
-        tracedecay_hooks::HookAdmissionDecisionV1::Admitted
-    );
-    assert_eq!(
-        tracedecay_hooks::hook_admission_reset_required_roots(data_root.path()),
-        Vec::<std::path::PathBuf>::new()
-    );
 }
 
 #[test]

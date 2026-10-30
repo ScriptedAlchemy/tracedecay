@@ -81,10 +81,7 @@ impl AgentIntegration for CursorIntegration {
         let mcp_current = mcp
             .pointer("/mcpServers/tracedecay")
             .is_some_and(Value::is_object);
-        if matches!(
-            component,
-            HostComponentV1::ContextMcp | HostComponentV1::OperatorMcp
-        ) {
+        if component == HostComponentV1::ContextMcp {
             return if mcp_current {
                 HostBundleRegistrationStateV1::Current
             } else {

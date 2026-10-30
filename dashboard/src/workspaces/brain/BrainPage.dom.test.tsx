@@ -29,23 +29,6 @@ function registryBody(status: string, error: string | null = null) {
   };
 }
 
-/**
- * The transport status each body really arrives with.
- *
- * `projects.rs::list` answers both registry failures with 503, never with a
- * 200 carrying a failing status, so serving these at 200, as this suite used
- * to, exercised a response the daemon cannot produce. It passed only because
- * the former generic client discarded non-2xx bodies, which made these very
- * branches unreachable in production.
- *
- * An unrecognised status is different, and stays at 200: `status` is a bare
- * string in Rust, so a future successful state is a word this build has not
- * been taught, arriving on a perfectly ordinary success.
- */
-function transportStatusFor(status: string): number {
-  return status === 'missing_registry' || status === 'registry_unavailable' ? 503 : 200;
-}
-
 function registryEnvelope(status: string, error: string | null = null) {
   return fixtureEnvelope(registryBody(status, error), status === 'ok' ? 'ready' : 'partial');
 }
@@ -56,7 +39,7 @@ function renderBrain(status: string, error: string | null = null) {
     vi.fn(
       async () =>
         new Response(JSON.stringify(registryEnvelope(status, error)), {
-          status: transportStatusFor(status),
+          status: 200,
         }),
     ),
   );

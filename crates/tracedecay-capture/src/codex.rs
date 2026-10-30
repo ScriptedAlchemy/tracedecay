@@ -30,7 +30,7 @@ pub struct CodexCurrentUserMessage<'a> {
 
 /// Validated Codex goal context carried by a `response_item.message(user)`.
 pub struct CodexResponseGoalContext<'a> {
-    pub item_id: Option<&'a str>,
+    pub item_id: &'a str,
     pub content: &'a Value,
     pub visible_text: String,
 }
@@ -59,10 +59,9 @@ pub fn codex_current_user_message(payload: &Value) -> Option<CodexCurrentUserMes
     Some(CodexCurrentUserMessage { item_id, content })
 }
 
-/// Validate the legacy response-only goal-context shape. A response item may
-/// omit `id` in older rollouts; when present, it must still be a valid native
-/// observation identity. Pair replacement belongs to transactional projection,
-/// after the matching current item has committed successfully.
+/// Validate the response-only goal-context shape. The response item must carry
+/// a valid native observation `id`. Pair replacement belongs to transactional
+/// projection, after the matching current item has committed successfully.
 pub fn codex_response_goal_context(payload: &Value) -> Option<CodexResponseGoalContext<'_>> {
     if payload.get("type").and_then(Value::as_str) != Some("message")
         || payload.get("role").and_then(Value::as_str) != Some("user")
@@ -72,10 +71,8 @@ pub fn codex_response_goal_context(payload: &Value) -> Option<CodexResponseGoalC
     let item_id = payload
         .get("id")
         .and_then(Value::as_str)
-        .filter(|item_id| !item_id.is_empty());
-    if item_id.is_some_and(|item_id| ObservationId::new(item_id).is_err()) {
-        return None;
-    }
+        .filter(|item_id| !item_id.is_empty())?;
+    ObservationId::new(item_id).ok()?;
     let content = payload.get("content")?;
     let visible_text = tracedecay_store::codex_message_visible_text(content);
     tracedecay_store::codex_goal_context_from_text(&visible_text)?;
@@ -196,7 +193,7 @@ fn normalize_codex_record(
             .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
     );
     // `session_meta.payload.id` is the native thread id. The session parser may
-    // fall back to a filename for legacy source identity, which is not enough
+    // fall back to a filename for source identity, which is not enough
     // evidence to populate this relation.
     if let Some(thread_id) = native_thread_id.and_then(observation_id_from_native) {
         relations = relations.with_thread_id(thread_id);
@@ -212,8 +209,7 @@ fn normalize_codex_record(
             "event_msg" => codex_current_user_message(payload)
                 .and_then(|message| observation_id_from_native(message.item_id)),
             "response_item" => codex_response_goal_context(payload)
-                .and_then(|message| message.item_id)
-                .and_then(observation_id_from_native),
+                .and_then(|message| observation_id_from_native(message.item_id)),
             _ => None,
         }
         .unwrap_or_else(|| stable_record_id.clone());
@@ -380,15 +376,10 @@ fn append_codex_event_facts(
     facts: &mut Vec<CanonicalObservationFactV1>,
 ) {
     match payload.get("type").and_then(Value::as_str) {
-        Some("user_message" | "agent_message") => {
-            let role = if payload.get("type").and_then(Value::as_str) == Some("user_message") {
-                CanonicalMessageRoleV1::User
-            } else {
-                CanonicalMessageRoleV1::Assistant
-            };
+        Some("agent_message") => {
             if let Some(content) = payload.get("message").cloned() {
                 facts.push(CanonicalObservationFactV1::Message {
-                    role,
+                    role: CanonicalMessageRoleV1::Assistant,
                     content,
                     model: payload
                         .get("model")

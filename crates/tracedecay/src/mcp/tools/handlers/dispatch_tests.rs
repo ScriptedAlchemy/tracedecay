@@ -60,47 +60,6 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingMultiRoot
 }
 
 #[tokio::test]
-async fn retired_file_metadata_is_absent_and_refused_by_public_dispatch() {
-    let retired = "tracedecay_file_metadata";
-    assert!(
-        get_tool_definitions()
-            .expect("tool definitions")
-            .iter()
-            .all(|definition| definition.name != retired)
-    );
-    assert!(
-        tracedecay_mcp::tools::binding::mcp_dispatch_catalog()
-            .expect("MCP dispatch catalog")
-            .contract(retired)
-            .is_none()
-    );
-    let dir = TempDir::new().expect("temporary project");
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("retired-file-metadata");
-    fs::create_dir_all(&project).expect("project root");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
-        "project.retired-file-metadata",
-    )
-    .await
-    .expect("TraceDecay fixture");
-    let error = handle_tool_call_with_registry_options(
-        &cg,
-        retired,
-        json!({"files": ["../outside"]}),
-        ToolCallRegistryOptions::default(),
-    )
-    .await
-    .expect_err("retired tool must be refused");
-    assert!(
-        error.to_string().contains("unknown tool"),
-        "retired tool reached a public dispatch path: {error}"
-    );
-    cg.close();
-}
-
-#[tokio::test]
 async fn multi_root_tools_invoke_the_closed_daemon_routes() {
     let dir = TempDir::new().unwrap();
     let (cg, _runtime) = registered_lib_fixture(
@@ -149,7 +108,7 @@ async fn multi_root_tools_invoke_the_closed_daemon_routes() {
         )
         .await
         .unwrap();
-        assert_eq!(result.semantic_error(), Some(true));
+        assert!(result.semantic_error());
     }
 
     assert_eq!(
@@ -1305,7 +1264,7 @@ async fn pr_context_unresolvable_ref_fails_fast_within_deadline() {
         "unresolvable ref must fail fast, took {:?}",
         started.elapsed(),
     );
-    assert_eq!(result.semantic_error(), Some(true));
+    assert!(result.semantic_error());
     let message = result.failure_message().unwrap_or_default().to_owned();
     assert!(
         message.contains("does-not-exist-ref"),
@@ -1374,7 +1333,7 @@ async fn pr_context_returns_git_evidence_while_verified_graph_is_unavailable() {
         )
         .await
         .expect("transient verified graph failure must preserve available Git evidence");
-        assert_ne!(result.semantic_error(), Some(true));
+        assert!(!result.semantic_error());
         let brief: PrContextBriefV1 = serde_json::from_value(tool_json(&result))
             .expect("default PR response uses the closed briefing contract");
 

@@ -25,8 +25,9 @@ use tracedecay_session_memory::context::{
 use tracedecay_session_memory::session::{SessionRefreshTarget, SessionRequestBinding};
 use tracedecay_store::SessionRefreshFrontierV1;
 
-pub use tracedecay_session_memory::session::SessionRefreshServicePort as RetainedSessionRefreshPortV1;
-use tracedecay_session_memory::session::{SessionRefreshAction, SessionRefreshCommand};
+use tracedecay_session_memory::session::{
+    SessionRefreshAction, SessionRefreshCommand, SessionRefreshServicePort,
+};
 
 const REQUEST_MAX_RESULTS: u64 = 64;
 const REQUEST_MAX_BYTES: u64 = 64 * 1024 * 1024;
@@ -47,7 +48,7 @@ pub struct MountedSessionRefreshAuthorityV1<'a> {
     pub session_root_id: &'a SessionRootId,
     pub configuration_digest: &'a ManifestDigest,
     pub policy_digest: &'a ManifestDigest,
-    pub refresh: &'a dyn RetainedSessionRefreshPortV1,
+    pub refresh: &'a dyn SessionRefreshServicePort,
 }
 
 #[tracing::instrument(

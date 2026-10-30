@@ -24,7 +24,8 @@ use tracedecay_domain::{
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_session_memory::context::{ResolvedSessionIdentity, SessionRootId, SessionStoreId};
 use tracedecay_session_memory::session::{
-    SessionDataFreshness, SessionFreshnessPolicy, SessionRetrievalScope, SessionTemporalQuery,
+    SessionDataFreshness, SessionFreshnessPolicy, SessionRefreshServicePort, SessionRetrievalScope,
+    SessionTemporalQuery,
 };
 use tracedecay_sessions::WorkflowIndexReadPort;
 use tracedecay_sessions::runtime::git_correlation::{GitScopeFilter, git_scope_filter_from_args};
@@ -37,10 +38,7 @@ use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_temporal_query::snapshot::TemporalCandidateFilterV1;
 use tracedecay_temporal_query::snapshot::TemporalCandidatePopulationCount;
 
-use super::session_refresh::{
-    MountedSessionRefreshAuthorityV1, RetainedSessionRefreshPortV1,
-    admitted_session_refresh_command,
-};
+use super::session_refresh::{MountedSessionRefreshAuthorityV1, admitted_session_refresh_command};
 use crate::session_retrieval::{
     DaemonSessionRetrievalService, SessionApplicationRetrievalPortV1,
     SessionRetrievalCoverageOmissionView, SessionRetrievalPageView, SessionRetrievalServiceOutcome,
@@ -65,7 +63,7 @@ pub struct ProjectRetainedSessionAuthoritiesV1 {
     pub session_store_id: SessionStoreId,
     pub session_root_id: SessionRootId,
     pub configuration_digest: ManifestDigest,
-    pub refresh: Arc<dyn RetainedSessionRefreshPortV1>,
+    pub refresh: Arc<dyn SessionRefreshServicePort>,
     pub retrieval: Arc<dyn SessionApplicationRetrievalPortV1>,
     pub session_database: RegisteredGlobalDbLeaseV1,
     pub workflow_index: Arc<dyn WorkflowIndexReadPort>,
@@ -77,7 +75,7 @@ enum RetainedSessionAuthority<'a> {
         session_database: super::ProfileSessionDatabaseSource<'a>,
         identity: ResolvedSessionIdentity,
         configuration_digest: ManifestDigest,
-        refresh: Option<&'a dyn RetainedSessionRefreshPortV1>,
+        refresh: Option<&'a dyn SessionRefreshServicePort>,
         refresh_status:
             Option<Arc<dyn tracedecay_sessions::serving::SessionProjectionServingStatusPort>>,
     },
@@ -92,7 +90,7 @@ impl<'a> DirectRetainedSessionPortV1<'a> {
         session_database: super::ProfileSessionDatabaseSource<'a>,
         identity: ResolvedSessionIdentity,
         configuration_digest: ManifestDigest,
-        refresh: Option<&'a dyn RetainedSessionRefreshPortV1>,
+        refresh: Option<&'a dyn SessionRefreshServicePort>,
         refresh_status: Option<
             Arc<dyn tracedecay_sessions::serving::SessionProjectionServingStatusPort>,
         >,
@@ -114,7 +112,7 @@ impl<'a> DirectRetainedSessionPortV1<'a> {
         request: &SessionRefreshRequestV1,
         identity: &ResolvedSessionIdentity,
         configuration_digest: &ManifestDigest,
-        refresh: Option<&dyn RetainedSessionRefreshPortV1>,
+        refresh: Option<&dyn SessionRefreshServicePort>,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
         let SessionRefreshScopeV1::Profile {} = &request.request.scope else {
             return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);

@@ -13,7 +13,7 @@ use super::backend::{
     AgentTaskRetryReport, BackendRetryPolicy, run_agent_task_with_retry_report,
     runtime_failure_class,
 };
-use super::config::AutomationConfig;
+use super::config::AutomationSettingsV1;
 use super::lifecycle::{
     AgentRunFinalizer, AutomationCommittedReceipt, AutomationRunControl, AutomationRunError,
     AutomationRunLedgerPublication, AutomationRunResult, BackendTaskRun, SchedulerGate,
@@ -65,6 +65,7 @@ pub use super::memory_curator::{
     MemoryCuratorAutomationOptions, MemoryCuratorAutomationRun,
     run_memory_curator_with_backend_for_retained_settlement,
 };
+pub(crate) use evidence::CanonicalEvidenceHit;
 pub use evidence::{AutomationTemporalEvidence, AutomationTemporalEvidenceItem};
 pub use retrieval::registered_project_automation_retrieval;
 pub use retrieval::{
@@ -287,7 +288,7 @@ impl RetainedCombinedReviewRun {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_combined_review_with_backend_and_retrieval_for_retained_settlement(
     cg: &AutomationProjectContext,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     retrieval: &dyn AutomationSessionRetrieval,
@@ -319,7 +320,7 @@ pub async fn run_combined_review_with_backend_and_retrieval_for_retained_settlem
 ///
 /// `Ok(Err(dispatch))` is the not-due answer the caller returns verbatim.
 async fn acquire_combined_task_lock(
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     executable: Option<&Path>,
     dashboard_root: &Path,
     sessions_db: &RegisteredGlobalDb,
@@ -398,7 +399,7 @@ fn combined_skill_writer_evidence_or_not_combined(
 )]
 async fn run_combined_review_for_retrieval(
     cg: &AutomationProjectContext,
-    config: &AutomationConfig,
+    config: &AutomationSettingsV1,
     configuration_revision_id: &ConfigurationRevisionId,
     io: AutomationTaskIo<'_>,
     options: CombinedReviewAutomationOptions,
@@ -423,7 +424,7 @@ async fn run_combined_review_for_retrieval(
 #[allow(clippy::too_many_arguments)]
 fn run_combined_review_for_retrieval_inner<'a>(
     cg: &'a AutomationProjectContext,
-    config: &'a AutomationConfig,
+    config: &'a AutomationSettingsV1,
     configuration_revision_id: &'a ConfigurationRevisionId,
     io: AutomationTaskIo<'a>,
     options: CombinedReviewAutomationOptions,

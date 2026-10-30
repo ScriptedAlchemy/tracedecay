@@ -15,13 +15,14 @@ use tracedecay_contracts::{
     ResolvedScope,
     retained_surfaces::{AutomationRunRequestV1, AutomationTaskV1},
 };
-use tracedecay_domain::{ActorId, FactOwnerV1, ManifestDigest, RunId};
+use tracedecay_domain::{ActorId, FactOwnerV1, ManifestDigest};
 use tracedecay_private_fs::framed_log::{
     DirectorySyncPolicy, sync_parent_directory, with_owned_temp_publish,
 };
 
 use super::contract::contract_error;
-use super::terminal::{AutomationSettledProblem, AutomationSettledTerminal};
+use super::terminal::AutomationSettledTerminal;
+use tracedecay_contracts::retained_surfaces::AutomationRunProblemV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 /// Production builds keep the item crate-private. Test / `test-helpers` builds
@@ -102,18 +103,18 @@ pub struct DurableAutomationAdmission {
 pub enum AutomationRecoveryBinding {
     Memory {
         owner: FactOwnerV1,
-        recovery_problem: AutomationSettledProblem,
+        recovery_problem: AutomationRunProblemV1,
     },
     /// External effects have no canonical destination-side receipt store.
     /// Restart recovery must close them with this typed indeterminate problem
     /// and must never repeat the delivery or skill mutation.
     External {
-        recovery_problem: AutomationSettledProblem,
+        recovery_problem: AutomationRunProblemV1,
     },
 }
 
 impl DurableAutomationAdmission {
-    pub fn recovery_problem(&self) -> &AutomationSettledProblem {
+    pub fn recovery_problem(&self) -> &AutomationRunProblemV1 {
         match &self.recovery {
             AutomationRecoveryBinding::Memory {
                 recovery_problem, ..
@@ -444,40 +445,6 @@ pub fn read_indexed_terminal_blocking(path: &Path) -> Result<Option<AutomationSe
             DurableAutomationState::Reserved => return Ok(None),
         };
         read_terminal_sidecar(path, &terminal).map(Some)
-    })
-}
-
-pub enum JournalShapeProbe {
-    Missing,
-    Current(Box<DurableAutomationRecord>),
-    /// The persisted shape was refused and the journal with its sidecar was
-    /// durably removed. No current writer produces a refused shape, so its
-    /// admission can never be reconciled or replayed.
-    Discarded(TraceDecayError),
-}
-
-pub fn read_or_discard_unsupported_record_blocking(path: &Path) -> Result<JournalShapeProbe> {
-    with_journal_lock(path, || {
-        let refusal = match read_record(path) {
-            Ok(None) => return Ok(JournalShapeProbe::Missing),
-            Ok(Some(record)) => return Ok(JournalShapeProbe::Current(Box::new(record))),
-            Err(error) if error.reset_required_context().is_some() => error,
-            Err(error) => return Err(error),
-        };
-        remove_terminal_sidecar_if_present(path)?;
-        tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(path).map_err(
-            |error| {
-                contract_error(format!(
-                    "unsupported automation journal reset failed: {error}"
-                ))
-            },
-        )?;
-        sync_parent_directory(path, DirectorySyncPolicy::Strict).map_err(|error| {
-            contract_error(format!(
-                "unsupported automation journal reset directory sync failed: {error}"
-            ))
-        })?;
-        Ok(JournalShapeProbe::Discarded(refusal))
     })
 }
 
@@ -1128,33 +1095,6 @@ fn read_journal_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
-/// A journal whose persisted shape no current reader accepts.
-pub struct RefusedJournalShape {
-    pub reason: String,
-    /// The run id the journal's admission names, when it still parses as one.
-    /// It is only a claim until checked against the journal's filename digest.
-    pub claimed_run_id: Option<RunId>,
-}
-
-/// Read-only shape probe for diagnostics: takes no journal lock and changes
-/// nothing, so it never stands in for the locked recovery read.
-pub fn refused_journal_shape_blocking(path: &Path) -> Result<Option<RefusedJournalShape>> {
-    let Some(bytes) = read_journal_bytes(path)? else {
-        return Ok(None);
-    };
-    let Err(error) = serde_json::from_slice::<DurableAutomationRecord>(&bytes) else {
-        return Ok(None);
-    };
-    let claimed_run_id = serde_json::from_slice::<serde_json::Value>(&bytes)
-        .ok()
-        .and_then(|journal| journal.pointer("/admission/request/run_id").cloned())
-        .and_then(|run_id| serde_json::from_value::<RunId>(run_id).ok());
-    Ok(Some(RefusedJournalShape {
-        reason: error.to_string(),
-        claimed_run_id,
-    }))
-}
-
 test_helpers_pub! {
 fn read_record(path: &Path) -> Result<Option<DurableAutomationRecord>> {
     let Some(bytes) = read_journal_bytes(path)? else {
@@ -1298,8 +1238,7 @@ pub fn replace_automation_file_atomically(
 ) -> std::io::Result<()> {
     #[cfg(windows)]
     {
-        let temporary_file =
-            tracedecay_runtime_core::windows_security::make_private_file(temporary)?;
+        let temporary_file = tracedecay_private_fs::windows::make_private_file(temporary)?;
         temporary_file.sync_all()?;
         drop(temporary_file);
     }
@@ -1310,7 +1249,7 @@ pub fn replace_automation_file_atomically(
     )
     .map_err(std::io::Error::other)?;
     #[cfg(windows)]
-    tracedecay_runtime_core::windows_security::validate_private_file(destination)?;
+    tracedecay_private_fs::windows::validate_private_file(destination)?;
     Ok(())
 }
 

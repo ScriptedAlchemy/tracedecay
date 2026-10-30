@@ -413,6 +413,8 @@ class Ctx:
         self.hooks = []
     def register_hook(self, name, handler):
         self.hooks.append((name, handler))
+    def register_context_engine(self, engine):
+        pass
 
 ctx = Ctx()
 plugin.register(ctx)
@@ -907,7 +909,7 @@ assert engine.hermes_home == "/tmp/hermes-from-config"
 }
 
 #[test]
-fn generated_context_engine_registers_when_supported() {
+fn generated_context_engine_registers() {
     run_python_check(
         "check_context_engine.py",
         r#"
@@ -1019,17 +1021,8 @@ profile_engine.on_session_start(session_id="next")
 assert profile_engine.should_compress_preflight(messages=[], current_tokens=321) is False
 assert calls == []
 
-class LegacyCtx:
-    def register_tool(self, *args, **kwargs):
-        pass
-
-    def register_hook(self, *args, **kwargs):
-        pass
-
-legacy = LegacyCtx()
-plugin.register(legacy)
 "#,
-        "generated plugin should register a Hermes context engine when supported",
+        "generated plugin should register a Hermes context engine",
     );
 }
 
@@ -1803,6 +1796,8 @@ class Ctx:
     def __init__(self):
         self.skills = []
     def register_hook(self, name, handler):
+        pass
+    def register_context_engine(self, engine):
         pass
     def register_skill(self, name, path):
         if ":" in name:

@@ -12,9 +12,6 @@ mod tests;
 const RESULT_SCHEMA_VERSION: u32 = 2;
 const WORKLOAD_SCHEMA_VERSION: u32 = 3;
 const WORKLOAD_ID: &str = "claude-observation-pipeline-v1";
-/// Workload id recorded by archival artifacts sealed before the capability
-/// rename; accepted only for historical and retired evidence provenance.
-const RETIRED_WORKLOAD_ID: &str = "pr5-observation-pipeline-v1";
 const WARMUP_REPETITIONS: usize = 3;
 const MEASURED_REPETITIONS: usize = 30;
 const RECORDS_PER_REPETITION: usize = 64;

@@ -334,8 +334,6 @@ pub struct LexicalLaneEvidence {
     pub typo_recovery_applied: bool,
     pub echo_penalty_applied: bool,
     /// Source-role evidence for the same-symbol definition/reference order.
-    /// Absent historical evidence deserializes as a non-definition hit.
-    #[serde(default)]
     pub source_role: tracedecay_domain::RetrievalSourceRoleV1,
 }
 

@@ -156,13 +156,6 @@ export function SchemaConvergencePanel({
               {convergenceStateLabel(finding.state)}
             </span>{' '}
             · {finding.store} · {finding.stage.replaceAll('_', ' ')}
-            {finding.progress ? (
-              <>
-                {' '}
-                · {finding.progress.unit} {finding.progress.done} done /{' '}
-                {finding.progress.remaining} remaining
-              </>
-            ) : null}
             {' · '}started {formatMicrosUtc(finding.started_at_micros)}
             {finding.degraded_row ? <> · {finding.degraded_row}</> : null}
           </li>
@@ -175,8 +168,8 @@ export function SchemaConvergencePanel({
 function convergenceStateLabel(state: SchemaConvergenceFindingV1['state']): string {
   return (
     {
-      pending_schema_migration: 'Pending schema migration',
-      released_shape_convergence_in_progress: 'Released-shape convergence in progress',
+      pending: 'Schema convergence pending',
+      running: 'Schema convergence running',
       degraded: 'Schema convergence degraded',
       completed: 'Schema convergence completed',
     } satisfies Record<SchemaConvergenceFindingV1['state'], string>

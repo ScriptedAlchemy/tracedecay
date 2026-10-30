@@ -15,7 +15,7 @@ import {
   dueSummary,
   epochSeconds,
   formatUtc,
-  latestRunForTask,
+  latestRunForKey,
   observedSchedulerActivity,
   runStatusTone,
   sameInspected,
@@ -162,7 +162,7 @@ function TaskLine({
   const last = task.last_scheduler_run;
   // The scheduler's own last-run record is the authority for this row; the
   // loaded ledger page is consulted only when the scheduler attached none.
-  const fallback = last == null && runs !== null ? latestRunForTask(runs, task.task) : undefined;
+  const fallback = last == null && runs !== null ? latestRunForKey(runs, task.task) : undefined;
   return (
     <InspectRow
       testId={`task-row-${task.task}`}

@@ -59,13 +59,8 @@ fn profile_project_root(database_path: &Path) -> Option<&Path> {
     let shard_root = data_root.parent()?;
     if shard_root
         .file_name()
-        .is_some_and(|name| name == "projects" || name == "stores")
+        .is_some_and(|name| name == "projects")
     {
-        // `stores/` is the pre-project-id profile-sharded layout retained by
-        // registry rows that have not yet converged to `projects/`. It has
-        // the same profile authority boundary; treating the store leaf as a
-        // standalone profile would make read snapshots fail closed as
-        // unverifiable and strand otherwise collectable orphan data.
         shard_root.parent()
     } else {
         None

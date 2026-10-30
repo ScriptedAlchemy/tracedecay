@@ -77,7 +77,7 @@ export function Lane({
       className="relative flex min-h-[var(--pane-min-height)] min-w-0 flex-col border border-edge-subtle bg-surface-1"
     >
       <Corners tone={read.state === 'ready' ? 'signal' : 'edge'} />
-      {/* Name over state, so four headers align whatever length a state's
+      {/* Name over state, so the headers align whatever length a state's
         * detail runs to. The chip truncates its detail; the body repeats the
         * full sentence for any lane that has no rows to show instead. */}
       <header className="flex shrink-0 flex-col gap-1 border-b border-edge-subtle px-2.5 py-1.5">
@@ -318,11 +318,6 @@ function LaneBody({
           title: 'Never named',
           body: `The run concluded without naming ${spec.label}. No answer exists to show.`,
         };
-      case 'unregistered':
-        return {
-          title: 'No production authority',
-          body: `${read.detail}. Nothing is invented for this lane, and no other lane's readiness applies to it.`,
-        };
       case 'indeterminate':
         return {
           title: 'Indeterminate',
@@ -483,7 +478,7 @@ function rovingRows(event: KeyboardEvent<HTMLDivElement>) {
   rows[next]?.scrollIntoView({ block: 'nearest' });
 }
 
-/** The lanes grid: the four columns and the horizontal-arrow traversal
+/** The lanes grid: the lane columns and the horizontal-arrow traversal
  * between them. Moving left or right lands on the same row index in the
  * neighbouring lane, or on that lane's region when it has no rows, so a
  * keyboard reader can walk across the authorities the way a pointer would. */

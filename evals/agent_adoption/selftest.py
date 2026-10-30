@@ -318,13 +318,13 @@ def test_specialist_agents():
     ])
     codex = grade.load_transcript_lines(
         [json.dumps({
-            "msg": {
-                "type": "function_call",
-                "name": "spawn_agent",
-                "arguments": json.dumps({
-                    "agent_type": "tracedecay-runtime-storage-doctor"
-                }),
-            }
+            "type": "item.completed",
+            "item": {
+                "id": "item_spawn",
+                "type": "collab_tool_call",
+                "tool": "spawn_agent",
+                "arguments": {"agent_type": "tracedecay-runtime-storage-doctor"},
+            },
         })],
         "codex",
     )
@@ -409,12 +409,12 @@ def test_end_to_end():
 
         # full condition, steering-driven, correct answer.
         answer = "The reserve_stock function decrements on-hand stock."
-        with open(os.path.join(rdir, "explore_reserve_stock__claude.stdout.jsonl"), "w") as f:
+        with open(os.path.join(rdir, "explore_reserve_stock__claude__haiku.stdout.jsonl"), "w") as f:
             f.write("\n".join([claude_tool(TD, {}), claude_result(answer)]) + "\n")
         # bare condition (filename-encoded), unprompted adoption.
-        with open(os.path.join(rdir, "explore_reserve_stock__claude__bare.stdout.jsonl"), "w") as f:
+        with open(os.path.join(rdir, "explore_reserve_stock__claude__haiku__bare.stdout.jsonl"), "w") as f:
             f.write("\n".join([claude_tool(TD, {}), claude_result(answer)]) + "\n")
-        with open(os.path.join(rdir, "explore_reserve_stock__claude__bare.meta.json"), "w") as f:
+        with open(os.path.join(rdir, "explore_reserve_stock__claude__haiku__bare.meta.json"), "w") as f:
             json.dump({"channel_condition": "bare", "repeated_query_hints": "on"}, f)
         # Failed launches are harness failures, not behavioral evidence.
         failed = "explore_reserve_stock__claude__sonnet"
@@ -450,7 +450,7 @@ def test_end_to_end():
               by_cond.get("bare", {}).get("channel") == grade.CH_UNPROMPTED)
         check("e2e: correctness scored",
               by_cond["full"]["correctness"]["status"] == "pass" and "score" not in by_cond["full"])
-        agg = sb["aggregate"]["claude"]
+        agg = sb["aggregate"]["claude/haiku"]
         check("e2e: adoption_rate 1.0", agg["adoption_rate"] == 1.0)
         check("e2e: per-condition present", set(agg["conditions"]) == {"full", "bare"})
         check("e2e: no native baseline is reported as missing",
@@ -468,7 +468,7 @@ def test_end_to_end():
               by_cond["bare"].get("repeated_query_hints") == "on"
               and by_cond["full"].get("repeated_query_hints") == "off")
         check("e2e: report compares hint cells",
-              "claude bare hints-on" in report and "claude full hints-off" in report)
+              "claude/haiku bare hints-on" in report and "claude/haiku full hints-off" in report)
 
 
 def test_skill_routing():
@@ -654,9 +654,6 @@ def test_transcript_base_repetitions():
     check("reps: rep suffix on full condition",
           grade.parse_transcript_base("trace_callers__claude__opus__r3")
           == ("trace_callers", "claude", "full", "opus"))
-    check("reps: legacy id__host keeps a trailing r-like host untouched",
-          grade.parse_transcript_base("routing_r1__claude")
-          == ("routing_r1", "claude", "full", ""))
 
 
 def test_cost_and_corrections():

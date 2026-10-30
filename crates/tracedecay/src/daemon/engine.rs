@@ -13,7 +13,6 @@ use tracedecay_contracts::project_open::ProjectOpenStatusStateV1;
 #[cfg(unix)]
 use tracedecay_daemon_identity::profile_identity;
 #[cfg(unix)]
-use tracedecay_daemon_protocol::{client_version_skew, version_skew_action};
 #[cfg(unix)]
 use tracedecay_daemon_service::shutdown::{DAEMON_TASK_ABORT_DEADLINE, DaemonLifecycle};
 use tracedecay_hooks::core_events::HOOK_EVENT_METHOD;
@@ -84,9 +83,6 @@ pub(super) struct DaemonEngine {
         Arc<tokio::sync::Mutex<Option<Arc<scheduler::AutomationSchedulerExitBarrier>>>>,
     #[cfg(test)]
     pub(super) automation_scheduler_state_changed: Arc<tokio::sync::Notify>,
-    /// Client versions whose skew was already logged. Proxy clients reconnect
-    /// per request, so without this the mismatch would flood the daemon log.
-    logged_client_version_skews: Arc<tokio::sync::Mutex<HashSet<String>>>,
     /// Client processes already told to refresh their tool catalog during
     /// this daemon generation. The set is process-local by design: a daemon
     /// restart creates a new generation and permits one fresh notification.
@@ -257,39 +253,6 @@ impl DaemonEngine {
                 )
                 .await
         })
-    }
-
-    /// Returns the client version to log for this handshake, once per distinct
-    /// skewed version; repeat connections from the same client return `None`.
-    pub(super) async fn client_version_skew_to_log(
-        &self,
-        handshake: &DaemonHandshake,
-    ) -> Result<Option<String>> {
-        let Some(skew) = client_version_skew(&handshake.client_version, binary_version()?) else {
-            return Ok(None);
-        };
-        let mut logged = self.logged_client_version_skews.lock().await;
-        Ok(logged.insert(skew.clone()).then_some(skew))
-    }
-
-    /// Logs a `daemon_version_skew` event when this handshake's client runs a
-    /// different binary version, deduped per distinct client version.
-    #[tracing::instrument(name = "daemon.engine.log_version_skew", level = "trace", skip_all)]
-    pub(super) async fn log_client_version_skew(&self, handshake: &DaemonHandshake) -> Result<()> {
-        let Some(client_version) = self.client_version_skew_to_log(handshake).await? else {
-            return Ok(());
-        };
-        let daemon_version = binary_version()?;
-        let hint = version_skew_action(daemon_version, &client_version).to_string();
-        log_daemon_event(
-            "daemon_version_skew",
-            &[
-                ("daemon_version", daemon_version.to_string()),
-                ("client_version", client_version),
-                ("hint", hint),
-            ],
-        );
-        Ok(())
     }
 
     /// Claims the one catalog-refresh notification for this client in the

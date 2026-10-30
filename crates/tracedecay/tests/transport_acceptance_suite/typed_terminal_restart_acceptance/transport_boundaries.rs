@@ -966,7 +966,7 @@ fn typescript_retained_surfaces_keep_identity_across_physical_restart() {
             }),
             json!({
                 "type": "event_msg", "timestamp": "2026-10-01T12:00:01Z",
-                "payload": { "type": "user_message", "message": MESSAGE }
+                "payload": crate::common::codex_user_message_payload(MESSAGE)
             })
         ),
     )

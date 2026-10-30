@@ -985,42 +985,13 @@ fn cursor_after_shell_missing_daemon_exits_promptly_without_children() {
 }
 
 #[test]
-fn kiro_hooks_capture_prompt_boundary_and_type_post_tool_use_unsupported() {
+fn kiro_hooks_capture_prompt_boundary() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
     let project_path = canonical_existing_path(project.path());
     let host = NativeHostIdentityV1::Kiro;
     let data_root = enroll_native_capture_project(&home_path, &project_path, "proj_kiro_capture");
-    std::fs::create_dir_all(project_path.join("src")).unwrap();
-    std::fs::write(
-        project_path.join("src/lib.rs"),
-        "pub fn answer() -> u32 { 44 }\n",
-    )
-    .unwrap();
-
-    // Kiro's only native capture family is PromptBoundary; postToolUse is
-    // typed Unsupported (fail-open exit 0) and never enters the spool.
-    let post_tool_use = run_native_capture_hook(
-        &home_path,
-        &project_path,
-        "hook-kiro-post-tool-use",
-        &json!({
-            "hook_event_name": "postToolUse",
-            "cwd": project_path,
-            "tool_name": "fs_write",
-            "tool_input": {
-                "path": "src/lib.rs"
-            },
-        }),
-    );
-    assert_capture_transport_response("Kiro postToolUse unsupported", &post_tool_use, 0);
-    assert_eq!(
-        native_capture_pending_records(&data_root, host),
-        0,
-        "unsupported Kiro postToolUse must not enqueue a spool record"
-    );
-
     let prompt_submit = run_native_capture_hook(
         &home_path,
         &project_path,
@@ -1476,10 +1447,16 @@ fn connect_initialized_project_client(home_path: &Path, project_path: &Path) -> 
         "scope_prefix": null,
         "timings": false,
         "allow_init": false,
+        "allow_initialize_root_routing": false,
         "client_identity": {
             "profile_root": home_path.join(".tracedecay"),
             "global_db_path": home_path.join(".tracedecay/global.db")
-        }
+        },
+        "client_version": cli_build_version(),
+        "client_instance_id": "0000000000000000000000000000d001",
+        "tool_list_changed_capable": false,
+        "catalog_version": "",
+        "moved_store_adoption": "never"
     });
     writeln!(client, "{handshake}").expect("write daemon handshake");
     writeln!(
@@ -4138,8 +4115,7 @@ fn configuration_get_from(home: &Path, cwd: &Path, key: &str) -> (Option<i32>, V
 
 /// A user-scoped setting belongs to the profile, so it resolves wherever the
 /// command runs: the same value is reported inside and outside any project. A
-/// project-scoped key still needs a project, and the retired worldwide-counter
-/// upload setting is no longer a registered key.
+/// project-scoped key still needs a project.
 #[test]
 fn user_settings_resolve_from_the_profile_outside_any_project() {
     let home = TempDir::new().unwrap();
@@ -4161,13 +4137,6 @@ fn user_settings_resolve_from_the_profile_outside_any_project() {
             cwd.display()
         );
     }
-
-    let (code, retired) = configuration_get_from(&home, &outside, "user.upload_enabled.v1");
-    assert_ne!(
-        code,
-        Some(0),
-        "the retired upload setting must be refused, not read: {retired}"
-    );
 
     let (code, refused) = configuration_get_from(&home, &outside, "index.max_file_size.v1");
     assert_eq!(code, Some(1), "{refused}");

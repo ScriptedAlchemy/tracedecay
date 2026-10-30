@@ -42,12 +42,6 @@ fn terminal_application_definitions_project_canonical_request_schemas() {
                 properties.remove("project_selector").is_some(),
                 "{tool_name} must expose project_selector.project_id",
             );
-            for alias in ["project_id", "project_path", "project_root", "root"] {
-                assert!(
-                    !properties.contains_key(alias),
-                    "{tool_name} must not expose legacy selector alias {alias}",
-                );
-            }
         }
         assert_eq!(
             projected,

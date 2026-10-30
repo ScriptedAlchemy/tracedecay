@@ -47,7 +47,6 @@ const CODEX_PLUGIN_ACTIVATION_KEY_PREFIX: &str = "tracedecay@";
 
 mod mcp_registry;
 mod plugin_registry;
-mod retired_bundle_files;
 
 pub struct CodexIntegration;
 
@@ -360,10 +359,6 @@ impl AgentIntegration for CodexIntegration {
             &crate::host_io(),
             &ctx.home,
         )?;
-        // `codex plugin add` copies the whole source into Codex's cache, so a
-        // retired skill left there would keep the loaded plugin from ever
-        // matching the rendered bundle.
-        remove_codex_retired_bundle_files(&codex_plugin_install_dir(&ctx.home))?;
         if !codex_plugin_is_natively_active(
             &ctx.profile,
             &ctx.home,
@@ -416,7 +411,6 @@ impl AgentIntegration for CodexIntegration {
         // `plugin remove` never clears it. Leaving it would hold post-uninstall
         // registration at Repairable via [`codex_registration_residue`].
         remove_codex_marketplace_entry_at(&codex_personal_marketplace_path(&ctx.home), "personal")?;
-        remove_codex_retired_bundle_files(&codex_plugin_install_dir(&ctx.home))?;
         // `codex plugin remove` deliberately never touches `[hooks.state]`,
         // so the managed trust records written at install/update time would
         // otherwise survive as registration residue and hold uninstall
@@ -1531,9 +1525,9 @@ fn codex_expected_discovery_relatives(
     Ok(relatives)
 }
 
-/// Entrypoints in the personal source that neither the current bundle nor a
-/// retired release file accounts for. Codex would copy them into its cache,
-/// so the loaded plugin could never match the rendered bundle.
+/// Entrypoints in the personal source that the current bundle does not
+/// account for. Codex would copy them into its cache, so the loaded plugin
+/// could never match the rendered bundle.
 fn codex_foreign_bundle_entrypoints(profile_root: &Path, home: &Path) -> Result<Vec<PathBuf>> {
     let source_root = codex_plugin_install_dir(home);
     let relatives = codex_embedded_plugin_files()?
@@ -1553,13 +1547,7 @@ fn codex_foreign_bundle_entrypoints(profile_root: &Path, home: &Path) -> Result<
     for relative in
         super::unexpected_bundle_entrypoints(&source_root, &expected, CODEX_DISCOVERY_ROOTS)?
     {
-        let path = source_root.join(&relative);
-        let contents = std::fs::read(&path).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to read {}: {e}", path.display()),
-        })?;
-        if !retired_bundle_files::is_retired_bundle_file(&relative, &contents) {
-            foreign.push(path);
-        }
+        foreign.push(source_root.join(&relative));
     }
     Ok(foreign)
 }
@@ -1805,55 +1793,6 @@ fn remove_codex_plugin_skills_dir(install_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Delete skill files a previous release deployed at paths the current bundle
-/// no longer ships, with their emptied directories. Only exact released bytes
-/// are TraceDecay's; anything else under `skills/` stays.
-fn remove_codex_retired_bundle_files(install_dir: &Path) -> Result<()> {
-    let skills_dir = install_dir.join("skills");
-    match std::fs::symlink_metadata(&skills_dir) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-        _ => return Ok(()),
-    }
-    let files = super::collect_regular_files(&skills_dir).map_err(|e| TraceDecayError::Config {
-        message: format!("failed to list {}: {e}", skills_dir.display()),
-    })?;
-    for file in files {
-        let Some(relative) = file
-            .strip_prefix(install_dir)
-            .ok()
-            .and_then(Path::to_str)
-            .map(|relative| relative.replace(std::path::MAIN_SEPARATOR, "/"))
-        else {
-            continue;
-        };
-        let contents = std::fs::read(&file).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to read {}: {e}", file.display()),
-        })?;
-        if !retired_bundle_files::is_retired_bundle_file(&relative, &contents) {
-            continue;
-        }
-        super::safe_remove_host_file(&file).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to remove retired {}: {e}", file.display()),
-        })?;
-        for dir in file
-            .ancestors()
-            .skip(1)
-            .take_while(|dir| *dir != skills_dir)
-        {
-            match std::fs::remove_dir(dir) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => break,
-                Err(e) => {
-                    return Err(TraceDecayError::Config {
-                        message: format!("failed to prune {}: {e}", dir.display()),
-                    });
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 fn remove_codex_managed_skill_overlay(install_dir: &Path) {
     std::fs::remove_dir_all(install_dir.join("skills/agent-managed")).ok();
 }
@@ -1920,7 +1859,6 @@ fn remove_codex_plugin_install(install_dir: &Path) -> Result<()> {
         });
     }
     remove_codex_plugin_skills_dir(install_dir)?;
-    remove_codex_retired_bundle_files(install_dir)?;
     if codex_plugin_dir_has_only_managed_files(install_dir) {
         std::fs::remove_dir_all(install_dir).map_err(|e| TraceDecayError::Config {
             message: format!("failed to remove {}: {e}", install_dir.display()),

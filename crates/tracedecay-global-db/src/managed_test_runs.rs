@@ -51,14 +51,6 @@ const MANAGED_TEST_RUN_SCHEMA: &str = "
         ON managed_test_runs(root_uri, started_at_micros);
 ";
 
-/// Stores created before admission recorded document digests gain the column
-/// with every earlier run bound to no document, which is what those runs
-/// captured durably.
-const MANAGED_TEST_RUN_DOCUMENT_DIGESTS_COLUMN: &str = "
-    ALTER TABLE managed_test_runs ADD COLUMN document_content_digests_json TEXT NOT NULL
-        DEFAULT '{}' CHECK(json_valid(document_content_digests_json))
-";
-
 pub(crate) async fn ensure_managed_test_run_schema(
     transaction: &impl Executor,
 ) -> tracedecay_domain::errors::Result<()> {
@@ -66,27 +58,6 @@ pub(crate) async fn ensure_managed_test_run_schema(
         .execute_batch(MANAGED_TEST_RUN_SCHEMA)
         .await
         .map_err(|error| global_db_operation_error("initialize managed test-run schema", error))?;
-    let mut columns = transaction
-        .query(
-            "SELECT 1 FROM pragma_table_info('managed_test_runs')
-             WHERE name = 'document_content_digests_json'",
-            (),
-        )
-        .await
-        .map_err(|error| global_db_operation_error("inspect managed test-run schema", error))?;
-    let has_digests = columns
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error("inspect managed test-run schema", error))?
-        .is_some();
-    if !has_digests {
-        transaction
-            .execute_batch(MANAGED_TEST_RUN_DOCUMENT_DIGESTS_COLUMN)
-            .await
-            .map_err(|error| {
-                global_db_operation_error("add managed test-run document digests", error)
-            })?;
-    }
     Ok(())
 }
 
@@ -368,64 +339,6 @@ mod tests {
 
     /// The `managed_test_runs` table as released stores created it, before
     /// admission recorded document digests.
-    const RELEASED_TABLE_WITHOUT_DIGESTS: &str = "
-        DROP TABLE managed_test_runs;
-        CREATE TABLE managed_test_runs (
-            operation_id TEXT PRIMARY KEY,
-            root_uri TEXT NOT NULL,
-            session_id TEXT,
-            head_commit_id TEXT,
-            code_generation_id TEXT,
-            started_at_micros INTEGER NOT NULL CHECK(started_at_micros > 0),
-            requested_tests INTEGER NOT NULL CHECK(requested_tests >= 0),
-            finished_at_micros INTEGER,
-            termination TEXT,
-            exit_code INTEGER,
-            passed INTEGER,
-            failed INTEGER,
-            ignored INTEGER,
-            results_json TEXT,
-            receipt_json TEXT
-        ) STRICT;
-        INSERT INTO managed_test_runs
-            (operation_id, root_uri, session_id, started_at_micros, requested_tests)
-        VALUES ('run-released', 'file:///work/project', NULL, 1000, 1);
-    ";
-
-    #[asupersync::test]
-    async fn a_released_store_gains_document_digests_and_keeps_its_runs() {
-        let harness = RegisteredGlobalDbHarness::open("managed-test-runs-digest-column").await;
-        harness
-            .registered
-            .runtime_database()
-            .writer_connection("stage released managed test-run table")
-            .await
-            .expect("writer")
-            .execute_batch(RELEASED_TABLE_WITHOUT_DIGESTS)
-            .await
-            .expect("stage released table");
-        let harness = harness.restart().await;
-        let db = &harness.registered;
-
-        let released = db
-            .latest_managed_test_run("file:///work/project")
-            .await
-            .expect("read released run")
-            .expect("released run survives the upgrade");
-        assert_eq!(released.start.operation_id, "run-released");
-        assert_eq!(released.start.document_content_digests, BTreeMap::new());
-
-        db.record_managed_test_run_start(&start("run-new", 2_000))
-            .await
-            .expect("record start on the upgraded store");
-        let recorded = db
-            .latest_managed_test_run("file:///work/project")
-            .await
-            .expect("read new run")
-            .expect("new run");
-        assert_eq!(recorded.start, start("run-new", 2_000));
-    }
-
     #[asupersync::test]
     async fn a_started_run_settles_its_outcome_once_and_reads_back_newest_first() {
         let harness = RegisteredGlobalDbHarness::open("managed-test-runs-settle").await;

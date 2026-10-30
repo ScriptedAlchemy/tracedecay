@@ -13,13 +13,12 @@ import { facetCounts, LANES, SOURCE_LANE_IDS, type Hit, type LaneId } from './mo
 import { RunRegister } from './panels.tsx';
 
 /**
- * Explorer, one query, four independent authorities.
+ * Explorer, one query, three independent authorities.
  *
  * TraceDecay remembers a repository several separate ways, and the honest
  * consequence is that a search is a *fan-out*, not a single ranked list: the
  * code graph, the transcript store and the fact store each answer for
- * themselves, and the semantic lane the product contract names has no
- * registered authority at all. This surface makes that structure the design.
+ * themselves. This surface makes that structure the design.
  * Each authority is a lane with its own lifecycle, count, rows and typed
  * absence; a ready lane can never make its neighbour look ready; and because
  * the daemon returns hits but no relevance score, "why this is here" is told
@@ -93,7 +92,7 @@ export function ExplorerPage() {
       <WorkspaceHeader
         path="explorer"
         title="Explorer"
-        note="one query · four independent authorities · no cross-lane rank"
+        note="one query · three independent authorities · no cross-lane rank"
       />
 
       {/* The query register: the field, the run's own state, and the lane and

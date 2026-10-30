@@ -664,7 +664,6 @@ import type {
   SavingsSessionSummaryV1,
   SavingsSumV1,
   SchemaConvergenceFindingV1,
-  SchemaConvergenceProgressV1,
   SchemaConvergenceStageV1,
   SchemaConvergenceStateV1,
   SchemaId,
@@ -1979,7 +1978,7 @@ export const AutomationRunLedgerRecordSchema: z.ZodObject<{
   status: z.ZodType<AutomationRunStatus, unknown>;
   strict_json: z.ZodOptional<z.ZodType<boolean | null, unknown>>;
   task: z.ZodType<AgentTaskKind, unknown>;
-  task_key: z.ZodOptional<z.ZodType<string | null, unknown>>;
+  task_key: z.ZodType<string, unknown>;
   trigger: z.ZodType<AutomationTrigger, unknown>;
   validation_report: z.ZodOptional<z.ZodType<unknown, unknown>>;
 }> = z.object({
@@ -2016,7 +2015,7 @@ export const AutomationRunLedgerRecordSchema: z.ZodObject<{
   status: z.lazy(() => AutomationRunStatusSchema),
   strict_json: z.boolean().nullable().optional(),
   task: z.lazy(() => AgentTaskKindSchema),
-  task_key: z.string().nullable().optional(),
+  task_key: z.string(),
   trigger: z.lazy(() => AutomationTriggerSchema),
   validation_report: z.unknown().optional(),
 });
@@ -2064,8 +2063,7 @@ export const AutomationRunResultV1Schema: z.ZodObject<{
 }).strict();
 
 /** One ledger record as the run-history row. `task_key` is the exact per-job
-identity (`user_job:<id>`); rows written before it existed carry `null` and
-cannot be joined to a job. */
+identity (`user_job:<id>`). */
 export const AutomationRunRowV1Schema: z.ZodObject<{
   accepted_count: z.ZodType<number, unknown>;
   artifact_kinds: z.ZodType<Array<string>, unknown>;
@@ -2083,7 +2081,7 @@ export const AutomationRunRowV1Schema: z.ZodObject<{
   started_at: z.ZodType<string, unknown>;
   status: z.ZodType<AutomationRunStatus, unknown>;
   task: z.ZodType<AgentTaskKind, unknown>;
-  task_key: z.ZodType<string | null, unknown>;
+  task_key: z.ZodType<string, unknown>;
   trigger: z.ZodType<AutomationTrigger, unknown>;
 }> = z.object({
   accepted_count: z.number().int().min(0),
@@ -2102,7 +2100,7 @@ export const AutomationRunRowV1Schema: z.ZodObject<{
   started_at: z.string(),
   status: z.lazy(() => AutomationRunStatusSchema),
   task: z.lazy(() => AgentTaskKindSchema),
-  task_key: z.string().nullable(),
+  task_key: z.string(),
   trigger: z.lazy(() => AutomationTriggerSchema),
 });
 
@@ -4153,9 +4151,9 @@ export const DoctorFamilyUnavailableReasonV1Schema: z.ZodUnion<[z.ZodLiteral<"un
 /** Stable Doctor finding families.
 
 The initial list covers advisory findings from
-Brain, Explorer, Loom, Code, and Observatory, plus the legacy
-`core_doctor` checks (graph quick-check, temporal/migration health,
-configuration compatibility drift, code-index mount state, session ingest).
+Brain, Explorer, Loom, Code, and Observatory, plus the daemon
+core doctor checks (graph quick-check, temporal health, configuration
+drift, code-index mount state, session ingest).
 Each family maps to one audited typed input surface. The set is kept small
 and honest; new families are added through a future versioned enum rather
 than by widening the meaning of an existing variant. */
@@ -4227,7 +4225,7 @@ The storage family never reports a silent overage: each subclass names one
 observable retention/size condition Doctor surfaces over canonical size
 observability read models. The set is closed and grows only through a future
 versioned enum, never by widening an existing subclass. */
-export const DoctorStorageFindingKindV1Schema: z.ZodUnion<[z.ZodLiteral<"over_budget_store">, z.ZodLiteral<"orphan_store">, z.ZodLiteral<"incident_debris_present">, z.ZodLiteral<"retention_backlog">, z.ZodLiteral<"table_growth">, z.ZodLiteral<"pending_schema_migration">, z.ZodLiteral<"wal_checkpoint_pinned">]> = z.union([z.literal("over_budget_store"), z.literal("orphan_store"), z.literal("incident_debris_present"), z.literal("retention_backlog"), z.literal("table_growth"), z.literal("pending_schema_migration"), z.literal("wal_checkpoint_pinned")]);
+export const DoctorStorageFindingKindV1Schema: z.ZodUnion<[z.ZodLiteral<"over_budget_store">, z.ZodLiteral<"orphan_store">, z.ZodLiteral<"incident_debris_present">, z.ZodLiteral<"retention_backlog">, z.ZodLiteral<"table_growth">, z.ZodLiteral<"schema_convergence_incomplete">, z.ZodLiteral<"wal_checkpoint_pinned">]> = z.union([z.literal("over_budget_store"), z.literal("orphan_store"), z.literal("incident_debris_present"), z.literal("retention_backlog"), z.literal("table_growth"), z.literal("schema_convergence_incomplete"), z.literal("wal_checkpoint_pinned")]);
 
 export const DuplicateEffectOutcomeV1Schema: z.ZodEnum<{ "committed": "committed"; "not_applicable": "not_applicable"; "prevented": "prevented"; "unknown": "unknown" }> = z.enum(["committed", "not_applicable", "prevented", "unknown"]);
 
@@ -8931,33 +8929,21 @@ export const SavingsSumV1Schema: z.ZodObject<{
 
 export const SchemaConvergenceFindingV1Schema: z.ZodObject<{
   degraded_row: z.ZodType<string | null, unknown>;
-  progress: z.ZodType<SchemaConvergenceProgressV1 | null, unknown>;
   stage: z.ZodType<SchemaConvergenceStageV1, unknown>;
   started_at_micros: z.ZodType<number, unknown>;
   state: z.ZodType<SchemaConvergenceStateV1, unknown>;
   store: z.ZodType<string, unknown>;
 }, z.core.$strict> = z.object({
   degraded_row: z.string().nullable(),
-  progress: z.union([z.lazy(() => SchemaConvergenceProgressV1Schema), z.null()]),
   stage: z.lazy(() => SchemaConvergenceStageV1Schema),
   started_at_micros: z.number().int(),
   state: z.lazy(() => SchemaConvergenceStateV1Schema),
   store: z.string(),
 }).strict();
 
-export const SchemaConvergenceProgressV1Schema: z.ZodType<SchemaConvergenceProgressV1, unknown> = z.discriminatedUnion("unit", [z.object({
-  done: z.number().int().min(0),
-  remaining: z.number().int().min(0),
-  unit: z.literal("pages"),
-}).strict(), z.object({
-  done: z.number().int().min(0),
-  remaining: z.number().int().min(0),
-  unit: z.literal("rows"),
-}).strict()]);
-
 export const SchemaConvergenceStageV1Schema: z.ZodLiteral<"registered_schema"> = z.literal("registered_schema");
 
-export const SchemaConvergenceStateV1Schema: z.ZodEnum<{ "completed": "completed"; "degraded": "degraded"; "pending_schema_migration": "pending_schema_migration"; "released_shape_convergence_in_progress": "released_shape_convergence_in_progress" }> = z.enum(["completed", "degraded", "pending_schema_migration", "released_shape_convergence_in_progress"]);
+export const SchemaConvergenceStateV1Schema: z.ZodEnum<{ "completed": "completed"; "degraded": "degraded"; "pending": "pending"; "running": "running" }> = z.enum(["completed", "degraded", "pending", "running"]);
 
 /** Stable, canonical catalog identity for `SchemaId`. */
 export const SchemaIdSchema: z.ZodType<string, unknown> = z.string();
@@ -9265,8 +9251,7 @@ export const SkillOutcomeRecordSchema: z.ZodObject<{
 /** `adopted` means a use was recorded after activation. It is an adoption
 proxy, not evidence that the skill improved any task. `unknown` means no use was
 recorded and neither task opportunity nor reliable host use telemetry
-exists, so it is never a failure. Snapshots written before that
-distinction stored `unknown` as `ignored`. */
+exists, so it is never a failure. */
 export const SkillOutcomeVerdictSchema: z.ZodEnum<{ "adopted": "adopted"; "too_early": "too_early"; "unknown": "unknown" }> = z.enum(["adopted", "too_early", "unknown"]);
 
 /** Stable, canonical catalog identity for `SortContractId`. */

@@ -30,7 +30,7 @@ vi.mock('../../data/sse/useEvents.tsx', () => ({
 }));
 
 function pulse(family: string, projectId: string | null = 'project.alpha'): LiveActivityPulse {
-  return { projectId, family, streamId: `${family}:${projectId ?? 'none'}`, at: 1,
+  return { projectId, family, streamId: `${family}:${projectId ?? 'none'}`, at: 1, detail: null,
     eventId: `fixture:${family}:${projectId ?? 'none'}`, observationTime: '1000' };
 }
 

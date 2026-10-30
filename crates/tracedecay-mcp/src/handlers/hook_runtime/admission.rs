@@ -14,7 +14,7 @@ use super::context_scout::{
     NativeLifecycleAdmissionV1, admit_native_context_scout_lifecycle,
     hook_v2_context_scout_lifecycle_for_session, hook_v2_native_context_scout_lifecycle,
     lookup_hook_v2_delivery_claim, native_lifecycle_order, native_lifecycle_order_floor,
-    recovered_native_lifecycle_order, remove_hook_v2_delivery_claim, retain_hook_v2_delivery_claim,
+    remove_hook_v2_delivery_claim, retain_hook_v2_delivery_claim,
 };
 use super::envelope::{
     daemon_mint_hook_v2_envelope, hook_now, hook_v2_envelope, hook_v2_family_label,
@@ -97,17 +97,6 @@ struct HookV2AdmissionLedgers {
 static HOOK_V2_ADMISSION_LEDGERS: HookV2AdmissionLedgers =
     HookV2AdmissionLedgers::new(MAX_OPEN_HOOK_V2_ADMISSION_LEDGERS);
 
-/// Where producer work lived before the admission ledger owned it. A project
-/// still holding it is refused for reset with its ledgers.
-fn pre_ledger_hook_v2_pending_work_root(
-    data_root: &Path,
-    host: tracedecay_domain::NativeHostIdentityV1,
-) -> std::path::PathBuf {
-    data_root
-        .join(tracedecay_hooks::PRE_LEDGER_PENDING_WORK_DIR)
-        .join(host.hook_key())
-}
-
 fn settle_hook_v2_pending_work(
     data_root: &Path,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
@@ -118,13 +107,9 @@ fn settle_hook_v2_pending_work(
     if !ledger_root.is_dir() {
         return false;
     }
-    match with_hook_v2_admission_ledger(
-        Some(data_root),
-        ledger_root,
-        envelope.producer,
-        hook_now(),
-        |ledger| ledger.stage_work_settlement(envelope, settlement),
-    ) {
+    match with_hook_v2_admission_ledger(ledger_root, envelope.producer, hook_now(), |ledger| {
+        ledger.stage_work_settlement(envelope, settlement)
+    }) {
         Ok(Ok(Some(commit))) => commit.wait().is_ok(),
         Ok(Ok(None)) => true,
         Err(_) | Ok(Err(_)) => false,
@@ -173,11 +158,10 @@ pub fn hook_v2_pending_work_envelopes(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
         Err(_) => Err(tracedecay_hooks::HookAdmissionLedgerError::Io),
     };
-    if absent(&ledger_root)? && absent(&pre_ledger_hook_v2_pending_work_root(data_root, host))? {
+    if absent(&ledger_root)? {
         return Ok(Vec::new());
     }
     Ok(with_hook_v2_admission_ledger(
-        Some(data_root),
         ledger_root,
         host,
         now,
@@ -209,7 +193,6 @@ fn stage_hook_v2_admission(
     now: UtcMicros,
 ) -> Option<tracedecay_hooks::HookAdmissionStagedV1> {
     with_hook_v2_admission_ledger(
-        Some(data_root),
         hook_v2_admission_ledger_root(data_root, envelope.producer),
         envelope.producer,
         now,
@@ -224,13 +207,12 @@ fn stage_hook_v2_admission(
 }
 
 fn with_hook_v2_admission_ledger<T>(
-    data_root: Option<&Path>,
     ledger_root: std::path::PathBuf,
     host: tracedecay_domain::NativeHostIdentityV1,
     now: UtcMicros,
     operation: impl FnOnce(&mut tracedecay_hooks::HookAdmissionLedgerV1) -> T,
 ) -> std::result::Result<T, HookV2AdmissionLedgerUnavailable> {
-    HOOK_V2_ADMISSION_LEDGERS.with_ledger(data_root, ledger_root, host, now, operation)
+    HOOK_V2_ADMISSION_LEDGERS.with_ledger(ledger_root, host, now, operation)
 }
 
 impl HookV2AdmissionLedgers {
@@ -242,13 +224,10 @@ impl HookV2AdmissionLedgers {
     }
 
     /// Runs `operation` on the retained ledger at `ledger_root`, opening it on
-    /// first use and again after a failed write or a release. A project
-    /// ledger (`data_root`) whose pre-ledger pending work remains is refused
-    /// for reset. An open failure, reset refusal, poisoned owner, or a full
+    /// first use and again after a failed write or a release. An open failure, reset refusal, poisoned owner, or a full
     /// bound is a typed error; callers must not treat it as an empty ledger.
     fn with_ledger<T>(
         &self,
-        data_root: Option<&Path>,
         ledger_root: std::path::PathBuf,
         host: tracedecay_domain::NativeHostIdentityV1,
         now: UtcMicros,
@@ -269,7 +248,6 @@ impl HookV2AdmissionLedgers {
         }
         Ok(operation(open_ledger(
             &mut ledgers,
-            data_root,
             ledger_root,
             host,
             now,
@@ -295,31 +273,24 @@ fn release_one_settled_ledger(
     Ok(())
 }
 
-fn open_ledger<'a>(
-    ledgers: &'a mut BTreeMap<std::path::PathBuf, tracedecay_hooks::HookAdmissionLedgerV1>,
-    data_root: Option<&Path>,
+fn open_ledger(
+    ledgers: &mut BTreeMap<std::path::PathBuf, tracedecay_hooks::HookAdmissionLedgerV1>,
     ledger_root: std::path::PathBuf,
     host: tracedecay_domain::NativeHostIdentityV1,
     now: UtcMicros,
 ) -> std::result::Result<
-    &'a mut tracedecay_hooks::HookAdmissionLedgerV1,
+    &mut tracedecay_hooks::HookAdmissionLedgerV1,
     HookV2AdmissionLedgerUnavailable,
 > {
     Ok(match ledgers.entry(ledger_root) {
         Entry::Occupied(retained) => retained.into_mut(),
         Entry::Vacant(unopened) => {
-            let opened = match data_root {
-                Some(data_root) => refuse_pre_ledger_pending_work(data_root, host),
-                None => Ok(()),
-            }
-            .and_then(|()| {
-                tracedecay_hooks::HookAdmissionLedgerV1::open(
-                    unopened.key().clone(),
-                    host,
-                    tracedecay_hooks::HookAdmissionLedgerLimitsV1::stock(),
-                    now,
-                )
-            });
+            let opened = tracedecay_hooks::HookAdmissionLedgerV1::open(
+                unopened.key().clone(),
+                host,
+                tracedecay_hooks::HookAdmissionLedgerLimitsV1::stock(),
+                now,
+            );
             match opened {
                 Ok((ledger, _report)) => unopened.insert(ledger),
                 Err(error) => {
@@ -334,22 +305,6 @@ fn open_ledger<'a>(
             }
         }
     })
-}
-
-/// Refuses `host`'s project ledger for reset while the pre-ledger
-/// pending-work spool remains beside it.
-fn refuse_pre_ledger_pending_work(
-    data_root: &Path,
-    host: tracedecay_domain::NativeHostIdentityV1,
-) -> std::result::Result<(), tracedecay_hooks::HookAdmissionLedgerError> {
-    let root = pre_ledger_hook_v2_pending_work_root(data_root, host);
-    let present = root
-        .try_exists()
-        .map_err(|_| tracedecay_hooks::HookAdmissionLedgerError::Io)?;
-    if present {
-        return Err(tracedecay_hooks::HookAdmissionLedgerError::ResetRequired);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -745,22 +700,7 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
         let Ok(provider) = ProviderId::new(envelope.producer.hook_key()) else {
             return HookV2AdmissionOutcomeV1::Backpressured;
         };
-        if receipt.order_reconstructed
-            && matches!(envelope.ordering, tracedecay_hooks::HookOrderingV1::Unknown)
-        {
-            match native_lifecycle.as_ref() {
-                Some(lifecycle) => {
-                    recovered_native_lifecycle_order(
-                        mount.project_sessions,
-                        provider,
-                        lifecycle,
-                        range,
-                    )
-                    .await
-                }
-                None => NativeLifecycleAdmissionV1::Unavailable,
-            }
-        } else if let Some(native_lifecycle) = native_lifecycle.as_ref() {
+        if let Some(native_lifecycle) = native_lifecycle.as_ref() {
             admit_gated_native_lifecycle(
                 mount,
                 provider,
@@ -1106,7 +1046,7 @@ pub(super) fn hook_v2_profile_admit(
         .join(tracedecay_hooks::PROFILE_HOOK_ADMISSIONS_DIR)
         .join(binding.host.hook_key());
     let now = hook_now();
-    let outcome = with_hook_v2_admission_ledger(None, ledger_root, binding.host, now, |ledger| {
+    let outcome = with_hook_v2_admission_ledger(ledger_root, binding.host, now, |ledger| {
         ledger.stage_admission(&envelope, None, None, Some(0), now)
     })
     .map(|staged| staged.and_then(|staged| staged.commit.wait().map(|()| staged.receipt.decision)));

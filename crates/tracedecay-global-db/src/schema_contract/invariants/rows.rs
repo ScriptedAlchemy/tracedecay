@@ -417,7 +417,7 @@ pub(super) async fn validate_source_cursor_authority_chunk(
                         && matches!(
                             parsed_reason,
                             ObservationCoverageReason::DuplicateObservation
-                                | ObservationCoverageReason::CanonicalPayloadRevision
+                                | ObservationCoverageReason::ReplayedOccurrence
                         ) == receipt.payload().is_some()
                 }
                 _ => false,

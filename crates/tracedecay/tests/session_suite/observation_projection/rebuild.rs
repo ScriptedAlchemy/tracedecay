@@ -269,29 +269,32 @@ async fn canonical_provider_incremental_and_rebuild_projection_converge() {
 #[tokio::test]
 async fn generation_rollover_coalesces_same_and_changed_native_output() {
     let tmp = TempDir::new().unwrap();
-    let first = observation_in_generation(
+    let first = shared_output_observation(
         "session-generation",
         GENERATION,
         0,
         100,
         "receipt.generation-1",
-        conversational_payload("message-generation", "generation original canary"),
+        "message-generation",
+        "generation original canary",
     );
-    let same_content = observation_in_generation(
+    let same_content = shared_output_observation(
         "session-generation",
         GENERATION + 1,
         0,
         100,
         "receipt.generation-2",
-        conversational_payload("message-generation", "generation original canary"),
+        "message-generation",
+        "generation original canary",
     );
-    let replacement = observation_in_generation(
+    let replacement = shared_output_observation(
         "session-generation",
         GENERATION + 2,
         0,
         100,
         "receipt.generation-3",
-        conversational_payload("message-generation", "generation replacement canary"),
+        "message-generation",
+        "generation replacement canary",
     );
 
     {
@@ -312,13 +315,13 @@ async fn generation_rollover_coalesces_same_and_changed_native_output() {
     persist(
         &store,
         same_content.clone(),
-        Some(cursor_in_generation("session-generation", GENERATION, 100)),
+        Some(shared_output_cursor("session-generation", GENERATION, 100)),
     )
     .await;
     persist(
         &store,
         replacement.clone(),
-        Some(cursor_in_generation(
+        Some(shared_output_cursor(
             "session-generation",
             GENERATION + 1,
             100,
@@ -341,7 +344,7 @@ async fn generation_rollover_coalesces_same_and_changed_native_output() {
         "unchanged content re-observed in a later generation shares its output digest; \
          replacement content has its own"
     );
-    let texts = projected_message_texts(&tmp).await;
+    let texts = shared_output_message_texts(&tmp).await;
     assert_eq!(texts.len(), 1);
     assert!(texts[0].contains("generation replacement canary"));
 
@@ -358,7 +361,7 @@ async fn generation_rollover_coalesces_same_and_changed_native_output() {
     assert_eq!(projection_counts(&tmp).await, (1, 0, 0, 1, 0, 3));
     drain_projection_queue(&store).await;
     assert_eq!(projection_counts(&tmp).await, (1, 1, 3, 1, 0, 0));
-    let texts = projected_message_texts(&tmp).await;
+    let texts = shared_output_message_texts(&tmp).await;
     assert_eq!(texts.len(), 1);
     assert!(texts[0].contains("generation replacement canary"));
 }
@@ -386,7 +389,7 @@ async fn durable_projection_alias_survives_rebuild_without_rewriting_observation
                 (projector_version, observation_id, output_provider, output_message_id)
              VALUES (?1, ?2, 'claude', 'consolidated/source/message-alias')",
             rusqlite::params![
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
                 candidate.observation_id().as_str()
             ],
         )
@@ -453,329 +456,39 @@ async fn rebuild_preserves_output_referenced_by_another_projector_version() {
 }
 
 #[tokio::test]
-async fn v5_predecessor_cutover_rebuilds_stale_provenance_and_preserves_unrelated_owner() {
-    let tmp = TempDir::new().unwrap();
-    let runtime = profile_runtime(&tmp).await;
-    let store = runtime
-        .observation_store(HostAdmissionScope::Profile)
-        .unwrap();
-    let predecessor = observation(
-        "session-v5-predecessor",
-        0,
-        100,
-        "receipt.v5-predecessor",
-        conversational_payload("message-v5-predecessor", "v5 predecessor canary"),
-    );
-    let unrelated = observation(
-        "session-v5-unrelated",
-        0,
-        100,
-        "receipt.v5-unrelated",
-        conversational_payload("message-v5-unrelated", "unrelated owner canary"),
-    );
-    persist(&store, predecessor.clone(), None).await;
-    persist(&store, unrelated.clone(), None).await;
-    drain_projection_queue(&store).await;
-    seed_v5_predecessor_with_stale_split_output(&tmp, predecessor.observation_id());
-    add_other_projector_owner(&tmp, unrelated.observation_id()).await;
-    drop(store);
-    drop(runtime);
-    checkpoint_database(&tmp).await;
-
-    let runtime = profile_runtime(&tmp).await;
-    let store = runtime
-        .observation_store(HostAdmissionScope::Profile)
-        .expect("v5 projection state must remain admissible for convergence");
-
-    let rebuilt = rebuild_projection_to_completion(&store, 2).await;
-    assert_eq!(rebuilt.projected_rows(), 2);
-    assert_eq!(rebuilt.skipped_observations(), 0);
-    assert_eq!(
-        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION_V5),
-        0
-    );
-    assert_eq!(
-        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION),
-        2
-    );
-    assert_eq!(projection_owner_count(&tmp, "test-projector-v2"), 1);
-    assert_eq!(projected_message_texts(&tmp).await.len(), 2);
-    assert!(
-        projected_message_texts(&tmp)
-            .await
-            .iter()
-            .all(|text| text != "obsolete split projection output"),
-        "v5 outputs retired by the one-row projector must not remain searchable"
-    );
-
-    let provenance = projection_provenance_rows(&tmp).await;
-    let repeated = rebuild_projection_to_completion(&store, 2).await;
-    assert_eq!(repeated.projected_rows(), 2);
-    assert_eq!(projection_provenance_rows(&tmp).await, provenance);
-}
-
-#[tokio::test]
-async fn v5_predecessor_cutover_rolls_back_and_retries_after_activation_failure() {
-    let tmp = TempDir::new().unwrap();
-    let runtime = profile_runtime(&tmp).await;
-    let store = runtime
-        .observation_store(HostAdmissionScope::Profile)
-        .unwrap();
-    let predecessor = observation(
-        "session-v5-cutover-retry",
-        0,
-        100,
-        "receipt.v5-cutover-retry",
-        conversational_payload("message-v5-cutover-retry", "cutover retry canary"),
-    );
-    persist(&store, predecessor.clone(), None).await;
-    drain_projection_queue(&store).await;
-    seed_v4_predecessor_with_stale_current_provenance(&tmp, predecessor.observation_id());
-    let raw_conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
-    raw_conn
-        .execute_batch(
-            "CREATE TRIGGER interrupt_v5_predecessor_cutover
-             BEFORE DELETE ON observation_projection_provenance
-             WHEN OLD.projector_version = 'claude-session-message-v4' BEGIN
-                SELECT RAISE(ABORT, 'injected predecessor cutover interruption');
-             END;",
-        )
-        .unwrap();
-
-    let error = store
-        .rebuild_projection(1)
-        .await
-        .expect_err("interrupted activation must roll back predecessor retirement");
-    assert!(matches!(error, ProjectionStoreError::Storage { .. }));
-    assert_eq!(
-        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION_V4),
-        1
-    );
-    raw_conn
-        .execute_batch("DROP TRIGGER interrupt_v5_predecessor_cutover;")
-        .unwrap();
-    drop(raw_conn);
-
-    let rebuilt = rebuild_projection_to_completion(&store, 1).await;
-    assert_eq!(rebuilt.projected_rows(), 1);
-    assert_eq!(rebuilt.skipped_observations(), 0);
-    assert_eq!(
-        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION_V4),
-        0
-    );
-    assert_eq!(
-        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION),
-        1
-    );
-    assert_eq!(projected_message_texts(&tmp).await.len(), 1);
-}
-
-#[tokio::test]
-async fn host_drain_converges_predecessor_before_ordinary_projection_and_is_idempotent() {
-    let tmp = TempDir::new().unwrap();
-    let runtime = profile_runtime(&tmp).await;
-    let store = runtime
-        .observation_store(HostAdmissionScope::Profile)
-        .unwrap();
-    let predecessor = observation(
-        "session-host-predecessor",
-        0,
-        100,
-        "receipt.host-predecessor",
-        conversational_payload("message-host-predecessor", "host predecessor canary"),
-    );
-    let unrelated = observation(
-        "session-host-unrelated",
-        0,
-        100,
-        "receipt.host-unrelated",
-        conversational_payload("message-host-unrelated", "host unrelated canary"),
-    );
-    persist(&store, predecessor.clone(), None).await;
-    persist(&store, unrelated.clone(), None).await;
-    drain_projection_queue(&store).await;
-    seed_v5_predecessor_with_stale_split_output(&tmp, predecessor.observation_id());
-    add_other_projector_owner(&tmp, unrelated.observation_id()).await;
-
-    let scope = ObservationScopeV1::Profile;
-    let cancellation = ObservationCancellation::default();
-    let drained = runtime
-        .facade()
-        .drain_projection_queue("claude", &scope, &cancellation, 16)
-        .await
-        .unwrap();
-    assert!(!drained.deferred);
-    assert_eq!(drained.projected, 0);
-    assert_eq!(
-        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION_V5),
-        0
-    );
-    assert_eq!(
-        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION),
-        2
-    );
-    assert_eq!(projection_owner_count(&tmp, "test-projector-v2"), 1);
-    assert!(
-        projected_message_texts(&tmp)
-            .await
-            .iter()
-            .all(|text| text != "obsolete split projection output"),
-        "v5 outputs retired by the one-row projector must not remain searchable"
-    );
-
-    let provenance = projection_provenance_rows(&tmp).await;
-    let repeated = runtime
-        .facade()
-        .drain_projection_queue("claude", &scope, &cancellation, 16)
-        .await
-        .unwrap();
-    assert!(!repeated.deferred);
-    assert_eq!(projection_provenance_rows(&tmp).await, provenance);
-}
-
-#[tokio::test]
-async fn host_drain_resumes_predecessor_convergence_after_restart() {
-    let tmp = TempDir::new().unwrap();
-    let runtime = profile_runtime(&tmp).await;
-    let store = runtime
-        .observation_store(HostAdmissionScope::Profile)
-        .unwrap();
-    let mut expected_cursor = None;
-    let mut predecessor = None;
-    for index in 0..257_u64 {
-        let start = index * 100;
-        let candidate = observation(
-            "session-host-restart",
-            start,
-            start + 100,
-            &format!("receipt.host-restart-{index}"),
-            conversational_payload(
-                &format!("message-host-restart-{index}"),
-                &format!("host restart canary {index}"),
-            ),
-        );
-        if index == 0 {
-            predecessor = Some(candidate.observation_id().clone());
-        }
-        persist(&store, candidate, expected_cursor.clone()).await;
-        expected_cursor = Some(cursor("session-host-restart", start + 100));
-    }
-    drain_projection_queue(&store).await;
-    seed_v4_predecessor(&tmp, &predecessor.unwrap());
-
-    let scope = ObservationScopeV1::Profile;
-    let first = runtime
-        .facade()
-        .drain_projection_queue("claude", &scope, &ObservationCancellation::default(), 16)
-        .await
-        .unwrap();
-    assert!(first.deferred);
-    assert_eq!(table_count(&tmp, "projection_queue").await, 0);
-    drop(store);
-    drop(runtime);
-    checkpoint_database(&tmp).await;
-
-    let reopened = profile_runtime(&tmp).await;
-    let resumed = reopened
-        .facade()
-        .drain_projection_queue("claude", &scope, &ObservationCancellation::default(), 16)
-        .await
-        .unwrap();
-    assert!(!resumed.deferred);
-    assert_eq!(
-        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION_V4),
-        0
-    );
-    assert_eq!(
-        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION),
-        257
-    );
-}
-
-#[tokio::test]
-async fn cancelled_host_drain_leaves_predecessor_rebuild_resumable() {
-    let tmp = TempDir::new().unwrap();
-    let runtime = profile_runtime(&tmp).await;
-    let store = runtime
-        .observation_store(HostAdmissionScope::Profile)
-        .unwrap();
-    let predecessor = observation(
-        "session-host-cancelled",
-        0,
-        100,
-        "receipt.host-cancelled",
-        conversational_payload("message-host-cancelled", "host cancelled canary"),
-    );
-    persist(&store, predecessor.clone(), None).await;
-    drain_projection_queue(&store).await;
-    seed_v4_predecessor_with_stale_current_provenance(&tmp, predecessor.observation_id());
-
-    let cancellation = ObservationCancellation::default();
-    cancellation.cancel();
-    let error = runtime
-        .facade()
-        .drain_projection_queue("claude", &ObservationScopeV1::Profile, &cancellation, 16)
-        .await
-        .unwrap_err();
-    assert_eq!(error.reason_code, Some("admission_cancelled"));
-    assert_eq!(
-        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION_V4),
-        1
-    );
-    assert_eq!(
-        table_count(&tmp, "observation_projection_rebuilds").await,
-        0
-    );
-
-    let resumed = runtime
-        .facade()
-        .drain_projection_queue(
-            "claude",
-            &ObservationScopeV1::Profile,
-            &ObservationCancellation::default(),
-            16,
-        )
-        .await
-        .unwrap();
-    assert!(!resumed.deferred);
-    assert_eq!(
-        projection_owner_count(&tmp, SESSION_MESSAGE_PROJECTOR_VERSION_V4),
-        0
-    );
-}
-
-#[tokio::test]
 async fn cross_projector_owner_blocks_incompatible_generation_rollover() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
     let store = runtime
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
-    let original = observation_in_generation(
+    let original = shared_output_observation(
         "session-global-owner",
         GENERATION,
         0,
         100,
         "receipt.global-owner-original",
-        conversational_payload("message-global-owner", "global owner original"),
+        "message-global-owner",
+        "global owner original",
     );
     persist(&store, original.clone(), None).await;
     drain_projection_queue(&store).await;
 
     add_other_projector_owner(&tmp, original.observation_id()).await;
 
-    let replacement = observation_in_generation(
+    let replacement = shared_output_observation(
         "session-global-owner",
         GENERATION + 1,
         0,
         100,
         "receipt.global-owner-replacement",
-        conversational_payload("message-global-owner", "global owner replacement"),
+        "message-global-owner",
+        "global owner replacement",
     );
     persist(
         &store,
         replacement.clone(),
-        Some(cursor_in_generation(
+        Some(shared_output_cursor(
             "session-global-owner",
             GENERATION,
             100,
@@ -796,7 +509,7 @@ async fn cross_projector_owner_blocks_incompatible_generation_rollover() {
         ),
         other => panic!("expected a collision skip, got {other:?}"),
     }
-    assert!(projected_message_texts(&tmp).await[0].contains("global owner original"));
+    assert!(shared_output_message_texts(&tmp).await[0].contains("global owner original"));
     assert_eq!(table_count(&tmp, "projection_queue").await, 0);
 }
 
@@ -807,33 +520,29 @@ async fn rebuild_freezes_cross_projector_multi_generation_ownership() {
     let store = runtime
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
-    let original = observation_in_generation(
+    let original = shared_output_observation(
         "session-retained-generations",
         GENERATION,
         0,
         100,
         "receipt.retained-generation-original",
-        conversational_payload(
-            "message-retained-generations",
-            "retained generation original",
-        ),
+        "message-retained-generations",
+        "retained generation original",
     );
-    let replacement = observation_in_generation(
+    let replacement = shared_output_observation(
         "session-retained-generations",
         GENERATION + 1,
         0,
         100,
         "receipt.retained-generation-replacement",
-        conversational_payload(
-            "message-retained-generations",
-            "retained generation replacement",
-        ),
+        "message-retained-generations",
+        "retained generation replacement",
     );
     persist(&store, original.clone(), None).await;
     persist(
         &store,
         replacement.clone(),
-        Some(cursor_in_generation(
+        Some(shared_output_cursor(
             "session-retained-generations",
             GENERATION,
             100,
@@ -846,7 +555,7 @@ async fn rebuild_freezes_cross_projector_multi_generation_ownership() {
 
     let rebuilt = rebuild_projection_to_completion(&store, 1).await;
     assert_eq!(rebuilt.projected_rows(), 1);
-    assert!(projected_message_texts(&tmp).await[0].contains("retained generation replacement"));
+    assert!(shared_output_message_texts(&tmp).await[0].contains("retained generation replacement"));
     assert_eq!(
         table_count(&tmp, "observation_projection_provenance").await,
         3
@@ -856,7 +565,7 @@ async fn rebuild_freezes_cross_projector_multi_generation_ownership() {
         store.projection_checkpoint().await.unwrap().last_sequence(),
         2
     );
-    assert!(projected_message_texts(&tmp).await[0].contains("retained generation replacement"));
+    assert!(shared_output_message_texts(&tmp).await[0].contains("retained generation replacement"));
 }
 
 #[tokio::test]
@@ -984,7 +693,7 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
                 'consolidated/pinned/message-interrupted-rebuild-200'
              )",
             rusqlite::params![
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
                 aliased_observation.as_str(),
             ],
         )
@@ -1013,7 +722,7 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
              SET output_message_id = 'consolidated/transient/message-interrupted-rebuild-200'
              WHERE projector_version = ?1 AND observation_id = ?2",
             rusqlite::params![
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
                 aliased_observation.as_str(),
             ],
         )
@@ -1024,7 +733,7 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
              FROM observation_projection_rebuild_aliases
              WHERE projector_version = ?1 AND observation_id = ?2",
             rusqlite::params![
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
                 aliased_observation.as_str(),
             ],
             |row| row.get::<_, String>(0),
@@ -1040,7 +749,7 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
              SET output_message_id = 'consolidated/pinned/message-interrupted-rebuild-200'
              WHERE projector_version = ?1 AND observation_id = ?2",
             rusqlite::params![
-                CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION,
+                SESSION_MESSAGE_PROJECTOR_VERSION,
                 aliased_observation.as_str(),
             ],
         )
@@ -1061,7 +770,7 @@ async fn interrupted_rebuild_resumes_same_generation_with_pinned_aliases() {
             "SELECT generation, staged_through, state
              FROM observation_projection_rebuilds
              WHERE projector_version = ?1",
-            rusqlite::params![CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION],
+            rusqlite::params![SESSION_MESSAGE_PROJECTOR_VERSION],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -1163,19 +872,17 @@ async fn high_generation_output_uses_constant_size_owner_state() {
     let mut expected_cursor = None;
     for generation_offset in 0..257_u64 {
         let generation = GENERATION + generation_offset;
-        let candidate = observation_in_generation(
+        let candidate = shared_output_observation(
             "session-high-generation",
             generation,
             0,
             100,
             &format!("receipt.high-generation-{generation}"),
-            conversational_payload(
-                "message-high-generation",
-                &format!("high generation canary {generation}"),
-            ),
+            "message-high-generation",
+            &format!("high generation canary {generation}"),
         );
         persist(&store, candidate, expected_cursor.clone()).await;
-        expected_cursor = Some(cursor_in_generation(
+        expected_cursor = Some(shared_output_cursor(
             "session-high-generation",
             generation,
             100,
@@ -1184,7 +891,7 @@ async fn high_generation_output_uses_constant_size_owner_state() {
     drain_projection_queue(&store).await;
 
     assert_eq!(projection_counts(&tmp).await, (1, 1, 257, 1, 0, 0));
-    assert!(projected_message_texts(&tmp).await[0].contains("high generation canary 267"));
+    assert!(shared_output_message_texts(&tmp).await[0].contains("high generation canary 267"));
 }
 
 // These projection-contract cases inject provider-tagged durable/canonical records directly.

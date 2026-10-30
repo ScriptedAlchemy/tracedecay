@@ -462,6 +462,7 @@ mod tests {
                 "logical_evidence_id": "evidence.reserve",
                 "occurrences": [],
                 "exact_class": "approximate",
+                "source_role": "production_other",
                 "utility_micros": 0,
                 "contributions": [],
                 "freshness": [],

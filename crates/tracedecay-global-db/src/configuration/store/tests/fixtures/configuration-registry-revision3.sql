@@ -483,3 +483,8 @@ BEFORE DELETE ON configuration_semantic_accepted_profile_receipt_key_v1
 BEGIN
     SELECT RAISE(ABORT, 'accepted profile receipt key is immutable');
 END;
+DROP TABLE configuration_semantic_retrieval_state_v1;
+DROP TABLE configuration_semantic_retrieval_pending_v1;
+DROP TABLE configuration_semantic_retrieval_inventory_v1;
+DROP TABLE configuration_semantic_accepted_profiles_v1;
+DROP TABLE configuration_semantic_accepted_profile_receipt_key_v1;

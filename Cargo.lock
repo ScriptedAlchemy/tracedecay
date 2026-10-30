@@ -6568,6 +6568,7 @@ dependencies = [
  "tracedecay-daemon-identity",
  "tracedecay-daemon-protocol",
  "tracedecay-domain",
+ "tracedecay-private-fs",
  "tracedecay-runtime-core",
  "tracing",
  "windows",

@@ -3,7 +3,9 @@ use axum::extract::State;
 use axum::response::Json;
 use serde_json::{Value, json};
 use tracedecay_automation_runtime::automation::backend;
-use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationHostMode};
+use tracedecay_automation_runtime::automation::config::{
+    AutomationBackendV1, AutomationHostModeV1,
+};
 
 use crate::{DashboardState, RequestControl, automation_config_api, multi_root_api};
 
@@ -18,11 +20,11 @@ pub(super) async fn capabilities(
     let automation = automation_config_api::effective_automation_config(&state);
     let (automation_configured, automation_mode, automation_payload) = match automation {
         Ok((configuration_revision_id, config, codex)) => {
-            let backend_supported = matches!(config.backend, AutomationBackend::CodexAppServer);
+            let backend_supported = matches!(config.backend, AutomationBackendV1::CodexAppServer);
             let configured = config.enabled && backend_supported;
             let mode = if !configured {
                 "disabled"
-            } else if config.host_mode == AutomationHostMode::DelegatedHost {
+            } else if config.host_mode == AutomationHostModeV1::DelegatedHost {
                 "delegated_host"
             } else {
                 "standalone_backend"

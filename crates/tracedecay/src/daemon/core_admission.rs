@@ -306,9 +306,6 @@ impl DaemonPerClientAdmission {
         &self,
         handshake: &DaemonHandshake,
     ) -> std::result::Result<DaemonPerClientPermit, DaemonClientSaturationResponse> {
-        if !valid_client_instance_id(&handshake.client_instance_id) {
-            return Ok(DaemonPerClientPermit { _permit: None });
-        }
         let key = DaemonClientFairnessKey {
             profile_root: handshake.client_identity.profile_root.clone(),
             global_db_path: handshake.client_identity.global_db_path.clone(),
@@ -339,12 +336,6 @@ impl DaemonPerClientAdmission {
             return Ok(DaemonPerClientPermit { _permit: None });
         }
         self.try_admit(handshake)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn tracked_client_count(&self) -> usize {
-        self.clients.retain_live();
-        self.clients.len()
     }
 }
 
@@ -600,21 +591,21 @@ pub(crate) async fn reject_admitted_request(
 /// The request line a saturation rejection should answer, or `None` when this
 /// connection has already been answered or closed without one.
 async fn saturated_request_line(transport: &mut BrokerStreamTransport) -> Result<Option<String>> {
-    // A broker client sends a handshake before its JSON-RPC request, optionally
-    // preceded by an auth preface. Consume those frames so the rejection uses
-    // the request ID instead of being discarded as a notification.
-    let Some(first_line) = read_line_handling_wire_oversized(transport).await? else {
+    // A broker client sends an auth preface and a handshake before its
+    // JSON-RPC request. Consume those frames so the rejection uses the request
+    // ID instead of being discarded as a notification.
+    let Some(preface_line) = read_line_handling_wire_oversized(transport).await? else {
         return Ok(None);
     };
-    let handshake_line = if DaemonAuthPreface::from_line(&first_line).is_ok() {
-        let Some(handshake_line) = read_line_handling_wire_oversized(transport).await? else {
-            return Ok(None);
-        };
-        handshake_line
-    } else {
-        first_line
+    if DaemonAuthPreface::from_line(&preface_line).is_err() {
+        super::connection_serving::refuse_unauthenticated_client(transport, binary_version()?)
+            .await;
+        return Ok(None);
+    }
+    let Some(handshake_line) = read_line_handling_wire_oversized(transport).await? else {
+        return Ok(None);
     };
-    if DaemonHandshake::from_line(&handshake_line).is_err() {
+    let Ok(handshake) = DaemonHandshake::from_line(&handshake_line) else {
         // Saturation is not a reason to hide wire skew. Propagating the parse
         // failure here dropped the socket with the client's pipelined request
         // still unread, which the kernel reports as `Connection reset by peer`
@@ -626,6 +617,9 @@ async fn saturated_request_line(transport: &mut BrokerStreamTransport) -> Result
             binary_version()?,
         )
         .await;
+        return Ok(None);
+    };
+    if super::connection_serving::refuse_incompatible_handshake(transport, &handshake).await? {
         return Ok(None);
     }
     read_line_handling_wire_oversized(transport).await

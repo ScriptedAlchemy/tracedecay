@@ -180,7 +180,7 @@ async fn success_denial_and_partial_effect_reach_http_and_mcp_unchanged() {
         .expect("MCP Work settlement");
         assert_eq!(tool_json(&mcp), http);
         assert_eq!(http["value"]["request_id"], request_id.as_str());
-        assert_eq!(mcp.semantic_error(), Some(index != 0));
+        assert_eq!(mcp.semantic_error(), index != 0);
         if index == 0 {
             assert_eq!(http_status, axum::http::StatusCode::OK);
             assert_eq!(
@@ -293,7 +293,7 @@ async fn read_mutation_and_evidence_preserve_the_typed_http_work_envelope() {
         .await
         .expect("MCP Work adapter response");
 
-        assert_eq!(mcp.semantic_error(), Some(true));
+        assert!(mcp.semantic_error());
         assert_eq!(
             tool_json(&mcp),
             http,

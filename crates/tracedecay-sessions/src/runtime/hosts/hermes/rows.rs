@@ -32,8 +32,7 @@ pub struct HermesRow {
     /// True only for the authority's current highest active message row in
     /// this session. Joined mutable session counters are emitted only here.
     pub is_session_usage_frontier: bool,
-    /// `messages.active` soft-delete flag (0 = rewound/undone turn). Legacy
-    /// stores without the column read as 1.
+    /// `messages.active` soft-delete flag (0 = rewound/undone turn).
     pub active: i64,
     /// Set when SQL `typeof`/`length` rejected a column before materialization.
     pub sql_value_oversized: bool,

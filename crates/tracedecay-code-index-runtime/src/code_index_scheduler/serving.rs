@@ -392,7 +392,6 @@ pub(super) type ParkedGraphReleaseCallback = Arc<dyn Fn() + Send + Sync>;
 
 pub struct CodeTextGenerationSharedV1 {
     pub(super) metadata: Arc<VerifiedSealedTextGenerationMetadataV1>,
-    pub(super) sealed_format_revision: u32,
     pub(super) query_owners: Arc<RwLock<Option<Arc<ProductionCodeIndexQueryOwnersV1>>>>,
     /// Native-graph readiness for this exact sealed text generation. Status
     /// reads this authority even while an older generation still owns the
@@ -1095,7 +1094,7 @@ impl DaemonCodeTextArtifactStoreV1 {
         let retained = pointer
             .iter()
             .flat_map(|pointer| pointer.generation_index.iter())
-            .filter_map(|entry| entry.text_artifact())
+            .filter_map(|entry| entry.text_artifact.as_ref())
             .map(|descriptor| self.restore_witness_path(descriptor))
             .collect::<Result<BTreeSet<_>, _>>()?;
         let mut retained = retained;
@@ -1144,7 +1143,7 @@ impl DaemonCodeTextArtifactStoreV1 {
         let still_referenced = pointer
             .iter()
             .flat_map(|pointer| pointer.generation_index.iter())
-            .filter_map(|entry| entry.text_artifact())
+            .filter_map(|entry| entry.text_artifact.as_ref())
             .any(|retained| {
                 self.restore_witness_path(retained)
                     .is_ok_and(|retained_path| retained_path == path)
@@ -1294,7 +1293,7 @@ impl DaemonCodeTextArtifactStoreV1 {
             .generation_index
             .iter()
             .find(|entry| entry.generation_id == generation_id.as_str())
-            .and_then(|entry| entry.text_artifact().cloned()))
+            .and_then(|entry| entry.text_artifact.clone()))
     }
 
     /// Withdraw one exact missing/corrupt derived artifact so the immutable
@@ -1322,7 +1321,7 @@ impl DaemonCodeTextArtifactStoreV1 {
             .generation_index
             .iter()
             .find(|entry| entry.generation_id == descriptor.generation_id.as_str())
-            .and_then(|entry| entry.text_artifact());
+            .and_then(|entry| entry.text_artifact.as_ref());
         if current != Some(descriptor) {
             return Err(RetrievalPortError::AuthorityUnavailable(
                 "durable text-artifact attachment changed during repair".to_owned(),
@@ -1829,11 +1828,6 @@ impl LatestCodeTextGenerationV1 {
         &self,
     ) -> Result<&CodeGenerationSourceCommitmentsV1, CodeIndexProductionErrorV1> {
         self.metadata.source_commitments()
-    }
-
-    pub fn uses_partitioned_manifest(&self) -> bool {
-        self.sealed_format_revision
-            == tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1
     }
 
     pub fn artifact_occurrence_by_chunk(

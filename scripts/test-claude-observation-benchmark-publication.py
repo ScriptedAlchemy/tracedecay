@@ -28,14 +28,10 @@ class BenchmarkPublicationTests(unittest.TestCase):
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
         self.evidence = self.repo / "benchmark_data/claude-observation"
         self.evidence.mkdir(parents=True)
-        self.historical = self.evidence / "result-historical.json"
-        self.historical.write_text('{"evidence_status":"historical_stale"}\n')
-        self.historical_bytes = self.historical.read_bytes()
         self.index = self.evidence / "evidence-index.json"
         self.index.write_text(json.dumps({
             "schema_version": 1,
             "current_acceptance": None,
-            "historical_stale": [self.historical.name],
         }) + "\n")
         self.index_bytes = self.index.read_bytes()
         git_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
@@ -74,9 +70,6 @@ elif "--test_arg=evidence_directory_matches_index_contract" in sys.argv:
     directory = Path(next(arg[len(prefix):] for arg in sys.argv if arg.startswith(prefix)))
     index = json.loads((directory / "evidence-index.json").read_text())
     assert json.loads((directory / index["current_acceptance"]).read_text()) == {"measured": True}
-    for name in index["historical_stale"]:
-        assert (directory / name).is_symlink()
-        assert json.loads((directory / name).read_text())["evidence_status"] == "historical_stale"
     print("test result: ok. 1 passed; 0 failed; 0 ignored")
 else:
     raise SystemExit("unexpected Bazel command")
@@ -118,7 +111,6 @@ if mode == boundary:
             env=dict(self.env, PUBLICATION_FAULT=fault, PUBLICATION_SIGNAL=signal),
             capture_output=True, text=True, timeout=15,
         )
-        self.assertEqual(self.historical.read_bytes(), self.historical_bytes)
         self.assertEqual(list(self.tmp.iterdir()), [], "publication staging was retained")
         return completed
 

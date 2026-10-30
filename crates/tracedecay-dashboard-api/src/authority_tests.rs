@@ -1043,7 +1043,7 @@ async fn capabilities_with_admitted_transport_report_the_typed_no_collection_sta
     assert_eq!(capabilities["multi_root"]["status"], "unavailable");
     assert_eq!(
         capabilities["multi_root"]["reason"],
-        "no default multi-root collection is configured; name an explicit collection"
+        "no multi-root collection was named; name an explicit collection"
     );
 }
 
@@ -1121,35 +1121,6 @@ async fn standalone_dashboard_reports_native_integration_authority_unmounted() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["outcome"], "unavailable");
     assert_eq!(body["reason"], "authority_unmounted");
-}
-
-#[tokio::test]
-async fn doctor_routes_expose_diagnostics_without_mutation_endpoints() {
-    let fixture = DashboardStateFixture::open("project.dashboard-doctor-read-only").await;
-    let app = router_with_active_application(fixture.state, None, Router::new());
-
-    for (method, path) in [
-        (Method::POST, "/api/doctor/remediations/preview"),
-        (Method::POST, "/api/doctor/remediations/apply"),
-        (Method::GET, "/api/doctor/remediations/operation"),
-    ] {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(method)
-                    .uri(path)
-                    .body(Body::empty())
-                    .expect("legacy Doctor mutation request"),
-            )
-            .await
-            .expect("legacy Doctor mutation response");
-        assert_eq!(
-            response.status(),
-            StatusCode::NOT_FOUND,
-            "{path} is not mounted"
-        );
-    }
 }
 
 /// A router served without [`with_dashboard_http_admission`] has no request

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_automation_runtime::automation::config::{
-    AutomationBackend, AutomationConfigPatch, AutomationHostMode, AutomationTaskPatch,
+    AutomationBackendV1, AutomationConfigPatch, AutomationHostModeV1, AutomationTaskPatch,
 };
 
 /// How `install --agent codex --automation` should configure the daemon loop.
@@ -49,8 +49,8 @@ pub(super) async fn install_codex_daemon_automation(
 ) -> tracedecay_domain::errors::Result<()> {
     let patch = AutomationConfigPatch {
         enabled: Some(true),
-        backend: Some(AutomationBackend::CodexAppServer),
-        host_mode: Some(AutomationHostMode::Standalone),
+        backend: Some(AutomationBackendV1::CodexAppServer),
+        host_mode: Some(AutomationHostModeV1::Standalone),
         memory_curator: codex_daemon_interval_task(15 * 60),
         session_reflector: codex_daemon_interval_task(15 * 60),
         skill_writer: AutomationTaskPatch {

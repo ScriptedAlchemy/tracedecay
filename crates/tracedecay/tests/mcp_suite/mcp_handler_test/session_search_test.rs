@@ -55,14 +55,11 @@ fn write_production_codex_rollouts(home: &Path, project: &Path, count: usize) {
             json!({
                 "timestamp": "2026-08-02T00:00:01.000Z",
                 "type": "event_msg",
-                "payload": {
-                    "type": "user_message",
-                    "message": if target {
+                "payload": crate::common::codex_user_message_payload(if target {
                         "Find the cobalt orchard scheduler migration".to_owned()
                     } else {
                         format!("Inspect isolated session fixture {index:03}")
-                    },
-                },
+                    }),
             }),
             json!({
                 "timestamp": "2026-08-02T00:00:02.000Z",

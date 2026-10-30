@@ -18,9 +18,8 @@ use crate::configuration::registry::ConfigurationRegistry;
 use crate::configuration::resolver::resolve_configuration;
 use tracedecay_domain::configuration::{
     CodeIndexWorkerSelectionV1, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
-    ConfigurationMutationOperationV1, ConfigurationValueKindV1, DeprecationStateV1,
-    RestartRequirementV1, SettingDefinitionV1, SettingKey, SettingScopeV1, SettingSensitivityV1,
-    USER_CODE_INDEX_WORKERS_SETTING_KEY, USER_REPEATED_QUERY_HINTS_SETTING_KEY,
+    ConfigurationMutationOperationV1, SettingKey, USER_CODE_INDEX_WORKERS_SETTING_KEY,
+    USER_REPEATED_QUERY_HINTS_SETTING_KEY,
 };
 
 #[asupersync::test]
@@ -183,122 +182,6 @@ async fn worker_only_profile_store_converges_onto_the_profile_registry() {
             .unwrap(),
         &ConfigurationValueV1::Boolean(false)
     );
-}
-
-/// A profile store written while the worldwide counter shipped carries the
-/// `user.upload_enabled.v1` opt-in, possibly enabled. It converges on the
-/// first read: the retired key is dropped without any upload, the operator's
-/// other values survive, and a second read finds nothing left to do.
-#[asupersync::test]
-async fn profile_store_carrying_the_retired_upload_setting_converges_and_keeps_other_values() {
-    let directory = tempfile::tempdir().unwrap();
-    let profile_root = directory.path().join("profile");
-    let runtime = crate::tests::harness::HostAdmissionTestRuntimeV1::profile(&profile_root)
-        .await
-        .unwrap();
-    let db = runtime
-        .registered_database(HostAdmissionScope::Profile)
-        .unwrap();
-    let profile_id = db.binding().shard_id.profile_id.clone();
-    let upload_key = SettingKey::new("user.upload_enabled.v1").unwrap();
-    let worker_key = SettingKey::new(USER_CODE_INDEX_WORKERS_SETTING_KEY).unwrap();
-    assert!(
-        ConfigurationRegistry::profile()
-            .unwrap()
-            .definition(&upload_key)
-            .is_err(),
-        "the current profile registry must not register the retired key"
-    );
-    let mut legacy_definitions = ConfigurationRegistry::profile()
-        .unwrap()
-        .definitions()
-        .cloned()
-        .collect::<Vec<_>>();
-    legacy_definitions.push(SettingDefinitionV1 {
-        key: upload_key.clone(),
-        schema_revision: crate::configuration::registry::CONFIGURATION_REGISTRY_SCHEMA_REVISION,
-        value_kind: ConfigurationValueKindV1::Boolean,
-        default_value: ConfigurationValueV1::Boolean(false),
-        sensitivity: SettingSensitivityV1::Public,
-        scope: SettingScopeV1::UserProfile,
-        restart_requirement: RestartRequirementV1::None,
-        deprecation: DeprecationStateV1::Active,
-    });
-    let legacy = ConfigurationRegistry::from_definitions(legacy_definitions).unwrap();
-    let initial_revision = id("configuration.profile.initial.v1");
-    GlobalDbConfigurationControlStore::new_registered(db)
-        .initialize_canonical_with_registry(
-            &initial_revision,
-            &resolve_configuration(&legacy, &[]).unwrap(),
-            UtcMicros(1),
-            &legacy,
-        )
-        .await
-        .unwrap();
-    let layer = ConfigurationLayerIdV1::UserProfile {
-        profile_id: profile_id.clone(),
-    };
-    let mut revision = initial_revision;
-    for (name, key, value) in [
-        (
-            "worker",
-            worker_key.clone(),
-            ConfigurationValueV1::CodeIndexWorkerSelection(CodeIndexWorkerSelectionV1::Exact {
-                workers: 8,
-            }),
-        ),
-        (
-            "upload",
-            upload_key.clone(),
-            ConfigurationValueV1::Boolean(true),
-        ),
-    ] {
-        let authority = control_authority_with_key_for_layer(
-            ConfigurationMutationOperationV1::DirectMutation,
-            &revision,
-            Some(
-                ConfigurationIdempotencyKey::new(format!(
-                    "configuration.idempotency.legacy-{name}"
-                ))
-                .unwrap(),
-            ),
-            layer.clone(),
-        );
-        let transaction = db.begin_write_transaction().await.unwrap();
-        let committed = super::super::mutation::commit_direct_in_transaction_with_registry(
-            &transaction,
-            &authority,
-            &DirectConfigurationMutation::Set {
-                layer: layer.clone(),
-                key,
-                value: Box::new(value),
-            },
-            &revision,
-            &legacy,
-        )
-        .await
-        .unwrap();
-        transaction.commit().await.unwrap();
-        revision = committed.current.revision_id;
-    }
-
-    let store = super::super::ProfileConfigurationStore::new_registered(db, &profile_id).unwrap();
-    let converged = store.read_or_initialize(UtcMicros(3)).await.unwrap();
-
-    assert_ne!(converged.revision_id, revision);
-    assert!(
-        !converged
-            .snapshot
-            .effective_values
-            .contains_key(&upload_key),
-        "the retired upload opt-in must be dropped, not carried"
-    );
-    assert_eq!(
-        converged.code_index_workers().unwrap().selection,
-        CodeIndexWorkerSelectionV1::Exact { workers: 8 }
-    );
-    let settled = store.read_or_initialize(UtcMicros(4)).await.unwrap();
-    assert_eq!(settled.revision_id, converged.revision_id);
 }
 
 #[asupersync::test]

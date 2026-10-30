@@ -262,36 +262,10 @@ impl ClineTranscriptStream {
     }
 }
 
-/// Verified replacement of a historical combined Cline record by its native stream.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ClineNativeSourceTransition {
-    predecessor_id: CanonicalObservationIdV1,
-    successor_id: CanonicalObservationIdV1,
-    predecessor_payload: PayloadReferenceV1,
-    successor_payload: PayloadReferenceV1,
-    stream: ClineTranscriptStream,
-}
-
-impl ClineNativeSourceTransition {
-    pub fn predecessor_id(&self) -> &CanonicalObservationIdV1 {
-        &self.predecessor_id
-    }
-    pub fn successor_id(&self) -> &CanonicalObservationIdV1 {
-        &self.successor_id
-    }
-    pub fn predecessor_payload(&self) -> &PayloadReferenceV1 {
-        &self.predecessor_payload
-    }
-    pub fn successor_payload(&self) -> &PayloadReferenceV1 {
-        &self.successor_payload
-    }
-    pub fn stream(&self) -> ClineTranscriptStream {
-        self.stream
-    }
-}
-
-/// Stable task/native-object identity used before native stream cursors split.
-/// This derives a lookup key; it neither fabricates nor persists an observation.
+/// Task-level identity of a native Cline-family stream record: the identity the
+/// record's native id has under its task source, without the stream key. Host
+/// source capture keys each task's native objects by it. This derives a lookup
+/// key; it neither fabricates nor persists an observation.
 pub fn cline_task_native_observation_id(
     observation: &DurableObservationV1,
 ) -> Result<Option<CanonicalObservationIdV1>, ObservationContractError> {
@@ -299,9 +273,6 @@ pub fn cline_task_native_observation_id(
         return Ok(None);
     }
     let identity = observation.identity();
-    let Some(native_record_id) = identity.native_record_id() else {
-        return Ok(None);
-    };
     let task_source = ObservationSourceIdentityV1::for_provider(
         observation.source().provider().clone(),
         observation.source().session_id().clone(),
@@ -312,46 +283,7 @@ pub fn cline_task_native_observation_id(
         identity.generation(),
         identity.position(),
         identity.ordering_domain(),
-        native_record_id.clone(),
-    )?;
-    CanonicalObservationIdV1::derive(&material).map(Some)
-}
-
-/// Locates the native-stream candidate for an immutable combined-source record.
-/// A matching key is not transition authority; callers must verify both records.
-pub fn cline_native_source_successor_id(
-    observation: &DurableObservationV1,
-) -> Result<Option<CanonicalObservationIdV1>, ObservationContractError> {
-    if observation.source().explicit_source_key().is_some()
-        || !matches!(
-            observation.source().provider().as_str(),
-            "cline" | "roo-code" | "kilo"
-        )
-    {
-        return Ok(None);
-    }
-    let Some(native_id) = observation.identity().native_record_id() else {
-        return Ok(None);
-    };
-    let Ok(envelope) = CanonicalObservationEnvelopeV1::deserialize(observation.payload()) else {
-        return Ok(None);
-    };
-    let stream = match envelope.native_record_kind() {
-        "message" => ClineTranscriptStream::ApiHistory,
-        "usage" => ClineTranscriptStream::UiMessages,
-        _ => return Ok(None),
-    };
-    let identity = observation.identity();
-    let material = ObservationIdentityMaterialV1::for_native_record(
-        stream.source_identity(
-            observation.source().provider().clone(),
-            observation.source().session_id().clone(),
-        )?,
-        observation.scope().clone(),
-        identity.generation(),
-        identity.position(),
-        identity.ordering_domain(),
-        native_id.clone(),
+        identity.native_record_id().clone(),
     )?;
     CanonicalObservationIdV1::derive(&material).map(Some)
 }
@@ -367,97 +299,12 @@ pub fn codex_rollout_siblings(left: &DurableObservationV1, right: &DurableObserv
         && left_source.session_id() == right_source.session_id()
         && left_source != right_source
         && left.scope() == right.scope()
-        && left.identity().native_record_id().is_some()
         && left.identity().native_record_id() == right.identity().native_record_id()
 }
 
 /// A keyed Codex source feeds one rollout file of a thread.
 pub fn is_codex_rollout_source(source: &ObservationSourceIdentityV1) -> bool {
     source.provider().as_str() == "codex" && source.explicit_source_key().is_some()
-}
-
-/// Permits only the evidenced combined-file to native-file source transition.
-/// Authored facts, native identity, scope and sanitization remain exact; a UI
-/// record may lose only the API-array length formerly added to its position.
-pub fn prove_cline_native_source_transition(
-    predecessor: &DurableObservationV1,
-    successor: &DurableObservationV1,
-) -> Option<ClineNativeSourceTransition> {
-    let stream = ClineTranscriptStream::from_source(successor.source())?;
-    let prior = predecessor.identity();
-    let next = successor.identity();
-    let native_id = next.native_record_id()?;
-    if predecessor.source().explicit_source_key().is_some()
-        || predecessor.source().provider() != successor.source().provider()
-        || predecessor.source().session_id() != successor.source().session_id()
-        || predecessor.scope() != successor.scope()
-        || prior.native_record_id() != Some(native_id)
-        || prior.ordering_domain() != ObservationOrderingDomainV1::SnapshotOrder
-        || next.ordering_domain() != ObservationOrderingDomainV1::SnapshotOrder
-        || predecessor.retention_class() != successor.retention_class()
-        || predecessor.receipt().disposition() != successor.receipt().disposition()
-        || predecessor.receipt().sensitivity() != successor.receipt().sensitivity()
-        || predecessor.receipt().receipt().sanitizer_version()
-            != successor.receipt().receipt().sanitizer_version()
-        || cline_task_native_observation_id(successor)
-            .ok()
-            .flatten()
-            .as_ref()
-            != Some(predecessor.observation_id())
-    {
-        return None;
-    }
-    let mut old = CanonicalObservationEnvelopeV1::deserialize(predecessor.payload()).ok()?;
-    let new = CanonicalObservationEnvelopeV1::deserialize(successor.payload()).ok()?;
-    if serde_json::to_value(&old).ok().as_ref() != Some(predecessor.payload())
-        || serde_json::to_value(&new).ok().as_ref() != Some(successor.payload())
-        || old.provider() != predecessor.source().provider()
-        || new.provider() != successor.source().provider()
-        || old.stable_record_id() != native_id
-        || new.stable_record_id() != native_id
-        || old.relations().session_id() != predecessor.source().session_id()
-        || new.relations().session_id() != successor.source().session_id()
-        || old.evidence.ordering_domain != ObservationOrderingDomainV1::SnapshotOrder
-        || new.evidence.ordering_domain != ObservationOrderingDomainV1::SnapshotOrder
-        || old.evidence.range != prior.position()
-        || new.evidence.range != next.position()
-    {
-        return None;
-    }
-    match stream {
-        ClineTranscriptStream::ApiHistory => {
-            if old.native_record_kind() != "message" || new.native_record_kind() != "message" {
-                return None;
-            }
-        }
-        ClineTranscriptStream::UiMessages => {
-            if old.native_record_kind() != "usage"
-                || new.native_record_kind() != "usage"
-                || !old.facts().iter().all(|fact| {
-                    matches!(fact, CanonicalObservationFactV1::UncorrelatedUsage { .. })
-                })
-                || old.evidence.range.end() - old.evidence.range.start() != 1
-                || new.evidence.range.end() - new.evidence.range.start() != 1
-                || old.evidence.range.start() < new.evidence.range.start()
-                || old.evidence.native_sequence != Some(old.evidence.range.start())
-                || new.evidence.native_sequence != Some(new.evidence.range.start())
-            {
-                return None;
-            }
-            old.evidence.range = new.evidence.range;
-            old.evidence.native_sequence = new.evidence.native_sequence;
-        }
-    }
-    if old != new {
-        return None;
-    }
-    Some(ClineNativeSourceTransition {
-        predecessor_id: predecessor.observation_id().clone(),
-        successor_id: successor.observation_id().clone(),
-        predecessor_payload: predecessor.payload_reference().clone(),
-        successor_payload: successor.payload_reference().clone(),
-        stream,
-    })
 }
 
 /// Native ordering authority for one provider source.
@@ -616,28 +463,10 @@ pub struct ObservationIdentityMaterialV1 {
     position: ObservationSourceRangeV1,
     #[serde(default, skip_serializing_if = "is_file_bytes_ordering")]
     ordering_domain: ObservationOrderingDomainV1,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    native_record_id: Option<ObservationId>,
+    native_record_id: ObservationId,
 }
 
 impl ObservationIdentityMaterialV1 {
-    /// Constructs legacy file-byte identity material.
-    pub fn new(
-        source: ObservationSourceIdentityV1,
-        scope: ObservationScopeV1,
-        generation: ObservationSourceGenerationV1,
-        position: ObservationSourceRangeV1,
-    ) -> Result<Self, ObservationContractError> {
-        Self::for_ordered_record(
-            source,
-            scope,
-            generation,
-            position,
-            ObservationOrderingDomainV1::FileBytes,
-            None,
-        )
-    }
-
     /// Constructs provider identity with an explicit ordering domain and stable
     /// native record key. The key may itself be a canonical content digest when
     /// the provider exposes no immutable identifier.
@@ -649,31 +478,11 @@ impl ObservationIdentityMaterialV1 {
         ordering_domain: ObservationOrderingDomainV1,
         native_record_id: ObservationId,
     ) -> Result<Self, ObservationContractError> {
-        Self::for_ordered_record(
-            source,
-            scope,
-            generation,
-            position,
-            ordering_domain,
-            Some(native_record_id),
-        )
-    }
-
-    fn for_ordered_record(
-        source: ObservationSourceIdentityV1,
-        scope: ObservationScopeV1,
-        generation: ObservationSourceGenerationV1,
-        position: ObservationSourceRangeV1,
-        ordering_domain: ObservationOrderingDomainV1,
-        native_record_id: Option<ObservationId>,
-    ) -> Result<Self, ObservationContractError> {
         source.validate()?;
         scope.validate()?;
-        if let Some(record_id) = &native_record_id {
-            record_id
-                .validate()
-                .map_err(|_| ObservationContractError::InvalidNativeRecordIdentity)?;
-        }
+        native_record_id
+            .validate()
+            .map_err(|_| ObservationContractError::InvalidNativeRecordIdentity)?;
         Ok(Self {
             source,
             scope,
@@ -704,19 +513,16 @@ impl ObservationIdentityMaterialV1 {
         self.ordering_domain
     }
 
-    pub fn native_record_id(&self) -> Option<&ObservationId> {
-        self.native_record_id.as_ref()
+    pub fn native_record_id(&self) -> &ObservationId {
+        &self.native_record_id
     }
 
     pub fn validate(&self) -> Result<(), ObservationContractError> {
         self.source.validate()?;
         self.scope.validate()?;
-        if let Some(record_id) = &self.native_record_id {
-            record_id
-                .validate()
-                .map_err(|_| ObservationContractError::InvalidNativeRecordIdentity)?;
-        }
-        Ok(())
+        self.native_record_id
+            .validate()
+            .map_err(|_| ObservationContractError::InvalidNativeRecordIdentity)
     }
 }
 
@@ -733,24 +539,21 @@ impl CanonicalObservationIdV1 {
         material: &ObservationIdentityMaterialV1,
     ) -> Result<Self, ObservationContractError> {
         material.validate()?;
-        if let Some(native_record_id) = material.native_record_id() {
-            #[derive(Serialize)]
-            struct NativeIdentity<'a> {
-                source: &'a ObservationSourceIdentityV1,
-                scope: &'a ObservationScopeV1,
-                native_record_id: &'a ObservationId,
-            }
-
-            return Self::new(domain_digest(
-                OBSERVATION_ID_DOMAIN,
-                &NativeIdentity {
-                    source: material.source(),
-                    scope: material.scope(),
-                    native_record_id,
-                },
-            )?);
+        #[derive(Serialize)]
+        struct NativeIdentity<'a> {
+            source: &'a ObservationSourceIdentityV1,
+            scope: &'a ObservationScopeV1,
+            native_record_id: &'a ObservationId,
         }
-        Self::new(domain_digest(OBSERVATION_ID_DOMAIN, material)?)
+
+        Self::new(domain_digest(
+            OBSERVATION_ID_DOMAIN,
+            &NativeIdentity {
+                source: material.source(),
+                scope: material.scope(),
+                native_record_id: material.native_record_id(),
+            },
+        )?)
     }
 }
 
@@ -2710,33 +2513,28 @@ pub fn classify_observation_collision(
     }
 }
 
-/// Whether `candidate` is the current canonical form of a retained Codex or
-/// Cursor record written before route-only source context was removed, a
-/// Cursor native record replayed from another physical transcript occurrence,
-/// or a snapshot-host (Cline-family, Kiro) or Vibe record written before its
-/// location was projected as a leading `Session` fact.
+/// Whether `candidate` is `existing`'s native record observed again at another
+/// physical occurrence: a Cursor record mirrored at another transcript offset,
+/// or a snapshot-host (Cline-family, Kiro) or Vibe record whose projected
+/// location moved since it was retained.
 ///
-/// The compatibility is deliberately directional and field-bounded. It first
-/// binds both payloads to the same native record identity, then permits only
-/// the exact source-context fields those providers formerly synthesized, the
-/// Codex tool-invocation `arguments` that earlier capture dropped to null, and,
-/// for Cursor, the physical evidence range. Any authored fact, role, content,
-/// non-null arguments, native timestamp, or unrelated relation still differs
-/// after normalization and therefore remains an identity collision.
-pub fn is_canonical_payload_revision_replay(
+/// The comparison is deliberately field-bounded. It first binds both payloads
+/// to the same native record identity, then permits only the Cursor evidence
+/// range or the leading location-only `Session` fact's location. Any authored
+/// fact, role, content, timestamp, or relation still differs after
+/// normalization and therefore remains an identity collision.
+pub fn is_replayed_occurrence(
     existing: &DurableObservationV1,
     candidate: &DurableObservationV1,
 ) -> bool {
     let existing_identity = existing.identity();
     let candidate_identity = candidate.identity();
-    let Some(native_record_id) = existing_identity.native_record_id() else {
-        return false;
-    };
+    let native_record_id = existing_identity.native_record_id();
     if existing.observation_id() != candidate.observation_id()
         || existing_identity.source() != candidate_identity.source()
         || existing_identity.scope() != candidate_identity.scope()
         || existing_identity.ordering_domain() != candidate_identity.ordering_domain()
-        || candidate_identity.native_record_id() != Some(native_record_id)
+        || candidate_identity.native_record_id() != native_record_id
         || existing.retention_class() != candidate.retention_class()
         || existing.receipt().disposition() != candidate.receipt().disposition()
         || existing.receipt().sensitivity() != candidate.receipt().sensitivity()
@@ -2767,208 +2565,65 @@ pub fn is_canonical_payload_revision_replay(
 
     let mut normalized = existing.payload().clone();
     let current = candidate.payload();
-    let legacy_context_changed = match candidate_envelope.provider().as_str() {
-        "codex" => normalize_codex_payload_revision(&mut normalized, current),
-        "cursor" => normalize_cursor_payload_revision(&mut normalized, current),
+    let occurrence_changed = match candidate_envelope.provider().as_str() {
+        "cursor" => adopt_cursor_evidence_range(&mut normalized, current),
         "cline" | "roo-code" | "kilo" | "kiro" | "vibe" => {
-            normalize_snapshot_location_revision(&mut normalized, current)
+            adopt_moved_snapshot_location(&mut normalized, current)
         }
         _ => false,
     };
-    legacy_context_changed && normalized == *current
+    occurrence_changed && normalized == *current
 }
 
-/// Snapshot hosts (Cline-family, Kiro) and Vibe now lead every canonical
-/// payload with a location-only `Session` fact; records admitted before that
-/// change carry none. The revision is directional: an existing payload gains
-/// the candidate's leading location session verbatim, or a retained
-/// location-only session may adopt a moved `location_path`/`location_provenance`.
-/// A candidate whose first fact is not a location-only session, or any deeper
-/// difference, stays an identity collision.
-fn normalize_snapshot_location_revision(existing: &mut Value, current: &Value) -> bool {
-    let (Some(existing_object), Some(current_object)) =
-        (existing.as_object_mut(), current.as_object())
-    else {
-        return false;
-    };
-    let (Some(existing_facts), Some(current_facts)) = (
-        existing_object
-            .get_mut("facts")
-            .and_then(Value::as_array_mut),
-        current_object.get("facts").and_then(Value::as_array),
+/// Snapshot hosts (Cline-family, Kiro) and Vibe lead every canonical payload
+/// with a location-only `Session` fact derived again on each rescan. A
+/// retained location-only session adopts the candidate's moved
+/// `location_path`/`location_provenance`; any deeper difference stays an
+/// identity collision.
+fn adopt_moved_snapshot_location(existing: &mut Value, current: &Value) -> bool {
+    let (Some(existing_session), Some(current_session)) = (
+        existing
+            .pointer_mut("/facts/0")
+            .and_then(Value::as_object_mut),
+        current.pointer("/facts/0").and_then(Value::as_object),
     ) else {
         return false;
     };
-    let Some(current_session) = current_facts.first().and_then(Value::as_object) else {
-        return false;
-    };
-    if current_session.get("kind").and_then(Value::as_str) != Some("session")
+    if !is_location_only_session_fact(existing_session)
         || !is_location_only_session_fact(current_session)
     {
         return false;
     }
-    let existing_is_session = existing_facts
-        .first()
-        .and_then(Value::as_object)
-        .is_some_and(|fact| fact.get("kind").and_then(Value::as_str) == Some("session"));
-    if existing_is_session {
-        if existing_facts.len() != current_facts.len() {
-            return false;
-        }
-        let Some(existing_session) = existing_facts.first_mut().and_then(Value::as_object_mut)
-        else {
-            return false;
-        };
-        if !is_location_only_session_fact(existing_session) {
-            return false;
-        }
-        let mut changed = false;
-        for key in ["location_path", "location_provenance"] {
-            changed |= replace_with_current_field(existing_session, current_session, key);
-        }
-        changed
-    } else {
-        if existing_facts.len() + 1 != current_facts.len() {
-            return false;
-        }
-        existing_facts.insert(0, current_facts[0].clone());
-        true
+    let mut changed = false;
+    for key in ["location_path", "location_provenance"] {
+        changed |= replace_with_current_field(existing_session, current_session, key);
     }
+    changed
 }
 
 /// A session fact may carry only the projected location. Fields the
 /// serializer always emits (`source`) or that are absent in this revision's
 /// shape must be unset or JSON null to count as location-only.
 fn is_location_only_session_fact(fact: &serde_json::Map<String, Value>) -> bool {
-    fact.iter().all(|(key, value)| {
-        matches!(
-            key.as_str(),
-            "kind" | "location_path" | "location_provenance"
-        ) || value.is_null()
-    })
+    fact.get("kind").and_then(Value::as_str) == Some("session")
+        && fact.iter().all(|(key, value)| {
+            matches!(
+                key.as_str(),
+                "kind" | "location_path" | "location_provenance"
+            ) || value.is_null()
+        })
 }
 
-fn normalize_codex_payload_revision(existing: &mut Value, current: &Value) -> bool {
-    let (Some(existing_object), Some(current_object)) =
-        (existing.as_object_mut(), current.as_object())
-    else {
-        return false;
-    };
-    let mut changed =
-        remove_legacy_relation_when_current_absent(existing_object, current_object, "turn_id");
-    let (Some(existing_facts), Some(current_facts)) = (
-        existing_object
-            .get_mut("facts")
-            .and_then(Value::as_array_mut),
-        current_object.get("facts").and_then(Value::as_array),
-    ) else {
-        return false;
-    };
-    if existing_facts.len() != current_facts.len() {
-        return false;
-    }
-    for (existing_fact, current_fact) in existing_facts.iter_mut().zip(current_facts) {
-        let (Some(existing_fact), Some(current_fact)) =
-            (existing_fact.as_object_mut(), current_fact.as_object())
-        else {
-            return false;
-        };
-        if existing_fact.get("kind") != current_fact.get("kind") {
-            return false;
-        }
-        match current_fact.get("kind").and_then(Value::as_str) {
-            Some("session") => {
-                if current_fact.contains_key("transcript_path") {
-                    return false;
-                }
-                for key in ["project_path", "location_path", "transcript_path"] {
-                    changed |= replace_with_current_field(existing_fact, current_fact, key);
-                }
-            }
-            Some("tool_invocation")
-                if existing_fact.get("arguments").is_none_or(Value::is_null) =>
-            {
-                changed |= replace_with_current_field(existing_fact, current_fact, "arguments");
-            }
-            Some("provider_usage") if is_unknown_absent_model(current_fact.get("model")) => {
-                changed |= replace_with_current_field(existing_fact, current_fact, "model");
-            }
-            Some("uncorrelated_usage")
-                if current_adds_only_missing_model(existing_fact, current_fact) =>
-            {
-                changed |=
-                    replace_with_current_field(existing_fact, current_fact, "missing_dimensions");
-            }
-            _ => {}
-        }
-    }
-    changed
-}
-
-fn normalize_cursor_payload_revision(existing: &mut Value, current: &Value) -> bool {
-    let (Some(existing_object), Some(current_object)) =
-        (existing.as_object_mut(), current.as_object())
-    else {
-        return false;
-    };
-    let mut changed =
-        remove_legacy_relation_when_current_absent(existing_object, current_object, "thread_id");
-    let (Some(existing_facts), Some(current_facts)) = (
-        existing_object
-            .get_mut("facts")
-            .and_then(Value::as_array_mut),
-        current_object.get("facts").and_then(Value::as_array),
-    ) else {
-        return false;
-    };
-    if existing_facts.len() != current_facts.len() {
-        return false;
-    }
-    for (existing_fact, current_fact) in existing_facts.iter_mut().zip(current_facts) {
-        let (Some(existing_fact), Some(current_fact)) =
-            (existing_fact.as_object_mut(), current_fact.as_object())
-        else {
-            return false;
-        };
-        if existing_fact.get("kind") != current_fact.get("kind") {
-            return false;
-        }
-        if current_fact.get("kind").and_then(Value::as_str) == Some("message") {
-            for key in ["model", "timestamp"] {
-                if !current_fact.contains_key(key) {
-                    changed |= existing_fact.remove(key).is_some();
-                }
-            }
-        }
-    }
+/// A Cursor transcript can mirror one native record at another offset, so the
+/// same record arrives again with a different physical evidence range.
+fn adopt_cursor_evidence_range(existing: &mut Value, current: &Value) -> bool {
     let (Some(existing_evidence), Some(current_evidence)) = (
-        existing_object
-            .get_mut("evidence")
-            .and_then(Value::as_object_mut),
-        current_object.get("evidence").and_then(Value::as_object),
+        existing.get_mut("evidence").and_then(Value::as_object_mut),
+        current.get("evidence").and_then(Value::as_object),
     ) else {
         return false;
     };
-    if !current_evidence.contains_key("native_timestamp") {
-        changed |= existing_evidence.remove("native_timestamp").is_some();
-    }
-    changed |= replace_with_current_field(existing_evidence, current_evidence, "range");
-    changed
-}
-
-fn remove_legacy_relation_when_current_absent(
-    existing: &mut serde_json::Map<String, Value>,
-    current: &serde_json::Map<String, Value>,
-    relation: &str,
-) -> bool {
-    let Some(existing_relations) = existing.get_mut("relations").and_then(Value::as_object_mut)
-    else {
-        return false;
-    };
-    let Some(current_relations) = current.get("relations").and_then(Value::as_object) else {
-        return false;
-    };
-    !current_relations.contains_key(relation) && existing_relations.remove(relation).is_some()
+    replace_with_current_field(existing_evidence, current_evidence, "range")
 }
 
 fn replace_with_current_field(
@@ -2989,31 +2644,6 @@ fn replace_with_current_field(
         }
     }
     true
-}
-
-fn is_unknown_absent_model(model: Option<&Value>) -> bool {
-    model.is_some_and(|model| {
-        model.get("state").and_then(Value::as_str) == Some("unknown")
-            && model.get("reason").and_then(Value::as_str) == Some("absent")
-    })
-}
-
-fn current_adds_only_missing_model(
-    existing: &serde_json::Map<String, Value>,
-    current: &serde_json::Map<String, Value>,
-) -> bool {
-    let (Some(existing_dimensions), Some(current_dimensions)) = (
-        existing.get("missing_dimensions").and_then(Value::as_array),
-        current.get("missing_dimensions").and_then(Value::as_array),
-    ) else {
-        return false;
-    };
-    let mut expected = existing_dimensions.clone();
-    expected.push(Value::String("model".to_owned()));
-    expected.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
-    let mut actual = current_dimensions.clone();
-    actual.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
-    expected == actual
 }
 
 fn validate_sha256(value: &str, field: &'static str) -> Result<(), ObservationContractError> {

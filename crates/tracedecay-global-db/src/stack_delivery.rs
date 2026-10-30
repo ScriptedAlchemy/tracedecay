@@ -117,10 +117,8 @@ impl GitHubStackSignalAppendOutcomeV1 {
 }
 
 /// Schema owned by this module, installed for existing stores as well as fresh
-/// ones.  Rows left in the retired `host_pending` staging state by an older
-/// daemon are returned to `pending` through the settlement guard, and the
-/// overflow they were holding back is promoted under the per-recipient bound.
-/// Every statement is a no-op once applied.
+/// ones. Deferred overflow is promoted under the per-recipient bound. Every
+/// statement is a no-op once applied.
 pub(crate) async fn ensure_github_stack_delivery_schema(
     connection: &impl Executor,
 ) -> tracedecay_domain::errors::Result<()> {
@@ -141,16 +139,13 @@ pub(crate) async fn ensure_github_stack_delivery_schema(
                 signal_id TEXT NOT NULL,
                 recipient TEXT NOT NULL,
                 state TEXT NOT NULL CHECK(state IN (
-                    'pending', 'deferred', 'host_pending', 'settled',
-                    'authorization_lost'
+                    'pending', 'deferred', 'settled', 'authorization_lost'
                 )),
                 PRIMARY KEY(project_id, signal_id, recipient),
                 FOREIGN KEY(project_id, signal_id)
                     REFERENCES github_stack_delivery_signals(project_id, signal_id)
                     ON DELETE RESTRICT
             ) STRICT;
-            DROP INDEX IF EXISTS idx_github_stack_delivery_pending;
-            DROP INDEX IF EXISTS idx_github_stack_delivery_host_pending;
             CREATE INDEX IF NOT EXISTS idx_github_stack_delivery_pending_recipient
                 ON github_stack_delivery_recipients(
                     project_id, recipient, signal_id
@@ -177,14 +172,12 @@ pub(crate) async fn ensure_github_stack_delivery_schema(
             BEGIN
                 SELECT RAISE(ABORT, 'GitHub stack delivery recipient identity is immutable');
             END;
-            DROP TRIGGER IF EXISTS github_stack_delivery_recipients_transition_guard;
             CREATE TRIGGER IF NOT EXISTS github_stack_delivery_recipients_settlement_guard
             BEFORE UPDATE ON github_stack_delivery_recipients
             WHEN NOT (
                 (OLD.state = NEW.state)
                 OR (OLD.state = 'pending' AND NEW.state IN ('settled', 'authorization_lost'))
                 OR (OLD.state = 'deferred' AND NEW.state IN ('pending', 'authorization_lost'))
-                OR (OLD.state = 'host_pending' AND NEW.state = 'pending')
             )
             BEGIN
                 SELECT RAISE(ABORT, 'invalid GitHub stack delivery state transition');
@@ -194,8 +187,6 @@ pub(crate) async fn ensure_github_stack_delivery_schema(
             BEGIN
                 SELECT RAISE(ABORT, 'GitHub stack delivery recipient rows are retained');
             END;
-            UPDATE github_stack_delivery_recipients
-            SET state = 'pending' WHERE state = 'host_pending';
             {promote}",
         promote = promote_deferred_sql("")
     );

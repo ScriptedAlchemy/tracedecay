@@ -102,9 +102,11 @@ impl TaskIdentity {
                 .ok()
                 .and_then(|path| package_id_from_executable(&path))
                 .unwrap_or(WindowsPackageId::Stable);
-            let user_sid = tracedecay_runtime_core::windows_security::current_user_sid_string()
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("could not determine current Windows user SID: {error}"),
+            let user_sid =
+                tracedecay_private_fs::windows::current_user_sid_string().map_err(|error| {
+                    TraceDecayError::Config {
+                        message: format!("could not determine current Windows user SID: {error}"),
+                    }
                 })?;
             Self::for_package_user_sid(package_id, &user_sid)?.for_profile(profile)
         }
@@ -723,10 +725,9 @@ pub(super) fn materialize_service_spec_after_quiescence(
         let source = scoop_service_source(&spec.tracedecay_bin, package_id)?;
         atomic_copy_private_executable(&source, &layout.executable)?;
     } else {
-        tracedecay_runtime_core::windows_security::validate_private_file(&layout.executable)
-            .map_err(|error| {
-                secure_path_error("validate service executable", &layout.executable, error)
-            })?;
+        tracedecay_private_fs::windows::validate_private_file(&layout.executable).map_err(
+            |error| secure_path_error("validate service executable", &layout.executable, error),
+        )?;
     }
     let mut materialized = spec.clone();
     materialized.tracedecay_bin = layout.executable;
@@ -791,15 +792,15 @@ fn ensure_private_runtime_layout(layout: &ServiceRuntimeLayout) -> Result<()> {
                     layout.directory.display()
                 ),
             })?;
-    tracedecay_runtime_core::windows_security::validate_directory_path(local_app_data)
+    tracedecay_private_fs::windows::validate_directory_path(local_app_data)
         .map_err(|error| secure_path_error("validate LOCALAPPDATA", local_app_data, error))?;
 
     let tracedecay_dir = local_app_data.join("TraceDecay");
     let service_dir = tracedecay_dir.join("service");
     for directory in [&tracedecay_dir, &service_dir, &layout.directory] {
-        tracedecay_runtime_core::windows_security::create_private_directory(directory).map_err(
-            |error| secure_path_error("create private service directory", directory, error),
-        )?;
+        tracedecay_private_fs::windows::create_private_directory(directory).map_err(|error| {
+            secure_path_error("create private service directory", directory, error)
+        })?;
     }
     Ok(())
 }
@@ -826,8 +827,8 @@ fn atomic_copy_private_executable(source: &Path, destination: &Path) -> Result<(
                 source.display()
             ),
         })?;
-        let mut output = tracedecay_runtime_core::windows_security::create_private_file(&temporary)
-            .map_err(|error| {
+        let mut output =
+            tracedecay_private_fs::windows::create_private_file(&temporary).map_err(|error| {
                 secure_path_error("create service executable temporary", &temporary, error)
             })?;
         let mut buffer = vec![0_u8; 64 * 1024];
@@ -856,7 +857,7 @@ fn atomic_copy_private_executable(source: &Path, destination: &Path) -> Result<(
             destination,
             "Scoop service executable",
         )?;
-        tracedecay_runtime_core::windows_security::validate_private_file(destination)
+        tracedecay_private_fs::windows::validate_private_file(destination)
             .map_err(|error| secure_path_error("validate service executable", destination, error))
     })();
     if operation.is_err() {
@@ -1240,12 +1241,11 @@ fn verify_restored_task(
 
 #[cfg(windows)]
 fn current_package_identity(package_id: WindowsPackageId) -> Result<TaskIdentity> {
-    let user_sid =
-        tracedecay_runtime_core::windows_security::current_user_sid_string().map_err(|error| {
-            TraceDecayError::Config {
-                message: format!("could not determine current Windows user SID: {error}"),
-            }
-        })?;
+    let user_sid = tracedecay_private_fs::windows::current_user_sid_string().map_err(|error| {
+        TraceDecayError::Config {
+            message: format!("could not determine current Windows user SID: {error}"),
+        }
+    })?;
     TaskIdentity::for_package_user_sid(package_id, &user_sid)
 }
 
@@ -1289,7 +1289,7 @@ fn write_scoop_state(state_file: &Path, state: &ScoopServiceState) -> Result<()>
 
 #[cfg(windows)]
 fn read_scoop_state(state_file: &Path) -> Result<Option<ScoopServiceState>> {
-    let file = match tracedecay_runtime_core::windows_security::open_private_file(state_file) {
+    let file = match tracedecay_private_fs::windows::open_private_file(state_file) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
@@ -1312,15 +1312,13 @@ fn read_scoop_state(state_file: &Path) -> Result<Option<ScoopServiceState>> {
 
 #[cfg(windows)]
 fn remove_scoop_state(state_file: &Path) -> Result<()> {
-    tracedecay_runtime_core::windows_security::validate_private_file(state_file).map_err(
-        |error| {
-            secure_path_error(
-                "validate Scoop service state before removal",
-                state_file,
-                error,
-            )
-        },
-    )?;
+    tracedecay_private_fs::windows::validate_private_file(state_file).map_err(|error| {
+        secure_path_error(
+            "validate Scoop service state before removal",
+            state_file,
+            error,
+        )
+    })?;
     std::fs::remove_file(state_file).map_err(|error| {
         secure_path_error("remove restored Scoop service state", state_file, error)
     })
@@ -1328,7 +1326,7 @@ fn remove_scoop_state(state_file: &Path) -> Result<()> {
 
 #[cfg(windows)]
 fn remove_private_runtime_executable(executable: &Path) -> Result<()> {
-    match tracedecay_runtime_core::windows_security::validate_private_file(executable) {
+    match tracedecay_private_fs::windows::validate_private_file(executable) {
         Ok(()) => std::fs::remove_file(executable).map_err(|error| {
             secure_path_error(
                 "remove quiesced Scoop service executable",
@@ -2116,12 +2114,11 @@ fn with_platform_api_for_package<T>(
     package_id: WindowsPackageId,
     operation: impl FnOnce(&mut dyn TaskSchedulerApi) -> Result<T>,
 ) -> Result<T> {
-    let user_sid =
-        tracedecay_runtime_core::windows_security::current_user_sid_string().map_err(|error| {
-            TraceDecayError::Config {
-                message: format!("could not determine current Windows user SID: {error}"),
-            }
-        })?;
+    let user_sid = tracedecay_private_fs::windows::current_user_sid_string().map_err(|error| {
+        TraceDecayError::Config {
+            message: format!("could not determine current Windows user SID: {error}"),
+        }
+    })?;
     let identity = TaskIdentity::for_package_user_sid(package_id, &user_sid)?
         .for_profile(&ProfileRoot::from_env()?)?;
     let mut api = native::NativeTaskScheduler::connect_for(identity)?;

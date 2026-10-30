@@ -125,7 +125,7 @@ memory and does not write project LCM data into an arbitrary working directory.
 
 ## Memory
 
-- **Recall before external search.** Run `fact_search` (and `lcm_grep` for past
+- **Recall before external search.** Run `fact_store(action="search")` (and `lcm_grep` for past
   conversations) before reaching for web or external search. Prior sessions
   often already answered the question.
 - **Calibrate trust; don't default everything high.** Aim for a spread across
@@ -134,9 +134,9 @@ memory and does not write project LCM data into an arbitrary working directory.
     user-stated preferences).
   - `~ 0.7`, ordinary well-sourced observations.
   - `~ 0.5`, plausible but unverified; prefer not storing over storing noise.
-- **Read the add result's diff report.** `fact_add` returns
-  `diff` / `closest_fact_id` / `similarity` / `reason`:
-  - `near_duplicate`, a very similar fact exists; prefer `fact_update` on the
+- **Read the add result's diff report.** `fact_store(action="add")`
+  returns `diff` / `closest_fact_id` / `similarity` / `reason`:
+  - `near_duplicate`, a very similar fact exists; prefer `fact_store(action="update")` on the
     existing fact over piling on duplicates.
   - `possible_conflict`, a negation/state-change cue suggests supersession;
     confirm which fact is current and update or remove the stale one.

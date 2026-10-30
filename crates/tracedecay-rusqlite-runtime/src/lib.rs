@@ -19,8 +19,7 @@ mod ledger;
 /// SQLite stores.
 pub mod runtime_ledger {
     pub use crate::ledger::{
-        PersistedWriterAuthorityError, RETIRE_RUNTIME_EFFECTS_V1, RUNTIME_LEDGER_SCHEMA,
-        persisted_writer_authority_epoch,
+        PersistedWriterAuthorityError, RUNTIME_LEDGER_SCHEMA, persisted_writer_authority_epoch,
     };
 }
 pub mod native_runtime;

@@ -276,7 +276,7 @@ pub(super) async fn run_combined_scheduler_effect(
     admission: CombinedEffectAdmission,
     engine: &DaemonEngine,
     automation_context: &AutomationProjectContext,
-    config: &tracedecay_automation_runtime::automation::config::AutomationConfig,
+    config: &tracedecay_automation_runtime::automation::config::AutomationSettingsV1,
     configuration_revision_id: &tracedecay_domain::configuration::ConfigurationRevisionId,
     backend: &dyn tracedecay_automation_runtime::automation::backend::AgentTaskBackend,
     retrieval: &dyn tracedecay_automation_runtime::automation::runner::AutomationSessionRetrieval,
@@ -310,7 +310,7 @@ fn run_combined_scheduler_effect_inner<'a>(
     admission: CombinedEffectAdmission,
     engine: &'a DaemonEngine,
     automation_context: &'a AutomationProjectContext,
-    config: &'a tracedecay_automation_runtime::automation::config::AutomationConfig,
+    config: &'a tracedecay_automation_runtime::automation::config::AutomationSettingsV1,
     configuration_revision_id: &'a tracedecay_domain::configuration::ConfigurationRevisionId,
     backend: &'a dyn tracedecay_automation_runtime::automation::backend::AgentTaskBackend,
     retrieval: &'a dyn tracedecay_automation_runtime::automation::runner::AutomationSessionRetrieval,
@@ -470,7 +470,7 @@ fn run_execute_pair<'a>(
     skill: AutomationEffectAuthority,
     engine: &'a DaemonEngine,
     automation_context: &'a AutomationProjectContext,
-    config: &'a tracedecay_automation_runtime::automation::config::AutomationConfig,
+    config: &'a tracedecay_automation_runtime::automation::config::AutomationSettingsV1,
     configuration_revision_id: &'a tracedecay_domain::configuration::ConfigurationRevisionId,
     backend: &'a dyn tracedecay_automation_runtime::automation::backend::AgentTaskBackend,
     retrieval: &'a dyn tracedecay_automation_runtime::automation::runner::AutomationSessionRetrieval,
@@ -798,7 +798,7 @@ mod tests {
     use tracedecay_automation_runtime::automation::backend::{
         AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
     };
-    use tracedecay_automation_runtime::automation::config::AutomationConfig;
+    use tracedecay_automation_runtime::automation::config::AutomationSettingsV1;
     use tracedecay_automation_runtime::automation::run_ledger::{
         AutomationRunStatus, AutomationTrigger, find_run_record_exact_bounded_blocking,
         run_ledger_path,
@@ -1189,9 +1189,9 @@ mod tests {
         let session_db = fixture.mount_observability().await;
         let backend = RecordingEarlyGateBackend::new();
         let retrieval = RecordingEarlyGateRetrieval::new();
-        let config = AutomationConfig {
+        let config = AutomationSettingsV1 {
             enabled: false,
-            ..AutomationConfig::default()
+            ..AutomationSettingsV1::default()
         };
         let parent_control = AutomationRunControl::from_interrupted(Arc::new(|| false));
         let options = CombinedReviewAutomationOptions::default();

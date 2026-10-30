@@ -52,14 +52,6 @@ class CodexHookInputRendererTests(unittest.TestCase):
             [(1, "user", prompt, 2, "user", prompt)],
         )
 
-    def test_legacy_user_message_remains_supported(self) -> None:
-        fixture = self.write_records(
-            [{"type": "event_msg", "payload": {"type": "user_message", "message": "Legacy prompt."}}]
-        )
-        _, users = self.renderer.parse_file(fixture)
-
-        self.assertEqual(users[-1].text, "Legacy prompt.")
-
     def test_duplicate_malformed_and_non_user_items_do_not_add_prompts(self) -> None:
         fixture = self.write_records(
             [

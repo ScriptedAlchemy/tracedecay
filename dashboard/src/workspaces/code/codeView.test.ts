@@ -22,7 +22,7 @@ describe('Code view locations', () => {
     });
   });
 
-  it.each(['core', 'atlas', 'unknown'])(
+  it.each(['unknown'])(
     'opens the unsupported %s view in Cortex without losing symbol focus',
     (view) => {
       expect(
@@ -34,9 +34,9 @@ describe('Code view locations', () => {
     },
   );
 
-  it('preserves project and revision selectors when rewriting a retired view', () => {
+  it('preserves project and revision selectors when rewriting an unknown view', () => {
     const current = new URLSearchParams(
-      'view=atlas&symbol=symbol-42&project=project-7&base_revision=abc&scope=local',
+      'view=unknown&symbol=symbol-42&project=project-7&base_revision=abc&scope=local',
     );
     const next = writeCodeLocation(current, readCodeLocation(current));
 
@@ -45,7 +45,7 @@ describe('Code view locations', () => {
     expect(next.get('project')).toBe('project-7');
     expect(next.get('base_revision')).toBe('abc');
     expect(next.get('scope')).toBe('local');
-    expect(current.get('view')).toBe('atlas');
+    expect(current.get('view')).toBe('unknown');
   });
 
   it('writes the default view without redundant query parameters', () => {

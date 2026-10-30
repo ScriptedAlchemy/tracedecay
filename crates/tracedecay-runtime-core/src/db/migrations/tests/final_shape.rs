@@ -183,7 +183,7 @@ async fn runtime_writer_ledger_is_part_of_the_final_shape() {
     let (_directory, path) = fresh_current_store().await;
     assert_eq!(
         ledger_tables(&path).len(),
-        4,
+        2,
         "fresh store carries the ledger"
     );
     let before = store_snapshot(&path);

@@ -7,7 +7,6 @@ use super::exact_lookup::{
     json_pointer_exists, read_logical_run_lifecycle, scan_jsonl_row,
 };
 use super::run_ledger_path;
-use crate::automation::backend::task_key as canonical_task_key;
 use crate::automation::config_error;
 use tracedecay_domain::errors::Result;
 
@@ -58,10 +57,7 @@ fn read_latest_task_validation_pointer(
         let Some(row) = scan_jsonl_row(&file, path, line)? else {
             continue;
         };
-        let task_key = row
-            .task_key
-            .as_deref()
-            .unwrap_or_else(|| canonical_task_key(row.task));
+        let task_key = row.task_key.as_str();
         if task_key != requested_task_key {
             continue;
         }
@@ -87,11 +83,7 @@ fn read_latest_task_validation_pointer(
     let selected_key = canonical_completion_key(&selected)?;
     let lifecycle = read_logical_run_lifecycle(&file, path, &selected.run_id)?
         .ok_or_else(|| config_error("automation cursor selected run disappeared"))?;
-    let task_key = lifecycle
-        .newest
-        .task_key
-        .as_deref()
-        .unwrap_or_else(|| canonical_task_key(lifecycle.newest.task));
+    let task_key = lifecycle.newest.task_key.as_str();
     if task_key != requested_task_key {
         return Err(config_error(
             "automation cursor logical newest lifecycle is outside the requested task",
@@ -258,7 +250,10 @@ mod tests {
             })),
         );
         let unrelated = ledger_line("unrelated", None)
-            .replace("\"task\":\"memory_curator\"", "\"task\":\"skill_writer\"")
+            .replace(
+                "\"task\":\"memory_curator\",\"task_key\":\"memory_curator\"",
+                "\"task\":\"skill_writer\",\"task_key\":\"skill_writer\"",
+            )
             .replace("\"accepted_count\":0", "\"accepted_count\":false");
         std::fs::write(&path, format!("{cursor}\n{unrelated}\n")).unwrap();
 
@@ -314,7 +309,10 @@ mod tests {
         let newer = with_completion(
             ledger_line("same-run", None)
                 .replace("\"succeeded\"", "\"running\"")
-                .replace("\"task\":\"memory_curator\"", "\"task\":\"skill_writer\"")
+                .replace(
+                    "\"task\":\"memory_curator\",\"task_key\":\"memory_curator\"",
+                    "\"task\":\"skill_writer\",\"task_key\":\"skill_writer\"",
+                )
                 .replace(
                     "\"task_key\":\"memory_curator\"",
                     "\"task_key\":\"skill_writer\"",

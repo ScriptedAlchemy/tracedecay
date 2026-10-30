@@ -147,9 +147,6 @@ TEST_DATA = {
         "benchmark_data/index-bench/README.md",
     ],
     ("tracedecay-private-fs", "unit_test"): [":Cargo.toml"],
-    ("tracedecay-store-runtime", "unit_test"): [
-        "crates/tracedecay-code-index/tests/fixtures/partitioned_pre_paging/manifest.json",
-    ],
 }
 
 # #[path] modules a build script pulls in outside its own directory.
@@ -759,9 +756,21 @@ def main():
     for p in meta["packages"]:
         by_kind = {"normal": [], "dev": [], "build": []}
         for d in p["dependencies"]:
-            if d["name"] in members and cfg_applies_linux(d.get("target")):
-                # cargo metadata 1.x reports normal deps as null, not "normal".
-                by_kind[d["kind"] or "normal"].append(d["name"])
+            if d["name"] not in members:
+                continue
+            if not cfg_applies_linux(d.get("target")):
+                # The generated graph is the Linux resolution, so a member
+                # dependency gated off Linux would silently vanish from every
+                # BUILD file and break only the other platform's build.
+                sys.exit(
+                    f"gen_builds.py: {p['name']} declares workspace member "
+                    f"{d['name']} only for {d.get('target')!r}; the Bazel graph "
+                    "cannot express a member dependency that Linux excludes, "
+                    "so declare it under [dependencies] and keep the cfg gate "
+                    "on the code that uses it"
+                )
+            # cargo metadata 1.x reports normal deps as null, not "normal".
+            by_kind[d["kind"] or "normal"].append(d["name"])
         member_deps_of[p["name"]] = by_kind
 
     # Every feature-resolution context a generated target needs.

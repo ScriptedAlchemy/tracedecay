@@ -318,13 +318,15 @@ async fn claim_public(
 
 #[tokio::test]
 async fn project_open_edit_stop_and_explicit_feedback_preserve_privacy_and_supersession() {
-    use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationConfig};
+    use tracedecay_automation_runtime::automation::config::{
+        AutomationBackendV1, AutomationSettingsV1,
+    };
 
     let temporary = tempfile::tempdir().expect("temporary directory");
-    let model_config = AutomationConfig {
+    let model_config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        ..AutomationConfig::default()
+        backend: AutomationBackendV1::CodexAppServer,
+        ..AutomationSettingsV1::default()
     };
     let pin = configured_model_pin();
     let control = pin.control();
@@ -597,13 +599,15 @@ async fn project_open_edit_stop_and_explicit_feedback_preserve_privacy_and_super
 
 #[tokio::test]
 async fn claim_refuses_work_from_a_displaced_configuration_revision() {
-    use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationConfig};
+    use tracedecay_automation_runtime::automation::config::{
+        AutomationBackendV1, AutomationSettingsV1,
+    };
 
     let temporary = tempfile::tempdir().expect("temporary directory");
-    let model_config = AutomationConfig {
+    let model_config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        ..AutomationConfig::default()
+        backend: AutomationBackendV1::CodexAppServer,
+        ..AutomationSettingsV1::default()
     };
     let first_pin = configured_model_pin_with_timeout("revision.scout.claim.first", 30);
     let first_control = first_pin.control();
@@ -727,7 +731,7 @@ async fn stock_disabled_configuration_produces_nothing() {
         pin,
         tracedecay_agent_hosts::agents::context_scout::model::ContextScoutModelConfig {
             automation:
-                &tracedecay_automation_runtime::automation::config::AutomationConfig::default(),
+                &tracedecay_automation_runtime::automation::config::AutomationSettingsV1::default(),
             codex: &tracedecay_domain::configuration::LcmSummarizerExecutableV1::Unconfigured,
         },
     )

@@ -8,7 +8,7 @@ use super::{
     jobs_path, validate_job,
 };
 use crate::automation::backend::{AgentTaskFailureClass, AgentTaskKind};
-use crate::automation::config::AutomationConfig;
+use crate::automation::config::AutomationSettingsV1;
 use crate::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, append_run_record,
     find_run_record_exact_bounded, load_run_records_for_task_key,
@@ -297,7 +297,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     )
     .await
     .unwrap();
-    let config = AutomationConfig::default();
+    let config = AutomationSettingsV1::default();
     let first = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
         temp.path(),
         &config,
@@ -441,7 +441,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
 async fn scheduler_lock_skip_uses_a_diagnostic_identity_outside_the_effect_occurrence() {
     let temp = tempfile::TempDir::new().unwrap();
     let job = interval_job();
-    let config = AutomationConfig::default();
+    let config = AutomationSettingsV1::default();
     let occurrence = "locked-occurrence";
     let started_at = "200".to_owned();
     let skip = super::scheduler_gate::record_scheduler_lock_skip(

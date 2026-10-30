@@ -627,7 +627,7 @@ export type AutomationRunLedgerRecord = {
   status: AutomationRunStatus;
   strict_json?: boolean | null | undefined;
   task: AgentTaskKind;
-  task_key?: string | null | undefined;
+  task_key: string;
   trigger: AutomationTrigger;
   validation_report?: unknown;
 };
@@ -667,7 +667,7 @@ export type AutomationRunRowV1 = {
   started_at: string;
   status: AutomationRunStatus;
   task: AgentTaskKind;
-  task_key: string | null;
+  task_key: string;
   trigger: AutomationTrigger;
 };
 
@@ -2158,7 +2158,7 @@ export type DoctorReportEntryV1 = {
   storage_kind: DoctorStorageFindingKindV1 | null;
 };
 
-export type DoctorStorageFindingKindV1 = "over_budget_store" | "orphan_store" | "incident_debris_present" | "retention_backlog" | "table_growth" | "pending_schema_migration" | "wal_checkpoint_pinned";
+export type DoctorStorageFindingKindV1 = "over_budget_store" | "orphan_store" | "incident_debris_present" | "retention_backlog" | "table_growth" | "schema_convergence_incomplete" | "wal_checkpoint_pinned";
 
 export type DuplicateEffectOutcomeV1 = "committed" | "not_applicable" | "prevented" | "unknown";
 
@@ -4987,28 +4987,15 @@ export type SavingsSumV1 = {
 
 export type SchemaConvergenceFindingV1 = {
   degraded_row: string | null;
-  progress: SchemaConvergenceProgressV1 | null;
   stage: SchemaConvergenceStageV1;
   started_at_micros: number;
   state: SchemaConvergenceStateV1;
   store: string;
 };
 
-export type SchemaConvergenceProgressV1 =
-  | {
-    done: number;
-    remaining: number;
-    unit: "pages";
-  }
-  | {
-    done: number;
-    remaining: number;
-    unit: "rows";
-  };
-
 export type SchemaConvergenceStageV1 = "registered_schema";
 
-export type SchemaConvergenceStateV1 = "completed" | "degraded" | "pending_schema_migration" | "released_shape_convergence_in_progress";
+export type SchemaConvergenceStateV1 = "completed" | "degraded" | "pending" | "running";
 
 export type SchemaId = string;
 

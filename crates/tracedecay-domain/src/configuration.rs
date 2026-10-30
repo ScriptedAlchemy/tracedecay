@@ -44,38 +44,6 @@ pub const CONTEXT_SCOUT_SETTINGS_SETTING_KEY: &str = "context_scout.settings.v1"
 pub const AUTOMATION_SETTINGS_SETTING_KEY: &str = "automation.settings.v1";
 pub const LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY: &str = "lcm.summarizer_executables.v1";
 
-/// Core setting keys that shipped in published betas and were then retired.
-/// A persisted snapshot carrying one converges by dropping it; its value has
-/// no registered owner anymore. `semantic.runtime.v1` shipped through
-/// v0.1.0-beta.37 and left with the dense retrieval runtime;
-/// `sync.orphan_db_gc_days.v1` shipped through v0.1.0-beta.50 and left with
-/// the orphan branch-database sweep; `index.git_ignore.v1` shipped through
-/// v0.1.0-beta.50 and left because the code index is defined by Git's view
-/// of the worktree, which always honors `.gitignore`. The upload,
-/// watcher-debounce, and extraction-timeout user settings were stored in each
-/// project's snapshot through v1.0.0-beta.61 and now live only in the profile
-/// store ([`PROFILE_SETTING_KEYS_V1`]). `diagnostics.prewarm.v1` shipped
-/// through v1.0.0-beta.83 and left with the compile-on-read cargo prewarm.
-/// The full-sync escalation and concurrent-sync settings were retired because
-/// sync execution does not read them.
-pub const RETIRED_CORE_SETTING_KEYS_V1: &[&str] = &[
-    "diagnostics.prewarm.v1",
-    "index.git_ignore.v1",
-    "semantic.runtime.v1",
-    "sync.full_sync_escalation_files.v1",
-    "sync.max_concurrent_syncs.v1",
-    "sync.orphan_db_gc_days.v1",
-    "user.upload_enabled.v1",
-    USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
-    USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
-];
-
-/// Profile setting keys that shipped and were then retired. A profile store
-/// carrying one converges by dropping it on the next read; the value has no
-/// registered owner anymore. `user.upload_enabled.v1` was the opt-in of the
-/// worldwide token counter, removed without a final upload.
-pub const RETIRED_PROFILE_SETTING_KEYS_V1: &[&str] = &["user.upload_enabled.v1"];
-
 /// Canonical user-profile settings.
 pub const USER_REPEATED_QUERY_HINTS_SETTING_KEY: &str = "user.repeated_query_hints.v1";
 pub const USER_CODE_INDEX_WORKERS_SETTING_KEY: &str = "user.code_index_workers.v1";
@@ -527,24 +495,6 @@ pub enum RestartRequirementV1 {
     DaemonRestart,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "state")]
-pub enum DeprecationStateV1 {
-    Active,
-    Deprecated { replacement: Option<SettingKey> },
-}
-
-impl DeprecationStateV1 {
-    pub fn validate(&self) -> Result<(), DomainError> {
-        match self {
-            Self::Active => Ok(()),
-            Self::Deprecated { replacement } => {
-                replacement.as_ref().map_or(Ok(()), SettingKey::validate)
-            }
-        }
-    }
-}
-
 #[derive(
     Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
 )]
@@ -760,19 +710,6 @@ pub struct AutomationTaskSettingsV1 {
     pub interval_secs: Option<u64>,
     pub cooldown_secs: Option<u64>,
     pub min_idle_secs: Option<u64>,
-    /// Historical snapshot payload only. Preserve absent, null, and numeric
-    /// forms so their recorded digests remain verifiable. Current settings
-    /// retire this field; task ownership is governed by the operating-system
-    /// lock, never by an elapsed-time override.
-    #[doc(hidden)]
-    #[schemars(skip)]
-    #[serde(
-        rename = "stale_lock_secs",
-        default,
-        deserialize_with = "deserialize_retired_lock_timeout",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub legacy_stale_lock_secs: Option<Option<u64>>,
     /// Suppression window between session-evidence retrieval attempts while
     /// the evidence budget stays exhausted. Unset uses the automation crate's
     /// one-hour default. Distinct from `cooldown_secs`, which paces retries
@@ -787,7 +724,6 @@ impl AutomationTaskSettingsV1 {
             self.interval_secs,
             self.cooldown_secs,
             self.min_idle_secs,
-            self.legacy_stale_lock_secs.flatten(),
             self.session_evidence_budget_backoff_secs,
         ] {
             if matches!(value, Some(0)) {
@@ -801,18 +737,6 @@ impl AutomationTaskSettingsV1 {
         }
         Ok(())
     }
-}
-
-#[allow(clippy::option_option)]
-fn deserialize_retired_lock_timeout<'de, D>(
-    deserializer: D,
-) -> Result<Option<Option<u64>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    // `default` handles an absent field. This function runs for an explicitly
-    // present null too, which ordinary nested Option deserialization loses.
-    Option::<u64>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
@@ -866,34 +790,7 @@ impl AutomationSettingsV1 {
     }
 
     pub fn is_default(&self) -> bool {
-        let mut current = self.clone();
-        current.retire_lock_timeout();
-        current == Self::default()
-    }
-
-    pub fn has_retired_lock_timeout(&self) -> bool {
-        [
-            &self.tasks.memory_curator,
-            &self.tasks.session_reflector,
-            &self.tasks.skill_writer,
-        ]
-        .iter()
-        .any(|task| task.legacy_stale_lock_secs.is_some())
-    }
-
-    /// Project a historical value onto the current effective settings. The
-    /// store calls this on a copy when committing a converged child revision;
-    /// historical snapshots retain their original serialized representation.
-    pub fn retire_lock_timeout(&mut self) -> bool {
-        let mut changed = false;
-        for task in [
-            &mut self.tasks.memory_curator,
-            &mut self.tasks.session_reflector,
-            &mut self.tasks.skill_writer,
-        ] {
-            changed |= task.legacy_stale_lock_secs.take().is_some();
-        }
-        changed
+        *self == Self::default()
     }
 }
 
@@ -905,7 +802,6 @@ impl Default for AutomationSettingsV1 {
             interval_secs: Some(interval_secs),
             cooldown_secs: Some(300),
             min_idle_secs,
-            legacy_stale_lock_secs: None,
             session_evidence_budget_backoff_secs: None,
         };
         Self {
@@ -924,61 +820,6 @@ impl Default for AutomationSettingsV1 {
                 skill_writer: scheduled_task(3_600, Some(900)),
             },
         }
-    }
-}
-
-#[cfg(test)]
-mod automation_settings_tests {
-    use super::{AutomationSettingsV1, AutomationTaskSettingsV1};
-    use crate::canonical_sha256;
-
-    #[test]
-    fn historical_lock_timeouts_preserve_their_serialized_identity() {
-        for timeout in [
-            None,
-            Some(serde_json::Value::Null),
-            Some(serde_json::json!(3600)),
-        ] {
-            let mut historical = serde_json::to_value(AutomationSettingsV1::default()).unwrap();
-            for task in ["memory_curator", "session_reflector", "skill_writer"] {
-                if let Some(timeout) = &timeout {
-                    historical["tasks"][task]["stale_lock_secs"] = timeout.clone();
-                }
-            }
-            let stored: AutomationSettingsV1 = serde_json::from_value(historical.clone()).unwrap();
-            stored.validate().unwrap();
-            assert_eq!(stored.has_retired_lock_timeout(), timeout.is_some());
-            assert_eq!(serde_json::to_value(&stored).unwrap(), historical);
-            assert_eq!(
-                canonical_sha256(&stored).unwrap(),
-                canonical_sha256(&historical).unwrap(),
-                "loading an absent, null, or numeric historical field must preserve the digest input"
-            );
-            assert!(
-                stored.is_default(),
-                "a retired timeout is not an active override"
-            );
-
-            let mut effective = stored.clone();
-            assert_eq!(effective.retire_lock_timeout(), timeout.is_some());
-            assert_eq!(effective, AutomationSettingsV1::default());
-            assert!(!effective.retire_lock_timeout(), "retirement is idempotent");
-            for task in ["memory_curator", "session_reflector", "skill_writer"] {
-                assert!(
-                    serde_json::to_value(&effective).unwrap()["tasks"][task]
-                        .get("stale_lock_secs")
-                        .is_none()
-                );
-            }
-            assert_eq!(serde_json::to_value(&stored).unwrap(), historical);
-        }
-    }
-
-    #[test]
-    fn current_automation_schema_has_no_lock_timeout_control() {
-        let schema = serde_json::to_value(schemars::schema_for!(AutomationTaskSettingsV1)).unwrap();
-        assert!(schema["properties"].get("stale_lock_secs").is_none());
-        assert_eq!(schema["additionalProperties"], false);
     }
 }
 
@@ -1454,7 +1295,6 @@ pub struct SettingDefinitionV1 {
     pub sensitivity: SettingSensitivityV1,
     pub scope: SettingScopeV1,
     pub restart_requirement: RestartRequirementV1,
-    pub deprecation: DeprecationStateV1,
 }
 
 impl SettingDefinitionV1 {
@@ -1465,8 +1305,7 @@ impl SettingDefinitionV1 {
                 field: "configuration setting definition",
             });
         }
-        self.default_value.validate()?;
-        self.deprecation.validate()
+        self.default_value.validate()
     }
 }
 

@@ -494,7 +494,7 @@ mod tests {
         )
         .await
         .expect("a refused source edit renders as a tool result");
-        assert_eq!(result.semantic_error(), Some(true), "{}", result.value);
+        assert!(result.semantic_error(), "{}", result.value);
         result.value["structuredContent"]["problem"].clone()
     }
 

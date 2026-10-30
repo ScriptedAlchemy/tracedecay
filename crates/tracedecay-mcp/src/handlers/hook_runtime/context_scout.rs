@@ -14,8 +14,8 @@ use tracedecay_contracts::retrieval::{
 use tracedecay_domain::errors::Result;
 use tracedecay_domain::{
     CanonicalBoundaryKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
-    CanonicalObservationFactV1, CanonicalObservationIdV1, CanonicalObservationRelationsV1,
-    ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
+    ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
     ProviderId, RetentionClass, SessionId, UtcMicros,
 };
@@ -27,7 +27,7 @@ use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_sessions::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
-use tracedecay_store::{ObservationPersistOutcome, ObservationStore, StoreShardScopeV1};
+use tracedecay_store::{ObservationPersistOutcome, StoreShardScopeV1};
 
 use super::admission::{HookV2BindingAdmission, hook_v2_binding_admission};
 use super::envelope::{hook_now, hook_v2_envelope};
@@ -141,90 +141,6 @@ fn native_lifecycle_observation_envelope(
         CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::DaemonSequence, range),
     )
     .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
-}
-
-/// A reconstructed legacy position never proves that producer work ran or
-/// became obsolete. Recover its immutable range from the canonical native
-/// observation, and compare only that range with the compatible source cursor.
-pub(super) async fn recovered_native_lifecycle_order(
-    sessions: &RegisteredGlobalDb,
-    provider: ProviderId,
-    lifecycle: &tracedecay_agent_hosts::hooks::NativeContextScoutLifecycleV1,
-    reconstructed_range: ObservationSourceRangeV1,
-) -> NativeLifecycleAdmissionV1 {
-    let Some((facade, scope, source)) = native_lifecycle_authorities(
-        sessions,
-        None,
-        provider.clone(),
-        lifecycle.session_id.clone(),
-    ) else {
-        return NativeLifecycleAdmissionV1::Unavailable;
-    };
-    let Ok(generation) = ObservationSourceGenerationV1::new(1) else {
-        return NativeLifecycleAdmissionV1::Unavailable;
-    };
-    // Native identity derivation uses source/scope/call, not the candidate's
-    // range. No reconstructed range is persisted or used for cursor ordering.
-    let Ok(candidate) = ObservationIdentityMaterialV1::for_native_record(
-        source.clone(),
-        scope.clone(),
-        generation,
-        reconstructed_range,
-        ObservationOrderingDomainV1::DaemonSequence,
-        lifecycle.call_id.clone(),
-    ) else {
-        return NativeLifecycleAdmissionV1::Unavailable;
-    };
-    let Ok(id) = CanonicalObservationIdV1::derive(&candidate) else {
-        return NativeLifecycleAdmissionV1::Unavailable;
-    };
-    let Ok(Some(stored)) = sessions.observation_store().get_observation(&id).await else {
-        return NativeLifecycleAdmissionV1::Unavailable;
-    };
-    let observation = stored.observation();
-    let identity = observation.identity();
-    if identity.source() != &source
-        || identity.scope() != &scope
-        || identity.generation() != generation
-        || identity.ordering_domain() != ObservationOrderingDomainV1::DaemonSequence
-        || identity.native_record_id() != Some(&lifecycle.call_id)
-    {
-        return NativeLifecycleAdmissionV1::Unavailable;
-    }
-    let range = identity.position();
-    let Ok(expected) =
-        native_lifecycle_observation_envelope(provider, lifecycle, range).and_then(|envelope| {
-            serde_json::to_value(envelope)
-                .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
-        })
-    else {
-        return NativeLifecycleAdmissionV1::Unavailable;
-    };
-    let committed = stored.committed_cursor();
-    if observation.payload() != &expected
-        || committed.source() != &source
-        || committed.scope() != &scope
-        || committed.generation() != generation
-        || committed.ordering_domain() != ObservationOrderingDomainV1::DaemonSequence
-        || committed.position() != range.end()
-    {
-        return NativeLifecycleAdmissionV1::Unavailable;
-    }
-    match facade.get_source_cursor(&source, &scope).await {
-        Ok(Some(cursor))
-            if cursor.source() == &source
-                && cursor.scope() == &scope
-                && cursor.generation() == generation
-                && cursor.ordering_domain() == ObservationOrderingDomainV1::DaemonSequence =>
-        {
-            match cursor.position().cmp(&range.end()) {
-                std::cmp::Ordering::Equal => NativeLifecycleAdmissionV1::Ready,
-                std::cmp::Ordering::Greater => NativeLifecycleAdmissionV1::Superseded,
-                std::cmp::Ordering::Less => NativeLifecycleAdmissionV1::Unavailable,
-            }
-        }
-        Ok(None | Some(_)) | Err(_) => NativeLifecycleAdmissionV1::Unavailable,
-    }
 }
 
 /// A later canonical lifecycle is proof that an older boundary is superseded,

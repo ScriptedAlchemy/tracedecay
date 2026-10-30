@@ -138,7 +138,7 @@ async fn production_fixture() -> ProductionFixture {
         .output()
         .expect("run tracedecay init");
     assert_command_success("tracedecay init", &initialized);
-    let handshake = tracedecay::daemon::handshake_for_current_client(
+    let handshake = crate::common::handshake_for_current_client(
         environment.profile(),
         Some(project.clone()),
         None,
@@ -806,7 +806,7 @@ async fn immediate_concurrent_and_repeated_opens_publish_one_callable_owner() {
     );
 
     let fresh_client = || {
-        let handshake = tracedecay::daemon::handshake_for_current_client(
+        let handshake = crate::common::handshake_for_current_client(
             fixture._environment.profile(),
             Some(fixture.project.clone()),
             None,

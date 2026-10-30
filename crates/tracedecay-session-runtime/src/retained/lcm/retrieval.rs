@@ -200,14 +200,8 @@ pub(super) async fn execute_grep(
     let roles = request
         .role
         .map_or_default(|role| vec![role.as_str().to_owned()]);
-    let start_time = time_filter(
-        request.start_time.as_ref().or(request.since.as_ref()),
-        SearchTimeBound::Start,
-    )?;
-    let end_time = time_filter(
-        request.end_time.as_ref().or(request.until.as_ref()),
-        SearchTimeBound::End,
-    )?;
+    let start_time = time_filter(request.start_time.as_ref(), SearchTimeBound::Start)?;
+    let end_time = time_filter(request.end_time.as_ref(), SearchTimeBound::End)?;
     let git_filter = git_scope_filter_from_args(
         trimmed(request.branch.as_deref())?,
         trimmed(request.worktree.as_deref())?,

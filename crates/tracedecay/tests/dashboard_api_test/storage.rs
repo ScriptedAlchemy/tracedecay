@@ -93,7 +93,7 @@ fn storage_doctor_findings_report_every_producer_source_honestly() {
                 "incident_debris_present",
                 "retention_backlog",
                 "table_growth",
-                "pending_schema_migration",
+                "schema_convergence_incomplete",
             ],
             "every canonical storage producer must appear exactly once"
         );
@@ -110,7 +110,7 @@ fn storage_doctor_findings_report_every_producer_source_honestly() {
             "incident_debris_present",
             "retention_backlog",
             "table_growth",
-            "pending_schema_migration",
+            "schema_convergence_incomplete",
         ] {
             let producer = status_for(kind);
             assert_eq!(

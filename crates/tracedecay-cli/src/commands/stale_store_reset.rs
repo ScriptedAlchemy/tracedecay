@@ -3,9 +3,7 @@ use std::time::Duration;
 
 use tracedecay_domain::errors::{ResettableStoreV1, Result, StoreResetRequiredV1, TraceDecayError};
 use tracedecay_global_db::profile_registry_maintenance::verify_store_path_absent;
-use tracedecay_hooks::{
-    PRE_LEDGER_PENDING_WORK_DIR, PROFILE_HOOK_ADMISSIONS_DIR, PROJECT_HOOK_ADMISSIONS_DIR,
-};
+use tracedecay_hooks::{PROFILE_HOOK_ADMISSIONS_DIR, PROJECT_HOOK_ADMISSIONS_DIR};
 use tracedecay_runtime_core::config::{GLOBAL_DB_FILENAME, ProfileRoot};
 use tracedecay_runtime_core::storage::{
     SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME, USER_SESSIONS_DB_FILENAME,
@@ -37,7 +35,10 @@ pub(crate) async fn handle_wipe_stale(profile: &ProfileRoot, assume_yes: bool) -
                 .to_owned(),
         });
     }
-    if !tracedecay_daemon_control::daemon_reachable(profile) {
+    if !tracedecay_daemon_control::daemon_reachable(
+        profile,
+        crate::product_runtime::PRODUCT_BUILD_VERSION,
+    ) {
         return Err(TraceDecayError::Config {
             message: "wipe --stale reads the stores that require reset from the running daemon; \
                       start it (`tracedecay daemon start`) and re-run. Nothing was wiped."
@@ -223,7 +224,7 @@ fn store_location(
         ),
         ResettableStoreV1::ProjectHookAdmissions { project_id } => (
             project_root(project_id)?,
-            StoreMembers::Directories(&[PROJECT_HOOK_ADMISSIONS_DIR, PRE_LEDGER_PENDING_WORK_DIR]),
+            StoreMembers::Directories(&[PROJECT_HOOK_ADMISSIONS_DIR]),
         ),
     })
 }

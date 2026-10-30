@@ -40,10 +40,9 @@ import {
   lanePending,
   runIsTerminal,
   searchLane,
-  semanticLane,
   type ExplorerLaneReadModel,
 } from './laneModel.ts';
-import { LANES, type Hit, type LaneId, type SourceLaneId } from './model.ts';
+import { LANES, type Hit, type LaneId } from './model.ts';
 
 /* ------------------------------------------------------------------ routes */
 
@@ -154,7 +153,7 @@ function transportBackoffMs(consecutiveFailures: number): number {
 /* -------------------------------------------------------------- controller */
 
 interface ExplorerFacet {
-  readonly lane: SourceLaneId;
+  readonly lane: LaneId;
   readonly value: string;
 }
 
@@ -174,7 +173,7 @@ export interface ExplorerController {
   /** Whether the current scope accepts a query run, from the scope authority.
    * Anything but `writable` means no run was, or will be, dispatched. */
   readonly writability: ScopeWritability;
-  /** One read model per lane, in `LANES` order, four, including semantic. */
+  /** One read model per lane, in `LANES` order. */
   readonly lanes: readonly ExplorerLaneReadModel[];
   /** The lanes the current lane filter admits. */
   readonly visibleLanes: readonly ExplorerLaneReadModel[];
@@ -308,7 +307,6 @@ export function useExplorerController(): ExplorerController {
   const lanes = useMemo<readonly ExplorerLaneReadModel[]>(
     () =>
       LANES.map((spec): ExplorerLaneReadModel => {
-        if (spec.id === 'semantic') return semanticLane();
         if (searching) {
           // A run is created with a POST, and the project gateway refuses
           // writes for every project but the active one. The gate is read

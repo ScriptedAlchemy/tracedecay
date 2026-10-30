@@ -49,80 +49,8 @@ const ROOT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS metadata (
 /// receipts, keeps full external-source receipts only while retained, and
 /// stores each external-source mutation without what its row already says.
 /// v39 drops the handoff grant table, which lives in the project session store.
-pub const SCHEMA_VERSION: u32 = 39;
-
-/// The runtime ledger's retired outbox and inbox tables, exactly as v39 stores
-/// carry them. Nothing reads or writes them, but a store cannot change shape
-/// in place, so the v39 shape keeps them until the next [`SCHEMA_VERSION`].
-const RETIRED_RUNTIME_EFFECTS_SCHEMA_V39: &str = "
-CREATE TABLE IF NOT EXISTS td_runtime_writer_outbox_v1 (
-    source_shard_json TEXT NOT NULL,
-    source_incarnation INTEGER NOT NULL CHECK (source_incarnation > 0),
-    source_authority_epoch INTEGER NOT NULL CHECK (source_authority_epoch > 0),
-    effect_id TEXT NOT NULL,
-    ordering_key TEXT NOT NULL,
-    source_sequence INTEGER NOT NULL CHECK (source_sequence >= 0),
-    state TEXT NOT NULL CHECK (
-        state IN ('pending', 'dispatched', 'effect_unknown', 'acknowledged')
-    ),
-    entry_json TEXT NOT NULL,
-    source_receipt_json TEXT NOT NULL,
-    transaction_scope_json TEXT NOT NULL,
-    operation_id TEXT NOT NULL,
-    durability_json TEXT NOT NULL,
-    updated_at_micros INTEGER NOT NULL,
-    PRIMARY KEY (source_shard_json, source_incarnation, source_authority_epoch, effect_id)
-) WITHOUT ROWID;
-
-CREATE INDEX IF NOT EXISTS td_runtime_writer_outbox_ordering_v1
-ON td_runtime_writer_outbox_v1 (
-    source_shard_json,
-    source_incarnation,
-    source_authority_epoch,
-    ordering_key,
-    source_sequence,
-    effect_id
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS td_runtime_writer_outbox_effect_v1
-ON td_runtime_writer_outbox_v1 (source_shard_json, effect_id);
-
-CREATE INDEX IF NOT EXISTS td_runtime_writer_outbox_state_v1
-ON td_runtime_writer_outbox_v1 (
-    source_shard_json,
-    source_incarnation,
-    source_authority_epoch,
-    state,
-    updated_at_micros
-);
-
-CREATE TABLE IF NOT EXISTS td_runtime_writer_inbox_v1 (
-    target_shard_json TEXT NOT NULL,
-    target_incarnation INTEGER NOT NULL CHECK (target_incarnation > 0),
-    target_authority_epoch INTEGER NOT NULL CHECK (target_authority_epoch > 0),
-    effect_id TEXT NOT NULL,
-    ordering_key TEXT NOT NULL,
-    source_sequence INTEGER NOT NULL CHECK (source_sequence >= 0),
-    target_sequence INTEGER NOT NULL CHECK (target_sequence > 0),
-    identity_json TEXT NOT NULL,
-    receipt_json TEXT NOT NULL,
-    committed_at_micros INTEGER NOT NULL,
-    PRIMARY KEY (target_shard_json, target_incarnation, target_authority_epoch, effect_id)
-) WITHOUT ROWID;
-
-CREATE INDEX IF NOT EXISTS td_runtime_writer_inbox_ordering_v1
-ON td_runtime_writer_inbox_v1 (
-    target_shard_json,
-    target_incarnation,
-    target_authority_epoch,
-    ordering_key,
-    source_sequence,
-    effect_id
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS td_runtime_writer_inbox_effect_v1
-ON td_runtime_writer_inbox_v1 (target_shard_json, effect_id);
-";
+/// v40 drops the retired runtime writer outbox and inbox tables.
+pub const SCHEMA_VERSION: u32 = 40;
 
 fn schema_stamp_error(error: crate::db::schema_version::SchemaVersionError) -> TraceDecayError {
     TraceDecayError::Database {
@@ -131,8 +59,7 @@ fn schema_stamp_error(error: crate::db::schema_version::SchemaVersionError) -> T
     }
 }
 
-/// Recorded graph version. An unstamped file is 0, and a legacy pragma is
-/// visible until [`adopt_graph_stamp`] moves it.
+/// Recorded graph version. An unstamped file is 0.
 async fn get_version(conn: &(impl QueryExecutor + Sync)) -> Result<u32> {
     let version =
         crate::db::schema_version::read_version(conn, crate::db::schema_version::GRAPH_COMPONENT)
@@ -159,11 +86,6 @@ async fn record_graph_version(conn: &(impl Executor + Sync), version: u32) -> Re
     .map_err(schema_stamp_error)
 }
 
-async fn adopt_graph_stamp(conn: &(impl Executor + Sync)) -> Result<()> {
-    crate::db::schema_version::retire_user_version(conn)
-        .await
-        .map_err(schema_stamp_error)
-}
 /// Configures incremental auto-vacuum for a brand-new database before any
 /// schema-shaping pragmas or tables are created.
 pub async fn configure_fresh_auto_vacuum(conn: &Connection, operation: &str) -> Result<()> {
@@ -263,12 +185,6 @@ async fn create_schema_transaction(conn: &(impl Executor + Sync)) -> Result<()> 
             message: format!("failed to create runtime writer ledger: {e}"),
             operation: "create_schema".to_string(),
         })?;
-    conn.execute_batch(RETIRED_RUNTIME_EFFECTS_SCHEMA_V39)
-        .await
-        .map_err(|e| TraceDecayError::Database {
-            message: format!("failed to create retired runtime effects tables: {e}"),
-            operation: "create_schema".to_string(),
-        })?;
     final_shape::require_exact_final_shape(conn).await?;
     record_graph_version(conn, SCHEMA_VERSION).await?;
     Ok(())
@@ -313,83 +229,6 @@ async fn store_has_objects(conn: &impl QueryExecutor) -> Result<bool> {
     .await
 }
 
-async fn retired_sqlite_projection_object(conn: &impl QueryExecutor) -> Result<Option<String>> {
-    let mut rows = conn
-        .query(
-            "SELECT name FROM sqlite_master
-             WHERE type IN ('table', 'view', 'trigger')
-               AND (
-                   name IN (
-                       'nodes', 'edges', 'files', 'unresolved_refs',
-                       'node_fingerprints', 'redundancy_pairs',
-                       'memory_facts', 'memory_entities',
-                       'memory_fact_entities', 'memory_feedback_events',
-                       'memory_oplog', 'memory_fact_relations',
-                       'memory_banks', 'memory_bank_dirty',
-                       'memory_v2_banks', 'memory_v2_bank_dirty',
-                       'memory_v2_fact_relations',
-                       'memory_v2_assertion_vectors',
-                       'memory_v2_legacy_map', 'memory_v2_legacy_quarantine',
-                       'memory_v2_backfill_progress',
-                       'memory_v2_legacy_proposal_map',
-                       'memory_v2_proposals',
-                       'memory_v2_proposal_transitions',
-                       'memory_v2_proposal_current',
-                       'memory_v2_legacy_feedback_event_map',
-                       'memory_v2_feedback_history_repair_progress',
-                       'memory_v2_compatibility_operation_receipts',
-                       'memory_v2_compatibility_banks',
-                       'memory_v2_compatibility_bank_dirty'
-                   )
-                   OR name GLOB 'nodes_fts*'
-                   OR name GLOB 'memory_facts_fts*'
-               )
-             ORDER BY name
-             LIMIT 1",
-            (),
-        )
-        .await
-        .map_err(|error| TraceDecayError::Database {
-            message: format!("failed to probe for retired SQLite projection objects: {error}"),
-            operation: "ensure_schema_current".to_owned(),
-        })?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| TraceDecayError::Database {
-            message: format!("failed to read retired SQLite projection object probe: {error}"),
-            operation: "ensure_schema_current".to_owned(),
-        })?
-    else {
-        return Ok(None);
-    };
-    row.get::<String>(0)
-        .map(Some)
-        .map_err(|error| TraceDecayError::Database {
-            message: format!("failed to decode retired SQLite projection object name: {error}"),
-            operation: "ensure_schema_current".to_owned(),
-        })
-}
-
-/// Refuses a store that still carries an object of a retired `SQLite`
-/// projection, whatever its stamp, naming the retired object in the refusal.
-async fn require_no_retired_sqlite_projection_object(
-    conn: &(impl QueryExecutor + Sync),
-) -> Result<()> {
-    let Some(object) = retired_sqlite_projection_object(conn).await? else {
-        return Ok(());
-    };
-    let current = get_version(conn).await?;
-    Err(TraceDecayError::reset_required(
-        "SQLite store",
-        format!(
-            "database schema v{current} still contains retired SQLite projection object \
-             '{object}'; remove the store directory and let this binary create the exact \
-             relational shape"
-        ),
-    ))
-}
-
 fn unsupported_schema_version(current: u32) -> TraceDecayError {
     TraceDecayError::reset_required(
         "SQLite store",
@@ -424,8 +263,7 @@ async fn ensure_schema_current_engine_connection(
     if current == 0 && !store_has_objects(conn).await? {
         return create_schema_engine_connection(conn).await;
     }
-    verify_final_schema_connection(conn).await?;
-    adopt_graph_stamp(conn).await
+    verify_final_schema_connection(conn).await
 }
 
 /// Verifies that an already-existing store has the one exact final shape this
@@ -434,7 +272,6 @@ async fn ensure_schema_current_engine_connection(
 pub(crate) async fn verify_final_schema_connection(
     conn: &(impl QueryExecutor + Sync),
 ) -> Result<()> {
-    require_no_retired_sqlite_projection_object(conn).await?;
     let current = get_version(conn).await?;
     if current != SCHEMA_VERSION {
         return Err(unsupported_schema_version(current));
@@ -449,8 +286,7 @@ pub(crate) async fn ensure_schema_current_connection(conn: &Connection) -> Resul
     if current == 0 && !store_has_objects(conn).await? {
         return create_schema_connection(conn).await;
     }
-    verify_final_schema_connection(conn).await?;
-    adopt_graph_stamp(conn).await
+    verify_final_schema_connection(conn).await
 }
 
 #[cfg(test)]

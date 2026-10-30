@@ -65,11 +65,14 @@ fn observation(start: u64, end: u64, receipt_id: &str, body: &str) -> DurableObs
         Some(payload_reference),
     )
     .unwrap();
-    let identity = ObservationIdentityMaterialV1::new(
+    let identity = ObservationIdentityMaterialV1::for_native_record(
         source(),
         scope(),
         ObservationSourceGenerationV1::new(GENERATION).unwrap(),
         ObservationSourceRangeV1::new(start, end).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
+        tracedecay_domain::ObservationId::new(payload["stable_record_id"].as_str().unwrap())
+            .unwrap(),
     )
     .unwrap();
     DurableObservationV1::new(

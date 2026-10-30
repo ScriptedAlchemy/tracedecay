@@ -37,7 +37,12 @@ use tracedecay_store::{
     RuntimeRequestControlV1,
 };
 
+use sha2::{Digest as _, Sha256};
+
 use super::super::DaemonSessionRuntimeRegistryV1;
+
+const RETIRED_FORMAT_REVISION: u32 =
+    tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1 - 1;
 use super::{
     AtomicGraphCancellationV1, GraphPublicationProbeV1, PUBLICATION_PROJECTION_IN_FLIGHT,
     ResidentMemoryGuardedGraphCancellationV1, RetainedCodeGraphRuntimeV1,
@@ -439,31 +444,28 @@ async fn unreadable_pending_replay_is_discarded_before_fresh_publication() {
         .await
         .expect("retain fresh code graph runtime");
 
-    let historical_fixture =
-        Path::new("../tracedecay-code-index/tests/fixtures/partitioned_pre_paging");
-    let historical_digest = "6fece830a4b12904018853a467e404edc60ea76e2cab48d4645fbbb4132bd6af";
     let generations_root = scoped_store.join("code-generations-v1");
-    let segments_root = code_generation_segments_root(&scoped_store);
-    std::fs::create_dir_all(&segments_root).expect("historical segment root");
-    std::fs::copy(
-        historical_fixture.join("manifest.json"),
+    let historical_manifest = {
+        let mut envelope: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(generations_root.join(&pointer.generation_file))
+                .expect("fresh partitioned manifest"),
+        )
+        .expect("fresh partitioned manifest json");
+        envelope["generation"]["format_revision"] = serde_json::json!(RETIRED_FORMAT_REVISION);
+        envelope["state_digest"] = serde_json::json!(format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(
+                serde_json::to_vec(&envelope["generation"]).expect("retired payload bytes")
+            ))
+        ));
+        serde_json::to_vec(&envelope).expect("retired manifest bytes")
+    };
+    let historical_digest = hex::encode(Sha256::digest(&historical_manifest));
+    std::fs::write(
         generations_root.join(format!("generation-{historical_digest}.json")),
+        &historical_manifest,
     )
     .expect("install historical partitioned manifest");
-    for digest in [
-        "462ca12853ede4c82969ef6cc161dedc0952b5b7ef85dcf23b125adddb25ecf8",
-        "5cea7a47c6160776faa037dc1a530e5cecd38440d4833f8ebaf60a86e7535ea7",
-        "cc82022dad2a1bfc50f483df6a1433962ffd454b70d63a73b6ddd7ebaee2cf12",
-        "d1b83239d4010ac53b635c2d7c4bef3d1be9aa2e59d8f09d0404d28c1d00e8ab",
-    ] {
-        std::fs::copy(
-            historical_fixture
-                .join("segments")
-                .join(format!("{digest}.json")),
-            segments_root.join(format!("segment-{digest}.json")),
-        )
-        .expect("install historical partitioned segment");
-    }
     let historical_repository =
         RepositoryId::new("repository.production").expect("historical repository id");
     let _historical_route = registry
@@ -516,10 +518,8 @@ async fn unreadable_pending_replay_is_discarded_before_fresh_publication() {
         .expect("historical sealed state digest"),
         projector_revision,
     };
-    // The historical fixture is sealed at the retired manifest revision seven,
-    // so the current reader refuses it at the revision gate, before the row
-    // evidence it also predates, and before the source-commitment check. The
-    // code-index suite pins the same refusal against these bytes.
+    // The historical manifest is sealed at a retired manifest revision, so the
+    // current reader refuses it at the revision gate.
     let refused = registry
         .graph_manifest_provider
         .hydrate_sealed_code_generation(
@@ -539,7 +539,9 @@ async fn unreadable_pending_replay_is_discarded_before_fresh_publication() {
             &refused,
             GraphDbError::SealedRevisionIncompatible { sealed_state_digest, message }
                 if sealed_state_digest == &format!("sha256:{historical_digest}")
-                    && message.contains("sealed generation format revision 7 predates this build")
+                    && message.contains(&format!(
+                        "sealed generation format revision {RETIRED_FORMAT_REVISION} predates this build"
+                    ))
         ),
         "unexpected error: {refused}"
     );

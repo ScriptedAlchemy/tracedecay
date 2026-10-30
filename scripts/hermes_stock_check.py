@@ -355,14 +355,13 @@ def main():
     assert schema_names == ["fact_store", "fact_feedback", "memory_status"], schema_names
     ok("memory tool schemas collapsed to fact_store/fact_feedback/memory_status")
 
-    # The shipped fixed-action compatibility wire still dispatches through the
-    # canonical fact-store contract without expanding the public schema.
     assert_tool_dispatch_success(
         provider.handle_tool_call(
-            "fact_add",
+            "fact_store",
             {
+                "action": "add",
                 "content": "stock hermes integration verified",
-                "fact_type": "decision",
+                "category": "decision",
                 "format": "json",
             },
         )
@@ -454,8 +453,13 @@ def main():
     isolation_marker = "stock hermes project two isolated"
     assert_tool_dispatch_success_when_ready(
         lambda: other_provider.handle_tool_call(
-            "fact_add",
-            {"content": isolation_marker, "fact_type": "decision", "format": "json"},
+            "fact_store",
+            {
+                "action": "add",
+                "content": isolation_marker,
+                "category": "decision",
+                "format": "json",
+            },
         )
     )
     first_project_result = plugin.call_tracedecay_json(

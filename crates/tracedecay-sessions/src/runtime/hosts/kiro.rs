@@ -1,13 +1,10 @@
 //! AWS Kiro IDE transcript source.
 //!
 //! Kiro persists chat history under VS Code-style globalStorage at
-//! `Kiro/User/globalStorage/kiro.kiroagent`. Two layouts are supported:
-//!
-//! * **Legacy**, `<workspace-hash>/<execution-id>.chat` JSON with a `chat`
-//!   array (`human`/`bot` roles) and `metadata` (model, workflow id, times).
-//! * **Modern**, extensionless execution JSON under workspace hash dirs or
-//!   `workspace-sessions/<encoded-workspace-path>/<session-id>.json` with a
-//!   top-level `messages`/`conversation`/`chat` array.
+//! `Kiro/User/globalStorage/kiro.kiroagent`. Extensionless execution JSON lives
+//! under workspace hash dirs or
+//! `workspace-sessions/<encoded-workspace-path>/<session-id>.json`, with a
+//! top-level `messages`/`conversation`/`transcript`/`entries`/`events` array.
 //!
 //! Project scoping resolves each workspace hash via
 //! `Kiro/User/workspaceStorage/<hash>/workspace.json` (`folder` field) or, for
@@ -46,7 +43,7 @@ use crate::runtime::snapshot_observation::{
 };
 use crate::runtime::source::{
     TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
-    collect_files_with_ext_bounded, content_hash64, read_snapshot_file_bounded,
+    content_hash64, read_snapshot_file_bounded,
 };
 use serde_json::{Map, Value};
 #[cfg(test)]
@@ -258,7 +255,7 @@ fn collect_user_workspace_session_files(
 /// Captures bounded Kiro snapshots through the daemon-owned observation authority.
 ///
 /// This deliberately re-reads complete snapshots and derives a new source generation
-/// from their content hash; it neither consults nor advances legacy parse offsets.
+/// from their content hash; it neither consults nor advances append-only parse offsets.
 /// `max_new_bytes` is one logical source-byte budget for the complete sweep.
 #[tracing::instrument(name = "sessions.hosts.kiro.capture", level = "trace", skip_all)]
 pub async fn capture_kiro_snapshot_observations(
@@ -452,19 +449,7 @@ fn collect_agent_storage_files(
 
     let mut out = Vec::new();
     for (_, workspace_dir, _) in workspace_dirs {
-        let mut workspace_files = collect_files_with_ext_bounded(
-            &workspace_dir,
-            "chat",
-            MAX_SCAN_DEPTH,
-            TranscriptDiscoveryBounds::from_discovered_units(MAX_TRANSCRIPTS_PER_WORKSPACE),
-        )
-        .paths
-        .into_iter()
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
-        workspace_files.sort();
-        workspace_files.dedup();
-        workspace_files.truncate(MAX_TRANSCRIPTS_PER_WORKSPACE);
+        let mut workspace_files = Vec::new();
         collect_extensionless_execution_files(&workspace_dir, MAX_SCAN_DEPTH, &mut workspace_files);
         workspace_files.sort();
         workspace_files.dedup();
@@ -520,19 +505,7 @@ fn collect_user_agent_storage_files(
 
     let mut out = Vec::new();
     for (_, workspace_dir) in workspace_dirs {
-        let mut workspace_files = collect_files_with_ext_bounded(
-            &workspace_dir,
-            "chat",
-            MAX_SCAN_DEPTH,
-            TranscriptDiscoveryBounds::from_discovered_units(MAX_TRANSCRIPTS_PER_WORKSPACE),
-        )
-        .paths
-        .into_iter()
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
-        workspace_files.sort();
-        workspace_files.dedup();
-        workspace_files.truncate(MAX_TRANSCRIPTS_PER_WORKSPACE);
+        let mut workspace_files = Vec::new();
         collect_extensionless_execution_files(&workspace_dir, MAX_SCAN_DEPTH, &mut workspace_files);
         workspace_files.sort();
         workspace_files.dedup();
@@ -721,22 +694,6 @@ fn messages_from_transcript(
     model: Option<&str>,
     location_cwd: &Path,
 ) -> TranscriptIngestResult<Vec<SessionMessageRecord>> {
-    if let Some(chat) = value.get("chat").and_then(Value::as_array) {
-        if chat.len() > MAX_MESSAGES_PER_SNAPSHOT {
-            return Err(non_durable(
-                path,
-                "snapshot message count exceeds provider bound",
-            ));
-        }
-        return Ok(legacy_chat_messages(
-            chat,
-            session_id,
-            path,
-            model,
-            value.get("metadata"),
-            location_cwd,
-        ));
-    }
     for key in [
         "messages",
         "conversation",
@@ -751,7 +708,7 @@ fn messages_from_transcript(
                     "snapshot message count exceeds provider bound",
                 ));
             }
-            return Ok(modern_messages(
+            return Ok(snapshot_messages(
                 messages,
                 session_id,
                 path,
@@ -763,61 +720,7 @@ fn messages_from_transcript(
     Err(non_durable(path, "unsupported snapshot message layout"))
 }
 
-fn legacy_chat_messages(
-    chat: &[Value],
-    session_id: &str,
-    path: &Path,
-    model: Option<&str>,
-    metadata: Option<&Value>,
-    location_cwd: &Path,
-) -> Vec<SessionMessageRecord> {
-    let base_ts = metadata
-        .and_then(|meta| meta.get("startTime"))
-        .and_then(parse_timestamp_secs);
-    let mut out = Vec::new();
-    let mut fallback_occurrences = BTreeMap::new();
-    for (index, entry) in chat.iter().enumerate() {
-        let role = match entry.get("role").and_then(Value::as_str) {
-            Some("human" | "user") => "user",
-            Some("bot" | "assistant" | "model") => "assistant",
-            _ => continue,
-        };
-        let content = entry.get("content").unwrap_or(entry);
-        let (text, tool_names) = content_storage_text_and_tools(content, entry.get("tool_calls"));
-        if text.trim().is_empty() {
-            continue;
-        }
-        let occurrence =
-            if string_field(entry, &["id", "messageId", "message_id", "eventId"]).is_none() {
-                let next = fallback_occurrences
-                    .entry((role.to_string(), None::<i64>, text.clone()))
-                    .or_insert(0);
-                let occurrence = *next;
-                *next += 1;
-                occurrence
-            } else {
-                0
-            };
-        out.push(SessionMessageRecord {
-            provider: PROVIDER.to_string(),
-            message_id: stable_message_id(session_id, entry, role, None, occurrence, &text),
-            session_id: session_id.to_string(),
-            role: role.to_string(),
-            timestamp: base_ts.map(|ts| ts + index as i64),
-            ordinal: index as i64,
-            text,
-            kind: Some("message".to_string()),
-            model: model.map(str::to_string),
-            tool_names: (!tool_names.is_empty()).then(|| tool_names.join(",")),
-            source_path: Some(path.to_string_lossy().to_string()),
-            source_offset: Some(index as i64),
-            metadata_json: serde_json::to_string(&message_metadata(entry, Some(location_cwd))).ok(),
-        });
-    }
-    out
-}
-
-fn modern_messages(
+fn snapshot_messages(
     messages: &[Value],
     session_id: &str,
     path: &Path,

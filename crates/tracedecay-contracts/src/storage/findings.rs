@@ -42,7 +42,7 @@ const fn kind_slug(kind: DoctorStorageFindingKindV1) -> &'static str {
         DoctorStorageFindingKindV1::IncidentDebrisPresent => "incident_debris_present",
         DoctorStorageFindingKindV1::RetentionBacklog => "retention_backlog",
         DoctorStorageFindingKindV1::TableGrowth => "table_growth",
-        DoctorStorageFindingKindV1::PendingSchemaMigration => "pending_schema_migration",
+        DoctorStorageFindingKindV1::SchemaConvergenceIncomplete => "schema_convergence_incomplete",
         DoctorStorageFindingKindV1::WalCheckpointPinned => "wal_checkpoint_pinned",
     }
 }
@@ -67,22 +67,21 @@ pub fn wal_checkpoint_pinned_finding(
     DoctorStorageFindingV1::new(kind, finding)
 }
 
-/// Report a store whose historical schema migrations have not completed.
+/// Report a store whose background schema convergence has not completed.
 ///
-/// These migrations cost what the store costs: a full index rebuild, a
-/// whole-table rewrite, so they run as background convergence after
-/// admission rather than inside an open's write lease, and the daemon serves
-/// while they run. `state` carries what the convergence authority observed:
-/// `Stale` while a store is behind its current schema but readable, and
-/// `Degraded` once a migration has stopped on a failure. Coverage is complete
-/// either way; the state is observed, not inferred.
-pub fn pending_schema_migration_finding(
+/// Convergence runs the authority-invariant audit, whose cost scales with the
+/// store, after admission rather than inside an open's write lease, and the
+/// daemon serves while it runs. `state` carries what the convergence authority
+/// observed: `Stale` while it is pending or running, and `Degraded` once it
+/// has stopped on a failure. Coverage is complete either way; the state is
+/// observed, not inferred.
+pub fn schema_convergence_incomplete_finding(
     store: &StoreKeyV1,
     state: DoctorEvidenceStateV1,
     detail: &str,
     coverage_statement: &str,
 ) -> Result<DoctorStorageFindingV1, ApplicationContractError> {
-    let kind = DoctorStorageFindingKindV1::PendingSchemaMigration;
+    let kind = DoctorStorageFindingKindV1::SchemaConvergenceIncomplete;
     let finding = problem_finding(
         kind,
         store,

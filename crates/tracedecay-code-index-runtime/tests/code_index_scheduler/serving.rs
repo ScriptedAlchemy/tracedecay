@@ -292,7 +292,7 @@ fn production_text_serving_builds_publishes_and_reopens_the_artifact_head() {
         .generation_index
         .iter()
         .find(|entry| entry.generation_id == active_generation)
-        .and_then(|entry| entry.text_artifact())
+        .and_then(|entry| entry.text_artifact.as_ref())
         .expect("restart artifact descriptor");
     if cfg!(unix) {
         let witness = CodeLexicalArtifactRestoreWitnessV1::decode(
@@ -561,7 +561,7 @@ fn retained_text_generation_reaches_query_owners_without_full_sealed_decode() {
         .expect("active pointer");
     retained_history_update.generation_index.clear();
     retained_history_update.generation_index_truncated = true;
-    retained_history_update.generation_index_digest = None;
+    retained_history_update.generation_index_digest = String::new();
     assert!(
         binding.matches(Some(&retained_history_update)),
         "retention-history changes must not supersede the same active seal"

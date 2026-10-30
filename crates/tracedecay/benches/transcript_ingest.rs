@@ -206,7 +206,7 @@ fn write_codex_fixture(sandbox: &Sandbox, config: &BenchConfig) -> PathBuf {
                 serde_json::json!({
                     "timestamp": timestamp(index),
                     "type": "event_msg",
-                    "payload": {"type": "user_message", "message": text}
+                    "payload": user_message_payload(text)
                 })
             } else {
                 serde_json::json!({
@@ -457,4 +457,21 @@ fn main() {
             outcome.report(&config);
         }
     });
+}
+
+/// Current Codex `item_completed/UserMessage` payload; the item id is derived
+/// from the text, so identical prompts share one message identity.
+fn user_message_payload(text: impl AsRef<str>) -> serde_json::Value {
+    let text = text.as_ref();
+    let id = text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    });
+    serde_json::json!({
+        "type": "item_completed",
+        "item": {
+            "type": "UserMessage",
+            "id": format!("user-item-{id:016x}"),
+            "content": [{"type": "text", "text": text}],
+        },
+    })
 }

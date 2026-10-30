@@ -119,6 +119,7 @@ describe('Brain exact interaction identity', () => {
         family: 'heartbeat',
         streamId: 'heartbeat',
         at: Date.now(),
+        detail: null,
       },
     ];
     stream.revision = 1;

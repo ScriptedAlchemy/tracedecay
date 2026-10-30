@@ -1,13 +1,12 @@
 //! Incident-debris detection and deletion (Plan 38 §5).
 
-use std::io;
 use std::path::{Path, PathBuf};
 
-use cap_fs_ext::{DirExt, ambient_authority};
+use cap_fs_ext::ambient_authority;
 use cap_std::fs::Dir;
 use tracedecay_contracts::storage::{
-    IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1,
-    RETIRED_BRANCH_STORE_DIRECTORY, RelativeArtifactPathV1, StorageByteSizeV1, StoreKeyV1,
+    IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1, RelativeArtifactPathV1,
+    StorageByteSizeV1, StoreKeyV1,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_private_fs::capability_dir::sync_directory;
@@ -66,10 +65,9 @@ impl StoreDebrisCapability {
     }
 }
 
-/// Deletes every classified loose debris file beside each census store, plus
-/// every file of the retired `branches/` store directory and that directory
-/// once empty. Only regular files reached through the store capability without
-/// following symlinks are removed; no other directory is debris.
+/// Deletes every classified loose debris file beside each census store. Only
+/// regular files reached through the store capability without following
+/// symlinks are removed; no directory is debris.
 #[must_use]
 #[tracing::instrument(name = "maintenance.incident_debris.sweep", level = "trace", skip_all)]
 pub fn sweep_incident_debris(
@@ -132,31 +130,9 @@ pub fn scan_incident_debris(
                 continue;
             }
         };
-        // Store subdirectories other than the retired branch-store directory
-        // are never debris; anything that is neither a directory nor a
-        // regular file makes the listing partial.
+        // Store subdirectories are never debris; anything that is neither a
+        // directory nor a regular file makes the listing partial.
         if file_type.is_dir() {
-            if name == RETIRED_BRANCH_STORE_DIRECTORY {
-                match list_retired_branch_store(&capability.root) {
-                    Ok(listing) => {
-                        listing_complete &= listing.complete;
-                        for (file_name, size_bytes) in listing.files {
-                            let path = format!("{RETIRED_BRANCH_STORE_DIRECTORY}/{file_name}");
-                            match application_artifact(
-                                &store,
-                                &path,
-                                IncidentDebrisKindV1::RetiredBranchStore,
-                                size_bytes,
-                                observed_at,
-                            ) {
-                                Some(artifact) => artifacts.push(artifact),
-                                None => listing_complete = false,
-                            }
-                        }
-                    }
-                    Err(_) => listing_complete = false,
-                }
-            }
             continue;
         }
         if !file_type.is_file() {
@@ -218,7 +194,6 @@ fn delete_loose_debris(capability: &StoreDebrisCapability, report: &mut Incident
         }
     };
     let mut debris = Vec::new();
-    let mut retired_branch_store = false;
     for listed in entries {
         let Ok(listed) = listed else {
             push_failure(
@@ -232,12 +207,6 @@ fn delete_loose_debris(capability: &StoreDebrisCapability, report: &mut Incident
         let Some(name) = name.to_str() else {
             continue;
         };
-        if name == RETIRED_BRANCH_STORE_DIRECTORY
-            && listed.file_type().is_ok_and(|file_type| file_type.is_dir())
-        {
-            retired_branch_store = true;
-            continue;
-        }
         if IncidentDebrisKindV1::classify(name).is_none() {
             continue;
         }
@@ -267,9 +236,6 @@ fn delete_loose_debris(capability: &StoreDebrisCapability, report: &mut Incident
         report.collected = report.collected.saturating_add(1);
         report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(size_bytes);
     }
-    if retired_branch_store {
-        removed |= delete_retired_branch_store(capability, report);
-    }
     if removed && sync_directory(&capability.root).is_err() {
         push_failure(
             report,
@@ -277,104 +243,6 @@ fn delete_loose_debris(capability: &StoreDebrisCapability, report: &mut Incident
             IncidentDebrisFailureKind::RemoveFailed,
         );
     }
-}
-
-struct RetiredBranchStoreListing {
-    directory: Dir,
-    files: Vec<(String, u64)>,
-    /// False when an entry could not be read or was not a regular file; such
-    /// entries are left in place and keep the directory.
-    complete: bool,
-}
-
-/// Opens the retired `branches/` directory without following a symlink, so a
-/// swapped link can never redirect deletion onto live store files.
-fn list_retired_branch_store(root: &Dir) -> io::Result<RetiredBranchStoreListing> {
-    let directory = root.open_dir_nofollow(RETIRED_BRANCH_STORE_DIRECTORY)?;
-    let mut files = Vec::new();
-    let mut complete = true;
-    for listed in directory.entries()? {
-        let Ok(listed) = listed else {
-            complete = false;
-            continue;
-        };
-        let name = listed.file_name();
-        match (name.to_str(), listed.metadata()) {
-            (Some(name), Ok(metadata)) if metadata.is_file() => {
-                files.push((name.to_owned(), metadata.len()));
-            }
-            _ => complete = false,
-        }
-    }
-    Ok(RetiredBranchStoreListing {
-        directory,
-        files,
-        complete,
-    })
-}
-
-/// Deletes every regular file of the retired `branches/` directory, then the
-/// directory itself once nothing else remains in it. Returns whether the store
-/// root changed and needs a directory sync.
-fn delete_retired_branch_store(
-    capability: &StoreDebrisCapability,
-    report: &mut IncidentDebrisSweepReport,
-) -> bool {
-    let Ok(listing) = list_retired_branch_store(&capability.root) else {
-        push_failure(
-            report,
-            &capability.store_id,
-            IncidentDebrisFailureKind::InspectFailed,
-        );
-        return false;
-    };
-    let mut emptied = listing.complete;
-    if !listing.complete {
-        push_failure(
-            report,
-            &capability.store_id,
-            IncidentDebrisFailureKind::InspectFailed,
-        );
-    }
-    let mut removed = false;
-    for (name, size_bytes) in listing.files {
-        if listing.directory.remove_file(&name).is_err() {
-            emptied = false;
-            push_failure(
-                report,
-                &capability.store_id,
-                IncidentDebrisFailureKind::RemoveFailed,
-            );
-            continue;
-        }
-        removed = true;
-        report.collected = report.collected.saturating_add(1);
-        report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(size_bytes);
-    }
-    if removed && sync_directory(&listing.directory).is_err() {
-        push_failure(
-            report,
-            &capability.store_id,
-            IncidentDebrisFailureKind::RemoveFailed,
-        );
-    }
-    drop(listing.directory);
-    if !emptied {
-        return false;
-    }
-    if capability
-        .root
-        .remove_dir(RETIRED_BRANCH_STORE_DIRECTORY)
-        .is_err()
-    {
-        push_failure(
-            report,
-            &capability.store_id,
-            IncidentDebrisFailureKind::RemoveFailed,
-        );
-        return false;
-    }
-    true
 }
 
 fn application_artifact(
@@ -421,7 +289,7 @@ mod tests {
             manifest_root: None,
             last_write_secs: NOW,
             size_bytes: 0,
-            expected_store_relpath: "stores/store.debris".to_string(),
+            expected_store_relpath: "projects/store.debris".to_string(),
             expected_created_at: 0,
             expected_last_write_at: None,
             expected_payload_mtime_secs: NOW,
@@ -434,7 +302,7 @@ mod tests {
     #[test]
     fn sweep_deletes_loose_debris_immediately_and_preserves_live_files() {
         let profile = tempfile::tempdir().unwrap();
-        let store_root = profile.path().join("stores/store.debris");
+        let store_root = profile.path().join("projects/store.debris");
         std::fs::create_dir_all(store_root.join("payloads")).unwrap();
         let debris = store_root.join("sessions.db.corrupt-incident");
         let scratch = store_root.join("recovery-scratch-incident");
@@ -486,7 +354,7 @@ mod tests {
     #[test]
     fn directories_are_never_debris_even_with_a_debris_name() {
         let profile = tempfile::tempdir().unwrap();
-        let store_root = profile.path().join("stores/store.debris");
+        let store_root = profile.path().join("projects/store.debris");
         let named = store_root.join("graph.db.recovered-dir");
         std::fs::create_dir_all(&named).unwrap();
         std::fs::write(named.join("payload"), b"store data").unwrap();
@@ -506,7 +374,7 @@ mod tests {
     fn sweep_never_follows_a_debris_named_symlink() {
         let profile = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        let store_root = profile.path().join("stores/store.debris");
+        let store_root = profile.path().join("projects/store.debris");
         std::fs::create_dir_all(&store_root).unwrap();
         let target = outside.path().join("precious.db");
         std::fs::write(&target, b"not debris").unwrap();
@@ -518,25 +386,6 @@ mod tests {
         assert_eq!(report.collected, 0);
         assert!(link.symlink_metadata().is_ok());
         assert_eq!(std::fs::read(&target).unwrap(), b"not debris");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn sweep_never_follows_a_symlinked_retired_branch_directory() {
-        let profile = tempfile::tempdir().unwrap();
-        let store_root = profile.path().join("stores/store.debris");
-        std::fs::create_dir_all(store_root.join("live")).unwrap();
-        let live = store_root.join("live/tracedecay.db");
-        std::fs::write(&live, b"live database").unwrap();
-        std::os::unix::fs::symlink(store_root.join("live"), store_root.join("branches")).unwrap();
-
-        let scan = scan_incident_debris(&entry(&store_root), profile.path(), NOW).unwrap();
-        assert!(scan.is_empty());
-        let report = sweep_incident_debris(&[entry(&store_root)], profile.path());
-
-        assert_eq!(report.collected, 0);
-        assert_eq!(std::fs::read(&live).unwrap(), b"live database");
-        assert!(store_root.join("branches").symlink_metadata().is_ok());
     }
 
     #[test]

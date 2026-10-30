@@ -28,7 +28,7 @@ pub(super) fn publish_record_atomically(
     let publish = (|| {
         #[cfg(windows)]
         let mut file =
-            crate::windows_security::create_private_file(temporary).map_err(|error| {
+            tracedecay_private_fs::windows::create_private_file(temporary).map_err(|error| {
                 access_io_error(&format!("create {record_name}"), temporary, &error)
             })?;
         #[cfg(not(windows))]
@@ -42,7 +42,7 @@ pub(super) fn publish_record_atomically(
         drop(file);
         replace_file_atomically(temporary, destination, record_name)?;
         #[cfg(windows)]
-        crate::windows_security::validate_private_file(destination).map_err(|error| {
+        tracedecay_private_fs::windows::validate_private_file(destination).map_err(|error| {
             access_io_error(
                 &format!("validate published {record_name}"),
                 destination,
@@ -61,7 +61,7 @@ pub(super) fn read_record_strict(path: &Path, record_name: &str) -> Result<Optio
     const MAX_RECORD_BYTES: u64 = 4096;
 
     #[cfg(windows)]
-    let file = match crate::windows_security::open_private_file(path) {
+    let file = match tracedecay_private_fs::windows::open_private_file(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {

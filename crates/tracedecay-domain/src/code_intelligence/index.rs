@@ -253,8 +253,8 @@ pub struct CodeGenerationManifestV1 {
     pub parent_generation: Option<CodeGenerationId>,
     /// Source identities computed after canonical chunk materialization and
     /// authenticated by `seal.expected_digest`. `None` exists only while the
-    /// production planner is materializing that source or when historical
-    /// bytes predate source commitments; published readers reject it typed.
+    /// production planner is materializing that source; published readers
+    /// refuse it as a contract failure.
     pub source_commitments: Option<CodeGenerationSourceCommitmentsV1>,
     pub seal: GenerationSealV1,
 }

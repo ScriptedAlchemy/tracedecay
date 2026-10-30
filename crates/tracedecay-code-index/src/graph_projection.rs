@@ -258,8 +258,7 @@ impl From<GraphDbError> for CodeGraphProjectionError {
             GraphDbError::Corrupt { message } => Self::Corrupt(message),
             GraphDbError::Unavailable { message }
             | GraphDbError::SealedStoreImmutable { message } => Self::Unavailable(message),
-            error @ (GraphDbError::SourceCommitmentsUnavailable { .. }
-            | GraphDbError::SealedRevisionIncompatible { .. }
+            error @ (GraphDbError::SealedRevisionIncompatible { .. }
             | GraphDbError::SealSuperseded) => Self::Unavailable(error.to_string()),
             GraphDbError::DurabilityUncertain { message } => Self::DurabilityUncertain(message),
             GraphDbError::Closed => Self::Closed,

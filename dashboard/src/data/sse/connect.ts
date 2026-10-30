@@ -46,9 +46,8 @@ export interface LiveActivityPulse {
   /** Client receipt time (ms since epoch). */
   at: number;
   /** The daemon's bounded detail word for the pulse (`leased`, `file_edit`,
-   * …) when the family carried one; `null` when the frame named none. Absent
-   * on pulses built before this field existed. */
-  detail?: string | null;
+   * …) when the family carried one; `null` when the frame named none. */
+  detail: string | null;
 }
 
 export interface SseConnection {

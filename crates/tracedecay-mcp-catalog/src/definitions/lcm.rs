@@ -182,8 +182,6 @@ pub(super) fn lcm_grep_schema() -> Value {
             },
             "start_time": time_filter_schema("Optional inclusive minimum raw-message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like 'last hour'."),
             "end_time": time_filter_schema("Optional inclusive maximum raw-message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like 'last hour'."),
-            "since": time_filter_schema("Alias for start_time."),
-            "until": time_filter_schema("Alias for end_time."),
             "limit": {
                 "type": "integer",
                 "minimum": 1,

@@ -6,7 +6,7 @@ use sha2::{Digest as _, Sha256};
 /// Native Codex record shape that carried a rendered goal context.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CodexGoalContextSource {
-    /// Legacy/user `response_item.message` representation.
+    /// User `response_item.message` representation.
     ResponseItem,
     /// Current `event_msg.item_completed/UserMessage` representation.
     ItemCompleted,
@@ -31,7 +31,7 @@ impl CodexGoalContextCorrelation {
     }
 }
 
-/// Collect visible text from current and legacy Codex content bags.
+/// Collect visible text from current Codex content bags.
 pub fn codex_message_visible_text(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),

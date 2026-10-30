@@ -67,7 +67,7 @@ fn refusal(result: Result<ToolResult, TraceDecayError>) -> String {
 /// `kind code [legal actions]: message`.
 fn problem_refusal(result: Result<ToolResult, TraceDecayError>) -> String {
     let result = result.expect("a daemon refusal renders as a tool result");
-    assert_eq!(result.semantic_error(), Some(true), "{}", result.value);
+    assert!(result.semantic_error(), "{}", result.value);
     let problem = &result.value["structuredContent"]["problem"];
     let actions = problem["legal_actions"]
         .as_array()

@@ -2848,7 +2848,7 @@ function doctorFindingsEnvelope(): Record<string, unknown> {
           'incident_debris_present',
           'retention_backlog',
           'table_growth',
-          'pending_schema_migration',
+          'schema_convergence_incomplete',
         ] as const
       ).map((kind) => ({
         kind,

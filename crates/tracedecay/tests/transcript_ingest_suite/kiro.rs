@@ -41,51 +41,6 @@ fn encode_workspace_path(path: &std::path::Path) -> String {
     out.replace('/', "_")
 }
 
-fn write_legacy_chat(
-    home: &std::path::Path,
-    project: &std::path::Path,
-    workspace_hash: &str,
-    execution_id: &str,
-) -> std::path::PathBuf {
-    let data_dir = tracedecay_agent_hosts::agents::kiro_data_dir(home);
-    let ws_storage = data_dir.join("User/workspaceStorage").join(workspace_hash);
-    std::fs::create_dir_all(&ws_storage).unwrap();
-    std::fs::write(
-        ws_storage.join("workspace.json"),
-        serde_json::json!({
-            "folder": url::Url::from_file_path(project)
-                .expect("project has a portable file URI")
-                .to_string()
-        })
-        .to_string(),
-    )
-    .unwrap();
-
-    let agent_dir = data_dir
-        .join("User/globalStorage/kiro.kiroagent")
-        .join(workspace_hash);
-    std::fs::create_dir_all(&agent_dir).unwrap();
-    let chat_path = agent_dir.join(format!("{execution_id}.chat"));
-    std::fs::write(
-        &chat_path,
-        serde_json::to_string_pretty(&serde_json::json!({
-            "executionId": execution_id,
-            "chat": [
-                {"role": "human", "content": "Investigate the billing pipeline regression"},
-                {"role": "bot", "content": "The billing pipeline regression is fixed."}
-            ],
-            "metadata": {
-                "workflowId": "kiro-workflow-1",
-                "modelId": "claude-sonnet-4.6",
-                "startTime": 1_800_000_000_i64
-            }
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    chat_path
-}
-
 fn write_workspace_session_json(
     home: &std::path::Path,
     project: &std::path::Path,
@@ -151,59 +106,6 @@ fn write_extensionless_execution(
     )
     .unwrap();
     path
-}
-
-#[tokio::test]
-async fn kiro_legacy_chat_populates_searchable_messages() {
-    let tmp = TempDir::new().unwrap();
-    let (home, project) = setup(&tmp);
-    let linked_worktree = tmp.path().join("linked-worktree");
-    create_git_repo_with_linked_worktree(&project, &linked_worktree);
-    write_legacy_chat(
-        &home,
-        &linked_worktree,
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "exec-1",
-    );
-
-    let db = open_project_session_db(&project).await.unwrap();
-    let stats =
-        ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Kiro)).await;
-    assert_eq!(stats.messages_upserted, 2);
-
-    let results = db
-        .search_session_messages(
-            "kiro",
-            Some(db.project_id().as_str()),
-            "billing pipeline",
-            10,
-        )
-        .await;
-    assert_eq!(results.len(), 2);
-    assert!(results.iter().any(|hit| {
-        hit.message.model.as_deref() == Some("claude-sonnet-4-6")
-            || hit.message.model.as_deref() == Some("claude-sonnet-4.6")
-    }));
-    let session = db.get_session("kiro", "kiro-workflow-1").await.unwrap();
-    assert_eq!(session.started_at, Some(1_800_000_000));
-    assert_eq!(session.ended_at, Some(1_800_000_001));
-    let first = results
-        .iter()
-        .find(|hit| hit.message.ordinal == 0)
-        .expect("first Kiro message");
-    assert_eq!(first.message.timestamp, Some(1_800_000_000));
-    let second = results
-        .iter()
-        .find(|hit| hit.message.ordinal == 1)
-        .expect("second Kiro message");
-    assert_eq!(second.message.timestamp, Some(1_800_000_001));
-
-    assert_eq!(
-        ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Kiro))
-            .await
-            .messages_upserted,
-        0
-    );
 }
 
 #[tokio::test]
@@ -449,7 +351,7 @@ async fn kiro_transcript_for_other_project_is_skipped() {
     let (home, project) = setup(&tmp);
     let other = tmp.path().join("other-project");
     std::fs::create_dir_all(&other).unwrap();
-    write_legacy_chat(
+    write_extensionless_execution(
         &home,
         &other,
         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -471,7 +373,7 @@ async fn kiro_user_scope_includes_only_unregistered_sessions() {
     let (home, project) = setup(&tmp);
     let projectless = tmp.path().join("general-chat");
     std::fs::create_dir_all(&projectless).unwrap();
-    write_legacy_chat(
+    write_extensionless_execution(
         &home,
         &project,
         "cccccccccccccccccccccccccccccccc",
@@ -502,7 +404,7 @@ async fn kiro_user_scope_includes_only_unregistered_sessions() {
     );
     assert!(
         db.runtime()
-            .session_for_test(HostAdmissionScope::Profile, "kiro", "kiro-workflow-1")
+            .session_for_test(HostAdmissionScope::Profile, "kiro", "registered-exec")
             .await
             .unwrap()
             .is_none()

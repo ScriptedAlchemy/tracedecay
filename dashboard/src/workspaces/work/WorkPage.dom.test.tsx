@@ -76,7 +76,7 @@ afterEach(() => {
 });
 
 describe('the Work page over mounted routes', () => {
-  it('draws the board from the product graph without calling the legacy snapshot', async () => {
+  it('draws the board from the product graph', async () => {
     const calls: string[] = [];
     serve((url) => {
       calls.push(url);
@@ -88,8 +88,6 @@ describe('the Work page over mounted routes', () => {
     renderPage();
 
     expect(await screen.findByRole('button', { name: 'Alpha task' })).toBeTruthy();
-    expect(calls.some((url) => url.includes('/work/snapshot'))).toBe(false);
-    expect(calls.some((url) => url.includes('/work/delta'))).toBe(false);
   });
 
   it('leaves the shell its own main landmark and scrolls inside a named region', async () => {
@@ -187,7 +185,7 @@ describe('the Work page over mounted routes', () => {
     expect(screen.getByText(/Commands · Alpha task/)).toBeTruthy();
   });
 
-  it('accepts a task through the prepared product mutation and never calls the legacy command', async () => {
+  it('accepts a task through the prepared product mutation', async () => {
     const calls: string[] = [];
     const prepared = {
       mutation: 'accept_task',
@@ -237,10 +235,9 @@ describe('the Work page over mounted routes', () => {
     await waitFor(() =>
       expect(calls.some((url) => url.includes('/work/mutate-graph'))).toBe(true),
     );
-    expect(calls.some((url) => url.includes('/work/accept-task'))).toBe(false);
   });
 
-  it('applies an accepted relation replan through the product mutation and never calls the legacy command', async () => {
+  it('applies an accepted relation replan through the product mutation', async () => {
     const calls: string[] = [];
     const graph = workGraphRead({
       version: 4,
@@ -313,7 +310,6 @@ describe('the Work page over mounted routes', () => {
     await waitFor(() =>
       expect(calls.some((url) => url.includes('/work/mutate-graph'))).toBe(true),
     );
-    expect(calls.some((url) => url.includes('/work/replan-dependencies'))).toBe(false);
   });
 
   /** Keeps the narrow-width information loss from returning: the identity and

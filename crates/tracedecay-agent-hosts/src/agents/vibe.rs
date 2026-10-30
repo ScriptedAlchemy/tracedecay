@@ -290,9 +290,7 @@ fn component_registration_state(
             mcp_registration_state(config, expected_binary, Some(serve_args))
         }
         HostComponentV1::Core => prompt_registration_state(prompt),
-        HostComponentV1::Agent | HostComponentV1::OperatorMcp => {
-            HostBundleRegistrationStateV1::Missing
-        }
+        HostComponentV1::Agent => HostBundleRegistrationStateV1::Missing,
     }
 }
 

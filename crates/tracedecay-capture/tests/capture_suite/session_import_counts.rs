@@ -57,7 +57,7 @@ fn is_codex_message(value: &Value) -> bool {
                 Some("user" | "assistant")
             )
         }
-        Some("agent_message" | "user_message") => true,
+        Some("agent_message") => true,
         Some("item_completed") => matches!(
             payload.pointer("/item/type").and_then(Value::as_str),
             Some("UserMessage" | "AgentMessage")

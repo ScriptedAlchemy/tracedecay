@@ -551,7 +551,7 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
                 trigger:
                     tracedecay_automation_runtime::automation::run_ledger::AutomationTrigger::ManualCli,
                 task: tracedecay_automation_runtime::automation::backend::AgentTaskKind::MemoryCurator,
-                task_key: Some("memory_curator".to_string()),
+                task_key: "memory_curator".to_string(),
                 backend: "codex_app_server".to_string(),
                 backend_identity: None,
                 host_mode: Some("standalone".to_string()),

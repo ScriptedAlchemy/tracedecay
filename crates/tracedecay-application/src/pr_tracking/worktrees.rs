@@ -14,8 +14,8 @@ use tracedecay_runtime_core::branch::BranchAddOutcome;
 use tracedecay_runtime_core::native_runtime;
 
 use super::{
-    PrCommandControlV1, PrGitCommandError, StaleManagedPr, pr_label, pr_tracking_ref,
-    run_git_with_control, successful_git_with_control,
+    PrCommandControlV1, PrGitCommandError, pr_label, pr_tracking_ref, run_git_with_control,
+    successful_git_with_control,
 };
 
 const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
@@ -42,9 +42,6 @@ pub struct ReconcileReport {
     pub capped: bool,
     pub removals_suppressed: bool,
     pub failures: Vec<(String, String)>,
-    /// Undecodable persisted entries dropped from state; their leftover
-    /// artifacts go through the orphan sweep or a fresh track.
-    pub reset_stale: Vec<StaleManagedPr>,
 }
 
 /// Hex digits of a digest that name a branch or head in a worktree path or

@@ -74,7 +74,7 @@ pub enum RepositoryDirtyStateV1 {
 /// The captured digest never contains a URL, credential, query, or fragment.
 /// `Missing`, `Invalid`, and `Oversized` stay distinct so callers do not infer
 /// that a remote was available when the bounded probe could not retain one.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(
     tag = "availability",
     content = "value",
@@ -87,22 +87,14 @@ pub enum RepositoryRemoteIdentityV1 {
     Invalid,
     Oversized,
     Unavailable,
-    #[default]
-    Unknown,
 }
 
 impl RepositoryRemoteIdentityV1 {
     pub fn digest(&self) -> Option<&PrivacyDomainBoundLocatorDigest> {
         match self {
             Self::Known(digest) => Some(digest),
-            Self::Missing | Self::Invalid | Self::Oversized | Self::Unavailable | Self::Unknown => {
-                None
-            }
+            Self::Missing | Self::Invalid | Self::Oversized | Self::Unavailable => None,
         }
-    }
-
-    pub const fn is_unknown(&self) -> bool {
-        matches!(self, Self::Unknown)
     }
 
     fn validate(&self) -> Result<(), DomainError> {
@@ -119,10 +111,6 @@ pub struct RepositoryEvidenceV1 {
     head_commit: EvidenceAvailabilityV1<CommitId>,
     index_tree: EvidenceAvailabilityV1<TreeId>,
     path_identity_digest: EvidenceAvailabilityV1<PrivacyDomainBoundLocatorDigest>,
-    #[serde(
-        default,
-        skip_serializing_if = "RepositoryRemoteIdentityV1::is_unknown"
-    )]
     remote_identity: RepositoryRemoteIdentityV1,
     dirty_state: EvidenceAvailabilityV1<RepositoryDirtyStateV1>,
 }
@@ -134,7 +122,6 @@ struct RepositoryEvidenceWireV1 {
     head_commit: EvidenceAvailabilityV1<CommitId>,
     index_tree: EvidenceAvailabilityV1<TreeId>,
     path_identity_digest: EvidenceAvailabilityV1<PrivacyDomainBoundLocatorDigest>,
-    #[serde(default)]
     remote_identity: RepositoryRemoteIdentityV1,
     dirty_state: EvidenceAvailabilityV1<RepositoryDirtyStateV1>,
 }
@@ -522,7 +509,7 @@ mod tests {
             EvidenceAvailabilityV1::Unborn,
             EvidenceAvailabilityV1::Unavailable,
             EvidenceAvailabilityV1::Unknown,
-            RepositoryRemoteIdentityV1::Unknown,
+            RepositoryRemoteIdentityV1::Unavailable,
             EvidenceAvailabilityV1::Unknown,
         )
         .unwrap();
@@ -537,37 +524,7 @@ mod tests {
         );
         assert_eq!(
             round_trip.remote_identity(),
-            &RepositoryRemoteIdentityV1::Unknown
-        );
-    }
-
-    #[test]
-    fn legacy_unknown_remote_identity_preserves_capture_identity() {
-        let legacy_evidence = RepositoryEvidenceV1::new(
-            EvidenceAvailabilityV1::Known(id("refs/heads/main")),
-            EvidenceAvailabilityV1::Known(id(COMMIT)),
-            EvidenceAvailabilityV1::Known(id(TREE)),
-            EvidenceAvailabilityV1::Known(id(DIGEST_B)),
-            RepositoryRemoteIdentityV1::Unknown,
-            EvidenceAvailabilityV1::Known(RepositoryDirtyStateV1::Clean),
-        )
-        .unwrap();
-        let capture = RepositoryProvenanceV1::new(
-            id("repository.legacy-fixture"),
-            Some(id("project.fixture")),
-            Some(id("worktree.fixture")),
-            id(DIGEST_A),
-            legacy_evidence,
-            UtcMicros(42),
-        )
-        .unwrap();
-        let encoded = serde_json::to_value(&capture).unwrap();
-        assert!(encoded["evidence"].get("remote_identity").is_none());
-        let decoded: RepositoryProvenanceV1 = serde_json::from_value(encoded).unwrap();
-        assert_eq!(decoded.capture_id(), capture.capture_id());
-        assert_eq!(
-            decoded.evidence().remote_identity(),
-            &RepositoryRemoteIdentityV1::Unknown
+            &RepositoryRemoteIdentityV1::Unavailable
         );
     }
 

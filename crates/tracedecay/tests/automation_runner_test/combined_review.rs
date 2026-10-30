@@ -178,7 +178,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     let reflector = &run.session_reflector.ledger_record;
     assert_eq!(reflector.run_id, "combined-run-1");
     assert_eq!(reflector.task, AgentTaskKind::SessionReflector);
-    assert_eq!(reflector.task_key.as_deref(), Some("session_reflector"));
+    assert_eq!(reflector.task_key, "session_reflector");
     assert_eq!(reflector.trigger, AutomationTrigger::Scheduler);
     assert_eq!(reflector.status, AutomationRunStatus::Succeeded);
     assert_eq!(
@@ -190,7 +190,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     let skill = &run.skill_writer.ledger_record;
     assert_eq!(skill.run_id, "combined-run-1_skills");
     assert_eq!(skill.task, AgentTaskKind::SkillWriter);
-    assert_eq!(skill.task_key.as_deref(), Some("skill_writer"));
+    assert_eq!(skill.task_key, "skill_writer");
     assert_eq!(skill.trigger, AutomationTrigger::Scheduler);
     assert_eq!(skill.status, AutomationRunStatus::Succeeded);
     assert_eq!(skill.prompt_version.as_deref(), Some("combined_review:v4"));
@@ -1077,7 +1077,7 @@ async fn combined_review_records_noop_fallbacks_for_both_tasks_when_backend_fail
     let profile_root = temp.path().join("profile");
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         timeout_secs: 1,
         ..scheduler_config(Some(3600), None)
     };

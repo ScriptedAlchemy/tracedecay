@@ -1,8 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 pub use tracedecay_domain::configuration::{
-    AutomationBackendV1 as AutomationBackend, AutomationHostModeV1 as AutomationHostMode,
-    AutomationSettingsV1 as AutomationConfig, AutomationTaskSetV1 as AutomationTaskSet,
-    AutomationTaskSettingsV1 as AutomationTaskConfig,
+    AutomationBackendV1, AutomationHostModeV1, AutomationSettingsV1, AutomationTaskSetV1,
+    AutomationTaskSettingsV1,
 };
 
 use crate::backend::AgentTaskKind;
@@ -82,9 +81,9 @@ pub struct AutomationConfigPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backend: Option<AutomationBackend>,
+    pub backend: Option<AutomationBackendV1>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host_mode: Option<AutomationHostMode>,
+    pub host_mode: Option<AutomationHostModeV1>,
     #[serde(
         default,
         deserialize_with = "deserialize_clearable_field",
@@ -119,11 +118,10 @@ where
 }
 
 pub fn effective_config(
-    global: &AutomationConfig,
+    global: &AutomationSettingsV1,
     project: Option<&AutomationConfigPatch>,
-) -> Result<AutomationConfig> {
+) -> Result<AutomationSettingsV1> {
     let mut config = global.clone();
-    config.retire_lock_timeout();
     if let Some(patch) = project {
         apply_patch(&mut config, patch);
     }
@@ -140,7 +138,7 @@ pub fn merge_project_config(
     merged
 }
 
-pub fn validate_config(config: &AutomationConfig) -> Result<()> {
+pub fn validate_config(config: &AutomationSettingsV1) -> Result<()> {
     admit_config(config).map(|_| ())
 }
 
@@ -148,12 +146,12 @@ pub fn validate_config(config: &AutomationConfig) -> Result<()> {
 /// for reports and backend identity, but cannot change independently of timing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AdmittedAutomationConfig {
-    settings: AutomationConfig,
+    settings: AutomationSettingsV1,
     schedules: [AutomationSchedule; 3],
 }
 
 impl std::ops::Deref for AdmittedAutomationConfig {
-    type Target = AutomationConfig;
+    type Target = AutomationSettingsV1;
 
     fn deref(&self) -> &Self::Target {
         &self.settings
@@ -171,9 +169,8 @@ impl AdmittedAutomationConfig {
     }
 }
 
-pub fn admit_config(config: &AutomationConfig) -> Result<AdmittedAutomationConfig> {
-    let mut config = config.clone();
-    config.retire_lock_timeout();
+pub fn admit_config(config: &AutomationSettingsV1) -> Result<AdmittedAutomationConfig> {
+    let config = config.clone();
     if config.timeout_secs == 0 {
         return Err(config_error(
             "automation timeout_secs must be greater than zero",
@@ -218,7 +215,7 @@ pub fn admit_config(config: &AutomationConfig) -> Result<AdmittedAutomationConfi
     })
 }
 
-fn apply_patch(config: &mut AutomationConfig, patch: &AutomationConfigPatch) {
+fn apply_patch(config: &mut AutomationSettingsV1, patch: &AutomationConfigPatch) {
     if let Some(enabled) = patch.enabled {
         config.enabled = enabled;
     }
@@ -249,12 +246,12 @@ fn apply_patch(config: &mut AutomationConfig, patch: &AutomationConfigPatch) {
         &patch.session_reflector,
     );
     apply_task_patch(&mut config.tasks.skill_writer, &patch.skill_writer);
-    if config.backend != AutomationBackend::CodexAppServer {
+    if config.backend != AutomationBackendV1::CodexAppServer {
         config.model_id = None;
     }
 }
 
-fn apply_task_patch(config: &mut AutomationTaskConfig, patch: &AutomationTaskPatch) {
+fn apply_task_patch(config: &mut AutomationTaskSettingsV1, patch: &AutomationTaskPatch) {
     if let Some(enabled) = patch.enabled {
         config.enabled = enabled;
     }
@@ -289,7 +286,7 @@ fn merge_patch(config: &mut AutomationConfigPatch, patch: AutomationConfigPatch)
     merge_task_patch(&mut config.skill_writer, patch.skill_writer);
     if config
         .backend
-        .is_some_and(|backend| backend != AutomationBackend::CodexAppServer)
+        .is_some_and(|backend| backend != AutomationBackendV1::CodexAppServer)
     {
         config.model_id = Some(None);
     }
@@ -313,7 +310,10 @@ fn merge_optional_field<T>(current: &mut Option<T>, patch: Option<T>) {
     }
 }
 
-fn resolve_task_schedule(task: &str, config: &AutomationTaskConfig) -> Result<AutomationSchedule> {
+fn resolve_task_schedule(
+    task: &str,
+    config: &AutomationTaskSettingsV1,
+) -> Result<AutomationSchedule> {
     resolve_schedule(config.schedule.as_deref(), config.interval_secs).map_err(
         |error| match error {
             ScheduleResolutionError::Invalid(error) => {
@@ -630,47 +630,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn effective_settings_retire_legacy_lock_timeout_and_patch_refuses_it() {
-        let mut stored = serde_json::to_value(AutomationConfig::default()).unwrap();
-        stored["tasks"]["memory_curator"]["stale_lock_secs"] = serde_json::json!(3600);
-        stored["tasks"]["session_reflector"]["stale_lock_secs"] = serde_json::Value::Null;
-        stored["timeout_secs"] = serde_json::json!(137);
-        let stored: AutomationConfig = serde_json::from_value(stored).unwrap();
-        let historical_bytes = serde_json::to_vec(&stored).unwrap();
-        let effective = effective_config(&stored, None).unwrap();
-        assert_eq!(effective.timeout_secs, 137);
-        assert!(!effective.has_retired_lock_timeout());
-        let admitted = admit_config(&stored).unwrap();
-        assert_eq!(admitted.settings, effective);
-        assert!(!admitted.has_retired_lock_timeout());
-        for (task, every_secs) in [
-            (AgentTaskKind::MemoryCurator, 900),
-            (AgentTaskKind::SessionReflector, 900),
-            (AgentTaskKind::SkillWriter, 3600),
-        ] {
-            assert_eq!(
-                admitted.schedule(task),
-                Some(AutomationSchedule::Interval { every_secs })
-            );
-        }
-        assert!(stored.has_retired_lock_timeout());
-        assert_eq!(serde_json::to_vec(&stored).unwrap(), historical_bytes);
-        for task in ["memory_curator", "session_reflector", "skill_writer"] {
-            for value in [serde_json::Value::Null, serde_json::json!(3600)] {
-                let patch = serde_json::json!({ (task): { "stale_lock_secs": value } });
-                let error = serde_json::from_value::<AutomationConfigPatch>(patch).unwrap_err();
-                assert!(
-                    error
-                        .to_string()
-                        .contains("unknown field `stale_lock_secs`")
-                );
-            }
-        }
-    }
-
-    #[test]
     fn session_evidence_budget_backoff_is_patchable_clearable_and_nonzero() {
-        let base = AutomationConfig::default();
+        let base = AutomationSettingsV1::default();
         assert_eq!(
             base.tasks
                 .session_reflector
@@ -729,14 +690,14 @@ mod tests {
 
     #[test]
     fn non_codex_backend_wins_over_model_in_the_same_patch() {
-        let current = AutomationConfig {
+        let current = AutomationSettingsV1 {
             enabled: true,
-            backend: AutomationBackend::CodexAppServer,
+            backend: AutomationBackendV1::CodexAppServer,
             model_id: Some("gpt-5.6-mini".to_owned()),
-            ..AutomationConfig::default()
+            ..AutomationSettingsV1::default()
         };
         let patch = AutomationConfigPatch {
-            backend: Some(AutomationBackend::Disabled),
+            backend: Some(AutomationBackendV1::Disabled),
             model_id: Some(Some("must-not-survive".to_owned())),
             ..AutomationConfigPatch::default()
         };
@@ -746,14 +707,14 @@ mod tests {
             effective_config(&current, Some(&patch)).expect("backend patch should be canonical");
 
         assert_eq!(merged.model_id, Some(None));
-        assert_eq!(effective.backend, AutomationBackend::Disabled);
+        assert_eq!(effective.backend, AutomationBackendV1::Disabled);
         assert_eq!(effective.model_id, None);
     }
 
     #[test]
     fn codex_model_set_and_clear_preserve_explicit_patch_intent() {
         let codex = AutomationConfigPatch {
-            backend: Some(AutomationBackend::CodexAppServer),
+            backend: Some(AutomationBackendV1::CodexAppServer),
             ..AutomationConfigPatch::default()
         };
         let set = merge_project_config(
@@ -793,7 +754,7 @@ mod tests {
                 },
                 ..AutomationConfigPatch::default()
             };
-            effective_config(&AutomationConfig::default(), Some(&patch)).unwrap();
+            effective_config(&AutomationSettingsV1::default(), Some(&patch)).unwrap();
         }
         for (schedule, detail) in [
             ("60 * * * *", "value 60 is outside 0-59"),
@@ -808,7 +769,7 @@ mod tests {
                 ..AutomationConfigPatch::default()
             };
             assert_eq!(
-                effective_config(&AutomationConfig::default(), Some(&patch))
+                effective_config(&AutomationSettingsV1::default(), Some(&patch))
                     .unwrap_err()
                     .to_string(),
                 format!(
@@ -834,7 +795,7 @@ mod tests {
 
     #[test]
     fn schedule_admission_preserves_patch_omission_clear_and_precedence() {
-        let mut base = AutomationConfig::default();
+        let mut base = AutomationSettingsV1::default();
         base.tasks.memory_curator.schedule = Some("interval".to_owned());
         base.tasks.memory_curator.interval_secs = Some(600);
         for (patch, expected) in [
@@ -881,12 +842,12 @@ mod tests {
 
     #[test]
     fn validation_rejects_zero_global_and_task_durations() {
-        let mut config = AutomationConfig {
+        let mut config = AutomationSettingsV1 {
             timeout_secs: 0,
-            ..AutomationConfig::default()
+            ..AutomationSettingsV1::default()
         };
         let rejection =
-            |config: &AutomationConfig| validate_config(config).unwrap_err().to_string();
+            |config: &AutomationSettingsV1| validate_config(config).unwrap_err().to_string();
         assert_eq!(
             rejection(&config),
             "config error: automation timeout_secs must be greater than zero"
@@ -942,7 +903,7 @@ mod tests {
             },
             ..AutomationConfigPatch::default()
         };
-        effective_config(&AutomationConfig::default(), Some(&patch)).unwrap();
+        effective_config(&AutomationSettingsV1::default(), Some(&patch)).unwrap();
         let AutomationSchedule::Cron(cron) = resolve_schedule(Some(schedule), None).unwrap() else {
             panic!("expected cron schedule");
         };

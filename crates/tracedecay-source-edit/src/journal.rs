@@ -35,9 +35,7 @@ pub(super) enum SourceEditJournalStateV1 {
         outcome: SourceEditDurableOutcomeV1,
         committed_state: ManifestDigest,
         ended_at: UtcMicros,
-        #[serde(default)]
         control_observation: Option<CancellationObservation>,
-        #[serde(default)]
         verification_state: Option<SourceEditVerificationStateV1>,
     },
 }
@@ -118,7 +116,6 @@ pub(super) struct SourceEditDurableRequestV1 {
     pub(super) deadline: tracedecay_contracts::Deadline,
     pub(super) started_at: UtcMicros,
     pub(super) dry_run: bool,
-    #[serde(default)]
     pub(super) verification_requested: bool,
 }
 
@@ -129,7 +126,6 @@ pub(super) struct SourceEditDurableResultV1 {
     pub(super) input_digest: ManifestDigest,
     pub(super) authority_proof: tracedecay_contracts::SourceEditEffectProofV1,
     pub(super) dry_run: bool,
-    #[serde(default)]
     pub(super) predicted_state: Option<ManifestDigest>,
     pub(super) outcome: SourceEditDurableOutcomeV1,
     pub(super) effect: EffectResult<Value>,
@@ -223,13 +219,6 @@ impl SourceEditDurability {
             _file: FileLease::held(file, "source_edit.writer"),
             _queued: queued,
         };
-        let obsolete_records = self.root.join("rollback-records");
-        match fs::remove_dir_all(&obsolete_records) {
-            Ok(()) => sync_parent_directory(&obsolete_records, DirectorySyncPolicy::Strict)
-                .map_err(|error| io_error("sync obsolete source edit record removal", error))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(io_error("remove obsolete source edit records", error)),
-        }
         self.load_journal()?;
         Ok(lease)
     }
@@ -266,22 +255,13 @@ impl SourceEditDurability {
     }
 
     pub(super) fn load_journal(&self) -> Result<Option<SourceEditJournalV1>> {
-        let Some(mut value) = load_record::<Value>(&self.journal_path(), "source edit journal")?
+        let Some(journal) =
+            load_record::<SourceEditJournalV1>(&self.journal_path(), "source edit journal")?
         else {
             return Ok(None);
         };
-        let mut discarded_bodies = false;
-        if let Some(object) = value.as_object_mut() {
-            discarded_bodies |= object.remove("recovery_files").is_some();
-            discarded_bodies |= object.remove("recovery_digest").is_some();
-        }
-        let journal: SourceEditJournalV1 = serde_json::from_value(value)
-            .map_err(|error| config_error(format!("invalid source edit journal: {error}")))?;
         validate_durable_authority(&journal.request.authority, &journal.request.authority_proof)?;
         journal.validate_persisted()?;
-        if discarded_bodies {
-            self.persist_journal(&journal)?;
-        }
         Ok(Some(journal))
     }
 

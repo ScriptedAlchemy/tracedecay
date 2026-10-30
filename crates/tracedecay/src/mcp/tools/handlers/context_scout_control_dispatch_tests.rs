@@ -124,7 +124,7 @@ async fn context_scout_pause_and_resume_preserve_caller_idempotency_keys() {
         .await
         .expect("Context Scout control must reach its canonical executor");
 
-        assert_eq!(result.semantic_error(), Some(true));
+        assert!(result.semantic_error());
         assert_eq!(
             result.failure_message(),
             Some("application surface unavailable")

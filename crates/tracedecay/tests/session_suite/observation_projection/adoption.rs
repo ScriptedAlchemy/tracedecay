@@ -121,30 +121,29 @@ async fn adopted_message_is_not_mutated_by_rollover_and_rebuilds_cleanly() {
         .database_path(HostAdmissionScope::Profile)
         .unwrap()
         .to_path_buf();
-    let original = observation_in_generation(
+    let original = shared_output_observation(
         "session-adopted-rollover",
         GENERATION,
         0,
         100,
         "receipt.adopted-rollover-1",
-        conversational_payload("message-adopted-rollover", "adopted original canary"),
+        "message-adopted-rollover",
+        "adopted original canary",
     );
-    let replacement = observation_in_generation(
+    let replacement = shared_output_observation(
         "session-adopted-rollover",
         GENERATION + 1,
         0,
         100,
         "receipt.adopted-rollover-2",
-        conversational_payload(
-            "message-adopted-rollover",
-            "adopted replacement must not appear",
-        ),
+        "message-adopted-rollover",
+        "adopted replacement must not appear",
     );
     persist(&store, original.clone(), None).await;
     persist(
         &store,
         replacement.clone(),
-        Some(cursor_in_generation(
+        Some(shared_output_cursor(
             "session-adopted-rollover",
             GENERATION,
             100,
@@ -156,14 +155,14 @@ async fn adopted_message_is_not_mutated_by_rollover_and_rebuilds_cleanly() {
     conn.execute(
         "INSERT INTO sessions
             (provider, session_id, project_key, project_path, is_subagent)
-         VALUES ('claude', 'session-adopted-rollover', 'user', 'user', 0)",
+         VALUES ('opencode', 'session-adopted-rollover', 'user', 'user', 0)",
         (),
     )
     .unwrap();
     insert_stored_message(
         &conn,
         SessionMessageRecord {
-            provider: "claude".to_owned(),
+            provider: "opencode".to_owned(),
             message_id: "message-adopted-rollover".to_owned(),
             session_id: "session-adopted-rollover".to_owned(),
             role: "assistant".to_owned(),
@@ -171,7 +170,7 @@ async fn adopted_message_is_not_mutated_by_rollover_and_rebuilds_cleanly() {
             ordinal: 0,
             text: "adopted original canary".to_owned(),
             kind: Some("message".to_owned()),
-            model: Some("claude-sonnet-4".to_owned()),
+            model: Some("model.fixture".to_owned()),
             tool_names: None,
             source_path: None,
             source_offset: Some(0),
@@ -182,7 +181,7 @@ async fn adopted_message_is_not_mutated_by_rollover_and_rebuilds_cleanly() {
 
     drain_projection_queue(&store).await;
     assert_eq!(projection_ownership_rows(&tmp).await, vec![0, 0]);
-    let texts = projected_message_texts(&tmp).await;
+    let texts = shared_output_message_texts(&tmp).await;
     assert_eq!(texts.len(), 1);
     assert!(texts[0].contains("adopted original canary"));
     assert!(!texts[0].contains("adopted replacement must not appear"));
@@ -199,7 +198,7 @@ async fn adopted_message_is_not_mutated_by_rollover_and_rebuilds_cleanly() {
     drain_projection_queue(&store).await;
     assert_eq!(projection_counts(&tmp).await, (1, 1, 2, 1, 0, 0));
     assert_eq!(projection_ownership_rows(&tmp).await, vec![0, 0]);
-    let texts = projected_message_texts(&tmp).await;
+    let texts = shared_output_message_texts(&tmp).await;
     assert_eq!(texts.len(), 1);
     assert!(texts[0].contains("adopted original canary"));
     assert!(!texts[0].contains("adopted replacement must not appear"));

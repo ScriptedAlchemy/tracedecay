@@ -8,49 +8,6 @@ fn absent_canonical_fact_id(existing: &FactId) -> String {
 }
 
 #[test]
-fn retired_dashboard_routes_fall_through_to_the_canonical_spa_index() {
-    let runtime = create_runtime();
-    runtime.block_on(async {
-        let fixture = start_dashboard_fixture_without_memory().await;
-        let agent = http_agent();
-        // The suite serves the fixture bundle; production placeholder-proofing
-        // lives in the CLI build script's manifest validation and the
-        // registered product-runtime provider's bundle validation.
-        let fixture_index = tracedecay_project::product_runtime::FIXTURE_DASHBOARD_ASSETS
-            .assets
-            .iter()
-            .find(|asset| asset.path == "index.html")
-            .unwrap_or_else(|| panic!("fixture bundle must carry index.html"));
-
-        for path in [
-            "/legacy",
-            "/shell/shell.js",
-            "/dashboard-plugins/savings/dist/index.js",
-        ] {
-            let mut response = agent
-                .get(format!("{}{path}", fixture.base_url))
-                .call()
-                .unwrap_or_else(|err| panic!("GET {path} failed: {err}"));
-            assert_eq!(response.status().as_u16(), 200);
-            assert_eq!(
-                response
-                    .headers()
-                    .get("content-type")
-                    .and_then(|value| value.to_str().ok()),
-                Some("text/html; charset=utf-8"),
-                "retired path must fall through to the canonical SPA, never a legacy asset"
-            );
-            let body = response.body_mut().read_to_string().unwrap();
-            assert_eq!(
-                body.as_bytes(),
-                fixture_index.contents,
-                "retired path {path} must serve the mounted SPA index byte-exact"
-            );
-        }
-    });
-}
-
-#[test]
 fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
     let runtime = create_runtime();
     runtime.block_on(async {

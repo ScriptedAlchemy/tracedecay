@@ -81,11 +81,7 @@ if [[ -z $result_json ]]; then
   echo "benchmark result marker was malformed" >&2
   exit 1
 fi
-# Stage only the new output. Historical evidence is read through symlinks,
-# without creating a second copy of any existing artifact.
-for historical in "$repo_root"/benchmark_data/claude-observation/result-*.json; do
-  ln -s "$historical" "$staging/$(basename "$historical")"
-done
+# Stage only the new output.
 printf '%s\n' "$result_json" >"$staging/$result_name"
 sed "s/\"current_acceptance\": null/\"current_acceptance\": \"$result_name\"/" \
   "$index_path" >"$staging/evidence-index.json"

@@ -111,11 +111,6 @@ copies. Pi is the MCP-free host: its extension registers the catalog tools over
 | **LSP** | `.lsp.json` | native VS Code extension (not `.lsp.json`) | **no** (typed unavailable; intentional) | **no** (intentional) | **no** (OpenCode 2 runs no LSP) | **no** (intentional) |
 | **Rules** | **no** (intentional) | yes (`rules/tracedecay.mdc`) | **no** (intentional) | **no** (intentional) | `AGENTS.md` is Core instruction content, not a rules product | routing skill is Core instruction content |
 
-Cursor CLI binaries exist for `hook-cursor-subagent-start` and
-`hook-cursor-before-submit-prompt`; the Cursor bundle does not wire those
-events. Treat them as typed-unavailable unless Cursor grows those adapter
-events.
-
 ## First-party catalog
 
 Every registry artifact declares a class and owning component. Command prompt

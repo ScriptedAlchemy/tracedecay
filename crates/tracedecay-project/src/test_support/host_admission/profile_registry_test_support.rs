@@ -208,10 +208,7 @@ impl HostAdmissionTestRuntimeV1 {
 
     #[doc(hidden)]
     pub async fn plan_registry_reap(&self) -> Result<tracedecay_global_db::RegistryReapPlan> {
-        self.profile_database
-            .plan_registry_reap()
-            .await
-            .map(legacy_registry_reap_plan)
+        self.profile_database.plan_registry_reap().await
     }
 
     #[doc(hidden)]
@@ -219,8 +216,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         plan: &tracedecay_global_db::RegistryReapPlan,
     ) -> Result<usize> {
-        let plan = registered_registry_reap_plan(plan);
-        self.profile_database.apply_registry_reap(&plan).await
+        self.profile_database.apply_registry_reap(plan).await
     }
 
     #[doc(hidden)]
@@ -237,88 +233,6 @@ impl HostAdmissionTestRuntimeV1 {
         upsert: tracedecay_global_db::StoreArtifactUpsert,
     ) -> Result<tracedecay_global_db::StoreArtifactRecord> {
         self.profile_database.upsert_store_artifact(upsert).await
-    }
-}
-
-fn legacy_registry_reap_plan(
-    plan: tracedecay_global_db::RegistryReapPlan,
-) -> tracedecay_global_db::RegistryReapPlan {
-    tracedecay_global_db::RegistryReapPlan {
-        reapable: plan
-            .reapable
-            .into_iter()
-            .map(legacy_registry_reap_entry)
-            .collect(),
-        retained: plan
-            .retained
-            .into_iter()
-            .map(|retained| tracedecay_global_db::RetainedRegistryEntry {
-                entry: legacy_registry_reap_entry(retained.entry),
-                reason: retained.reason,
-            })
-            .collect(),
-    }
-}
-
-fn legacy_registry_reap_entry(
-    entry: tracedecay_global_db::RegistryReapEntry,
-) -> tracedecay_global_db::RegistryReapEntry {
-    tracedecay_global_db::RegistryReapEntry {
-        kind: match entry.kind {
-            tracedecay_global_db::ReapEntryKind::SavingsLedgerPath => {
-                tracedecay_global_db::ReapEntryKind::SavingsLedgerPath
-            }
-            tracedecay_global_db::ReapEntryKind::ProjectAlias => {
-                tracedecay_global_db::ReapEntryKind::ProjectAlias
-            }
-            tracedecay_global_db::ReapEntryKind::CodeProject => {
-                tracedecay_global_db::ReapEntryKind::CodeProject
-            }
-        },
-        key: entry.key,
-        missing_path: entry.missing_path,
-        project_id: entry.project_id,
-    }
-}
-
-fn registered_registry_reap_plan(
-    plan: &tracedecay_global_db::RegistryReapPlan,
-) -> tracedecay_global_db::RegistryReapPlan {
-    tracedecay_global_db::RegistryReapPlan {
-        reapable: plan
-            .reapable
-            .iter()
-            .map(registered_registry_reap_entry)
-            .collect(),
-        retained: plan
-            .retained
-            .iter()
-            .map(|retained| tracedecay_global_db::RetainedRegistryEntry {
-                entry: registered_registry_reap_entry(&retained.entry),
-                reason: retained.reason.clone(),
-            })
-            .collect(),
-    }
-}
-
-fn registered_registry_reap_entry(
-    entry: &tracedecay_global_db::RegistryReapEntry,
-) -> tracedecay_global_db::RegistryReapEntry {
-    tracedecay_global_db::RegistryReapEntry {
-        kind: match entry.kind {
-            tracedecay_global_db::ReapEntryKind::SavingsLedgerPath => {
-                tracedecay_global_db::ReapEntryKind::SavingsLedgerPath
-            }
-            tracedecay_global_db::ReapEntryKind::ProjectAlias => {
-                tracedecay_global_db::ReapEntryKind::ProjectAlias
-            }
-            tracedecay_global_db::ReapEntryKind::CodeProject => {
-                tracedecay_global_db::ReapEntryKind::CodeProject
-            }
-        },
-        key: entry.key.clone(),
-        missing_path: entry.missing_path.clone(),
-        project_id: entry.project_id.clone(),
     }
 }
 

@@ -47,8 +47,8 @@ use crate::automation::effect_runtime::projection::{
     project_skip_reason,
 };
 use crate::automation::effect_runtime::{
-    AutomationSettledProblem, AutomationSettledTerminal, add_pending_blocking, contract_error,
-    curate_receipt_outcome, digest, effect_authority_digest as calculate_effect_authority_digest,
+    AutomationSettledTerminal, add_pending_blocking, contract_error, curate_receipt_outcome,
+    digest, effect_authority_digest as calculate_effect_authority_digest,
     finalize_terminal_housekeeping, journal, recovered_partial_terminal, remove_pending_blocking,
 };
 use crate::automation::run_ledger::{
@@ -61,7 +61,7 @@ use crate::automation::runner::{
     RetainedCombinedReviewSettlementGuards, ReusedSchedulerSkip,
 };
 use crate::automation::{AutomationCommittedReceipt, AutomationRunError};
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::Result;
 
 #[cfg(test)]
 #[path = "settlement/tests.rs"]
@@ -233,7 +233,7 @@ pub enum RetainedAutomationSettlementOutcome {
         record: AutomationRunLedgerRecord,
     },
     Problem {
-        problem: Box<AutomationSettledProblem>,
+        problem: Box<AutomationRunProblemV1>,
         record: Option<AutomationRunLedgerRecord>,
     },
     Reused {
@@ -484,28 +484,6 @@ fn agent_task_kind(task: AutomationTaskV1) -> AgentTaskKind {
         AutomationTaskV1::CombinedReview => AgentTaskKind::CombinedReview,
         AutomationTaskV1::UserJob => AgentTaskKind::UserJob,
     }
-}
-
-/// The released proposal store (`fact_proposals.json`) and the archive its
-/// retirement wrote are a shape this binary neither reads nor retires.
-async fn refuse_released_fact_proposal_history(dashboard_root: &Path) -> Result<()> {
-    for name in ["fact_proposals.json", "fact_proposals.archive"] {
-        let path = dashboard_root.join(name);
-        let probe = path.clone();
-        if crate::automation::blocking_fs(move || std::fs::symlink_metadata(probe))
-            .await
-            .is_ok()
-        {
-            return Err(TraceDecayError::reset_required(
-                "automation fact proposal store",
-                format!(
-                    "'{}' is the released fact proposal history shape",
-                    path.display()
-                ),
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// Already-admitted retained request handed upward by the composition root.
@@ -820,9 +798,8 @@ impl AutomationEffectAuthority {
         error: AutomationRunError,
         guard: AutomationRunSettlementGuard,
         observer: Option<AutomationLedgerObserver>,
-    ) -> RetainedSettlementWaiter<
-        Result<(AutomationSettledProblem, Option<AutomationRunLedgerRecord>)>,
-    > {
+    ) -> RetainedSettlementWaiter<Result<(AutomationRunProblemV1, Option<AutomationRunLedgerRecord>)>>
+    {
         RetainedSettlementWaiter::start(move || {
             self.settle_retained_problem_blocking(
                 error,
@@ -952,7 +929,7 @@ impl AutomationEffectAuthority {
         guard: RetainedSettlementGuardOwner,
         observer: Option<AutomationLedgerObserver>,
         #[cfg(test)] phase_hook: Option<SettlementPhaseHook>,
-    ) -> Result<RetainedOwnerValue<(AutomationSettledProblem, Option<AutomationRunLedgerRecord>)>>
+    ) -> Result<RetainedOwnerValue<(AutomationRunProblemV1, Option<AutomationRunLedgerRecord>)>>
     {
         let projection = match error {
             AutomationRunError::PartialEffect {
@@ -1075,7 +1052,6 @@ impl AutomationEffectAuthority {
             "{}.json",
             journal_key.as_str().trim_start_matches("sha256:")
         ));
-        refuse_released_fact_proposal_history(&dashboard_root).await?;
         let task = request.task_kind();
         let retained_operation = RetainedSurfaceOperation::FactStoreCurate;
         let operation =
@@ -1523,7 +1499,7 @@ impl AutomationEffectAuthority {
         committed_receipt: Box<tracedecay_contracts::EffectReceipt>,
         detail: String,
         committed_outer_result: AutomationRunResultV1,
-    ) -> Result<AutomationSettledProblem> {
+    ) -> Result<AutomationRunProblemV1> {
         let problem =
             retained_surface_execution_problem(RetainedSurfaceExecutionErrorV1::PartialEffect {
                 reason_code,
@@ -1569,11 +1545,7 @@ impl AutomationEffectAuthority {
             .task
             .expected_external_task_key()
             .unwrap_or_else(|| task_key(admitted_task).to_owned());
-        let prior_task_key = reused
-            .prior_record
-            .task_key
-            .as_deref()
-            .unwrap_or_else(|| task_key(reused.prior_record.task));
+        let prior_task_key = reused.prior_record.task_key.as_str();
         if reused.requested_run_id != self.admission.request.run_id.as_str()
             || reused.prior_record.run_id == reused.requested_run_id
             || !matches!(
@@ -1617,7 +1589,7 @@ impl AutomationEffectAuthority {
         run_id: &str,
         committed: &AutomationCommittedReceipt,
         detail: &'static str,
-    ) -> Result<AutomationSettledProblem> {
+    ) -> Result<AutomationRunProblemV1> {
         if run_id != self.admission.request.run_id.as_str() {
             return Err(contract_error(
                 "automation run identity changed before settlement",
@@ -1656,7 +1628,7 @@ impl AutomationEffectAuthority {
         &self,
         problem: ApplicationProblem,
         committed_receipts: Vec<AutomationCommittedReceiptV1>,
-    ) -> Result<AutomationSettledProblem> {
+    ) -> Result<AutomationRunProblemV1> {
         problem.validate().map_err(contract_error)?;
         let problem = ApplicationProblemEnvelope::new(
             self.operation.result_contract().clone(),

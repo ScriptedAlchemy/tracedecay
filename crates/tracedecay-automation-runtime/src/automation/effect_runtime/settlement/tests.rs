@@ -47,6 +47,14 @@ impl crate::automation::backend::AgentTaskBackend for NeverAutomationBackend {
 
 use tracedecay_domain::test_fixtures::digest;
 
+/// Paces a test's wait loop. These loops probe the filesystem or a task lock
+/// with blocking calls; spinning on `yield_now` kept a runtime worker busy and
+/// starved the settlement work being awaited when the suite ran in parallel on
+/// a loaded CI host.
+async fn pause_before_next_poll() {
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+}
+
 fn exact_publication(seed: char, payload_len: u64) -> ExactRunPublication {
     serde_json::from_value(json!({
         "schema_version": 1,
@@ -224,10 +232,7 @@ fn write_private_test_file(path: &std::path::Path, bytes: &[u8]) {
             .expect("private test file mode");
     }
     #[cfg(windows)]
-    drop(
-        tracedecay_runtime_core::windows_security::make_private_file(path)
-            .expect("private test file ACL"),
-    );
+    drop(tracedecay_private_fs::windows::make_private_file(path).expect("private test file ACL"));
 }
 
 fn retained_external_authority(
@@ -349,17 +354,19 @@ async fn retained_disabled_user_job_run(
     job_id: &str,
 ) -> crate::automation::runner::RetainedAutomationRun<crate::automation::jobs::UserJobAutomationRun>
 {
-    use crate::automation::config::{AutomationBackend, AutomationConfig, AutomationHostMode};
+    use crate::automation::config::{
+        AutomationBackendV1, AutomationHostModeV1, AutomationSettingsV1,
+    };
     use crate::automation::jobs::{
         AutomationJob, JobDelivery, UserJobRunOptions,
         run_user_job_with_backend_for_retained_settlement,
     };
 
-    let config = AutomationConfig {
+    let config = AutomationSettingsV1 {
         enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        ..AutomationConfig::default()
+        backend: AutomationBackendV1::CodexAppServer,
+        host_mode: AutomationHostModeV1::Standalone,
+        ..AutomationSettingsV1::default()
     };
     let job = AutomationJob {
         id: job_id.to_owned(),
@@ -668,6 +675,7 @@ fn session_evidence_timeout_ledger_projects_a_typed_terminal() {
         "run_id": run_id,
         "trigger": "scheduler",
         "task": "session_reflector",
+        "task_key": "session_reflector",
         "backend": "codex_app_server",
         "status": "skipped",
         "accepted_count": 0,
@@ -977,14 +985,13 @@ fn indexed_terminal_publishers_replace_a_held_journal_with_private_files() {
         ReservationResult::Execute { claim, .. } => claim,
         _ => panic!("fresh indexed reservation must execute"),
     };
-    tracedecay_runtime_core::windows_security::validate_private_file(&journal_path)
+    tracedecay_private_fs::windows::validate_private_file(&journal_path)
         .expect("private Reserved journal");
-    tracedecay_runtime_core::windows_security::validate_private_file(&pending_index_path)
+    tracedecay_private_fs::windows::validate_private_file(&pending_index_path)
         .expect("private pending index");
     let reserved_bytes = std::fs::read(&journal_path).expect("Reserved journal bytes");
-    let mut held_reader =
-        tracedecay_runtime_core::windows_security::open_private_file(&journal_path)
-            .expect("held Reserved journal reader");
+    let mut held_reader = tracedecay_private_fs::windows::open_private_file(&journal_path)
+        .expect("held Reserved journal reader");
 
     let terminal = AutomationSettledTerminal::Problem(admission.recovery_problem().clone());
     persist_terminal_blocking(&journal_path, &admission, terminal)
@@ -1006,13 +1013,13 @@ fn indexed_terminal_publishers_replace_a_held_journal_with_private_files() {
             .expect("Terminal journal")
             .is_terminal()
     );
-    tracedecay_runtime_core::windows_security::validate_private_file(&journal_path)
+    tracedecay_private_fs::windows::validate_private_file(&journal_path)
         .expect("private Terminal journal");
-    tracedecay_runtime_core::windows_security::validate_private_file(
+    tracedecay_private_fs::windows::validate_private_file(
         &terminal_sidecar_path(&journal_path).expect("terminal sidecar path"),
     )
     .expect("private terminal sidecar");
-    tracedecay_runtime_core::windows_security::validate_private_file(&pending_index_path)
+    tracedecay_private_fs::windows::validate_private_file(&pending_index_path)
         .expect("private retained pending index");
     drop(claim);
 }
@@ -1690,6 +1697,7 @@ async fn direct_recover_retires_spool_staged_before_prepared_binding() {
         "run_id": original.request.run_id.as_str(),
         "trigger": "dashboard",
         "task": "memory_curator",
+        "task_key": "memory_curator",
         "backend": "codex_app_server",
         "status": "skipped",
         "accepted_count": 0,
@@ -2109,7 +2117,7 @@ fn retained_settlement_waiter_is_send_and_static() {
     assert_send_static::<
         super::RetainedSettlementWaiter<
             tracedecay_domain::errors::Result<(
-                super::AutomationSettledProblem,
+                super::AutomationRunProblemV1,
                 Option<AutomationRunLedgerRecord>,
             )>,
         >,
@@ -2211,7 +2219,7 @@ async fn retained_projector_panic_finishes_recovery_before_releasing_task_lock()
             Instant::now() < deadline,
             "projector-panic recovery terminal did not become durable"
         );
-        tokio::task::yield_now().await;
+        pause_before_next_poll().await;
     }
     assert!(
         crate::automation::run_ledger::find_run_record_exact_bounded_blocking(
@@ -2239,7 +2247,7 @@ async fn retained_projector_panic_finishes_recovery_before_releasing_task_lock()
             Instant::now() < deadline,
             "projector-panic task lock was not released after durable recovery"
         );
-        tokio::task::yield_now().await;
+        pause_before_next_poll().await;
     }
 }
 
@@ -2309,7 +2317,7 @@ async fn assert_request_waiting_pair_abandoned_cleanly(
             std::time::Instant::now() < deadline,
             "request-waiting pair did not abandon both authorities before releasing its locks"
         );
-        tokio::task::yield_now().await;
+        pause_before_next_poll().await;
     }
     for (journal_path, admission) in fixture.journal_paths.iter().zip(&fixture.admissions) {
         assert!(!journal_path.exists(), "abandoned journal remained present");
@@ -2394,7 +2402,7 @@ async fn partial_pair_submit_abandons_the_closed_sibling_under_shared_guard_owne
             std::time::Instant::now() < deadline,
             "submitted first abandonment did not finish"
         );
-        tokio::task::yield_now().await;
+        pause_before_next_poll().await;
     }
     assert!(
         task_lock_is_denied(dashboard_root, &fixture.job_ids[0]).await,
@@ -3188,57 +3196,6 @@ async fn cancelled_after_admission_does_not_reserve_journal() {
 }
 
 #[tokio::test]
-async fn released_fact_proposal_history_is_a_typed_reset_before_reservation() {
-    for released in ["fact_proposals.json", "fact_proposals.archive"] {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let (authority, _, _) = retained_external_authority(
-            temp.path(),
-            external_admission("run.fixture-proposals", "request.fixture-proposals"),
-        );
-        let context = authority.context.clone();
-        let cancellation = authority.cancellation.clone();
-        let configuration_digest = authority.admission.configuration_digest.clone();
-        authority
-            .abandon_uncommitted()
-            .await
-            .expect("abandon fixture reservation");
-        let released_path = temp.path().join(released);
-        let bytes = br#"{"schema_version":1,"proposals":[{"add_fact_request":{"source_label":"reflector"}}]}"#;
-        std::fs::write(&released_path, bytes).expect("released proposal history");
-
-        let request = session_reflector_admission("run.proposals", "request.proposals").request;
-        let journal_path = canonical_journal_path(temp.path(), &request.run_id);
-        let Err(error) = Box::pin(AutomationEffectAuthority::prepare(
-            AdmittedAutomationEffectRequest {
-                context: context.clone(),
-                cancellation,
-                observed_at: UtcMicros(2),
-                configuration_digest,
-                request,
-                dashboard_root: temp.path().to_path_buf(),
-            },
-            || {
-                Ok(FactOwnerV1::Project {
-                    project_id: context.scope().project_id.clone(),
-                })
-            },
-            |_, _| async { Err(contract_error("a refused admission must not read receipts")) },
-        ))
-        .await
-        else {
-            panic!("released proposal history must refuse admission")
-        };
-        let (authority, reason) = error.reset_required_context().unwrap_or_else(|| {
-            panic!("released proposal history must be a typed reset: {error:?}")
-        });
-        assert_eq!(authority, "automation fact proposal store");
-        assert!(reason.contains(released), "{reason}");
-        assert!(!journal_path.exists(), "a refused run reserves no journal");
-        assert_eq!(std::fs::read(&released_path).expect("preserved"), bytes);
-    }
-}
-
-#[tokio::test]
 async fn timed_out_after_admission_does_not_reserve_journal() {
     let temp = tempfile::tempdir().expect("tempdir");
     let (authority, _, _) = retained_external_authority(
@@ -3307,244 +3264,6 @@ async fn timed_out_after_admission_does_not_reserve_journal() {
             .expect("pending index")
             .is_empty(),
         "timed-out run must not enter the pending journal index"
-    );
-}
-
-fn reserve_indexed(
-    dashboard_root: &std::path::Path,
-    admission: &DurableAutomationAdmission,
-) -> std::path::PathBuf {
-    let path = canonical_journal_path(dashboard_root, &admission.request.run_id);
-    let ReservationResult::Execute { claim } = reserve_or_replay_with_index(
-        &path,
-        admission.clone(),
-        || recovery_index::add_pending_blocking(dashboard_root, &path, admission),
-        || Ok(()),
-    )
-    .expect("indexed reservation") else {
-        panic!("fresh admission must execute")
-    };
-    drop(claim);
-    path
-}
-
-/// Rewrites a reserved memory journal into the shape written before retirement
-/// bindings were removed from the memory recovery binding.
-fn rewrite_as_retired_memory_binding_shape(path: &std::path::Path) {
-    let mut journal: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(path).expect("journal")).expect("journal json");
-    let binding = journal["admission"]["recovery"]["binding"]
-        .as_object_mut()
-        .expect("memory recovery binding");
-    binding.insert("retirement".to_owned(), serde_json::Value::Null);
-    binding.insert("reset_source_digest".to_owned(), serde_json::Value::Null);
-    write_private_test_file(path, &serde_json::to_vec_pretty(&journal).expect("bytes"));
-}
-
-async fn recover_without_memory_reads(
-    dashboard_root: &std::path::Path,
-) -> recovery_index::AutomationEffectRecoveryReport {
-    let owner = FactOwnerV1::Project {
-        project_id: scope().project_id,
-    };
-    let cancellation =
-        CancellationSignal::active("cancellation.old-shape-recovery").expect("cancellation");
-    match recovery_index::prepare_reserved_automation_effect_recovery(dashboard_root)
-        .await
-        .expect("prepare recovery")
-    {
-        recovery_index::AutomationEffectRecoveryPreparation::Complete(report) => report,
-        recovery_index::AutomationEffectRecoveryPreparation::Pending(preparation) => {
-            recovery_index::reconcile_prepared_automation_effects_for_project(
-                preparation,
-                |_, _| async { panic!("refused journal shapes must not read memory receipts") },
-                &owner,
-                &cancellation,
-                &scope(),
-            )
-            .await
-            .expect("reconcile recovery")
-        }
-    }
-}
-
-#[tokio::test]
-async fn refused_memory_journal_shape_resets_per_entry_and_recovery_converges() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let dashboard_root = temp.path();
-    let old_memory = reserve_indexed(
-        dashboard_root,
-        &admission("run.old-memory-shape", "request.old-memory-shape"),
-    );
-    rewrite_as_retired_memory_binding_shape(&old_memory);
-    let external = reserve_indexed(
-        dashboard_root,
-        &external_admission("run.current-external", "request.current-external"),
-    );
-    let Err(refusal) = read_indexed_record_blocking(&old_memory) else {
-        panic!("old memory binding shape must be refused")
-    };
-    assert!(
-        refusal.reset_required_context().is_some(),
-        "refusal must be a typed reset: {refusal}"
-    );
-
-    let report = recover_without_memory_reads(dashboard_root).await;
-    assert_eq!(report.inspected, 2);
-    assert_eq!(report.reset_required, 1);
-    assert_eq!(report.indeterminate, 1);
-    assert_eq!(report.deferred, 0);
-    assert!(!old_memory.exists(), "refused journal is discarded");
-    assert!(
-        !terminal_sidecar_path(&old_memory)
-            .expect("sidecar")
-            .exists()
-    );
-    assert!(
-        read_indexed_record_blocking(&external)
-            .expect("external journal")
-            .expect("external terminal")
-            .is_terminal()
-    );
-    assert!(
-        recovery_index::indexed_journals_blocking(dashboard_root, &scope())
-            .expect("pending index")
-            .is_empty()
-    );
-    assert_eq!(
-        recover_without_memory_reads(dashboard_root).await,
-        recovery_index::AutomationEffectRecoveryReport::default(),
-        "a converged recovery has nothing left to inspect"
-    );
-}
-
-/// A settled journal leaves the pending index, so a legacy terminal journal is
-/// referenced by nothing. Recovery must still retire it, or its run id is
-/// refused forever; a current settled journal beside it stays the replay
-/// authority for its own run id.
-#[tokio::test]
-async fn unreferenced_refused_terminal_journal_is_retired_and_its_run_id_reusable() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let dashboard_root = temp.path();
-    let legacy = external_admission("run.legacy-terminal", "request.legacy-terminal");
-    let legacy_journal = reserve_indexed(dashboard_root, &legacy);
-    let current = external_admission("run.current-terminal", "request.current-terminal");
-    let current_journal = reserve_indexed(dashboard_root, &current);
-    recover_without_memory_reads(dashboard_root).await;
-    assert!(
-        recovery_index::indexed_journals_blocking(dashboard_root, &scope())
-            .expect("pending index")
-            .is_empty(),
-        "settled journals leave the pending index"
-    );
-    let mut journal: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&legacy_journal).expect("journal")).expect("json");
-    journal["admission"]["recovery"]["binding"]["retirement"] = serde_json::Value::Null;
-    write_private_test_file(
-        &legacy_journal,
-        &serde_json::to_vec_pretty(&journal).expect("bytes"),
-    );
-    let refusal =
-        reserve_or_replay_with_index(&legacy_journal, legacy.clone(), || Ok(()), || Ok(()))
-            .err()
-            .expect("a legacy terminal journal refuses its run id");
-    assert!(
-        refusal.reset_required_context().is_some(),
-        "refusal must be a typed reset: {refusal}"
-    );
-
-    let report = recover_without_memory_reads(dashboard_root).await;
-    assert_eq!(
-        report,
-        recovery_index::AutomationEffectRecoveryReport {
-            inspected: 1,
-            reset_required: 1,
-            ..recovery_index::AutomationEffectRecoveryReport::default()
-        }
-    );
-    assert!(!legacy_journal.exists(), "legacy journal is retired");
-    assert!(
-        !terminal_sidecar_path(&legacy_journal)
-            .expect("sidecar")
-            .exists()
-    );
-    let ReservationResult::Replay { .. } =
-        reserve_or_replay_with_index(&current_journal, current, || Ok(()), || Ok(()))
-            .expect("current terminal journal replays")
-    else {
-        panic!("a current settled journal keeps replaying its run id")
-    };
-    let ReservationResult::Execute { claim } =
-        reserve_or_replay_with_index(&legacy_journal, legacy, || Ok(()), || Ok(()))
-            .expect("the retired run id is admitted again")
-    else {
-        panic!("a retired run id runs as a fresh reservation")
-    };
-    drop(claim);
-}
-
-#[tokio::test]
-async fn refused_pending_index_shape_rebuilds_from_journals_and_converges() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let dashboard_root = temp.path();
-    let old_memory = reserve_indexed(
-        dashboard_root,
-        &admission("run.old-index-memory", "request.old-index-memory"),
-    );
-    rewrite_as_retired_memory_binding_shape(&old_memory);
-    let external = reserve_indexed(
-        dashboard_root,
-        &external_admission("run.old-index-external", "request.old-index-external"),
-    );
-    let index_path = dashboard_root
-        .join("automation_effects")
-        .join("pending-index.json");
-    let mut index: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&index_path).expect("index")).expect("index json");
-    let old_memory_file = old_memory
-        .file_name()
-        .and_then(|name| name.to_str())
-        .expect("journal filename");
-    index["retirement_transitions"] = json!([{
-        "journal_file": old_memory_file,
-        "project_id": scope().project_id,
-        "scope_digest": scope().scope_digest,
-        "source_digest": format!("sha256:{}", "c".repeat(64)),
-        "capture_expected": false,
-    }]);
-    write_private_test_file(
-        &index_path,
-        &serde_json::to_vec_pretty(&index).expect("bytes"),
-    );
-
-    let fresh = admission("run.after-old-index", "request.after-old-index");
-    let fresh_path = canonical_journal_path(dashboard_root, &fresh.request.run_id);
-    let refusal = recovery_index::add_pending_blocking(dashboard_root, &fresh_path, &fresh)
-        .expect_err("old index shape refuses new reservations until recovery");
-    assert!(
-        refusal.reset_required_context().is_some(),
-        "refusal must be a typed reset: {refusal}"
-    );
-
-    let report = recover_without_memory_reads(dashboard_root).await;
-    assert_eq!(report.inspected, 2);
-    assert_eq!(report.reset_required, 1);
-    assert_eq!(report.indeterminate, 1);
-    assert_eq!(report.deferred, 0);
-    assert!(!old_memory.exists(), "refused journal is discarded");
-    assert!(
-        read_indexed_record_blocking(&external)
-            .expect("external journal")
-            .expect("external terminal")
-            .is_terminal()
-    );
-    recovery_index::add_pending_blocking(dashboard_root, &fresh_path, &fresh)
-        .expect("rebuilt index admits new reservations");
-    recovery_index::remove_pending_blocking(dashboard_root, &fresh_path).expect("cleanup");
-    assert_eq!(
-        recover_without_memory_reads(dashboard_root).await,
-        recovery_index::AutomationEffectRecoveryReport::default(),
-        "a converged recovery has nothing left to inspect"
     );
 }
 

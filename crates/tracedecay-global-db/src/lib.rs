@@ -62,8 +62,7 @@ pub use observability_rollup::{
 };
 pub use observation_adapter::GlobalDbObservationStore;
 pub use observation_projection::{
-    converge_projection_predecessor, project_observation, project_queued_observations,
-    rebuild_projection,
+    project_observation, project_queued_observations, rebuild_projection,
 };
 pub use tracedecay_domain::CoverageStateV1;
 pub use workflow_adapter::GlobalDbWorkflowStore;

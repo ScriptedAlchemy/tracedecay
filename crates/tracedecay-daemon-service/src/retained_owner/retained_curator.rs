@@ -232,9 +232,7 @@ fn log_curator_settlement(
 }
 
 fn automation_problem(
-    problem: Box<
-        tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledProblem,
-    >,
+    problem: Box<tracedecay_contracts::retained_surfaces::AutomationRunProblemV1>,
 ) -> RetainedSurfaceExecutionErrorV1 {
     RetainedSurfaceExecutionErrorV1::ApplicationProblem(problem.problem.problem.source().clone())
 }

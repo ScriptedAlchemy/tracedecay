@@ -351,11 +351,6 @@ fn health_delta_outcome<T>(
             "application.health-delta.definition-mismatch",
             "before_cursor was measured under another health definition. Omit before_cursor to record a new baseline.",
         ),
-        HealthDeltaError::DefinitionUnrecorded => (
-            PrimitiveFailureKind::CursorRefused,
-            "application.health-delta.definition-unrecorded",
-            "before_cursor predates recorded health definitions. Omit before_cursor to record a new baseline.",
-        ),
         HealthDeltaError::CorruptPoint => (
             PrimitiveFailureKind::Unavailable,
             "application.health-delta.point-corrupt",

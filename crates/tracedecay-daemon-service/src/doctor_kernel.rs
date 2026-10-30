@@ -16,7 +16,7 @@ use tracedecay_application::advisory::github_runtime::{
 };
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::code_index_scheduler::identity::repository_id_for;
-use tracedecay_configuration::config::{PinnedRuntimeConfiguration, setting_findings};
+use tracedecay_configuration::config::PinnedRuntimeConfiguration;
 use tracedecay_contracts::code_index_freshness::CodeIndexStalenessStateV1;
 use tracedecay_contracts::doctor::{
     AdvisoryFeedbackDoctorPort, AdvisoryFeedbackReadV1, CodeIndexMountDoctorPort,
@@ -31,8 +31,8 @@ use tracedecay_contracts::doctor::{
     ProfileAuthorityReadV1, RemoteOperationalReadV1, ResidentMemoryDoctorPort,
     ResidentMemoryHolderReadV1, ResidentMemoryOwnerReadV1, ResidentMemoryReadV1,
     RuntimeHealthDoctorPort, RuntimeHealthReadV1, StorageDoctorPort,
-    UnappliedConfigurationSettingV1, advisory_feedback_read_from_publication, merge_storage_reads,
-    runtime_health_read, storage_family_read,
+    advisory_feedback_read_from_publication, merge_storage_reads, runtime_health_read,
+    storage_family_read,
 };
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::storage::SchemaConvergenceFindingV1;
@@ -55,37 +55,18 @@ const DOCTOR_CONTEXT_HORIZON_MICROS: i64 = 30_000_000;
 
 /// Map a real pinned-configuration lookup outcome into a kernel read.
 ///
-/// A pinned snapshot is in sync only when the runtime configuration applies
-/// every stored value; each part [`setting_findings`] reports it leaves
-/// unapplied makes the read [`ConfigurationDriftV1::Unapplied`]. A cold cache,
-/// the fail-closed accessor's `Err`, is a typed
+/// A pinned snapshot is in sync. A cold cache, the fail-closed accessor's
+/// `Err`, is a typed
 /// [`ConfigurationAuthorityReadV1::Absent`], never a fabricated healthy result.
 #[must_use]
 pub fn configuration_read_from_pin<E>(
     resolved: &Result<PinnedRuntimeConfiguration, E>,
 ) -> ConfigurationAuthorityReadV1 {
-    let Ok(pinned) = resolved else {
+    if resolved.is_err() {
         return ConfigurationAuthorityReadV1::Absent;
-    };
-    let unapplied: Vec<_> = pinned
-        .snapshot()
-        .effective_values
-        .iter()
-        .flat_map(|(key, value)| {
-            setting_findings(key, value).into_iter().map(|finding| {
-                UnappliedConfigurationSettingV1 {
-                    key: key.clone(),
-                    finding,
-                }
-            })
-        })
-        .collect();
+    }
     ConfigurationAuthorityReadV1::Resolved {
-        drift: if unapplied.is_empty() {
-            ConfigurationDriftV1::InSync
-        } else {
-            ConfigurationDriftV1::Unapplied(unapplied)
-        },
+        drift: ConfigurationDriftV1::InSync,
         coverage: DoctorCoverageCompletenessV1::Complete,
     }
 }
@@ -226,29 +207,28 @@ fn code_index_mount_state(staleness: Option<CodeIndexStalenessStateV1>) -> CodeI
     }
 }
 
-// === Pending schema migrations (Storage family) ==============================
+// === Incomplete schema convergence (Storage family) ==========================
 
-/// Report the shards whose historical schema convergence has not completed.
+/// Report the shards whose schema convergence has not completed.
 ///
-/// Convergence carries the migrations whose cost scales with store size, a
-/// full index rebuild, a whole-table rewrite, so on a large store it runs for
-/// minutes after the daemon is already serving. That is deliberate: it runs
-/// after the fail-closed admission checks and outside any caller's write
+/// Convergence runs the authority-invariant audit and re-arms projection
+/// retries. The audit pages every authority row, so on a large store it runs
+/// for minutes after the daemon is already serving. That is deliberate: it
+/// runs after the fail-closed admission checks and outside any caller's write
 /// lease, so it blocks neither admission nor retrieval. What it must not do is
-/// stay invisible. A shard still pending or running reads as `Stale`, the
-/// store is behind its current schema but readable, and one whose migration
-/// failed reads as `Degraded`, carrying the failure the convergence task
-/// recorded. An empty set is absent rather than a healthy claim, since a
+/// stay invisible. A shard still pending or running reads as `Stale`, and one
+/// whose convergence failed reads as `Degraded`, carrying the failure the
+/// convergence task recorded. An empty set is absent rather than a healthy claim, since a
 /// daemon with no mounted shard has converged nothing.
 #[must_use]
-pub fn pending_schema_migration_read(
+pub fn schema_convergence_incomplete_read(
     unconverged: &[(
         tracedecay_store::StoreShardIdV1,
         tracedecay_store_runtime::RegisteredSchemaConvergenceStatus,
     )],
 ) -> DoctorStorageFamilyReadV1 {
     use tracedecay_contracts::doctor::DoctorEvidenceStateV1;
-    use tracedecay_contracts::storage::{StoreKeyV1, pending_schema_migration_finding};
+    use tracedecay_contracts::storage::{StoreKeyV1, schema_convergence_incomplete_finding};
     use tracedecay_store_runtime::RegisteredSchemaConvergenceStatus;
 
     let mut findings = Vec::new();
@@ -257,17 +237,17 @@ pub fn pending_schema_migration_read(
             RegisteredSchemaConvergenceStatus::Pending => (
                 DoctorEvidenceStateV1::Stale,
                 "queued".to_owned(),
-                "schema migrations are queued and have not started",
+                "schema convergence is queued and has not started",
             ),
             RegisteredSchemaConvergenceStatus::Running => (
                 DoctorEvidenceStateV1::Stale,
                 "running".to_owned(),
-                "schema migrations are running; the store stays served meanwhile",
+                "schema convergence is running; the store stays served meanwhile",
             ),
             RegisteredSchemaConvergenceStatus::Degraded { message } => (
                 DoctorEvidenceStateV1::Degraded,
                 format!("stopped.{message}"),
-                "schema migrations stopped on a failure and left the store behind its schema",
+                "schema convergence stopped on a failure and left the store unaudited",
             ),
             // Filtered by the authority; a converged shard has nothing to report.
             RegisteredSchemaConvergenceStatus::Complete => continue,
@@ -275,7 +255,7 @@ pub fn pending_schema_migration_read(
         let Ok(store) = StoreKeyV1::new(format!("{shard:?}")) else {
             return DoctorStorageFamilyReadV1::Unknown;
         };
-        let Ok(finding) = pending_schema_migration_finding(&store, state, &detail, statement)
+        let Ok(finding) = schema_convergence_incomplete_finding(&store, state, &detail, statement)
         else {
             return DoctorStorageFamilyReadV1::Unknown;
         };
