@@ -98,9 +98,9 @@ jobs:
         run: python3 scripts/test-claude-observation-benchmark-publication.py
 
   # The cheap repository gates in one job: commit lint, cache lineage, the
-  # release guards, and rustfmt. Each used to hold its own ubuntu-latest
-  # runner for a couple of minutes of work; on 20 free slots that is three
-  # queue entries per push doing what one does.
+  # release guards, rustfmt, and the generator feature policy. Each used to
+  # hold its own ubuntu-latest runner for a couple of minutes of work; on 20
+  # free slots that is several queue entries per push doing what one does.
   gates:
     permissions:
       contents: read
@@ -162,15 +162,24 @@ jobs:
                 && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
                     || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
 
-      - name: Test repository policies with Bazel workers
+      # One Bazel invocation for every policy test and the rustfmt check.
+      # Analysis, not actions, dominates these: in run 41016935321 the
+      # policy tests spent 65 s of 71 s loading and analyzing (critical path
+      # 6 s), `//:rustfmt_check` 35 s of 37 s (critical path 2 s), and the
+      # Feature gates job 83 s of 85 s for a 1 s `gen_builds_test`. Sharing
+      # one analysis runs the actions side by side instead of in series.
+      - name: Test repository policies and check formatting with Bazel
         run: >-
           bazel test --config=ci --test_output=errors
+          //:rustfmt_check
+          //scripts:gen_builds_test
           //scripts:unused_tool_context_measure_test
           //scripts:sqlite_plan_stability_check_test
           //scripts:ambient_tokio_check_test
           //scripts:rusqlite_storage_boundary_test
           //scripts:packaged_lsp_bridge_test
           //scripts:configure_ci_fleet_test
+          //scripts:release_pr_refresh_test
 
       - name: Test the ranked-tail trim replay against the Rust rule cases
         run: bazel run //scripts:test-measure-ranked-tail-trim.py
@@ -193,7 +202,6 @@ jobs:
           python3 scripts/test-check-release-artifacts.py
           python3 scripts/test-generate-release-inventory.py
           python3 scripts/test-update-release-checksums.py
-          bazel test --config=ci --test_output=errors //scripts:release_pr_refresh_test
           bash tests/macos_stable_codesign_test.sh
 
       # Exercise the release guard scripts when admitting proposed changes.
@@ -206,9 +214,6 @@ jobs:
           bash tests/release_pr_integrity_test.sh
           bash tests/dashboard_bundle_check_test.sh
           bash tests/dashboard_digests_check_test.sh
-
-      - name: Check formatting
-        run: bazel build --config=ci //:rustfmt_check
 
       # Manifest edits that skip a gen_builds.py rerun leave stale BUILD
       # files; compare the committed files against a fresh generation.
@@ -720,21 +725,20 @@ jobs:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
           key: ${{ steps.bazel.outputs.disk-cache-key }}
 
-  # Feature gates remains a required check and exercises the parser and policy.
+  # Branch protection requires this check name. The generator feature policy
+  # test (`//scripts:gen_builds_test`) runs inside Repository gates, whose
+  # Bazel analysis it shares; on its own runner it paid 52 s of Bazel setup
+  # and 83 s of analysis for a 1 s test. Delete this job once branch
+  # protection requires Repository gates instead.
   feature-gates:
     name: Feature gates
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    needs: gates
+    if: ${{ always() && !cancelled() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: ./.github/actions/setup-bazel
-        with:
-          cache-key: ci-feature-gates
-
-      - name: Test generator feature policy and Cargo tree parsing
-        run: bazel test --config=ci --test_output=errors //scripts:gen_builds_test
+      - name: Require the generator feature policy test in Repository gates
+        run: test "${{ needs.gates.result }}" = "success"
 
   # The configuration users actually receive: the release build of
   # `tracedecay-cli`, whose default features are `production`. It catches a
