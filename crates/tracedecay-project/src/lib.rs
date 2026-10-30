@@ -45,6 +45,7 @@
 #![allow(clippy::single_match_else)]
 
 pub mod config;
+pub mod dashboard;
 pub mod product_runtime;
 pub mod project;
 mod project_store_runtime;
