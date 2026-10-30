@@ -1,27 +1,29 @@
-name: Workspace source export
+name: Workspace formatter export
 on:
   push:
     branches: [work/automation-retirement-source-20261030]
 permissions:
   contents: read
 jobs:
-  source:
+  formatter:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: 64a04ef4d4b542a03ebc419ddd10429f4f110a0c
-          persist-credentials: false
-      - name: Export the exact tracked source tree
+      - name: Prepare the repository-pinned formatter
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = 64a04ef4d4b542a03ebc419ddd10429f4f110a0c
-          git archive --format=tar HEAD | gzip > "$RUNNER_TEMP/tracedecay-source.tar.gz"
+          rustup toolchain install 1.99.1 --profile minimal --component rustfmt
+          formatter="$(rustup which --toolchain 1.99.1 rustfmt)"
+          root="$(dirname "$(dirname "$formatter")")"
+          mkdir -p "$RUNNER_TEMP/formatter/bin" "$RUNNER_TEMP/formatter/lib"
+          cp "$formatter" "$RUNNER_TEMP/formatter/bin/"
+          find "$root/lib" -maxdepth 1 -type f -name '*.so*' -exec cp {} "$RUNNER_TEMP/formatter/lib/" \;
+          "$RUNNER_TEMP/formatter/bin/rustfmt" --version
+          tar -C "$RUNNER_TEMP/formatter" -czf "$RUNNER_TEMP/rustfmt-1.99.1.tar.gz" .
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: tracedecay-source-64a04ef4
-          path: ${{ runner.temp }}/tracedecay-source.tar.gz
+          name: rustfmt-1.99.1-linux
+          path: ${{ runner.temp }}/rustfmt-1.99.1.tar.gz
           if-no-files-found: error
           retention-days: 1
