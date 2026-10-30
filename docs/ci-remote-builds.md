@@ -11,12 +11,13 @@ private NativeLink coordinator through the official Tailscale action. GitHub
 supplies checkout, analysis, local compilation, test execution, artifacts, and
 check reporting; Ubuntu-main and
 Omarchy supply additional Linux compilation and test capacity. The Mac worker
-serves macOS actions; this CI integration does not send Linux actions to it. ARM Linux and macOS CI retain their existing hosted execution. The Mac currently has a
-newer Xcode/SDK than the macos-26 image; matching OS and CPU alone does not make
-native compilation compatible.
+serves macOS actions; this CI integration does not send Linux actions to it.
+ARM Linux retains hosted execution. macOS ARM64 selects the Darwin fleet profile;
+native compilation still requires compatible Xcode/SDK installations, not just
+matching OS and CPU architecture.
 
-Windows x86_64 CI enrolls through the same restricted identity and shares
-`Rustc` actions, including native linking, between the hosted runner and MINI.
+Windows x86_64 CI enrolls through the same restricted identity and sends
+`Rustc` actions, including native linking, to the Windows MINI worker.
 Build scripts and tests remain on GitHub's Windows runner. Both machines expose
 MSVC 14.44.35207 through a `V:` drive mapping to the existing Visual Studio installation;
 Bazel selects Windows SDK 10.0.26100.0. This avoids machine-specific Enterprise
@@ -24,18 +25,21 @@ versus BuildTools paths without copying the toolchain. The setup fails if the
 pinned compiler is missing or `V:` is already occupied. The Windows execution
 platform matches `OSFamily=windows` and `cpu_arch=x86_64`.
 
-All fleet-enabled CI runners use dynamic execution for Rustc actions. The
+Linux and macOS CI runners use dynamic execution for Rustc actions. The
 GitHub-hosted runner and compatible remote workers may compile the same action;
 Bazel keeps the first result and cancels the competing branch. Local compilation
-uses two CPU slots and half the hosted runner's RAM, alongside sixteen in-flight
-actions on Windows or forty on Linux/macOS. These resource estimates bound
+uses two CPU slots and half the hosted runner's RAM, alongside forty in-flight
+actions. Windows keeps sixteen in-flight actions and the same two local CPU slots
+for build scripts, tests, and fallback compilation. These resource estimates bound
 admission, not the compiler's actual memory consumption. Workstations already
 enrolled as NativeLink workers retain their shared-scheduler profile so the same
 physical resources are not admitted independently twice.
 
-Linux and macOS use sandboxed local execution. Windows uses the local strategy
-with `--experimental_local_lockfree_output` so a local compiler does not take the
-output lock before execution and prevent a remote result from winning.
+Linux and macOS use sandboxed local execution, so the losing branch never
+writes the shared output tree. Windows has no local sandbox: an unsandboxed
+dynamic branch wrote the execroot while the remote result for the same action
+landed, failing builds with missing `.rlib`/`.pdb` outputs and output-digest
+mismatches. Windows therefore compiles Rustc actions remotely only.
 Linux/macOS TestRunner actions also use dynamic execution; Windows tests remain
 local. Tests carry Node, Rust Analyzer, and their compiler tools as declared
 runfiles. Each remote test reserves four worker CPU units and its Rust harness
@@ -43,13 +47,31 @@ uses four threads. The local test branch reserves the hosted runner CPU budget
 so suites do not compete with one another for local cores. The shared action
 cache remains enabled.
 
-Remote-to-local fallback is disabled: dynamic execution already owns its local
-branch, and fallback could start a second unsandboxed compiler writing the same
-outputs. Remote infrastructure failures are retried; exhausted retries, actual
-compiler errors, failed tests, and remote execution timeouts still fail the build.
+Linux and macOS disable remote-to-local fallback because dynamic execution
+already owns their local branch. Windows enables it: after the remote attempt
+fails with a worker infrastructure error, the hosted runner compiles that action
+once with the same pinned compiler and SDK. The two copies run in sequence and
+never concurrently. Actual compiler errors, failed tests, and remote execution
+timeouts still fail the build.
 BuildBuddy events upload asynchronously, so a reporting outage does not fail a
 successful build.
 A terminated runner can leave an incomplete report.
+
+Completed cacheable local actions upload their results synchronously to the shared
+cache. This avoids leaving completed outputs in a background upload queue when a
+new push cancels the runner. Cache reuse still requires matching action inputs,
+flags and toolchains, and retained output blobs. Cancellation during compilation
+or upload does not create a reusable result. Shared-cache entries are independent
+of GitHub run IDs and are not deleted when a workflow is cancelled. In contrast,
+the hosted-only disk cache is saved after builds and its save is skipped on
+cancellation; a cancelled VM's unsaved disk contents do not survive.
+
+Every Windows job using `setup-bazel`, including release jobs, verifies Defender
+real-time scanning is disabled (or its service is stopped) before building. The
+preflight is restricted to disposable GitHub-hosted runners, reports CPU/memory
+and free-space information in the job summary, and fails if scanning remains
+enabled or its effective state cannot be checked. It does not change persistent
+fleet machines. Windows test jobs also put temporary files on the workspace drive.
 
 CI checks Tailscale enrollment and TCP connectivity to the executor before
 selecting the private fleet. If either fails, it uses the hosted runner and
@@ -61,9 +83,10 @@ builds and tests `//...` in that job rather than expanding into hosted shards.
 
 The connectivity check proves that the coordinator accepts connections, not
 that compatible workers are online. A reachable coordinator can queue an
-action while its worker pool is offline. Dynamic compilation can still progress on the hosted runner while
-waiting for a compatible worker. The checked-in execution platforms select OS and CPU architecture, with
-CPU admission requirements. They do not define a high-memory worker
+action while its worker pool is offline. Linux and macOS dynamic compilation can
+still progress on the hosted runner while waiting for a compatible worker;
+Windows compilation waits for MINI. The checked-in execution platforms select OS
+and CPU architecture, with CPU admission requirements. They do not define a high-memory worker
 class for asupersync. Worker memory capacity and scheduling belong to the
 private fleet configuration and must be verified from executed-action worker
 identities and metrics.
