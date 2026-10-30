@@ -1,29 +1,66 @@
-name: Workspace formatter export
+name: Isolated schedule repair validation
 on:
   push:
     branches: [work/automation-retirement-source-20261030]
 permissions:
   contents: read
 jobs:
-  formatter:
+  native:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - name: Prepare the repository-pinned formatter
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Apply the reviewed patch to its exact source base
         shell: bash
         run: |
           set -euo pipefail
-          rustup toolchain install 1.99.1 --profile minimal --component rustfmt
-          formatter="$(rustup which --toolchain 1.99.1 rustfmt)"
-          root="$(dirname "$(dirname "$formatter")")"
-          mkdir -p "$RUNNER_TEMP/formatter/bin" "$RUNNER_TEMP/formatter/lib"
-          cp "$formatter" "$RUNNER_TEMP/formatter/bin/"
-          find "$root/lib" -maxdepth 1 -type f -name '*.so*' -exec cp {} "$RUNNER_TEMP/formatter/lib/" \;
-          "$RUNNER_TEMP/formatter/bin/rustfmt" --version
-          tar -C "$RUNNER_TEMP/formatter" -czf "$RUNNER_TEMP/rustfmt-1.99.1.tar.gz" .
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+          python3 -c 'import base64,gzip,pathlib; pathlib.Path("/tmp/schedule.patch").write_bytes(gzip.decompress(base64.b64decode(pathlib.Path("_repair/schedule.patch.gz.b64").read_text())))'
+          git checkout --detach 64a04ef4d4b542a03ebc419ddd10429f4f110a0c
+          git apply --index /tmp/schedule.patch
+          test "$(git write-tree)" = 06a246422bddbb3f70d0f6df6fd036cd4e99821a
+          git diff --cached --check
+      - uses: ./.github/actions/setup-bazel
         with:
-          name: rustfmt-1.99.1-linux
-          path: ${{ runner.temp }}/rustfmt-1.99.1.tar.gz
+          cache-key: ci-linux-test-v2
+          cache-save: 'false'
+          tailscale-client-id: ${{ github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID || '' }}
+      - name: Run owning suites with fresh test results
+        run: >-
+          bazel test --config=ci --nocache_test_results --test_output=errors
+          //crates/tracedecay-automation-runtime:unit_test
+          //crates/tracedecay-project:unit_test
+          //crates/tracedecay-daemon-service:unit_test
+          //crates/tracedecay:automation_runner_test
+          //crates/tracedecay:unit_test
+      - name: Check owning Clippy targets
+        run: >-
+          bazel build --config=clippy
+          //crates/tracedecay-automation-runtime:unit_test
+          //crates/tracedecay-project:unit_test
+          //crates/tracedecay-daemon-service:unit_test
+          //crates/tracedecay:automation_runner_test
+          //crates/tracedecay:unit_test
+      - name: Verify formatting and generated targets
+        run: |
+          bazel build --config=ci //:rustfmt_check
+          bazel run //scripts:gen_builds -- --check
+      - name: Record the tested tree
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/schedule-validation"
+          git write-tree > "$RUNNER_TEMP/schedule-validation/tree.txt"
+          git diff --cached --binary > "$RUNNER_TEMP/schedule-validation/tested.patch"
+          cp -rL bazel-testlogs "$RUNNER_TEMP/schedule-validation/testlogs" 2>/dev/null || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: schedule-validation
+          path: ${{ runner.temp }}/schedule-validation
           if-no-files-found: error
           retention-days: 1
