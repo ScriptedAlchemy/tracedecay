@@ -114,7 +114,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Commit lint needs the complete commit graph, but no historical blobs.
           fetch-depth: 0
+          filter: blob:none
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -349,12 +351,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          # Keep history by default: the search evaluator reads pinned blobs
+          # through gix, which cannot lazily fetch a partial clone's objects.
+          fetch-depth: ${{ contains(fromJSON('["root-a","workspace-a","workspace-code","workspace-b"]'), matrix.shard) && 1 || 0 }}
 
       # The workspace build plus its test outputs outgrow the runner's free
       # space (run 37403143722 died with ENOSPC mid-test); drop preinstalled
       # SDKs this job never uses.
       - name: Free runner disk space
+        id: disk-cleanup
         run: |
           set -euo pipefail
           df -h /
@@ -546,6 +551,21 @@ jobs:
         with:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
           key: ${{ steps.bazel.outputs.disk-cache-key }}
+
+      - name: Report runner disk usage
+        if: always() && (steps.disk-cleanup.outcome == 'success' || steps.disk-cleanup.outcome == 'failure')
+        run: |
+          df -h /
+          for path in "$HOME/.bazel" "$HOME/.cache/bazel-disk"; do
+            if [[ -d "$path" ]]; then
+              du -sh "$path"
+            fi
+          done
+          # Bazel 9 puts unpacked repositories alongside the download CAS.
+          # Report both before changing the archive restored by every job.
+          if [[ -d "$HOME/.cache/bazel-repo" ]]; then
+            du -h -d 1 "$HOME/.cache/bazel-repo"
+          fi
 
   # Preserves the "Test Linux" check name for branch protection.
   linux-test-result:
