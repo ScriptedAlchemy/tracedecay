@@ -65,7 +65,9 @@ async fn same_length_rewrite_with_preserved_timestamp_replaces_timing_not_accept
     assert!(!Arc::ptr_eq(&accepted, &changed));
     assert_eq!(
         changed[0].schedule(),
-        AutomationSchedule::Interval { every_secs: 604800 }
+        AutomationSchedule::Interval {
+            every_secs: 604_800
+        }
     );
     assert_eq!(
         accepted[0].schedule(),
