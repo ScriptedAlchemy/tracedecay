@@ -55,51 +55,61 @@ class ConfigureCiFleetTest(unittest.TestCase):
             if option.startswith("--local_resources=")
         )
 
-    def test_reachable_executor_prefers_remote_rust_without_hosted_fallback(self) -> None:
+    def test_linux_executor_shares_compilation_with_bounded_hosted_cpu(self) -> None:
         self.endpoint.listen()
         self.assertTrue(self.configure())
         options = self.options()
         self.assertEqual(options["--config"], "rbe-linux")
         self.assertIn("--noremote_local_fallback", options)
         self.assertNotIn("--remote_local_fallback", options)
-        self.assertEqual(self.resource_limits()["cpu"], "HOST_CPUS")
+        self.assertEqual(self.resource_limits(), {"cpu": "2", "memory": "HOST_RAM*.5"})
+        self.assertEqual(options["--dynamic_local_strategy"], "sandboxed")
+        self.assertEqual(options["--dynamic_remote_strategy"], "remote")
+        self.assertNotIn("--experimental_local_lockfree_output", options)
         self.assertEqual(options["--remote_retries"], "10")
         strategies = [
             line for line in self.rc.read_text().splitlines() if "--strategy=" in line
         ]
-        self.assertIn("build --strategy=Rustc=remote", strategies)
+        self.assertIn("build --strategy=Rustc=dynamic", strategies)
         self.assertIn("build --strategy=TestRunner=dynamic,local", strategies)
         self.assertEqual(self.output.read_text(), "enabled=true\n")
 
-    def test_windows_executor_configures_bounded_local_fallback(self) -> None:
+    def test_windows_executor_shares_compilation_with_bounded_hosted_cpu(self) -> None:
         self.endpoint.listen()
         self.assertTrue(self.configure(runner_os="Windows"))
         options = self.options()
         self.assertEqual(options["--config"], "rbe-windows")
         self.assertEqual(options["--jobs"], "16")
         self.assertEqual(options["--spawn_strategy"], "local")
-        self.assertIn("--remote_local_fallback", options)
-        self.assertNotIn("--noremote_local_fallback", options)
+        self.assertIn("--noremote_local_fallback", options)
+        self.assertNotIn("--remote_local_fallback", options)
         self.assertEqual(
             self.resource_limits(), {"cpu": "2", "memory": "HOST_RAM*.5"}
         )
         host, port = self.endpoint.getsockname()
         self.assertEqual(options["--remote_executor"], f"grpc://{host}:{port}")
         self.assertEqual(options["--bes_backend"], f"grpc://{host}:1985")
-        self.assertNotIn("--dynamic_local_strategy", options)
-        self.assertIn("build --strategy=Rustc=remote", self.rc.read_text())
+        self.assertIn("--internal_spawn_scheduler", options)
+        self.assertEqual(options["--dynamic_local_strategy"], "local")
+        self.assertEqual(options["--dynamic_remote_strategy"], "remote")
+        self.assertIn("--experimental_local_lockfree_output", options)
+        self.assertIn("build --strategy=Rustc=dynamic", self.rc.read_text())
+        self.assertNotIn("build --strategy=Rustc=remote", self.rc.read_text())
         self.assertIn("build --strategy=TestRunner=local", self.rc.read_text())
         self.assertEqual(self.output.read_text(), "enabled=true\n")
 
-    def test_macos_executor_uses_remote_only_compilation(self) -> None:
+    def test_macos_executor_shares_compilation_with_bounded_hosted_cpu(self) -> None:
         self.endpoint.listen()
         self.assertTrue(self.configure(runner_os="macOS", arch="ARM64"))
         options = self.options()
         self.assertEqual(options["--config"], "rbe-macos")
         self.assertIn("--noremote_local_fallback", options)
         self.assertNotIn("--remote_local_fallback", options)
-        self.assertEqual(self.resource_limits()["cpu"], "HOST_CPUS")
-        self.assertIn("build --strategy=Rustc=remote", self.rc.read_text())
+        self.assertEqual(self.resource_limits(), {"cpu": "2", "memory": "HOST_RAM*.5"})
+        self.assertEqual(options["--dynamic_local_strategy"], "sandboxed")
+        self.assertEqual(options["--dynamic_remote_strategy"], "remote")
+        self.assertNotIn("--experimental_local_lockfree_output", options)
+        self.assertIn("build --strategy=Rustc=dynamic", self.rc.read_text())
 
     def test_unsupported_windows_architecture_does_not_contact_executor(self) -> None:
         self.endpoint.listen()

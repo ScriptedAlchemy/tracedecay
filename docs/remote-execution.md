@@ -43,7 +43,7 @@ already enrolled in that pool: Bazel and NativeLink would independently admit
 work against the same machine. Dynamic execution is useful for a client that
 is not itself a fleet worker, such as a GitHub-hosted runner. That client's
 later `.bazelrc.local` can select dynamic strategies with its own resource
-limits, as the CI setup does for tests. Dynamic execution races duplicate local
+limits, as the CI setup does for Rust compilation and eligible tests. Dynamic execution races duplicate local
 and remote copies; it is not a partition of work between the machines.
 
 Verify distribution using executed-action worker identities or worker metrics,

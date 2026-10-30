@@ -3076,7 +3076,16 @@ impl CodeIndexSchedulerRegistryV1 {
                                             error = %error,
                                             "source verification after text projection failed; the completed generation may only take a stale seat"
                                         );
-                                        if error.is_resident_memory_refusal() {
+                                        if error.is_publication_race() {
+                                            // The moved source this pass found is
+                                            // still unpublished; rescan it against
+                                            // the publisher that won the pointer.
+                                            Self::note_wake(
+                                                &worker_pending_wake,
+                                                &worker_wake,
+                                                CodeIndexCadenceTriggerV1::Overflow,
+                                            );
+                                        } else if error.is_resident_memory_refusal() {
                                             match worker_memory_retry.record_memory_refusal(
                                                 &worker_control_epoch,
                                                 &error,
@@ -3597,12 +3606,13 @@ impl CodeIndexSchedulerRegistryV1 {
                                 // The refusal registered with the resident-memory
                                 // authority; the headroom wake is its retry.
                                 capacity_retry.record_progress();
-                            } else if transient_capacity {
+                            } else if transient_capacity || error.is_publication_race() {
                                 // A graph operation budget another holder
                                 // releases without waking this worktree gets a
-                                // bounded retry. Permanent refusals never reach
-                                // here: retrying those forever is the failure
-                                // this loop already had.
+                                // bounded retry, as does a seal that lost the
+                                // pointer race to another publisher. Permanent
+                                // refusals never reach here: retrying those
+                                // forever is the failure this loop already had.
                                 if !Self::arm_capacity_retry(&mut capacity_retry, &worker_wake) {
                                     tracing::warn!(
                                         event = "code_index_reconcile_capacity_retry_exhausted",

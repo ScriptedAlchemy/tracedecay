@@ -2463,7 +2463,7 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
     );
 
     first_run.ledger_record.run_id = "run.invalid-pair-projection".to_owned();
-    let (phase_tx, phase_rx) = std::sync::mpsc::channel();
+    let (phase_tx, mut phase_rx) = tokio::sync::mpsc::unbounded_channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let release_rx = Arc::new(Mutex::new(release_rx));
     let phase_release = Arc::clone(&release_rx);
@@ -2477,7 +2477,7 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
                 .expect("release second pair leg");
         }
     });
-    let (second_observed_tx, second_observed_rx) = std::sync::mpsc::channel();
+    let (second_observed_tx, mut second_observed_rx) = tokio::sync::mpsc::unbounded_channel();
     let submission =
         super::AutomationEffectAuthority::start_request_waiting_settlement_pair_with_phase_hooks(
             (first_authority, first_guard),
@@ -2505,9 +2505,10 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
         .expect("submit both pair terminals");
 
     assert_eq!(
-        phase_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("second pair leg attempted"),
+        tokio::time::timeout(Duration::from_secs(5), phase_rx.recv())
+            .await
+            .expect("second pair leg attempted")
+            .expect("second pair leg attempted: channel unexpectedly closed"),
         super::RetainedSettlementPhase::Prepared
     );
     let super::RetainedSettlementPairWaiter { first, second, .. } = waiter;
@@ -2552,9 +2553,10 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
         second_run_id
     );
     assert_eq!(
-        second_observed_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("second pair exact observation"),
+        tokio::time::timeout(Duration::from_secs(5), second_observed_rx.recv())
+            .await
+            .expect("second pair exact observation")
+            .expect("second pair exact observation: channel unexpectedly closed"),
         second_expected_record.clone()
     );
     assert_eq!(
@@ -2788,7 +2790,7 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
     recovery_index::add_pending_blocking(dashboard_root, &journal_path, &expected_admission)
         .expect("retain settlement cleanup authority");
 
-    let (phase_tx, phase_rx) = std::sync::mpsc::channel();
+    let (phase_tx, mut phase_rx) = tokio::sync::mpsc::unbounded_channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let release_rx = Arc::new(Mutex::new(release_rx));
     let phase_release = Arc::clone(&release_rx);
@@ -2816,8 +2818,8 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
         }
         Ok(())
     });
-    let (observed_tx, observed_rx) = std::sync::mpsc::channel();
-    let (projected_tx, projected_rx) = std::sync::mpsc::channel();
+    let (observed_tx, mut observed_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (projected_tx, mut projected_rx) = tokio::sync::mpsc::unbounded_channel();
     let waiter = authority.start_retained_automation_settlement_with_phase_hooks(
         retained,
         Some(Box::new(move |record| {
@@ -2835,14 +2837,16 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
         Some(prepared_write_hook),
     );
     drop(waiter);
-    let expected_record = projected_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("projector executed inside detached owner");
+    let expected_record = tokio::time::timeout(Duration::from_secs(5), projected_rx.recv())
+        .await
+        .expect("projector executed inside detached owner")
+        .expect("projector executed inside detached owner: channel unexpectedly closed");
 
     assert_eq!(
-        phase_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("unbound retry phase"),
+        tokio::time::timeout(Duration::from_secs(5), phase_rx.recv())
+            .await
+            .expect("unbound retry phase")
+            .expect("unbound retry phase: channel unexpectedly closed"),
         super::RetainedSettlementPhase::PreparedWriteFailed
     );
     let reserved = read_indexed_record_blocking(&journal_path)
@@ -2864,9 +2868,10 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
 
     release_tx.send(()).expect("release failed Prepared phase");
     assert_eq!(
-        phase_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("prepared phase"),
+        tokio::time::timeout(Duration::from_secs(5), phase_rx.recv())
+            .await
+            .expect("prepared phase")
+            .expect("prepared phase: channel unexpectedly closed"),
         super::RetainedSettlementPhase::Prepared
     );
     assert!(
@@ -2895,9 +2900,10 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
 
     release_tx.send(()).expect("release prepared phase");
     assert_eq!(
-        phase_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("published phase"),
+        tokio::time::timeout(Duration::from_secs(5), phase_rx.recv())
+            .await
+            .expect("published phase")
+            .expect("published phase: channel unexpectedly closed"),
         super::RetainedSettlementPhase::Published
     );
     assert_eq!(
@@ -2959,9 +2965,10 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
 
     release_tx.send(()).expect("release published phase");
     assert_eq!(
-        observed_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("detached exact observation"),
+        tokio::time::timeout(Duration::from_secs(5), observed_rx.recv())
+            .await
+            .expect("detached exact observation")
+            .expect("detached exact observation: channel unexpectedly closed"),
         expected_record.clone()
     );
     assert!(

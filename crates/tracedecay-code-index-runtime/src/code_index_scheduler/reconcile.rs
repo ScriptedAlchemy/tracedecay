@@ -448,6 +448,21 @@ impl CodeIndexSchedulerErrorV1 {
             )
     }
 
+    /// Another publisher moved the active pointer before this pass sealed.
+    /// The race says nothing about the source; the source this pass captured
+    /// is still unpublished, so the next pass must reconcile it against the
+    /// new pointer instead of the worker forgetting it.
+    pub fn is_publication_race(&self) -> bool {
+        matches!(
+            self,
+            Self::Production(CodeIndexProductionErrorV1::Publication(
+                CodeIndexPublicationStoreErrorV1::CompareAndSwap,
+            )) | Self::PreparedPublicationRefused {
+                error: CodeIndexPublicationStoreErrorV1::CompareAndSwap
+            } | Self::PublicationConflict(_)
+        )
+    }
+
     /// Another owner, in this or another process, holds this scope's
     /// code-generation store lock.
     pub fn is_store_lock_contended(&self) -> bool {
@@ -2000,7 +2015,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         }
         let snapshot_content_identity = generation.snapshot().content_identity.clone();
         self.latest_content_identity = Some(snapshot_content_identity.clone());
-        self.mark_reconciled(source_manifest, began_under);
+        self.mark_reconciled(source_manifest, began_under, &metadata);
         Ok(Some(CodeIndexReconcileOutcomeV1::Noop(
             CodeIndexNoopEvidenceV1 {
                 snapshot_content_identity,
@@ -2893,6 +2908,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         // bound to; a HEAD move under the same worktree is allowed and simply
         // records a new source revision, so the served generation is never
         // mis-attributed across identities.
+        let captured_under = identity::GitMetadataFingerprintV1::capture(&self.project_root);
         let resolved = identity::IndexingIdentityV1::resolve(&self.project_root)
             .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
         if !resolved.authorizes_reuse_of(&self.identity) {
@@ -2912,7 +2928,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         }
         // Capture may advance `.git/index` mtime (git_open::open). The post-reconcile
         // witness is sampled at `mark_reconciled`, after that side effect, so
-        // the next ready probe does not see this pass as stale.
+        // the next ready probe does not see this pass as stale. A HEAD or ref
+        // move after this pre-capture sample stays visible to that probe.
         let mut overflow_reconciled = false;
         for retry in 0..=MAX_SUPERSEDED_RECONCILE_RETRIES {
             let control = self.reconcile_control();
@@ -3012,6 +3029,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 self.mark_reconciled(
                     SourceContentManifestV1::for_snapshot(&captured.snapshot),
                     control.expected_epoch(),
+                    &captured_under,
                 );
                 return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
                     snapshot_content_identity: captured.snapshot.content_identity,
@@ -3122,7 +3140,11 @@ impl CodeIndexWorktreeSchedulerV1 {
                     CodeIndexInputErrorV1::NoExtractableFiles,
                 ))) => {
                     self.latest_content_identity = Some(snapshot_content_identity.clone());
-                    self.mark_reconciled(source_manifest, control.expected_epoch());
+                    self.mark_reconciled(
+                        source_manifest,
+                        control.expected_epoch(),
+                        &captured_under,
+                    );
                     return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
                         snapshot_content_identity,
                         overflow_reconciled,
@@ -3132,7 +3154,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             };
             self.require_reusable_publication(&generation)?;
             self.latest_content_identity = Some(snapshot_content_identity);
-            self.mark_reconciled(source_manifest, control.expected_epoch());
+            self.mark_reconciled(source_manifest, control.expected_epoch(), &captured_under);
             return Ok(CodeIndexReconcileOutcomeV1::Published(
                 self.publish_evidence(&generation, reextracted_files, overflow_reconciled),
             ));
@@ -3145,12 +3167,25 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// `source_epoch` is the epoch that pass began under. A pass that sealed
     /// or verified past a newer epoch proves only that one, so freshness keeps
     /// reporting the source as moved until the follow-up pass.
+    ///
+    /// `captured_under` is the git metadata sampled before the pass read any
+    /// source. The witness is resampled here because capture may refresh
+    /// `.git/index`; but if HEAD or a ref moved in between, the snapshot
+    /// predates that commit or checkout. Recording the earlier sample keeps the
+    /// move visible to the next freshness probe instead of sealing it as
+    /// reconciled.
     pub(super) fn mark_reconciled(
         &mut self,
         source_manifest: SourceContentManifestV1,
         source_epoch: u64,
+        captured_under: &identity::GitMetadataFingerprintV1,
     ) {
-        let metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
+        let sampled = identity::GitMetadataFingerprintV1::capture(&self.project_root);
+        let metadata = if sampled.same_refs_as(captured_under) {
+            sampled
+        } else {
+            captured_under.clone()
+        };
         let source_witness =
             self.worktree_stat_signature()
                 .ok()

@@ -107,6 +107,47 @@ pub(super) struct EvictionReservation {
     owner: std::sync::Arc<super::StoreRuntimeOwnerAttachment>,
 }
 
+/// Completes one reserved eviction exactly once, inline when its settlement
+/// task never runs. Completion drains and joins the evicted runtime's writer
+/// and readers, which parks the calling thread.
+pub(super) struct ReservedEviction {
+    registry: StoreRuntimeRegistry,
+    reservation: Option<EvictionReservation>,
+    outcomes: std::sync::mpsc::Sender<Result<(), StoreRuntimeRegistryFailure>>,
+}
+
+impl ReservedEviction {
+    pub(super) fn new(
+        registry: StoreRuntimeRegistry,
+        reservation: EvictionReservation,
+        outcomes: std::sync::mpsc::Sender<Result<(), StoreRuntimeRegistryFailure>>,
+    ) -> Self {
+        Self {
+            registry,
+            reservation: Some(reservation),
+            outcomes,
+        }
+    }
+
+    pub(super) fn complete(&mut self) {
+        if let Some(reservation) = self.reservation.take() {
+            let outcome = self.registry.complete_eviction(reservation);
+            if let Err(std::sync::mpsc::SendError(Err(failure))) = self.outcomes.send(outcome) {
+                tracing::warn!(
+                    ?failure,
+                    "registered runtime eviction failed after its waiter stopped waiting"
+                );
+            }
+        }
+    }
+}
+
+impl Drop for ReservedEviction {
+    fn drop(&mut self) {
+        self.complete();
+    }
+}
+
 impl StoreRuntimeRegistry {
     pub(super) fn reserve_project_code_capacity(
         &self,

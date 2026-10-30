@@ -46,17 +46,14 @@ def configure_fleet(
 
     if enabled:
         windows = runner_os == "Windows"
-        fallback = (
-            "# Both Windows hosts use the pinned V: compiler. Recover worker\n"
-            "# infrastructure errors locally; compiler failures remain failures.\n"
-            "build --remote_local_fallback\n"
-            if windows
-            else "# Fleet compilation must not fall back onto the smaller hosted VM.\n"
-            "# Dynamic tests still have their explicitly scheduled local branch.\n"
-            "build --noremote_local_fallback\n"
-        )
         execution = (
-            "build --spawn_strategy=local\nbuild --strategy=TestRunner=local\n"
+            "build --spawn_strategy=local\n"
+            "build --internal_spawn_scheduler\n"
+            "build --dynamic_local_strategy=local\n"
+            "build --dynamic_remote_strategy=remote\n"
+            "# Let remote results cancel a local compiler before publishing outputs.\n"
+            "build --experimental_local_lockfree_output\n"
+            "build --strategy=TestRunner=local\n"
             if windows
             else "build --internal_spawn_scheduler\n"
             "build --dynamic_local_strategy=sandboxed\n"
@@ -71,15 +68,17 @@ build --remote_instance_name=main
 build --remote_timeout=600
 # Survive brief coordinator restarts; five retries expire in about 3s.
 build --remote_retries=10
-{fallback}build --remote_download_outputs=toplevel
+# Dynamic execution already owns its local branch. Remote fallback would start
+# another unsandboxed compiler writing the same outputs on Windows.
+build --noremote_local_fallback
+build --remote_download_outputs=toplevel
 build --jobs={16 if windows else 40}
-# Four local Rust actions exhaust Windows hosted commit capacity. Bound local
-# fallback to the hosted-only build's two slots while remote work stays parallel.
-build --local_resources=cpu={2 if windows else "HOST_CPUS"}
+# Leave room for Bazel analysis and downloads while large Rust actions compile.
+build --local_resources=cpu=2
 build --local_resources=memory=HOST_RAM*.5
 # Windows keeps build scripts and tests on the hosted runner. MSVC paths for
 # remote Rust compilation/linking are shared through the V: toolchain drive.
-{execution}build --strategy=Rustc=remote
+{execution}build --strategy=Rustc=dynamic
 build --bes_backend=grpc://{host}:1985
 build --bes_results_url=https://ubuntu-main.tail039078.ts.net/invocation/
 build --bes_timeout=30s

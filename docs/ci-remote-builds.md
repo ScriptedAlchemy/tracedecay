@@ -15,34 +15,40 @@ serves macOS actions; this CI integration does not send Linux actions to it. ARM
 newer Xcode/SDK than the macos-26 image; matching OS and CPU alone does not make
 native compilation compatible.
 
-Windows x86_64 CI enrolls through the same restricted identity and sends
-`Rustc` actions, including native linking, to the Windows MINI worker. Build
-scripts and tests remain on GitHub's Windows runner. Both machines expose
+Windows x86_64 CI enrolls through the same restricted identity and shares
+`Rustc` actions, including native linking, between the hosted runner and MINI.
+Build scripts and tests remain on GitHub's Windows runner. Both machines expose
 MSVC 14.44.35207 through a `V:` drive mapping to the existing Visual Studio installation;
 Bazel selects Windows SDK 10.0.26100.0. This avoids machine-specific Enterprise
 versus BuildTools paths without copying the toolchain. The setup fails if the
 pinned compiler is missing or `V:` is already occupied. The Windows execution
 platform matches `OSFamily=windows` and `cpu_arch=x86_64`.
 
-Rustc actions, including asupersync, prefer remote execution. Large Rust
-compilations do not race a second copy on the smaller hosted runner.
-TestRunner actions use Bazel dynamic execution with sandboxed local execution
-and remote execution: both may start the same test, and Bazel keeps the first
-result and cancels the other. Local work is admitted against the runner CPU
-count and half its RAM; these scheduler estimates do not cap a compiler's
-actual memory use. The shared action cache remains enabled. Tests carry Node,
-Rust Analyzer, and their compiler tools as declared runfiles.
-Each remote test reserves four worker CPU units and the Rust harness uses four
-threads. The local branch reserves the hosted runner CPU budget so suites do not
-compete with one another for local cores. Linux and macOS remote compilation do
-not fall back to the hosted runner; their dynamic tests retain the scheduled
-local branch. Windows retries remote infrastructure failures locally with the
-same pinned compiler and SDK, including worker cleanup and rejected output
-downloads. It keeps sixteen remote jobs while reserving at most two local CPU
-slots and half the hosted runner's RAM. This recovers eligible actions without
-repairing the remote cache itself. Actual compiler errors, failed tests, and
-remote action execution timeouts still fail the build. BuildBuddy events
-upload asynchronously, so a reporting outage does not fail a successful build.
+All fleet-enabled CI runners use dynamic execution for Rustc actions. The
+GitHub-hosted runner and compatible remote workers may compile the same action;
+Bazel keeps the first result and cancels the competing branch. Local compilation
+uses two CPU slots and half the hosted runner's RAM, alongside sixteen in-flight
+actions on Windows or forty on Linux/macOS. These resource estimates bound
+admission, not the compiler's actual memory consumption. Workstations already
+enrolled as NativeLink workers retain their shared-scheduler profile so the same
+physical resources are not admitted independently twice.
+
+Linux and macOS use sandboxed local execution. Windows uses the local strategy
+with `--experimental_local_lockfree_output` so a local compiler does not take the
+output lock before execution and prevent a remote result from winning.
+Linux/macOS TestRunner actions also use dynamic execution; Windows tests remain
+local. Tests carry Node, Rust Analyzer, and their compiler tools as declared
+runfiles. Each remote test reserves four worker CPU units and its Rust harness
+uses four threads. The local test branch reserves the hosted runner CPU budget
+so suites do not compete with one another for local cores. The shared action
+cache remains enabled.
+
+Remote-to-local fallback is disabled: dynamic execution already owns its local
+branch, and fallback could start a second unsandboxed compiler writing the same
+outputs. Remote infrastructure failures are retried; exhausted retries, actual
+compiler errors, failed tests, and remote execution timeouts still fail the build.
+BuildBuddy events upload asynchronously, so a reporting outage does not fail a
+successful build.
 A terminated runner can leave an incomplete report.
 
 CI checks Tailscale enrollment and TCP connectivity to the executor before
@@ -55,10 +61,9 @@ builds and tests `//...` in that job rather than expanding into hosted shards.
 
 The connectivity check proves that the coordinator accepts connections, not
 that compatible workers are online. A reachable coordinator can queue an
-action while its worker pool is offline. Local fallback follows infrastructure
-errors from Bazel; it does not guarantee immediate recovery from a queue with
-no workers. The checked-in execution platforms select OS and CPU architecture,
-with CPU admission requirements. They do not define a high-memory worker
+action while its worker pool is offline. Dynamic compilation can still progress on the hosted runner while
+waiting for a compatible worker. The checked-in execution platforms select OS and CPU architecture, with
+CPU admission requirements. They do not define a high-memory worker
 class for asupersync. Worker memory capacity and scheduling belong to the
 private fleet configuration and must be verified from executed-action worker
 identities and metrics.
