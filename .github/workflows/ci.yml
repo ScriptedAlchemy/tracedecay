@@ -355,11 +355,22 @@ jobs:
           # through gix, which cannot lazily fetch a partial clone's objects.
           fetch-depth: ${{ contains(fromJSON('["root-a","workspace-a","workspace-code","workspace-b"]'), matrix.shard) && 1 || 0 }}
 
-      # The workspace build plus its test outputs outgrow the runner's free
-      # space (run 37403143722 died with ENOSPC mid-test); drop preinstalled
-      # SDKs this job never uses.
+      - uses: ./.github/actions/setup-bazel
+        id: bazel
+        with:
+          cache-key: ci-linux-test-v2
+          # Tailscale binds each client to this repository, workflow, and actor ID.
+          # Fork PRs never receive a fleet identity.
+          tailscale-client-id: >-
+            ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+                && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
+                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
+
+      # Fleet measurements leave about 46 GiB free without deleting SDKs.
+      # Keep cleanup for unmeasured hosted shards and fleet fallback, where
+      # local builds have previously exhausted the runner disk.
       - name: Free runner disk space
-        id: disk-cleanup
+        if: matrix.shard != 'fleet' || steps.bazel.outputs.fleet-enabled != 'true'
         run: |
           set -euo pipefail
           df -h /
@@ -377,17 +388,6 @@ jobs:
           done
           df -h /
           exit "$status"
-
-      - uses: ./.github/actions/setup-bazel
-        id: bazel
-        with:
-          cache-key: ci-linux-test-v2
-          # Tailscale binds each client to this repository, workflow, and actor ID.
-          # Fork PRs never receive a fleet identity.
-          tailscale-client-id: >-
-            ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-                && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
-                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
 
       - name: Select Linux test targets
         id: targets
@@ -551,21 +551,6 @@ jobs:
         with:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
           key: ${{ steps.bazel.outputs.disk-cache-key }}
-
-      - name: Report runner disk usage
-        if: always() && (steps.disk-cleanup.outcome == 'success' || steps.disk-cleanup.outcome == 'failure')
-        run: |
-          df -h /
-          for path in "$HOME/.bazel" "$HOME/.cache/bazel-disk"; do
-            if [[ -d "$path" ]]; then
-              du -sh "$path"
-            fi
-          done
-          # Bazel 9 puts unpacked repositories alongside the download CAS.
-          # Report both before changing the archive restored by every job.
-          if [[ -d "$HOME/.cache/bazel-repo" ]]; then
-            du -h -d 1 "$HOME/.cache/bazel-repo"
-          fi
 
   # Preserves the "Test Linux" check name for branch protection.
   linux-test-result:

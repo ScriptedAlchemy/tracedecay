@@ -1,6 +1,6 @@
 name: Set up Bazel
 description: >
-  Installs Bazel through the pinned bazelisk with its repository cache, and a
+  Installs Bazel through the pinned bazelisk with a download-only cache, and a
   disk cache named by `cache-key` that only master saves automatically: PRs
   restore master's entry; explicit native Windows dispatches may also prime
   their branch's cache. Jobs with the same configuration and
@@ -19,7 +19,7 @@ inputs:
       Clippy can reuse Test Linux action outputs.
     default: ""
   cache-save:
-    description: Whether this setup may save Bazelisk and repository caches.
+    description: Whether to save repository downloads (any ref) and Bazelisk (master only).
     default: "true"
   windows-redirect-temp:
     description: Put Windows test temporary files on the runner workspace drive.
@@ -60,12 +60,13 @@ runs:
 
     # Cache versions include the literal path. Keep setup-bazel's existing
     # directory and key prefix to restore previously compiled outputs.
-    - name: Resolve action cache location
+    - name: Resolve Bazel cache locations
       id: disk-cache-config
       shell: bash
       env:
         CACHE_NAME: ${{ inputs.cache-key }}
         EXTRA_RESTORE_KEYS: ${{ inputs.extra-restore-keys }}
+        REPOSITORY_INPUTS_HASH: ${{ hashFiles('.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock', 'Cargo.lock', 'rust-toolchain.toml', 'scripts/bazel/**') }}
       run: |
         node <<'JS'
         const fs = require('node:fs');
@@ -73,6 +74,11 @@ runs:
         const path = process.platform === 'win32'
           ? 'D:/b-disk'
           : `${os.homedir().replace(/\\/g, '/')}/.cache/bazel-disk`;
+        const repositoryPath = process.platform === 'win32'
+          ? 'D:/b-repo'
+          : `${os.homedir().replace(/\\/g, '/')}/.cache/bazel-repo`;
+        const repositoryPrefix = `bazel-downloads-v1-${process.platform}-${os.arch()}-`;
+        const repositoryInputsPrefix = `${repositoryPrefix}${process.env.REPOSITORY_INPUTS_HASH}-`;
         const names = [process.env.CACHE_NAME, ...(process.env.EXTRA_RESTORE_KEYS || '')
           .split(',')
           .map((name) => name.trim())
@@ -83,15 +89,47 @@ runs:
           process.env.GITHUB_OUTPUT,
           `path=${path}\nprefix=${prefixes[0]}\nrestore-keys<<EOF\n${prefixes.join('\n')}\nEOF\n`,
         );
+        fs.appendFileSync(
+          process.env.GITHUB_OUTPUT,
+          `repository-path=${repositoryPath}\nrepository-prefix=${repositoryPrefix}\n` +
+          `repository-inputs-prefix=${repositoryInputsPrefix}\n` +
+          `repository-key=${repositoryInputsPrefix}${process.env.CACHE_NAME}\n`,
+        );
         JS
+
+    # Bazel checks download digests and canonical IDs before reuse. Dependency
+    # changes can restore an older CAS and fetch only missing entries. Never
+    # restore the old whole-repository archive: Bazel 9's extracted contents
+    # dominate it. PR-scoped saves allow reuse before a dependency update lands.
+    # Caller keys let larger jobs save additions to a smaller job's seed cache.
+    - name: Restore and save Bazel downloads
+      if: inputs.cache-save == 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.disk-cache-config.outputs.repository-path }}/content_addressable
+        key: ${{ steps.disk-cache-config.outputs.repository-key }}
+        restore-keys: |
+          ${{ steps.disk-cache-config.outputs.repository-inputs-prefix }}
+          ${{ steps.disk-cache-config.outputs.repository-prefix }}
+
+    - name: Restore Bazel downloads without saving
+      if: inputs.cache-save != 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.disk-cache-config.outputs.repository-path }}/content_addressable
+        key: ${{ steps.disk-cache-config.outputs.repository-key }}
+        restore-keys: |
+          ${{ steps.disk-cache-config.outputs.repository-inputs-prefix }}
+          ${{ steps.disk-cache-config.outputs.repository-prefix }}
 
     - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
       with:
         bazelisk-cache: true
-        repository-cache: true
+        repository-cache: false
         disk-cache: false
-        bazelrc: >-
+        bazelrc: |
           build --disk_cache=${{ steps.disk-cache-config.outputs.path }}
+          common --repository_cache=${{ steps.disk-cache-config.outputs.repository-path }}
         cache-save: ${{ github.ref == 'refs/heads/master' && inputs.cache-save == 'true' }}
         # Windows build-script runfiles nest each vendored crate's sources
         # under its repository name twice; a short output base (default
