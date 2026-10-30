@@ -24,24 +24,25 @@ versus BuildTools paths without copying the toolchain. The setup fails if the
 pinned compiler is missing or `V:` is already occupied. The Windows execution
 platform matches `OSFamily=windows` and `cpu_arch=x86_64`.
 
-Linux and macOS Rustc actions, including asupersync, prefer remote execution.
-Large Rust compilations do not race a second copy on the smaller hosted runner.
-TestRunner actions use Bazel dynamic execution with sandboxed local execution
-and remote execution: both may start the same test, and Bazel keeps the first
-result and cancels the other. Local work is admitted against the runner CPU
-count and half its RAM; these scheduler estimates do not cap a compiler's
-actual memory use. The shared action cache remains enabled. Tests carry Node,
-Rust Analyzer, and their compiler tools as declared runfiles.
-Each remote test reserves four worker CPU units and the Rust harness uses four
-threads. The local branch reserves the hosted runner CPU budget so suites do not
-compete with one another for local cores. Linux and macOS remote compilation do
-not fall back to the hosted runner; their dynamic tests retain the scheduled
-local branch. Windows Rustc actions use dynamic execution with at most two local
-CPU slots and half the hosted runner's RAM, alongside sixteen in-flight actions.
-Bazel keeps the first result and cancels the competing branch. The local strategy
-uses `--experimental_local_lockfree_output` so a local compiler does not take the
-output lock before execution and prevent a remote result from winning. These
-resource estimates bound admission, not the compiler's actual memory consumption.
+All fleet-enabled CI runners use dynamic execution for Rustc actions. The
+GitHub-hosted runner and compatible remote workers may compile the same action;
+Bazel keeps the first result and cancels the competing branch. Local compilation
+uses two CPU slots and half the hosted runner's RAM, alongside sixteen in-flight
+actions on Windows or forty on Linux/macOS. These resource estimates bound
+admission, not the compiler's actual memory consumption. Workstations already
+enrolled as NativeLink workers retain their shared-scheduler profile so the same
+physical resources are not admitted independently twice.
+
+Linux and macOS use sandboxed local execution. Windows uses the local strategy
+with `--experimental_local_lockfree_output` so a local compiler does not take the
+output lock before execution and prevent a remote result from winning.
+Linux/macOS TestRunner actions also use dynamic execution; Windows tests remain
+local. Tests carry Node, Rust Analyzer, and their compiler tools as declared
+runfiles. Each remote test reserves four worker CPU units and its Rust harness
+uses four threads. The local test branch reserves the hosted runner CPU budget
+so suites do not compete with one another for local cores. The shared action
+cache remains enabled.
+
 Remote-to-local fallback is disabled: dynamic execution already owns its local
 branch, and fallback could start a second unsandboxed compiler writing the same
 outputs. Remote infrastructure failures are retried; exhausted retries, actual
@@ -60,9 +61,8 @@ builds and tests `//...` in that job rather than expanding into hosted shards.
 
 The connectivity check proves that the coordinator accepts connections, not
 that compatible workers are online. A reachable coordinator can queue an
-action while its worker pool is offline. Remote-only compilation waits for a
-compatible worker; Windows dynamic compilation can still progress on the hosted
-runner. The checked-in execution platforms select OS and CPU architecture, with
+action while its worker pool is offline. Dynamic compilation can still progress on the hosted runner while
+waiting for a compatible worker. The checked-in execution platforms select OS and CPU architecture, with
 CPU admission requirements. They do not define a high-memory worker
 class for asupersync. Worker memory capacity and scheduling belong to the
 private fleet configuration and must be verified from executed-action worker
