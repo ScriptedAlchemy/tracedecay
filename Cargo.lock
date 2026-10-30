@@ -6990,6 +6990,7 @@ dependencies = [
  "tracedecay-hooks",
  "tracedecay-host-admission",
  "tracedecay-lcm",
+ "tracedecay-lsp",
  "tracedecay-maintenance",
  "tracedecay-mcp-catalog",
  "tracedecay-privacy",
