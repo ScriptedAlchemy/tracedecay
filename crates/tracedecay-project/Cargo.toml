@@ -92,6 +92,7 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 [dev-dependencies]
 rusqlite.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["full", "test-util"] }
 tracedecay-application = { path = "../tracedecay-application", features = ["test-helpers"] }
 tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", features = ["test-helpers"] }
 tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false, features = ["test-helpers"] }
@@ -105,3 +106,7 @@ tracedecay-session-runtime = { path = "../tracedecay-session-runtime", features 
 tracedecay-sessions = { path = "../tracedecay-sessions", features = ["test-helpers"] }
 tracedecay-store-runtime = { path = "../tracedecay-store-runtime", features = ["test-helpers"] }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", features = ["test-helpers"] }
+
+[[test]]
+name = "workflow_handoff_test"
+required-features = ["test-helpers", "test-transport"]
