@@ -773,14 +773,7 @@ fn daemon_warming_doctor_message(
     project_path: &Path,
     error: &tracedecay_domain::errors::TraceDecayError,
 ) -> Option<String> {
-    if matches!(
-        error.project_route_context(),
-        Some((
-            tracedecay_runtime_core::git_discovery::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
-            _,
-            _
-        ))
-    ) {
+    if crate::daemon::error_is_repository_discovery_deferred(error) {
         return Some(format!(
             "daemon is still warming: repository discovery blocked on {}",
             repository_discovery_block_path(error, project_path)
