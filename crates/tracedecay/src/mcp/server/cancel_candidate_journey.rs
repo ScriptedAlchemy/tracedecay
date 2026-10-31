@@ -215,6 +215,14 @@ async fn mount_candidate_corpus() -> MountedCorpus {
         registry.request_complete_generation(&corpus).await,
         "complete-generation demand must reach the mounted corpus"
     );
+    // Subscribe before the first probe: the watch marks what it has seen at
+    // subscribe time, so a seat installed between the probe and the wait still
+    // advances it. Every advance re-reads the slot, and the probe keeps the
+    // production query-owner demand on each read.
+    let mut serving_changes = registry
+        .subscribe_serving_generation_changes(&corpus)
+        .await
+        .expect("mounted candidate corpus serving owner");
     let latest = tokio::time::timeout(Duration::from_mins(3), async {
         loop {
             // `production_query_owners` is the serving path's owner demand:
@@ -227,7 +235,10 @@ async fn mount_candidate_corpus() -> MountedCorpus {
             {
                 return latest;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            serving_changes
+                .changed()
+                .await
+                .expect("the scheduler registry outlives the wait");
         }
     })
     .await

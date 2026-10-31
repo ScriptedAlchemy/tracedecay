@@ -110,7 +110,7 @@ COMPILE_DATA_EXTRA = {
 # repository file whose directory becomes a filegroup.
 TEST_DATA = {
     ("tracedecay", "agent_suite"): ["//plugin:sources"],
-    ("tracedecay", "claude_observation_benchmark"): ["//benchmark_data:claude-observation"],
+    ("tracedecay-project", "claude_observation_benchmark"): ["//benchmark_data:claude-observation"],
     ("tracedecay", "mcp_suite"): [
         "crates/tracedecay-code-extraction/fixtures/sample.astro",
         "plugin/agents/code-explorer.md",
