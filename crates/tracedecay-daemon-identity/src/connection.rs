@@ -88,6 +88,12 @@ impl ResolvedDaemonConnection {
     }
 }
 
+impl tracedecay_daemon_protocol::DaemonConnectTarget for ResolvedDaemonConnection {
+    fn daemon_connect_endpoint(&self) -> &tracedecay_daemon_protocol::DaemonEndpoint {
+        self.endpoint()
+    }
+}
+
 struct AuthorityLivenessProbe {
     record: authority::DaemonAuthorityRecord,
 }

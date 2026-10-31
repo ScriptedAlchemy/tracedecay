@@ -12,8 +12,6 @@ use asupersync::io::AsyncWriteExt;
 use asupersync::time::wall_now;
 use serde::{Deserialize, Serialize};
 
-#[cfg(unix)]
-use super::connect_with_restart_grace;
 use super::repeat_reads::RepeatReads;
 use super::repeated_queries::RepeatedQueries;
 use super::tool_surface::ToolSurface;
@@ -25,6 +23,8 @@ use super::{
     json_rpc_error_is_project_open_retryable, next_daemon_response_line, write_daemon_preamble,
 };
 use tracedecay_contracts::catalog_composition::CatalogProfileName;
+#[cfg(unix)]
+use tracedecay_daemon_identity::client_connection;
 use tracedecay_daemon_protocol::DAEMON_TOOL_RESPONSE_GRACE;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::JsonRpcRequest;
@@ -133,9 +133,14 @@ pub(crate) async fn should_proxy_serve_to_daemon_with(
     if installed_service_socket != Some(socket_path) {
         return false;
     }
-    connect_with_restart_grace(profile_root, socket_path, grace, poll_interval)
-        .await
-        .is_ok()
+    tracedecay_daemon_protocol::connect_with_restart_grace_resolving(
+        || client_connection(profile_root, socket_path),
+        super::core_client::authority_absent,
+        grace,
+        poll_interval,
+    )
+    .await
+    .is_ok()
 }
 
 #[cfg(any(test, feature = "test-transport"))]

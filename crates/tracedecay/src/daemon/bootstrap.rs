@@ -1046,8 +1046,8 @@ async fn run_foreground_unix(
     }
     // Stop accepting and unlink the socket before draining so clients that
     // connect during shutdown get NotFound/ConnectionRefused (which they retry
-    // via `connect_with_restart_grace`) instead of a queued connection that
-    // will never be served.
+    // through the daemon restart-grace connect kernel) instead of a queued
+    // connection that will never be served.
     drop(listener);
     let endpoint_cleanup = authority.cleanup_owned_endpoint();
     cancel_retained_session_history(&engine.store_administration).await;

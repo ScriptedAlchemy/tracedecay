@@ -314,25 +314,85 @@ pub async fn connect_to_daemon_connection(
     .await
 }
 
+/// The endpoint a restart-grace connect attempt dials.
+///
+/// The kernel returns the connection object resolved for the successful
+/// attempt, so each caller keeps its own credential and liveness authority
+/// while sharing the retry loop.
+pub trait DaemonConnectTarget {
+    fn daemon_connect_endpoint(&self) -> &DaemonEndpoint;
+}
+
+impl DaemonConnectTarget for DaemonConnection {
+    fn daemon_connect_endpoint(&self) -> &DaemonEndpoint {
+        &self.endpoint
+    }
+}
+
 #[tracing::instrument(name = "daemon_protocol.client.connect", level = "trace", skip_all)]
 pub async fn connect_with_restart_grace(
     connection: &DaemonConnection,
     grace: Duration,
     poll_interval: Duration,
 ) -> Result<DaemonClientStream> {
+    let (_, stream) = connect_with_restart_grace_resolving(
+        || Ok(connection.clone()),
+        |_| false,
+        grace,
+        poll_interval,
+    )
+    .await?;
+    Ok(stream)
+}
+
+/// Connects to the daemon, tolerating a short restart outage.
+///
+/// `resolve` runs once per attempt. A caller whose target is fixed returns it
+/// unchanged; a caller whose authority record can rotate resolves it afresh
+/// each time, because a daemon restart rotates both its authority epoch and
+/// authentication token, and a daemon's first start writes its record only
+/// moments before it binds. `retry_resolution` classifies a failed resolution:
+/// only errors it accepts are retried within `grace`; every other resolution
+/// and connect error is terminal.
+///
+/// Retrying here is safe: nothing has been written yet, so no request can be
+/// duplicated. Non-transient connect errors (e.g. permission denied) fail
+/// immediately.
+#[tracing::instrument(
+    name = "daemon_protocol.client.connect_restart_grace",
+    level = "trace",
+    skip_all
+)]
+pub async fn connect_with_restart_grace_resolving<C>(
+    mut resolve: impl FnMut() -> Result<C>,
+    retry_resolution: impl Fn(&TraceDecayError) -> bool,
+    grace: Duration,
+    poll_interval: Duration,
+) -> Result<(C, DaemonClientStream)>
+where
+    C: DaemonConnectTarget,
+{
     let deadline = Instant::now() + grace;
     loop {
-        match DaemonClientStream::connect(&connection.endpoint).await {
-            Ok(stream) => return Ok(stream),
+        let connection = match resolve() {
+            Ok(connection) => connection,
+            Err(error) if retry_resolution(&error) && Instant::now() < deadline => {
+                asupersync::time::sleep(asupersync::time::wall_now(), poll_interval).await;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        match DaemonClientStream::connect(connection.daemon_connect_endpoint()).await {
+            Ok(stream) => return Ok((connection, stream)),
             Err(TraceDecayError::Io(err)) => {
+                let endpoint = connection.daemon_connect_endpoint();
                 if !is_transient_daemon_connect_error(err.kind()) || Instant::now() >= deadline {
                     return Err(if is_transient_daemon_connect_error(err.kind()) {
-                        daemon_connect_failure(&connection.endpoint, &err)
+                        daemon_connect_failure(endpoint, &err)
                     } else {
                         TraceDecayError::Config {
                             message: format!(
-                                "could not connect to TraceDecay daemon endpoint '{}': {err}. {}",
-                                connection.endpoint,
+                                "could not connect to TraceDecay daemon endpoint '{endpoint}': {err}. {}",
                                 daemon_connect_failure_advice(err.kind())
                             ),
                         }
@@ -556,5 +616,137 @@ mod restart_tests {
         assert!(!super::is_transient_daemon_connect_error(
             std::io::ErrorKind::PermissionDenied
         ));
+    }
+
+    /// A daemon restart rotates the authority record. A resolver that yields
+    /// the replacement endpoint must have that *second* connection honoured,
+    /// not the endpoint the first attempt tried.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolving_connect_honours_a_rotated_authority_on_retry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stale_socket = dir.path().join("stale.sock");
+        let live_socket = dir.path().join("live.sock");
+        let _listener = tokio::net::UnixListener::bind(&live_socket).expect("bind live daemon");
+        let mut attempts = 0_u32;
+
+        let (connection, _stream) = super::connect_with_restart_grace_resolving(
+            || {
+                attempts += 1;
+                let (socket, token) = if attempts == 1 {
+                    (stale_socket.clone(), "stale")
+                } else {
+                    (live_socket.clone(), "rotated")
+                };
+                Ok(super::DaemonConnection::new(
+                    super::DaemonEndpoint::Unix(socket),
+                    token.to_owned(),
+                ))
+            },
+            |_| false,
+            std::time::Duration::from_secs(2),
+            std::time::Duration::from_millis(10),
+        )
+        .await
+        .expect("the successful attempt's connection must be returned");
+
+        assert_eq!(attempts, 2, "the stale endpoint must be retried once");
+        assert_eq!(connection.auth_token, "rotated");
+        assert_eq!(
+            connection.endpoint,
+            super::DaemonEndpoint::Unix(live_socket)
+        );
+    }
+
+    /// A retryable resolution failure (the daemon has not written its authority
+    /// record yet) consumes an attempt without a connect; the next resolution
+    /// inside the grace proceeds normally.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn retryable_resolution_failures_are_retried_within_the_grace() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let live_socket = dir.path().join("live.sock");
+        let _listener = tokio::net::UnixListener::bind(&live_socket).expect("bind live daemon");
+        let mut attempts = 0_u32;
+
+        let (connection, _stream) = super::connect_with_restart_grace_resolving(
+            || {
+                attempts += 1;
+                if attempts == 1 {
+                    Err(tracedecay_domain::errors::TraceDecayError::project_route(
+                        "daemon_authority_unavailable",
+                        true,
+                        "authority record not written yet",
+                    ))
+                } else {
+                    Ok(super::DaemonConnection::new(
+                        super::DaemonEndpoint::Unix(live_socket.clone()),
+                        "token".to_owned(),
+                    ))
+                }
+            },
+            |error| {
+                error
+                    .project_route_context()
+                    .is_some_and(|(code, retryable, _)| {
+                        code == "daemon_authority_unavailable" && retryable
+                    })
+            },
+            std::time::Duration::from_secs(2),
+            std::time::Duration::from_millis(10),
+        )
+        .await
+        .expect("a retryable resolution failure must be retried");
+
+        assert_eq!(attempts, 2);
+        assert_eq!(connection.auth_token, "token");
+    }
+
+    /// A fixed target keeps one connection for every attempt: the retry count
+    /// stays bounded by the grace and the poll interval, exactly as before the
+    /// kernel was shared.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fixed_target_connect_retries_the_same_endpoint_until_the_grace_ends() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("never-bound.sock");
+        let connection =
+            super::DaemonConnection::new(super::DaemonEndpoint::Unix(socket), "fixed".to_owned());
+        let grace = std::time::Duration::from_millis(200);
+        let poll = std::time::Duration::from_millis(20);
+        let mut attempts = 0_u32;
+        let started = std::time::Instant::now();
+
+        let error = match super::connect_with_restart_grace_resolving(
+            || {
+                attempts += 1;
+                Ok(connection.clone())
+            },
+            |_| false,
+            grace,
+            poll,
+        )
+        .await
+        {
+            Ok(_) => panic!("no daemon ever binds the fixed endpoint"),
+            Err(error) => error,
+        };
+
+        assert!(
+            started.elapsed() >= grace,
+            "restart grace must be fully observed"
+        );
+        assert!(attempts > 1, "fixed-target connects must retry: {attempts}");
+        assert!(
+            u128::from(attempts) <= grace.as_millis() / poll.as_millis() + 2,
+            "retries must stop within one poll interval after grace: {attempts} attempts"
+        );
+        assert_eq!(
+            error
+                .project_route_context()
+                .map(|(code, retryable, _)| (code, retryable)),
+            Some((super::DAEMON_CONNECT_DOWN, true)),
+            "{error}"
+        );
     }
 }

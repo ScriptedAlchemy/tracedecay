@@ -17,8 +17,7 @@ use tracedecay_daemon_identity::{
 };
 pub(crate) use tracedecay_daemon_protocol::DAEMON_TOOL_LIVENESS_POLL_INTERVAL;
 pub(crate) use tracedecay_daemon_protocol::connection::{
-    DAEMON_RESTART_GRACE, DAEMON_RESTART_POLL_INTERVAL, daemon_connect_failure_advice,
-    is_transient_daemon_connect_error,
+    DAEMON_RESTART_GRACE, DAEMON_RESTART_POLL_INTERVAL,
 };
 use tracedecay_daemon_protocol::{
     DaemonClientStream, daemon_tool_response_bound, tool_request_deadline,
@@ -220,6 +219,11 @@ pub fn invocation_client_for_current_client(
     ))
 }
 
+/// Connects within the caller deadline, re-resolving the daemon authority on
+/// every attempt: a restart rotates both the authority epoch and the
+/// authentication token, and a daemon's first start writes its record only
+/// moments before it binds. The shared kernel owns the retry schedule and
+/// error classification.
 pub(crate) async fn connect_to_current_daemon_within(
     profile_root: &Path,
     socket_path: &Path,
@@ -229,77 +233,13 @@ pub(crate) async fn connect_to_current_daemon_within(
         Some(deadline) => deadline.remaining()?.min(DAEMON_RESTART_GRACE),
         None => DAEMON_RESTART_GRACE,
     };
-    connect_with_restart_grace_resolving(
+    tracedecay_daemon_protocol::connect_with_restart_grace_resolving(
         || client_connection(profile_root, socket_path),
+        authority_absent,
         grace,
         DAEMON_RESTART_POLL_INTERVAL,
     )
     .await
-}
-
-/// Connects to the daemon socket, tolerating a short restart outage.
-///
-/// Retrying here is safe: nothing has been written yet, so no request can be
-/// duplicated. Non-transient errors (e.g. permission denied) fail immediately.
-#[cfg(unix)]
-pub(crate) async fn connect_with_restart_grace(
-    profile_root: &Path,
-    socket_path: &Path,
-    grace: Duration,
-    poll_interval: Duration,
-) -> Result<DaemonClientStream> {
-    let (_, stream) = connect_with_restart_grace_resolving(
-        || client_connection(profile_root, socket_path),
-        grace,
-        poll_interval,
-    )
-    .await?;
-    Ok(stream)
-}
-
-/// Resolves endpoint authority on every retry because a daemon restart rotates
-/// both its authority epoch and authentication token, and a daemon's first
-/// start writes its record only moments before it binds.
-#[tracing::instrument(name = "daemon.core.connect_restart_grace", level = "trace", skip_all)]
-pub(super) async fn connect_with_restart_grace_resolving(
-    mut resolve: impl FnMut() -> Result<ResolvedDaemonConnection>,
-    grace: Duration,
-    poll_interval: Duration,
-) -> Result<(ResolvedDaemonConnection, DaemonClientStream)> {
-    let deadline = Instant::now() + grace;
-    loop {
-        let connection = match resolve() {
-            Ok(connection) => connection,
-            Err(error) if authority_absent(&error) && Instant::now() < deadline => {
-                sleep(wall_now(), poll_interval).await;
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        match DaemonClientStream::connect(connection.endpoint()).await {
-            Ok(stream) => return Ok((connection, stream)),
-            Err(TraceDecayError::Io(err)) => {
-                if !is_transient_daemon_connect_error(err.kind()) || Instant::now() >= deadline {
-                    return Err(if is_transient_daemon_connect_error(err.kind()) {
-                        tracedecay_daemon_protocol::daemon_connect_failure(
-                            connection.endpoint(),
-                            &err,
-                        )
-                    } else {
-                        TraceDecayError::Config {
-                            message: format!(
-                                "could not connect to TraceDecay daemon endpoint '{}': {err}. {}",
-                                connection.endpoint(),
-                                daemon_connect_failure_advice(err.kind())
-                            ),
-                        }
-                    });
-                }
-                sleep(wall_now(), poll_interval).await;
-            }
-            Err(error) => return Err(error),
-        }
-    }
 }
 
 pub(super) fn authority_absent(error: &TraceDecayError) -> bool {
