@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_lines)]
+
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
