@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.95](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.94...v1.0.0-beta.95) (2026-10-31)
+
+
+### Bug Fixes
+
+* **daemon:** settle Work delivery before reusing connections ([#4663](https://github.com/ScriptedAlchemy/tracedecay/issues/4663)) ([e2488c5](https://github.com/ScriptedAlchemy/tracedecay/commit/e2488c528ec9a18a8303f06901a34ea27dfe7ed3))
+
 ## [1.0.0-beta.94](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.93...v1.0.0-beta.94) (2026-10-31)
 
 
