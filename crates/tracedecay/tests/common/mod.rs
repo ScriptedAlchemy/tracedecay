@@ -1405,9 +1405,9 @@ const FIXTURE_CALL_ATTEMPTS: usize = 12;
 
 /// Retries one state read may spend on a client timeout. A timed-out attempt
 /// already spent the whole request budget on a single sample, so a read that
-/// observes state gets few — enough to absorb one publish burst, short of
-/// overshooting the caller's own poll deadline — and they come out of their
-/// own budget, never out of [`FIXTURE_CALL_ATTEMPTS`].
+/// observes state gets a separate bounded budget, never taken out of
+/// [`FIXTURE_CALL_ATTEMPTS`]. This helper has no caller deadline; each retry
+/// may spend another full client timeout plus backoff.
 const READ_TIMEOUT_RETRIES: usize = 3;
 
 /// What one failed attempt of a state read means for the next attempt.
@@ -1426,12 +1426,11 @@ pub enum ReadRetry {
 /// `connection_failures` counts connection-level failures already retried and
 /// `timeout_retries` counts client timeouts already retried. The two budgets
 /// are independent: a slow sample never shortens the connection budget a
-/// freshly started (or briefly overloaded) server needs. A timeout is not a
-/// failed request — the peer accepted it and is still working, and a dashboard
-/// read of durable state can wait behind a writer that holds the store's lock
-/// across its publish — so a read that only observes state gets the same
-/// answer by asking again. Mutations never use this: a timed-out POST may
-/// already have applied its effect.
+/// freshly started (or briefly overloaded) server needs. A timeout does not
+/// prove whether the peer accepted or completed the request. An observational
+/// read may safely sample state again, though that state may have changed.
+/// Mutations never use this: a timed-out POST may already have applied its
+/// effect.
 pub fn read_retry(
     err: &ureq::Error,
     connection_failures: usize,
@@ -1474,10 +1473,10 @@ pub fn http_call_with_retry(
 
 /// [`http_call_with_retry`] for a read that only observes state.
 ///
-/// It also retries a client timeout, so the caller's own poll deadline — not
-/// one slow sample's clock — decides when a wait has failed. Connection-level
-/// errors keep [`FIXTURE_CALL_ATTEMPTS`] exactly; only the timeout retries are
-/// bounded separately by [`READ_TIMEOUT_RETRIES`].
+/// It also retries client timeouts up to [`READ_TIMEOUT_RETRIES`], preserving
+/// the independent [`FIXTURE_CALL_ATTEMPTS`] connection-error budget. This call
+/// can outlast an enclosing poll deadline or panic when retries are exhausted;
+/// the caller can check its deadline only after this call returns.
 pub fn http_read_with_retry(
     label: &str,
     send: impl Fn() -> Result<ureq::http::Response<ureq::Body>, ureq::Error>,
