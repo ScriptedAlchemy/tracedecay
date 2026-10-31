@@ -19,9 +19,11 @@ const PREVIOUS_VERSION: &str = "0.0.0-previous";
 
 /// `kimi web --no-open --port <p>` serving Kimi's plugin routes over the
 /// isolated `installed.json`, the way Kimi Code 2.1 does. `mode` selects a
-/// failure: `unauthorized` answers 401, `hang` never serves.
+/// failure: `unauthorized` answers 401, `hang` never serves, and `foreign`
+/// never serves while another local server takes port `<p>` and records
+/// what it is sent.
 const FAKE_KIMI: &str = r#"
-import json, os, shutil, sys, time
+import json, os, shutil, sys, threading, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 args = sys.argv[1:]
@@ -44,7 +46,22 @@ with open(os.path.join(state, "pid"), "w") as f:
 with open(os.path.join(state, "env.json"), "w") as f:
     json.dump({"KIMI_CODE_NO_AUTO_UPDATE": os.environ.get("KIMI_CODE_NO_AUTO_UPDATE")}, f)
 mode = state_file("mode", "ok")
-if mode == "hang":
+if mode == "foreign":
+    class Foreign(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            with open(os.path.join(state, "foreign-requests.jsonl"), "a") as f:
+                f.write(json.dumps({"path": self.path,
+                                    "authorization": self.headers.get("Authorization")}) + "\n")
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    foreign = HTTPServer(("127.0.0.1", int(args[3])), Foreign)
+    threading.Thread(target=foreign.serve_forever, daemon=True).start()
+if mode in ("hang", "foreign"):
     while True:
         time.sleep(1)
 with open(os.path.join(home, "server.token")) as f:
@@ -108,8 +125,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self.handle_plugins("POST")
 
-port = int(args[3])
-server = HTTPServer(("127.0.0.1", port), Handler)
+server = HTTPServer(("127.0.0.1", int(args[3])), Handler)
+port = server.server_address[1]
 print("  Kimi server ready  2.1.1")
 print("  Local:    http://127.0.0.1:%d/#token=%s" % (port, token), flush=True)
 server.serve_forever()
@@ -158,6 +175,18 @@ impl FakeKimi {
                     request["authorization"].as_str().unwrap_or("").to_string(),
                     request["body"].clone(),
                 )
+            })
+            .collect()
+    }
+
+    /// The `Authorization` header of every request the foreign server got.
+    fn foreign_authorizations(&self) -> Vec<String> {
+        fs::read_to_string(self.code_home.join("fake-kimi/foreign-requests.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| {
+                let request: Value = serde_json::from_str(line).unwrap();
+                request["authorization"].as_str().unwrap_or("").to_string()
             })
             .collect()
     }
@@ -402,6 +431,41 @@ fn kimi_web_refresh_falls_back_to_the_operator_step_when_kimi_never_serves() {
         Some(false),
         "the hung `kimi web` must be stopped"
     );
+}
+
+/// A port TraceDecay asked `kimi web` for, but that `kimi web` never bound,
+/// can belong to any local process; Kimi's server token must never reach it.
+#[test]
+fn kimi_web_refresh_never_sends_the_token_to_a_server_kimi_did_not_announce() {
+    let cli = IsolatedCli::new();
+    let kimi = FakeKimi::install(&cli);
+    let _ = cli.run(&["install", "--agent", "kimi"]);
+    kimi.install_previous_release(&cli);
+    kimi.set("mode", "foreign");
+
+    let update = cli.run(&["update-plugin"]);
+    let update_stderr = stderr(&update);
+
+    assert_eq!(
+        update.status.code(),
+        Some(PENDING_OPERATOR_ACTION_EXIT),
+        "{update_stderr}"
+    );
+    assert!(
+        update_stderr.contains(
+            "The automatic refresh through `kimi web` did not apply: `kimi web` did not serve \
+             its plugin API within 20 seconds"
+        ),
+        "{update_stderr}"
+    );
+    assert_eq!(
+        kimi.foreign_authorizations(),
+        Vec::<String>::new(),
+        "only the server `kimi web` announces may be sent Kimi's token"
+    );
+    assert_eq!(kimi.requests(), Vec::new());
+    assert_eq!(kimi.managed_version(), PREVIOUS_VERSION);
+    assert_eq!(kimi.process(), Some(false));
 }
 
 /// Without its `kimi` CLI, Kimi Code is not installed: the sweep skips it and
