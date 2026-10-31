@@ -8,8 +8,8 @@ use tracedecay_code_index::graph_projection::{
 use tracedecay_domain::{ProjectId, SymbolOccurrenceId};
 use tracedecay_graph_db::NeverCancelled;
 
-use super::ProductionProjectCompositionHarnessV1;
 use super::journey_test_support::tool_payload;
+use crate::daemon::production_harness::ProductionProjectCompositionHarnessV1;
 use crate::test_support::git::git;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

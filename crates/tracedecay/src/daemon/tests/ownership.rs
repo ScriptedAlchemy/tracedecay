@@ -1,8 +1,19 @@
+use super::super::branch_admin::StoreAdministration;
+use super::super::database_owner_registry::DatabaseOwnerRegistry;
 #[cfg(unix)]
+#[cfg(unix)]
+use super::super::engine::DaemonEngine;
+#[cfg(unix)]
+use super::super::project_open_admission::store_owner_key_from_paths;
+use super::super::project_open_admission::{ProjectRouteKey, ProjectServerKey};
+use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
+use tracedecay_daemon_protocol::DaemonHandshake;
+use tracedecay_session_runtime::StoreOwnerKey;
 
 use super::*;
-use crate::daemon::ProjectServerRequirement;
+use crate::daemon::project_open_admission::ProjectServerRequirement;
 
 #[cfg(unix)]
 #[derive(Clone, Copy)]
@@ -216,10 +227,12 @@ async fn non_git_open_gate_reuses_preflight_identity_during_concurrent_discovery
         ..test_handshake_defaults()
     };
     let route = ProjectRouteKey::from_handshake(&project, &handshake).expect("project route");
-    let gates = tokio::sync::Mutex::new(super::super::ProjectOpenGates::default());
-    let common_dir = super::super::ensure_checkout_topology_before_admission(&project)
-        .await
-        .expect("preflight decides this is not a repository");
+    let gates =
+        tokio::sync::Mutex::new(crate::daemon::project_open_admission::ProjectOpenGates::default());
+    let common_dir =
+        crate::daemon::project_routing::ensure_checkout_topology_before_admission(&project)
+            .await
+            .expect("preflight decides this is not a repository");
     assert!(common_dir.is_none());
 
     // Non-repository topology is not retained. Another reader can start a
@@ -231,12 +244,16 @@ async fn non_git_open_gate_reuses_preflight_identity_during_concurrent_discovery
         tracedecay_runtime_core::git_repository::repository_topology(&probe_path)
     });
     block.wait_entered().await;
-    let gate = super::super::project_open_gate(&gates, &route, common_dir.as_deref()).await;
+    let gate =
+        crate::daemon::project_routing::project_open_gate(&gates, &route, common_dir.as_deref())
+            .await;
     block.release();
     assert!(walk.join().expect("discovery thread").is_err());
     tracedecay_runtime_core::git_repository::reset_repository_discovery_for_test(&project);
 
-    let same_gate = super::super::project_open_gate(&gates, &route, common_dir.as_deref()).await;
+    let same_gate =
+        crate::daemon::project_routing::project_open_gate(&gates, &route, common_dir.as_deref())
+            .await;
     assert!(Arc::ptr_eq(&gate, &same_gate));
 }
 
@@ -271,24 +288,37 @@ async fn linked_worktree_open_gates_share_repository_and_isolate_scope() {
     let route = ProjectRouteKey::from_handshake(&project, &handshake).expect("primary route");
     let linked_route = ProjectRouteKey::from_handshake(&linked, &handshake).expect("linked route");
     assert_ne!(route, linked_route);
-    let common_dir = super::super::ensure_checkout_topology_before_admission(&project)
-        .await
-        .expect("primary preflight");
-    let linked_common_dir = super::super::ensure_checkout_topology_before_admission(&linked)
-        .await
-        .expect("linked preflight");
+    let common_dir =
+        crate::daemon::project_routing::ensure_checkout_topology_before_admission(&project)
+            .await
+            .expect("primary preflight");
+    let linked_common_dir =
+        crate::daemon::project_routing::ensure_checkout_topology_before_admission(&linked)
+            .await
+            .expect("linked preflight");
     assert!(common_dir.is_some());
     assert_eq!(common_dir, linked_common_dir);
-    let gates = tokio::sync::Mutex::new(super::super::ProjectOpenGates::default());
-    let gate = super::super::project_open_gate(&gates, &route, common_dir.as_deref()).await;
-    let linked_gate =
-        super::super::project_open_gate(&gates, &linked_route, linked_common_dir.as_deref()).await;
+    let gates =
+        tokio::sync::Mutex::new(crate::daemon::project_open_admission::ProjectOpenGates::default());
+    let gate =
+        crate::daemon::project_routing::project_open_gate(&gates, &route, common_dir.as_deref())
+            .await;
+    let linked_gate = crate::daemon::project_routing::project_open_gate(
+        &gates,
+        &linked_route,
+        linked_common_dir.as_deref(),
+    )
+    .await;
     assert!(Arc::ptr_eq(&gate, &linked_gate));
 
     let mut scoped_route = linked_route;
     scoped_route.scope_prefix = Some("other-scope".to_owned());
-    let scoped_gate =
-        super::super::project_open_gate(&gates, &scoped_route, linked_common_dir.as_deref()).await;
+    let scoped_gate = crate::daemon::project_routing::project_open_gate(
+        &gates,
+        &scoped_route,
+        linked_common_dir.as_deref(),
+    )
+    .await;
     assert!(!Arc::ptr_eq(&gate, &scoped_gate));
     tracedecay_runtime_core::git_repository::reset_repository_discovery_for_test(&project);
     tracedecay_runtime_core::git_repository::reset_repository_discovery_for_test(&linked);
@@ -325,8 +355,10 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
     )
     .expect("daemon database scope");
     let engine = test_daemon_engine_for_profile(&profile_root);
-    let direct_route = super::super::ProjectRouteKey::from_handshake(&project, &direct).unwrap();
-    let alias_route = super::super::ProjectRouteKey::from_handshake(
+    let direct_route =
+        crate::daemon::project_open_admission::ProjectRouteKey::from_handshake(&project, &direct)
+            .unwrap();
+    let alias_route = crate::daemon::project_open_admission::ProjectRouteKey::from_handshake(
         &project.canonicalize().expect("canonical project"),
         &aliased,
     )
@@ -607,7 +639,7 @@ async fn mounted_route_alias_serves_without_readmission_until_retirement() {
     // so this test pins only the admission contract: an evicted route
     // re-enters `ensure_registered_project_route`, where the tombstone
     // refuses the re-mount.
-    let route = super::super::ProjectRouteKey::from_handshake(
+    let route = crate::daemon::project_open_admission::ProjectRouteKey::from_handshake(
         &project.canonicalize().expect("canonical project"),
         &handshake,
     )
@@ -902,20 +934,22 @@ async fn failed_rekey_cancels_the_route_waiters_but_not_project_open() {
         client_identity,
         ..test_handshake_defaults()
     };
-    let fresh_key = super::super::ProjectServerKey::from_open_project(&graph, &handshake)
-        .expect("fresh project server key");
+    let fresh_key = crate::daemon::project_open_admission::ProjectServerKey::from_open_project(
+        &graph, &handshake,
+    )
+    .expect("fresh project server key");
     // The route still believes it owns a different physical graph, so the
     // reconciler attempts a rekey; the registry holds no server under that
     // stale key, so the transition fails exactly as an owner collision does.
     let mut stale_key = fresh_key.clone();
     stale_key.owner.graph_db_path = stale_key.owner.graph_db_path.with_file_name("stale.db");
     let owners = Arc::new(tokio::sync::Mutex::new(
-        super::super::DatabaseOwnerRegistry::default(),
+        crate::daemon::database_owner_registry::DatabaseOwnerRegistry::default(),
     ));
     let route_registered = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let project_open = super::super::CancellationToken::new();
+    let project_open = tracedecay_runtime_core::cancellation::CancellationToken::new();
     let route_cancellation = project_open.child_token();
-    let reconcile = super::super::portable_database_owner_reconciler(
+    let reconcile = crate::daemon::project_routing::portable_database_owner_reconciler(
         StoreAdministration::with_project_servers(owners),
         Arc::new(tokio::sync::Mutex::new(stale_key)),
         Arc::clone(&route_registered),
@@ -1684,7 +1718,7 @@ async fn automation_retirement_timeout_retains_owner_tombstone_until_join_finish
 
     assert_eq!(
         rekey,
-        Ok(super::super::MaintenanceRekeyOutcome::Retiring),
+        Ok(crate::daemon::project_open_admission::MaintenanceRekeyOutcome::Retiring),
         "noncooperative retirement must return its bounded timeout outcome"
     );
     assert!(
@@ -1703,7 +1737,7 @@ async fn automation_retirement_timeout_retains_owner_tombstone_until_join_finish
     assert!(completed.is_ok(), "noncooperative owner was not released");
     assert_eq!(
         joined,
-        Ok(super::super::MaintenanceRekeyOutcome::Completed),
+        Ok(crate::daemon::project_open_admission::MaintenanceRekeyOutcome::Completed),
         "released owner must be joined by the next retirement attempt"
     );
     assert!(
@@ -1859,13 +1893,19 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
     drop((cg, server));
     engine.shutdown_all().await;
 
-    assert_eq!(timed_out, super::super::MaintenanceRekeyOutcome::Retiring);
+    assert_eq!(
+        timed_out,
+        crate::daemon::project_open_admission::MaintenanceRekeyOutcome::Retiring
+    );
     assert_eq!(reconcile, AutomationSchedulerReconcileOutcome::Retiring);
     assert!(
         no_overlap,
         "replacement must not overlap the retiring owner"
     );
-    assert_eq!(replaced, super::super::MaintenanceRekeyOutcome::Completed);
+    assert_eq!(
+        replaced,
+        crate::daemon::project_open_admission::MaintenanceRekeyOutcome::Completed
+    );
     assert_eq!(owner_count, 1, "exactly one scheduler owner must remain");
     assert!(owns_new, "the released tombstone must permit replacement");
     assert!(

@@ -64,6 +64,7 @@ pub mod logging;
 mod mcp_project_registry;
 mod mcp_workflow_index;
 pub mod profile_host_admission_replay;
+mod project_open_status;
 pub mod project_owner_registration;
 pub mod project_runtime;
 pub mod query_mcp_admission;
@@ -124,6 +125,7 @@ pub use profile_host_admission_replay::{
     ProfileHostAdmissionBootstrapOperation, ProfileHostAdmissionBootstrapStatus,
     ProfileHostAdmissionReplayPass, ProfileHostAdmissionReplayRegistry,
 };
+pub use project_open_status::{reject_stalled_project_open_status, stalled_project_open_error};
 pub use project_runtime::{
     FeedbackCyclePublicationError, ProjectRuntimePublicationAttemptV1,
     ProjectRuntimePublicationStateV1, ProjectRuntimeRegistryError, ProjectRuntimeRegistryV1,

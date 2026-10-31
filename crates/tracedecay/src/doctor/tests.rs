@@ -1,4 +1,8 @@
 use super::*;
+use tracedecay_daemon_protocol::{
+    PROJECT_SERVER_CAPACITY_REASON_CODE, PROJECT_WARMING_REASON_CODE,
+};
+use tracedecay_runtime_core::git_discovery::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE;
 
 #[test]
 fn domain_symbol_rules_warning_is_silent_without_the_file() {
@@ -242,7 +246,7 @@ fn daemon_runtime_parser_reports_missing_database_telemetry_as_pending() {
 fn doctor_reports_a_discovery_blocked_daemon_without_recovery_guidance() {
     let path = std::path::Path::new("/Volumes/external/checkout");
     let blocked = tracedecay_domain::errors::TraceDecayError::project_route(
-        crate::daemon::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
+        REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
         true,
         format!(
             "repository discovery for '{}' is deferred (DeadlineExceeded); repository discovery blocked on {}; retry after 2000ms",
@@ -281,7 +285,7 @@ fn doctor_reports_a_discovery_blocked_daemon_without_recovery_guidance() {
     );
 
     let warming = tracedecay_domain::errors::TraceDecayError::project_route(
-        crate::daemon::PROJECT_WARMING_REASON_CODE,
+        PROJECT_WARMING_REASON_CODE,
         true,
         "TraceDecay profile runtime is warming in the background; retry the same tool shortly",
     );
@@ -339,7 +343,7 @@ fn stalled_snapshot_on_successful_status_is_a_typed_doctor_failure() {
 fn stalled_capacity_status_is_a_typed_doctor_failure_not_a_closed_connection() {
     let path = std::path::Path::new("/tmp/project.capacity");
     let capacity = tracedecay_domain::errors::TraceDecayError::project_route(
-        crate::daemon::PROJECT_SERVER_CAPACITY_REASON_CODE,
+        PROJECT_SERVER_CAPACITY_REASON_CODE,
         true,
         "daemon project server capacity reached (capacity=8); retiring idle project 'project.capacity' is blocked: ClientLeases { count: 1 } / ProjectSessions",
     );

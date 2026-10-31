@@ -1,5 +1,6 @@
-use super::{StoreAdministration, StoreOwnerKey};
+use crate::daemon::branch_admin::StoreAdministration;
 use std::time::Instant;
+use tracedecay_session_runtime::StoreOwnerKey;
 
 use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome, TimeoutError};
 use tracedecay_store_runtime::{ShutdownStatus, ShutdownTaskOutcome, ShutdownTaskReceipt};
@@ -979,12 +980,12 @@ mod tests {
         .await;
         let replacement_server = crate::mcp::McpServer::new(replacement_graph, None).await;
         let administration = StoreAdministration::default();
-        let idle_key = crate::daemon::ProjectServerKey {
+        let idle_key = crate::daemon::project_open_admission::ProjectServerKey {
             owner: isolated_owner(&profile, "project-idle"),
             project_root: idle_project.clone(),
             scope_prefix: None,
         };
-        let idle_route = crate::daemon::ProjectRouteKey {
+        let idle_route = crate::daemon::project_open_admission::ProjectRouteKey {
             profile_root: idle_key.owner.profile_root.clone(),
             global_db_path: idle_key.owner.global_db_path.clone(),
             project_path: idle_project,
@@ -1041,12 +1042,12 @@ mod tests {
         );
         drop(admission_blocker);
 
-        let replacement_key = crate::daemon::ProjectServerKey {
+        let replacement_key = crate::daemon::project_open_admission::ProjectServerKey {
             owner: isolated_owner(&profile, "project-replacement"),
             project_root: replacement_project.clone(),
             scope_prefix: None,
         };
-        let replacement_route = crate::daemon::ProjectRouteKey {
+        let replacement_route = crate::daemon::project_open_admission::ProjectRouteKey {
             profile_root: replacement_key.owner.profile_root.clone(),
             global_db_path: replacement_key.owner.global_db_path.clone(),
             project_path: replacement_project,

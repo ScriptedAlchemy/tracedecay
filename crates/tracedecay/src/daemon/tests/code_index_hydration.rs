@@ -10,8 +10,10 @@ use tracedecay_domain::{
     SourceOccurrenceId, TemporalModeV1, VectorWatermark,
 };
 
-use super::super::{code_index_search_display_binding, code_index_text_search_display_binding};
 use super::git;
+use tracedecay_code_index_runtime::code_index_executor::{
+    code_index_search_display_binding, code_index_text_search_display_binding,
+};
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeIndexWorktreeSchedulerV1, LatestCompleteCodeIndexV1, SharedCodeIndexBytePoolV1,
 };

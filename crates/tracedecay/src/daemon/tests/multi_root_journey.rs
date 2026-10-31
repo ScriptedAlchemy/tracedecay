@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracedecay_daemon_protocol::DaemonHandshake;
 
 use serde_json::json;
 use tempfile::TempDir;
@@ -21,8 +22,9 @@ use super::{
     enter_test_daemon_database_scope, test_client_identity_for, test_daemon_engine_for_profile,
     test_handshake_defaults,
 };
-use crate::daemon::{
-    DaemonEngine, DaemonHandshake, execute_daemon_invocation, execute_portable_daemon_invocation,
+use crate::daemon::engine::DaemonEngine;
+use crate::daemon::invocation_dispatch::{
+    execute_daemon_invocation, execute_portable_daemon_invocation,
 };
 use tracedecay_daemon_service::{
     DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationProblem,
@@ -266,7 +268,9 @@ async fn run_scope_set_cas_with_registered_cold_root() {
         "registry discovery must not pretend the cold project runtime is mounted"
     );
 
-    let capacity_gate = super::super::project_open_capacity_gate(&engine.project_open_gates).await;
+    let capacity_gate =
+        crate::daemon::project_routing::project_open_capacity_gate(&engine.project_open_gates)
+            .await;
     let capacity_guard = capacity_gate.lock_owned().await;
     let release_capacity = tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;

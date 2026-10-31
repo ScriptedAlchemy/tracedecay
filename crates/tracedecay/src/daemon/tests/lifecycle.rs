@@ -1,21 +1,31 @@
+use super::super::branch_admin::StoreAdministration;
 use super::*;
+use serde_json::json;
+use std::sync::Arc;
+use tracedecay_daemon_protocol::DaemonHandshake;
 
 #[test]
 fn daemon_client_admission_reports_saturation_and_recovers() {
-    let admission = super::super::DaemonClientAdmission::new(1);
+    let admission = crate::daemon::core_admission::DaemonClientAdmission::new(1);
     let permit = match admission.try_admit() {
-        super::super::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
-        super::super::DaemonClientAdmissionOutcome::Saturated(_) => panic!("first client rejected"),
+        crate::daemon::core_admission::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
+        crate::daemon::core_admission::DaemonClientAdmissionOutcome::Saturated(_) => {
+            panic!("first client rejected")
+        }
     };
 
     let response = match admission.try_admit() {
-        super::super::DaemonClientAdmissionOutcome::Saturated(response) => response,
-        super::super::DaemonClientAdmissionOutcome::Admitted(_) => panic!("capacity exceeded"),
+        crate::daemon::core_admission::DaemonClientAdmissionOutcome::Saturated(response) => {
+            response
+        }
+        crate::daemon::core_admission::DaemonClientAdmissionOutcome::Admitted(_) => {
+            panic!("capacity exceeded")
+        }
     };
     assert_eq!(
         response,
-        super::super::DaemonClientSaturationResponse {
-            kind: super::super::DaemonClientSaturationKind::ClientCapacityReached,
+        crate::daemon::core_admission::DaemonClientSaturationResponse {
+            kind: crate::daemon::core_admission::DaemonClientSaturationKind::ClientCapacityReached,
             retryable: true,
             capacity: 1,
         }
@@ -24,7 +34,7 @@ fn daemon_client_admission_reports_saturation_and_recovers() {
     drop(permit);
     assert!(matches!(
         admission.try_admit(),
-        super::super::DaemonClientAdmissionOutcome::Admitted(_)
+        crate::daemon::core_admission::DaemonClientAdmissionOutcome::Admitted(_)
     ));
 }
 
@@ -43,8 +53,10 @@ fn daemon_client_admission_reports_saturation_and_recovers() {
 #[tokio::test]
 async fn parked_requests_never_starve_admission_for_work_that_cannot_park() {
     const GENERAL_CAPACITY: usize = 4;
-    let admission =
-        super::super::DaemonClientAdmission::with_reserved_capacity(GENERAL_CAPACITY + 1, 1);
+    let admission = crate::daemon::core_admission::DaemonClientAdmission::with_reserved_capacity(
+        GENERAL_CAPACITY + 1,
+        1,
+    );
     let baseline = admission.available_general_permits();
     assert_eq!(baseline, GENERAL_CAPACITY);
 
@@ -54,28 +66,27 @@ async fn parked_requests_never_starve_admission_for_work_that_cannot_park() {
     let mut parked = Vec::new();
     for _ in 0..GENERAL_CAPACITY {
         let permit = match admission.try_admit() {
-            super::super::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
-            super::super::DaemonClientAdmissionOutcome::Saturated(_) => {
+            crate::daemon::core_admission::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
+            crate::daemon::core_admission::DaemonClientAdmissionOutcome::Saturated(_) => {
                 panic!("parked client rejected below capacity")
             }
         };
         assert_eq!(
             permit.class(),
-            super::super::DaemonClientAdmissionClass::General
+            crate::daemon::core_admission::DaemonClientAdmissionClass::General
         );
         let mut lifted = barrier.subscribe();
-        parked.push(tokio::spawn(super::super::with_connection_admission(
-            permit,
-            async move {
-                super::super::park_admission(async {
+        parked.push(tokio::spawn(
+            crate::daemon::core_admission::with_connection_admission(permit, async move {
+                crate::daemon::core_admission::park_admission(async {
                     while !*lifted.borrow_and_update() {
                         lifted.changed().await.expect("barrier sender retained");
                     }
                 })
                 .await;
                 "parked request completed"
-            },
-        )));
+            }),
+        ));
     }
     assert_eq!(
         admission.available_general_permits(),
@@ -98,14 +109,14 @@ async fn parked_requests_never_starve_admission_for_work_that_cannot_park() {
     // The acceptance property: a call that never touches a generation still
     // admits as general traffic instead of being shed.
     let unparked = match admission.try_admit() {
-        super::super::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
-        super::super::DaemonClientAdmissionOutcome::Saturated(response) => {
+        crate::daemon::core_admission::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
+        crate::daemon::core_admission::DaemonClientAdmissionOutcome::Saturated(response) => {
             panic!("generation-parked requests starved unrelated work: {response:?}")
         }
     };
     assert_eq!(
         unparked.class(),
-        super::super::DaemonClientAdmissionClass::General,
+        crate::daemon::core_admission::DaemonClientAdmissionClass::General,
         "unrelated work must not be pushed onto the reserved control lane"
     );
     drop(unparked);
@@ -143,7 +154,7 @@ fn mcp_discovery_requests_are_reserved_control_traffic() {
         .to_string();
         let request = super::super::AuthenticatedFirstRequest::new(request);
         assert!(
-            super::super::is_reserved_control_request(&request),
+            crate::daemon::core_admission::is_reserved_control_request(&request),
             "{method} must be admitted as reserved control traffic"
         );
     }
@@ -154,7 +165,7 @@ fn mcp_discovery_requests_are_reserved_control_traffic() {
     .to_string();
     let notification = super::super::AuthenticatedFirstRequest::new(notification);
     assert!(
-        super::super::is_reserved_control_request(&notification),
+        crate::daemon::core_admission::is_reserved_control_request(&notification),
         "notifications/initialized must be admitted as reserved control traffic"
     );
 }
@@ -175,8 +186,9 @@ fn daemon_shutdown_requires_a_response_id() {
 
     let notification = super::super::AuthenticatedFirstRequest::new(notification);
     let request = super::super::AuthenticatedFirstRequest::new(request);
-    assert!(super::super::daemon_shutdown_response(&notification).is_none());
-    let response = super::super::daemon_shutdown_response(&request).expect("shutdown response");
+    assert!(crate::daemon::core_admission::daemon_shutdown_response(&notification).is_none());
+    let response = crate::daemon::core_admission::daemon_shutdown_response(&request)
+        .expect("shutdown response");
     assert_eq!(response.id, serde_json::json!(17));
     assert_eq!(response.result, Some(serde_json::json!({"accepted": true})));
 }
@@ -196,16 +208,18 @@ async fn authenticated_daemon_shutdown_acks_and_begins_draining() {
     .expect("loopback listener");
     let server = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept shutdown client");
-        Box::pin(super::super::serve_windows_broker_client(
-            stream,
-            TEST_AUTH_TOKEN,
-            &server_lifecycle,
-            store_administration,
-            Arc::new(tokio::sync::Mutex::new(
-                super::super::ProjectOpenGates::default(),
-            )),
-            None,
-        ))
+        Box::pin(
+            crate::daemon::connection_serving::serve_windows_broker_client(
+                stream,
+                TEST_AUTH_TOKEN,
+                &server_lifecycle,
+                store_administration,
+                Arc::new(tokio::sync::Mutex::new(
+                    crate::daemon::project_open_admission::ProjectOpenGates::default(),
+                )),
+                None,
+            ),
+        )
         .await
         .expect("serve shutdown client");
     });
@@ -256,7 +270,7 @@ async fn authenticated_daemon_shutdown_acks_and_begins_draining() {
 
 #[test]
 fn daemon_per_client_admission_is_fair_and_reconnects_after_release() {
-    let admission = super::super::DaemonPerClientAdmission::new(2);
+    let admission = crate::daemon::core_admission::DaemonPerClientAdmission::new(2);
     let mut client_a = test_handshake_defaults();
     client_a.client_instance_id = "a".repeat(32);
     let mut client_b = test_handshake_defaults();
@@ -273,8 +287,9 @@ fn daemon_per_client_admission_is_fair_and_reconnects_after_release() {
         .expect_err("one client must not consume an unbounded share");
     assert_eq!(
         response,
-        super::super::DaemonClientSaturationResponse {
-            kind: super::super::DaemonClientSaturationKind::PerClientCapacityReached,
+        crate::daemon::core_admission::DaemonClientSaturationResponse {
+            kind:
+                crate::daemon::core_admission::DaemonClientSaturationKind::PerClientCapacityReached,
             retryable: true,
             capacity: 2,
         }
@@ -294,7 +309,7 @@ fn daemon_per_client_admission_is_fair_and_reconnects_after_release() {
 
 #[test]
 fn daemon_per_client_fairness_never_blocks_reserved_health_requests() {
-    let admission = super::super::DaemonPerClientAdmission::new(1);
+    let admission = crate::daemon::core_admission::DaemonPerClientAdmission::new(1);
     let mut client = test_handshake_defaults();
     client.client_instance_id = "c".repeat(32);
     let _bulk = admission.try_admit(&client).expect("initial bulk lease");
@@ -331,8 +346,8 @@ fn daemon_per_client_fairness_never_blocks_reserved_health_requests() {
 
 #[test]
 fn daemon_client_saturation_response_is_typed_json_rpc_data() {
-    let response = super::super::DaemonClientSaturationResponse {
-        kind: super::super::DaemonClientSaturationKind::ClientCapacityReached,
+    let response = crate::daemon::core_admission::DaemonClientSaturationResponse {
+        kind: crate::daemon::core_admission::DaemonClientSaturationKind::ClientCapacityReached,
         retryable: true,
         capacity: 3,
     }
@@ -350,9 +365,9 @@ fn daemon_client_saturation_response_is_typed_json_rpc_data() {
 
 #[test]
 fn project_server_capacity_response_is_typed_json_rpc_data() {
-    let response = super::super::project_open_error_response(
+    let response = crate::daemon::project_open_handshake::project_open_error_response(
         serde_json::Value::Null,
-        &super::super::project_server_capacity_error(),
+        &crate::daemon::project_routing::project_server_capacity_error(),
     );
     let error = response.error.expect("error response");
     let refusal = serde_json::to_value(&error).expect("serialize capacity refusal");
@@ -367,7 +382,7 @@ fn project_server_capacity_response_is_typed_json_rpc_data() {
     assert_eq!(data["retryable"], true);
     assert_eq!(data["capacity"], super::super::MAX_CACHED_PROJECT_SERVERS);
     assert!(super::super::error_is_project_open_retryable(
-        &super::super::project_server_capacity_error()
+        &crate::daemon::project_routing::project_server_capacity_error()
     ));
     let prose = tracedecay_domain::errors::TraceDecayError::Config {
         message: "daemon project server capacity reached".to_owned(),
@@ -390,26 +405,27 @@ async fn reserved_response_under_general_saturation(
     let _database_scope = enter_test_daemon_database_scope(&client_identity.profile_root, scope);
     prewarm_test_profile_runtime(&store_administration).await;
 
-    let admission = super::super::DaemonClientAdmission::with_reserved_capacity(2, 1);
+    let admission =
+        crate::daemon::core_admission::DaemonClientAdmission::with_reserved_capacity(2, 1);
     let general = match admission.try_admit() {
-        super::super::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
-        super::super::DaemonClientAdmissionOutcome::Saturated(_) => {
+        crate::daemon::core_admission::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
+        crate::daemon::core_admission::DaemonClientAdmissionOutcome::Saturated(_) => {
             panic!("general client rejected")
         }
     };
     let reserved = match admission.try_admit() {
-        super::super::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
-        super::super::DaemonClientAdmissionOutcome::Saturated(_) => {
+        crate::daemon::core_admission::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
+        crate::daemon::core_admission::DaemonClientAdmissionOutcome::Saturated(_) => {
             panic!("reserved client rejected")
         }
     };
     assert_eq!(
         reserved.class(),
-        super::super::DaemonClientAdmissionClass::ReservedControl
+        crate::daemon::core_admission::DaemonClientAdmissionClass::ReservedControl
     );
     assert!(matches!(
         admission.try_admit(),
-        super::super::DaemonClientAdmissionOutcome::Saturated(_)
+        crate::daemon::core_admission::DaemonClientAdmissionOutcome::Saturated(_)
     ));
 
     let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
@@ -420,18 +436,20 @@ async fn reserved_response_under_general_saturation(
     let server = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept reserved client");
         let lifecycle = DaemonLifecycle::default();
-        Box::pin(super::super::serve_windows_broker_client_with_class(
-            stream,
-            TEST_AUTH_TOKEN,
-            &lifecycle,
-            store_administration,
-            Arc::new(tokio::sync::Mutex::new(
-                super::super::ProjectOpenGates::default(),
-            )),
-            super::super::DaemonPerClientAdmission::default(),
-            reserved.class(),
-            None,
-        ))
+        Box::pin(
+            crate::daemon::connection_serving::serve_windows_broker_client_with_class(
+                stream,
+                TEST_AUTH_TOKEN,
+                &lifecycle,
+                store_administration,
+                Arc::new(tokio::sync::Mutex::new(
+                    crate::daemon::project_open_admission::ProjectOpenGates::default(),
+                )),
+                crate::daemon::core_admission::DaemonPerClientAdmission::default(),
+                reserved.class(),
+                None,
+            ),
+        )
         .await
         .expect("serve reserved client");
     });
@@ -533,11 +551,11 @@ async fn one_shot_tool_call_receives_a_matching_saturation_response() {
     let (client_done, client_done_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept tool call");
-        super::super::reject_saturated_daemon_client(
+        crate::daemon::core_admission::reject_saturated_daemon_client(
             tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(stream)
                 .expect("daemon end of the test socket"),
-            super::super::DaemonClientSaturationResponse {
-                kind: super::super::DaemonClientSaturationKind::ClientCapacityReached,
+            crate::daemon::core_admission::DaemonClientSaturationResponse {
+                kind: crate::daemon::core_admission::DaemonClientSaturationKind::ClientCapacityReached,
                 retryable: true,
                 capacity: 1,
             },
@@ -548,7 +566,7 @@ async fn one_shot_tool_call_receives_a_matching_saturation_response() {
 
     let error = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        super::super::call_tool_with_liveness_poll(
+        crate::daemon::core_client::call_tool_with_liveness_poll(
             &socket,
             &test_handshake_defaults(),
             "tracedecay_status",
@@ -589,10 +607,12 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
         client_identity,
         ..test_handshake_defaults()
     };
-    let route =
-        super::super::ProjectRouteKey::from_handshake(&project, &handshake).expect("route key");
+    let route = crate::daemon::project_open_admission::ProjectRouteKey::from_handshake(
+        &project, &handshake,
+    )
+    .expect("route key");
     let owners = std::sync::Arc::new(tokio::sync::Mutex::new(
-        super::super::DatabaseOwnerRegistry::default(),
+        crate::daemon::database_owner_registry::DatabaseOwnerRegistry::default(),
     ));
     prepare_test_profile_root(&profile_root);
     let profile_identity =
@@ -614,14 +634,14 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
     // plan production would have computed. Leaving it out made the warmup poll
     // spin until its timeout unless some *other* test in the same binary won
     // the process-wide worker-plan `OnceLock` first.
-    super::super::DaemonInvocationState::default()
+    crate::daemon::invocation_state::DaemonInvocationState::default()
         .install_worker_selection(
             &store_administration,
             tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::default(),
         )
         .expect("install portable broker profile worker plan");
     let gates = std::sync::Arc::new(tokio::sync::Mutex::new(
-        super::super::ProjectOpenGates::default(),
+        crate::daemon::project_open_admission::ProjectOpenGates::default(),
     ));
     let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let lifecycle = DaemonLifecycle::default();
@@ -645,14 +665,16 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
                 let attempts = std::sync::Arc::clone(&attempts);
                 let lifecycle = lifecycle.clone();
                 clients.spawn(async move {
-                    Box::pin(super::super::serve_windows_broker_client(
-                        stream,
-                        TEST_AUTH_TOKEN,
-                        &lifecycle,
-                        store_administration,
-                        gates,
-                        Some(attempts),
-                    ))
+                    Box::pin(
+                        crate::daemon::connection_serving::serve_windows_broker_client(
+                            stream,
+                            TEST_AUTH_TOKEN,
+                            &lifecycle,
+                            store_administration,
+                            gates,
+                            Some(attempts),
+                        ),
+                    )
                     .await
                 });
             }
@@ -710,8 +732,12 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
                 return Ok(());
             }
             if let Some(failure) =
-                super::super::portable_cached_project_open_failure(gates.as_ref(), &handshake, None)
-                    .await?
+                crate::daemon::project_open_orchestration::portable_cached_project_open_failure(
+                    gates.as_ref(),
+                    &handshake,
+                    None,
+                )
+                .await?
             {
                 return Err(failure.to_error());
             }
@@ -750,7 +776,7 @@ async fn one_shot_tool_call_aborts_when_daemon_liveness_fails_after_write() {
 
     let error = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        super::super::call_tool_with_liveness_poll(
+        crate::daemon::core_client::call_tool_with_liveness_poll(
             &socket,
             &test_handshake_defaults(),
             "tracedecay_status",
@@ -794,7 +820,7 @@ async fn proxied_request_uses_shared_liveness_boundary_after_write() {
 
     let error = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        super::super::send_daemon_request_line_with_liveness_poll(
+        crate::daemon::core_proxy::send_daemon_request_line_with_liveness_poll(
             &socket,
             &test_handshake_defaults(),
             &request,
@@ -843,7 +869,7 @@ async fn post_write_disconnect_reports_ambiguous_outcome_without_retry() {
 
     let error = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        super::super::send_daemon_request_line_with_liveness_poll(
+        crate::daemon::core_proxy::send_daemon_request_line_with_liveness_poll(
             &socket,
             &test_handshake_defaults(),
             &request,
@@ -907,7 +933,7 @@ async fn one_shot_tool_call_allows_long_response_while_daemon_stays_live() {
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        super::super::call_tool_with_liveness_poll(
+        crate::daemon::core_client::call_tool_with_liveness_poll(
             &socket,
             &test_handshake_defaults(),
             "tracedecay_status",
@@ -971,7 +997,7 @@ async fn one_shot_tool_call_preserves_response_split_across_liveness_poll() {
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        super::super::call_tool_with_liveness_poll(
+        crate::daemon::core_client::call_tool_with_liveness_poll(
             &socket,
             &test_handshake_defaults(),
             "tracedecay_status",
@@ -1136,7 +1162,7 @@ async fn draining_waits_for_one_bounded_in_flight_request() {
 /// Asserted on task outcomes and permit counts, never on elapsed time.
 #[tokio::test]
 async fn a_panicking_connection_isolates_from_its_peers_and_returns_its_permit() {
-    use super::super::{
+    use crate::daemon::core_admission::{
         DaemonClientAdmission, DaemonClientAdmissionClass, DaemonClientAdmissionOutcome,
     };
 
@@ -1159,12 +1185,12 @@ async fn a_panicking_connection_isolates_from_its_peers_and_returns_its_permit()
         };
         assert_eq!(permit.class(), DaemonClientAdmissionClass::General);
         let mut lifted = barrier.subscribe();
-        let spawned = clients.spawn(super::super::with_connection_admission(
+        let spawned = clients.spawn(crate::daemon::core_admission::with_connection_admission(
             permit,
             async move {
                 // Client 0 unwinds immediately, still holding its slot.
                 assert!(index != 0, "connection task panicked holding its slot");
-                super::super::park_admission(async move {
+                crate::daemon::core_admission::park_admission(async move {
                     while !*lifted.borrow_and_update() {
                         lifted.changed().await.expect("barrier sender retained");
                     }
@@ -1246,7 +1272,7 @@ async fn a_panicking_connection_isolates_from_its_peers_and_returns_its_permit()
 /// slot and anything the hop holds are free when the clients owner reports.
 #[tokio::test]
 async fn a_client_dropped_mid_tokio_hop_releases_the_hop_before_the_drain_receipt() {
-    use super::super::{DaemonClientAdmission, DaemonClientAdmissionOutcome};
+    use crate::daemon::core_admission::{DaemonClientAdmission, DaemonClientAdmissionOutcome};
 
     struct HopResource(Arc<std::sync::atomic::AtomicBool>);
     impl Drop for HopResource {
@@ -1272,7 +1298,7 @@ async fn a_client_dropped_mid_tokio_hop_releases_the_hop_before_the_drain_receip
     let (started, hop_started) = tokio::sync::oneshot::channel();
     let mut clients = crate::daemon::bootstrap::ClientTasks::default();
     clients
-        .spawn(super::super::with_connection_admission(
+        .spawn(crate::daemon::core_admission::with_connection_admission(
             permit,
             async move {
                 tracedecay_runtime_core::native_runtime::in_tokio_context(hop_handle, async move {

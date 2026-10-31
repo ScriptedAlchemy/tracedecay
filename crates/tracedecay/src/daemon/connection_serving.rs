@@ -4,14 +4,67 @@
 //! portable broker path. Each entry point owns framing, project-owner routing,
 //! and connection teardown for exactly one client.
 
-use super::*;
+use super::AuthenticatedFirstRequest;
+use super::PROJECT_WARMING_RETRY_HINT;
+use super::bootstrap_route::{
+    apply_daemon_initialize_route, attach_initialize_route_metadata, attach_reset_required_stores,
+    daemon_bootstrap_response,
+};
+use super::branch_add::{branch_add_response, parse_branch_add_request};
+use super::branch_admin::{
+    StoreAdministration, parse_branch_admin_request, write_branch_admin_response,
+};
+#[cfg(any(not(unix), test))]
+use super::core_admission::daemon_shutdown_response;
+use super::core_doctor::{
+    CoreDoctorStatusV1, doctor_runtime_request, serve_core_doctor_runtime_request,
+};
+use super::core_handshake::binary_version;
+use super::core_proxy::InitializeRouteMetadata;
+#[cfg(unix)]
+use super::engine::DaemonEngine;
+#[cfg(any(not(unix), test))]
+use super::invocation_dispatch::execute_portable_daemon_invocation;
+#[cfg(unix)]
+use super::invocation_dispatch::{execute_daemon_invocation, write_tool_list_changed_notification};
+use super::lsp_sessions::{
+    cleanup_connection_lsp_sessions, invocation_lsp_session_transition,
+    update_connection_lsp_sessions,
+};
+use super::project_open_handshake::{
+    initialize_project_open_error, project_open_error_response, write_project_open_error,
+};
+#[cfg(any(not(unix), test))]
+use super::project_open_orchestration::{
+    portable_cached_project_open_failure, portable_cached_project_server,
+    portable_project_server_for_request, schedule_portable_project_server_warmup,
+};
+use super::project_server_lifecycle::schedule_user_profile_host_admission_replay_for_identity;
+use super::projectless::{projectless_first_request, serve_projectless_client};
+#[cfg(test)]
+use super::tests;
+use super::wire_io::{read_line_handling_wire_oversized, write_daemon_response};
+use crate::mcp::server::ProductionMcpConnectionContext;
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use tokio::time::Duration;
 use tracedecay_daemon_service::ProfileHostAdmissionBootstrapStatus;
 use tracedecay_daemon_service::shutdown::{DaemonActivity, DaemonLifecycle};
 use tracedecay_daemon_service::{
     DaemonInvocationService, DaemonLspSessionAccess, DaemonWorkDeliveryDescriptorV1, Lease,
     settle_daemon_work_delivery,
 };
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::BrokerSelectedResponseLease;
+use tracedecay_mcp::server::{
+    McpMethod, RmcpConnectionAdapter, RmcpInitializeResponseDecorator, classify_mcp_method,
+};
+use tracedecay_mcp::transport::ReplayTransport;
+use tracedecay_mcp::{
+    BrokerStreamTransport, ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport,
+};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
@@ -91,10 +144,10 @@ fn report_profile_host_admission_bootstrap_status(
 
 #[cfg(unix)]
 pub(super) async fn serve_authenticated_socket_client_with_class(
-    stream: BrokerStream,
+    stream: tracedecay_daemon_protocol::BrokerStream,
     engine: DaemonEngine,
     auth_token: String,
-    admission_class: DaemonClientAdmissionClass,
+    admission_class: crate::daemon::core_admission::DaemonClientAdmissionClass,
 ) -> Result<()> {
     Box::pin(serve_broker_socket_client(
         stream,
@@ -233,12 +286,12 @@ pub(super) async fn refuse_unparseable_handshake(
 /// never serves a client from a different build.
 pub(super) async fn refuse_incompatible_handshake(
     transport: &mut (impl tracedecay_mcp::McpTransport + Send),
-    handshake: &DaemonHandshake,
+    handshake: &tracedecay_daemon_protocol::DaemonHandshake,
 ) -> Result<bool> {
     let daemon_version = binary_version()?;
     if tracedecay_daemon_protocol::client_version_skew(&handshake.client_version, daemon_version)
         .is_none()
-        && valid_client_instance_id(&handshake.client_instance_id)
+        && crate::daemon::core_admission::valid_client_instance_id(&handshake.client_instance_id)
     {
         return Ok(false);
     }
@@ -272,7 +325,7 @@ pub(super) async fn refuse_unauthenticated_client(
 /// classifies it as retryable through [`error_is_project_open_retryable`].
 fn profile_identity_warming_error() -> TraceDecayError {
     TraceDecayError::project_route(
-        PROJECT_WARMING_REASON_CODE,
+        tracedecay_daemon_protocol::PROJECT_WARMING_REASON_CODE,
         true,
         format!("TraceDecay profile runtime {PROJECT_WARMING_RETRY_HINT}"),
     )
@@ -294,7 +347,7 @@ fn profile_identity_warming_error() -> TraceDecayError {
 /// and make the next client start over. Detaching it instead lets this client's
 /// retry, or the next one, find the registry already warm.
 pub(super) async fn bind_authenticated_profile_identity_within_deadline(
-    handshake: &mut DaemonHandshake,
+    handshake: &mut tracedecay_daemon_protocol::DaemonHandshake,
     store_administration: &StoreAdministration,
 ) -> Result<StoreAdministration> {
     let mut binding_handshake = handshake.clone();
@@ -303,10 +356,12 @@ pub(super) async fn bind_authenticated_profile_identity_within_deadline(
     let (bound, binding) = tokio::sync::oneshot::channel();
     native_runtime::NativeTask::spawn(async move {
         let _ = bound.send(
-            Box::pin(bind_authenticated_profile_identity(
-                &mut binding_handshake,
-                &binding_administration,
-            ))
+            Box::pin(
+                crate::daemon::project_routing::bind_authenticated_profile_identity(
+                    &mut binding_handshake,
+                    &binding_administration,
+                ),
+            )
             .await
             .map(|administration| (binding_handshake, administration)),
         );
@@ -507,7 +562,7 @@ where
                                 std::time::Instant::now() + PROJECT_OWNER_HALF_CLOSE_GRACE,
                             ) =>
                                 Err(TraceDecayError::project_route(
-                                    PROJECT_WARMING_REASON_CODE,
+                                    tracedecay_daemon_protocol::PROJECT_WARMING_REASON_CODE,
                                     true,
                                     format!(
                                         "TraceDecay project owner {PROJECT_WARMING_RETRY_HINT}"
@@ -570,10 +625,10 @@ async fn await_project_owner_for_first_request<T: Send>(
 #[cfg(unix)]
 #[tracing::instrument(name = "daemon.engine.transport.broker", level = "trace", skip_all)]
 async fn serve_broker_socket_client(
-    stream: BrokerStream,
+    stream: tracedecay_daemon_protocol::BrokerStream,
     engine: DaemonEngine,
     auth_token: String,
-    admission_class: DaemonClientAdmissionClass,
+    admission_class: crate::daemon::core_admission::DaemonClientAdmissionClass,
 ) -> Result<()> {
     serve_broker_socket_client_inner(stream, engine, auth_token, admission_class).await
 }
@@ -590,16 +645,23 @@ async fn serve_broker_socket_client(
     reason = "Delivery ACK settlement is one state machine shared by the Unix and portable brokers."
 )]
 async fn drive_retained_invocation_responses<'a>(
-    mut invocation: std::result::Result<DaemonInvocationRequest, DaemonInvocationResponse>,
+    mut invocation: std::result::Result<
+        tracedecay_daemon_protocol::DaemonInvocationRequest,
+        tracedecay_daemon_protocol::DaemonInvocationResponse,
+    >,
     transport: &mut BrokerStreamTransport,
     service: &DaemonInvocationService,
-    handshake: &DaemonHandshake,
+    handshake: &tracedecay_daemon_protocol::DaemonHandshake,
     lifecycle: &DaemonLifecycle,
     owned_lsp_sessions: &mut HashMap<String, DaemonLspSessionAccess>,
     mut execute: impl FnMut(
-        DaemonInvocationRequest,
+        tracedecay_daemon_protocol::DaemonInvocationRequest,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = DaemonInvocationResponse> + Send + 'a>,
+        Box<
+            dyn std::future::Future<Output = tracedecay_daemon_protocol::DaemonInvocationResponse>
+                + Send
+                + 'a,
+        >,
     >,
 ) -> Result<()> {
     let mut pending_line = None;
@@ -775,7 +837,9 @@ async fn drive_retained_invocation_responses<'a>(
         let Some(next_line) = next_line else {
             return Ok(());
         };
-        let Some(next_invocation) = parse_daemon_invocation_request(&next_line) else {
+        let Some(next_invocation) =
+            tracedecay_daemon_protocol::parse_daemon_invocation_request(&next_line)
+        else {
             return Ok(());
         };
         invocation = next_invocation;
@@ -786,10 +850,13 @@ async fn drive_retained_invocation_responses<'a>(
 /// exit path of the invocation loop.
 #[cfg(unix)]
 async fn serve_retained_invocation_connection(
-    invocation: std::result::Result<DaemonInvocationRequest, DaemonInvocationResponse>,
+    invocation: std::result::Result<
+        tracedecay_daemon_protocol::DaemonInvocationRequest,
+        tracedecay_daemon_protocol::DaemonInvocationResponse,
+    >,
     mut transport: BrokerStreamTransport,
     engine: DaemonEngine,
-    handshake: DaemonHandshake,
+    handshake: tracedecay_daemon_protocol::DaemonHandshake,
 ) -> Result<()> {
     let mut owned_lsp_sessions = HashMap::new();
     let service = engine.invocation.service.clone();
@@ -819,10 +886,10 @@ async fn serve_retained_invocation_connection(
     reason = "One broker connection: authenticate, handshake, bind identity, then route the first request to its owning serve path."
 )]
 fn serve_broker_socket_client_inner(
-    stream: BrokerStream,
+    stream: tracedecay_daemon_protocol::BrokerStream,
     engine: DaemonEngine,
     auth_token: String,
-    admission_class: DaemonClientAdmissionClass,
+    admission_class: crate::daemon::core_admission::DaemonClientAdmissionClass,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>> {
     // Erase the deeply nested broker connection future before it reaches the
     // measured wrapper so every profiling feature can compute its layout.
@@ -843,7 +910,7 @@ fn serve_broker_socket_client_inner(
         let Some(preface_line) = preface_line else {
             return Ok(None);
         };
-        let authenticated = DaemonAuthPreface::from_line(&preface_line)
+        let authenticated = tracedecay_daemon_protocol::DaemonAuthPreface::from_line(&preface_line)
             .is_ok_and(|preface| preface.authenticate(&auth_token));
         if !authenticated {
             refuse_unauthenticated_client(&mut transport, binary_version()?).await;
@@ -859,7 +926,7 @@ fn serve_broker_socket_client_inner(
         let Some(setup_activity) = engine.lifecycle.try_enter() else {
             return Ok(None);
         };
-        let mut handshake = match DaemonHandshake::from_line(&line) {
+        let mut handshake = match tracedecay_daemon_protocol::DaemonHandshake::from_line(&line) {
             Ok(handshake) => handshake,
             Err(_) => {
                 drop(setup_activity);
@@ -890,7 +957,7 @@ fn serve_broker_socket_client_inner(
                 &engine.store_administration,
             ) => match result {
                 Ok(store_administration) => store_administration,
-                Err(error) if error_is_project_warming(&error) => {
+                Err(error) if tracedecay_daemon_protocol::error_is_project_warming(&error) => {
                     drop(setup_activity);
                     refuse_warming_profile_identity(&mut transport, &first_request, &error).await?;
                     return Ok(None);
@@ -901,20 +968,20 @@ fn serve_broker_socket_client_inner(
         };
         let mut engine = engine;
         engine.store_administration = store_administration;
-        let reserved_control_request = is_reserved_control_request(&first_request);
-        if admission_class == DaemonClientAdmissionClass::ReservedControl
+        let reserved_control_request = crate::daemon::core_admission::is_reserved_control_request(&first_request);
+        if admission_class == crate::daemon::core_admission::DaemonClientAdmissionClass::ReservedControl
             && !reserved_control_request
         {
             drop(setup_activity);
-            reject_reserved_bulk_request(
+            crate::daemon::core_admission::reject_reserved_bulk_request(
                 &mut transport,
                 &first_request,
-                MAX_CONCURRENT_DAEMON_CLIENTS,
+                crate::daemon::core_admission::MAX_CONCURRENT_DAEMON_CLIENTS,
             )
             .await?;
             return Ok(None);
         }
-        let _per_client_permit = if admission_class == DaemonClientAdmissionClass::General {
+        let _per_client_permit = if admission_class == crate::daemon::core_admission::DaemonClientAdmissionClass::General {
             match engine
                 .per_client_admission
                 .try_admit_request(&handshake, &first_request)
@@ -922,7 +989,7 @@ fn serve_broker_socket_client_inner(
                 Ok(permit) => Some(permit),
                 Err(response) => {
                     drop(setup_activity);
-                    reject_admitted_request(&mut transport, &first_request, response).await?;
+                    crate::daemon::core_admission::reject_admitted_request(&mut transport, &first_request, response).await?;
                     return Ok(None);
                 }
             }
@@ -983,8 +1050,8 @@ fn serve_broker_socket_client_inner(
                 };
                 let (project_open, stalled_failure) = match handshake.project_path.as_deref() {
                     Some(project_path) => {
-                        let route = ProjectRouteKey::from_handshake(project_path, &handshake)?;
-                        let tasks = project_open_tasks(engine.project_open_gates.as_ref()).await;
+                        let route = crate::daemon::project_open_admission::ProjectRouteKey::from_handshake(project_path, &handshake)?;
+                        let tasks = crate::daemon::project_routing::project_open_tasks(engine.project_open_gates.as_ref()).await;
                         (tasks.status(&route), tasks.stalled_failure(&route))
                     }
                     None => (None, None),
@@ -1087,7 +1154,7 @@ fn serve_broker_socket_client_inner(
                             &mut transport,
                             engine.project_server_for_request(
                                 &handshake,
-                                ProjectServerRequirement::Core,
+                                crate::daemon::project_open_admission::ProjectServerRequirement::Core,
                             ),
                         )
                         .await
@@ -1110,7 +1177,7 @@ fn serve_broker_socket_client_inner(
                     })
                     .await;
                 }
-                if let Some(invocation) = parse_daemon_invocation_request(first_request.raw()) {
+                if let Some(invocation) = tracedecay_daemon_protocol::parse_daemon_invocation_request(first_request.raw()) {
                     return boxed_broker_connection_phase(async move {
                         serve_retained_invocation_connection(
                             invocation, transport, engine, handshake,
@@ -1251,7 +1318,7 @@ fn serve_broker_socket_client_inner(
                             first_request.parsed(),
                             engine.project_server_for_request(
                                 &handshake,
-                                project_server_requirement(first_request.parsed()),
+                                crate::daemon::project_open_admission::project_server_requirement(first_request.parsed()),
                             ),
                         )
                         .await
@@ -1349,11 +1416,13 @@ fn serve_broker_socket_client_inner(
 
 #[cfg(test)]
 pub(super) async fn serve_windows_broker_client(
-    stream: BrokerStream,
+    stream: tracedecay_daemon_protocol::BrokerStream,
     auth_token: &str,
     lifecycle: &DaemonLifecycle,
     store_administration: StoreAdministration,
-    project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    project_open_gates: Arc<
+        tokio::sync::Mutex<crate::daemon::project_open_admission::ProjectOpenGates>,
+    >,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> Result<()> {
     Box::pin(serve_windows_broker_client_with_class(
@@ -1362,8 +1431,8 @@ pub(super) async fn serve_windows_broker_client(
         lifecycle,
         store_administration,
         project_open_gates,
-        DaemonPerClientAdmission::default(),
-        DaemonClientAdmissionClass::General,
+        crate::daemon::core_admission::DaemonPerClientAdmission::default(),
+        crate::daemon::core_admission::DaemonClientAdmissionClass::General,
         #[cfg(test)]
         project_open_attempts,
     ))
@@ -1374,13 +1443,15 @@ pub(super) async fn serve_windows_broker_client(
 #[allow(clippy::too_many_arguments)]
 // Cohesive per-connection serving context; bundling into a params struct would churn every caller.
 pub(super) async fn serve_windows_broker_client_with_class(
-    stream: BrokerStream,
+    stream: tracedecay_daemon_protocol::BrokerStream,
     auth_token: &str,
     lifecycle: &DaemonLifecycle,
     store_administration: StoreAdministration,
-    project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
-    per_client_admission: DaemonPerClientAdmission,
-    admission_class: DaemonClientAdmissionClass,
+    project_open_gates: Arc<
+        tokio::sync::Mutex<crate::daemon::project_open_admission::ProjectOpenGates>,
+    >,
+    per_client_admission: crate::daemon::core_admission::DaemonPerClientAdmission,
+    admission_class: crate::daemon::core_admission::DaemonClientAdmissionClass,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> Result<()> {
     Box::pin(serve_windows_broker_client_with_class_and_invocation(
@@ -1389,8 +1460,8 @@ pub(super) async fn serve_windows_broker_client_with_class(
         lifecycle,
         store_administration,
         project_open_gates,
-        DaemonInvocationState::default(),
-        http_application::DaemonHttpApplicationRegistry::default(),
+        crate::daemon::invocation_state::DaemonInvocationState::default(),
+        crate::daemon::http_application::DaemonHttpApplicationRegistry::default(),
         per_client_admission,
         admission_class,
         #[cfg(test)]
@@ -1401,13 +1472,13 @@ pub(super) async fn serve_windows_broker_client_with_class(
 
 #[cfg(any(not(unix), test))]
 async fn authenticate_portable_broker(
-    stream: BrokerStream,
+    stream: tracedecay_daemon_protocol::BrokerStream,
     auth_token: &str,
     lifecycle: &DaemonLifecycle,
 ) -> Result<
     Option<(
         BrokerStreamTransport,
-        DaemonHandshake,
+        tracedecay_daemon_protocol::DaemonHandshake,
         AuthenticatedFirstRequest,
         DaemonActivity,
     )>,
@@ -1416,7 +1487,7 @@ async fn authenticate_portable_broker(
     let Some(preface_line) = read_line_handling_wire_oversized(&mut transport).await? else {
         return Ok(None);
     };
-    let authenticated = DaemonAuthPreface::from_line(&preface_line)
+    let authenticated = tracedecay_daemon_protocol::DaemonAuthPreface::from_line(&preface_line)
         .is_ok_and(|preface| preface.authenticate(auth_token));
     if !authenticated {
         refuse_unauthenticated_client(&mut transport, binary_version()?).await;
@@ -1428,7 +1499,7 @@ async fn authenticate_portable_broker(
     let Some(setup_activity) = lifecycle.try_enter() else {
         return Ok(None);
     };
-    let handshake = match DaemonHandshake::from_line(&handshake_line) {
+    let handshake = match tracedecay_daemon_protocol::DaemonHandshake::from_line(&handshake_line) {
         Ok(handshake) => handshake,
         Err(_) => {
             drop(setup_activity);
@@ -1457,9 +1528,10 @@ async fn authenticate_portable_broker(
 struct PortableBrokerDispatch<'a> {
     lifecycle: &'a DaemonLifecycle,
     store_administration: StoreAdministration,
-    project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
-    invocation: DaemonInvocationState,
-    http_application_registry: http_application::DaemonHttpApplicationRegistry,
+    project_open_gates:
+        Arc<tokio::sync::Mutex<crate::daemon::project_open_admission::ProjectOpenGates>>,
+    invocation: crate::daemon::invocation_state::DaemonInvocationState,
+    http_application_registry: crate::daemon::http_application::DaemonHttpApplicationRegistry,
     #[cfg(test)]
     project_open_attempts: Option<Arc<AtomicUsize>>,
 }
@@ -1469,10 +1541,13 @@ impl PortableBrokerDispatch<'_> {
     async fn admit(
         &mut self,
         transport: &mut BrokerStreamTransport,
-        handshake: &mut DaemonHandshake,
+        handshake: &mut tracedecay_daemon_protocol::DaemonHandshake,
         first_request: &AuthenticatedFirstRequest,
         setup_activity: DaemonActivity,
-        admission: (&DaemonPerClientAdmission, DaemonClientAdmissionClass),
+        admission: (
+            &crate::daemon::core_admission::DaemonPerClientAdmission,
+            crate::daemon::core_admission::DaemonClientAdmissionClass,
+        ),
     ) -> Result<
         Option<(
             Option<super::core_admission::DaemonPerClientPermit>,
@@ -1488,7 +1563,7 @@ impl PortableBrokerDispatch<'_> {
                 &self.store_administration,
             )) => match result {
                 Ok(administration) => administration,
-                Err(error) if error_is_project_warming(&error) => {
+                Err(error) if tracedecay_daemon_protocol::error_is_project_warming(&error) => {
                     drop(setup_activity);
                     refuse_warming_profile_identity(transport, first_request, &error).await?;
                     return Ok(None);
@@ -1498,21 +1573,34 @@ impl PortableBrokerDispatch<'_> {
             () = &mut peer_full_close => return Ok(None),
         };
         self.store_administration = bound_administration;
-        let reserved_control_request = is_reserved_control_request(first_request);
-        if admission_class == DaemonClientAdmissionClass::ReservedControl
+        let reserved_control_request =
+            crate::daemon::core_admission::is_reserved_control_request(first_request);
+        if admission_class
+            == crate::daemon::core_admission::DaemonClientAdmissionClass::ReservedControl
             && !reserved_control_request
         {
             drop(setup_activity);
-            reject_reserved_bulk_request(transport, first_request, MAX_CONCURRENT_DAEMON_CLIENTS)
-                .await?;
+            crate::daemon::core_admission::reject_reserved_bulk_request(
+                transport,
+                first_request,
+                crate::daemon::core_admission::MAX_CONCURRENT_DAEMON_CLIENTS,
+            )
+            .await?;
             return Ok(None);
         }
-        let _per_client_permit = if admission_class == DaemonClientAdmissionClass::General {
+        let _per_client_permit = if admission_class
+            == crate::daemon::core_admission::DaemonClientAdmissionClass::General
+        {
             match per_client_admission.try_admit_request(handshake, first_request) {
                 Ok(permit) => Some(permit),
                 Err(response) => {
                     drop(setup_activity);
-                    reject_admitted_request(transport, first_request, response).await?;
+                    crate::daemon::core_admission::reject_admitted_request(
+                        transport,
+                        first_request,
+                        response,
+                    )
+                    .await?;
                     return Ok(None);
                 }
             }
@@ -1541,14 +1629,20 @@ impl PortableBrokerDispatch<'_> {
     async fn serve_doctor(
         &self,
         transport: &mut BrokerStreamTransport,
-        handshake: &DaemonHandshake,
+        handshake: &tracedecay_daemon_protocol::DaemonHandshake,
         first_request: &AuthenticatedFirstRequest,
         setup_activity: DaemonActivity,
     ) -> Result<Option<DaemonActivity>> {
         let (project_open, stalled_failure) = match handshake.project_path.as_deref() {
             Some(project_path) => {
-                let route = ProjectRouteKey::from_handshake(project_path, handshake)?;
-                let tasks = project_open_tasks(self.project_open_gates.as_ref()).await;
+                let route = crate::daemon::project_open_admission::ProjectRouteKey::from_handshake(
+                    project_path,
+                    handshake,
+                )?;
+                let tasks = crate::daemon::project_routing::project_open_tasks(
+                    self.project_open_gates.as_ref(),
+                )
+                .await;
                 (tasks.status(&route), tasks.stalled_failure(&route))
             }
             None => (None, None),
@@ -1565,15 +1659,16 @@ impl PortableBrokerDispatch<'_> {
             setup_activity,
             first_request,
             || async {
-                let (canonical_project_path, _) = project_route_for_handshake(
-                    handshake,
-                    self.store_administration.owner_home()?,
-                )?;
+                let (canonical_project_path, _) =
+                    crate::daemon::project_routing::project_route_for_handshake(
+                        handshake,
+                        self.store_administration.owner_home()?,
+                    )?;
                 if let Some(server) = Box::pin(portable_cached_project_server(
                     &self.store_administration,
                     &canonical_project_path,
                     handshake,
-                    ProjectServerRequirement::Core,
+                    crate::daemon::project_open_admission::ProjectServerRequirement::Core,
                 ))
                 .await?
                 {
@@ -1606,7 +1701,7 @@ impl PortableBrokerDispatch<'_> {
     async fn prepare_initialize_route(
         &self,
         transport: &mut BrokerStreamTransport,
-        handshake: &mut DaemonHandshake,
+        handshake: &mut tracedecay_daemon_protocol::DaemonHandshake,
         first_request: &AuthenticatedFirstRequest,
         setup_activity: DaemonActivity,
     ) -> Result<Option<(DaemonActivity, Option<InitializeRouteMetadata>)>> {
@@ -1645,7 +1740,7 @@ impl PortableBrokerDispatch<'_> {
     async fn serve_branch_request(
         &self,
         transport: &mut BrokerStreamTransport,
-        handshake: &DaemonHandshake,
+        handshake: &tracedecay_daemon_protocol::DaemonHandshake,
         first_request: &AuthenticatedFirstRequest,
         setup_activity: DaemonActivity,
     ) -> Result<Option<DaemonActivity>> {
@@ -1678,7 +1773,7 @@ impl PortableBrokerDispatch<'_> {
                     self.invocation.clone(),
                     self.http_application_registry.clone(),
                     handshake,
-                    ProjectServerRequirement::Core,
+                    crate::daemon::project_open_admission::ProjectServerRequirement::Core,
                     #[cfg(test)]
                     self.project_open_attempts.clone(),
                 )),
@@ -1705,22 +1800,23 @@ impl PortableBrokerDispatch<'_> {
     }
     async fn cached_initialize_readiness(
         &self,
-        handshake: &DaemonHandshake,
+        handshake: &tracedecay_daemon_protocol::DaemonHandshake,
         request: &JsonRpcRequest,
     ) -> Result<(bool, Option<TraceDecayError>)> {
         Ok(
             if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
                 && handshake.project_path.is_some()
             {
-                let (project_path, _) = project_route_for_handshake(
-                    handshake,
-                    self.store_administration.owner_home()?,
-                )?;
+                let (project_path, _) =
+                    crate::daemon::project_routing::project_route_for_handshake(
+                        handshake,
+                        self.store_administration.owner_home()?,
+                    )?;
                 match Box::pin(portable_cached_project_server(
                     &self.store_administration,
                     &project_path,
                     handshake,
-                    ProjectServerRequirement::Core,
+                    crate::daemon::project_open_admission::ProjectServerRequirement::Core,
                 ))
                 .await
                 {
@@ -1736,7 +1832,7 @@ impl PortableBrokerDispatch<'_> {
     async fn serve_bootstrap_request(
         &self,
         transport: &mut BrokerStreamTransport,
-        handshake: &DaemonHandshake,
+        handshake: &tracedecay_daemon_protocol::DaemonHandshake,
         first_request: &AuthenticatedFirstRequest,
         setup_activity: DaemonActivity,
         initialize_route: Option<&InitializeRouteMetadata>,
@@ -1819,7 +1915,7 @@ impl PortableBrokerDispatch<'_> {
     async fn admit_file_edit(
         &self,
         transport: &mut BrokerStreamTransport,
-        handshake: &DaemonHandshake,
+        handshake: &tracedecay_daemon_protocol::DaemonHandshake,
         first_request: &AuthenticatedFirstRequest,
         setup_activity: DaemonActivity,
     ) -> Result<Option<DaemonActivity>> {
@@ -1874,10 +1970,12 @@ impl PortableBrokerDispatch<'_> {
     async fn serve_invocation(
         &self,
         transport: &mut BrokerStreamTransport,
-        handshake: &DaemonHandshake,
+        handshake: &tracedecay_daemon_protocol::DaemonHandshake,
         first_request: &AuthenticatedFirstRequest,
     ) -> Option<Result<()>> {
-        if let Some(invocation_request) = parse_daemon_invocation_request(first_request.raw()) {
+        if let Some(invocation_request) =
+            tracedecay_daemon_protocol::parse_daemon_invocation_request(first_request.raw())
+        {
             let mut owned_lsp_sessions = HashMap::new();
             let service = self.invocation.service.clone();
             let result = Box::pin(drive_retained_invocation_responses(
@@ -1910,7 +2008,7 @@ impl PortableBrokerDispatch<'_> {
     async fn serve_routed_request(
         self,
         mut transport: BrokerStreamTransport,
-        handshake: DaemonHandshake,
+        handshake: tracedecay_daemon_protocol::DaemonHandshake,
         first_request: AuthenticatedFirstRequest,
         setup_activity: DaemonActivity,
         initialize_route: Option<InitializeRouteMetadata>,
@@ -1930,7 +2028,9 @@ impl PortableBrokerDispatch<'_> {
                     self.invocation.clone(),
                     self.http_application_registry,
                     &handshake,
-                    project_server_requirement(first_request.parsed()),
+                    crate::daemon::project_open_admission::project_server_requirement(
+                        first_request.parsed(),
+                    ),
                     #[cfg(test)]
                     self.project_open_attempts.clone(),
                 )),
@@ -2006,15 +2106,17 @@ impl PortableBrokerDispatch<'_> {
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(name = "daemon.engine.transport.dispatch", level = "trace", skip_all)]
 pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
-    stream: BrokerStream,
+    stream: tracedecay_daemon_protocol::BrokerStream,
     auth_token: &str,
     lifecycle: &DaemonLifecycle,
     store_administration: StoreAdministration,
-    project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
-    invocation: DaemonInvocationState,
-    http_application_registry: http_application::DaemonHttpApplicationRegistry,
-    per_client_admission: DaemonPerClientAdmission,
-    admission_class: DaemonClientAdmissionClass,
+    project_open_gates: Arc<
+        tokio::sync::Mutex<crate::daemon::project_open_admission::ProjectOpenGates>,
+    >,
+    invocation: crate::daemon::invocation_state::DaemonInvocationState,
+    http_application_registry: crate::daemon::http_application::DaemonHttpApplicationRegistry,
+    per_client_admission: crate::daemon::core_admission::DaemonPerClientAdmission,
+    admission_class: crate::daemon::core_admission::DaemonClientAdmissionClass,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> Result<()> {
     let Some((mut transport, mut handshake, first_request, setup_activity)) =
@@ -2135,11 +2237,12 @@ mod broker_dispatch_admission_tests {
     use tracedecay_mcp::BrokerStreamTransport;
     use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
 
-    use super::{DaemonInvocationState, drive_retained_invocation_responses};
-    use crate::daemon::{
+    use super::drive_retained_invocation_responses;
+    use crate::daemon::core_admission::{
         DaemonClientAdmission, DaemonClientAdmissionOutcome, park_admission,
         with_connection_admission,
     };
+    use crate::daemon::invocation_state::DaemonInvocationState;
 
     const REQUEST_ID: &str = "request.parked-dispatch";
 

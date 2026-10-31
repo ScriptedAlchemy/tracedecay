@@ -5,6 +5,8 @@
 //! problem rather than a committed setting. Callers observe that through MCP
 //! `tools/call`, which is the path this journey drives.
 
+#[cfg(any(test, feature = "test-transport"))]
+use super::super::production_harness::ProductionProjectCompositionHarnessV1;
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -21,7 +23,6 @@ use tracedecay_domain::configuration::{
 use tracedecay_domain::{CapabilityId, LocatorDigest, ManifestDigest};
 
 use super::journey_test_support::tool_answer;
-use super::*;
 use crate::test_support::git::git;
 
 const ACCESS_RULE_ID: &str = "access-rule.preview-cursor-deny";

@@ -4,19 +4,57 @@
 //! `production_project_server` is the single composition root shared by the
 //! Unix broker, the portable broker, and the in-process test harness.
 
-use super::*;
+use super::MAX_CACHED_PROJECT_SERVERS;
+use super::branch_admin::StoreAdministration;
+use super::core_admission::{
+    coordinated_background_refresh_writer, coordinated_dashboard_automation_writer,
+};
+use super::engine::ensure_context_scout_owner_before_advertising;
+use super::graph_resolution::retained_project_server_resolver;
+use super::http_application;
+use super::http_application_router::mount_http_application_router;
+use super::invocation_executor::InProcessDaemonInvocationExecutor;
+use super::invocation_state::DaemonInvocationState;
+use super::project_delivery_mount;
+use super::project_open_admission;
+use super::project_open_admission::{
+    ProjectOpenGate, ProjectOpenGates, ProjectRouteKey, ProjectServerKey,
+};
+use super::project_open_handshake::open_project_for_handshake;
+use super::project_open_orchestration::ensure_registered_project_route;
+use super::project_open_owners;
+use super::project_routing::{
+    ensure_checkout_topology_before_admission, project_open_cancellation_checkpoint,
+    project_open_cancellation_error, project_open_capacity_gate, project_open_gate,
+    project_server_capacity_error, project_server_retirement_blocked_error,
+};
+use super::project_server_lifecycle::schedule_project_server_retirement;
 #[cfg(any(test, feature = "test-helpers"))]
 use crate::test_support::{
     hold_after_core_publish_for_test, hold_after_independent_owners_for_test,
     hold_before_route_bind_for_test,
 };
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 use tracedecay_agent_hosts::agents::context_scout::owner::unregister_registered_context_scout_owner;
 use tracedecay_agent_hosts::hooks::hook_project_id_for_layout;
+use tracedecay_code_index_runtime::code_index_branch_diff::code_index_branch_diff_executor;
+use tracedecay_code_index_runtime::code_index_executor::{
+    code_index_redundancy_executor, code_index_search_executor, code_index_similar_executor,
+};
 use tracedecay_code_index_runtime::code_index_scheduler;
 use tracedecay_daemon_identity::profile_identity;
+use tracedecay_daemon_protocol::DaemonHandshake;
 use tracedecay_daemon_service::daemon_owned_project_source_access_at;
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_runtime_core::path_safety::same_canonical_path;
+use tracedecay_session_runtime::StoreOwnerKey;
 use tracedecay_session_runtime::session_sync::DaemonSessionSyncConfig;
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::{
     ProfileSessionHistoricalIngestor, ProjectSessionHistoricalIngestor,

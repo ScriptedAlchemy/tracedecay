@@ -4,9 +4,11 @@
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tracedecay_daemon_protocol::DaemonHandshake;
 use tracedecay_runtime_core::native_runtime::timeout;
 
-use super::{DaemonHandshake, projectless_tool_call, write_daemon_response};
+use crate::daemon::projectless::projectless_tool_call;
+use crate::daemon::wire_io::write_daemon_response;
 use tracedecay_contracts::project_open::{ProjectOpenStatusStateV1, ProjectOpenStatusV1};
 use tracedecay_daemon_service::shutdown::DaemonActivity;
 use tracedecay_domain::errors::Result;
@@ -33,7 +35,7 @@ pub(super) struct CoreDoctorStatusV1 {
     pub project_open: Option<ProjectOpenStatusV1>,
     /// Exact open failure when `project_open` is stalled. Status and Doctor
     /// must answer this as a typed JSON-RPC error, not a successful snapshot.
-    pub stalled_failure: Option<super::ProjectOpenFailure>,
+    pub stalled_failure: Option<crate::daemon::project_open_admission::ProjectOpenFailure>,
     pub git_watcher_health: Option<serde_json::Value>,
 }
 
@@ -257,7 +259,7 @@ fn doctor_runtime_coverage(startup_health_only: bool) -> Option<serde_json::Valu
 
 async fn doctor_runtime_value(
     handshake: &DaemonHandshake,
-    store_administration: &super::StoreAdministration,
+    store_administration: &crate::daemon::branch_admin::StoreAdministration,
     project_open: Option<ProjectOpenStatusV1>,
     startup_health_only: bool,
     git_watcher_health: Option<serde_json::Value>,
@@ -288,7 +290,7 @@ async fn doctor_runtime_value(
 )]
 async fn doctor_runtime_value_inner(
     handshake: &DaemonHandshake,
-    store_administration: Option<&super::StoreAdministration>,
+    store_administration: Option<&crate::daemon::branch_admin::StoreAdministration>,
     startup_health_only: bool,
     build_version: &str,
 ) -> serde_json::Value {
@@ -549,7 +551,7 @@ pub(crate) async fn cold_doctor_runtime_value(handshake: &DaemonHandshake) -> se
 pub(in crate::daemon) async fn write_doctor_runtime_response(
     transport: &mut impl McpTransport,
     handshake: &DaemonHandshake,
-    store_administration: &super::StoreAdministration,
+    store_administration: &crate::daemon::branch_admin::StoreAdministration,
     project_open: Option<ProjectOpenStatusV1>,
     request: DoctorRuntimeRequest,
     git_watcher_health: Option<serde_json::Value>,
@@ -567,7 +569,7 @@ pub(in crate::daemon) async fn write_doctor_runtime_response(
     if request.doctor_report_requested() && value.get("doctor_report").is_none() {
         value["doctor_report"] = json!({
             "kind": "unknown",
-            "reason": super::DOCTOR_REPORT_OWNER_WARMING_REASON,
+            "reason": tracedecay_daemon_protocol::DOCTOR_REPORT_OWNER_WARMING_REASON,
             "table_growth_evidence": [],
         });
     }
@@ -581,15 +583,15 @@ pub(in crate::daemon) async fn write_doctor_runtime_response(
 
 async fn project_open_status_response(
     handshake: &DaemonHandshake,
-    store_administration: &super::StoreAdministration,
+    store_administration: &crate::daemon::branch_admin::StoreAdministration,
     project_open: &ProjectOpenStatusV1,
-    stalled_failure: Option<&super::ProjectOpenFailure>,
+    stalled_failure: Option<&crate::daemon::project_open_admission::ProjectOpenFailure>,
     id: serde_json::Value,
 ) -> Result<JsonRpcResponse> {
     if project_open.state == ProjectOpenStatusStateV1::Stalled {
         let error = stalled_failure.map_or_else(
-            || super::stalled_project_open_error(project_open),
-            super::ProjectOpenFailure::to_error,
+            || tracedecay_daemon_service::stalled_project_open_error(project_open),
+            crate::daemon::project_open_admission::ProjectOpenFailure::to_error,
         );
         return Ok(super::project_open_handshake::project_open_error_response(
             id, &error,
@@ -616,7 +618,7 @@ async fn project_open_status_response(
 pub(super) async fn serve_core_doctor_runtime_request<T, Probe, ProbeFuture>(
     transport: &mut T,
     handshake: &DaemonHandshake,
-    store_administration: &super::StoreAdministration,
+    store_administration: &crate::daemon::branch_admin::StoreAdministration,
     status: CoreDoctorStatusV1,
     setup_activity: DaemonActivity,
     first_request: &super::AuthenticatedFirstRequest,
@@ -634,7 +636,10 @@ where
         // Full host admission can still be opening after the graph core is
         // published. Its owner, rather than the admission task, answers status.
         if let Some(project_path) = handshake.project_path.as_deref() {
-            let route = super::ProjectRouteKey::from_handshake(project_path, handshake)?;
+            let route = crate::daemon::project_open_admission::ProjectRouteKey::from_handshake(
+                project_path,
+                handshake,
+            )?;
             if store_administration
                 .project_servers()
                 .lock()
@@ -666,8 +671,8 @@ where
     {
         drop(setup_activity);
         let error = status.stalled_failure.as_ref().map_or_else(
-            || super::stalled_project_open_error(project_open),
-            super::ProjectOpenFailure::to_error,
+            || tracedecay_daemon_service::stalled_project_open_error(project_open),
+            crate::daemon::project_open_admission::ProjectOpenFailure::to_error,
         );
         Box::pin(write_daemon_response(
             transport,
@@ -684,8 +689,8 @@ where
             // the socket before any frame made Doctor report a closed
             // connection and then print store-recovery guidance.
             Err(error)
-                if super::error_is_project_not_enrolled(&error)
-                    || super::error_is_project_warming(&error)
+                if tracedecay_daemon_protocol::error_is_project_not_enrolled(&error)
+                    || tracedecay_daemon_protocol::error_is_project_warming(&error)
                     || super::error_is_repository_discovery_deferred(&error)
                     || super::error_is_project_open_retryable(&error)
                     || tracedecay_mcp::reset_required_context(&error).is_some() =>
@@ -734,19 +739,21 @@ mod doctor_runtime_route_tests {
 
     use rusqlite::Connection;
 
-    use super::{
-        CoreDoctorStatusV1, cold_doctor_runtime_value, core_status_request_id,
-        doctor_runtime_coverage, doctor_runtime_request, serve_core_doctor_runtime_request,
+    use super::{core_status_request_id, doctor_runtime_coverage};
+    use crate::daemon::AuthenticatedFirstRequest;
+    use crate::daemon::branch_admin::StoreAdministration;
+    use crate::daemon::core_doctor::{
+        CoreDoctorStatusV1, cold_doctor_runtime_value, doctor_runtime_request,
+        serve_core_doctor_runtime_request,
     };
-    use crate::daemon::{
-        AuthenticatedFirstRequest, DaemonHandshake, ProjectOpenFailure, StoreAdministration,
-    };
+    use crate::daemon::project_open_admission::ProjectOpenFailure;
     use crate::mcp::McpServer;
     use crate::mcp::server::McpServerConstructionContext;
     use tracedecay_contracts::project_open::{
         ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
     };
     use tracedecay_daemon_protocol::DaemonClientIdentity;
+    use tracedecay_daemon_protocol::DaemonHandshake;
     use tracedecay_daemon_service::shutdown::DaemonLifecycle;
     use tracedecay_mcp::McpTransport;
     use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
@@ -754,7 +761,9 @@ mod doctor_runtime_route_tests {
 
     static REGISTERED_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 
-    fn parse_doctor_runtime_request(line: &str) -> Option<super::DoctorRuntimeRequest> {
+    fn parse_doctor_runtime_request(
+        line: &str,
+    ) -> Option<crate::daemon::core_doctor::DoctorRuntimeRequest> {
         let request = AuthenticatedFirstRequest::new(line.to_owned());
         doctor_runtime_request(request.parsed())
     }
@@ -1112,7 +1121,7 @@ mod doctor_runtime_route_tests {
             "status-published-core",
         )
         .expect("fixture daemon authority");
-        let graph = super::super::open_project_for_handshake(
+        let graph = crate::daemon::project_open_handshake::open_project_for_handshake(
             &project,
             &handshake,
             &administration,
@@ -1120,10 +1129,14 @@ mod doctor_runtime_route_tests {
         )
         .await
         .expect("fixture project graph");
-        let key = crate::daemon::ProjectServerKey::from_open_project(&graph, &handshake)
-            .expect("fixture server identity");
-        let route = crate::daemon::ProjectRouteKey::from_handshake(&project, &handshake)
-            .expect("fixture route identity");
+        let key = crate::daemon::project_open_admission::ProjectServerKey::from_open_project(
+            &graph, &handshake,
+        )
+        .expect("fixture server identity");
+        let route = crate::daemon::project_open_admission::ProjectRouteKey::from_handshake(
+            &project, &handshake,
+        )
+        .expect("fixture route identity");
         let server =
             McpServer::new_with_context(McpServerConstructionContext::direct(graph, None)).await;
         administration
@@ -1339,7 +1352,7 @@ mod doctor_runtime_route_tests {
         };
         let stalled_failure = ProjectOpenFailure::from_error(
             &tracedecay_domain::errors::TraceDecayError::project_route(
-                super::super::PROJECT_SERVER_CAPACITY_REASON_CODE,
+                tracedecay_daemon_protocol::PROJECT_SERVER_CAPACITY_REASON_CODE,
                 true,
                 detail.to_owned(),
             ),
@@ -1461,7 +1474,7 @@ mod doctor_runtime_route_tests {
             &first_request,
             || async {
                 Err(tracedecay_domain::errors::TraceDecayError::project_route(
-                    super::super::PROJECT_NOT_ENROLLED_REASON_CODE,
+                    tracedecay_daemon_protocol::PROJECT_NOT_ENROLLED_REASON_CODE,
                     false,
                     detail,
                 ))
@@ -1528,7 +1541,7 @@ mod doctor_runtime_route_tests {
                 let detail = detail.clone();
                 move || async move {
                     Err(tracedecay_domain::errors::TraceDecayError::project_route(
-                        super::super::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
+                        tracedecay_runtime_core::git_discovery::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
                         true,
                         detail,
                     ))
@@ -1674,7 +1687,7 @@ mod doctor_runtime_route_tests {
             "core-doctor-fast-runtime-health",
         )
         .expect("enter daemon database scope");
-        let graph = super::super::open_project_for_handshake(
+        let graph = crate::daemon::project_open_handshake::open_project_for_handshake(
             &project,
             &handshake,
             &store_administration,
@@ -1682,8 +1695,10 @@ mod doctor_runtime_route_tests {
         )
         .await
         .expect("open retained project graph");
-        let key = crate::daemon::ProjectServerKey::from_open_project(&graph, &handshake)
-            .expect("project server key");
+        let key = crate::daemon::project_open_admission::ProjectServerKey::from_open_project(
+            &graph, &handshake,
+        )
+        .expect("project server key");
         let route_live = Arc::new(AtomicBool::new(true));
         let server = McpServer::new_with_context(
             McpServerConstructionContext::direct(graph, None)

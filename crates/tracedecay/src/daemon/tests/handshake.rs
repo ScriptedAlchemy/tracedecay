@@ -1,4 +1,9 @@
+use super::super::branch_admin::StoreAdministration;
 use super::*;
+use serde_json::json;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
 
 #[cfg(unix)]
 fn test_client_instance_id(value: u128) -> String {
@@ -7,7 +12,7 @@ fn test_client_instance_id(value: u128) -> String {
 
 #[cfg(unix)]
 pub(super) async fn daemon_round_trip(
-    engine: super::super::DaemonEngine,
+    engine: crate::daemon::engine::DaemonEngine,
     handshake: &DaemonHandshake,
     request: Value,
 ) -> Vec<Value> {
@@ -49,11 +54,11 @@ pub(super) async fn daemon_round_trip(
 async fn portable_broker_rejects_missing_auth_before_routing() {
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
     let owners = std::sync::Arc::new(tokio::sync::Mutex::new(
-        super::super::DatabaseOwnerRegistry::default(),
+        crate::daemon::database_owner_registry::DatabaseOwnerRegistry::default(),
     ));
     let store_administration = StoreAdministration::with_project_servers(Arc::clone(&owners));
     let gates = std::sync::Arc::new(tokio::sync::Mutex::new(
-        super::super::ProjectOpenGates::default(),
+        crate::daemon::project_open_admission::ProjectOpenGates::default(),
     ));
     let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
@@ -67,14 +72,16 @@ async fn portable_broker_rejects_missing_auth_before_routing() {
     let server_lifecycle = lifecycle.clone();
     let server = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept client");
-        Box::pin(super::super::serve_windows_broker_client(
-            stream,
-            TOKEN,
-            &server_lifecycle,
-            server_administration,
-            gates,
-            Some(server_attempts),
-        ))
+        Box::pin(
+            crate::daemon::connection_serving::serve_windows_broker_client(
+                stream,
+                TOKEN,
+                &server_lifecycle,
+                server_administration,
+                gates,
+                Some(server_attempts),
+            ),
+        )
         .await
     });
     let mut handshake = test_handshake_defaults();
@@ -131,12 +138,14 @@ async fn socket_client_requires_authentication_before_routing() {
     .expect("bind broker");
     let server = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept client");
-        Box::pin(super::super::serve_authenticated_socket_client_with_class(
-            stream,
-            super::super::DaemonEngine::default(),
-            TOKEN.to_string(),
-            super::super::DaemonClientAdmissionClass::General,
-        ))
+        Box::pin(
+            crate::daemon::connection_serving::serve_authenticated_socket_client_with_class(
+                stream,
+                crate::daemon::engine::DaemonEngine::default(),
+                TOKEN.to_string(),
+                crate::daemon::core_admission::DaemonClientAdmissionClass::General,
+            ),
+        )
         .await
     });
 
@@ -189,13 +198,13 @@ fn missing_index_classifier_matches_the_kind_not_the_message() {
         tracedecay_domain::errors::ProjectOpenFailureKind::IndexMissing,
         "no TraceDecay database found at '/repo/store.db'; run 'tracedecay init' first",
     );
-    assert!(super::super::is_missing_index_error(&missing));
+    assert!(crate::daemon::project_open_handshake::is_missing_index_error(&missing));
 
     let lookalike = tracedecay_domain::errors::TraceDecayError::Config {
         message: "no TraceDecay index found at '/repo'".to_string(),
     };
     assert!(
-        !super::super::is_missing_index_error(&lookalike),
+        !crate::daemon::project_open_handshake::is_missing_index_error(&lookalike),
         "a config error whose text names a missing index must not auto-initialize"
     );
 }
@@ -380,13 +389,15 @@ async fn rejected_auth_preface_reads_typed_refusal_then_clean_eof() {
 
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
     let server_task = tokio::spawn(async move {
-        Box::pin(super::super::serve_authenticated_socket_client_with_class(
-            tracedecay_daemon_protocol::transport::BrokerStream::from_tokio_unix(server)
-                .expect("daemon end of the test socket"),
-            engine,
-            "daemon-minted-token".to_string(),
-            super::super::core_admission::DaemonClientAdmissionClass::General,
-        ))
+        Box::pin(
+            crate::daemon::connection_serving::serve_authenticated_socket_client_with_class(
+                tracedecay_daemon_protocol::transport::BrokerStream::from_tokio_unix(server)
+                    .expect("daemon end of the test socket"),
+                engine,
+                "daemon-minted-token".to_string(),
+                super::super::core_admission::DaemonClientAdmissionClass::General,
+            ),
+        )
         .await
     });
 
@@ -451,7 +462,7 @@ async fn rejected_auth_preface_reads_typed_refusal_then_clean_eof() {
 #[cfg(unix)]
 #[tokio::test]
 async fn catalog_refresh_claim_is_negotiated_and_once_per_generation() {
-    let engine = super::super::DaemonEngine::default();
+    let engine = crate::daemon::engine::DaemonEngine::default();
     let mut handshake = test_handshake_defaults();
     handshake.client_version = "0.0.0-old".to_string();
     handshake.catalog_version = "0.0.0-old".to_string();
@@ -498,7 +509,7 @@ async fn catalog_refresh_claim_is_negotiated_and_once_per_generation() {
         "fresh initialize marks the generation current without notifying"
     );
     handshake.tool_list_changed_capable = true;
-    handshake.catalog_version = super::super::binary_version()
+    handshake.catalog_version = crate::daemon::core_handshake::binary_version()
         .expect("fixture product runtime registered")
         .to_string();
     assert!(
@@ -523,7 +534,7 @@ async fn catalog_refresh_claim_is_negotiated_and_once_per_generation() {
             .is_none()
     );
 
-    let next_generation = super::super::DaemonEngine::default();
+    let next_generation = crate::daemon::engine::DaemonEngine::default();
     assert!(
         next_generation
             .claim_catalog_refresh(&handshake, ping.parsed())
@@ -532,10 +543,10 @@ async fn catalog_refresh_claim_is_negotiated_and_once_per_generation() {
         "a new daemon generation must notify the same long-lived client once"
     );
 
-    handshake.catalog_version = super::super::binary_version()
+    handshake.catalog_version = crate::daemon::core_handshake::binary_version()
         .expect("fixture product runtime registered")
         .to_string();
-    let same_version_generation = super::super::DaemonEngine::default();
+    let same_version_generation = crate::daemon::engine::DaemonEngine::default();
     assert!(
         same_version_generation
             .claim_catalog_refresh(&handshake, ping.parsed())
@@ -548,7 +559,7 @@ async fn catalog_refresh_claim_is_negotiated_and_once_per_generation() {
 #[cfg(unix)]
 #[tokio::test]
 async fn catalog_refresh_rejects_untrusted_ids_and_stops_at_capacity() {
-    let engine = super::super::DaemonEngine::default();
+    let engine = crate::daemon::engine::DaemonEngine::default();
     let mut handshake = test_handshake_defaults();
     handshake.tool_list_changed_capable = true;
     handshake.catalog_version = "0.0.0-old".to_string();
@@ -556,10 +567,12 @@ async fn catalog_refresh_rejects_untrusted_ids_and_stops_at_capacity() {
         json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string(),
     );
 
-    assert!(super::super::valid_client_instance_id(
+    assert!(crate::daemon::core_admission::valid_client_instance_id(
         &test_client_instance_id(0)
     ));
-    assert!(super::super::valid_client_instance_id("mcp-1234567890"));
+    assert!(crate::daemon::core_admission::valid_client_instance_id(
+        "mcp-1234567890"
+    ));
     for invalid_id in [
         "A".repeat(32),
         "x".repeat(4_096),
@@ -643,15 +656,16 @@ async fn daemon_refreshes_once_only_after_generation_change() {
         .iter()
         .map(serde_json::Value::to_string)
         .collect();
-    let metadata = super::super::proxy_initialize_metadata(
+    let metadata = crate::daemon::core_proxy::proxy_initialize_metadata(
         &initialize.to_string(),
         &initialize_response_lines,
     );
-    super::super::apply_proxy_initialize_metadata(&mut handshake, metadata);
+    crate::daemon::core_proxy::apply_proxy_initialize_metadata(&mut handshake, metadata);
     assert!(handshake.tool_list_changed_capable);
     assert_eq!(
         handshake.catalog_version,
-        super::super::binary_version().expect("fixture product runtime registered")
+        crate::daemon::core_handshake::binary_version()
+            .expect("fixture product runtime registered")
     );
 
     let same_generation = daemon_round_trip(
@@ -759,9 +773,9 @@ fn proxy_records_negotiated_catalog_capability_and_version() {
         })
         .to_string(),
     ];
-    let metadata = super::super::proxy_initialize_metadata(&initialize, &responses);
+    let metadata = crate::daemon::core_proxy::proxy_initialize_metadata(&initialize, &responses);
     let mut handshake = test_handshake_defaults();
-    super::super::apply_proxy_initialize_metadata(&mut handshake, metadata);
+    crate::daemon::core_proxy::apply_proxy_initialize_metadata(&mut handshake, metadata);
 
     assert!(handshake.tool_list_changed_capable);
     assert_eq!(handshake.catalog_version, "2.0.0");
@@ -794,11 +808,11 @@ async fn saturated_daemon_refuses_wire_drifted_handshake_instead_of_resetting() 
 
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
     let server_task = tokio::spawn(async move {
-        super::super::reject_saturated_daemon_client(
+        crate::daemon::core_admission::reject_saturated_daemon_client(
             tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(server)
                 .expect("daemon end of the test socket"),
-            super::super::DaemonClientSaturationResponse {
-                kind: super::super::DaemonClientSaturationKind::ClientCapacityReached,
+            crate::daemon::core_admission::DaemonClientSaturationResponse {
+                kind: crate::daemon::core_admission::DaemonClientSaturationKind::ClientCapacityReached,
                 retryable: true,
                 capacity: 1,
             },
@@ -912,7 +926,7 @@ async fn one_shot_clients_report_a_refusal_queued_before_their_write_failed() {
     let oversized = "x".repeat(4 * 1024 * 1024);
 
     let daemon = refusing_daemon(&socket, 1);
-    let error = super::super::call_tool(
+    let error = crate::daemon::core_client::call_tool(
         &socket,
         &handshake,
         "tracedecay_status",
@@ -932,7 +946,7 @@ async fn one_shot_clients_report_a_refusal_queued_before_their_write_failed() {
         "params": { "name": "tracedecay_status", "arguments": { "padding": oversized } },
     })
     .to_string();
-    let error = super::super::send_daemon_request_line(&socket, &handshake, &request)
+    let error = crate::daemon::core_proxy::send_daemon_request_line(&socket, &handshake, &request)
         .await
         .expect_err("a refused proxied request must fail");
     assert_authentication_refused(&error);
@@ -956,10 +970,13 @@ async fn proxied_request_reports_the_refusal_read_after_its_write() {
     })
     .to_string();
 
-    let error =
-        super::super::send_daemon_request_line(&socket, &test_handshake_defaults(), &request)
-            .await
-            .expect_err("a refused proxied request must fail");
+    let error = crate::daemon::core_proxy::send_daemon_request_line(
+        &socket,
+        &test_handshake_defaults(),
+        &request,
+    )
+    .await
+    .expect_err("a refused proxied request must fail");
     assert_authentication_refused(&error);
     daemon.await.expect("refusing daemon");
 }

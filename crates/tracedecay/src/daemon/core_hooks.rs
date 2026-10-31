@@ -22,7 +22,8 @@ use tracedecay_mcp::hook_events::{self, HookEventKind, HookEventPlan};
 use tracedecay_mcp::server::attach_stateless_request_context;
 use tracedecay_runtime_core::logging::log_daemon_event;
 
-use super::{JsonRpcRequest, write_daemon_preamble};
+use crate::daemon::core_client::write_daemon_preamble;
+use tracedecay_mcp::JsonRpcRequest;
 
 /// An unopened worktree needs only its registered session store to retain a
 /// file edit. Graph admission and full owner publication happen after the
@@ -33,10 +34,10 @@ use super::{JsonRpcRequest, write_daemon_preamble};
     skip_all
 )]
 pub(super) async fn admit_unmounted_file_edit(
-    stores: &super::StoreAdministration,
-    handshake: &super::DaemonHandshake,
+    stores: &crate::daemon::branch_admin::StoreAdministration,
+    handshake: &tracedecay_daemon_protocol::DaemonHandshake,
     request: Option<&JsonRpcRequest>,
-) -> Result<Option<super::DaemonHandshake>> {
+) -> Result<Option<tracedecay_daemon_protocol::DaemonHandshake>> {
     let Some(request) = request.filter(|request| {
         request.method == HOOK_EVENT_METHOD && tracedecay_mcp::server::opens_rmcp_session(request)
     }) else {
@@ -76,14 +77,15 @@ pub(super) async fn admit_unmounted_file_edit(
     })?;
     let mut routed = handshake.clone();
     routed.project_path = Some(root.to_path_buf());
-    let (root, route_key) = super::project_route_for_handshake(&routed, stores.owner_home()?)?;
+    let (root, route_key) =
+        crate::daemon::project_routing::project_route_for_handshake(&routed, stores.owner_home()?)?;
     if stores
         .project_servers()
         .lock()
         .await
         .get_route_and_touch_for(
             &route_key,
-            super::ProjectServerRequirement::RegisteredHostIngest,
+            crate::daemon::project_open_admission::ProjectServerRequirement::RegisteredHostIngest,
         )
         .is_some()
     {
@@ -95,16 +97,19 @@ pub(super) async fn admit_unmounted_file_edit(
 }
 
 async fn admit_registered_file_edit(
-    stores: &super::StoreAdministration,
-    mut routed: super::DaemonHandshake,
+    stores: &crate::daemon::branch_admin::StoreAdministration,
+    mut routed: tracedecay_daemon_protocol::DaemonHandshake,
     root: PathBuf,
     event: &hook_events::HookEvent,
-) -> Result<super::DaemonHandshake> {
-    super::ensure_registered_project_route(stores, &root, false).await?;
+) -> Result<tracedecay_daemon_protocol::DaemonHandshake> {
+    crate::daemon::project_open_orchestration::ensure_registered_project_route(
+        stores, &root, false,
+    )
+    .await?;
     let registry = stores.registered_profile_database().await?;
     let layout = tracedecay_project::project::TraceDecay::resolve_registered_configuration_layout(
         &root,
-        &super::handshake_open_options(&routed),
+        &crate::daemon::core_handshake::handshake_open_options(&routed),
         registry.as_ref(),
     )
     .await?;
@@ -204,7 +209,7 @@ async fn notify_hook_event_to_connection(
     event: DaemonHookEvent,
     connection: ResolvedDaemonConnection,
 ) -> HookEventNotifyOutcomeV1 {
-    let Ok(handshake) = crate::daemon::handshake_for_current_client(
+    let Ok(handshake) = crate::daemon::core_handshake::handshake_for_current_client(
         profile,
         Some(project_path.to_path_buf()),
         None,

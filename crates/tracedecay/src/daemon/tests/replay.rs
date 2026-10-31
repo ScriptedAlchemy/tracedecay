@@ -1,4 +1,6 @@
+use super::super::branch_admin::StoreAdministration;
 use super::*;
+use tracedecay_daemon_protocol::DaemonClientIdentity;
 
 #[tokio::test]
 async fn projectless_user_session_setup_failure_is_a_typed_unavailable_terminal() {
@@ -30,7 +32,7 @@ async fn projectless_user_session_setup_failure_is_a_typed_unavailable_terminal(
         }
     });
 
-    let response = super::super::projectless_tools_call_response(
+    let response = crate::daemon::projectless::projectless_tools_call_response(
         serde_json::json!(1),
         Some(&params),
         &identity,
@@ -97,7 +99,7 @@ async fn client_identity_startup_replays_retained_profile_receipts() {
             }
         }
     });
-    let response = super::super::projectless_tools_call_response(
+    let response = crate::daemon::projectless::projectless_tools_call_response(
         serde_json::json!(1),
         Some(&params),
         &identity,
@@ -153,9 +155,11 @@ async fn client_identity_startup_replays_retained_profile_receipts() {
     std::fs::remove_file(&automation_root).unwrap();
 
     let restarted = StoreAdministration::default().with_profile_identity(profile_identity);
-    super::super::replay_user_profile_host_admission_for_identity(&restarted, &identity)
-        .await
-        .unwrap();
+    crate::daemon::project_server_lifecycle::replay_user_profile_host_admission_for_identity(
+        &restarted, &identity,
+    )
+    .await
+    .unwrap();
     let recovered_db = restarted
         .registered_profile_session_database()
         .await

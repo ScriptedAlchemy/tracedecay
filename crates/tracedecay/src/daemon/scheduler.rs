@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use tracedecay_daemon_protocol::DaemonHandshake;
 
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 use tracedecay_automation_runtime::automation::backend::{AgentTaskBackend, AgentTaskKind};
@@ -19,7 +20,9 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_project::project::TraceDecay;
 
 use super::branch_admin::MaintenanceReaperKind;
-use super::{DaemonEngine, DaemonHandshake, ProjectServerKey, StoreAdministration};
+use crate::daemon::branch_admin::StoreAdministration;
+use crate::daemon::engine::DaemonEngine;
+use crate::daemon::project_open_admission::ProjectServerKey;
 use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_runtime_core::native_runtime::{self, timeout};
@@ -1044,7 +1047,7 @@ async fn retire_matching_automation_scheduler(
 /// races a loop that still holds the owner's session Store client.
 pub(super) async fn retire_owner_automation_schedulers(
     store_administration: &StoreAdministration,
-    owner: &super::StoreOwnerKey,
+    owner: &tracedecay_session_runtime::StoreOwnerKey,
 ) {
     let keys: Vec<ProjectServerKey> = store_administration
         .automation_schedulers()

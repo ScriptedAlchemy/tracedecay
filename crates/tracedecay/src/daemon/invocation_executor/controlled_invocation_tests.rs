@@ -2,7 +2,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use super::{invocation_is_native_integration_operation, settle_in_process_invocation};
+use super::settle_in_process_invocation;
+use crate::daemon::invocation_executor::invocation_is_native_integration_operation;
 use tracedecay_contracts::{CancellationSignal, clock::now_micros};
 use tracedecay_daemon_protocol::InvocationCancellationPolicy;
 use tracedecay_daemon_protocol::{

@@ -1,17 +1,18 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use tracedecay_daemon_protocol::DaemonHandshake;
 
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 use tracedecay_automation_runtime::automation::backend::{AgentTaskBackend, AgentTaskKind};
 
-use super::super::{DaemonEngine, DaemonHandshake};
 use super::{
     automation_scheduler_has_work, effective_automation_config_for_project,
     log_scheduler_automation_replay, log_scheduler_task_error, log_scheduler_task_start,
     maybe_run_global_retention, run_user_jobs_scheduler_pass, scheduler_run_observer,
     settle_scheduler_retained_automation,
 };
+use crate::daemon::engine::DaemonEngine;
 use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
     AutomationEffectAdmission, AutomationEffectAuthority,
 };

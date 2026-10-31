@@ -19,8 +19,9 @@
 
 use std::sync::Arc;
 
-use super::DaemonEngine;
-use crate::daemon::{project_open_tasks, shutdown_project_servers};
+use crate::daemon::engine::DaemonEngine;
+use crate::daemon::project_routing::project_open_tasks;
+use crate::daemon::project_server_lifecycle::shutdown_project_servers;
 #[cfg(test)]
 use tracedecay_daemon_service::shutdown::{
     DaemonShutdownPlan, DaemonShutdownReceipt, coordinate_daemon_shutdown,

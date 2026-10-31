@@ -5,6 +5,7 @@ use std::sync::{
     Arc, Weak,
     atomic::{AtomicBool, Ordering},
 };
+use tracedecay_daemon_protocol::DaemonHandshake;
 
 use serde_json::json;
 use tracedecay_application::pr_tracking::{
@@ -21,13 +22,13 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 #[cfg(unix)]
 use tracedecay_runtime_core::native_runtime;
 
-#[cfg(any(unix, test))]
-#[cfg(unix)]
-use super::ProjectServerKey;
-use super::StoreOwnerKey;
 #[cfg(unix)]
 use super::scheduler::{AutomationSchedulerHandle, AutomationSchedulerSignal};
-use super::{DaemonHandshake, DatabaseOwnerRegistry, write_daemon_response};
+use crate::daemon::database_owner_registry::DatabaseOwnerRegistry;
+#[cfg(any(unix, test))]
+#[cfg(unix)]
+use crate::daemon::project_open_admission::ProjectServerKey;
+use crate::daemon::wire_io::write_daemon_response;
 use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationServiceRegistry;
 #[cfg(unix)]
 use tracedecay_automation_runtime::automation::maintenance_termination::MaintenanceTaskTermination;
@@ -41,6 +42,7 @@ use tracedecay_daemon_service::{
 use tracedecay_mcp::handlers::hook_runtime::replay_projectless_hermes_host_admission;
 #[cfg(unix)]
 use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_session_runtime::StoreOwnerKey;
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
 use tracedecay_store_runtime::StoreWriterGates;
 pub(super) use tracedecay_store_runtime::{StoreWriterClass, WriterScope};
@@ -112,7 +114,7 @@ pub(super) struct ProfileSessionRefreshAuthorityV1 {
 /// Resolves the writer scope for one store family.
 ///
 /// The key is the canonical `data_root`, the exact value
-/// [`StoreOwnerKey::store_root`](super::StoreOwnerKey) carries, so every lane
+/// [`StoreOwnerKey::store_root`](tracedecay_session_runtime::StoreOwnerKey) carries, so every lane
 /// naming the same store lands on the same gate. A path that cannot be
 /// canonicalized degrades to daemon-wide, which is strictly *more* exclusive and
 /// therefore can never split one store's gate into two.
@@ -125,7 +127,7 @@ pub(super) fn store_writer_scope(data_root: &Path, class: StoreWriterClass) -> W
 
 /// Owner-lane scope for one registered database owner.
 ///
-/// [`StoreOwnerKey::store_root`](super::StoreOwnerKey) is already the
+/// [`StoreOwnerKey::store_root`](tracedecay_session_runtime::StoreOwnerKey) is already the
 /// canonicalized `data_root`, so this agrees by construction with
 /// [`store_writer_scope`] and [`graph_writer_scope`] for the same store.
 #[cfg(any(unix, test))]
@@ -1898,7 +1900,7 @@ impl StoreAdministration {
         // generation rebuild can hold a store's gate for minutes. Surrender the
         // admission slot while queued and take it back before running.
         let _writer = tracing::Instrument::instrument(
-            super::park_admission(self.gate.acquire(&scope)),
+            crate::daemon::core_admission::park_admission(self.gate.acquire(&scope)),
             tracing::trace_span!("daemon.branch_admin.writer.acquire"),
         )
         .await;

@@ -4,16 +4,23 @@
 //! Retirement waits for in-flight requests before aborting, so a rekey or a
 //! shutdown never leaves a store mid-write.
 
-use super::*;
+use super::branch_admin::StoreAdministration;
+use super::hook_v2_replay_consumer;
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
+use tokio::time::Duration;
 use tracedecay_agent_hosts::agents::context_scout::owner::unregister_registered_context_scout_owner;
 use tracedecay_agent_hosts::hooks::hook_project_id_for_layout;
 use tracedecay_daemon_identity::authority;
+use tracedecay_daemon_protocol::DaemonClientIdentity;
 use tracedecay_daemon_service::ProfileHostAdmissionBootstrapStatus;
 use tracedecay_daemon_service::shutdown::ShutdownStatus;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
+use tracedecay_session_runtime::StoreOwnerKey;
 use tracedecay_store_runtime::{
     ShutdownTaskOutcome, ShutdownTaskReceipt, join_shutdown_tasks_until,
 };
