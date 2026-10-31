@@ -13939,6 +13939,183 @@ fn a_current_witness_cannot_hide_a_dirty_seal_after_commit() {
     );
 }
 
+/// Git's skip-validation flags do not make unchanged source dirty. The
+/// canonical comparison must still admit the clean bytes at their exact HEAD
+/// without changing the user's index flags or decoding a retained graph.
+#[test]
+fn clean_flagged_source_keeps_exact_head_attribution() {
+    for flag in ["--assume-unchanged", "--skip-worktree"] {
+        let fixture = GitFixture::new(ALPHA_LIB_V1);
+        git(fixture.path(), &["update-index", flag, "src/lib.rs"]);
+        let index_flags = git_stdout(fixture.path(), &["ls-files", "-v", "--", "src/lib.rs"]);
+        let head = CommitId::new(git_stdout(fixture.path(), &["rev-parse", "HEAD"]))
+            .expect("committed HEAD");
+        let store = TempDir::new().expect("store root");
+        let mut scheduler = scheduler(
+            &fixture,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(
+            scheduler
+                .reconcile_now()
+                .expect("seal clean flagged source"),
+        );
+        let metadata = scheduler
+            .servable_retained_text_generation()
+            .expect("publication store")
+            .expect("authenticated clean generation")
+            .metadata()
+            .clone();
+        assert_eq!(metadata.snapshot().source_revision, Some(head), "{flag}");
+        let decodes_before = scheduler.sealed_decode_count();
+        let unchanged = scheduler
+            .reconcile_retained_text_generation_with(&metadata, false)
+            .expect("verify clean flagged source");
+        assert!(
+            matches!(unchanged, Some(CodeIndexReconcileOutcomeV1::Noop(_))),
+            "unchanged flagged source remains reusable: {flag}, {unchanged:?}"
+        );
+        assert_eq!(scheduler.sealed_decode_count(), decodes_before, "{flag}");
+        assert_eq!(
+            git_stdout(fixture.path(), &["ls-files", "-v", "--", "src/lib.rs"]),
+            index_flags,
+            "verification must preserve the persisted index flags: {flag}"
+        );
+    }
+}
+
+/// An absent skip-worktree entry belongs to a sparse checkout's omitted tree,
+/// not to its deletion set. Proving present flagged bytes must preserve that
+/// distinction and the clean HEAD-tree capture of intentionally absent source.
+#[test]
+fn absent_skip_worktree_source_keeps_sparse_checkout_attribution() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    git(
+        fixture.path(),
+        &["update-index", "--skip-worktree", "src/lib.rs"],
+    );
+    fixture.remove("src/lib.rs");
+    let index_flags = git_stdout(fixture.path(), &["ls-files", "-v", "--", "src/lib.rs"]);
+    let head =
+        CommitId::new(git_stdout(fixture.path(), &["rev-parse", "HEAD"])).expect("committed HEAD");
+    let store = TempDir::new().expect("store root");
+    let scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let captured = scheduler
+        .capture_authoritative_snapshot(None)
+        .expect("capture clean sparse checkout");
+    assert_eq!(captured.snapshot.source_revision, Some(head));
+    assert!(
+        captured.snapshot.files.iter().any(|file| {
+            file.logical_path == "src/lib.rs"
+                && file.content_digest == content_digest(ALPHA_LIB_V1[0].1.as_bytes())
+        }),
+        "the clean HEAD tree retains the intentionally unmaterialized source"
+    );
+    assert_eq!(
+        git_stdout(fixture.path(), &["ls-files", "-v", "--", "src/lib.rs"]),
+        index_flags,
+        "sparse omission must preserve the persisted skip-worktree flag"
+    );
+}
+
+/// A dirty seal followed by an index flag change still describes dirty source,
+/// even though ordinary Git status now suppresses its worktree difference.
+/// Both retained admission and canonical capture must prove actual bytes.
+#[test]
+fn hidden_dirty_source_is_never_attributed_to_head() {
+    for flag in ["--assume-unchanged", "--skip-worktree"] {
+        let fixture = GitFixture::new(ALPHA_LIB_V1);
+        fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+        let store = TempDir::new().expect("store root");
+        let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+        let mut live = scheduler(&fixture, store.path().to_path_buf(), Arc::clone(&bytes));
+        let dirty = published(live.reconcile_now().expect("seal dirty source"));
+        let metadata = live
+            .servable_retained_text_generation()
+            .expect("publication store")
+            .expect("authenticated dirty generation")
+            .metadata()
+            .clone();
+        assert_eq!(metadata.snapshot().source_revision, None, "{flag}");
+
+        git(fixture.path(), &["update-index", flag, "src/lib.rs"]);
+        let index_flags = git_stdout(fixture.path(), &["ls-files", "-v", "--", "src/lib.rs"]);
+        assert!(
+            git_stdout(fixture.path(), &["status", "--porcelain"]).is_empty(),
+            "the fixture must hide its dirty bytes from ordinary Git status: {flag}"
+        );
+        let decodes_before = live.sealed_decode_count();
+        let unchanged = live
+            .reconcile_retained_text_generation_with(&metadata, false)
+            .expect("verify retained hidden dirty source");
+        assert!(
+            matches!(unchanged, Some(CodeIndexReconcileOutcomeV1::Noop(_))),
+            "flagging unchanged dirty bytes must keep their absent revision: {flag}, {unchanged:?}"
+        );
+        assert_eq!(live.sealed_decode_count(), decodes_before, "{flag}");
+
+        // Exercise both canonical fallback modes independently of the
+        // retained admission decision; neither may turn status-clean into
+        // an attribution to HEAD's different source bytes.
+        for captured in [
+            live.capture_authoritative_snapshot(None)
+                .expect("capture with active row reuse"),
+            live.capture_authoritative_snapshot_without_active_generation_reuse(None)
+                .expect("capture without active row reuse"),
+        ] {
+            assert_eq!(captured.snapshot.source_revision, None, "{flag}");
+            assert_eq!(
+                captured.snapshot.content_identity, dirty.snapshot_content_identity,
+                "canonical capture must preserve the dirty bytes: {flag}"
+            );
+        }
+        drop(live);
+
+        let mut reopened = scheduler(&fixture, store.path().to_path_buf(), bytes);
+        let retained = reopened
+            .latest_complete()
+            .expect("decoded dirty generation");
+        assert_eq!(
+            retained.generation().snapshot().source_revision,
+            None,
+            "{flag}"
+        );
+        assert!(
+            matches!(
+                reopened
+                    .activate_or_reconcile()
+                    .expect("verify dirty frontier"),
+                CodeIndexReconcileOutcomeV1::Noop(_)
+            ),
+            "the decoded frontier must retain the hidden dirty seal: {flag}"
+        );
+        let current = reopened
+            .servable_retained_text_generation()
+            .expect("publication store")
+            .expect("authenticated dirty generation");
+        assert_eq!(
+            current.metadata().snapshot().source_revision,
+            None,
+            "{flag}"
+        );
+        assert_eq!(
+            current.metadata().manifest().generation_id,
+            dirty.generation_id,
+            "{flag}"
+        );
+        assert_eq!(
+            git_stdout(fixture.path(), &["ls-files", "-v", "--", "src/lib.rs"]),
+            index_flags,
+            "verification must preserve the persisted index flags: {flag}"
+        );
+    }
+}
+
 mod diagnostic_authority {
     use std::collections::BTreeSet;
     use std::sync::Arc;
