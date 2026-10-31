@@ -39,7 +39,7 @@ async fn response_handle_root(fixture: &ProductionCompositionFixture) -> PathBuf
         .harness
         .server(&fixture.project_root)
         .expect("production retrieve server")
-        .cg()
+        .cg_snapshot()
         .await
         .store_layout()
         .response_handle_root

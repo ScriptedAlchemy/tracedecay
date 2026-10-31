@@ -61,7 +61,7 @@ async fn unknown_node_ids_are_answered_while_the_released_catalog_cannot_rewarm(
         .warm_interactive_catalog_with_cancellation(None, Arc::new(NeverCancelled))
         .unwrap();
     assert!(matches!(
-        crate::test_support::release_idle_interactive_catalog(&store).await,
+        tracedecay_store_runtime::release_idle_interactive_catalog(&store).await,
         CodeGraphCatalogReleaseV1::Released { .. }
     ));
     let held_store = Arc::clone(&store);

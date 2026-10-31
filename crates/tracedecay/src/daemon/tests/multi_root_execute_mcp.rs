@@ -335,7 +335,7 @@ async fn run_multi_root_execute() {
         .project_server(&handshake)
         .await
         .expect("alpha MCP server");
-    let graph = server.cg().await;
+    let graph = server.cg_snapshot().await;
     let target = graph.configuration_runtime().configuration_target().clone();
     let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
         graph.project_root(),

@@ -615,7 +615,12 @@ async fn storage_status_reports_admitted_page_math_and_rejects_unknown_fields() 
         .project_id(&fixture.project_root)
         .await
         .expect("admitted project identity");
-    let store_path: PathBuf = server.cg().await.store_layout().graph_db_path.clone();
+    let store_path: PathBuf = server
+        .cg_snapshot()
+        .await
+        .store_layout()
+        .graph_db_path
+        .clone();
     let store_path = fs::canonicalize(&store_path)
         .unwrap_or_else(|error| panic!("canonicalize {}: {error}", store_path.display()));
     let store_path_text = store_path.display().to_string();

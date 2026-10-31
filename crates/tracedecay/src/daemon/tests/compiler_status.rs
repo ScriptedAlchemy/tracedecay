@@ -129,7 +129,7 @@ async fn register_work_for_configuration(
     server: &crate::mcp::McpServer,
     configuration: &PinnedRuntimeConfiguration,
 ) -> (ManifestDigest, bool, Result<(), TraceDecayError>) {
-    let graph = server.cg().await;
+    let graph = server.cg_snapshot().await;
     let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
         graph.project_root(),
         &graph
@@ -429,7 +429,7 @@ async fn route_eviction_reopen_reads_retained_compiler_status_with_leased_siblin
         "same-configuration reopen keeps the installed facade"
     );
     let old_configuration = reopened
-        .cg()
+        .cg_snapshot()
         .await
         .configuration_runtime()
         .client()
@@ -486,7 +486,7 @@ async fn route_eviction_reopen_reads_retained_compiler_status_with_leased_siblin
     drop(last_sibling);
     let (_, _, configured, _) = engine.open_project_server(&handshake).await.unwrap();
     let current_configuration = configured
-        .cg()
+        .cg_snapshot()
         .await
         .configuration_runtime()
         .client()
@@ -566,7 +566,7 @@ async fn route_eviction_reopen_reads_retained_compiler_status_with_leased_siblin
         .await,
     );
     let candidate_configuration = configured
-        .cg()
+        .cg_snapshot()
         .await
         .configuration_runtime()
         .client()
@@ -603,7 +603,7 @@ async fn route_eviction_reopen_reads_retained_compiler_status_with_leased_siblin
                 .await,
             );
             let latest = configured
-                .cg()
+                .cg_snapshot()
                 .await
                 .configuration_runtime()
                 .client()

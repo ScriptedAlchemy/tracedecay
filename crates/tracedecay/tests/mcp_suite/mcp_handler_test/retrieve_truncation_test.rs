@@ -63,7 +63,7 @@ async fn fixture_response_handle_root(
         .harness
         .server(&fixture.project_root)
         .expect("production retrieve server")
-        .cg()
+        .cg_snapshot()
         .await
         .store_layout()
         .response_handle_root

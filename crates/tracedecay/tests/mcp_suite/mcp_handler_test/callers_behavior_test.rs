@@ -304,7 +304,7 @@ async fn tracedecay_callers_reads_the_selected_registered_project() {
     let settle_id = function_id(&target_server, "settle").await;
     let main_id = function_id(&target_server, "main").await;
     let target_project_id = target_server
-        .cg()
+        .cg_snapshot()
         .await
         .store_layout()
         .identity

@@ -4,9 +4,6 @@
 use std::path::PathBuf;
 
 use tokio::time::Duration;
-use tracedecay_code_index::graph_projection::{
-    CodeGraphCatalogReleaseV1, CodeGraphProjectionStore,
-};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub mod git;
@@ -85,23 +82,6 @@ pub async fn hold_after_maintenance_listing_for_test() -> Result<()> {
         b"maintenance-listing",
     )
     .await
-}
-
-/// Releases `store`'s interactive catalog once nothing holds it. `Busy` means
-/// ask again later: after a test drops its own readers, a background catalog
-/// warm or residency pass can still hold the catalog for a moment.
-pub async fn release_idle_interactive_catalog(
-    store: &CodeGraphProjectionStore,
-) -> CodeGraphCatalogReleaseV1 {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        match store.release_interactive_catalog() {
-            CodeGraphCatalogReleaseV1::Busy if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            release => return release,
-        }
-    }
 }
 
 /// Records `<hold>.entered`, then waits until the file `variable` names is

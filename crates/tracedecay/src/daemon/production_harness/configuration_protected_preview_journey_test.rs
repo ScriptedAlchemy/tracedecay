@@ -166,7 +166,11 @@ async fn protected_preview_redacts_the_change_and_refuses_stale_or_invalid_input
     let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
         .await
         .expect("production composition");
-    let graph = harness.server(&project).expect("project server").cg().await;
+    let graph = harness
+        .server(&project)
+        .expect("project server")
+        .cg_snapshot()
+        .await;
     let project_id = graph
         .configuration_runtime()
         .configuration_target()
@@ -255,7 +259,11 @@ async fn protected_preview_redacts_the_change_and_refuses_stale_or_invalid_input
         json!([]),
     );
 
-    let graph = harness.server(&project).expect("project server").cg().await;
+    let graph = harness
+        .server(&project)
+        .expect("project server")
+        .cg_snapshot()
+        .await;
     let unchanged = graph
         .configuration_runtime()
         .client()
@@ -286,7 +294,11 @@ async fn protected_bind_source_preview_and_apply_share_one_outcome() {
     let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
         .await
         .expect("production composition");
-    let graph = harness.server(&project).expect("project server").cg().await;
+    let graph = harness
+        .server(&project)
+        .expect("project server")
+        .cg_snapshot()
+        .await;
     let project_id = graph
         .configuration_runtime()
         .configuration_target()

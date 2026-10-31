@@ -81,7 +81,7 @@ fn assert_rejected_get(document: &Value, diagnostic: &str) {
 
 async fn project_id(server: &McpServer) -> String {
     server
-        .cg()
+        .cg_snapshot()
         .await
         .store_layout()
         .identity

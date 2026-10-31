@@ -74,9 +74,16 @@ libc.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["full", "test-util"] }
+walkdir.workspace = true
+# Graph-activation journeys read projected code-graph catalogs and implement
+# the scheduler's execution-control port directly.
+tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false, features = ["test-helpers"] }
 tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", default-features = false, features = ["test-helpers"] }
 tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
+# The moved journeys release the interactive catalog through the session
+# registry's shared fixture.
+tracedecay-store-runtime = { path = "../tracedecay-store-runtime", features = ["test-helpers"] }
 # The moved lifecycle/doctor tests open projects through the registered test
 # runtime and pin the profile data directory.
 tracedecay-project = { path = "../tracedecay-project", features = ["test-helpers"] }
