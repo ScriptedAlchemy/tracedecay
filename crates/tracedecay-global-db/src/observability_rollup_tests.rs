@@ -200,6 +200,123 @@ async fn dirty_day_lease_is_exclusive_then_reclaimable_after_expiry() {
 }
 
 #[asupersync::test]
+async fn a_claimant_reclaims_the_dirty_day_lease_an_abandoned_pass_left() {
+    let harness = RegisteredGlobalDbHarness::open("observability-rollup-dirty-reclaim").await;
+    let watermark = harness
+        .registered
+        .append_observability_event(&topology_event(
+            "scope:rollup",
+            "topology:reclaim",
+            10 * DAY + 1,
+        ))
+        .await
+        .expect("append topology event");
+    harness
+        .registered
+        .claim_observability_rollup_dirty_day("scope:rollup", "producer:first", 30)
+        .await
+        .expect("claim dirty day")
+        .expect("dirty day exists");
+
+    let reclaimed = harness
+        .registered
+        .claim_observability_rollup_dirty_day("scope:rollup", "producer:first", 30)
+        .await
+        .expect("reclaim own dirty-day lease")
+        .expect("an unreleased lease never blocks its own claimant");
+    assert_eq!(reclaimed.day_start_seconds, 10 * DAY);
+    assert_eq!(reclaimed.source_watermark, watermark);
+    assert!(
+        harness
+            .registered
+            .claim_observability_rollup_dirty_day("scope:rollup", "producer:second", 30)
+            .await
+            .expect("inspect reclaimed dirty day")
+            .is_none(),
+        "the reclaimed lease stays exclusive against other claimants"
+    );
+    assert!(
+        harness
+            .registered
+            .release_observability_rollup_dirty_day(&reclaimed)
+            .await
+            .expect("release reclaimed dirty day")
+    );
+    assert!(
+        harness
+            .registered
+            .claim_observability_rollup_dirty_day("scope:rollup", "producer:second", 30)
+            .await
+            .expect("claim released dirty day")
+            .is_some()
+    );
+}
+
+#[asupersync::test]
+async fn a_claimant_reclaims_the_empty_day_lease_an_abandoned_pass_left() {
+    let harness = RegisteredGlobalDbHarness::open("observability-rollup-empty-reclaim").await;
+    harness
+        .registered
+        .initialize_observability_rollup_frontier("scope:rollup")
+        .await
+        .expect("initialize first observable day");
+    let transaction = harness
+        .registered
+        .begin_write_transaction()
+        .await
+        .expect("begin completed-day frontier fixture");
+    transaction
+        .execute(
+            "UPDATE observability_rollup_frontiers
+             SET coverage_start_day_seconds = ?2, next_day_start_seconds = ?2
+             WHERE scope_ref = ?1",
+            tracedecay_runtime_core::db::engine::params!["scope:rollup", 10 * DAY],
+        )
+        .await
+        .expect("move frontier to completed fixture day");
+    transaction
+        .commit()
+        .await
+        .expect("commit completed-day frontier fixture");
+    let ObservabilityRollupEmptyDayClaimOutcomeV1::Claimed(_) = harness
+        .registered
+        .claim_observability_rollup_empty_day("scope:rollup", "producer:empty", 30)
+        .await
+        .expect("claim completed empty day")
+    else {
+        panic!("completed quiet day must be claimable");
+    };
+
+    let ObservabilityRollupEmptyDayClaimOutcomeV1::Claimed(reclaimed) = harness
+        .registered
+        .claim_observability_rollup_empty_day("scope:rollup", "producer:empty", 30)
+        .await
+        .expect("reclaim own empty-day lease")
+    else {
+        panic!("an unreleased lease never blocks its own claimant");
+    };
+    assert_eq!(reclaimed.day_start_seconds, 10 * DAY);
+    assert_eq!(
+        harness
+            .registered
+            .claim_observability_rollup_empty_day("scope:rollup", "producer:other", 30)
+            .await
+            .expect("inspect reclaimed empty day"),
+        ObservabilityRollupEmptyDayClaimOutcomeV1::Leased {
+            day_start_seconds: 10 * DAY
+        },
+        "the reclaimed lease stays exclusive against other claimants"
+    );
+    assert!(
+        harness
+            .registered
+            .release_observability_rollup_empty_day(&reclaimed)
+            .await
+            .expect("release reclaimed empty day")
+    );
+}
+
+#[asupersync::test]
 async fn empty_day_frontier_starts_after_mount_advances_atomically_and_recovers_publication() {
     let harness = RegisteredGlobalDbHarness::open("observability-rollup-empty-frontier").await;
     let frontier = harness
