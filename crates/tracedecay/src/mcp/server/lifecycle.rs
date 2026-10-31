@@ -264,10 +264,7 @@ impl McpServer {
             freshness_probe_sink: self.code_index_freshness_probe_sink.clone(),
         };
         match refresh(request).await {
-            Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(Some(fresh))) => {
-                *crate::mcp::server::requests::recover_lock(&self.file_token_map) = fresh;
-            }
-            Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(None)) => {}
+            Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted) => {}
             Ok(super::hook_writes::BackgroundRefreshOutcome::NotApplicable) => {
                 tracing::debug!("startup code-index catch-up does not apply without Git identity");
             }
@@ -436,7 +433,6 @@ impl McpServer {
         let running = Arc::clone(&self.background_refresh_running);
         let running_guard = ReadRefreshRunningGuard(Arc::clone(&running));
         let done_at = Arc::clone(&self.last_background_refresh_done_at);
-        let token_map = Arc::clone(&self.file_token_map);
         let refresh = Arc::clone(&self.background_refresh_writer);
         let request = BackgroundRefreshRequest {
             graph: Arc::clone(cg),
@@ -448,12 +444,7 @@ impl McpServer {
         let _admitted = self.background_tasks.spawn(async move {
             let _running = running_guard;
             match refresh(request).await {
-                Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(Some(fresh))) => {
-                    if let Ok(mut guard) = token_map.lock() {
-                        *guard = fresh;
-                    }
-                }
-                Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(None)) => {}
+                Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted) => {}
                 Ok(super::hook_writes::BackgroundRefreshOutcome::NotApplicable) => {
                     tracing::debug!(
                         "background code-index reconciliation does not apply without Git identity"

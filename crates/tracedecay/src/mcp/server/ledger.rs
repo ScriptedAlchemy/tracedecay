@@ -105,25 +105,6 @@ impl McpServer {
         matches!(self.ledger_sink(), LedgerSink::Mounted(_))
     }
 
-    /// Estimates the raw-file token cost ("before") for the given file
-    /// paths from the cached file-token map (indexed file bytes / 4).
-    /// Pure lookup, persists nothing.
-    #[tracing::instrument(name = "mcp.ledger.estimate_raw_tokens", level = "trace", skip_all)]
-    pub(crate) fn estimate_raw_file_tokens(&self, file_paths: &[String]) -> u64 {
-        if file_paths.is_empty() {
-            return 0;
-        }
-        // Paths arrive from indexed node rows on every tool response. A blank
-        // one is bad index data, not a broken invariant, so it is skipped
-        // rather than asserted on this shared response path.
-        let map = crate::mcp::server::requests::recover_lock(&self.file_token_map);
-        file_paths
-            .iter()
-            .filter(|path| !path.is_empty())
-            .filter_map(|path| map.get(path.as_str()))
-            .sum()
-    }
-
     /// Fire-and-forget persistence for one accounted tool response: the
     /// tokens-saved counters (project DB, resettable local counter, ledger
     /// sink) plus the live monitor ring-buffer entry.
@@ -267,11 +248,6 @@ impl McpServer {
     #[cfg(test)]
     pub(crate) fn spawn_wedged_ledger_write_for_test(&self) {
         self.spawn_observed_ledger_write(std::future::pending::<()>());
-    }
-
-    #[cfg(test)]
-    pub(crate) fn file_token_map_snapshot(&self) -> HashMap<String, u64> {
-        crate::mcp::server::requests::recover_lock(&self.file_token_map).clone()
     }
 
     #[tracing::instrument(name = "mcp.ledger.record_error_analytics", level = "trace", skip_all)]
