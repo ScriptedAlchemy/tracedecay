@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
-use tracedecay_contracts::remote::auth::{
-    OpaqueRemoteCredential, RemoteEnrollmentAdmissionEvidenceV1,
-};
+use tracedecay_contracts::remote::auth::OpaqueRemoteCredential;
 use tracedecay_contracts::remote::credential_admission::{
     RemoteCredentialAdmissionErrorV1, RemoteCredentialAdmissionPortV1,
     RemoteCredentialAdmissionServiceV1, RemoteCredentialUseV1,
@@ -17,13 +15,12 @@ use tracedecay_contracts::remote::status::{
     RemoteOperationalReadinessV1, RemoteOperationalStatusReadV1,
 };
 use tracedecay_contracts::{
-    AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, DoctorCoverageCompletenessV1,
+    AuthorityReceipt, CapabilityGrantId, DisclosureClass, DoctorCoverageCompletenessV1,
     PolicyDecisionRef, RemoteListenerReadV1, RemoteOperationalReadV1, ResolvedScope,
 };
 use tracedecay_domain::{
-    ActorId, BrainNodeId, ComponentVersion, CurrentRemoteAuthorityStateV1, EnrollmentGrantV1,
-    EntityId, ManifestDigest, ProjectId, RefId, RemoteCapabilityV1, RemoteCredentialFingerprintV1,
-    RemoteRepositoryScopeV1, RepositoryId, RepositoryStateSnapshotId, UtcMicros, WorktreeId,
+    BrainNodeId, ComponentVersion, CurrentRemoteAuthorityStateV1, EntityId, ManifestDigest,
+    RemoteCapabilityV1, RemoteCredentialFingerprintV1, RemoteRepositoryScopeV1, UtcMicros,
     canonical_sha256,
 };
 use tracedecay_rusqlite_runtime::remote::{
@@ -31,6 +28,9 @@ use tracedecay_rusqlite_runtime::remote::{
 };
 
 use super::DaemonSessionRuntimeRegistryV1;
+use super::remote_fixtures::{
+    remote_enrollment_admission_fixture, remote_enrollment_grant_fixture,
+};
 
 struct TestRemoteKeyring(Arc<RemoteSpoolKeyV1>);
 
@@ -45,71 +45,6 @@ impl RemoteSpoolKeyringV1 for TestRemoteKeyring {
     ) -> Result<Option<Arc<RemoteSpoolKeyV1>>, RemoteSqliteStorageErrorV1> {
         Ok((revision == self.0.revision()).then(|| Arc::clone(&self.0)))
     }
-}
-
-pub(crate) fn grant(
-    brain_id: tracedecay_domain::BrainId,
-    node_id: BrainNodeId,
-    secret: &[u8],
-) -> EnrollmentGrantV1 {
-    EnrollmentGrantV1 {
-        grant_id: EntityId::new("grant.remote-registry").expect("grant identity"),
-        brain_id,
-        node_id,
-        fingerprint: RemoteCredentialFingerprintV1::from_secret(secret)
-            .expect("credential fingerprint"),
-        revision: 1,
-        issued_at: UtcMicros(1),
-        expires_at: UtcMicros(100),
-        revoked_at: None,
-        capabilities: [RemoteCapabilityV1::Query].into_iter().collect(),
-        scope: RemoteRepositoryScopeV1 {
-            project_id: ProjectId::new("project.remote-registry").expect("project identity"),
-            repository_id: RepositoryId::new("repository.remote-registry")
-                .expect("repository identity"),
-            worktree_id: WorktreeId::new("worktree.remote-registry").expect("worktree identity"),
-            reference: Some(RefId::new("refs/heads/main").expect("reference identity")),
-            snapshot_id: RepositoryStateSnapshotId::new("snapshot.remote-registry")
-                .expect("snapshot identity"),
-        },
-    }
-}
-
-pub(crate) fn admission(grant: &EnrollmentGrantV1) -> RemoteEnrollmentAdmissionEvidenceV1 {
-    let scope = ResolvedScope::new(
-        grant.scope.project_id.clone(),
-        grant.scope.repository_id.clone(),
-        grant.scope.worktree_id.clone(),
-        grant.scope.reference.clone(),
-    )
-    .expect("resolved scope");
-    let grant_digest = canonical_sha256(grant).expect("grant digest");
-    RemoteEnrollmentAdmissionEvidenceV1::new(
-        grant,
-        scope.clone(),
-        AuthorityReceipt {
-            grant_id: CapabilityGrantId::new(grant.grant_id.as_str())
-                .expect("capability grant identity"),
-            grant_revision: grant.revision,
-            grant_digest: grant_digest.clone(),
-            authorized_scope_digest: scope.scope_digest,
-            disclosure: DisclosureClass::Evidence,
-            policy: PolicyDecisionRef::new(
-                "policy.remote-registry",
-                1,
-                grant_digest,
-                ComponentVersion::new("policy.remote-registry.v1").expect("policy component"),
-            )
-            .expect("policy decision"),
-            revalidated_at: UtcMicros(2),
-        },
-        ActorId::new("actor.remote-registry").expect("actor identity"),
-        ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("configuration digest"),
-        ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).expect("catalog digest"),
-        ManifestDigest::new(format!("sha256:{}", "c".repeat(64))).expect("privacy digest"),
-        Deadline::new(UtcMicros(100)).expect("deadline"),
-    )
-    .expect("enrollment admission")
 }
 
 pub(crate) fn replay_policy(scope: &RemoteRepositoryScopeV1) -> RemoteReplayPolicyEvidenceV1 {
@@ -216,9 +151,10 @@ async fn remote_operational_read_observes_mounted_authorities_and_fails_typed_wh
     // the mounted enrollment, spool, and recovery-journal authorities.
     let node_id = BrainNodeId::new("node.remote-operational").expect("node identity");
     let secret = [11_u8; 32];
-    let grant = grant(identity.brain_id().clone(), node_id.clone(), &secret);
+    let grant =
+        remote_enrollment_grant_fixture(identity.brain_id().clone(), node_id.clone(), &secret);
     registry
-        .provision_remote_node(grant.clone(), admission(&grant))
+        .provision_remote_node(grant.clone(), remote_enrollment_admission_fixture(&grant))
         .await
         .expect("authenticated RemoteNode provisioning");
     credentials.publish_listener_serving();
@@ -308,9 +244,10 @@ async fn mounted_node_populates_exact_prebody_credential_route_and_shutdown_canc
         .expect("session runtime registry");
     let node_id = BrainNodeId::new("node.remote-registry").expect("node identity");
     let secret = [9_u8; 32];
-    let grant = grant(identity.brain_id().clone(), node_id.clone(), &secret);
+    let grant =
+        remote_enrollment_grant_fixture(identity.brain_id().clone(), node_id.clone(), &secret);
     registry
-        .provision_remote_node(grant.clone(), admission(&grant))
+        .provision_remote_node(grant.clone(), remote_enrollment_admission_fixture(&grant))
         .await
         .expect("authenticated first RemoteNode provisioning");
     let keyring = Arc::new(TestRemoteKeyring(Arc::new(
@@ -358,7 +295,7 @@ fn joined_discovery(
     node_id: BrainNodeId,
     secret: &[u8],
 ) -> tracedecay_contracts::remote::discovery::RemoteAuthorityDiscoveryV1 {
-    let mut grant = grant(brain_id, node_id, &[3_u8; 32]);
+    let mut grant = remote_enrollment_grant_fixture(brain_id, node_id, &[3_u8; 32]);
     grant.capabilities = [
         RemoteCapabilityV1::CaptureOffline,
         RemoteCapabilityV1::DiscoverAuthority,
@@ -379,7 +316,7 @@ fn joined_discovery(
         scope: grant.scope.clone(),
     };
     let receipt = tracedecay_contracts::remote::auth::RemoteEnrollmentCommitReceiptV1 {
-        admission: admission(&grant),
+        admission: remote_enrollment_admission_fixture(&grant),
         prior_grant_digest: canonical_sha256(&grant).expect("grant digest"),
         input_digest: ManifestDigest::new(format!("sha256:{}", "e".repeat(64)))
             .expect("input digest"),
@@ -508,10 +445,10 @@ async fn joined_node_store_serves_only_offline_capture_for_its_member_brain() {
         Err(crate::RemoteNodeOperatorErrorV1::Conflict),
         "a different record for the adopted enrollment never replaces it"
     );
-    let own = grant(identity.brain_id().clone(), node_id, &[14_u8; 32]);
+    let own = remote_enrollment_grant_fixture(identity.brain_id().clone(), node_id, &[14_u8; 32]);
     assert_eq!(
         registry
-            .provision_remote_node(own.clone(), admission(&own))
+            .provision_remote_node(own.clone(), remote_enrollment_admission_fixture(&own))
             .await,
         Err(crate::RemoteNodeOperatorErrorV1::BrainIdentityConflict),
         "a joined node store never becomes a hosted one"

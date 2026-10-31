@@ -6,7 +6,7 @@
 //! outcome is an empty success or a semantic tool error.
 //!
 //! The configured (`observed`) plane is proved at the two seams that can mount
-//! one cheaply: `daemon::remote_protocol_tests` provisions a real node and
+//! one cheaply: `daemon::store_runtime_tests` provisions a real node and
 //! serving listener against the session runtime registry, and
 //! `mcp::tools::handlers::info::remote_status_dispatch_tests` drives an
 //! observed reader through dispatch. This suite owns the transport boundary

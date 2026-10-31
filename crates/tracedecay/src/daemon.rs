@@ -523,7 +523,3 @@ mod http_application_tests;
 #[cfg(all(test, unix))]
 #[allow(clippy::expect_used)]
 mod broker_stream_transport_tests;
-
-#[cfg(test)]
-#[allow(clippy::expect_used)]
-mod remote_protocol_tests;
