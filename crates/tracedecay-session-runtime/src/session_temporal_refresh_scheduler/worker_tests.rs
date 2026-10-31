@@ -467,6 +467,84 @@ async fn a_live_wake_publishes_before_waiting_for_summary_admission() {
     worker.await.expect("refresh worker exits on cancellation");
 }
 
+struct RetryOnceProjector {
+    retry_pending: AtomicBool,
+}
+
+impl SessionTemporalRefreshProjector for RetryOnceProjector {
+    fn project<'a>(
+        &'a self,
+        database: &'a RegisteredGlobalDbLeaseV1,
+        recovery: SessionRefreshRecoveryV1,
+    ) -> SessionTemporalRefreshProjectionFuture<'a> {
+        Box::pin(async move {
+            if self.retry_pending.swap(false, Ordering::AcqRel) {
+                Err(SessionTemporalRefreshProjectorError::retryable(
+                    "fixture_source_temporarily_busy",
+                ))
+            } else {
+                CanonicalSessionTemporalProjector
+                    .project(database, recovery)
+                    .await
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_retryable_projection_publishes_while_summary_admission_is_blocked() {
+    let harness = RegisteredGlobalDbHarness::open("refresh-retry-before-summary-admission").await;
+    let store = SessionTemporalStore::new(harness.registered.as_ref());
+    let session_id = SessionId::new("refresh-retry-before-summary").expect("session id");
+    let begun = store
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            session_id.clone(),
+            SessionRefreshFrontierV1::new(0, 0).expect("empty frontier"),
+        ))
+        .await
+        .expect("running refresh");
+    let state = Arc::new(SessionTemporalRefreshWakeState::default());
+    let handle = state.handle();
+    let join = handle.wake_and_wait_for_session_projection(&session_id, Duration::from_secs(5));
+    tokio::pin!(join);
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(join.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    let admission = Arc::new(tokio::sync::Semaphore::new(0));
+    let worker = tokio::spawn(run_session_temporal_refresh_scheduler(
+        harness.registered.clone(),
+        Arc::clone(&state),
+        Arc::new(RetryOnceProjector {
+            retry_pending: AtomicBool::new(true),
+        }),
+        Arc::new(std::sync::RwLock::new(None)),
+        Arc::clone(&admission),
+        SessionTemporalRefreshPolicy::default(),
+    ));
+
+    // No further wake or summary permit is supplied after the initial refusal.
+    // The existing projection retry must independently finish publication.
+    let published = join.await;
+    state.cancel();
+    worker.await.expect("refresh worker exits on cancellation");
+    assert!(
+        published,
+        "summary admission must not strand a zero-progress projection retry"
+    );
+    assert_eq!(admission.available_permits(), 0);
+    let receipt = store
+        .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
+            begun.operation_id().clone(),
+            begun.session_id().clone(),
+        ))
+        .await
+        .expect("read terminal receipt")
+        .expect("the retried projection must settle durably");
+    assert_eq!(receipt.state(), SessionRefreshTerminalStateV1::Complete);
+}
+
 #[tokio::test]
 async fn a_live_wake_during_summary_admission_preserves_the_queued_turn() {
     let harness = RegisteredGlobalDbHarness::open("refresh-join-during-summary-admission").await;
