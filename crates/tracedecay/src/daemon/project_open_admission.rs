@@ -860,6 +860,7 @@ impl ProjectOpenTasks {
     }
 
     #[cfg(test)]
+    #[cfg(unix)]
     pub(super) fn joins(&self) -> tokio::sync::watch::Receiver<usize> {
         self.lock_registry().joins.subscribe()
     }
@@ -884,6 +885,7 @@ impl ProjectOpenTasks {
 
     /// Signals every admitted open to stop at its next cancellation boundary
     /// without waiting; `shutdown` joins them.
+    #[cfg(unix)]
     pub(super) fn cancel_all(&self) {
         for entry in self.lock_registry().routes.values() {
             entry.cancellation.cancel();

@@ -104,7 +104,7 @@ linker = "scripts/macos-sign-linker.sh"
 # Full-suite aliases share the assertion-enabled perf profile. Hosted CI
 # runs Bazel targets generated from the same per-crate optimization levels.
 # Extra filters append, for example: cargo test-ci --locked -E 'binary(=x)'.
-test-ci = "nextest run --workspace --profile ci --features tracedecay/test-helpers,tracedecay/search-eval --cargo-profile perf"
+test-ci = "nextest run --workspace --profile ci --features tracedecay/test-helpers --cargo-profile perf"
 # Deliberately broader than CI: every optional feature (test-transport
 # acceptance suites, …) under the same cargo profile, with the
 # default nextest policy (no retries).

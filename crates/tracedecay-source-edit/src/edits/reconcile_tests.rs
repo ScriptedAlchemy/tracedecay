@@ -247,6 +247,7 @@ async fn completed_restart_replays_when_journal_cleanup_fails() {
     let durability = SourceEditDurability::for_graph(&fixture.graph);
     let journal_path = durability.journal_path();
     let before = fs::read(&journal_path).unwrap();
+    #[cfg(not(windows))]
     let root = journal_path.parent().unwrap();
     #[cfg(not(windows))]
     let permissions = fs::metadata(root).unwrap().permissions();

@@ -564,6 +564,36 @@ async fn code_index_reconciliation_is_optional(
     )
 }
 
+#[tracing::instrument(name = "cli.sync.run", level = "trace", skip_all)]
+pub(crate) async fn handle_sync(
+    profile: &ProfileRoot,
+    path: Option<String>,
+    verbose: bool,
+) -> tracedecay_domain::errors::Result<()> {
+    let resolved = super::scope::resolve_project_scope(
+        profile,
+        tracedecay_configuration::resolve_path_with_discovery(profile, path),
+    )
+    .await?;
+    let handshake = super::daemon::client_handshake(profile, Some(&resolved.project_path))?;
+    let deadline = crate::tool_command::tool_command_deadline()?;
+    let result = admin_sync(profile, handshake, deadline).await?;
+    if verbose {
+        eprintln!("{}", serde_json::to_string_pretty(&result)?);
+    }
+    match result.status {
+        AdminSyncAdmissionV1::Queued => eprintln!(
+            "code-index reconciliation queued via daemon for {}",
+            resolved.project_path.display()
+        ),
+        AdminSyncAdmissionV1::NotApplicable => eprintln!(
+            "code indexing does not apply to {}",
+            resolved.project_path.display()
+        ),
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod daemon_precondition_tests {
@@ -1214,34 +1244,4 @@ mod init_bootstrap_tests {
             ["tracedecay", "init", "/repo/it's an example"]
         );
     }
-}
-
-#[tracing::instrument(name = "cli.sync.run", level = "trace", skip_all)]
-pub(crate) async fn handle_sync(
-    profile: &ProfileRoot,
-    path: Option<String>,
-    verbose: bool,
-) -> tracedecay_domain::errors::Result<()> {
-    let resolved = super::scope::resolve_project_scope(
-        profile,
-        tracedecay_configuration::resolve_path_with_discovery(profile, path),
-    )
-    .await?;
-    let handshake = super::daemon::client_handshake(profile, Some(&resolved.project_path))?;
-    let deadline = crate::tool_command::tool_command_deadline()?;
-    let result = admin_sync(profile, handshake, deadline).await?;
-    if verbose {
-        eprintln!("{}", serde_json::to_string_pretty(&result)?);
-    }
-    match result.status {
-        AdminSyncAdmissionV1::Queued => eprintln!(
-            "code-index reconciliation queued via daemon for {}",
-            resolved.project_path.display()
-        ),
-        AdminSyncAdmissionV1::NotApplicable => eprintln!(
-            "code indexing does not apply to {}",
-            resolved.project_path.display()
-        ),
-    }
-    Ok(())
 }

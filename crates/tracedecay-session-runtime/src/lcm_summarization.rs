@@ -24,7 +24,7 @@ mod provider_capabilities;
 #[cfg(all(test, unix))]
 mod summarizer_executable_tests;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use provider_capabilities::{CODEX_APP_SERVER_UNCONFIGURED, CURSOR_AGENT_UNCONFIGURED};
 use provider_capabilities::{
     NativeSummaryCandidate, authoritative_summarizer, native_summary_recognizers,

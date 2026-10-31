@@ -710,6 +710,47 @@ def target_sources(t, extra_dirs=()):
     return rust_sources((Path(t["src_path"]).resolve().parent, *extra_dirs))
 
 
+# rustfmt-checked sources close a function at its opening indentation.
+RE_FN_ITEM = re.compile(
+    r"^(?P<indent>[ \t]*)(?:pub(?:\([^)]*\))?[ \t]+)?"
+    r"(?:(?:async|const|unsafe)[ \t]+)*fn[ \t]+(?P<name>\w+)",
+    re.M,
+)
+
+
+def function_bodies(text):
+    """(name, source) for every fn item in rustfmt-formatted `text`."""
+    for m in RE_FN_ITEM.finditer(text):
+        close = re.compile(rf"^{m['indent']}\}}", re.M).search(text, m.end())
+        yield m["name"], text[m.start() : close.end() if close else len(text)]
+
+
+@lru_cache(maxsize=None)
+def spawning_helpers(pattern, shared):
+    """Names of functions in `shared` (path, text) sources that reach `pattern`,
+    directly or through other shared functions. A suite compiles the whole
+    shared tree but only depends on what it calls into."""
+    bodies = [(name, body) for _, text in shared for name, body in function_bodies(text)]
+    helpers = {name for name, body in bodies if re.search(pattern, body)}
+    while True:
+        calls = re.compile(rf"(?<!fn )\b(?:{'|'.join(map(re.escape, sorted(helpers)))})\b")
+        reached = {name for name, body in bodies if helpers and calls.search(body)}
+        if reached <= helpers:
+            return frozenset(helpers)
+        helpers |= reached
+
+
+def reaches_runtime_binary(pattern, own, shared):
+    """True when a target's own sources locate a runtime binary: they match
+    `pattern`, or mention a shared helper that does."""
+    helpers = spawning_helpers(pattern, shared)
+    mention = rf"(?<!fn )\b(?:{'|'.join(map(re.escape, sorted(helpers)))})\b"
+    return any(
+        re.search(pattern, text) or (helpers and re.search(mention, text))
+        for _, text in own
+    )
+
+
 def test_resource_globs(p, t, extra_dirs=()):
     """Resources owned by a test directory and its explicit shared modules.
 
@@ -1072,12 +1113,17 @@ def main():
     def runtime_binaries(p, t, extra_dirs=()):
         """{env var: label} for workspace binaries a target's sources locate
         at run time through the shared test helpers, which read these
-        overrides before falling back to Cargo's profile directory."""
-        text = "".join(text for _, text in target_sources(t, tuple(extra_dirs)))
+        overrides before falling back to Cargo's profile directory. Every
+        suite compiles the shared helpers, so only a call into one that
+        reaches the binary counts."""
+        own = target_sources(t)
+        shared = tuple(
+            item for item in target_sources(t, tuple(extra_dirs)) if item not in own
+        )
         return {
             variable: label
             for variable, label, pattern in RUNTIME_BINARIES
-            if re.search(pattern, text)
+            if reaches_runtime_binary(pattern, own, shared)
         }
 
     def needs_env_tmpdir(p, t, extra_dirs=()):

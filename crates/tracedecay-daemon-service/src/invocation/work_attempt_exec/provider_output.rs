@@ -15,6 +15,7 @@ use tracedecay_domain::{
 };
 
 /// How often a reader parked on a quiet pipe re-checks its stop flag.
+#[cfg(unix)]
 const STOP_POLL_INTERVAL_MS: i32 = 50;
 
 /// A captured pipe end the reader can wait on without blocking in `read`.

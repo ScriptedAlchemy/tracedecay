@@ -24,6 +24,8 @@ single_version_override(
         "//scripts:bazel/patches/rules-rust-toolchain-settings.patch",
         # Keep Windows link and metadata outputs isolated between actions.
         "//scripts:bazel/patches/rules-rust-windows-action-outputs.patch",
+        # Windows Clippy must not overwrite the compiler's sealed metadata.
+        "//scripts:bazel/patches/rules-rust-windows-clippy-metadata.patch",
     ],
     patch_strip = 1,
 )

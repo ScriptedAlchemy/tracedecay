@@ -53,6 +53,8 @@ impl ProductionProjectCompositionRuntime {
         route_cancellation: CancellationToken,
         handshake: DaemonHandshake,
     ) -> crate::mcp::DatabaseOwnerReconciler {
+        #[cfg(not(unix))]
+        let _ = &current_project_path;
         match self {
             #[cfg(unix)]
             Self::Unix(engine) => engine.database_owner_reconciler(
@@ -83,6 +85,8 @@ impl ProductionProjectCompositionRuntime {
         current_project_path: Arc<tokio::sync::Mutex<PathBuf>>,
         handshake: DaemonHandshake,
     ) -> Option<tracedecay_dashboard_api::AutomationSchedulerReconciler> {
+        #[cfg(not(unix))]
+        let _ = (&current_key, &current_project_path, &handshake);
         match self {
             #[cfg(unix)]
             Self::Unix(engine) => Some(engine.automation_scheduler_reconciler(
