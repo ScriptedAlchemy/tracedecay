@@ -77,3 +77,8 @@ tracedecay-code-index = { path = "../tracedecay-code-index", default-features = 
 tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", default-features = false, features = ["test-helpers"] }
 tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
+
+[[test]]
+name = "code_index_ignored_dependencies_test"
+path = "tests/code_index_ignored_dependencies_test/main.rs"
+required-features = ["test-helpers"]

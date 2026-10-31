@@ -53,7 +53,7 @@ async fn assert_fresh_project_open_owners(label: &str, git_state: ProjectGitStat
         .project_server(&handshake)
         .await
         .expect("fresh project-open owners");
-    let graph = server.cg().await;
+    let graph = server.cg_snapshot().await;
     let canonical_project = graph.project_root().to_path_buf();
     let replay_root = graph.hook_store_layout().data_root.clone();
 
@@ -165,7 +165,7 @@ async fn cold_project_shutdown_joins_every_production_graph_holder() {
         .project_server(&handshake)
         .await
         .expect("cold project server");
-    let graph = server.cg().await;
+    let graph = server.cg_snapshot().await;
     let graph_weak = Arc::downgrade(&graph);
     drop(graph);
     drop(server);
@@ -465,7 +465,7 @@ async fn mounted_graph_listing_takes_no_server_lease_while_it_reads() {
     );
     startup_parked.await.expect("startup owner parked");
 
-    let graph = server.cg().await;
+    let graph = server.cg_snapshot().await;
     let key = ProjectServerKey::from_open_project(&graph, &handshake).expect("mounted owner key");
     let route = ProjectRouteKey::from_handshake(graph.project_root(), &handshake)
         .expect("mounted route key");
@@ -1743,7 +1743,7 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
         ..test_handshake_defaults()
     };
     let server = save_scheduled_automation(&engine, &handshake, true).await;
-    let cg = server.cg().await;
+    let cg = server.cg_snapshot().await;
     let dashboard_root = cg.store_layout().dashboard_root.clone();
     save_scheduler_control(
         &dashboard_root,

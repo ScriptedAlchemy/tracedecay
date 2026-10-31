@@ -546,7 +546,7 @@ mod tests {
                 .expect("route composition");
         let server = harness.server(&project).expect("registered route server");
         let route_root = server
-            .cg()
+            .cg_snapshot()
             .await
             .project_root()
             .to_string_lossy()
@@ -582,7 +582,7 @@ mod tests {
     #[tokio::test]
     async fn cached_resolved_route_is_out_of_band_and_preserves_arguments() {
         let fixture = resolved_route_fixture("session.route-cache", "thread.route-cache").await;
-        let expected_graph = fixture.server.cg().await;
+        let expected_graph = fixture.server.cg_snapshot().await;
         let expected_project_id = expected_graph
             .store_layout()
             .identity

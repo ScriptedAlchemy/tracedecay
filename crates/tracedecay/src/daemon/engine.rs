@@ -831,7 +831,7 @@ impl DaemonEngine {
             self.lifecycle.clone(),
             tracing::Instrument::instrument(
                 async move {
-                    let cg = recovery_server.cg().await;
+                    let cg = recovery_server.cg_snapshot().await;
                     project_open_owners::reconcile_project_open_automation_effects(cg).await;
                 },
                 tracing::trace_span!("daemon.engine.reconcile_automation_effects"),
@@ -841,7 +841,7 @@ impl DaemonEngine {
             self.lifecycle.clone(),
             tracing::Instrument::instrument(
                 async move {
-                    let cg = server.cg().await;
+                    let cg = server.cg_snapshot().await;
                     engine
                         .activate_automation_scheduler_for_open_project(
                             key,

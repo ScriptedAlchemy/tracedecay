@@ -119,7 +119,7 @@ impl McpServer {
             )
             .await?;
         let dispatch_server = routed.selected_server.as_deref().unwrap_or(self);
-        let cg = dispatch_server.cg().await;
+        let cg = dispatch_server.cg_snapshot().await;
         let application_invocation_target =
             invocation_target_for_route(routed.selected_project.as_ref());
         let ApplicationSurfaceDispatch {

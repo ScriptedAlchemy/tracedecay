@@ -122,7 +122,7 @@ async fn curated_project() -> CuratedProject {
         .harness
         .server(&fixture.project_root)
         .expect("production automation server")
-        .cg()
+        .cg_snapshot()
         .await
         .store_layout()
         .dashboard_root

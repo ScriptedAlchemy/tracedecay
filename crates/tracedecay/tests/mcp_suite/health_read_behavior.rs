@@ -160,7 +160,7 @@ async fn seal_serving_database(fixture: HealthProject) -> HealthProject {
             .server(&project_root)
             .expect("mounted project server");
         server
-            .cg()
+            .cg_snapshot()
             .await
             .db()
             .canonical_database_path()
@@ -191,7 +191,7 @@ async fn serving_database_path(fixture: &HealthProject) -> PathBuf {
         .server(&fixture.project_root)
         .expect("mounted project server");
     server
-        .cg()
+        .cg_snapshot()
         .await
         .db()
         .canonical_database_path()
