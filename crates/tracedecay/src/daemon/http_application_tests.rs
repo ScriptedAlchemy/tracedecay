@@ -1225,9 +1225,12 @@ async fn authenticated_remote_node_provisioning_creates_and_registers_first_stor
     );
     let node_id = BrainNodeId::new("node.remote-http-provision").expect("node identity");
     let secret = [7_u8; 32];
-    let grant =
-        super::remote_protocol_tests::grant(identity.brain_id().clone(), node_id.clone(), &secret);
-    let admission = super::remote_protocol_tests::admission(&grant);
+    let grant = tracedecay_store_runtime::remote_enrollment_grant_fixture(
+        identity.brain_id().clone(),
+        node_id.clone(),
+        &secret,
+    );
+    let admission = tracedecay_store_runtime::remote_enrollment_admission_fixture(&grant);
     let payload = serde_json::json!({
         "grant": grant,
         "admission": admission,

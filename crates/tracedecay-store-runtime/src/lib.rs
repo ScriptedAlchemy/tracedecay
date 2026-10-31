@@ -48,6 +48,10 @@ pub use session_registry::maintenance::RegisteredSchemaConvergenceTestGate;
 pub use session_registry::maintenance::{
     ForegroundProjectOpenAdmission, RegisteredSchemaConvergenceStatus,
 };
+#[cfg(any(test, feature = "test-helpers"))]
+pub use session_registry::remote_fixtures::{
+    remote_enrollment_admission_fixture, remote_enrollment_grant_fixture,
+};
 pub use session_registry::{
     DaemonSessionRuntimeRegistryV1, MAX_RETAINED_GRAPH_DB_OWNERS, RemoteRecoveryAdmission,
     RemoteRecoveryProjectLifecycle, mark_process_long_lived_for_session_maintenance,

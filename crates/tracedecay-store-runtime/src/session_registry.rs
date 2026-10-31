@@ -45,6 +45,8 @@ mod code_reads;
 pub mod maintenance;
 mod memory_graph_reconciliation_tasks;
 mod mounts;
+#[cfg(any(test, feature = "test-helpers"))]
+pub(crate) mod remote_fixtures;
 mod remote_recovery;
 mod retained_hook_tasks;
 mod terminal_tasks;

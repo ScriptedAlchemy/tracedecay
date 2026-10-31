@@ -17,6 +17,9 @@ use tracedecay_runtime_core::resident_memory::{
 };
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
+use tracedecay_application::advisory::github_runtime::{
+    GitHubReadOnlyCredentialLifecycleV1, GitHubSecretReadPortV1,
+};
 use tracedecay_application::work::{
     WorkFederatedQueryAuthorityFutureV1, WorkFederatedQueryAuthorityPortV1,
 };
@@ -46,8 +49,8 @@ mod project_invocation;
 pub(crate) struct DaemonInvocationState {
     pub(super) lsp_session_registry: Arc<tokio::sync::Mutex<LspSessionRegistry>>,
     pub(super) service: DaemonInvocationService,
-    pub(super) github_credential_lifecycle:
-        github_credential_lifecycle::DaemonGitHubReadOnlyCredentialLifecycleV1,
+    pub(super) github_credential_lifecycle: GitHubReadOnlyCredentialLifecycleV1,
+    pub(super) github_secret_reader: Arc<dyn GitHubSecretReadPortV1>,
     pub(super) code_index_schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
     pub(super) compiler_admission: Arc<OnceLock<TypeScriptCompilerAdmission>>,
     work_federated_query_authority: Arc<dyn WorkFederatedQueryAuthorityPortV1>,
@@ -83,8 +86,8 @@ impl DaemonInvocationState {
         Self {
             lsp_session_registry: Arc::new(tokio::sync::Mutex::new(LspSessionRegistry::default())),
             service,
-            github_credential_lifecycle:
-                github_credential_lifecycle::DaemonGitHubReadOnlyCredentialLifecycleV1::default(),
+            github_credential_lifecycle: GitHubReadOnlyCredentialLifecycleV1::default(),
+            github_secret_reader: Arc::new(github_secret_reader::ProductionOsSecretReadPortV1),
             code_index_schedulers,
             compiler_admission: Arc::new(OnceLock::new()),
             work_federated_query_authority,
@@ -290,7 +293,11 @@ impl DaemonInvocationState {
         &self,
         identity: &profile_identity::LocalProfileIdentityAuthorityV1,
     ) {
-        self.github_credential_lifecycle.configure_profile(identity);
+        self.github_credential_lifecycle.configure_profile(
+            identity.profile_id(),
+            identity.profile_root(),
+            Arc::clone(&self.github_secret_reader),
+        );
     }
 
     pub(super) fn mount_github_read_only_credential_authority_for_project(

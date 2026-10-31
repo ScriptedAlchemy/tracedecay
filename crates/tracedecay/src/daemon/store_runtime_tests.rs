@@ -379,7 +379,7 @@ async fn remote_node_mount_uses_registered_identity_and_reuses_one_runtime() {
         .expect("session runtime registry");
     let node_id = BrainNodeId::new("node.remote.mount").expect("remote node identity");
     let secret = [5_u8; 32];
-    let grant = crate::daemon::remote_protocol_tests::grant(
+    let grant = tracedecay_store_runtime::remote_enrollment_grant_fixture(
         identity.brain_id().clone(),
         node_id.clone(),
         &secret,
@@ -387,7 +387,7 @@ async fn remote_node_mount_uses_registered_identity_and_reuses_one_runtime() {
     registry
         .provision_remote_node(
             grant.clone(),
-            crate::daemon::remote_protocol_tests::admission(&grant),
+            tracedecay_store_runtime::remote_enrollment_admission_fixture(&grant),
         )
         .await
         .expect("authenticated first RemoteNode provisioning");
