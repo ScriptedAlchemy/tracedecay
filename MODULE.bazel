@@ -22,6 +22,8 @@ single_version_override(
         "//scripts:bazel/patches/rules-rust-clippy-metadata-inputs.patch",
         # Forward strip maps and execution flags to their target toolchains.
         "//scripts:bazel/patches/rules-rust-toolchain-settings.patch",
+        # Keep Windows link and metadata outputs isolated between actions.
+        "//scripts:bazel/patches/rules-rust-windows-action-outputs.patch",
     ],
     patch_strip = 1,
 )
