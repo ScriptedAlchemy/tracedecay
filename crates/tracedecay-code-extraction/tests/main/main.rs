@@ -7,6 +7,7 @@
 //! second time as their own binaries; `tests/extract_alloc.rs` stays separate
 //! because its counting `#[global_allocator]` is binary-global.
 
+mod annotation_helpers;
 mod astro;
 #[cfg(feature = "lang-bash")]
 mod bash;
@@ -16,6 +17,7 @@ mod c;
 mod clone_body_tokens;
 #[cfg(feature = "lang-cobol")]
 mod cobol;
+mod complexity;
 mod complexity_budget;
 mod cpp;
 mod csharp;

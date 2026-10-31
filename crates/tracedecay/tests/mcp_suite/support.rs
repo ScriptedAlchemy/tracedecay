@@ -1484,20 +1484,6 @@ pub(crate) async fn seed_project_registry(
     runtime
 }
 
-pub(crate) fn tool_properties<'a>(
-    tools: &'a [tracedecay_mcp::ToolDefinition],
-    name: &str,
-) -> &'a serde_json::Map<String, Value> {
-    tools
-        .iter()
-        .find(|tool| tool.name == name)
-        .unwrap_or_else(|| panic!("{name} definition"))
-        .input_schema
-        .get("properties")
-        .and_then(Value::as_object)
-        .unwrap_or_else(|| panic!("{name} properties"))
-}
-
 #[cfg(feature = "test-transport")]
 pub(crate) async fn seed_lcm_session_message(
     cg: &TraceDecay,
