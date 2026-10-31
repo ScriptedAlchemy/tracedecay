@@ -111,7 +111,7 @@ async fn authoritative_summary_journey_owns_the_message_corpus_once() {
         );
     }
 
-    let service = DaemonLcmEffectService::new(db, None, None);
+    let service = DaemonLcmEffectService::new(db, None, None, None);
     let before = BODY_COPIES.with(Cell::get);
     let response = service.compress(request).await.unwrap();
     let body_copies = BODY_COPIES.with(Cell::get) - before;

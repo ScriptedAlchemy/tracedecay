@@ -4,7 +4,9 @@
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use tracedecay_contracts::retrieval::HookRuntimeSurfaceRequestV1;
+use tracedecay_contracts::retrieval::{
+    HookCompactionResultV1, HookRuntimeResultV1, HookRuntimeSurfaceRequestV1,
+};
 
 use serde_json::Value;
 
@@ -327,8 +329,16 @@ async fn codex_post_compact(
     let args = HookRuntimeSurfaceRequestV1::CodexCompact {
         event_json: event_json.to_owned(),
     };
-    if let Err(error) = super::daemon_hook_action(runtime, Some(&root), args, telemetry).await {
-        tracing::warn!(%error, "Codex PostCompact daemon call failed");
+    let result = super::daemon_hook_action(runtime, Some(&root), args, telemetry).await;
+    match result {
+        Ok(result) => match serde_json::from_value::<HookRuntimeResultV1>(result) {
+            Ok(HookRuntimeResultV1::CodexCompact(HookCompactionResultV1::Settled {
+                status,
+                ..
+            })) if matches!(status.as_str(), "ok" | "best_effort") => {}
+            outcome => tracing::warn!(?outcome, "Codex PostCompact daemon call failed"),
+        },
+        Err(error) => tracing::warn!(%error, "Codex PostCompact daemon call failed"),
     }
 }
 

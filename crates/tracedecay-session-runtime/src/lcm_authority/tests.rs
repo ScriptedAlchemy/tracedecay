@@ -40,7 +40,7 @@ async fn registered_authority() -> (
     )
     .await
     .unwrap();
-    let authority = DaemonLcmAuthority::registered(runtime.profile_database_arc());
+    let authority = DaemonLcmAuthority::registered(runtime.profile_database_arc(), None);
     (directory, runtime, authority)
 }
 
@@ -354,6 +354,50 @@ async fn pressure_protocol_provider_mismatch_is_typed_before_ingest() {
 }
 
 #[tokio::test]
+async fn compaction_storage_failure_preserves_the_returned_diagnostic() {
+    let (_directory, runtime, authority) = registered_authority().await;
+    let database = runtime.profile_database_arc();
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch("DROP TABLE lcm_lifecycle_state")
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Compact, true);
+    let command = LcmCompactionCommand {
+        preflight: preflight("cursor"),
+        evidence: LcmCompressionEvidence::PressureOnly {
+            protocol: LcmHostProtocol::CursorPreCompact {
+                protocol_revision: "cursor.precompact.v1".to_owned(),
+                event_digest: canonical_sha256(&"cursor-storage-failure").unwrap(),
+            },
+        },
+    };
+    let response = authority
+        .execute(LcmAuthorityInvocation {
+            context,
+            binding,
+            target: target("cursor", Some("session.lcm-test")),
+            cancellation,
+            request: LcmAuthorityRequest::Compact(Box::new(command)),
+        })
+        .await;
+
+    let LcmAuthorityOutcome::Failed { diagnostic } = response.outcome else {
+        panic!(
+            "broken storage must return a failure: {:?}",
+            response.outcome
+        );
+    };
+    assert!(diagnostic.contains("lcm_lifecycle_state"), "{diagnostic}");
+    assert_eq!(
+        response.receipt.execution.termination,
+        OperationTermination::Failed
+    );
+    assert!(response.receipt.committed_state.is_none());
+}
+
+#[tokio::test]
 async fn unsupported_pressure_preflight_does_not_create_session_or_raw_messages() {
     let directory = tempfile::tempdir().unwrap();
     let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
@@ -362,7 +406,7 @@ async fn unsupported_pressure_preflight_does_not_create_session_or_raw_messages(
     .await
     .unwrap();
     let database = runtime.profile_database_arc();
-    let authority = DaemonLcmAuthority::registered(database.clone());
+    let authority = DaemonLcmAuthority::registered(database.clone(), None);
     let mut request = preflight("cursor");
     request.messages = vec![serde_json::json!({
         "id": "message.must-not-persist",
@@ -445,7 +489,7 @@ async fn registered_doctor_reads_snapshot_while_writer_lane_is_held() {
     });
     writer_ready_rx.await.unwrap();
 
-    let authority = DaemonLcmAuthority::registered(database);
+    let authority = DaemonLcmAuthority::registered(database, None);
     let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Doctor, true);
     let response = tokio::time::timeout(
         std::time::Duration::from_secs(2),
@@ -488,7 +532,7 @@ async fn mounted_authority_rejects_identity_that_does_not_own_registered_shard()
         SessionRootId::new("root.profile.lcm-test").unwrap(),
     );
     let mounted =
-        mount_registered_lcm_authority(database.clone(), profile_identity, &shard).unwrap();
+        mount_registered_lcm_authority(database.clone(), profile_identity, &shard, None).unwrap();
     let first = mounted
         .execute(LcmAuthorityRequest::Status(LcmStatusQuery {
             provider: "claude".to_owned(),
@@ -520,7 +564,7 @@ async fn mounted_authority_rejects_identity_that_does_not_own_registered_shard()
             BranchId::new("branch.wrong-owner").unwrap(),
         ),
     );
-    assert!(mount_registered_lcm_authority(database, project_identity, &shard).is_none());
+    assert!(mount_registered_lcm_authority(database, project_identity, &shard, None).is_none());
 }
 
 #[test]

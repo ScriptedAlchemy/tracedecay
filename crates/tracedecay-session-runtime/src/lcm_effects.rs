@@ -1,10 +1,12 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tracedecay_contracts::{CancellationSignal, Deadline};
 use tracedecay_temporal_query::execution::ExecutionControl;
 
+use tracedecay_domain::SessionId;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_lcm::{
     LcmCompressionOutcome, LcmCompressionRequest, LcmCompressionResponse, LcmError,
@@ -13,6 +15,7 @@ use tracedecay_lcm::{
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_lcm::{LcmSessionBoundaryRequest, LcmSessionBoundaryResponse};
 use tracedecay_session_temporal_store::SessionTemporalAccess;
+use tracedecay_sessions::serving::SessionRefreshWorkerPort;
 
 pub(super) const LCM_EFFECT_CEILING: Duration =
     tracedecay_daemon_protocol::DEFAULT_DAEMON_OPERATION_DEADLINE;
@@ -27,6 +30,7 @@ const LCM_EFFECT_WORK_LIMIT: usize = 4_096;
 pub(super) struct DaemonLcmEffectService {
     db: RegisteredGlobalDbLeaseV1,
     control: LcmEffectControl,
+    projection: Option<Arc<dyn SessionRefreshWorkerPort>>,
 }
 
 #[derive(Clone)]
@@ -97,10 +101,12 @@ impl DaemonLcmEffectService {
         db: RegisteredGlobalDbLeaseV1,
         deadline: Option<&Deadline>,
         cancellation: Option<&CancellationSignal>,
+        projection: Option<Arc<dyn SessionRefreshWorkerPort>>,
     ) -> Self {
         Self {
             db,
             control: LcmEffectControl::new(deadline, cancellation),
+            projection,
         }
     }
 
@@ -124,45 +130,66 @@ impl DaemonLcmEffectService {
             )
             .await?;
         if request.summarizer.has_nonempty_provided_summary() {
-            return self.commit_compression(&request).await;
+            return self.commit_compression(&request, None).await;
         }
 
         // The message corpus is owned once by `request`; only `summarizer`
         // changes between the planning pass and the final commit.
         request.summarizer = LcmSummarizerMode::HermesAuxiliary;
-        let pending = self.commit_compression(&request).await?;
-        let summary_request = match pending.outcome()? {
-            LcmCompressionOutcome::NeedsSummary(summary_request) => summary_request,
-            LcmCompressionOutcome::Complete | LcmCompressionOutcome::Deferred { .. } => {
-                return Ok(pending);
-            }
-        };
-        let summary = match super::lcm_summarization::resolve_authoritative_summary(
-            &self.db,
-            &request.provider,
-            &request.session_id,
-            summary_request,
-            self.control.remaining()?,
-            None,
-        )
-        .await
-        {
-            Ok(summary) => summary,
-            Err(super::lcm_summarization::SummaryResolutionError::Storage(error)) => {
-                return Err(error);
-            }
-            Err(super::lcm_summarization::SummaryResolutionError::Unavailable(reason)) => {
-                self.control.checkpoint()?;
-                return pending.defer_for_authoritative_summary(reason);
-            }
-        };
-        self.control.checkpoint()?;
-        request.summarizer = LcmSummarizerMode::Provided {
-            summary_text: summary.text,
-            route: Some(summary.route),
-            extraction_result: None,
-        };
-        self.commit_compression(&request).await
+        let mut pending = self.commit_compression(&request, None).await?;
+        let mut sources_changed = false;
+        loop {
+            let summary_request = match pending.outcome()? {
+                LcmCompressionOutcome::NeedsSummary(summary_request) => summary_request,
+                LcmCompressionOutcome::Complete | LcmCompressionOutcome::Deferred { .. } => {
+                    return Ok(pending);
+                }
+            };
+            let resolved = if sources_changed {
+                // Native compaction evidence predates this revision. Only a
+                // provider run over the new request can summarize its new bytes.
+                super::lcm_summarization::generate_provider_summary(
+                    &self.db,
+                    &request.provider,
+                    summary_request,
+                    self.control.remaining()?,
+                )
+                .await
+            } else {
+                super::lcm_summarization::resolve_authoritative_summary(
+                    &self.db,
+                    &request.provider,
+                    &request.session_id,
+                    summary_request,
+                    self.control.remaining()?,
+                    None,
+                )
+                .await
+            };
+            let summary = match resolved {
+                Ok(summary) => summary,
+                Err(super::lcm_summarization::SummaryResolutionError::Storage(error)) => {
+                    return Err(error);
+                }
+                Err(super::lcm_summarization::SummaryResolutionError::Unavailable(reason)) => {
+                    self.control.checkpoint()?;
+                    return pending.defer_for_authoritative_summary(reason);
+                }
+            };
+            self.control.checkpoint()?;
+            request.summarizer = LcmSummarizerMode::Provided {
+                summary_text: summary.text,
+                route: Some(summary.route),
+                extraction_result: None,
+            };
+            // Publication reuses the text only while these exact sources still
+            // match. A changed selection returns the canonical NeedsSummary
+            // outcome and regenerates within this call's original deadline.
+            pending = self
+                .commit_compression(&request, Some(&summary_request.source_messages))
+                .await?;
+            sources_changed = true;
+        }
     }
 
     pub(super) async fn compress_retained_page(
@@ -252,20 +279,49 @@ impl DaemonLcmEffectService {
     async fn commit_compression(
         &self,
         request: &LcmCompressionRequest,
+        expected_sources: Option<&[tracedecay_lcm::LcmSummarySourceMessage]>,
     ) -> Result<LcmCompressionResponse, LcmError> {
-        let execution = self.control.execution_control();
-        let before_commit = self.control.clone();
-        self.control
-            .execute(
-                &execution,
-                Box::pin(tracing::Instrument::instrument(
-                    self.db.lcm_compress_guarded(request, &execution, move || {
-                        before_commit.checkpoint()
-                    }),
-                    tracing::trace_span!("daemon.lcm.commit"),
-                )),
-            )
-            .await
+        loop {
+            let execution = self.control.execution_control();
+            let before_commit = self.control.clone();
+            let result = self
+                .control
+                .execute(
+                    &execution,
+                    Box::pin(tracing::Instrument::instrument(
+                        self.db.lcm_compress_guarded(
+                            request,
+                            expected_sources,
+                            &execution,
+                            move || before_commit.checkpoint(),
+                        ),
+                        tracing::trace_span!("daemon.lcm.commit"),
+                    )),
+                )
+                .await;
+            match result {
+                Err(error @ LcmError::StaleSummaryGeneration { expected, actual })
+                    if actual > expected =>
+                {
+                    let Some(projection) = &self.projection else {
+                        return Err(error);
+                    };
+                    let session_id = SessionId::new(request.session_id.clone())
+                        .map_err(|error| LcmError::Db(error.to_string()))?;
+                    let settled = projection
+                        .wake_and_wait_for_session_projection(
+                            &session_id,
+                            self.control.remaining()?,
+                        )
+                        .await;
+                    self.control.checkpoint()?;
+                    if !settled {
+                        return Err(error);
+                    }
+                }
+                result => return result,
+            }
+        }
     }
 
     async fn commit_retained_compression(
@@ -371,7 +427,7 @@ pub async fn lcm_compress_for_test(
     db: RegisteredGlobalDbLeaseV1,
     request: LcmCompressionRequest,
 ) -> Result<LcmCompressionResponse, LcmError> {
-    DaemonLcmEffectService::new(db, None, None)
+    DaemonLcmEffectService::new(db, None, None, None)
         .compress(request)
         .await
 }
@@ -382,7 +438,7 @@ pub async fn lcm_session_boundary_for_test(
     db: RegisteredGlobalDbLeaseV1,
     request: LcmSessionBoundaryRequest,
 ) -> Result<LcmSessionBoundaryResponse, LcmError> {
-    DaemonLcmEffectService::new(db, None, None)
+    DaemonLcmEffectService::new(db, None, None, None)
         .session_boundary(request)
         .await
 }

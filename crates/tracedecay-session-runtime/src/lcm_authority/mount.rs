@@ -21,6 +21,7 @@ use tracedecay_session_memory::session::lcm::{
     LcmAuthorityInvocation, LcmAuthorityPort, LcmAuthorityRequest, LcmAuthorityResponse,
     LcmAuthorityTarget, lcm_authority_operation_identity,
 };
+use tracedecay_sessions::serving::SessionRefreshWorkerPort;
 use tracedecay_store::{StoreShardIdV1, StoreShardScopeV1};
 use tracedecay_tool_catalog::CapabilityId;
 
@@ -254,6 +255,7 @@ pub fn mount_registered_lcm_authority(
     database: RegisteredGlobalDbLeaseV1,
     identity: ResolvedSessionIdentity,
     expected_shard: &StoreShardIdV1,
+    projection: Option<Arc<dyn SessionRefreshWorkerPort>>,
 ) -> Option<Arc<dyn MountedLcmAuthorityPort>> {
     if &database.binding().shard_id != expected_shard
         || !identity_matches_shard(&identity, expected_shard)
@@ -261,7 +263,7 @@ pub fn mount_registered_lcm_authority(
         return None;
     }
     Some(Arc::new(MountedLcmAuthority {
-        authority: DaemonLcmAuthority::registered(database),
+        authority: DaemonLcmAuthority::registered(database, projection),
         identity,
     }))
 }

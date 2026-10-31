@@ -272,6 +272,7 @@ async fn seed_production_summary(
                     extraction_result: None,
                 },
             },
+            None,
             &ExecutionControl::default(),
             || Ok(()),
         )

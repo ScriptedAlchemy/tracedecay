@@ -171,7 +171,12 @@ async fn execute_profile_retained(
     let (lcm_authority, session_refresh) = if lcm || refresh {
         let database = Box::pin(store_administration.registered_profile_session_database()).await?;
         let lcm_authority = session_root.expected_runtime_shard().and_then(|shard| {
-            mount_registered_lcm_authority(database.clone(), session_root.identity().clone(), shard)
+            mount_registered_lcm_authority(
+                database.clone(),
+                session_root.identity().clone(),
+                shard,
+                None,
+            )
         });
         let session_refresh =
             Box::pin(store_administration.profile_session_refresh(&database)).await;

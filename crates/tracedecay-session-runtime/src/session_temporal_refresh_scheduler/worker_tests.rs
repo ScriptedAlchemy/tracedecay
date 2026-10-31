@@ -5,6 +5,7 @@ use std::time::Duration;
 use tracedecay_domain::{SessionId, UtcMicros};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
+use tracedecay_lcm::{LcmCompressionOverrides, LcmCompressionRequest, LcmError, LcmSummarizerMode};
 use tracedecay_session_temporal_store::{SessionRefreshRecoveryV1, SessionTemporalStore};
 use tracedecay_store::{
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshFrontierV1, SessionRefreshProgressV1,
@@ -28,6 +29,7 @@ use super::wake::{
 use super::worker::{
     apply_refresh_effect, run_session_temporal_refresh_pass, run_session_temporal_refresh_scheduler,
 };
+use crate::lcm_effects::DaemonLcmEffectService;
 use tracedecay_sessions::ProviderPassUnits;
 use tracedecay_sessions::serving::{
     SessionHistoryProgressState, SessionProjectionServingStatusPort,
@@ -46,6 +48,113 @@ async fn begin_empty_refreshes(
             .await
             .expect("running recovery");
     }
+}
+
+fn summary_request(session_id: &str) -> LcmCompressionRequest {
+    LcmCompressionRequest {
+        provider: "codex".to_owned(),
+        session_id: session_id.to_owned(),
+        messages: (0..4)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("message-{index}"),
+                    "role": if index % 2 == 0 { "user" } else { "assistant" },
+                    "content": format!("durable context message {index}"),
+                    "timestamp": index + 1,
+                })
+            })
+            .collect(),
+        current_tokens: Some(1_000),
+        focus_topic: None,
+        ignore_session_patterns: Vec::new(),
+        stateless_session_patterns: Vec::new(),
+        ignore_message_patterns: Vec::new(),
+        expected_current_frontier_store_id: None,
+        overrides: LcmCompressionOverrides {
+            threshold_tokens: Some(1),
+            fresh_tail_count: Some(1),
+            ..Default::default()
+        },
+        summarizer: LcmSummarizerMode::Provided {
+            summary_text: "Summary of the durable context".to_owned(),
+            route: None,
+            extraction_result: None,
+        },
+    }
+}
+
+#[tokio::test]
+async fn summary_publication_waits_for_its_session_refresh() {
+    let harness = RegisteredGlobalDbHarness::open("summary-refresh-settlement").await;
+    let store = SessionTemporalStore::new(harness.registered.as_ref());
+    let session_id = "summary-refresh-session";
+    begin_empty_refreshes(&store, [session_id, "unrelated-refused-session"]).await;
+    let state = Arc::new(SessionTemporalRefreshWakeState::default());
+    let service = DaemonLcmEffectService::new(
+        harness.registered.clone(),
+        None,
+        None,
+        Some(Arc::new(state.handle())),
+    );
+    let mut compression =
+        tokio::spawn(async move { service.compress(summary_request(session_id)).await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            result = &mut compression => panic!("summary must join its unfinished refresh: {result:?}"),
+            _ = state.wake.notified() => {},
+        }
+    }).await.expect("summary did not request projection settlement");
+
+    let worker = tokio::spawn(run_session_temporal_refresh_scheduler(
+        harness.registered.clone(),
+        Arc::clone(&state),
+        Arc::new(SessionRefusingProjector {
+            refused: SessionId::new("unrelated-refused-session").unwrap(),
+        }),
+        Arc::new(std::sync::RwLock::new(None)),
+        Arc::new(tokio::sync::Semaphore::new(0)),
+        SessionTemporalRefreshPolicy::default(),
+    ));
+    let response = tokio::time::timeout(Duration::from_secs(5), compression).await;
+    state.cancel();
+    worker.await.expect("refresh worker exits on cancellation");
+    let response = response.expect("summary did not settle").unwrap().unwrap();
+    assert_eq!(response.summary_nodes_created, 1);
+    let status = harness
+        .registered
+        .lcm_status("codex", Some(session_id))
+        .await
+        .unwrap();
+    assert_eq!(status.raw_message_count, 4);
+    assert_eq!(status.summary_node_count, 1);
+}
+
+#[tokio::test]
+async fn cancelled_refresh_does_not_publish_a_summary() {
+    let harness = RegisteredGlobalDbHarness::open("summary-refresh-cancelled").await;
+    let store = SessionTemporalStore::new(harness.registered.as_ref());
+    let session_id = "summary-cancelled-session";
+    begin_empty_refreshes(&store, [session_id]).await;
+    let state = Arc::new(SessionTemporalRefreshWakeState::default());
+    state.cancel();
+    let service = DaemonLcmEffectService::new(
+        harness.registered.clone(),
+        None,
+        None,
+        Some(Arc::new(state.handle())),
+    );
+    let error = service
+        .compress(summary_request(session_id))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, LcmError::StaleSummaryGeneration { .. }));
+    let status = harness
+        .registered
+        .lcm_status("codex", Some(session_id))
+        .await
+        .unwrap();
+    assert_eq!(status.summary_node_count, 0);
+    assert_eq!(status.raw_message_count, 0);
 }
 
 #[tokio::test]
@@ -356,6 +465,84 @@ async fn a_live_wake_publishes_before_waiting_for_summary_admission() {
 
     state.cancel();
     worker.await.expect("refresh worker exits on cancellation");
+}
+
+struct RetryOnceProjector {
+    retry_pending: AtomicBool,
+}
+
+impl SessionTemporalRefreshProjector for RetryOnceProjector {
+    fn project<'a>(
+        &'a self,
+        database: &'a RegisteredGlobalDbLeaseV1,
+        recovery: SessionRefreshRecoveryV1,
+    ) -> SessionTemporalRefreshProjectionFuture<'a> {
+        Box::pin(async move {
+            if self.retry_pending.swap(false, Ordering::AcqRel) {
+                Err(SessionTemporalRefreshProjectorError::retryable(
+                    "fixture_source_temporarily_busy",
+                ))
+            } else {
+                CanonicalSessionTemporalProjector
+                    .project(database, recovery)
+                    .await
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_retryable_projection_publishes_while_summary_admission_is_blocked() {
+    let harness = RegisteredGlobalDbHarness::open("refresh-retry-before-summary-admission").await;
+    let store = SessionTemporalStore::new(harness.registered.as_ref());
+    let session_id = SessionId::new("refresh-retry-before-summary").expect("session id");
+    let begun = store
+        .begin_or_join_session_refresh(SessionRefreshBeginOrJoinRequestV1::new(
+            session_id.clone(),
+            SessionRefreshFrontierV1::new(0, 0).expect("empty frontier"),
+        ))
+        .await
+        .expect("running refresh");
+    let state = Arc::new(SessionTemporalRefreshWakeState::default());
+    let handle = state.handle();
+    let join = handle.wake_and_wait_for_session_projection(&session_id, Duration::from_secs(5));
+    tokio::pin!(join);
+    assert!(
+        std::future::poll_fn(|cx| std::task::Poll::Ready(join.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    let admission = Arc::new(tokio::sync::Semaphore::new(0));
+    let worker = tokio::spawn(run_session_temporal_refresh_scheduler(
+        harness.registered.clone(),
+        Arc::clone(&state),
+        Arc::new(RetryOnceProjector {
+            retry_pending: AtomicBool::new(true),
+        }),
+        Arc::new(std::sync::RwLock::new(None)),
+        Arc::clone(&admission),
+        SessionTemporalRefreshPolicy::default(),
+    ));
+
+    // No further wake or summary permit is supplied after the initial refusal.
+    // The existing projection retry must independently finish publication.
+    let published = join.await;
+    state.cancel();
+    worker.await.expect("refresh worker exits on cancellation");
+    assert!(
+        published,
+        "summary admission must not strand a zero-progress projection retry"
+    );
+    assert_eq!(admission.available_permits(), 0);
+    let receipt = store
+        .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
+            begun.operation_id().clone(),
+            begun.session_id().clone(),
+        ))
+        .await
+        .expect("read terminal receipt")
+        .expect("the retried projection must settle durably");
+    assert_eq!(receipt.state(), SessionRefreshTerminalStateV1::Complete);
 }
 
 #[tokio::test]

@@ -369,6 +369,7 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
                     database,
                     identity.clone(),
                     &expected_shard,
+                    None,
                 )
                 .map(ResolvedRetainedLcmAuthority::Owned)
                 .ok_or_else(|| {

@@ -932,6 +932,15 @@ impl LiveProjectionDuringSummary<'_> {
         tokio::pin!(stage);
         let mut retry_attempt = 0u32;
         let mut retry_at = None;
+        // The preceding projection may have consumed its wake without making
+        // progress. Carry that owed retry into this wait while retaining the
+        // same fair summary admission or in-flight page.
+        if let Some(class) = report.retry_class {
+            retry_attempt = 1;
+            self.state.mark_recovering(class.into(), class);
+            self.state.requeue_projection();
+            retry_at = Some(Instant::now() + session_refresh_retry_delay(class, retry_attempt));
+        }
         let mut summary_pass_owed = false;
         let result = loop {
             let projection_wake = async {
