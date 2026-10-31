@@ -7,6 +7,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use tracedecay_daemon_protocol::DaemonHandshake;
+#[cfg(not(unix))]
+use tracedecay_daemon_service::shutdown::DaemonLifecycle;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
