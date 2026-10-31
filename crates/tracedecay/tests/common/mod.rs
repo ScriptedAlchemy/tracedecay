@@ -1398,6 +1398,63 @@ pub fn is_transient_connection_error(err: &ureq::Error) -> bool {
     }
 }
 
+/// Attempts one fixture request makes after connection-level failures before
+/// it fails. A freshly started server races its own readiness, so this budget
+/// is the same for every caller and no read narrows it.
+const FIXTURE_CALL_ATTEMPTS: usize = 12;
+
+/// Retries one state read may spend on a client timeout. A timed-out attempt
+/// already spent the whole request budget on a single sample, so a read that
+/// observes state gets few — enough to absorb one publish burst, short of
+/// overshooting the caller's own poll deadline — and they come out of their
+/// own budget, never out of [`FIXTURE_CALL_ATTEMPTS`].
+const READ_TIMEOUT_RETRIES: usize = 3;
+
+/// What one failed attempt of a state read means for the next attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReadRetry {
+    /// Retryable with budget left; wait this long and ask again.
+    Retry(Duration),
+    /// This cause's budget is spent.
+    Exhausted,
+    /// Not retryable: the request itself is what is wrong.
+    Fatal,
+}
+
+/// Decide one state read's next attempt.
+///
+/// `connection_failures` counts connection-level failures already retried and
+/// `timeout_retries` counts client timeouts already retried. The two budgets
+/// are independent: a slow sample never shortens the connection budget a
+/// freshly started (or briefly overloaded) server needs. A timeout is not a
+/// failed request — the peer accepted it and is still working, and a dashboard
+/// read of durable state can wait behind a writer that holds the store's lock
+/// across its publish — so a read that only observes state gets the same
+/// answer by asking again. Mutations never use this: a timed-out POST may
+/// already have applied its effect.
+pub fn read_retry(
+    err: &ureq::Error,
+    connection_failures: usize,
+    timeout_retries: usize,
+) -> ReadRetry {
+    if matches!(err, ureq::Error::Timeout(_)) {
+        return if timeout_retries < READ_TIMEOUT_RETRIES {
+            ReadRetry::Retry(Duration::from_millis(25 * (timeout_retries as u64 + 1)))
+        } else {
+            ReadRetry::Exhausted
+        };
+    }
+    if !is_transient_connection_error(err) {
+        return ReadRetry::Fatal;
+    }
+    // The attempt that exhausts the budget is the failure, not a retry.
+    if connection_failures + 1 >= FIXTURE_CALL_ATTEMPTS {
+        ReadRetry::Exhausted
+    } else {
+        ReadRetry::Retry(Duration::from_millis(25 * (connection_failures as u64 + 1)))
+    }
+}
+
 /// Issues an idempotent HTTP request, retrying transient connection-level
 /// errors (the server racing its own readiness under parallel load) with a
 /// short bounded backoff. `send` performs one attempt; a `ureq::Error` that
@@ -1407,13 +1464,58 @@ pub fn http_call_with_retry(
     label: &str,
     send: impl Fn() -> Result<ureq::http::Response<ureq::Body>, ureq::Error>,
 ) -> ureq::http::Response<ureq::Body> {
-    let mut last_err: Option<ureq::Error> = None;
-    for attempt in 0..12 {
+    retrying_call(
+        label,
+        FIXTURE_CALL_ATTEMPTS,
+        is_transient_connection_error,
+        send,
+    )
+}
+
+/// [`http_call_with_retry`] for a read that only observes state.
+///
+/// It also retries a client timeout, so the caller's own poll deadline — not
+/// one slow sample's clock — decides when a wait has failed. Connection-level
+/// errors keep [`FIXTURE_CALL_ATTEMPTS`] exactly; only the timeout retries are
+/// bounded separately by [`READ_TIMEOUT_RETRIES`].
+pub fn http_read_with_retry(
+    label: &str,
+    send: impl Fn() -> Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+) -> ureq::http::Response<ureq::Body> {
+    let mut connection_failures = 0;
+    let mut timeout_retries = 0;
+    loop {
         match send() {
             Ok(response) => return response,
-            Err(err) if is_transient_connection_error(&err) => {
+            Err(err) => match read_retry(&err, connection_failures, timeout_retries) {
+                ReadRetry::Retry(delay) => {
+                    if matches!(err, ureq::Error::Timeout(_)) {
+                        timeout_retries += 1;
+                    } else {
+                        connection_failures += 1;
+                    }
+                    std::thread::sleep(delay);
+                }
+                ReadRetry::Exhausted => panic!("{label} failed after retries: {err:?}"),
+                ReadRetry::Fatal => panic!("{label} failed: {err}"),
+            },
+        }
+    }
+}
+
+fn retrying_call(
+    label: &str,
+    attempts: usize,
+    is_transient: impl Fn(&ureq::Error) -> bool,
+    send: impl Fn() -> Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+) -> ureq::http::Response<ureq::Body> {
+    let mut last_err: Option<ureq::Error> = None;
+    for attempt in 0..attempts {
+        match send() {
+            Ok(response) => return response,
+            Err(err) if is_transient(&err) => {
                 last_err = Some(err);
-                std::thread::sleep(Duration::from_millis(25 * (attempt + 1)));
+                std::thread::sleep(Duration::from_millis(25 * (attempt as u64 + 1)));
             }
             Err(err) => panic!("{label} failed: {err}"),
         }
@@ -1422,7 +1524,7 @@ pub fn http_call_with_retry(
 }
 
 pub fn get_json(agent: &ureq::Agent, url: &str) -> (u16, Value) {
-    let response = http_call_with_retry(&format!("GET {url}"), || agent.get(url).call());
+    let response = http_read_with_retry(&format!("GET {url}"), || agent.get(url).call());
     response_to_json(response)
 }
 
