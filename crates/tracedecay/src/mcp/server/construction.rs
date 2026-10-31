@@ -18,7 +18,9 @@ use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_sessions::serving::{SessionProjectionServingStatusPort, SessionRefreshWorkerPort};
 
-use super::hook_writes::{BackgroundRefreshWriter, direct_background_refresh_writer};
+use super::hook_writes::BackgroundRefreshWriter;
+#[cfg(any(test, feature = "test-transport"))]
+use super::hook_writes::direct_background_refresh_writer;
 
 fn wrap_profile_identity(
     identity: LocalProfileIdentityAuthorityV1,
@@ -264,6 +266,7 @@ impl McpServerWriters {
 }
 
 impl McpServerConstructionContext {
+    #[cfg(any(test, feature = "test-transport"))]
     #[tracing::instrument(name = "mcp.server.construction.direct", level = "trace", skip_all)]
     pub(crate) fn direct(cg: impl Into<Arc<TraceDecay>>, scope_prefix: Option<String>) -> Self {
         let cg = cg.into();

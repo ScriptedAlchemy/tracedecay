@@ -582,6 +582,7 @@ impl McpServer {
     /// on large monorepos where nested ignored directories
     /// (`apps/*/node_modules`, `packages/*/target`) drove unbounded event
     /// traffic and `FileId` cache growth.
+    #[cfg(any(test, feature = "test-transport"))]
     pub async fn new(cg: TraceDecay, scope_prefix: Option<String>) -> Arc<Self> {
         Self::new_with_context(McpServerConstructionContext::direct(cg, scope_prefix)).await
     }
@@ -1139,6 +1140,7 @@ impl McpServer {
     /// where time is spent inside the index vs. on the JSON-RPC/stdio
     /// transport. Safe to flip at any time, the next call observes the
     /// new setting.
+    #[cfg(any(test, feature = "test-transport"))]
     pub fn set_timings_enabled(&self, enabled: bool) {
         self.timings_enabled
             .store(enabled, std::sync::atomic::Ordering::Relaxed);

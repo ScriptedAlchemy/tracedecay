@@ -165,6 +165,7 @@ use tracedecay_mcp::tools::binding::{
 use tracedecay_mcp::tools::dispatch::McpDispatchMetadataError;
 use tracedecay_mcp::{handle_multi_root, handle_work, handle_workflow};
 use tracedecay_project::project::TraceDecay;
+#[cfg(any(test, feature = "test-transport"))]
 use tracedecay_runtime_core::storage::registered_project_id;
 
 fn ensure_mcp_dispatch_available(tool_name: &str) -> Result<()> {
@@ -199,6 +200,7 @@ fn ensure_mcp_dispatch_available(tool_name: &str) -> Result<()> {
 ///
 /// Returns the tool result and touched file paths, or an error if the tool
 /// name is unknown or the handler fails.
+#[cfg(any(test, feature = "test-transport"))]
 pub async fn handle_tool_call(cg: &TraceDecay, tool_name: &str, args: Value) -> Result<ToolResult> {
     Box::pin(handle_tool_call_with_registry_options(
         cg,
@@ -213,6 +215,7 @@ pub async fn handle_tool_call(cg: &TraceDecay, tool_name: &str, args: Value) -> 
 /// holds so integration tests get an admitted snapshot. Production dispatch
 /// carries `admitted_project_scope` from project-open; without it the root
 /// fails closed.
+#[cfg(any(test, feature = "test-transport"))]
 pub(crate) fn opened_project_scope(cg: &TraceDecay) -> Result<tracedecay_contracts::ResolvedScope> {
     let project_id = registered_project_id(cg.store_layout())?;
     tracedecay_code_index_runtime::resolved_scope_for_project(cg.project_root(), &project_id)
@@ -415,6 +418,7 @@ impl ToolCallRegistryOptions<'_> {
     /// Marks this call as admitted for the opened project's checkout.
     /// Fixture `handle_tool_call` uses this; production carries the scope
     /// from project-open publication.
+    #[cfg(any(test, feature = "test-transport"))]
     pub fn admit_opened_project(mut self, cg: &TraceDecay) -> Result<Self> {
         self.admitted_project_scope = Some(opened_project_scope(cg)?);
         Ok(self)
