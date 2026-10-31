@@ -64,7 +64,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 capture="$staging/capture.log"
 
-bazel test --config=release --config=ci //crates/tracedecay:claude_observation_benchmark \
+bazel test --config=release --config=ci //crates/tracedecay-project:claude_observation_benchmark \
   --test_strategy=standalone --nocache_test_results --test_output=all \
   --test_env=TRACEDECAY_BENCHMARK_REPO_ROOT="$repo_root" \
   --test_env=TRACEDECAY_BENCHMARK_BAZEL_VERSION="$(bazel --version)" \
@@ -85,7 +85,7 @@ fi
 printf '%s\n' "$result_json" >"$staging/$result_name"
 sed "s/\"current_acceptance\": null/\"current_acceptance\": \"$result_name\"/" \
   "$index_path" >"$staging/evidence-index.json"
-scripts/require-exact-test.sh bazel test --config=release --config=ci //crates/tracedecay:claude_observation_benchmark \
+scripts/require-exact-test.sh bazel test --config=release --config=ci //crates/tracedecay-project:claude_observation_benchmark \
   --test_strategy=standalone --nocache_test_results --test_output=all \
   --test_env=TRACEDECAY_BENCHMARK_REPO_ROOT="$repo_root" \
   --test_env=TRACEDECAY_BENCHMARK_REQUIRE_ACCEPTANCE=1 \
