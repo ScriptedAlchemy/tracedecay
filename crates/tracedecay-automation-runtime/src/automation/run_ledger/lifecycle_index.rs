@@ -16,7 +16,7 @@
 //!   append rows or truncate an *uncommitted* tail during recovery, so bytes
 //!   below a committed frontier are never rewritten in place.
 //! * `witness` is the digest of the final `<= 4 KiB` before the frontier, read
-//!   under the exclusive ledger lock. Together with the identity and the
+//!   under the shared ledger lock. Together with the identity and the
 //!   `frontier <= len` check it rejects a same-length rewrite the same way the
 //!   task-summary memo does.
 //!
@@ -430,8 +430,11 @@ fn refresh_index(
 
 /// Runs `read` against the committed lifecycle index of the open ledger.
 ///
-/// The caller holds the exclusive ledger lock. A refresh failure discards the
-/// cached index so the next access rebuilds from the ledger.
+/// The caller holds the ledger lock in either mode. A refresh failure discards
+/// the cached index so the next access rebuilds from the ledger. Concurrent
+/// shared readers may rebuild the same index twice; the index is a pure
+/// function of the committed ledger, so a duplicate rebuild is wasted work
+/// rather than a divergent answer.
 pub(super) fn with_run_ledger_index<T>(
     file: &std::fs::File,
     path: &Path,
