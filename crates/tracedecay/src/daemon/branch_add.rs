@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::Arc;
-#[cfg(unix)]
 use tracedecay_daemon_protocol::DaemonHandshake;
 
 #[cfg(unix)]

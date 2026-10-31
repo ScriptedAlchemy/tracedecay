@@ -24,6 +24,11 @@ use super::branch_admin::StoreAdministration;
 use super::connection_serving::serve_authenticated_socket_client_with_class;
 #[cfg(not(unix))]
 use super::connection_serving::serve_windows_broker_client_with_class_and_invocation;
+#[cfg(not(unix))]
+use super::core_admission::{
+    DaemonClientAdmission, DaemonClientAdmissionOutcome, DaemonPerClientAdmission,
+    MAX_CONCURRENT_DAEMON_CLIENTS, reject_saturated_daemon_client, with_connection_admission,
+};
 use super::core_handshake::binary_version;
 #[cfg(unix)]
 use super::engine::DaemonEngine;
@@ -35,11 +40,19 @@ use super::http_application_router::{
 use super::invocation_state::DaemonInvocationState;
 use super::maintenance;
 use super::pr_autotrack;
+#[cfg(not(unix))]
+use super::project_open_admission::ProjectOpenGates;
+#[cfg(not(unix))]
+use super::project_routing::project_open_tasks;
+#[cfg(not(unix))]
+use super::project_server_lifecycle::{cancel_retained_session_history, shutdown_project_servers};
 use super::remote_deletion;
 #[cfg(unix)]
 use tokio::net::UnixStream;
 #[cfg(unix)]
 use tracedecay_daemon_protocol::ensure_private_socket_parent;
+#[cfg(not(unix))]
+use tracedecay_daemon_protocol::{BrokerListener, default_loopback_endpoint};
 #[cfg(unix)]
 use tracedecay_daemon_service::bounded_stderr_log::BoundedStderrLog;
 use tracedecay_daemon_service::shutdown::DAEMON_CLIENT_DRAIN_DEADLINE;
