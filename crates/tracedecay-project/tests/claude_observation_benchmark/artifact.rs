@@ -651,7 +651,7 @@ pub(super) fn status_output_is_dirty(output: &[u8]) -> bool {
 /// the package (`tests/claude_observation_benchmark/...`), a different anchor from the
 /// workspace-level fixtures and benchmark data below.
 pub(super) fn package_root() -> PathBuf {
-    repository_root().join("crates/tracedecay")
+    repository_root().join("crates/tracedecay-project")
 }
 
 pub(super) fn repository_root() -> PathBuf {
