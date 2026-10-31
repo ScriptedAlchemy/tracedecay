@@ -6,7 +6,6 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tracedecay_application::advisory::github_runtime::{
     ConfiguredGitHubSourceAccessAuthorityV1, GitHubDiscoveryControlV1,
@@ -72,7 +71,7 @@ use tracedecay_domain::feedback::{
 };
 use tracedecay_domain::{
     CommitId, ConfigurationRevisionId, HostKindV1, ManifestDigest, ProviderId, UtcMicros,
-    canonical_sha256,
+    canonical_sha256, sha256_prefix16,
 };
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use tracedecay_global_db::configuration::contracts::ports::ConfigurationCurrentStateV1;
@@ -1793,11 +1792,11 @@ fn hook_feedback_document_uri(
             .find(|logical_path| {
                 let logical_file_id = daemon_mint_hook_v2_file_id(
                     request.hook.envelope(),
-                    hash16(logical_path.as_bytes()),
+                    sha256_prefix16(logical_path.as_bytes()),
                 );
                 let absolute_file_id = daemon_mint_hook_v2_file_id(
                     request.hook.envelope(),
-                    hash16(project_root.join(logical_path).to_string_lossy().as_bytes()),
+                    sha256_prefix16(project_root.join(logical_path).to_string_lossy().as_bytes()),
                 );
                 logical_file_id == *file_id || absolute_file_id == *file_id
             })?,
@@ -1819,13 +1818,6 @@ fn stop_boundary_document(
         .filter(|file| file.language.is_some())
         .map(|file| file.logical_path.as_str())
         .min()
-}
-
-fn hash16(value: &[u8]) -> [u8; 16] {
-    let digest = Sha256::digest(value);
-    let mut value = [0_u8; 16];
-    value.copy_from_slice(&digest[..16]);
-    value
 }
 
 #[tracing::instrument(name = "daemon.project.owners.advisory", level = "trace", skip_all)]

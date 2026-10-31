@@ -16,6 +16,7 @@ use tracedecay_runtime_core::branch::{
     rollback_prepared_branch_tracking,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::lifecycle_lease::canonical_or_original;
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_runtime_core::path_safety::same_canonical_path;
 
@@ -92,9 +93,7 @@ pub(super) async fn branch_add_response(
             "branch add requires a project path",
         );
     };
-    let canonical_root = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| project_root.to_path_buf());
+    let canonical_root = canonical_or_original(project_root);
     let mounted = administration.mounted_project_graphs().await;
     let Some(graph) = mounted
         .iter()

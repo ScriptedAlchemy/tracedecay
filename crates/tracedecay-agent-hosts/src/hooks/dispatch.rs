@@ -11,7 +11,7 @@ use tracedecay_contracts::retrieval::{
     HookRuntimeDispositionV1, HookRuntimeResultV1, HookRuntimeSurfaceRequestV1,
     HookV2ProfileAdmissionResultV1,
 };
-use tracedecay_domain::{HostIntegrationIdV1, NativeHostIdentityV1};
+use tracedecay_domain::{HostIntegrationIdV1, NativeHostIdentityV1, sha256_prefix16};
 use tracedecay_domain::{ProjectId, UtcMicros};
 #[cfg(test)]
 use tracedecay_hooks::HookImmediateAdmissionStateV1;
@@ -1088,11 +1088,13 @@ fn native_material(
         protected_session_id: protected_session_id_for_native(session),
         observed_at,
         tool_id: (family == tracedecay_hooks::HookEventFamily::ToolLifecycle).then_some(event_id),
-        effect_receipt_id: fields.call_id().map(|value| hash16(value.as_bytes())),
+        effect_receipt_id: fields
+            .call_id()
+            .map(|value| sha256_prefix16(value.as_bytes())),
         file_id: (family == tracedecay_hooks::HookEventFamily::SavedEdit).then(|| {
             fields
                 .file_path()
-                .map_or(event_id, |file_path| hash16(file_path.as_bytes()))
+                .map_or(event_id, |file_path| sha256_prefix16(file_path.as_bytes()))
         }),
         changed_range_count: fields
             .edits
@@ -1136,14 +1138,7 @@ fn native_event_digest(
     digest_material.extend_from_slice(source);
     digest_material.extend_from_slice(&(material.len() as u64).to_le_bytes());
     digest_material.extend_from_slice(material);
-    hash16(&digest_material)
-}
-
-fn hash16(bytes: &[u8]) -> [u8; 16] {
-    let digest = Sha256::digest(bytes);
-    let mut output = [0; 16];
-    output.copy_from_slice(&digest[..16]);
-    output
+    sha256_prefix16(&digest_material)
 }
 
 fn hash32(bytes: &[u8]) -> [u8; 32] {

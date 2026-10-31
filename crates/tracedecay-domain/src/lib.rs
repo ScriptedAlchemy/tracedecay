@@ -50,7 +50,9 @@ pub use application_problem_detail::{
     ApplicationProblemDetailV1, DaemonServiceUnitObservationV1, DiagnosticsSearchedTsconfigV1,
 };
 pub use automation::{SESSION_EVIDENCE_BUDGET_EXHAUSTED, SESSION_EVIDENCE_BUDGET_SUPPRESSED};
-pub use canonical_text::{encode_lowercase_hex, nonnegative_sha256_prefix, sha256_hex_suffix};
+pub use canonical_text::{
+    encode_lowercase_hex, nonnegative_sha256_prefix, sha256_hex_suffix, sha256_prefix16,
+};
 pub use code_intelligence::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChangedCodeChunkSetV1, ChangedCodeChunkV1,
     ChunkLogicalIdentityV1, ChunkerRevision, CodeChunkProjectionReceiptV1, CodeGenerationId,

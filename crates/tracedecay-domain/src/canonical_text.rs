@@ -162,6 +162,17 @@ pub fn nonnegative_sha256_prefix(digest: &[u8]) -> u64 {
     u64::from_be_bytes(prefix) & i64::MAX as u64
 }
 
+/// The first 16 bytes of the SHA-256 digest of `bytes`, byte-exact.
+///
+/// Hook envelope identities derive fixed-width keys from raw path bytes, so
+/// this returns the digest prefix itself rather than any framed encoding.
+#[must_use]
+pub fn sha256_prefix16(bytes: &[u8]) -> [u8; 16] {
+    let mut prefix = [0_u8; 16];
+    prefix.copy_from_slice(&Sha256::digest(bytes)[..16]);
+    prefix
+}
+
 /// The hex body of a `sha256:`-tagged digest, without the algorithm tag.
 ///
 /// Identities that embed a digest under their own namespace all need the
@@ -443,6 +454,25 @@ mod tests {
         assert_eq!(
             validate_canonical_identity("", "field"),
             Err(DomainError::NonCanonical { field: "field" })
+        );
+    }
+
+    #[test]
+    fn sha256_prefix16_is_the_raw_digest_prefix() {
+        for bytes in [&b""[..], b"a", b"src/lib.rs", &[0xff_u8; 64]] {
+            let digest = Sha256::digest(bytes);
+            assert_eq!(
+                sha256_prefix16(bytes),
+                digest[..16],
+                "prefix diverged for {bytes:?}"
+            );
+        }
+        assert_eq!(
+            sha256_prefix16(b""),
+            [
+                0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f,
+                0xb9, 0x24,
+            ]
         );
     }
 
