@@ -9,3 +9,4 @@ mod analyzer_runtime;
 mod async_content_length;
 mod bridge_protocol;
 mod diagnostic_publication_stress;
+mod lsp_gateway_protocol;
