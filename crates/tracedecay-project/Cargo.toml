@@ -130,3 +130,7 @@ required-features = ["test-helpers"]
 name = "claude_observation_benchmark"
 path = "tests/claude_observation_benchmark/main.rs"
 required-features = ["test-helpers"]
+
+[[test]]
+name = "workflow_handoff_test"
+required-features = ["test-helpers", "test-transport"]

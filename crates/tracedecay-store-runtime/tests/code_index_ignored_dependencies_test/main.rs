@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_lines)]
+
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
