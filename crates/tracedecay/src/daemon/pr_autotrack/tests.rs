@@ -686,9 +686,23 @@ async fn retained_linked_worktree_honors_parent_native_graph_refusal() {
         .mount_worktree(project_id.clone(), &linked, code_index_store.clone())
         .await
         .expect("mount retained-generation seeder");
+    // Subscribe before the first probe: the watch marks what it has seen at
+    // subscribe time, so a seat installed between the probe and the wait still
+    // advances it. The wait is signal-driven; the bound only turns a seat that
+    // never arrives into a diagnostic instead of a hang.
+    let mut seeder_seats = seeder
+        .subscribe_serving_generation_changes(&linked)
+        .await
+        .expect("mounted seeder serving owner");
     tokio::time::timeout(Duration::from_secs(5), async {
-        while seeder.latest_generation_id(&linked).await.is_none() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        loop {
+            if seeder.latest_generation_id(&linked).await.is_some() {
+                break;
+            }
+            seeder_seats
+                .changed()
+                .await
+                .expect("the seeder registry outlives the wait");
         }
     })
     .await
@@ -707,12 +721,19 @@ async fn retained_linked_worktree_honors_parent_native_graph_refusal() {
     activate_linked_worktree(None, &schedulers, &graph, &linked)
         .await
         .expect("mount retained linked-worktree generation");
+    let mut serving_changes = schedulers
+        .subscribe_serving_generation_changes(&linked)
+        .await
+        .expect("mounted linked-worktree serving owner");
     let latest = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Some(latest) = schedulers.latest_text_serving_for_scope(&scope).await {
                 break latest;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            serving_changes
+                .changed()
+                .await
+                .expect("the scheduler registry outlives the wait");
         }
     })
     .await
