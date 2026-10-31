@@ -116,10 +116,9 @@ pub(crate) async fn install_project_open_source_edit_preview_owner(
             }
         })?),
     );
-    let runtime: Arc<dyn tracedecay_source_edit::SourceEditRuntimePort> = graph;
     let mutation = SourceEditMutationGate::warming();
     let owner = Arc::new(ProjectSourceEditOwnerV1::new(
-        runtime,
+        graph,
         code_graph,
         authorization,
         Arc::clone(&mutation),

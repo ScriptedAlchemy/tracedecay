@@ -13,4 +13,5 @@ pub mod tools;
 
 pub(crate) use server::DatabaseOwnerReconciler;
 pub use server::McpServer;
+#[cfg(any(test, feature = "test-transport"))]
 pub use tools::handle_tool_call;

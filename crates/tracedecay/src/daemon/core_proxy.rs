@@ -138,6 +138,7 @@ pub(crate) async fn should_proxy_serve_to_daemon_with(
         .is_ok()
 }
 
+#[cfg(any(test, feature = "test-transport"))]
 pub async fn proxy_transport_to_daemon(
     socket_path: &Path,
     handshake: &DaemonHandshake,

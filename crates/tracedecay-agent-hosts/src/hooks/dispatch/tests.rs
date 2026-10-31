@@ -411,7 +411,7 @@ fn opencode_event_uses_nested_data_identity() {
     )
     .unwrap();
 
-    assert_ne!(material.event_id, hash16(b"evt-17"));
+    assert_ne!(material.event_id, sha256_prefix16(b"evt-17"));
     assert_eq!(material.protected_session_id, hash32(b"session-23"));
     assert_eq!(material.effect_receipt_id, None);
     assert_eq!(material.file_id, None);
@@ -510,10 +510,16 @@ fn opencode_tool_event_uses_call_and_input_path_identity() {
     )
     .unwrap();
 
-    assert_ne!(material.event_id, hash16(b"call-31"));
+    assert_ne!(material.event_id, sha256_prefix16(b"call-31"));
     assert_eq!(material.protected_session_id, hash32(b"session-29"));
-    assert_eq!(material.effect_receipt_id, Some(hash16(b"call-31")));
-    assert_eq!(material.file_id, Some(hash16(b"/project/src/main.rs")));
+    assert_eq!(
+        material.effect_receipt_id,
+        Some(sha256_prefix16(b"call-31"))
+    );
+    assert_eq!(
+        material.file_id,
+        Some(sha256_prefix16(b"/project/src/main.rs"))
+    );
 }
 
 #[test]
@@ -686,8 +692,14 @@ fn cursor_saved_edits_preserve_exact_file_identity() {
     )
     .unwrap();
     assert_ne!(first.event_id, second.event_id);
-    assert_eq!(first.file_id, Some(hash16(b"/project/src/first.rs")));
-    assert_eq!(second.file_id, Some(hash16(b"/project/src/second.rs")));
+    assert_eq!(
+        first.file_id,
+        Some(sha256_prefix16(b"/project/src/first.rs"))
+    );
+    assert_eq!(
+        second.file_id,
+        Some(sha256_prefix16(b"/project/src/second.rs"))
+    );
 }
 
 #[test]
@@ -711,7 +723,7 @@ fn kimi_rendered_hook_fixture_queues_only_native_session_and_call_identity() {
 
     assert_eq!(lifecycle.session_id.as_str(), "session.kimi.native");
     assert_eq!(lifecycle.call_id.as_str(), "call.kimi.native");
-    assert_eq!(material.file_id, Some(hash16(b"<SAVED_PATH>")));
+    assert_eq!(material.file_id, Some(sha256_prefix16(b"<SAVED_PATH>")));
 }
 
 #[test]
@@ -725,10 +737,13 @@ fn hermes_real_tool_fixture_uses_terminal_receipt_identity() {
     )
     .unwrap();
 
-    assert_ne!(material.event_id, hash16(b"<TOOL_CALL_ID>"));
+    assert_ne!(material.event_id, sha256_prefix16(b"<TOOL_CALL_ID>"));
     assert_eq!(material.protected_session_id, hash32(b"<SESSION_ID>"));
     assert_eq!(material.tool_id, Some(material.event_id));
-    assert_eq!(material.effect_receipt_id, Some(hash16(b"<TOOL_CALL_ID>")));
+    assert_eq!(
+        material.effect_receipt_id,
+        Some(sha256_prefix16(b"<TOOL_CALL_ID>"))
+    );
     assert_eq!(material.file_id, None);
 }
 
@@ -744,10 +759,13 @@ fn hermes_adapter_fixture_preserves_native_terminal_identity() {
     )
     .unwrap();
 
-    assert_ne!(material.event_id, hash16(b"<TOOL_CALL_ID>"));
+    assert_ne!(material.event_id, sha256_prefix16(b"<TOOL_CALL_ID>"));
     assert_eq!(material.protected_session_id, hash32(b"<SESSION_ID>"));
     assert_eq!(material.tool_id, Some(material.event_id));
-    assert_eq!(material.effect_receipt_id, Some(hash16(b"<TOOL_CALL_ID>")));
+    assert_eq!(
+        material.effect_receipt_id,
+        Some(sha256_prefix16(b"<TOOL_CALL_ID>"))
+    );
     assert_eq!(material.file_id, None);
 }
 

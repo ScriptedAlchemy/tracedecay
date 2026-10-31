@@ -108,6 +108,9 @@ test-helpers = [
     "tracedecay-sessions/test-helpers",
     "tracedecay-store-runtime/test-helpers",
     "dep:tracedecay-temporal-query",
+    # The fixture surface under `src/test_support` and the session-temporal
+    # bench harness both sandbox host state in temp directories.
+    "dep:tempfile",
 ]
 
 test-transport = [
@@ -180,7 +183,6 @@ tracedecay-api = { path = "../tracedecay-api" }
 tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-automation = { path = "../tracedecay-automation" }
 tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime" }
-tracedecay-code-extraction = { path = "../tracedecay-code-extraction", default-features = false }
 tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false }
 tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention" }
 tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", default-features = false }
@@ -200,7 +202,6 @@ tracedecay-maintenance = { path = "../tracedecay-maintenance" }
 tracedecay-global-db = { path = "../tracedecay-global-db" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db" }
 tracedecay-graph-query = { path = "../tracedecay-graph-query" }
-tracedecay-policy = { path = "../tracedecay-policy" }
 tracedecay-privacy = { path = "../tracedecay-privacy" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 # Workspace-versioned like this crate: it owns `version::PACKAGE_VERSION`.
@@ -215,7 +216,6 @@ tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-sto
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", optional = true }
 tracedecay-lcm = { path = "../tracedecay-lcm" }
 tracedecay-sessions = { path = "../tracedecay-sessions" }
-tracedecay-source-edit = { path = "../tracedecay-source-edit" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
 tracedecay-store = { path = "../tracedecay-store" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
@@ -229,11 +229,9 @@ tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
 tokio-stream = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 sha2.workspace = true
-walkdir.workspace = true
-gix.workspace = true
 zeroize.workspace = true
 keyring = { version = "4.1.5", features = ["v1"] }
-tempfile.workspace = true
+tempfile = { workspace = true, optional = true }
 futures-util.workspace = true
 rmcp = { workspace = true, features = ["server"] }
 # Opt-in. Cargo rejects optional dev-dependencies, and an unconditional one
@@ -246,6 +244,16 @@ rmcp = { workspace = true, features = ["server"] }
 libc.workspace = true
 
 [dev-dependencies]
+# Only test targets name these: no production module in this crate references
+# them, and the extraction harness now lives in the extraction crate itself.
+gix.workspace = true
+walkdir.workspace = true
+tracedecay-policy = { path = "../tracedecay-policy" }
+tracedecay-code-extraction = { path = "../tracedecay-code-extraction", default-features = false }
+# Unit and integration targets build temp directories without the `test-helpers`
+# dependency feature, which is the only thing that enables the optional normal
+# dependency the library's own fixture surface needs.
+tempfile.workspace = true
 rusqlite.workspace = true
 tree-sitter.workspace = true
 rustls = { workspace = true, features = ["ring", "std", "tls12"] }

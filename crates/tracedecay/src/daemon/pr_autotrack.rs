@@ -58,6 +58,7 @@ use tracedecay_domain::ProjectId;
 use tracedecay_domain::errors::TraceDecayError;
 
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use tracedecay_runtime_core::lifecycle_lease::canonical_or_original;
 #[cfg(any(unix, test))]
 use tracedecay_runtime_core::logging::log_daemon_event;
 
@@ -521,10 +522,7 @@ pub(crate) async fn cleanup_manual_branch_retirement(
         )));
     }
     let artifacts = ManualBranchArtifactsV1::for_head(data_root, branch, &source.source_oid);
-    let expected_worktree = artifacts
-        .worktree
-        .canonicalize()
-        .unwrap_or(artifacts.worktree.clone());
+    let expected_worktree = canonical_or_original(&artifacts.worktree);
     let ownership = manual_branch_artifact_ownership_off_runtime(
         repo_root,
         &expected_worktree,
@@ -580,9 +578,7 @@ pub(crate) async fn retire_worktree_mount(
             "code-index scheduler authority is unavailable for worktree retirement",
         ));
     };
-    let root = worktree
-        .canonicalize()
-        .unwrap_or_else(|_| worktree.to_path_buf());
+    let root = canonical_or_original(worktree);
     let roots = BTreeSet::from([root]);
     if !schedulers.retire_project_roots(&roots).await {
         return Err(scheduler_unavailable(
@@ -987,7 +983,7 @@ async fn remove_pr_store(
         return Err("managed PR label does not name a PR worktree".to_string());
     };
     let worktree = data_root.join("pr-worktrees").join(format!("pr-{number}"));
-    let root = worktree.canonicalize().unwrap_or_else(|_| worktree.clone());
+    let root = canonical_or_original(&worktree);
     let roots = BTreeSet::from([root]);
     if !schedulers.retire_project_roots(&roots).await {
         return Err(scheduler_unavailable(
