@@ -196,6 +196,7 @@ mod types;
 mod work;
 mod work_attempt_exec;
 mod work_blocked_interval_recovery;
+mod work_delivery;
 mod work_routing;
 
 pub use clock::now_millis;
@@ -228,6 +229,7 @@ use source_edit::{execute_source_edit, execute_source_edit_reconcile};
 use tracedecay_contracts::now_micros;
 use types::*;
 use work::*;
+pub use work_delivery::{DaemonWorkDeliveryDescriptorV1, settle_daemon_work_delivery};
 pub use work_routing::DaemonWorkProposalRoutingAuthorityV1;
 
 pub use feedback::{
