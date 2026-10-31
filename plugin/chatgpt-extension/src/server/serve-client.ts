@@ -84,7 +84,7 @@ export function toFailure(error: unknown): Failure {
 export function classifyCode(code: string): FailureKind {
   if (code.includes("not_authorized") || code === "denied" || code.startsWith("authorization")) return "denied";
   if (code.includes("not_found") || code === "project_required") return "not_found";
-  if (code.includes("stale")) return "stale";
+  if (code.includes("stale") || code === "project_server_response_revoked") return "stale";
   if (code.includes("unavailable") || code.includes("warming") || code.includes("saturated")) return "unavailable";
   if (code.includes("invalid") || code.includes("malformed")) return "invalid_request";
   if (code.includes("disconnected") || code.includes("socket")) return "disconnected";

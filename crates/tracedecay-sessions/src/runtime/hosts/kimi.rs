@@ -1206,7 +1206,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(!outcome.deferred);
+        assert!(!outcome.deferred, "{outcome:?}");
         let observations = admission.observations();
         assert_eq!(observations.len(), 1);
         assert_eq!(

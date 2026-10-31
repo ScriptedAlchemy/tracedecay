@@ -22,10 +22,11 @@ use super::engine::DaemonEngine;
 use super::explicit_git_state;
 #[cfg(unix)]
 use super::scheduler::{AutomationSchedulerExitBarrier, AutomationSchedulerLifecycle};
+#[cfg(unix)]
+use super::store_owner_key_from_paths;
 use super::{
     DaemonClientIdentity, DaemonHandshake, DatabaseOwnerRegistry, ProjectRouteKey,
     ProjectServerKey, StoreAdministration, StoreOwnerKey, multi_root_family_allows,
-    store_owner_key_from_paths,
 };
 use crate::test_support::git::git;
 use tracedecay_daemon_service::shutdown::DaemonLifecycle;
@@ -391,8 +392,15 @@ async fn serve_authenticated_test_client(
 pub(super) async fn connect_loopback_test_peer(
     endpoint: &tracedecay_daemon_protocol::DaemonEndpoint,
 ) -> tokio::net::TcpStream {
-    let tracedecay_daemon_protocol::DaemonEndpoint::Loopback(address) = endpoint else {
-        panic!("portable server fixtures bind loopback, got {endpoint}");
+    #[cfg(not(unix))]
+    let tracedecay_daemon_protocol::DaemonEndpoint::Loopback(address) = endpoint;
+    #[cfg(unix)]
+    let address = match endpoint {
+        tracedecay_daemon_protocol::DaemonEndpoint::Loopback(address) => address,
+        #[cfg(unix)]
+        tracedecay_daemon_protocol::DaemonEndpoint::Unix(_) => {
+            panic!("portable server fixtures bind loopback, got {endpoint}")
+        }
     };
     tokio::net::TcpStream::connect(address)
         .await

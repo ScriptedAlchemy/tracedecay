@@ -1,6 +1,8 @@
 use super::*;
 use serde_json::Value;
+#[cfg(unix)]
 use tracedecay_domain::ProjectId;
+#[cfg(unix)]
 use tracedecay_domain::configuration::{LcmSummarizerExecutableV1, LcmSummarizerExecutablesV1};
 use tracedecay_domain::{
     CanonicalObservationEnvelopeV1, ComponentVersion, DurableObservationV1,
@@ -10,19 +12,22 @@ use tracedecay_domain::{
     SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
 };
 use tracedecay_global_db::RegisteredGlobalDb;
+#[cfg(unix)]
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_global_db::tests::harness::{
-    RegisteredGlobalDbHarness, RegisteredGlobalDbTestRuntime,
-};
+use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
+#[cfg(unix)]
+use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 use tracedecay_lcm::{LcmRelationProjectionStatus, LcmSourceRef, LcmSummarizerMode};
 use tracedecay_runtime_core::db::engine::params;
 #[cfg(unix)]
 use tracedecay_runtime_core::test_executable::write_executable_script;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
+#[cfg(unix)]
+use tracedecay_store::SessionRefreshStore as _;
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
-    SessionRefreshStore as _, build_observation_resolution_authorization_v1,
-    build_observation_retrieval_anchor, derive_canonical_projection,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
+    derive_canonical_projection,
 };
 
 mod compression_ownership;
@@ -120,6 +125,7 @@ fn retained_guard(
 
 /// A configured fake summarizer on the shortest admitted run budget, so a
 /// fake that stops answering fails the test quickly instead of at the default.
+#[cfg(unix)]
 fn fake_summarizer(executable: &std::path::Path) -> LcmSummarizerExecutableV1 {
     LcmSummarizerExecutableV1::configured_with(
         executable.to_path_buf(),
@@ -133,12 +139,14 @@ fn fake_summarizer(executable: &std::path::Path) -> LcmSummarizerExecutableV1 {
 /// publishes explicitly through `lcm.summarizer_executables.v1`. Provider
 /// executables are never resolved from the environment or `PATH`, so a test
 /// that expects a fake summarizer to run must pin it here.
+#[cfg(unix)]
 struct ProjectSummarizerFixture {
     runtime: RegisteredGlobalDbTestRuntime,
     project_id: ProjectId,
     root: tempfile::TempDir,
 }
 
+#[cfg(unix)]
 impl ProjectSummarizerFixture {
     /// The project identity is the `project_key` every fixture session
     /// carries, so observations scoped to this project reconcile with the
@@ -1590,6 +1598,7 @@ fn parked_sessions_converge_once_the_summarizer_becomes_available_without_restar
     });
 }
 
+#[cfg(unix)]
 async fn active_projection_frontier(db: &RegisteredGlobalDb, session_id: &str) -> Option<i64> {
     let snapshot = db.read_snapshot().await.unwrap();
     let mut rows = snapshot
@@ -1609,6 +1618,7 @@ async fn active_projection_frontier(db: &RegisteredGlobalDb, session_id: &str) -
 
 /// An explicit refresh request shaped like the session refresh service's:
 /// bound to the caller's view of the frontier through its refresh key.
+#[cfg(unix)]
 fn explicit_refresh_request(
     session: &SessionId,
     observed_through: u64,
@@ -1636,6 +1646,7 @@ fn explicit_refresh_request(
     .with_refresh_key(refresh_key)
 }
 
+#[cfg(unix)]
 async fn eventually<F, Fut>(what: &str, mut ready: F)
 where
     F: FnMut() -> Fut,

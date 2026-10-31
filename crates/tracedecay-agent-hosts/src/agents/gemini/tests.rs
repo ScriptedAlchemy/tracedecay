@@ -11,6 +11,7 @@ use super::extension::{
 };
 use super::*;
 
+#[cfg(unix)]
 use tracedecay_domain::errors::TraceDecayError;
 #[cfg(unix)]
 use tracedecay_runtime_core::test_executable::write_executable_script;
@@ -88,6 +89,7 @@ fn install_context(home: &Path, tracedecay_bin: &str) -> InstallContext {
     }
 }
 
+#[cfg(unix)]
 fn read_json(path: &Path) -> serde_json::Value {
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }

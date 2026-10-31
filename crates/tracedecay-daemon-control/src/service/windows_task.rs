@@ -721,13 +721,13 @@ pub(super) fn materialize_service_spec_after_quiescence(
     };
     let layout = local_runtime_layout(package_id)?;
     ensure_private_runtime_layout(&layout)?;
-    if !windows_paths_equal(&spec.tracedecay_bin, &layout.executable)? {
+    if windows_paths_equal(&spec.tracedecay_bin, &layout.executable)? {
+        tracedecay_private_fs::windows::validate_private_file(&layout.executable).map_err(
+            |error| secure_path_error("validate service executable", &layout.executable, &error),
+        )?;
+    } else {
         let source = scoop_service_source(&spec.tracedecay_bin, package_id)?;
         atomic_copy_private_executable(&source, &layout.executable)?;
-    } else {
-        tracedecay_private_fs::windows::validate_private_file(&layout.executable).map_err(
-            |error| secure_path_error("validate service executable", &layout.executable, error),
-        )?;
     }
     let mut materialized = spec.clone();
     materialized.tracedecay_bin = layout.executable;
@@ -793,13 +793,13 @@ fn ensure_private_runtime_layout(layout: &ServiceRuntimeLayout) -> Result<()> {
                 ),
             })?;
     tracedecay_private_fs::windows::validate_directory_path(local_app_data)
-        .map_err(|error| secure_path_error("validate LOCALAPPDATA", local_app_data, error))?;
+        .map_err(|error| secure_path_error("validate LOCALAPPDATA", local_app_data, &error))?;
 
     let tracedecay_dir = local_app_data.join("TraceDecay");
     let service_dir = tracedecay_dir.join("service");
     for directory in [&tracedecay_dir, &service_dir, &layout.directory] {
         tracedecay_private_fs::windows::create_private_directory(directory).map_err(|error| {
-            secure_path_error("create private service directory", directory, error)
+            secure_path_error("create private service directory", directory, &error)
         })?;
     }
     Ok(())
@@ -829,7 +829,7 @@ fn atomic_copy_private_executable(source: &Path, destination: &Path) -> Result<(
         })?;
         let mut output =
             tracedecay_private_fs::windows::create_private_file(&temporary).map_err(|error| {
-                secure_path_error("create service executable temporary", &temporary, error)
+                secure_path_error("create service executable temporary", &temporary, &error)
             })?;
         let mut buffer = vec![0_u8; 64 * 1024];
         loop {
@@ -845,11 +845,11 @@ fn atomic_copy_private_executable(source: &Path, destination: &Path) -> Result<(
                 break;
             }
             output.write_all(&buffer[..read]).map_err(|error| {
-                secure_path_error("write service executable temporary", &temporary, error)
+                secure_path_error("write service executable temporary", &temporary, &error)
             })?;
         }
         output.sync_all().map_err(|error| {
-            secure_path_error("sync service executable temporary", &temporary, error)
+            secure_path_error("sync service executable temporary", &temporary, &error)
         })?;
         drop(output);
         tracedecay_runtime_core::db::DatabaseAuthority::replace_file_atomically(
@@ -858,7 +858,7 @@ fn atomic_copy_private_executable(source: &Path, destination: &Path) -> Result<(
             "Scoop service executable",
         )?;
         tracedecay_private_fs::windows::validate_private_file(destination)
-            .map_err(|error| secure_path_error("validate service executable", destination, error))
+            .map_err(|error| secure_path_error("validate service executable", destination, &error))
     })();
     if operation.is_err() {
         let _ = std::fs::remove_file(&temporary);
@@ -874,7 +874,7 @@ fn windows_paths_equal(left: &Path, right: &Path) -> Result<bool> {
 }
 
 #[cfg(windows)]
-fn secure_path_error(operation: &str, path: &Path, error: std::io::Error) -> TraceDecayError {
+fn secure_path_error(operation: &str, path: &Path, error: &std::io::Error) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("{operation} '{}': {error}", path.display()),
     }
@@ -1296,7 +1296,7 @@ fn read_scoop_state(state_file: &Path) -> Result<Option<ScoopServiceState>> {
             return Err(secure_path_error(
                 "open Scoop service state",
                 state_file,
-                error,
+                &error,
             ));
         }
     };
@@ -1316,11 +1316,11 @@ fn remove_scoop_state(state_file: &Path) -> Result<()> {
         secure_path_error(
             "validate Scoop service state before removal",
             state_file,
-            error,
+            &error,
         )
     })?;
     std::fs::remove_file(state_file).map_err(|error| {
-        secure_path_error("remove restored Scoop service state", state_file, error)
+        secure_path_error("remove restored Scoop service state", state_file, &error)
     })
 }
 
@@ -1331,14 +1331,14 @@ fn remove_private_runtime_executable(executable: &Path) -> Result<()> {
             secure_path_error(
                 "remove quiesced Scoop service executable",
                 executable,
-                error,
+                &error,
             )
         }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(secure_path_error(
             "validate Scoop service executable before removal",
             executable,
-            error,
+            &error,
         )),
     }
 }
@@ -2175,7 +2175,11 @@ mod native {
     use windows::Win32::System::Variant::VARIANT;
     use windows::core::{BSTR, HRESULT};
 
-    use super::*;
+    use super::{
+        PathBuf, ProfileRoot, Result, TaskIdentity, TaskSchedulerApi, TaskSnapshot,
+        TraceDecayError, foreign_task, missing_task, profile_root_from_task_xml,
+        task_definition_is_owned, task_profile_is_owned, task_snapshot_from_scheduler_state,
+    };
 
     const OWNER_AND_DACL_SECURITY_INFORMATION: i32 = 0x0000_0001 | 0x0000_0004;
 
@@ -2191,7 +2195,7 @@ mod native {
         fn initialize() -> Result<Self> {
             unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
                 .ok()
-                .map_err(|error| com_error("initialize COM", error))?;
+                .map_err(|error| com_error("initialize COM", &error))?;
             Ok(Self)
         }
     }
@@ -2217,12 +2221,12 @@ mod native {
             let apartment = ComApartment::initialize()?;
             let service: ITaskService =
                 unsafe { CoCreateInstance(&TaskScheduler, None, CLSCTX_INPROC_SERVER) }
-                    .map_err(|error| com_error("create Task Scheduler service", error))?;
+                    .map_err(|error| com_error("create Task Scheduler service", &error))?;
             let empty = VARIANT::default();
             unsafe { service.Connect(&empty, &empty, &empty, &empty) }
-                .map_err(|error| com_error("connect to Task Scheduler as current user", error))?;
+                .map_err(|error| com_error("connect to Task Scheduler as current user", &error))?;
             let root = unsafe { service.GetFolder(&BSTR::from(r"\")) }
-                .map_err(|error| com_error("open Task Scheduler root folder", error))?;
+                .map_err(|error| com_error("open Task Scheduler root folder", &error))?;
             Ok(Self {
                 root,
                 identity,
@@ -2237,7 +2241,7 @@ mod native {
             } {
                 Ok(task) => Ok(Some(task)),
                 Err(error) if is_task_not_found(&error) => Ok(None),
-                Err(error) => Err(com_error("get TraceDecay daemon task", error)),
+                Err(error) => Err(com_error("get TraceDecay daemon task", &error)),
             }
         }
 
@@ -2251,7 +2255,7 @@ mod native {
 
         fn verify_ownership(&self, task: &IRegisteredTask) -> Result<()> {
             let xml = unsafe { task.Xml() }
-                .map_err(|error| com_error("read daemon task XML for ownership", error))?;
+                .map_err(|error| com_error("read daemon task XML for ownership", &error))?;
             let xml = String::try_from(xml).map_err(|error| TraceDecayError::Config {
                 message: format!("daemon task XML is not valid UTF-16: {error}"),
             })?;
@@ -2269,8 +2273,9 @@ mod native {
                     loaded: profile_root_from_task_xml(&xml).map(PathBuf::into_boxed_path),
                 });
             }
-            let sddl = unsafe { task.GetSecurityDescriptor(OWNER_AND_DACL_SECURITY_INFORMATION) }
-                .map_err(|error| com_error("read daemon task security descriptor", error))?;
+            let sddl =
+                unsafe { task.GetSecurityDescriptor(OWNER_AND_DACL_SECURITY_INFORMATION) }
+                    .map_err(|error| com_error("read daemon task security descriptor", &error))?;
             let sddl = String::try_from(sddl).map_err(|error| TraceDecayError::Config {
                 message: format!("daemon task security descriptor is not valid UTF-16: {error}"),
             })?;
@@ -2296,10 +2301,10 @@ mod native {
                 return Ok(None);
             };
             let enabled = unsafe { task.Enabled() }
-                .map_err(|error| com_error("read daemon task enablement", error))?
+                .map_err(|error| com_error("read daemon task enablement", &error))?
                 .as_bool();
             let scheduler_state = unsafe { task.State() }
-                .map_err(|error| com_error("read daemon task state", error))?;
+                .map_err(|error| com_error("read daemon task state", &error))?;
             task_snapshot_from_scheduler_state(scheduler_state.0, enabled).map(Some)
         }
 
@@ -2308,7 +2313,7 @@ mod native {
                 return Ok(None);
             };
             let xml =
-                unsafe { task.Xml() }.map_err(|error| com_error("read daemon task XML", error))?;
+                unsafe { task.Xml() }.map_err(|error| com_error("read daemon task XML", &error))?;
             String::try_from(xml)
                 .map(Some)
                 .map_err(|error| TraceDecayError::Config {
@@ -2320,8 +2325,9 @@ mod native {
             let Some(task) = self.task()? else {
                 return Ok(None);
             };
-            let sddl = unsafe { task.GetSecurityDescriptor(OWNER_AND_DACL_SECURITY_INFORMATION) }
-                .map_err(|error| com_error("read daemon task security descriptor", error))?;
+            let sddl =
+                unsafe { task.GetSecurityDescriptor(OWNER_AND_DACL_SECURITY_INFORMATION) }
+                    .map_err(|error| com_error("read daemon task security descriptor", &error))?;
             String::try_from(sddl)
                 .map(Some)
                 .map_err(|error| TraceDecayError::Config {
@@ -2357,14 +2363,14 @@ mod native {
                     &sddl,
                 )
             }
-            .map_err(|error| com_error("register TraceDecay daemon task", error))?;
+            .map_err(|error| com_error("register TraceDecay daemon task", &error))?;
             self.verify_ownership(&task)
         }
 
         fn set_enabled(&mut self, enabled: bool) -> Result<()> {
             let task = self.required_task("change enablement of")?;
             unsafe { task.SetEnabled(enabled.into()) }
-                .map_err(|error| com_error("change daemon task enablement", error))
+                .map_err(|error| com_error("change daemon task enablement", &error))
         }
 
         fn disable_for_rollback(&mut self) -> Result<()> {
@@ -2372,7 +2378,7 @@ mod native {
                 return Ok(());
             };
             let xml = unsafe { task.Xml() }
-                .map_err(|error| com_error("read daemon task XML during rollback", error))?;
+                .map_err(|error| com_error("read daemon task XML during rollback", &error))?;
             let xml = String::try_from(xml).map_err(|error| TraceDecayError::Config {
                 message: format!("daemon task XML is not valid UTF-16: {error}"),
             })?;
@@ -2391,19 +2397,19 @@ mod native {
                 });
             }
             unsafe { task.SetEnabled(false.into()) }
-                .map_err(|error| com_error("disable daemon task during rollback", error))
+                .map_err(|error| com_error("disable daemon task during rollback", &error))
         }
 
         fn run(&mut self) -> Result<()> {
             let task = self.required_task("start")?;
             unsafe { task.Run(&VARIANT::default()) }
                 .map(drop)
-                .map_err(|error| com_error("start daemon task", error))
+                .map_err(|error| com_error("start daemon task", &error))
         }
 
         fn stop(&mut self) -> Result<()> {
             let task = self.required_task("stop")?;
-            unsafe { task.Stop(0) }.map_err(|error| com_error("stop daemon task", error))
+            unsafe { task.Stop(0) }.map_err(|error| com_error("stop daemon task", &error))
         }
 
         fn delete(&mut self) -> Result<()> {
@@ -2416,7 +2422,7 @@ mod native {
             } {
                 Ok(()) => Ok(()),
                 Err(error) if is_task_not_found(&error) => Ok(()),
-                Err(error) => Err(com_error("delete TraceDecay daemon task", error)),
+                Err(error) => Err(com_error("delete TraceDecay daemon task", &error)),
             }
         }
     }
@@ -2430,7 +2436,7 @@ mod native {
             || code == HRESULT::from_win32(ERROR_PATH_NOT_FOUND.0)
     }
 
-    fn com_error(operation: &str, error: windows::core::Error) -> TraceDecayError {
+    fn com_error(operation: &str, error: &windows::core::Error) -> TraceDecayError {
         TraceDecayError::Config {
             message: format!("{operation} failed: {error}"),
         }

@@ -155,6 +155,9 @@ async fn broker_pair() -> (BrokerStreamTransport, ClientStream) {
     let (listener, endpoint) = BrokerListener::bind(&default_loopback_endpoint())
         .await
         .expect("bind loopback listener");
+    #[cfg(not(unix))]
+    let DaemonEndpoint::Loopback(address) = endpoint;
+    #[cfg(unix)]
     let DaemonEndpoint::Loopback(address) = endpoint else {
         panic!("loopback bind returned {endpoint}");
     };

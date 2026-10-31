@@ -7,6 +7,8 @@
 //! and the readiness probe keeps failing closed with a typed identity
 //! mismatch when the daemon that answers is not the expected version.
 
+#![cfg(unix)]
+
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
 

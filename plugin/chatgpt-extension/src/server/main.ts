@@ -135,42 +135,66 @@ async function main(): Promise<void> {
     },
   });
   const bridge = bridgeFromEnvironment(process.env, values.binary);
-  const assets = await loadAssets();
-  const createServer = () => createExtensionServer({ bridge, assets });
   let tokenPath: string | null = null;
+  let listening: LoopbackHttpServer | null = null;
+  let stopping = false;
   const shutdown = async () => {
-    await bridge.close();
-    if (tokenPath !== null) await rm(tokenPath, { force: true });
-  };
-  process.once("SIGINT", () => void shutdown().finally(() => process.exit(0)));
-  process.once("SIGTERM", () => void shutdown().finally(() => process.exit(0)));
-  if (values.http !== undefined) {
-    const [host, portText] = splitHostPort(values.http);
-    const port = Number.parseInt(portText, 10);
-    if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error(`invalid --http port: ${portText}`);
-    const token = values.token ?? randomBytes(24).toString("base64url");
-    const listening = await serveLoopbackHttp(createServer, host, port, token);
-    process.stderr.write(`tracedecay-chatgpt-extension listening on ${listening.url}\n`);
-    if (values.token === undefined) {
-      // The generated credential goes to an operator-readable file, never to
-      // stderr: supervisors that capture logs must not retain a reusable
-      // bearer token. It is scoped to the bound listener and published only
-      // after the bind succeeds, so a second server can neither mask a live
-      // listener's token nor leave a file behind when it fails to start.
-      // Beside the daemon authority record keeps it in the same trust domain
-      // with the same 0600 posture.
-      const profileRoot = resolveProfileRoot(process.env);
-      tokenPath = join(profileRoot, `chatgpt-loopback-bearer-token-${new URL(listening.url).port}`);
-      await mkdir(profileRoot, { recursive: true });
-      await writeFile(tokenPath, `${token}\n`, { mode: 0o600 });
-      await chmod(tokenPath, 0o600);
-      process.stderr.write(`MCP bearer token written to ${tokenPath} (send as Authorization: Bearer)\n`);
+    try {
+      await startup;
+    } finally {
+      try {
+        if (listening !== null) await listening.close();
+        await bridge.close();
+      } finally {
+        if (tokenPath !== null) await rm(tokenPath, { force: true });
+      }
     }
-    return;
-  }
-  const server = createServer();
-  server.server.onclose = () => void shutdown();
-  await server.connect(new StdioServerTransport());
+  };
+  const stop = () => {
+    if (stopping) return;
+    stopping = true;
+    void shutdown().then(() => process.exit(0), reportFatalError);
+  };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  // A Node supervisor owns an IPC child's lifetime. Disconnect is a graceful
+  // boundary on Windows too, where child.kill() cannot deliver Unix signals.
+  const supervised = typeof process.send === "function";
+  if (supervised) process.once("disconnect", stop);
+  const startup = (async () => {
+    const assets = await loadAssets();
+    if (stopping) return;
+    const createServer = () => createExtensionServer({ bridge, assets });
+    if (values.http !== undefined) {
+      const [host, portText] = splitHostPort(values.http);
+      const port = Number.parseInt(portText, 10);
+      if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error(`invalid --http port: ${portText}`);
+      const token = values.token ?? randomBytes(24).toString("base64url");
+      listening = await serveLoopbackHttp(createServer, host, port, token);
+      process.stderr.write(`tracedecay-chatgpt-extension listening on ${listening.url}\n`);
+      if (values.token === undefined) {
+        // The generated credential goes to an operator-readable file, never to
+        // stderr: supervisors that capture logs must not retain a reusable
+        // bearer token. It is scoped to the bound listener and published only
+        // after the bind succeeds, so a second server can neither mask a live
+        // listener's token nor leave a file behind when it fails to start.
+        // Beside the daemon authority record keeps it in the same trust domain
+        // with the same 0600 posture.
+        const profileRoot = resolveProfileRoot(process.env);
+        tokenPath = join(profileRoot, `chatgpt-loopback-bearer-token-${new URL(listening.url).port}`);
+        await mkdir(profileRoot, { recursive: true });
+        await writeFile(tokenPath, `${token}\n`, { mode: 0o600 });
+        await chmod(tokenPath, 0o600);
+        process.stderr.write(`MCP bearer token written to ${tokenPath} (send as Authorization: Bearer)\n`);
+      }
+      return;
+    }
+    const server = createServer();
+    server.server.onclose = () => void shutdown().catch(reportFatalError);
+    await server.connect(new StdioServerTransport());
+  })();
+  if (supervised && !process.connected) stop();
+  await startup;
 }
 
 function splitHostPort(value: string): [string, string] {
@@ -191,9 +215,11 @@ function invokedDirectly(): boolean {
   }
 }
 
+function reportFatalError(error: unknown): never {
+  process.stderr.write(`${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`);
+  process.exit(1);
+}
+
 if (invokedDirectly()) {
-  main().catch((error: unknown) => {
-    process.stderr.write(`${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`);
-    process.exit(1);
-  });
+  main().catch(reportFatalError);
 }
