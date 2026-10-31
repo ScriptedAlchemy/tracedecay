@@ -5,6 +5,7 @@
 //! registries and lifecycle handles that one daemon generation owns.
 
 use super::*;
+#[cfg(unix)]
 use std::collections::HashSet;
 #[cfg(unix)]
 use tracedecay_code_index_runtime::{GitWatchSyncConfigV1, git_watch};
@@ -15,6 +16,7 @@ use tracedecay_daemon_identity::profile_identity;
 #[cfg(unix)]
 #[cfg(unix)]
 use tracedecay_daemon_service::shutdown::{DAEMON_TASK_ABORT_DEADLINE, DaemonLifecycle};
+#[cfg(unix)]
 use tracedecay_hooks::core_events::HOOK_EVENT_METHOD;
 
 #[cfg(unix)]
@@ -35,9 +37,11 @@ fn git_watch_sync_config(config: &tracedecay_configuration::SyncConfig) -> GitWa
 #[cfg(unix)]
 mod shutdown;
 
+#[cfg(unix)]
 type CachedProjectServerFutureV1<'a> = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<Option<Arc<crate::mcp::McpServer>>>> + Send + 'a>,
 >;
+#[cfg(unix)]
 type OpenProjectServerFutureV1<'a> = std::pin::Pin<
     Box<
         dyn std::future::Future<

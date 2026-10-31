@@ -96,6 +96,7 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         Some((self.aliases.get(route)?, &entry.server))
     }
 
+    #[cfg(unix)]
     pub(super) fn bind_ready_route(
         &mut self,
         route: ProjectRouteKey,

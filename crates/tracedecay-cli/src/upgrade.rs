@@ -23,6 +23,7 @@ use tempfile::TempDir;
 
 use self::attestation::{ReleaseProvenance, verify_release_attestation};
 use crate::cloud::{self, InstallMethod};
+#[cfg(unix)]
 use crate::macos_codesign::stabilize_installed_executable;
 use tracedecay_application::http_agent::http_agent;
 use tracedecay_dashboard_api::cloud::ReleaseLookupError;

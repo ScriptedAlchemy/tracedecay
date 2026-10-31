@@ -221,7 +221,10 @@ mod runtime_configuration_cutover {
     use std::collections::BTreeMap;
 
     use tempfile::TempDir;
+    #[cfg(unix)]
     use tracedecay_application::advisory::github_runtime::daemon_owned_github_source_binding_v1;
+    #[cfg(unix)]
+    use tracedecay_domain::configuration::SourceKindV1;
     use tracedecay_domain::configuration::{
         AUTOMATION_SETTINGS_SETTING_KEY, AuthorityRef, AutomationSettingsV1, ConfigurationGrantId,
         ConfigurationGrantReceiptId, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
@@ -229,7 +232,7 @@ mod runtime_configuration_cutover {
         ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationRevisionId,
         ConfigurationValueV1, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
         SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY, ScopeSourceBinding, SettingKey,
-        SourceBindingId, SourceKindV1, TELEMETRY_TIMINGS_SETTING_KEY,
+        SourceBindingId, TELEMETRY_TIMINGS_SETTING_KEY,
     };
     use tracedecay_domain::{AccessPolicyDigest, ActorId, LocatorDigest, ProjectId, UtcMicros};
 
@@ -1229,6 +1232,7 @@ mod runtime_configuration_cutover {
         );
     }
 
+    #[cfg(unix)]
     fn github_source_bindings(
         configuration: &PinnedRuntimeConfiguration,
     ) -> Vec<(String, tracedecay_domain::LocatorDigest)> {

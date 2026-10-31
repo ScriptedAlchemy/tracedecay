@@ -153,7 +153,7 @@ fn read_config_observation(path: &Path, owned_key: &str) -> Result<CodexPluginPr
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;

@@ -29,6 +29,7 @@ pub(crate) struct PrAutotrackTask {
 }
 
 impl PrAutotrackTask {
+    #[cfg(unix)]
     pub(crate) fn cancellation(&self) -> CancellationToken {
         self.cancellation.clone()
     }

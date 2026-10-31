@@ -15,6 +15,7 @@ use tracedecay_domain::configuration::{
 use tracedecay_global_db::configuration::registry::ConfigurationRegistry;
 #[cfg(test)]
 pub use tracedecay_global_db::configuration::{registry, resolver};
+#[cfg(unix)]
 pub use tracedecay_runtime_core::config::is_ambient_project_root;
 
 /// The `index.exclude.v1` / `index.include.v1` policy a fresh profile

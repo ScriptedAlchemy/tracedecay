@@ -888,10 +888,10 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_writers_on_a_slow_disk_publish_every_receipt_within_budget() {
+    fn concurrent_writers_on_a_slow_disk_stage_every_receipt_behind_an_owner() {
         const WRITERS: usize = 8;
         let root = TestDir::new();
-        drop(HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).unwrap());
+        let owner = HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).unwrap();
         let _slow_disk = tracedecay_private_fs::framed_log::sync_latency::inject(
             &root.0,
             Duration::from_millis(20),
@@ -919,17 +919,30 @@ mod tests {
         assert_eq!(
             retained,
             (0..WRITERS)
-                .map(|_| Ok(HookDeliveryRetentionV1::Published))
+                .map(|_| Ok(HookDeliveryRetentionV1::Staged))
                 .collect::<Vec<_>>()
         );
-        let mut pending = HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO)
-            .unwrap()
-            .pending(64)
-            .unwrap();
+        assert_eq!(owner.pending(64).unwrap(), Vec::new());
+        drop(owner);
+
+        let owner = HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO).unwrap();
+        let mut pending = owner.pending(64).unwrap();
         let mut expected = receipts;
         pending.sort_by_key(|receipt| receipt.receipt_id);
         expected.sort_by_key(|receipt| receipt.receipt_id);
         assert_eq!(pending, expected);
+        let receipt_ids = expected
+            .iter()
+            .map(|receipt| receipt.receipt_id)
+            .collect::<Vec<_>>();
+        assert_eq!(owner.acknowledge_many(&receipt_ids), Ok(WRITERS));
+        assert_eq!(
+            HookDeliveryReceiptSpoolV1::open(&root.0, Duration::ZERO)
+                .unwrap()
+                .pending(64)
+                .unwrap(),
+            Vec::new()
+        );
     }
 
     #[test]

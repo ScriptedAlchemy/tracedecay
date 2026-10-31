@@ -691,7 +691,7 @@ fn account_information_error_is_not_task_not_found() {
     use windows::core::HRESULT;
 
     assert!(!native::is_task_not_found_code(HRESULT(
-        0x8004_130f_u32 as i32
+        i32::from_ne_bytes(0x8004_130f_u32.to_ne_bytes())
     )));
     assert!(native::is_task_not_found_code(HRESULT::from_win32(
         windows::Win32::Foundation::ERROR_FILE_NOT_FOUND.0

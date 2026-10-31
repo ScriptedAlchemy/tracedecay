@@ -19,7 +19,8 @@ use super::repeated_queries::RepeatedQueries;
 use super::tool_surface::ToolSurface;
 use super::{
     DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DaemonClientDeadline, DaemonHandshake,
-    PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, PROJECT_WARMING_RETRY_HINT,
+    PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL,
+    PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE, PROJECT_WARMING_RETRY_HINT,
     REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE, connect_to_current_daemon_within,
     json_rpc_error_is_project_open_retryable, next_daemon_response_line, write_daemon_preamble,
 };
@@ -482,6 +483,7 @@ pub(crate) fn apply_proxy_initialize_metadata(
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 pub(crate) fn reset_proxy_handshake_for_initialize(
     base_handshake: &DaemonHandshake,
     handshake: &mut DaemonHandshake,
@@ -723,6 +725,7 @@ async fn write_proxy_request_result(
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 pub(crate) async fn send_daemon_request_line(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -738,13 +741,42 @@ pub(crate) async fn send_daemon_request_line(
     .await
 }
 
-fn responses_are_project_open_retryable(responses: &[String]) -> bool {
-    responses.len() == 1
-        && serde_json::from_str::<serde_json::Value>(&responses[0])
-            .ok()
-            .and_then(|response| response.get("error").cloned())
-            .as_ref()
-            .is_some_and(json_rpc_error_is_project_open_retryable)
+fn responses_are_retryable_for_request(
+    request: &DaemonProxyRequest<'_>,
+    responses: &[String],
+) -> bool {
+    let [response] = responses else {
+        return false;
+    };
+    let Ok(response) = serde_json::from_str::<serde_json::Value>(response) else {
+        return false;
+    };
+    let Some(error) = response.get("error") else {
+        return false;
+    };
+    if error
+        .pointer("/data/retryable")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        return false;
+    }
+    if json_rpc_error_is_project_open_retryable(error) {
+        return true;
+    }
+    if error
+        .pointer("/data/reason_code")
+        .and_then(serde_json::Value::as_str)
+        != Some(PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE)
+    {
+        return false;
+    }
+    // A retired response may follow a committed effect. Each connection has a
+    // new request scope, so only canonical reads can be replayed here.
+    request_tool_name(request.parsed.as_ref()).is_some_and(|tool| {
+        tracedecay_mcp::tools::binding::mcp_dispatch_contract(&tool)
+            .is_ok_and(tracedecay_tool_catalog::McpDispatchContractV1::read_only)
+    })
 }
 
 /// Sends one host request and fits the daemon's answer to this session's tool
@@ -780,7 +812,9 @@ async fn send_daemon_request_with_project_open_retry(
 ) -> Result<Vec<String>> {
     let deadline = Instant::now() + PROJECT_OPEN_RETRY_GRACE;
     let mut responses = send_daemon_request(socket_path, handshake, request, cancellation).await?;
-    while cancellation.borrow().is_none() && responses_are_project_open_retryable(&responses) {
+    while cancellation.borrow().is_none()
+        && responses_are_retryable_for_request(request, &responses)
+    {
         let Some(remaining) = deadline
             .checked_duration_since(Instant::now())
             .filter(|remaining| !remaining.is_zero())
@@ -797,6 +831,7 @@ async fn send_daemon_request_with_project_open_retry(
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 pub(crate) async fn send_daemon_request_line_with_liveness_poll(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -968,6 +1003,7 @@ where
 /// Extracts the daemon's advertised version from a proxied `initialize`
 /// response (`result.serverInfo.version`).
 #[cfg(test)]
+#[cfg(unix)]
 pub(crate) fn proxy_initialize_metadata(
     request_line: &str,
     responses: &[String],
@@ -1029,10 +1065,11 @@ fn daemon_proxy_error_response(
 mod tests {
     use serde_json::json;
 
-    use super::responses_are_project_open_retryable;
+    use super::{DaemonProxyRequest, responses_are_retryable_for_request};
 
     #[test]
     fn project_open_retry_accepts_warming_and_capacity_errors() {
+        let request = DaemonProxyRequest::new(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
         let retryable = [
             json!({
                 "jsonrpc": "2.0",
@@ -1079,40 +1116,108 @@ mod tests {
         ];
 
         for response in retryable {
-            assert!(responses_are_project_open_retryable(
+            assert!(responses_are_retryable_for_request(
+                &request,
                 &[response.to_string()]
             ));
         }
-        assert!(!responses_are_project_open_retryable(&[json!({
-            "jsonrpc": "2.0",
-            "id": 4,
-            "error": {
-                "code": -32603,
-                "message": "permanent project open failure",
-                "data": {
-                    "kind": "project_open_failed",
-                    "retryable": false
-                }
-            }
-        })
-        .to_string()]));
-        assert!(
-            !responses_are_project_open_retryable(&[json!({
+        assert!(!responses_are_retryable_for_request(
+            &request,
+            &[json!({
                 "jsonrpc": "2.0",
-                "id": 5,
+                "id": 4,
                 "error": {
                     "code": -32603,
-                    "message": "daemon project server capacity reached",
+                    "message": "permanent project open failure",
                     "data": {
-                        "kind": "project_server_capacity_reached",
-                        "retryable": true,
-                        "capacity": 8
+                        "kind": "project_open_failed",
+                        "retryable": false
                     }
                 }
             })
-            .to_string()]),
+            .to_string()]
+        ));
+        assert!(
+            !responses_are_retryable_for_request(
+                &request,
+                &[json!({
+                    "jsonrpc": "2.0",
+                    "id": 5,
+                    "error": {
+                        "code": -32603,
+                        "message": "daemon project server capacity reached",
+                        "data": {
+                            "kind": "project_server_capacity_reached",
+                            "retryable": true,
+                            "capacity": 8
+                        }
+                    }
+                })
+                .to_string()]
+            ),
             "capacity prose and kind without reason_code must not decide proxy retry"
         );
+    }
+
+    #[test]
+    fn retired_responses_require_read_only_contract_and_retry_permission() {
+        assert!(
+            !tracedecay_mcp::tools::binding::mcp_dispatch_contract("tracedecay_fact_store_curate")
+                .expect("curation has a canonical dispatch contract")
+                .read_only()
+        );
+        for (tool, reason, retryable, expected) in [
+            (
+                "tracedecay_search",
+                "project_server_response_revoked",
+                true,
+                true,
+            ),
+            (
+                "tracedecay_fact_store_curate",
+                "project_server_response_revoked",
+                true,
+                false,
+            ),
+            (
+                "unknown_tool",
+                "project_server_response_revoked",
+                true,
+                false,
+            ),
+            (
+                "tracedecay_search",
+                "project_server_response_revoked",
+                false,
+                false,
+            ),
+            (
+                "tracedecay_search",
+                "tool_dispatch_effect_unknown",
+                false,
+                false,
+            ),
+            ("tracedecay_search", "tool_dispatch_cancelled", false, false),
+        ] {
+            let line = json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": tool, "arguments": {} },
+            })
+            .to_string();
+            let response = json!({
+                "jsonrpc": "2.0", "id": 1,
+                "error": {
+                    "code": -32603, "message": "route refusal",
+                    "data": { "reason_code": reason, "retryable": retryable },
+                },
+            })
+            .to_string();
+            assert_eq!(
+                responses_are_retryable_for_request(&DaemonProxyRequest::new(&line), &[response]),
+                expected,
+                "{tool}: {reason}, retryable={retryable}",
+            );
+        }
     }
 
     /// The post-disconnect drain must never cut short work the daemon is still
