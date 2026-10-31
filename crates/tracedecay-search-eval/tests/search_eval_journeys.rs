@@ -1,12 +1,40 @@
-use crate::common;
-
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use serde_json::Value;
 
+fn repository_root() -> PathBuf {
+    std::path::absolute("../..").expect("absolute repository root")
+}
+
+fn search_eval_bin(name: &str) -> PathBuf {
+    let override_env = match name {
+        "tracedecay-search-eval-direct" => "TRACEDECAY_SEARCH_EVAL_DIRECT_TEST_BIN",
+        _ => "TRACEDECAY_SEARCH_EVAL_TEST_BIN",
+    };
+    let binary = std::env::var_os(override_env).map_or_else(
+        || {
+            let test_executable =
+                std::env::current_exe().expect("test executable path should resolve");
+            let profile_dir = test_executable
+                .parent()
+                .and_then(Path::parent)
+                .expect("integration test should run from a Cargo profile directory");
+            profile_dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
+        },
+        PathBuf::from,
+    );
+    assert!(
+        binary.is_file(),
+        "search-eval binary `{name}` is missing at {}; set {override_env} or build it beside the test profile",
+        binary.display()
+    );
+    binary
+}
+
 fn run(args: &[&str]) -> Output {
-    Command::new(common::search_eval_bin("tracedecay-search-eval"))
-        .current_dir(common::repository_root())
+    Command::new(search_eval_bin("tracedecay-search-eval"))
+        .current_dir(repository_root())
         .args(args)
         .output()
         .unwrap()
@@ -130,5 +158,47 @@ fn invalid_fixture_is_reported_as_fail_not_pending() {
         payload["rationale"]
             .as_str()
             .is_some_and(|rationale| rationale.contains("missing-workload.json"))
+    );
+}
+
+#[test]
+fn packaged_evaluator_binary_validates_without_a_source_checkout() {
+    let project = tempfile::tempdir().expect("unrelated temporary project");
+    std::fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname = \"unrelated\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("unrelated project content");
+    assert!(!project.path().join(".git").exists());
+    assert!(
+        !project
+            .path()
+            .join("tests/fixtures/search_quality")
+            .exists()
+    );
+
+    let output = Command::new(search_eval_bin("tracedecay-search-eval-direct"))
+        .current_dir(project.path())
+        .arg("validate")
+        .arg("--repo-root")
+        .arg(project.path())
+        .output()
+        .expect("run packaged evaluator binary");
+    assert!(
+        output.status.success(),
+        "packaged evaluator failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("typed evaluator JSON");
+    assert_eq!(response["status"], "pass");
+    // Without a checkout the binary can only have read its packaged workload,
+    // so its envelope must equal the library's receipt for those same assets.
+    let receipt = tracedecay_search_eval::validate_default_workload()
+        .expect("validate the packaged workload through the library");
+    assert_eq!(
+        response,
+        serde_json::to_value(&receipt).expect("serialize packaged workload receipt"),
+        "the packaged evaluator drifted from the library's packaged-workload receipt"
     );
 }

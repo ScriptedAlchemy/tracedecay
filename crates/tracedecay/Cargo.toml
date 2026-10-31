@@ -140,12 +140,6 @@ test-transport = [
     "tracedecay-code-index-runtime/test-transport",
 ]
 
-# Links the search-quality evaluator library. Cargo rejects optional
-# dev-dependencies, and an unconditional one links the evaluator into every
-# test target. Journeys that compare the CLI receipt to the library enable
-# this feature. `test-transport` and `production` must not.
-search-eval = ["dep:tracedecay-search-eval"]
-
 # The typed RMCP benchmark is the only consumer of the client-side RMCP
 # transport. Keep that surface out of ordinary integration-fixture builds:
 # the benchmark enables its complete client/runtime dependency set explicitly.
@@ -243,7 +237,6 @@ rmcp = { workspace = true, features = ["server"] }
 # Opt-in. Cargo rejects optional dev-dependencies, and an unconditional one
 # links the evaluator into every test target. Default and `production` builds
 # leave it off, so the shipped CLI does not link it.
-tracedecay-search-eval = { path = "../tracedecay-search-eval", optional = true }
 
 # `kill(2)` for the daemon integration suites' physical-restart journeys
 # (tests/daemon_suite). Store-locality detection lives in tracedecay-store-runtime.
