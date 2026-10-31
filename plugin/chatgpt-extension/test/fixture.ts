@@ -1,10 +1,10 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DaemonAuthorityRecordSchema } from "../src/server/authority.js";
+import { daemonAuthorityRecordPath, DaemonAuthorityRecordSchema } from "../src/server/authority.js";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -97,7 +97,9 @@ export class DaemonFixture {
   }
 
   static async create(): Promise<DaemonFixture> {
-    const root = await mkdtemp(path.join(os.tmpdir(), "tracedecay-chatgpt-ext-"));
+    // The profile suffix must still fit the native Unix socket path bound.
+    const tempRoot = process.platform === "win32" ? os.tmpdir() : "/tmp";
+    const root = await realpath(await mkdtemp(path.join(tempRoot, "tracedecay-chatgpt-ext-")));
     const fixture = new DaemonFixture(root);
     await mkdir(fixture.profileRoot, { recursive: true });
     await mkdir(path.join(fixture.home, ".config"), { recursive: true });
@@ -118,7 +120,7 @@ export class DaemonFixture {
     this.#daemon = child;
     const deadline = Date.now() + 120_000;
     while (Date.now() < deadline) {
-      if (child.exitCode !== null) throw new Error(`daemon exited early (${child.exitCode}):\n${this.#stderr}`);
+      if (child.exitCode !== null || child.signalCode !== null) throw new Error(`daemon exited early (${child.exitCode ?? child.signalCode}):\n${this.#stderr}`);
       const record = await this.readAuthority();
       if (record !== null && record.http_application_endpoint) return;
       await sleep(100);
@@ -128,7 +130,7 @@ export class DaemonFixture {
 
   async readAuthority() {
     try {
-      const raw = await readFile(path.join(this.profileRoot, "daemon-authority.json"), "utf8");
+      const raw = await readFile(daemonAuthorityRecordPath(this.profileRoot), "utf8");
       const parsed = DaemonAuthorityRecordSchema.safeParse(JSON.parse(raw));
       return parsed.success ? parsed.data : null;
     } catch {
@@ -140,8 +142,7 @@ export class DaemonFixture {
     const child = this.#daemon;
     if (child === null) return;
     this.#daemon = null;
-    if (child.exitCode === null) {
-      child.kill("SIGTERM");
+    if (child.exitCode === null && child.signalCode === null) {
       await new Promise<void>((resolve) => {
         const timer = setTimeout(() => {
           child.kill("SIGKILL");
@@ -151,6 +152,7 @@ export class DaemonFixture {
           clearTimeout(timer);
           resolve();
         });
+        child.kill("SIGTERM");
       });
     }
   }

@@ -48,6 +48,48 @@ jobs:
   # the Bazel Linux authority; dispatch can request OS and host journeys.
   # Job conditions evaluate that policy before a runner is scheduled.
 
+  # Bazel reruns only the actions whose inputs changed, but every Bazel job
+  # still pays a hosted runner, Bazel setup, analysis, and, without a warm
+  # cache, a cold build (a Renovate mockup bump ran Clippy for 53 minutes).
+  # Pull requests confined to paths no Bazel target or Bazel-backed step
+  # reads skip those jobs; scripts/ci-change-scope.py holds the allowlist
+  # and fails closed. Pushes and dispatches always run everything, and a
+  # skipped required check still satisfies branch protection.
+  change-scope:
+    name: Change scope
+    permissions:
+      contents: read
+      pull-requests: read
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      bazel: ${{ steps.decide.outputs.bazel }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: scripts/ci-change-scope.py
+          sparse-checkout-cone-mode: false
+
+      - name: Decide whether the Bazel jobs are needed
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_COUNT: ${{ github.event.pull_request.changed_files }}
+        run: |
+          set -euo pipefail
+          listing="$RUNNER_TEMP/changed-paths.tsv"
+          # An unlisted change set must run the Bazel jobs, not fail this gate.
+          if ! gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files?per_page=100" \
+              --jq '.[] | [.filename, (.previous_filename // "")] | @tsv' > "$listing"; then
+            echo "::warning::Could not list the pull request files; running every Bazel job."
+            : > "$listing"
+          fi
+          python3 scripts/ci-change-scope.py \
+            --event-name "$EVENT_NAME" --changed-paths "$listing" --expected-count "$EXPECTED_COUNT"
+
   # One dev-profile `tracedecay` binary for the explicitly requested stock
   # host integrations. Ordinary Linux validation needs no CLI artifact, so
   # this build is absent unless `run_hosts=true`.
@@ -71,7 +113,8 @@ jobs:
           tailscale-client-id: >-
             ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
                 && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
-                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
+                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)
+                    || (github.actor_id == '29139614' && vars.TS_BAZEL_RENOVATE_CLIENT_ID)) || '' }}
 
       - name: Publish the binary for the host integration jobs
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -98,9 +141,9 @@ jobs:
         run: python3 scripts/test-claude-observation-benchmark-publication.py
 
   # The cheap repository gates in one job: commit lint, cache lineage, the
-  # release guards, and rustfmt. Each used to hold its own ubuntu-latest
-  # runner for a couple of minutes of work; on 20 free slots that is three
-  # queue entries per push doing what one does.
+  # release guards, rustfmt, and the generator feature policy. Each used to
+  # hold its own ubuntu-latest runner for a couple of minutes of work; on 20
+  # free slots that is several queue entries per push doing what one does.
   gates:
     permissions:
       contents: read
@@ -142,6 +185,9 @@ jobs:
       - name: Test bounded commit range linting
         run: python3 scripts/test-lint-commit-range.py
 
+      - name: Test the pull request change-scope decision
+        run: python3 scripts/test-ci-change-scope.py
+
       - name: Test Windows checkout preserves generated and embedded bytes
         run: python3 scripts/test-checkout-bytes.py
 
@@ -162,17 +208,27 @@ jobs:
           tailscale-client-id: >-
             ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
                 && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
-                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
+                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)
+                    || (github.actor_id == '29139614' && vars.TS_BAZEL_RENOVATE_CLIENT_ID)) || '' }}
 
-      - name: Test repository policies with Bazel workers
+      # One Bazel invocation for every policy test and the rustfmt check.
+      # Analysis, not actions, dominates these: in run 41016935321 the
+      # policy tests spent 65 s of 71 s loading and analyzing (critical path
+      # 6 s), `//:rustfmt_check` 35 s of 37 s (critical path 2 s), and the
+      # Feature gates job 83 s of 85 s for a 1 s `gen_builds_test`. Sharing
+      # one analysis runs the actions side by side instead of in series.
+      - name: Test repository policies and check formatting with Bazel
         run: >-
           bazel test --config=ci --test_output=errors
+          //:rustfmt_check
+          //scripts:gen_builds_test
           //scripts:unused_tool_context_measure_test
           //scripts:sqlite_plan_stability_check_test
           //scripts:ambient_tokio_check_test
           //scripts:rusqlite_storage_boundary_test
           //scripts:packaged_lsp_bridge_test
           //scripts:configure_ci_fleet_test
+          //scripts:release_pr_refresh_test
 
       - name: Test the ranked-tail trim replay against the Rust rule cases
         run: bazel run //scripts:test-measure-ranked-tail-trim.py
@@ -195,7 +251,6 @@ jobs:
           python3 scripts/test-check-release-artifacts.py
           python3 scripts/test-generate-release-inventory.py
           python3 scripts/test-update-release-checksums.py
-          bazel test --config=ci --test_output=errors //scripts:release_pr_refresh_test
           bash tests/macos_stable_codesign_test.sh
 
       # Exercise the release guard scripts when admitting proposed changes.
@@ -208,9 +263,6 @@ jobs:
           bash tests/release_pr_integrity_test.sh
           bash tests/dashboard_bundle_check_test.sh
           bash tests/dashboard_digests_check_test.sh
-
-      - name: Check formatting
-        run: bazel build --config=ci //:rustfmt_check
 
       # Manifest edits that skip a gen_builds.py rerun leave stale BUILD
       # files; compare the committed files against a fresh generation.
@@ -286,7 +338,8 @@ jobs:
           tailscale-client-id: >-
             ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
                 && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
-                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
+                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)
+                    || (github.actor_id == '29139614' && vars.TS_BAZEL_RENOVATE_CLIENT_ID)) || '' }}
 
       # `bazel test` builds every target in the pattern, so tests start
       # while the rest of the workspace still links.
@@ -332,11 +385,16 @@ jobs:
   # Hosted-only runs retain their shards so local CPU and disk limits do not
   # serialize the entire workspace. Both routes feed the Test Linux check.
   linux-test:
+    needs: change-scope
     permissions:
       contents: read
       id-token: write
     name: Test Linux (${{ matrix.shard }})
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    # `!cancelled()` evaluates this after the push-only skip of change-scope;
+    # `!= 'false'` keeps running when that job failed to decide.
+    if: >-
+      ${{ !cancelled() && needs.change-scope.outputs.bazel != 'false'
+      && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
     timeout-minutes: 240
     env:
@@ -346,7 +404,8 @@ jobs:
       matrix:
         shard: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
           && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
-            || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID))
+            || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)
+            || (github.actor_id == '29139614' && vars.TS_BAZEL_RENOVATE_CLIENT_ID))
           && '["fleet"]' || '["root-a","root-b","workspace-a","workspace-code","workspace-b","workspace-c"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -364,7 +423,8 @@ jobs:
           tailscale-client-id: >-
             ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
                 && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
-                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
+                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)
+                    || (github.actor_id == '29139614' && vars.TS_BAZEL_RENOVATE_CLIENT_ID)) || '' }}
 
       # Fleet measurements leave about 46 GiB free without deleting SDKs.
       # Keep cleanup for unmeasured hosted shards and fleet fallback, where
@@ -555,24 +615,37 @@ jobs:
   # Preserves the "Test Linux" check name for branch protection.
   linux-test-result:
     name: Test Linux
-    needs: linux-test
+    needs: [change-scope, linux-test]
     if: ${{ always() && !cancelled() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Require every Linux test shard
-        run: test "${{ needs.linux-test.result }}" = "success"
+        env:
+          LINUX_RESULT: ${{ needs.linux-test.result }}
+          BAZEL_SCOPE: ${{ needs.change-scope.outputs.bazel }}
+        run: |
+          if [[ "$LINUX_RESULT" == success ]]; then
+            exit 0
+          fi
+          if [[ "$LINUX_RESULT" == skipped && "$BAZEL_SCOPE" == false ]]; then
+            echo "No changed path reaches a Bazel input; the Linux shards were not required."
+            exit 0
+          fi
+          echo "::error::Linux test shards finished with result '$LINUX_RESULT'."
+          exit 1
 
   windows-test:
     # Windows jobs share one private worker; let Linux use hosted runner slots first.
-    needs: linux-test
+    needs: [change-scope, linux-test]
     permissions:
       contents: read
       id-token: write
     # Branch protection requires this check name.
     name: Test Windows
     if: >-
-      ${{ !cancelled() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
+      ${{ !cancelled() && needs.change-scope.outputs.bazel != 'false' &&
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
       (github.event_name != 'workflow_dispatch' ||
       (inputs.run_os &&
       (inputs.native_platform == 'all' || inputs.native_platform == 'windows'))) }}
@@ -598,7 +671,8 @@ jobs:
           tailscale-client-id: >-
             ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
                 && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
-                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
+                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)
+                    || (github.actor_id == '29139614' && vars.TS_BAZEL_RENOVATE_CLIENT_ID)) || '' }}
 
       - name: Build and type-check the Windows workspace
         if: ${{ github.event_name != 'workflow_dispatch' }}
@@ -689,11 +763,14 @@ jobs:
   # Blocking Clippy policy over every Bazel Rust target, the
   # `cargo clippy --workspace --all-targets -D warnings` equivalent.
   clippy:
+    needs: change-scope
     permissions:
       contents: read
       id-token: write
     name: Clippy
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    if: >-
+      ${{ !cancelled() && needs.change-scope.outputs.bazel != 'false'
+      && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     # Same image as Test Linux so rustc action keys can restore that job's
     # disk cache (proc-macros, build scripts, grammar cc, matching rlibs)
     # when this job's own prefix misses. ARM isolated Clippy from that
@@ -712,7 +789,8 @@ jobs:
           tailscale-client-id: >-
             ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
                 && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
-                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
+                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)
+                    || (github.actor_id == '29139614' && vars.TS_BAZEL_RENOVATE_CLIENT_ID)) || '' }}
           extra-restore-keys: ci-linux-test-v2
 
       - name: Run blocking Clippy policy
@@ -725,21 +803,20 @@ jobs:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
           key: ${{ steps.bazel.outputs.disk-cache-key }}
 
-  # Feature gates remains a required check and exercises the parser and policy.
+  # Branch protection requires this check name. The generator feature policy
+  # test (`//scripts:gen_builds_test`) runs inside Repository gates, whose
+  # Bazel analysis it shares; on its own runner it paid 52 s of Bazel setup
+  # and 83 s of analysis for a 1 s test. Delete this job once branch
+  # protection requires Repository gates instead.
   feature-gates:
     name: Feature gates
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    needs: gates
+    if: ${{ always() && !cancelled() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: ./.github/actions/setup-bazel
-        with:
-          cache-key: ci-feature-gates
-
-      - name: Test generator feature policy and Cargo tree parsing
-        run: bazel test --config=ci --test_output=errors //scripts:gen_builds_test
+      - name: Require the generator feature policy test in Repository gates
+        run: test "${{ needs.gates.result }}" = "success"
 
   # The configuration users actually receive: the release build of
   # `tracedecay-cli`, whose default features are `production`. It catches a
@@ -771,7 +848,8 @@ jobs:
           tailscale-client-id: >-
             ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
                 && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
-                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)) || '' }}
+                    || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)
+                    || (github.actor_id == '29139614' && vars.TS_BAZEL_RENOVATE_CLIENT_ID)) || '' }}
 
       - name: Read immutable packaging inputs
         id: packaging
@@ -805,6 +883,8 @@ jobs:
   # Do not serialize them behind repository-wide Rust formatting and gates.
   dashboard:
     name: Dashboard
+    needs: change-scope
+    if: ${{ !cancelled() && needs.change-scope.outputs.bazel != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -858,6 +938,17 @@ jobs:
             bazel-testlogs/dashboard/**/test.log
             bazel-testlogs/sdks/typescript/**/test.log
             bazel-testlogs/plugin/chatgpt-extension/**/test.log
+
+      # This job has no fleet identity, so it is the one Bazel job whose
+      # disk cache hosted runs can actually use. No Linux disk cache existed
+      # at all before this save: fleet runs skip the restore, which leaves
+      # the save key empty, so master never wrote one.
+      - name: Save compiled Bazel actions
+        if: always() && !cancelled() && github.ref == 'refs/heads/master' && steps.bazel.outputs.disk-cache-key != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.bazel.outputs.disk-cache-path }}
+          key: ${{ steps.bazel.outputs.disk-cache-key }}
 
   hermes-integration:
     name: Hermes integration (stock)

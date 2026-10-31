@@ -346,6 +346,7 @@ impl McpServerConstructionContext {
     }
 
     #[cfg(test)]
+    #[cfg(unix)]
     pub(crate) fn with_direct_profile_identity(
         mut self,
         profile_identity: LocalProfileIdentityAuthorityV1,

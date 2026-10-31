@@ -22,6 +22,7 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::native_runtime;
 
 #[cfg(any(unix, test))]
+#[cfg(unix)]
 use super::ProjectServerKey;
 use super::StoreOwnerKey;
 #[cfg(unix)]
@@ -38,6 +39,7 @@ use tracedecay_daemon_service::{
     ProfileHostAdmissionReplayRegistry,
 };
 use tracedecay_mcp::handlers::hook_runtime::replay_projectless_hermes_host_admission;
+#[cfg(unix)]
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
 use tracedecay_store_runtime::StoreWriterGates;
@@ -127,6 +129,7 @@ pub(super) fn store_writer_scope(data_root: &Path, class: StoreWriterClass) -> W
 /// canonicalized `data_root`, so this agrees by construction with
 /// [`store_writer_scope`] and [`graph_writer_scope`] for the same store.
 #[cfg(any(unix, test))]
+#[cfg(unix)]
 pub(super) fn owner_writer_scope(key: &ProjectServerKey) -> WriterScope {
     WriterScope::store(key.owner.store_root.clone(), StoreWriterClass::Owner)
 }
@@ -1521,6 +1524,7 @@ impl StoreAdministration {
 
     /// Drops the cached profile refresh services so their profile session
     /// leases no longer keep the store runtime open at terminal close.
+    #[cfg(any(unix, test, feature = "test-transport"))]
     pub(super) async fn release_profile_session_refresh_services(&self) {
         self.profile_session_refresh_services.lock().await.clear();
     }

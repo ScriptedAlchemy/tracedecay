@@ -16,9 +16,12 @@ use tempfile::TempDir;
 use tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use tracedecay_code_index_retention::code_index_generations::acquire_code_generation_store_lock;
 use tracedecay_contracts::code_index_freshness::{
-    CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexFreshnessCoverageV1,
-    CodeIndexReadinessTargetV1, CodeIndexReadinessV1, CodeIndexReadinessWaitReadV1,
-    CodeIndexSourceOmissionReasonV1 as StatusOmissionReasonV1, CodeIndexStalenessStateV1,
+    CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexReadinessTargetV1,
+    CodeIndexReadinessV1, CodeIndexReadinessWaitReadV1, CodeIndexStalenessStateV1,
+};
+#[cfg(unix)]
+use tracedecay_contracts::code_index_freshness::{
+    CodeIndexFreshnessCoverageV1, CodeIndexSourceOmissionReasonV1 as StatusOmissionReasonV1,
 };
 use tracedecay_contracts::{
     CallableCodeOperationKind, CallableCodeQueryPort, CodeQueryScope, Deadline,
@@ -26,14 +29,15 @@ use tracedecay_contracts::{
     callable_code_operation,
 };
 use tracedecay_domain::{
-    AuthorizationRevision, CodeGenerationId, CodeSourceOmissionReasonV1, CommitId,
-    ComponentRevision, EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision,
-    FreshnessVectorDigest, OmittedCodeSourceV1, PrincipalId, ProjectId, PublicRetrieverStatus,
-    QueryNormalizationRevision, RefId, RetrievalBudget, RetrievalRequest, RetrievalScope,
-    RetrievalSnapshot, RetrieverKind, RetrieverOutcome, SanitizerRevision, ScoreDomainId,
-    SensitivityLevelV1, SingleRootScopeV1, SnapshotFileDispositionV1, TemporalModeV1, UtcMicros,
-    VectorWatermark, WorktreeId,
+    AuthorizationRevision, CodeGenerationId, CommitId, ComponentRevision,
+    EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision, FreshnessVectorDigest, PrincipalId,
+    ProjectId, PublicRetrieverStatus, QueryNormalizationRevision, RefId, RetrievalBudget,
+    RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind, RetrieverOutcome,
+    SanitizerRevision, ScoreDomainId, SensitivityLevelV1, SingleRootScopeV1,
+    SnapshotFileDispositionV1, TemporalModeV1, UtcMicros, VectorWatermark, WorktreeId,
 };
+#[cfg(unix)]
+use tracedecay_domain::{CodeSourceOmissionReasonV1, OmittedCodeSourceV1};
 use tracedecay_query::retrieval::{
     exact::{CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneRequest},
     lexical::LexicalLaneRequest,
@@ -67,15 +71,15 @@ use super::{
     wait_for_queryable_text_generation_id, wait_for_quiescent_owner_pass, wait_for_settled_owner,
     wait_for_worker_phase, wait_until_serving_seat, with_untouched_fillers, write,
 };
+#[cfg(unix)]
+use crate::code_index_scheduler::classification::NonUtf8ClassifiedChangeV1;
 use crate::code_index_scheduler::{
     CodeIndexCadenceOutcomeV1, CodeIndexCadenceTriggerV1, CodeIndexEventToReadyReceiptV1,
     CodeIndexHintPolicyV1, CodeIndexIgnoredDependencyRequestV1, CodeIndexReconcileAdmissionV1,
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorkerPhaseV1,
     CodeIndexWorktreeSchedulerV1, GenerationDecodeAdmissionV1, LatestCodeTextGenerationV1,
     LatestCompleteCodeIndexV1, RetainedGraphRecoveryPauseV1, SharedCodeIndexBytePoolV1,
-    classification::{
-        NonUtf8ClassifiedChangeV1, WorktreeChangeClassV1, WorktreeChangeClassificationV1,
-    },
+    classification::{WorktreeChangeClassV1, WorktreeChangeClassificationV1},
     feedback_document_identity_from_generation,
     freshness_witness::RestoreFreshnessWitnessV1,
     freshness_witness::SourceSweepStatsV1,

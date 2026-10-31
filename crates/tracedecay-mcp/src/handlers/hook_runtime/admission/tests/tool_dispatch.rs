@@ -113,8 +113,9 @@ async fn prove_dispatch_cutoff(refuse_first: bool) {
         )
         .unwrap()
     };
+    // Settlement removes debt after the effect, so observe debt first.
     assert!(
-        effects.load(Ordering::SeqCst) == 1 || !pending().is_empty(),
+        !pending().is_empty() || effects.load(Ordering::SeqCst) == 1,
         "a committed Tool boundary cannot lose both its intent execution and durable debt"
     );
     if refuse_first {

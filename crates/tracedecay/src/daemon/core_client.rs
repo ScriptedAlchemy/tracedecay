@@ -30,8 +30,9 @@ use tracedecay_runtime_core::config::ProfileRoot;
 
 use super::{
     DaemonClientDeadline, DaemonHandshake, JsonRpcError, JsonRpcRequest, JsonRpcResponse,
-    PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, Result, TraceDecayError,
-    error_is_project_open_retryable, tool_call_transport_error_is_retryable,
+    PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL,
+    PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE, Result, TraceDecayError,
+    error_is_project_open_retryable,
 };
 #[cfg(unix)]
 use tracedecay_daemon_service::logging::unavailable_error;
@@ -459,12 +460,16 @@ pub async fn call_tool_within(
 
 /// Transport errors the one-shot client rides out on its own cadence: a
 /// project open that has not finished (warming, deferred discovery, a
-/// saturated open queue) and a retained project server retired mid-response
-/// during a composition upgrade. The daemon types every one of these
-/// `retryable: true`; a client that honours only the open subset reports the
-/// upgrade window as a hard failure.
-fn is_project_open_retryable_error(error: &TraceDecayError) -> bool {
-    error_is_project_open_retryable(error) || tool_call_transport_error_is_retryable(error)
+/// saturated open queue), or a retired response to a canonical read. An
+/// effect may have committed before its response was revoked, and each
+/// connection gets a new request identity, so effects cannot be replayed here.
+fn is_project_open_retryable_error(tool_name: &str, error: &TraceDecayError) -> bool {
+    error_is_project_open_retryable(error)
+        || (matches!(
+            error.project_route_context(),
+            Some((PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE, true, _))
+        ) && tracedecay_mcp::tools::binding::mcp_dispatch_contract(tool_name)
+            .is_ok_and(tracedecay_tool_catalog::McpDispatchContractV1::read_only))
 }
 
 /// Reconstruct a typed daemon tool refusal from the JSON-RPC error frame.
@@ -538,6 +543,7 @@ fn tool_result_retry_after_delay(result: &serde_json::Value) -> Option<Duration>
 /// that result names. Every other completed result is returned on the first
 /// observation.
 fn project_open_retry_wait(
+    tool_name: &str,
     result: &Result<serde_json::Value>,
     deadline: Instant,
 ) -> Option<Duration> {
@@ -545,7 +551,7 @@ fn project_open_retry_wait(
         .and_then(|client_deadline| client_deadline.remaining())
         .ok()?;
     match result {
-        Err(error) if is_project_open_retryable_error(error) => {
+        Err(error) if is_project_open_retryable_error(tool_name, error) => {
             Some(remaining.min(PROJECT_OPEN_RETRY_INTERVAL))
         }
         Err(_) => None,
@@ -573,7 +579,7 @@ async fn call_tool_with_project_open_retry(
             deadline,
         )
         .await;
-        let Some(wait) = project_open_retry_wait(&result, deadline) else {
+        let Some(wait) = project_open_retry_wait(tool_name, &result, deadline) else {
             return result;
         };
         sleep(wall_now(), wait).await;
@@ -607,7 +613,7 @@ pub async fn call_default_tool(
     )
     .await;
     let retry_deadline = (Instant::now() + PROJECT_OPEN_RETRY_GRACE).min(deadline);
-    let Some(wait) = project_open_retry_wait(&result, retry_deadline) else {
+    let Some(wait) = project_open_retry_wait(tool_name, &result, retry_deadline) else {
         return result
             .map_err(|error| with_unavailable_daemon_advice(profile, &socket_path, error));
     };
@@ -803,6 +809,7 @@ mod tests {
         ApplicationProblem, ApplicationProblemEnvelope, RequestId, ResultContractRef,
         SafeDiagnostic,
     };
+    use tracedecay_domain::errors::TraceDecayError;
     use tracedecay_mcp::application_output::tool_result::ApplicationRefusal;
     use tracedecay_mcp::tool_errors::mark_semantic_tool_error;
     use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId, SchemaId};
@@ -855,14 +862,44 @@ mod tests {
         );
         assert!(tool_call_transport_error_is_retryable(&revoked));
         assert!(
-            super::is_project_open_retryable_error(&revoked),
+            super::is_project_open_retryable_error("tracedecay_search", &revoked),
             "the one-shot client rides out a mid-response retirement like a warming open"
         );
         assert!(
-            super::project_open_retry_wait(&Err(revoked), Instant::now() + Duration::from_secs(5))
-                .is_some(),
+            super::project_open_retry_wait(
+                "tracedecay_search",
+                &Err(revoked),
+                Instant::now() + Duration::from_secs(5)
+            )
+            .is_some(),
             "a revoked response is re-sent, not returned"
         );
+    }
+
+    #[test]
+    fn revoked_effects_and_unknown_outcomes_are_not_replayed() {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let revoked = TraceDecayError::project_route(
+            PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE,
+            true,
+            "retained server retired after dispatch",
+        );
+        assert_eq!(
+            super::project_open_retry_wait("tracedecay_fact_store_curate", &Err(revoked), deadline),
+            None,
+        );
+        for (reason, retryable) in [
+            (PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE, false),
+            ("tool_dispatch_effect_unknown", false),
+            ("tool_dispatch_cancelled", false),
+        ] {
+            let error = TraceDecayError::project_route(reason, retryable, "route refused");
+            assert_eq!(
+                super::project_open_retry_wait("tracedecay_search", &Err(error), deadline),
+                None,
+                "{reason}",
+            );
+        }
     }
 
     /// A problem tool result as the daemon's projectless retained route
@@ -911,7 +948,7 @@ mod tests {
             "{mounting}"
         );
         assert_eq!(
-            super::project_open_retry_wait(&Ok(mounting), deadline),
+            super::project_open_retry_wait("tracedecay_message_search", &Ok(mounting), deadline),
             Some(std::time::Duration::from_millis(250))
         );
 
@@ -919,7 +956,10 @@ mod tests {
             code: "application.retained.authority-unavailable".to_owned(),
             message: "no retained runtime is registered for this scope".to_owned(),
         }));
-        assert_eq!(super::project_open_retry_wait(&Ok(answer), deadline), None);
+        assert_eq!(
+            super::project_open_retry_wait("tracedecay_message_search", &Ok(answer), deadline),
+            None
+        );
     }
 
     #[test]

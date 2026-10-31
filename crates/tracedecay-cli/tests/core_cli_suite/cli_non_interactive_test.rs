@@ -888,6 +888,7 @@ fn dashboard_from_home_tells_the_operator_to_pass_path() {
     );
 }
 
+#[cfg(unix)]
 fn refresh_json(output: &Output, step: &str) -> serde_json::Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

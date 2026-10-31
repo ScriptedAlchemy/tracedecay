@@ -1,4 +1,5 @@
 use super::document_paths::validated_document_path;
+#[cfg(unix)]
 use std::io::Read;
 use std::path::{Component, Path};
 

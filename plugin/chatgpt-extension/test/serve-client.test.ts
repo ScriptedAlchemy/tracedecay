@@ -2,8 +2,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client, ProtocolError } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import { TraceDecayTransportError } from "@tracedecay/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonFailure, ServeSession, toFailure } from "../src/server/serve-client.js";
+import { failureFromSdk } from "../src/server/bridge.js";
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const NODE_BINARY = process.env.JS_BINARY__NODE_BINARY ?? process.execPath;
@@ -53,6 +55,30 @@ async function retrieveOffsets(serve: ServeSession, handle: string): Promise<num
   const result = await serve.callJson("retrieve_calls", { handle });
   return (result as { readonly offsets: number[] }).offsets;
 }
+
+describe("daemon route failures", () => {
+  it("preserves a retired response's typed reason through the SDK transport", () => {
+    const error = new ProtocolError(-32603, "retained server retired before response completion", {
+      reason_code: "project_server_response_revoked",
+      retryable: true,
+    });
+    expect(failureFromSdk(new TraceDecayTransportError("MCP request failed", error))).toEqual({
+      kind: "stale",
+      code: "project_server_response_revoked",
+      message: error.message,
+    });
+  });
+
+  it("keeps route denials distinct from generic protocol errors", () => {
+    expect(failureFromSdk(new ProtocolError(-32602, "not authorized", {
+      reason_code: "application_surface_not_found_or_not_authorized",
+      retryable: false,
+    }))).toEqual({ kind: "denied", code: "application_surface_not_found_or_not_authorized", message: "not authorized" });
+    expect(failureFromSdk(new ProtocolError(-32603, "unknown failure"))).toEqual({
+      kind: "protocol", code: "jsonrpc_-32603", message: "unknown failure",
+    });
+  });
+});
 
 describe("serve session shutdown", () => {
   it("refuses connection, calls, and tool discovery after closing an unused session", async () => {

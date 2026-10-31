@@ -831,6 +831,7 @@ fn enrolled_node_fails_over_after_the_operator_publishes_the_first_writer() {
 #[test]
 #[ignore = "requires a prebuilt production tracedecay daemon"]
 fn a_laptop_profile_joins_a_desktop_brain_and_holds_its_exact_enrollment() {
+    // Both profile sockets must fit the Unix sockaddr path bound.
     let scratch = TempDir::new().unwrap();
     let desktop_home = scratch.path().join("h1");
     let laptop_home = scratch.path().join("h2");

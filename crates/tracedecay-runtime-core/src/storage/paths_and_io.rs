@@ -557,7 +557,7 @@ fn unique_private_staging_directory(parent: &Path) -> io::Result<PathBuf> {
         ));
         match tracedecay_private_fs::create_private_directory(&path) {
             Ok(()) => return Ok(path),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
         }
     }

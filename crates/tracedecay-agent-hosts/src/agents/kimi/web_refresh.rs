@@ -1,6 +1,7 @@
 //! Refresh of an already-installed TraceDecay plugin through Kimi Code's own
 //! installer, reached through the token-protected local REST API that
-//! `kimi web` serves (`GET`/`POST /api/v1/plugins`).
+//! `kimi web` serves (`GET`/`POST /api/v1/plugins`) on the loopback endpoint
+//! it announces once bound.
 //!
 //! Consent boundary: the first install is the operator's interactive
 //! `/plugins install`, which carries Kimi's trust confirmation. This path only
@@ -9,7 +10,6 @@
 //! every failure, leaves the caller's pending operator action in place.
 
 use std::ffi::OsStr;
-use std::net::{Ipv4Addr, TcpListener};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -26,8 +26,8 @@ const KIMI_WEB_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Kimi's persistent server bearer token, under the Kimi Code home.
-const KIMI_SERVER_TOKEN_FILE: &str = "server.token";
+/// The origin of the `Local:` URL in `kimi web`'s ready banner.
+const KIMI_WEB_LOCAL_ORIGIN: &str = "http://127.0.0.1:";
 
 /// Why the non-interactive refresh did not apply. Every variant leaves the
 /// interactive `/plugins install` as the operator's step.
@@ -86,16 +86,14 @@ pub(crate) fn refresh_installed_plugin(
     })?;
     let kimi = require_host_cli(super::KIMI_CLI, "Kimi Code plugin refresh")
         .map_err(|error| KimiWebRefreshError::KimiUnavailable(error.to_string()))?;
-    let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-        .and_then(|listener| listener.local_addr())
-        .map_err(|error| KimiWebRefreshError::Start(format!("no loopback port: {error}")))?
-        .port()
-        .to_string();
-    // Without `--host`, Kimi binds 127.0.0.1 only. Its auto-update is
-    // disabled so a plugin refresh never upgrades Kimi itself.
+    // Without `--host`, Kimi binds 127.0.0.1 only. Port 0 lets the OS assign
+    // one that only this `kimi web` holds; a port chosen here could be taken
+    // by any local process before Kimi binds it, and Kimi itself moves past a
+    // busy one. Its auto-update is disabled so a plugin refresh never
+    // upgrades Kimi itself.
     let mut server = spawn_host_server(
         &kimi,
-        &["web", "--no-open", "--port", &port],
+        &["web", "--no-open", "--port", "0"],
         home,
         &[
             ("KIMI_CODE_HOME", code_home.as_os_str()),
@@ -103,14 +101,7 @@ pub(crate) fn refresh_installed_plugin(
         ],
     )
     .map_err(|error| KimiWebRefreshError::Start(error.to_string()))?;
-    let refreshed = refresh_through_server(
-        &mut server,
-        &format!("http://127.0.0.1:{port}/api/v1/plugins"),
-        &code_home,
-        source,
-        &staged,
-        &staged_version,
-    );
+    let refreshed = refresh_through_server(&mut server, source, &staged, &staged_version);
     let stopped = server.terminate();
     let refreshed = refreshed?;
     stopped.map_err(|error| KimiWebRefreshError::Stop(error.to_string()))?;
@@ -148,8 +139,6 @@ fn staged_bundle_version(staged: &Path) -> Result<String, KimiWebRefreshError> {
 
 fn refresh_through_server(
     server: &mut HostServerChild,
-    url: &str,
-    code_home: &Path,
     source: &str,
     staged: &Path,
     staged_version: &str,
@@ -167,7 +156,7 @@ fn refresh_through_server(
             .build(),
     );
     let deadline = Instant::now() + KIMI_WEB_READY_DEADLINE;
-    let (authorization, listing) = loop {
+    let (url, authorization, listing) = loop {
         if let Some(status) = server
             .exited()
             .map_err(|error| KimiWebRefreshError::Start(error.to_string()))?
@@ -177,22 +166,23 @@ fn refresh_through_server(
                 output: server.output().trim().to_string(),
             });
         }
-        let pending = match server_token(code_home, &server.output()) {
-            Some(token) => {
+        let pending = match announced_endpoint(&server.output()) {
+            Some(KimiWebEndpoint { port, token }) => {
+                let url = format!("{KIMI_WEB_LOCAL_ORIGIN}{port}/api/v1/plugins");
                 let authorization = format!("Bearer {token}");
                 match envelope_data(
                     agent
-                        .get(url)
+                        .get(&url)
                         .header("Authorization", &authorization)
                         .call(),
                     "GET /api/v1/plugins",
                 ) {
-                    Ok(listing) => break (authorization, listing),
+                    Ok(listing) => break (url, authorization, listing),
                     Err(KimiWebRefreshError::Unreachable(detail)) => detail,
                     Err(error) => return Err(error),
                 }
             }
-            None => "no server token yet".to_string(),
+            None => "it has not announced its local URL".to_string(),
         };
         if Instant::now() >= deadline {
             return Err(KimiWebRefreshError::NotReady {
@@ -221,7 +211,7 @@ fn refresh_through_server(
 
     let installed = envelope_data(
         agent
-            .post(url)
+            .post(&url)
             .header("Authorization", &authorization)
             .send_json(json!({ "source": source })),
         "POST /api/v1/plugins",
@@ -242,20 +232,30 @@ fn refresh_through_server(
     })
 }
 
-/// The persistent token Kimi writes on first boot, else the `#token=` it
-/// prints in its startup banner.
-fn server_token(code_home: &Path, output: &str) -> Option<String> {
-    if let Ok(token) = std::fs::read_to_string(code_home.join(KIMI_SERVER_TOKEN_FILE)) {
-        let token = token.trim();
-        if !token.is_empty() {
-            return Some(token.to_string());
-        }
-    }
-    let (_, rest) = output.split_once("#token=")?;
-    let token = rest
-        .split(|character: char| character.is_whitespace() || character == '\x1b')
-        .next()?;
-    (!token.is_empty()).then(|| token.to_string())
+/// The loopback endpoint a running `kimi web` serves its API on.
+#[derive(Debug, PartialEq, Eq)]
+struct KimiWebEndpoint {
+    port: u16,
+    token: String,
+}
+
+/// The endpoint from a complete `Local:    http://127.0.0.1:<port>/#token=<token>`
+/// line of `kimi web`'s ready banner, which Kimi prints only once it holds
+/// the port.
+fn announced_endpoint(output: &str) -> Option<KimiWebEndpoint> {
+    output
+        .split_inclusive('\n')
+        .filter_map(|line| line.strip_suffix('\n'))
+        .find_map(|line| {
+            let (_, url) = line.split_once(KIMI_WEB_LOCAL_ORIGIN)?;
+            let (port, fragment) = url.split_once("/#token=")?;
+            let port = port.parse::<u16>().ok().filter(|port| *port != 0)?;
+            let token = fragment.split_whitespace().next()?;
+            Some(KimiWebEndpoint {
+                port,
+                token: token.to_string(),
+            })
+        })
 }
 
 /// The `data` of a successful Kimi envelope (`{"code": 0, "data": ...}`).
@@ -286,4 +286,33 @@ fn envelope_data(
         .get("data")
         .cloned()
         .ok_or_else(|| KimiWebRefreshError::Unexpected(format!("{route} returned no data")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{KimiWebEndpoint, announced_endpoint};
+
+    const BANNER: &str = "\n  Kimi server ready  2.1.1\n\n  Local:    http://127.0.0.1:51234/#token=abc-123\n  Network:  off  use --host to enable\n";
+
+    #[test]
+    fn announced_endpoint_reads_the_local_line_of_the_ready_banner() {
+        assert_eq!(
+            announced_endpoint(BANNER),
+            Some(KimiWebEndpoint {
+                port: 51234,
+                token: "abc-123".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn announced_endpoint_waits_for_the_whole_local_line() {
+        let partial = &BANNER[..BANNER.find("abc-123").unwrap() + "abc".len()];
+        assert_eq!(announced_endpoint(partial), None);
+        assert_eq!(
+            announced_endpoint("  Local:    http://127.0.0.1:51234/\n"),
+            None,
+            "a banner without a token announces nothing TraceDecay can use"
+        );
+    }
 }

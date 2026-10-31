@@ -607,6 +607,7 @@ pub(super) fn open_files_match_generation_identity(
     }
 }
 
+#[cfg(unix)]
 pub(super) fn open_file_sha256_hex(file: &File) -> Result<String, CodeGenerationRetentionErrorV1> {
     open_file_sha256_hex_cancellable(file, &|| false)
 }

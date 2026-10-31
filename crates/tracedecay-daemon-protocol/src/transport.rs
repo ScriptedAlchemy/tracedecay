@@ -612,6 +612,9 @@ mod tests {
         let (listener, endpoint) = runtime
             .block_on(BrokerListener::bind(&default_loopback_endpoint()))
             .unwrap();
+        #[cfg(not(unix))]
+        let DaemonEndpoint::Loopback(address) = endpoint;
+        #[cfg(unix)]
         let DaemonEndpoint::Loopback(address) = endpoint else {
             panic!("loopback bind returned {endpoint}");
         };
