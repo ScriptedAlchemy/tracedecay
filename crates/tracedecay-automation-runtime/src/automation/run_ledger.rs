@@ -672,7 +672,7 @@ pub async fn load_run_records_for_task_key(
 ///
 /// Summaries are memoized per `(ledger path, task, task_key)` and validated by
 /// the ledger's length plus a digest of its final bytes, both read while the
-/// exclusive ledger lock is held. Scheduler ticks and dashboard status requests
+/// shared ledger lock is held. Scheduler ticks and dashboard status requests
 /// therefore rescan the ledger only after it actually changed; see
 /// `RUN_LEDGER_SUMMARY_MEMO` for the append-only invariant this relies on.
 #[tracing::instrument(name = "automation.run_ledger.task_summary", level = "trace", skip_all)]
@@ -734,7 +734,7 @@ fn validate_requested_task_key(task_key: &str) -> Result<()> {
 }
 
 /// Answers a ledger read either from `absent` or from `read` under the
-/// exclusive ledger lock.
+/// shared ledger lock.
 ///
 /// A read must not mint the dashboard directory: first lock acquisition can
 /// create it, and a root that does not exist has no ledger. Absence is therefore
@@ -933,7 +933,7 @@ struct CachedTaskSummary {
 /// The scheduler asks for one summary per task on every tick, and the
 /// dashboard scheduler-status endpoint asks several times per request. Each
 /// answer previously walked the entire append-only ledger twice while holding
-/// the exclusive ledger lock, so per-tick cost and lock-hold time grew with
+/// the shared ledger lock, so per-tick cost and lock-hold time grew with
 /// ledger size forever. The memo makes a repeated summary of an unchanged
 /// ledger O(1).
 ///
@@ -951,7 +951,7 @@ struct CachedTaskSummary {
 ///   equal-length ledger whose final 4 KiB are byte-identical yet whose
 ///   selected rows differ, which append-only framing does not produce.
 /// * Both the length and the digest are read from the same open handle while
-///   the caller holds the exclusive ledger lock (`with_run_ledger_read_lock`),
+///   the caller holds the shared ledger lock (`with_run_ledger_read_lock`),
 ///   which also serializes cross-process writers, so there is no TOCTOU window
 ///   between validating the fingerprint and returning the memoized summary.
 static RUN_LEDGER_SUMMARY_MEMO: std::sync::OnceLock<
@@ -1088,7 +1088,7 @@ fn read_run_ledger_task_summary(
     };
     // Answer an unchanged ledger from the memo instead of rescanning it. See
     // `RUN_LEDGER_SUMMARY_MEMO` for why `(len, tail digest)` read under the
-    // exclusive ledger lock is a sound witness of unchanged content.
+    // shared ledger lock is a sound witness of unchanged content.
     let (file_len, tail_digest, memo_key) = {
         let _span = tracing::trace_span!("automation.run_ledger.task_summary.memo_probe").entered();
         {

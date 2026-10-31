@@ -28,25 +28,41 @@ type AtomicFilePublisher<'a> = dyn Fn(&Path, &Path, &str) -> std::io::Result<()>
 
 pub(super) fn acquire_run_ledger_lock(path: &Path) -> std::io::Result<std::fs::File> {
     let lock_path = tracedecay_runtime_core::storage::append_lock_path(path);
-    acquire_nofollow_lock(&lock_path)
+    acquire_nofollow_lock(&lock_path, RunLedgerLockMode::Exclusive)
 }
 
 /// Reuses the writer's sidecar inode without publishing a namespace entry.
 /// First creation still establishes the directory barrier; writers retain
 /// their own barrier even when the lock already exists. Only absence permits
 /// creation, so no-follow, type and access refusals cannot become replacements.
+///
+/// The read lock is shared, so concurrent readers do not serialize against
+/// each other, while writers still exclude every reader for the whole
+/// publication. Readers only scan and fsync, so two of them may safely hold
+/// the sidecar at once.
 pub(super) fn acquire_run_ledger_read_lock(path: &Path) -> std::io::Result<std::fs::File> {
     let lock_path = tracedecay_runtime_core::storage::append_lock_path(path);
     match open_run_ledger_nofollow(&lock_path, true, true, false, false)? {
         Some(file) => {
-            file.lock()?;
+            file.lock_shared()?;
             Ok(file)
         }
-        None => acquire_run_ledger_lock(path),
+        None => acquire_nofollow_lock(&lock_path, RunLedgerLockMode::Shared),
     }
 }
 
-fn acquire_nofollow_lock(lock_path: &Path) -> std::io::Result<std::fs::File> {
+#[derive(Clone, Copy)]
+enum RunLedgerLockMode {
+    /// One writer at a time, excluding every reader for the publication.
+    Exclusive,
+    /// Any number of readers at once, still excluding writers.
+    Shared,
+}
+
+fn acquire_nofollow_lock(
+    lock_path: &Path,
+    mode: RunLedgerLockMode,
+) -> std::io::Result<std::fs::File> {
     let parent = lock_path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -84,7 +100,10 @@ fn acquire_nofollow_lock(lock_path: &Path) -> std::io::Result<std::fs::File> {
         ));
     }
     let file = file.into_std();
-    file.lock()?;
+    match mode {
+        RunLedgerLockMode::Exclusive => file.lock()?,
+        RunLedgerLockMode::Shared => file.lock_shared()?,
+    }
     Ok(file)
 }
 
@@ -1631,7 +1650,8 @@ fn with_spool_lock<T>(dashboard_root: &Path, operation: impl FnOnce() -> Result<
     tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(&directory)
         .map_err(TraceDecayError::from)?;
     let lock_path = dashboard_root.join(EXACT_RUN_SPOOL_LOCK);
-    let lock = acquire_nofollow_lock(&lock_path).map_err(TraceDecayError::from)?;
+    let lock = acquire_nofollow_lock(&lock_path, RunLedgerLockMode::Exclusive)
+        .map_err(TraceDecayError::from)?;
     let result = cleanup_abandoned_exact_spool_temps(&directory).and_then(|()| operation());
     let unlock = lock.unlock().map_err(TraceDecayError::from);
     result.and_then(|value| unlock.map(|()| value))
@@ -2116,6 +2136,64 @@ mod tests {
             digest_regular_file(&spool).expect("republished spool"),
             Some((actual.ledger_digest, actual.payload_len))
         );
+    }
+
+    /// Concurrent readers must share the sidecar; a writer must still wait for
+    /// the reader to release it.
+    ///
+    /// Both probes use the non-blocking lock primitives, so a regression to an
+    /// exclusive read lock fails the assertion instead of hanging the suite.
+    #[test]
+    fn read_locks_are_shared_between_readers_and_still_exclude_writers() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ledger = run_ledger_path(temp.path());
+        let reader = acquire_run_ledger_read_lock(&ledger).expect("first reader");
+        let lock_path = tracedecay_runtime_core::storage::append_lock_path(&ledger);
+
+        // A second reader reaches the same sidecar from another thread while
+        // `reader` still holds it.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let probe_path = lock_path.clone();
+        let second_reader = std::thread::spawn(move || {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&probe_path)
+                .expect("open the ledger sidecar");
+            let shared = match file.try_lock_shared() {
+                Ok(()) => {
+                    file.unlock().expect("release the probe lock");
+                    true
+                }
+                Err(std::fs::TryLockError::WouldBlock) => false,
+                Err(error) => panic!("shared probe lock failed: {error}"),
+            };
+            sender.send(shared).expect("report the probe");
+        });
+        assert!(
+            receiver
+                .recv()
+                .expect("the second reader reports while the first still holds the lock"),
+            "a reader must share the ledger lock with another reader"
+        );
+        second_reader.join().expect("join the second reader");
+
+        // Writers keep excluding readers for the whole publication window.
+        let writer = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .expect("open the ledger sidecar");
+        assert!(
+            matches!(writer.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+            "a writer must not acquire the ledger lock while a reader holds it"
+        );
+
+        reader.unlock().expect("release the read lock");
+        writer
+            .try_lock()
+            .expect("the writer acquires the lock after the reader releases it");
+        writer.unlock().expect("release the write lock");
     }
 
     #[cfg(unix)]
