@@ -79,7 +79,7 @@ async fn open_project(
         })?;
     let composition = open_project_composition(harness, project, instance).await?;
     let code_search_scope = {
-        let graph = composition.server.cg().await;
+        let graph = composition.server.cg_snapshot().await;
         let target = graph.configuration_runtime().configuration_target();
         tracedecay_code_index_runtime::resolved_scope_for_project(
             graph.project_root(),
@@ -299,7 +299,7 @@ async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
                 .await
                 .expect("a settled sequential client must release capacity for the next project");
         seeded_generations.push(serving.metadata().manifest().generation_id.clone());
-        let graph = opened.server.cg().await;
+        let graph = opened.server.cg_snapshot().await;
         let replay_root = graph.hook_store_layout().data_root.clone();
         assert!(
             crate::daemon::hook_v2_replay_consumer::hook_v2_replay_consumer_registered(
@@ -394,7 +394,7 @@ async fn twelve_project_journey_retires_idle_owners_without_empty_graphs() {
             seeded_generations[ordinal],
             "the cached reopen of project {ordinal} must serve its own seeded generation"
         );
-        let graph = opened.server.cg().await;
+        let graph = opened.server.cg_snapshot().await;
         assert!(
             crate::daemon::hook_v2_replay_consumer::hook_v2_replay_consumer_registered(
                 &graph.hook_store_layout().data_root,
@@ -708,7 +708,7 @@ async fn capacity_retirement_blocked_by_a_foreign_store_lease_is_typed_and_not_r
         .expect("the leased project opens");
     let project_id = leased
         .server
-        .cg()
+        .cg_snapshot()
         .await
         .configuration_runtime()
         .configuration_target()

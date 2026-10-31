@@ -28,7 +28,12 @@ async fn empty_store_curate_skips_and_refuses_caller_authority() {
         .harness
         .server(&fixture.project_root)
         .expect("production fact-store MCP server");
-    let dashboard_root = server.cg().await.store_layout().dashboard_root.clone();
+    let dashboard_root = server
+        .cg_snapshot()
+        .await
+        .store_layout()
+        .dashboard_root
+        .clone();
 
     // The project's scheduler takes the same curator lock. A held lock is the
     // legal transient skip; wait it out so the assertion is the empty-store

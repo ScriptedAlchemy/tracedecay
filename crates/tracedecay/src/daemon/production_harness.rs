@@ -534,7 +534,7 @@ async fn mount_one_production_composition_project(
     );
     if wait_for_code_index {
         let code_search_scope = {
-            let graph = composition.server.cg().await;
+            let graph = composition.server.cg_snapshot().await;
             let target = graph.configuration_runtime().configuration_target();
             tracedecay_code_index_runtime::resolved_scope_for_project(
                 graph.project_root(),
@@ -882,7 +882,7 @@ impl ProductionProjectCompositionHarnessV1 {
         &self,
         project_root: &Path,
     ) -> Result<Arc<CodeGraphProjectionStore>> {
-        let graph = self.server(project_root)?.cg().await;
+        let graph = self.server(project_root)?.cg_snapshot().await;
         let target = graph.configuration_runtime().configuration_target();
         let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
             graph.project_root(),
@@ -921,7 +921,7 @@ impl ProductionProjectCompositionHarnessV1 {
         project_root: impl AsRef<Path>,
         cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
     ) -> Result<tracedecay_domain::ProviderEvaluationStateV1> {
-        let graph = self.server(project_root)?.cg().await;
+        let graph = self.server(project_root)?.cg_snapshot().await;
         let target = graph.configuration_runtime().configuration_target();
         let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
             graph.project_root(),
@@ -976,7 +976,7 @@ impl ProductionProjectCompositionHarnessV1 {
     pub async fn project_data_root(&self, project_root: impl AsRef<Path>) -> Result<PathBuf> {
         Ok(self
             .server(project_root)?
-            .cg()
+            .cg_snapshot()
             .await
             .store_layout()
             .data_root
@@ -990,7 +990,7 @@ impl ProductionProjectCompositionHarnessV1 {
     pub async fn project_id(&self, project_root: impl AsRef<Path>) -> Result<String> {
         let project_root = project_root.as_ref().to_path_buf();
         self.server(&project_root)?
-            .cg()
+            .cg_snapshot()
             .await
             .store_layout()
             .identity
@@ -1010,7 +1010,7 @@ impl ProductionProjectCompositionHarnessV1 {
     /// surface instead of a private store path.
     pub async fn configuration_revision(&self, project_root: impl AsRef<Path>) -> Result<String> {
         let project_root = project_root.as_ref().to_path_buf();
-        let graph = self.server(&project_root)?.cg().await;
+        let graph = self.server(&project_root)?.cg_snapshot().await;
         let current = graph
             .configuration_runtime()
             .client()
@@ -1063,7 +1063,7 @@ impl ProductionProjectCompositionHarnessV1 {
                     ),
                 }
             })?;
-        let graph = self.server(&canonical_project_root)?.cg().await;
+        let graph = self.server(&canonical_project_root)?.cg_snapshot().await;
         let resources = self
             .resources
             .as_ref()

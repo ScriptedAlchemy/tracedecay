@@ -1170,7 +1170,7 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
         .project_server(&handshake)
         .await
         .expect("linked worktree must open before the primary route");
-    let linked_graph = linked_server.cg().await;
+    let linked_graph = linked_server.cg_snapshot().await;
     engine
         .store_administration
         .registered_project_session_database(&primary, linked_graph.store_layout())

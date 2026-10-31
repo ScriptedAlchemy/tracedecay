@@ -135,7 +135,7 @@ async fn automation_scheduler_tick_secs_reads_pinned_project_configuration() {
         },
     )
     .await;
-    let cg = server.cg().await;
+    let cg = server.cg_snapshot().await;
 
     let tick_secs = Box::pin(super::super::automation_scheduler_tick_secs_for_project(
         &cg,
@@ -172,7 +172,7 @@ async fn fresh_v2_project_starts_the_required_automation_scheduler() {
         .project_server(&handshake)
         .await
         .expect("open scheduler fixture through the daemon owner");
-    let cg = server.cg().await;
+    let cg = server.cg_snapshot().await;
     let key =
         super::super::ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
 
@@ -281,7 +281,7 @@ async fn daemon_scheduler_skips_stale_owner_key_after_rekey() {
         },
     )
     .await;
-    let cg = server.cg().await;
+    let cg = server.cg_snapshot().await;
     let stale_key = super::super::ProjectServerKey::from_open_project(&cg, &handshake)
         .expect("stale owner key");
 
@@ -327,7 +327,7 @@ async fn concurrent_reenable_creates_one_live_scheduler_owner() {
         ..test_handshake_defaults()
     };
     let server = save_scheduled_automation(&engine, &handshake, true).await;
-    let cg = server.cg().await;
+    let cg = server.cg_snapshot().await;
     let key = ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
     let finished = NativeTask::spawn(async {}).expect("native task");
     // The planted owner must read as finished to both re-enables. A signal
@@ -586,11 +586,11 @@ async fn profile_reconcile_broadcasts_to_cached_projects_without_opening_uncache
     let engine = test_daemon_engine_for_profile(&profile_root);
     let _database_scope = enter_test_daemon_database_scope(&profile_root, "profile-reconcile-test");
     let first_server = save_scheduled_automation(&engine, &first_handshake, true).await;
-    let first_cg = first_server.cg().await;
+    let first_cg = first_server.cg_snapshot().await;
     let first_key = ProjectServerKey::from_open_project(&first_cg, &first_handshake)
         .expect("first cached owner key");
     let second_server = save_scheduled_automation(&engine, &second_handshake, true).await;
-    let second_cg = second_server.cg().await;
+    let second_cg = second_server.cg_snapshot().await;
     let second_key = ProjectServerKey::from_open_project(&second_cg, &second_handshake)
         .expect("second cached owner key");
     engine
@@ -745,7 +745,7 @@ async fn cached_project_reconciles_cli_enabled_automation_without_cache_probe() 
         .project_server(&handshake)
         .await
         .expect("cache unconfigured project");
-    let cg = server.cg().await;
+    let cg = server.cg_snapshot().await;
     let key =
         super::super::ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
@@ -908,7 +908,7 @@ async fn disabled_scheduler_reconcile_cannot_acknowledge_an_owner_that_then_exit
     *engine.automation_scheduler_exit_barrier.lock().await = Some(Arc::clone(&barrier));
     let server =
         apply_project_automation_patch_via_surface(&engine, &handshake, scheduled.clone()).await;
-    let cg = server.cg().await;
+    let cg = server.cg_snapshot().await;
     let key = ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
     // Project-open setup owns the loop; ensure must notify it rather than
     // publish a second owner.
@@ -1032,7 +1032,7 @@ async fn cancel_stops_the_automation_loop_while_the_scheduler_map_is_held() {
         .project_server(&handshake)
         .await
         .expect("open scheduler fixture through the daemon owner");
-    let cg = server.cg().await;
+    let cg = server.cg_snapshot().await;
     let key =
         super::super::ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
     engine
@@ -1105,7 +1105,7 @@ fn the_automation_loop_starts_and_exits_without_a_tokio_runtime() {
         "scheduler-off-tokio-test",
     );
     let server = tokio.block_on(save_scheduled_automation(&engine, &handshake, false));
-    let cg = tokio.block_on(server.cg());
+    let cg = tokio.block_on(server.cg_snapshot());
     let key = ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
     let barrier = Arc::new(AutomationSchedulerExitBarrier::new());
     let _barrier_release = AutomationExitBarrierRelease(Arc::clone(&barrier));
@@ -1185,7 +1185,7 @@ fn project_open_activation_starts_the_automation_loop_without_a_tokio_runtime() 
     let server = tokio
         .block_on(engine.project_server(&handshake))
         .expect("open project");
-    let cg = tokio.block_on(server.cg());
+    let cg = tokio.block_on(server.cg_snapshot());
     let key = ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
     // Project open activated its own loop; retire it so the activation below
     // starts the one under test.

@@ -29,7 +29,7 @@ async fn current_revision(
     harness
         .server(project)
         .expect("project server")
-        .cg()
+        .cg_snapshot()
         .await
         .configuration_runtime()
         .client()
@@ -68,7 +68,11 @@ async fn cli_configuration_set(
     project: &Path,
     request: ConfigurationSetRequestV1,
 ) -> ApplicationResult<Value> {
-    let graph = harness.server(project).expect("project server").cg().await;
+    let graph = harness
+        .server(project)
+        .expect("project server")
+        .cg_snapshot()
+        .await;
     let target = graph.configuration_runtime().configuration_target().clone();
     let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
         graph.project_root(),
@@ -142,7 +146,7 @@ async fn current_profile_id(
     harness
         .server(project)
         .expect("project server")
-        .cg()
+        .cg_snapshot()
         .await
         .configuration_runtime()
         .registered_database()
@@ -158,7 +162,11 @@ async fn configuration_batch_via_surface(
     surface: tracedecay_tool_catalog::BindingSurface,
     request: ConfigurationBatchRequestV1,
 ) -> ApplicationResult<Value> {
-    let graph = harness.server(project).expect("project server").cg().await;
+    let graph = harness
+        .server(project)
+        .expect("project server")
+        .cg_snapshot()
+        .await;
     let target = graph.configuration_runtime().configuration_target().clone();
     let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
         graph.project_root(),
@@ -258,7 +266,11 @@ async fn configuration_http_sdk(
     crate::daemon::http_application::DaemonHttpApplicationService,
     Client,
 ) {
-    let graph = harness.server(project).expect("project server").cg().await;
+    let graph = harness
+        .server(project)
+        .expect("project server")
+        .cg_snapshot()
+        .await;
     let target = graph.configuration_runtime().configuration_target().clone();
     let scope = tracedecay_code_index_runtime::resolved_scope_for_project(
         graph.project_root(),
@@ -425,7 +437,7 @@ async fn configuration_set_has_cli_mcp_http_sdk_parity_and_replays_after_restart
     let project_id = harness
         .server(&project)
         .expect("project server")
-        .cg()
+        .cg_snapshot()
         .await
         .configuration_runtime()
         .configuration_target()

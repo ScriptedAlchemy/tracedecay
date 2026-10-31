@@ -52,7 +52,7 @@ async fn open_search_project() -> (crate::support::ProductionCompositionFixture,
 impl SearchProject {
     async fn from_server(server: Arc<McpServer>) -> Self {
         let project_id = server
-            .cg()
+            .cg_snapshot()
             .await
             .store_layout()
             .identity

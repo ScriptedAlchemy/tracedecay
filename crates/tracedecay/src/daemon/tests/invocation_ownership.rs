@@ -216,7 +216,12 @@ async fn aborted_socket_curator_preparation_keeps_its_writer_owned_through_shutd
         .project_server(&handshake)
         .await
         .expect("project server");
-    let dashboard_root = server.cg().await.store_layout().dashboard_root.clone();
+    let dashboard_root = server
+        .cg_snapshot()
+        .await
+        .store_layout()
+        .dashboard_root
+        .clone();
     drop(server);
     let registry = engine.invocation.service.project_runtimes.clone();
 
@@ -356,7 +361,7 @@ async fn aborted_automation_preparation_keeps_its_writer_owned_through_shutdown(
         .project_server(&handshake)
         .await
         .expect("project server");
-    let cg = server.cg().await;
+    let cg = server.cg_snapshot().await;
     let project_root = cg.project_root().to_path_buf();
     let dashboard_root = cg.store_layout().dashboard_root.clone();
     drop(server);
@@ -847,7 +852,7 @@ async fn primitive_read_with_a_saturated_configuration_store_is_unavailable_not_
         .await
         .expect("mounted project server");
     let configuration_store = server
-        .cg()
+        .cg_snapshot()
         .await
         .configuration_runtime()
         .registered_database();

@@ -1151,15 +1151,6 @@ impl McpServer {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Test-only accessor for the backing `TraceDecay`. Exposed so
-    /// integration tests can drive the staleness pipeline directly,
-    /// bypassing the 30 s cooldown in
-    /// [`maybe_sync_if_stale`](Self::maybe_sync_if_stale).
-    #[doc(hidden)]
-    pub async fn cg(&self) -> Arc<TraceDecay> {
-        self.cg_snapshot().await
-    }
-
     /// The daemon owner profile this server serves, when daemon-owned.
     pub(crate) fn owner_profile(&self) -> Option<&ProfileRoot> {
         self.profile.as_ref()
@@ -1299,7 +1290,7 @@ impl McpServer {
     }
     /// Clones out the currently served `TraceDecay` instance. The lock is
     /// held only for the clone, never across an await on the instance.
-    pub(crate) async fn cg_snapshot(&self) -> Arc<TraceDecay> {
+    pub async fn cg_snapshot(&self) -> Arc<TraceDecay> {
         self.cg.read().await.clone()
     }
 
