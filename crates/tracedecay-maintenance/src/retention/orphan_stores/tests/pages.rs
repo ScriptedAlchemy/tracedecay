@@ -481,7 +481,15 @@ async fn the_maintenance_cold_store_page_collects_an_unregistered_project_dir() 
     let cancellation = CancellationToken::new();
     let mut reclaimed_bytes = 0;
     // A tick may exhaust its page budget before reaching this directory.
+    let mut pages = 0;
     while reclaimed_bytes < 4096 {
+        pages += 1;
+        // Each page persists its cursor, so a few pages cover this fixture's
+        // directories even when every one exhausts its budget early.
+        assert!(
+            pages <= 32,
+            "{pages} cold-store pages never collected the unregistered directory; reclaimed {reclaimed_bytes} bytes"
+        );
         let report = crate::retention::cold_store::run_cold_store_page(
             &profile_root,
             &db,
