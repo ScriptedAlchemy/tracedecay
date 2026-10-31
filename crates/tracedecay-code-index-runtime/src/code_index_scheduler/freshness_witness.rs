@@ -59,6 +59,10 @@ struct StatCandidateV1 {
 /// candidate: a negative cache only, settled by [`SourceSweepCacheV1`].
 pub struct WorktreeStatSweepV1 {
     pub signature: String,
+    /// Git classification already needed to enumerate the source candidates.
+    /// This includes changes outside the indexed-language roster, just as
+    /// authoritative capture does when deciding whether it seals HEAD.
+    pub has_changes: bool,
 }
 
 /// A cheap stat-level sweep over every ordinary or explicitly admitted source
@@ -75,11 +79,11 @@ pub fn worktree_stat_sweep(
 ) -> Result<WorktreeStatSweepV1, CodeIndexSchedulerErrorV1> {
     let repository = tracedecay_runtime_core::git_open::open(project_root)
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
-    let candidate_roster = source_candidates(&repository, ignored_source_admissions)?.candidates;
+    let candidate_roster = source_candidates(&repository, ignored_source_admissions)?;
     // One sweep span covers the O(candidates) stat walk. Never emit one
     // trace event per file.
     let mut buf = Vec::new();
-    for candidate in candidate_roster {
+    for candidate in candidate_roster.candidates {
         let Ok(metadata) = std::fs::metadata(project_root.join(&candidate.logical_path)) else {
             continue;
         };
@@ -99,6 +103,7 @@ pub fn worktree_stat_sweep(
     }
     Ok(WorktreeStatSweepV1 {
         signature: encode_tagged_lowercase_hex("sha256:", &Sha256::digest(&buf)),
+        has_changes: candidate_roster.has_changes,
     })
 }
 
@@ -109,6 +114,7 @@ struct SourceCandidatesV1 {
     /// Every Git path no logical path can carry, whatever its extension,
     /// present or not: capture records each present one as an omitted source.
     unrepresentable: Vec<Vec<u8>>,
+    has_changes: bool,
 }
 
 fn source_candidates(
@@ -145,6 +151,7 @@ fn source_candidates(
     Ok(SourceCandidatesV1 {
         candidates,
         unrepresentable,
+        has_changes: classification.has_changes(),
     })
 }
 
@@ -582,6 +589,7 @@ impl SourceSweepCacheV1 {
                 let Ok(SourceCandidatesV1 {
                     candidates,
                     unrepresentable,
+                    ..
                 }) = source_candidates(&repository, ignored_source_admissions)
                 else {
                     return (false, stats);

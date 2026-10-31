@@ -100,9 +100,15 @@ impl WorktreeChangeClassificationV1 {
         let index = repository
             .index_or_empty()
             .map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
+        let skip_validation = gix::index::entry::Flags::UPTODATE
+            | gix::index::entry::Flags::SKIP_WORKTREE
+            | gix::index::entry::Flags::ASSUME_VALID
+            | gix::index::entry::Flags::FSMONITOR_VALID;
         let mut committed_baseline = BTreeSet::new();
         let mut non_utf8_paths = BTreeSet::new();
+        let mut has_skipped_entries = false;
         for entry in index.entries() {
+            has_skipped_entries |= entry.flags.intersects(skip_validation);
             let path: &[u8] = entry.path(&index).as_ref();
             match std::str::from_utf8(path) {
                 Ok(path) => {
@@ -113,12 +119,48 @@ impl WorktreeChangeClassificationV1 {
                 }
             }
         }
+        let mut status_index = gix::worktree::IndexPersistedOrInMemory::from(index);
+        if has_skipped_entries {
+            // These flags are Git status shortcuts, not evidence that source
+            // bytes still match the index. Recheck only those entries through
+            // gix's ordinary filtered blob comparison. An mtime at the index
+            // timestamp is racy even when all stat fields match, so neither
+            // the flags nor preserved file metadata can suppress that check.
+            // This private index is never written back to the user's checkout.
+            let mut checked = status_index.into_owned();
+            let racy_mtime = checked.timestamp().into();
+            for (entry, path) in checked.entries_mut_with_paths() {
+                if entry.flags.intersects(skip_validation) {
+                    // Sparse entries deliberately omit worktree content.
+                    // Preserve that omission; only materialized skipped
+                    // paths need to prove their bytes against the index.
+                    if entry
+                        .flags
+                        .contains(gix::index::entry::Flags::SKIP_WORKTREE)
+                        && (entry.mode.is_sparse()
+                            || repository.workdir().is_some_and(|root| {
+                                gix::path::from_bstr(path).is_ok_and(|relative| {
+                                    std::fs::symlink_metadata(root.join(relative)).is_err_and(
+                                        |error| error.kind() == std::io::ErrorKind::NotFound,
+                                    )
+                                })
+                            }))
+                    {
+                        continue;
+                    }
+                    entry.flags.remove(skip_validation);
+                    entry.stat.mtime = racy_mtime;
+                }
+            }
+            status_index = checked.into();
+        }
 
         let mut changes = Vec::new();
         let mut non_utf8_changes = Vec::new();
         let status = repository
             .status(gix::progress::Discard)
             .map_err(|error| ClassificationErrorV1::Git(error.to_string()))?
+            .index(status_index)
             // Emit untracked files, but not ignored ones: ignored/generated
             // content is out of indexing scope.
             .untracked_files(gix::status::UntrackedFiles::Files)
