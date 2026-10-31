@@ -167,6 +167,7 @@ async fn codex_post_compact_hook_commits_app_server_summary_through_daemon_effec
     write_executable_script(
         &codex_bin,
         r#"#!/bin/sh
+printf '%s\n' launch >> "$0.launches"
 while IFS= read -r line; do
   case "$line" in
     *'"id":0'*) printf '%s\n' '{"id":0,"result":{}}' ;;
@@ -228,6 +229,11 @@ done
         !String::from_utf8_lossy(&output.stderr).contains("PostCompact daemon call failed"),
         "the PostCompact hook must not fail open around the daemon effect: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(codex_bin.with_extension("launches")).unwrap(),
+        "launch\n",
+        "settling a temporal refresh must reuse the generated summary"
     );
     drop(daemon);
 
