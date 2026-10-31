@@ -451,9 +451,9 @@ Kimi Code's `/plugins install <staged-path>` registers it after Kimi's trust
 prompt. Once Kimi lists the TraceDecay plugin as installed and enabled from
 exactly that staged path, `tracedecay update`, `update-plugin`, and a repeated
 `install --agent kimi` refresh it themselves. TraceDecay starts
-`kimi web --no-open --port <ephemeral>` (loopback only, with Kimi's auto-update
-disabled), authenticates with Kimi's server token from
-`~/.kimi-code/server.token`, calls `POST /api/v1/plugins` with the staged path,
+`kimi web --no-open --port 0` (loopback only, with Kimi's auto-update
+disabled), waits for the local URL and server token that server announces once
+it holds its port, calls `POST /api/v1/plugins` there with the staged path,
 accepts the refresh only when Kimi reports the staged version in state `ok`,
 and stops the server it started. A missing `kimi`, an older Kimi without
 `kimi web`, a refused token, a timeout, or any other answer leaves the
