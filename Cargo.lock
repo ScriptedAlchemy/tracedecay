@@ -7084,7 +7084,9 @@ name = "tracedecay-project"
 version = "1.0.0-beta.94"
 dependencies = [
  "asupersync",
+ "hex",
  "rusqlite",
+ "serde",
  "serde_json",
  "sha2 0.11.1",
  "tempfile",
@@ -7094,6 +7096,7 @@ dependencies = [
  "tracedecay-api",
  "tracedecay-application",
  "tracedecay-automation-runtime",
+ "tracedecay-capture",
  "tracedecay-code-index",
  "tracedecay-code-index-runtime",
  "tracedecay-configuration",
