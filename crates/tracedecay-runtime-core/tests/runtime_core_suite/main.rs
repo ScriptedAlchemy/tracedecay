@@ -11,6 +11,7 @@
 //! `sqlite_foreign_snapshot_cost` reads the process-wide `/proc/self/io` counters.
 
 mod bounded_git_command;
+mod file_churn;
 mod git_discovery;
 mod git_topology;
 mod native_integration_authority;
