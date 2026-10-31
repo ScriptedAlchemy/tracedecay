@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.94](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.93...v1.0.0-beta.94) (2026-10-31)
+
+
+### Bug Fixes
+
+* **automation:** retain admitted job schedules per project ([#4634](https://github.com/ScriptedAlchemy/tracedecay/issues/4634)) ([d244ba7](https://github.com/ScriptedAlchemy/tracedecay/commit/d244ba7fa5196f076d424d665344ab160a032452))
+* **bazel:** attach the CLI runfile only to suites that spawn it ([#4643](https://github.com/ScriptedAlchemy/tracedecay/issues/4643)) ([77ec09a](https://github.com/ScriptedAlchemy/tracedecay/commit/77ec09a964a4a9f2bb49f8f80395dae8ccc27415))
+* **build:** declare daemon-control's private-fs dep for all targets ([c246a30](https://github.com/ScriptedAlchemy/tracedecay/commit/c246a3046b3a492e1032381ab33ac85d70c4759b))
+* **build:** forward Rust toolchain strip and execution settings ([5c31de3](https://github.com/ScriptedAlchemy/tracedecay/commit/5c31de31d032667f8605a1b65d43e7047937471e))
+* **build:** isolate Windows Rust action outputs ([c9b0f57](https://github.com/ScriptedAlchemy/tracedecay/commit/c9b0f57558c4c389c9a2c1d51b43bc569777cab2))
+* **code-index:** keep a commit that lands mid-reconcile visible ([#4624](https://github.com/ScriptedAlchemy/tracedecay/issues/4624)) ([43d4b23](https://github.com/ScriptedAlchemy/tracedecay/commit/43d4b23399159c935ec399dbb5deccaf8a8c16f1))
+* **code-index:** refresh dirty snapshot commit attribution ([#4655](https://github.com/ScriptedAlchemy/tracedecay/issues/4655)) ([ceb8511](https://github.com/ScriptedAlchemy/tracedecay/commit/ceb851128a37e9a913488521eb1f1c7f8a74e07a))
+* **deps:** update dependency three to ^0.187.0 ([#4633](https://github.com/ScriptedAlchemy/tracedecay/issues/4633)) ([5f688b0](https://github.com/ScriptedAlchemy/tracedecay/commit/5f688b0902e64dcfabccc828d2a125c138367c3c))
+* **global-db:** let a rollup claimant reclaim its own lease ([#4649](https://github.com/ScriptedAlchemy/tracedecay/issues/4649)) ([0dbcff7](https://github.com/ScriptedAlchemy/tracedecay/commit/0dbcff7c73ad5d2e533c178ed684a59af22d61b5))
+* **hooks:** suppress intents still pending at the pass address ([#4619](https://github.com/ScriptedAlchemy/tracedecay/issues/4619)) ([674006e](https://github.com/ScriptedAlchemy/tracedecay/commit/674006ebec24d16b1fa127f9f00a5e2af64e1d07))
+* **kimi:** only probe the endpoint kimi web announces ([#4648](https://github.com/ScriptedAlchemy/tracedecay/issues/4648)) ([c534b96](https://github.com/ScriptedAlchemy/tracedecay/commit/c534b966b79c3b6bd112295489535dfd9db8f079))
+* **lcm:** settle temporal refresh before summary publication ([#4650](https://github.com/ScriptedAlchemy/tracedecay/issues/4650)) ([fac9748](https://github.com/ScriptedAlchemy/tracedecay/commit/fac97485ad2a405b34d138395827d048384dec90))
+* **platform:** port native validation and runtime recovery fixes ([#4626](https://github.com/ScriptedAlchemy/tracedecay/issues/4626)) ([e0516f0](https://github.com/ScriptedAlchemy/tracedecay/commit/e0516f051f057dc36305e3233982061fc97cab81))
+* **runtime-core:** open and evict stores off async workers ([#4617](https://github.com/ScriptedAlchemy/tracedecay/issues/4617)) ([cfe8c35](https://github.com/ScriptedAlchemy/tracedecay/commit/cfe8c3507c287b1f19339328944062ac3dcdca64))
+
+
+### Performance Improvements
+
+* **ci:** compress private fleet cache transfers ([#4641](https://github.com/ScriptedAlchemy/tracedecay/issues/4641)) ([9688ef4](https://github.com/ScriptedAlchemy/tracedecay/commit/9688ef477007e60841a3fb11a87bc0d8e469226f))
+
 ## [1.0.0-beta.93](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.92...v1.0.0-beta.93) (2026-10-29)
 
 
