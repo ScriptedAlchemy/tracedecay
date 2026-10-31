@@ -469,7 +469,7 @@ impl DaemonLcmAuthority {
                     context,
                     LcmAuthorityOperation::Compact,
                     started_at,
-                    "daemon compaction failed",
+                    &format!("daemon compaction failed: {error}"),
                 )
             }
             Err(interruption) => terminal_interruption(

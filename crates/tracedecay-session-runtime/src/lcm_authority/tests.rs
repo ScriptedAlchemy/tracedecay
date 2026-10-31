@@ -354,6 +354,50 @@ async fn pressure_protocol_provider_mismatch_is_typed_before_ingest() {
 }
 
 #[tokio::test]
+async fn compaction_storage_failure_preserves_the_returned_diagnostic() {
+    let (_directory, runtime, authority) = registered_authority().await;
+    let database = runtime.profile_database_arc();
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch("DROP TABLE lcm_lifecycle_state")
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Compact, true);
+    let command = LcmCompactionCommand {
+        preflight: preflight("cursor"),
+        evidence: LcmCompressionEvidence::PressureOnly {
+            protocol: LcmHostProtocol::CursorPreCompact {
+                protocol_revision: "cursor.precompact.v1".to_owned(),
+                event_digest: canonical_sha256(&"cursor-storage-failure").unwrap(),
+            },
+        },
+    };
+    let response = authority
+        .execute(LcmAuthorityInvocation {
+            context,
+            binding,
+            target: target("cursor", Some("session.lcm-test")),
+            cancellation,
+            request: LcmAuthorityRequest::Compact(Box::new(command)),
+        })
+        .await;
+
+    let LcmAuthorityOutcome::Failed { diagnostic } = response.outcome else {
+        panic!(
+            "broken storage must return a failure: {:?}",
+            response.outcome
+        );
+    };
+    assert!(diagnostic.contains("lcm_lifecycle_state"), "{diagnostic}");
+    assert_eq!(
+        response.receipt.execution.termination,
+        OperationTermination::Failed
+    );
+    assert!(response.receipt.committed_state.is_none());
+}
+
+#[tokio::test]
 async fn unsupported_pressure_preflight_does_not_create_session_or_raw_messages() {
     let directory = tempfile::tempdir().unwrap();
     let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(

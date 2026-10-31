@@ -23,6 +23,12 @@ use tracedecay_sessions::runtime::{SessionMessageRecord, SessionStoreAccess};
 use tracedecay_temporal_query::execution::ExecutionControl;
 use tracedecay_temporal_query::execution::TemporalPortError;
 
+#[derive(Default)]
+struct CompressionGuard<'a> {
+    retained: Option<compression::RetainedCompressionGuard>,
+    expected_sources: Option<&'a [tracedecay_lcm::LcmSummarySourceMessage]>,
+}
+
 fn drive_lcm_compression<'a>(
     transaction: &'a crate::RegisteredGlobalDbWriteTransaction<'a>,
     scope: &'a ObservationScopeV1,
@@ -33,7 +39,7 @@ fn drive_lcm_compression<'a>(
     storage_root: &'a Path,
     request: &'a LcmCompressionRequest,
     payload_rollback: &'a mut payload::PayloadFileRollback,
-    retained: Option<compression::RetainedCompressionGuard>,
+    guard: CompressionGuard<'a>,
 ) -> Pin<
     Box<
         dyn Future<
@@ -46,6 +52,11 @@ fn drive_lcm_compression<'a>(
     >,
 > {
     Box::pin(async move {
+        let summary_sources_bound = guard.expected_sources.is_some()
+            || guard
+                .retained
+                .as_ref()
+                .is_some_and(|guard| guard.expected_summary_source_range.is_some());
         let begun: Pin<
             Box<
                 dyn Future<Output = Result<compression::CompressionAdmission, LcmError>>
@@ -58,11 +69,14 @@ fn drive_lcm_compression<'a>(
             storage_root,
             request,
             payload_rollback,
-            retained,
+            guard.retained,
         ));
         let classified = match begun.await? {
             compression::CompressionAdmission::Finished(response) => return Ok(response),
-            compression::CompressionAdmission::Classify(publish) => {
+            compression::CompressionAdmission::Classify(mut publish) => {
+                if let Some(expected) = guard.expected_sources {
+                    publish.replan_if_sources_changed(expected);
+                }
                 let classified: Pin<
                     Box<
                         dyn Future<
@@ -97,6 +111,7 @@ fn drive_lcm_compression<'a>(
                     publisher,
                     request,
                     publish,
+                    summary_sources_bound,
                 ));
                 published.await
             }
@@ -301,6 +316,7 @@ impl RegisteredGlobalDb {
     pub async fn lcm_compress_guarded<F>(
         &self,
         request: &LcmCompressionRequest,
+        expected_sources: Option<&[tracedecay_lcm::LcmSummarySourceMessage]>,
         control: &ExecutionControl,
         before_commit: F,
     ) -> Result<LcmCompressionResponse, LcmError>
@@ -343,7 +359,10 @@ impl RegisteredGlobalDb {
                 storage_root,
                 request,
                 &mut payload_rollback,
-                None,
+                CompressionGuard {
+                    expected_sources,
+                    ..Default::default()
+                },
             ),
             tracing::trace_span!("sessions.lcm.compress"),
         );
@@ -450,7 +469,10 @@ impl RegisteredGlobalDb {
                 storage_root,
                 request,
                 &mut payload_rollback,
-                Some(guard),
+                CompressionGuard {
+                    retained: Some(guard),
+                    ..Default::default()
+                },
             ),
             tracing::trace_span!("sessions.lcm.compress"),
         );

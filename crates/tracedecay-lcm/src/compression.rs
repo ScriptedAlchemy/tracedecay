@@ -74,6 +74,7 @@ struct CompressionTransactionWriteRequest<'a> {
     extraction_result: Option<LcmExtractionResult>,
     backlog: &'a [LcmRawMessage],
     forced_overflow_recovery: bool,
+    summary_sources_bound: bool,
 }
 
 struct CompressionTransactionWriteResult<'a> {
@@ -380,6 +381,33 @@ pub struct CompressionPublish {
     context: CompressionTransactionContext,
 }
 
+impl CompressionPublish {
+    /// Replan inside the publication transaction when the generated summary
+    /// no longer describes the exact selected source identities and content.
+    /// Comparing borrowed sources keeps the transcript owned by its request.
+    pub fn replan_if_sources_changed(&mut self, expected: &[super::LcmSummarySourceMessage]) {
+        let unchanged = expected
+            .iter()
+            .map(|message| {
+                (
+                    message.store_id,
+                    message.role.as_str(),
+                    message.content.as_str(),
+                )
+            })
+            .eq(self.context.selected_backlog().iter().map(|message| {
+                (
+                    message.store_id,
+                    message.role.as_str(),
+                    message.content.as_str(),
+                )
+            }));
+        if !unchanged {
+            self.summarizer = CompressionSummarizerAdapter::HermesAuxiliary;
+        }
+    }
+}
+
 fn bounded_compression(
     response: LcmCompressionResponse,
     rows_scanned: usize,
@@ -437,6 +465,7 @@ pub async fn publish_compression_pass(
     publisher: &impl dag::LcmSummaryPublicationPort,
     request: &LcmCompressionRequest,
     publish: CompressionPublish,
+    summary_sources_bound: bool,
 ) -> Result<super::summary_convergence::LcmBoundedCompressionResponse, LcmError> {
     let rows_scanned = publish.context.raw_rows_scanned;
     let bytes_scanned = publish.context.raw_bytes_scanned;
@@ -447,8 +476,11 @@ pub async fn publish_compression_pass(
         request,
         &publish.summarizer,
         publish.context,
+        summary_sources_bound,
     )
     .await?;
+    let has_more =
+        has_more || (summary_sources_bound && !response.frontier.maintenance_debt.is_empty());
     Ok(bounded_compression(
         response,
         rows_scanned,
@@ -870,6 +902,7 @@ async fn persist_and_replay_backlog_compression(
     request: &LcmCompressionRequest,
     summarizer: &CompressionSummarizerAdapter,
     context: CompressionTransactionContext,
+    summary_sources_bound: bool,
 ) -> Result<LcmCompressionResponse, LcmError> {
     let Some(summary_invocation) = summarizer.persisted_summary_invocation() else {
         return Err(LcmError::Db(
@@ -888,6 +921,7 @@ async fn persist_and_replay_backlog_compression(
             extraction_result: summary_invocation.extraction_result.clone(),
             backlog: &context.window.backlog,
             forced_overflow_recovery: context.plan.forced_overflow_recovery,
+            summary_sources_bound,
         },
     )
     .await?;
@@ -975,7 +1009,9 @@ async fn persist_compression_transaction_writes<'a>(
     publisher: &impl dag::LcmSummaryPublicationPort,
     write: CompressionTransactionWriteRequest<'a>,
 ) -> Result<CompressionTransactionWriteResult<'a>, LcmError> {
-    let pass_limit = if write.forced_overflow_recovery {
+    // A generated summary describes one planned chunk. Pressure recovery
+    // must leave later chunks as debt until they receive their own summary.
+    let pass_limit = if write.forced_overflow_recovery && !write.summary_sources_bound {
         MAX_FORCED_CATCHUP_PASSES
     } else {
         1

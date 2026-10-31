@@ -66,7 +66,7 @@ pub(super) async fn resolve_authoritative_summary(
 }
 
 #[tracing::instrument(name = "daemon.lcm.summarize", level = "trace", skip_all)]
-async fn generate_provider_summary(
+pub(super) async fn generate_provider_summary(
     database: &RegisteredGlobalDb,
     provider: &str,
     request: &LcmSummaryRequest,

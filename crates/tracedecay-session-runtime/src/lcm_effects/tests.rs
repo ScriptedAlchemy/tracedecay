@@ -123,6 +123,143 @@ fn retained_guard(
     }
 }
 
+async fn assert_interactive_publication_replans(changed_existing_source: bool) {
+    let harness = RegisteredGlobalDbHarness::open("lcm-interactive-source-replan").await;
+    let db = harness.registered.clone();
+    let session_id = "interactive-source-replan";
+    assert!(db.upsert_session(&session("cursor", session_id)).await);
+    for ordinal in 1..=8 {
+        db.lcm_ingest_raw_message(
+            db.db_path().parent().unwrap(),
+            &message(session_id, ordinal),
+        )
+        .await
+        .unwrap();
+    }
+    let service = DaemonLcmEffectService::new(db.clone(), None, None, None);
+    let mut request = daemon_summary_request("cursor", session_id);
+    request.overrides.leaf_chunk_tokens = None;
+    let planned = service.commit_compression(&request, None).await.unwrap();
+    let original = planned.summary_request.as_ref().unwrap();
+    assert_eq!(original.source_messages.len(), 7);
+
+    // A content edit preserves both range endpoints; an append moves a former
+    // fresh-tail row into the selected backlog. Neither is summarized by the
+    // text already produced from the original request.
+    let mut changed = message(session_id, if changed_existing_source { 2 } else { 9 });
+    changed.text = "updated durable source that the first summary never saw".to_owned();
+    db.lcm_ingest_raw_message(db.db_path().parent().unwrap(), &changed)
+        .await
+        .unwrap();
+    request.summarizer = provided_summary("stale text must never be published");
+    let replanned = service
+        .commit_compression(&request, Some(&original.source_messages))
+        .await
+        .unwrap();
+    let LcmCompressionOutcome::NeedsSummary(updated) = replanned.outcome().unwrap() else {
+        panic!("changed sources must request a new summary: {replanned:?}");
+    };
+    assert_eq!(replanned.summary_nodes_created, 0);
+    assert!(replanned.frontier.current_frontier_store_id.is_none());
+    let status = db.lcm_status("cursor", Some(session_id)).await.unwrap();
+    assert_eq!(status.summary_node_count, 0);
+    if changed_existing_source {
+        assert_eq!(updated.source_range, original.source_range);
+        assert_eq!(updated.source_messages[1].content, changed.text);
+    } else {
+        assert_eq!(updated.source_messages.len(), 8);
+        assert_ne!(updated.source_range, original.source_range);
+    }
+
+    request.summarizer = provided_summary("summary regenerated from the updated sources");
+    let committed = service
+        .commit_compression(&request, Some(&updated.source_messages))
+        .await
+        .unwrap();
+    assert_eq!(committed.summary_nodes_created, 1);
+    let summary = committed.summary_nodes.first().unwrap();
+    assert_eq!(
+        summary.summary_text,
+        "summary regenerated from the updated sources"
+    );
+    assert_eq!(
+        summary.source_refs,
+        updated
+            .source_messages
+            .iter()
+            .map(|source| LcmSourceRef::RawMessage {
+                store_id: source.store_id,
+            })
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn interactive_publication_replans_when_source_content_changes_within_the_same_range() {
+    assert_interactive_publication_replans(true).await;
+}
+
+#[tokio::test]
+async fn interactive_publication_replans_when_the_selected_source_range_grows() {
+    assert_interactive_publication_replans(false).await;
+}
+
+#[tokio::test]
+async fn source_bound_overflow_publishes_only_planned_sources_and_retains_debt() {
+    let harness = RegisteredGlobalDbHarness::open("lcm-interactive-overflow-sources").await;
+    let db = harness.registered.clone();
+    let session_id = "interactive-overflow-sources";
+    assert!(db.upsert_session(&session("cursor", session_id)).await);
+    for ordinal in 1..=8 {
+        db.lcm_ingest_raw_message(
+            db.db_path().parent().unwrap(),
+            &message(session_id, ordinal),
+        )
+        .await
+        .unwrap();
+    }
+    let service = DaemonLcmEffectService::new(db, None, None, None);
+    let mut request = daemon_summary_request("cursor", session_id);
+    request.current_tokens = Some(20_000);
+    request.overrides.leaf_chunk_tokens = None;
+    request.overrides.max_source_messages = Some(2);
+    request.overrides.max_assembly_tokens = Some(1);
+    let planned = service.commit_compression(&request, None).await.unwrap();
+    let source_request = planned.summary_request.as_ref().unwrap();
+    assert_eq!(source_request.source_messages.len(), 2);
+    request.summarizer = provided_summary("summary of only the first two messages");
+    let published = service
+        .commit_compression(&request, Some(&source_request.source_messages))
+        .await
+        .unwrap();
+
+    assert_eq!(published.status, "best_effort");
+    assert_eq!(published.summary_nodes_created, 1);
+    assert_eq!(published.summary_nodes[0].source_refs.len(), 2);
+    assert_eq!(
+        published.frontier.current_frontier_store_id,
+        Some(source_request.source_range.to_store_id)
+    );
+    assert!(!published.frontier.maintenance_debt.is_empty());
+
+    // The retained lane consumes the deferred work one freshly summarized
+    // chunk at a time and must not mark the remaining backlog as current.
+    request.summarizer = LcmSummarizerMode::HermesAuxiliary;
+    let planned = service
+        .commit_retained_compression(&request, None, None)
+        .await
+        .unwrap();
+    let source_request = planned.response.summary_request.as_ref().unwrap();
+    request.summarizer = provided_summary("summary of the next planned chunk");
+    let retained = service
+        .commit_retained_compression(&request, None, Some(&source_request.source_range))
+        .await
+        .unwrap();
+    assert_eq!(retained.response.summary_nodes_created, 1);
+    assert_eq!(retained.response.summary_nodes[0].source_refs.len(), 2);
+    assert!(retained.has_more);
+}
+
 /// A configured fake summarizer on the shortest admitted run budget, so a
 /// fake that stops answering fails the test quickly instead of at the default.
 #[cfg(unix)]
@@ -306,6 +443,7 @@ async fn compression_producer_apply_read_and_rollback_stay_one_authority() {
     let cancelled = db
         .lcm_compress_guarded(
             &compression_request("compress-session"),
+            None,
             &cancellation_control,
             || Err(LcmError::Cancelled),
         )
