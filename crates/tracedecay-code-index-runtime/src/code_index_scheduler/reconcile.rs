@@ -2009,6 +2009,23 @@ impl CodeIndexWorktreeSchedulerV1 {
         if witness.stat_signature != sweep.signature {
             return Ok(None);
         }
+        let resolved = identity::IndexingIdentityV1::resolve(&self.project_root)
+            .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
+        if !resolved.authorizes_reuse_of(&self.identity) {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "worktree identity changed under the scheduler".to_owned(),
+            ));
+        }
+        self.identity = resolved;
+        let source_revision = self
+            .identity
+            .head_commit()
+            .filter(|_| !sweep.has_changes && self.ignored_source_admissions.is_empty());
+        if generation.snapshot().reference.as_ref() != self.identity.head_ref()
+            || generation.snapshot().source_revision.as_ref() != source_revision
+        {
+            return Ok(None);
+        }
         let source_manifest = SourceContentManifestV1::for_snapshot(generation.snapshot());
         if !self.sources_match_manifest(&source_manifest) {
             return Ok(None);
@@ -2249,15 +2266,17 @@ impl CodeIndexWorktreeSchedulerV1 {
         // `source_revision`, so accepting here would leave the retained
         // generation attributed to a commit the checkout has left for as long
         // as the bytes hold still. `self.identity` was re-resolved above, so
-        // this costs no extra walk. A snapshot sealed without a revision
-        // (a dirty capture) has no commit attribution to invalidate.
+        // this costs no extra walk. The stat sweep already classified Git
+        // status, which also proves whether an absent revision still names a
+        // dirty checkout. A witness can have advanced independently of the
+        // sealed attribution, so its quiet metadata alone cannot prove that.
+        let source_revision = self
+            .identity
+            .head_commit()
+            .filter(|_| !sampled_sweep.has_changes);
         let sealed_attribution_is_current = metadata.snapshot().reference.as_ref()
             == self.identity.head_ref()
-            && metadata
-                .snapshot()
-                .source_revision
-                .as_ref()
-                .is_none_or(|sealed| self.identity.head_commit() == Some(sealed));
+            && metadata.snapshot().source_revision.as_ref() == source_revision;
         // Graph-on refuses to decode the sealed generation just because the
         // predecessor witness, or a git-index mtime this seal itself moved,
         // does not name this generation. The sealed digests are the proof.

@@ -13786,6 +13786,159 @@ fn a_moved_commit_refuses_the_sealed_generation_despite_identical_bytes() {
     );
 }
 
+/// A dirty generation remains reusable while the checkout is still dirty.
+/// Committing the indexed bytes moves only attribution, so the retained path
+/// must hand the pass back to capture even though every content digest agrees.
+#[test]
+fn committing_a_dirty_snapshot_reseals_its_unchanged_bytes_at_head() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let dirty = published(scheduler.reconcile_now().expect("seal dirty source"));
+    let metadata = scheduler
+        .servable_retained_text_generation()
+        .expect("publication store")
+        .expect("authenticated dirty generation")
+        .metadata()
+        .clone();
+    assert_eq!(metadata.snapshot().source_revision, None);
+
+    let decodes_before = scheduler.sealed_decode_count();
+    let unchanged = scheduler
+        .reconcile_retained_text_generation_with(&metadata, false)
+        .expect("unchanged dirty source remains reusable");
+    assert!(matches!(
+        unchanged,
+        Some(CodeIndexReconcileOutcomeV1::Noop(_))
+    ));
+    assert_eq!(
+        scheduler.sealed_decode_count(),
+        decodes_before,
+        "a quiet dirty generation must not require a full decode"
+    );
+
+    fixture.commit_all("commit the indexed source");
+    let committed_head =
+        CommitId::new(git_stdout(fixture.path(), &["rev-parse", "HEAD"])).expect("committed HEAD");
+    let refused = scheduler
+        .reconcile_retained_text_generation_with(&metadata, false)
+        .expect("retained reconcile after committing the same source");
+    assert!(
+        refused.is_none(),
+        "committing a dirty snapshot must recheck its missing revision: {refused:?}"
+    );
+
+    let committed = published(
+        scheduler
+            .reconcile_now()
+            .expect("seal the committed source revision"),
+    );
+    assert_eq!(
+        committed.snapshot_content_identity,
+        dirty.snapshot_content_identity
+    );
+    assert_ne!(committed.generation_id, dirty.generation_id);
+    assert_eq!(
+        scheduler
+            .servable_retained_text_generation()
+            .expect("publication store")
+            .expect("authenticated committed generation")
+            .metadata()
+            .snapshot()
+            .source_revision,
+        Some(committed_head),
+        "unchanged source bytes must now carry their exact committed revision"
+    );
+}
+
+/// A witness can have been rebound to current Git metadata while the seal
+/// still lacks a revision. Neither retained text verification nor decoded
+/// frontier activation may treat that sidecar as proof of dirty attribution.
+#[test]
+fn a_current_witness_cannot_hide_a_dirty_seal_after_commit() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let dirty = {
+        let mut initial = scheduler(&fixture, store.path().to_path_buf(), Arc::clone(&bytes));
+        let dirty = published(initial.reconcile_now().expect("seal dirty source"));
+        fixture.commit_all("commit the indexed source");
+
+        // Reproduce the sidecar left by accepting unchanged source digests
+        // without checking whether the missing revision is still truthful.
+        let mut witness = RestoreFreshnessWitnessV1::load(store.path()).expect("dirty witness");
+        witness.stat_signature = initial
+            .worktree_stat_signature()
+            .expect("current source stat");
+        witness.git_metadata_signature =
+            crate::code_index_scheduler::identity::GitMetadataFingerprintV1::capture(
+                fixture.path(),
+            )
+            .stable_signature();
+        witness.persist(store.path());
+        dirty
+    };
+
+    let committed_head =
+        CommitId::new(git_stdout(fixture.path(), &["rev-parse", "HEAD"])).expect("committed HEAD");
+    let mut reopened = scheduler(&fixture, store.path().to_path_buf(), bytes);
+    let metadata = reopened
+        .servable_retained_text_generation()
+        .expect("publication store")
+        .expect("authenticated dirty generation")
+        .metadata()
+        .clone();
+    assert_eq!(metadata.snapshot().source_revision, None);
+    let refused = reopened
+        .reconcile_retained_text_generation_with(&metadata, false)
+        .expect("retained verification of a current witness");
+    assert!(
+        refused.is_none(),
+        "a current witness must not hide missing commit attribution: {refused:?}"
+    );
+    assert_eq!(
+        reopened.sealed_decode_count(),
+        0,
+        "checking attribution must not decode the full generation"
+    );
+
+    // Seat the decoded retained owner so activation exercises its frontier
+    // path too, before falling back to authoritative capture of the commit.
+    let retained = reopened
+        .latest_complete()
+        .expect("decoded dirty generation");
+    assert_eq!(
+        retained.generation().manifest().generation_id,
+        dirty.generation_id
+    );
+    let committed = published(
+        reopened
+            .activate_or_reconcile()
+            .expect("a stale dirty frontier must reseal at the committed revision"),
+    );
+    assert_eq!(
+        committed.snapshot_content_identity,
+        dirty.snapshot_content_identity
+    );
+    assert_ne!(committed.generation_id, dirty.generation_id);
+    assert_eq!(
+        reopened
+            .servable_retained_text_generation()
+            .expect("publication store")
+            .expect("authenticated committed generation")
+            .metadata()
+            .snapshot()
+            .source_revision,
+        Some(committed_head)
+    );
+}
+
 mod diagnostic_authority {
     use std::collections::BTreeSet;
     use std::sync::Arc;
