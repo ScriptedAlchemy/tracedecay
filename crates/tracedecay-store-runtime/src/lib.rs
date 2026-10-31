@@ -44,6 +44,8 @@ pub use remote_frame_transfer::DaemonRemoteFrameTransferProtocolPortV1;
 pub use remote_query::DaemonRemoteExactObservationQueryPortV1;
 pub use remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1;
 #[cfg(any(test, feature = "test-helpers"))]
+pub use session_registry::graph_catalog_fixtures::release_idle_interactive_catalog;
+#[cfg(any(test, feature = "test-helpers"))]
 pub use session_registry::maintenance::RegisteredSchemaConvergenceTestGate;
 pub use session_registry::maintenance::{
     ForegroundProjectOpenAdmission, RegisteredSchemaConvergenceStatus,

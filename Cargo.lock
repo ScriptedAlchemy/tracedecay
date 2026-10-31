@@ -6634,6 +6634,7 @@ dependencies = [
  "tracedecay-api",
  "tracedecay-application",
  "tracedecay-automation-runtime",
+ "tracedecay-code-index",
  "tracedecay-code-index-retention",
  "tracedecay-code-index-runtime",
  "tracedecay-configuration",
@@ -6667,6 +6668,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "walkdir",
 ]
 
 [[package]]

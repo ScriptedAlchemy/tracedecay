@@ -1,7 +1,10 @@
-//! Graph-activation scheduler tests that need the root session registry.
+//! Persistent graph activation journeys for a mounted code index.
 //!
-//! These journeys used to live beside the scheduler. They open
-//! `DaemonSessionRuntimeRegistryV1`, so they compile in the composition root.
+//! A worktree mounted on the persistent graph runtime is indexed, restarted,
+//! refreshed, and read while its graph generation is retained, rebuilt, or
+//! released for memory. The journeys drive the code-index scheduler with the
+//! daemon session runtime registry that owns persistent graph stores, and
+//! compare the status and doctor reads of the same worktree.
 
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
@@ -56,7 +59,7 @@ use tracedecay_runtime_core::runtime_telemetry::{
     GenerationCensusServingFreshness, GenerationCensusSnapshot, GenerationCensusUnavailableReason,
 };
 use tracedecay_session_temporal_store::SessionTemporalAccess;
-use tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1;
+use tracedecay_store_runtime::{DaemonSessionRuntimeRegistryV1, release_idle_interactive_catalog};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use tracedecay_code_index_runtime::project_reads::{
@@ -2133,7 +2136,7 @@ async fn admitted_graph_read_retains_only_the_catalog_it_requires() {
     );
     drop(reader);
     assert!(matches!(
-        crate::test_support::release_idle_interactive_catalog(&graph).await,
+        release_idle_interactive_catalog(&graph).await,
         CodeGraphCatalogReleaseV1::Released { .. }
     ));
 
