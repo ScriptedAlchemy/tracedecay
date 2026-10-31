@@ -7,8 +7,8 @@ use tracedecay_mcp::BrokerStreamTransport;
 #[tokio::test]
 async fn rmcp_selected_target_retirement_between_handler_and_send_suppresses_response() {
     let (server, client) = tokio::net::UnixStream::pair().expect("UnixStream pair");
-    let active_lifecycle = crate::mcp::server::ProjectServerResponseLifecycle::default();
-    let target_lifecycle = crate::mcp::server::ProjectServerResponseLifecycle::default();
+    let active_lifecycle = tracedecay_mcp::server::ProjectServerResponseLifecycle::default();
+    let target_lifecycle = tracedecay_mcp::server::ProjectServerResponseLifecycle::default();
     let selected_responses = crate::mcp::server::RmcpSelectedProjectResponseAuthority::default();
     let mut transport = BrokerStreamTransport::new(
         BrokerStream::from_tokio_unix(server).expect("daemon end of the test socket"),
@@ -93,8 +93,8 @@ async fn rmcp_selected_target_retirement_between_handler_and_send_suppresses_res
 #[tokio::test]
 async fn rmcp_selected_target_response_does_not_fall_back_to_retired_active_server() {
     let (server, client) = tokio::net::UnixStream::pair().expect("UnixStream pair");
-    let active_lifecycle = crate::mcp::server::ProjectServerResponseLifecycle::default();
-    let target_lifecycle = crate::mcp::server::ProjectServerResponseLifecycle::default();
+    let active_lifecycle = tracedecay_mcp::server::ProjectServerResponseLifecycle::default();
+    let target_lifecycle = tracedecay_mcp::server::ProjectServerResponseLifecycle::default();
     let selected_responses = crate::mcp::server::RmcpSelectedProjectResponseAuthority::default();
     let mut transport = BrokerStreamTransport::new(
         BrokerStream::from_tokio_unix(server).expect("daemon end of the test socket"),

@@ -70,7 +70,7 @@ use analytics::HOOK_ANALYTICS_FILENAME;
 use analytics::mint_hint_id;
 pub use analytics::{
     HookCompletedReadinessDistributions, host_hook_telemetry_contract,
-    measure_host_event_payload_bytes,
+    install_dashboard_hook_readiness_projection, measure_host_event_payload_bytes,
 };
 use analytics::{
     HookStdinRefusal, record_hint_analytics, record_hint_emitted, record_hook_invoked,

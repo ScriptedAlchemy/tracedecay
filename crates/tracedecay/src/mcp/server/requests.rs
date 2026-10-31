@@ -7,7 +7,8 @@ use super::*;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_mcp::server::{
     ApplicationCancellationRegistration, DispatchControl, DispatchControlRequest,
-    DispatchSettlement, DispatchToolPolicy, PreparedDispatchControl, dispatch_cancelled_error,
+    DispatchSettlement, DispatchToolPolicy, McpMethod, PreparedDispatchControl,
+    dispatch_cancelled_error,
 };
 use tracedecay_mcp::tools::response_trailers::{
     self, ToolTokenAccounting, record_token_accounting, response_tokens,

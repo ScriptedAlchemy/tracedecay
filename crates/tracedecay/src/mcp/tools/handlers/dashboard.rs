@@ -958,7 +958,7 @@ pub(super) async fn compute_dashboard(
                     "retained dashboard project server resolved a different root",
                 ));
             }
-            let retained_cg = Arc::new(crate::dashboard::dashboard_project_context(
+            let retained_cg = Arc::new(tracedecay_project::dashboard::dashboard_project_context(
                 &retained_graph,
                 daemon_profile.as_ref(),
                 retained_server.profile_session_db(),
@@ -1074,7 +1074,7 @@ pub(super) async fn compute_dashboard(
                     );
                 Arc::new(adapter) as Arc<dyn tracedecay_dashboard_api::DashboardDeliveryReadPortV1>
             });
-            crate::hooks::install_dashboard_hook_readiness_projection()?;
+            tracedecay_agent_hosts::hooks::install_dashboard_hook_readiness_projection()?;
             // One fetch covers the served bundle and the advertised build
             // version; both come from the registered product runtime.
             let product_runtime = tracedecay_project::product_runtime::product_runtime()?;

@@ -16,12 +16,11 @@ use tokio::time::Duration;
 use tokio_stream::StreamExt;
 use tracedecay_lsp::{AdmittedRoot, AuthorizedLspWorkspace};
 
-use tracedecay_mcp::server::RmcpConnectionAdapter;
-
-use crate::mcp::server::{
-    McpMethod, ProductionMcpConnectionContext, RmcpInitializeResponseDecorator,
-    SERVER_INSTRUCTIONS, classify_mcp_method, initialize_result,
+use tracedecay_mcp::server::{
+    McpMethod, RmcpConnectionAdapter, RmcpInitializeResponseDecorator, classify_mcp_method,
 };
+
+use crate::mcp::server::{ProductionMcpConnectionContext, SERVER_INSTRUCTIONS, initialize_result};
 use branch_add::{branch_add_response, parse_branch_add_request};
 use branch_admin::{StoreAdministration, parse_branch_admin_request, write_branch_admin_response};
 #[cfg(all(unix, test))]
