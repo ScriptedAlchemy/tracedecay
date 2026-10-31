@@ -434,9 +434,7 @@ async fn census_finds_unregistered_project_dir_and_ignores_registered_ones() {
     assert!(findings[0].size_bytes >= 4096);
 }
 
-/// The daemon's maintenance tick runs the cold-store page; an unregistered
-/// project directory past the window must be collected there, not only when
-/// someone asks Doctor.
+/// Maintenance collects expired unregistered directories across bounded ticks.
 #[asupersync::test]
 async fn the_maintenance_cold_store_page_collects_an_unregistered_project_dir() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -480,26 +478,31 @@ async fn the_maintenance_cold_store_page_collects_an_unregistered_project_dir() 
         )
         .unwrap();
 
-    let report = crate::retention::cold_store::run_cold_store_page(
-        &profile_root,
-        &db,
-        Some(0),
-        &BTreeSet::new(),
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap();
+    let cancellation = CancellationToken::new();
+    let mut reclaimed_bytes = 0;
+    // A tick may exhaust its page budget before reaching this directory.
+    while reclaimed_bytes < 4096 {
+        let report = crate::retention::cold_store::run_cold_store_page(
+            &profile_root,
+            &db,
+            Some(0),
+            &BTreeSet::new(),
+            &cancellation,
+        )
+        .await
+        .unwrap();
+        reclaimed_bytes += report.reclaimed_bytes;
+        assert!(
+            memory_dir
+                .join(tracedecay_runtime_core::config::DB_FILENAME)
+                .is_file(),
+            "an unregistered directory holding durable memory must survive every tick: {report:?}"
+        );
+    }
 
     assert!(
         !unregistered_dir.exists(),
         "an unregistered project directory past the window must be collected"
-    );
-    assert!(report.reclaimed_bytes >= 4096, "{report:?}");
-    assert!(
-        memory_dir
-            .join(tracedecay_runtime_core::config::DB_FILENAME)
-            .is_file(),
-        "an unregistered directory holding durable memory must survive the tick"
     );
 }
 
@@ -529,34 +532,44 @@ async fn sweep_unregistered_stores_protects_unverifiable_payload_and_retains_you
     )
     .unwrap();
 
-    // Dry run: classifies but mutates nothing.
-    let report = sweep_unregistered_stores(&db, &profile_root, 7 * DAY, base, false)
-        .await
-        .unwrap();
-    assert_eq!(report.plan.collect.len(), 1);
-    assert_eq!(report.plan.collect[0].project_dir_name, "proj_old_ghost");
-    assert_eq!(report.plan.retained_immature.len(), 1);
-    assert!(!report.applied);
-    assert!(old_dir.exists(), "dry run must not delete");
-
-    let report = sweep_unregistered_stores(&db, &profile_root, 7 * DAY, base, true)
-        .await
-        .unwrap();
-    assert!(report.applied);
-    assert_eq!(report.outcome.collected.len(), 0);
-    assert_eq!(report.outcome.errors.len(), 1);
-    assert_eq!(
-        report.outcome.errors[0].kind,
-        CollectionFailureKind::DurableDataProtected
-    );
-    assert!(
-        old_dir.exists(),
-        "arbitrary payload without a manifest cannot prove durable-data absence"
-    );
-    assert!(
-        young_dir.exists(),
-        "immature unregistered dir must be retained"
-    );
+    for apply in [false, true] {
+        let report = loop {
+            let report = sweep_unregistered_stores(&db, &profile_root, 7 * DAY, base, apply)
+                .await
+                .unwrap();
+            if report.completion == UnregisteredSweepCompletionV1::Complete {
+                break report;
+            }
+            assert_eq!(
+                report.completion,
+                UnregisteredSweepCompletionV1::DeadlineExceeded,
+                "{report:?}"
+            );
+        };
+        assert!(report.next_cursor.is_none(), "{report:?}");
+        assert_eq!(report.plan.collect.len(), 1);
+        assert_eq!(report.plan.collect[0].project_dir_name, "proj_old_ghost");
+        assert_eq!(report.plan.retained_immature.len(), 1);
+        assert_eq!(report.applied, apply);
+        assert_eq!(report.outcome.collected.len(), 0, "{report:?}");
+        if apply {
+            assert_eq!(report.outcome.errors.len(), 1);
+            assert_eq!(
+                report.outcome.errors[0].kind,
+                CollectionFailureKind::DurableDataProtected
+            );
+        } else {
+            assert_eq!(report.outcome.errors.len(), 0, "{report:?}");
+        }
+        assert!(
+            old_dir.exists(),
+            "arbitrary payload without a manifest cannot prove durable-data absence"
+        );
+        assert!(
+            young_dir.exists(),
+            "immature unregistered dir must be retained"
+        );
+    }
 }
 
 /// A manifest root that is gone from disk is no proof the store is
