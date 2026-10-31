@@ -220,8 +220,8 @@ fn installed_rust_client_requires_workflow_reads_and_exact_lifecycle_capability(
 #[ignore = "requires a prebuilt production tracedecay daemon"]
 fn enrolled_remote_client_rejects_an_untrusted_private_authority_and_isolates_enrollment() {
     let scratch = TempDir::new().unwrap();
-    let first_home = scratch.path().join("first-home");
-    let second_home = scratch.path().join("second-home");
+    let first_home = scratch.path().join("h1");
+    let second_home = scratch.path().join("h2");
     let first_profile = first_home.join(".tracedecay");
     let second_profile = second_home.join(".tracedecay");
     let project = scratch.path().join("project");
@@ -832,9 +832,9 @@ fn enrolled_node_fails_over_after_the_operator_publishes_the_first_writer() {
 #[ignore = "requires a prebuilt production tracedecay daemon"]
 fn a_laptop_profile_joins_a_desktop_brain_and_holds_its_exact_enrollment() {
     // Both profile sockets must fit the Unix sockaddr path bound.
-    let scratch = TempDir::new_in("/tmp").unwrap();
-    let desktop_home = scratch.path().join("desktop-home");
-    let laptop_home = scratch.path().join("laptop-home");
+    let scratch = TempDir::new().unwrap();
+    let desktop_home = scratch.path().join("h1");
+    let laptop_home = scratch.path().join("h2");
     let desktop_profile = desktop_home.join(".tracedecay");
     let laptop_profile = laptop_home.join(".tracedecay");
     let project = scratch.path().join("project");
