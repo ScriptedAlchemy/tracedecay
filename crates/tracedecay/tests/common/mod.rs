@@ -1398,6 +1398,18 @@ pub fn is_transient_connection_error(err: &ureq::Error) -> bool {
     }
 }
 
+/// True when a read may retry `err`: every connection-level transient plus a
+/// client timeout.
+///
+/// A timeout is not a failed request. The peer accepted it and is still
+/// working — a dashboard read of durable state can wait behind a writer that
+/// holds the store's lock across its publish — so a read that only observes
+/// state gets the same answer by asking again. Mutations must not use this: a
+/// timed-out POST may already have applied its effect.
+pub fn is_transient_read_error(err: &ureq::Error) -> bool {
+    matches!(err, ureq::Error::Timeout(_)) || is_transient_connection_error(err)
+}
+
 /// Issues an idempotent HTTP request, retrying transient connection-level
 /// errors (the server racing its own readiness under parallel load) with a
 /// short bounded backoff. `send` performs one attempt; a `ureq::Error` that
@@ -1407,13 +1419,36 @@ pub fn http_call_with_retry(
     label: &str,
     send: impl Fn() -> Result<ureq::http::Response<ureq::Body>, ureq::Error>,
 ) -> ureq::http::Response<ureq::Body> {
+    retrying_call(label, 12, is_transient_connection_error, send)
+}
+
+/// [`http_call_with_retry`] for a read that only observes state.
+///
+/// It also retries a client timeout, so the caller's own poll deadline — not
+/// one slow sample's clock — decides when a wait has failed. Each timed-out
+/// attempt already spent the whole request budget, so the retries stay few:
+/// enough to absorb one publish burst, short of overshooting a caller whose
+/// deadline is the real completion wait.
+pub fn http_read_with_retry(
+    label: &str,
+    send: impl Fn() -> Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+) -> ureq::http::Response<ureq::Body> {
+    retrying_call(label, 4, is_transient_read_error, send)
+}
+
+fn retrying_call(
+    label: &str,
+    attempts: usize,
+    is_transient: impl Fn(&ureq::Error) -> bool,
+    send: impl Fn() -> Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+) -> ureq::http::Response<ureq::Body> {
     let mut last_err: Option<ureq::Error> = None;
-    for attempt in 0..12 {
+    for attempt in 0..attempts {
         match send() {
             Ok(response) => return response,
-            Err(err) if is_transient_connection_error(&err) => {
+            Err(err) if is_transient(&err) => {
                 last_err = Some(err);
-                std::thread::sleep(Duration::from_millis(25 * (attempt + 1)));
+                std::thread::sleep(Duration::from_millis(25 * (attempt as u64 + 1)));
             }
             Err(err) => panic!("{label} failed: {err}"),
         }
@@ -1422,7 +1457,7 @@ pub fn http_call_with_retry(
 }
 
 pub fn get_json(agent: &ureq::Agent, url: &str) -> (u16, Value) {
-    let response = http_call_with_retry(&format!("GET {url}"), || agent.get(url).call());
+    let response = http_read_with_retry(&format!("GET {url}"), || agent.get(url).call());
     response_to_json(response)
 }
 
