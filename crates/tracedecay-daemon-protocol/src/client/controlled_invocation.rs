@@ -178,9 +178,31 @@ impl DaemonInvocationClient {
         cancellation: CancellationSignal,
         policy: InvocationCancellationPolicy,
     ) -> Result<crate::contract::DaemonInvocationResponse, DaemonInvocationError> {
-        self.invoke_controlled_with_delivery(request, deadline, cancellation, policy)
-            .await
-            .map(DaemonInvocationResult::into_response)
+        let result = self
+            .invoke_controlled_with_delivery(
+                request,
+                deadline.clone(),
+                cancellation.clone(),
+                policy,
+            )
+            .await?;
+        if result.delivery.is_none() {
+            return result
+                .into_response()
+                .await
+                .map_err(classify_invoke_transport_error);
+        }
+        let stage = match policy {
+            InvocationCancellationPolicy::ReadOnly => CancellationStage::DuringRead,
+            InvocationCancellationPolicy::AuthoritativeEffect => CancellationStage::EffectInFlight,
+        };
+        let remaining =
+            deadline_remaining(&deadline).ok_or(DaemonInvocationError::TimedOut { stage })?;
+        tokio::select! {
+            result = result.into_response() => result.map_err(classify_invoke_transport_error),
+            () = wait_for_cancellation(cancellation) => Err(DaemonInvocationError::Cancelled { stage }),
+            () = asupersync::time::sleep(asupersync::time::wall_now(), remaining) => Err(DaemonInvocationError::TimedOut { stage }),
+        }
     }
 
     #[tracing::instrument(
@@ -211,14 +233,20 @@ impl DaemonInvocationClient {
         let response = self
             .invoke_controlled_on_connection(&mut lease, request, deadline, cancellation, policy)
             .await?;
-        let delivery = if delivery_ack_required && lease.connection.is_some() {
+        let delivery = if delivery_ack_required
+            && lease.connection.is_some()
+            && matches!(
+                &response.outcome,
+                crate::contract::DaemonInvocationOutcome::WorkApplication { outcome, .. }
+                    if outcome.requires_delivery_ack()
+            ) {
             Some(super::DaemonInvocationDelivery {
                 lease,
                 target_request_id,
                 connection: self.connection.clone(),
             })
         } else {
-            lease.release_to_pool();
+            lease.release_after_response(&response);
             None
         };
         Ok(DaemonInvocationResult { response, delivery })
