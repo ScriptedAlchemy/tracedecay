@@ -1,7 +1,10 @@
 pub(super) const DASHBOARD_CODE_GRAPH_REQUEST_DEADLINE_MICROS: i64 = 30_000_000;
 pub(super) const DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS: i64 = 300_000_000;
 
-pub(super) fn dashboard_http_request_deadline_micros(path: &str) -> i64 {
+/// The deadline the admission layer binds to a request for `path`, in micros
+/// from admission. Exposed so a caller polling a deferred run can wait for the
+/// contract the runtime enforces instead of guessing a budget.
+pub fn dashboard_http_request_deadline_micros(path: &str) -> i64 {
     let automation_run = path == "/api/application/retained/fact_store_curate"
         || one_segment_then(
             path,
