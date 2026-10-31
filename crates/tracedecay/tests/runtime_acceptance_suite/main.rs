@@ -22,11 +22,6 @@ mod lifecycle_production_authority_test;
 mod managed_test_run_restart_acceptance;
 mod private_route_restart_acceptance;
 mod runtime_surface_acceptance;
-// Not implied by `test-transport`: an unconditional evaluator dependency
-// links the evaluator into every test target of this package.
-#[cfg(feature = "search-eval")]
-#[allow(clippy::option_env_unwrap)]
-mod search_eval_cli_test;
 #[cfg(unix)]
 mod tool_client_transport;
 mod windows_durable_behavior;
