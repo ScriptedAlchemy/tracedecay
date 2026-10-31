@@ -71,6 +71,8 @@ mod seat_swap_tests;
 #[cfg(test)]
 mod serving_readiness_tests;
 mod serving_reads;
+#[cfg(test)]
+mod worker_plan_isolation_tests;
 
 use mount::StoreReleaseWaitStopV1;
 pub use scope_identity::latest_matches_scope_identity;
