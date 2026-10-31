@@ -95,7 +95,7 @@ async fn mounted_code_generation_retention_continues_capped_segment_reclamation(
     let graph = harness
         .server(&project_root)
         .expect("project server")
-        .cg()
+        .cg_snapshot()
         .await;
     // The scheduler hashes the canonical project root. A non-canonical
     // `project_root()` names a store that is never created, and

@@ -122,7 +122,7 @@ async fn release_one_idle_project_server_before_open(
         .collect::<std::collections::BTreeSet<_>>();
     let mut hook_replay_owners = Vec::with_capacity(retired_servers.len());
     for (_, server) in &retired_servers {
-        let graph = server.cg().await;
+        let graph = server.cg_snapshot().await;
         hook_replay_owners.push((
             graph.hook_store_layout().data_root.clone(),
             Arc::downgrade(&graph),
@@ -1157,7 +1157,7 @@ impl ProjectOpenInputs<'_> {
                 // lets the served check see that route instead of retiring
                 // owners the reopen now relies on.
                 let open_admission = capacity_gate.lock_owned().await;
-                let graph = retired_server.cg().await;
+                let graph = retired_server.cg_snapshot().await;
                 retire_unserved_process_owners(&store_administration, &graph).await;
                 drop(open_admission);
                 drop(graph);

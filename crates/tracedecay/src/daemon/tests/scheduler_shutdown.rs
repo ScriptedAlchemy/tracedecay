@@ -821,7 +821,7 @@ async fn engine_shutdown_with_code_index_reconcile_in_flight_stays_inside_term_g
         .await
         .expect("project open must publish a server");
     let project_id = server
-        .cg()
+        .cg_snapshot()
         .await
         .store_layout()
         .identity

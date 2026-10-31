@@ -42,6 +42,8 @@ use crate::store_locator_resolver::{
 mod code_graph;
 mod code_graph_manifest;
 mod code_reads;
+#[cfg(any(test, feature = "test-helpers"))]
+pub(crate) mod graph_catalog_fixtures;
 pub mod maintenance;
 mod memory_graph_reconciliation_tasks;
 mod mounts;

@@ -108,7 +108,7 @@ fn assert_project_fact(
 
 async fn project_id(fixture: &super::memory_facts_test::FactStoreMcpFixture) -> String {
     fact_store_server(fixture)
-        .cg()
+        .cg_snapshot()
         .await
         .store_layout()
         .identity

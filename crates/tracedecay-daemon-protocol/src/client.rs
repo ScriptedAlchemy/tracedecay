@@ -505,6 +505,18 @@ impl InvocationConnectionLease {
         self.disposition = LeaseDisposition::Return;
     }
 
+    fn release_after_response(&mut self, response: &crate::contract::DaemonInvocationResponse) {
+        // Admission saturation answers the request and closes the stream.
+        // Preserve that typed answer without pooling a connection it retired.
+        if !matches!(
+            &response.outcome,
+            crate::contract::DaemonInvocationOutcome::ApplicationProblem { problem }
+                if problem.kind() == ApplicationProblemKind::Saturated
+        ) {
+            self.release_to_pool();
+        }
+    }
+
     fn invalidate_pool(&mut self) {
         self.disposition = LeaseDisposition::InvalidatePool;
     }
@@ -567,8 +579,20 @@ pub struct DaemonInvocationResult {
 }
 
 impl DaemonInvocationResult {
-    pub fn into_response(self) -> crate::contract::DaemonInvocationResponse {
-        self.response
+    /// Consume the response and acknowledge any Work output received
+    /// here. Renderers that settle a later delivery boundary use `into_parts`.
+    pub async fn into_response(
+        self,
+    ) -> tracedecay_domain::errors::Result<crate::contract::DaemonInvocationResponse> {
+        if let Some(delivery) = self.delivery {
+            delivery
+                .acknowledge(
+                    tracedecay_domain::DeliverySettlementOutcomeV1::Delivered,
+                    None,
+                )
+                .await?;
+        }
+        Ok(self.response)
     }
 
     pub fn into_parts(
@@ -761,8 +785,9 @@ impl DaemonInvocationClient {
         request: crate::contract::DaemonInvocationRequest,
     ) -> tracedecay_domain::errors::Result<crate::contract::DaemonInvocationResponse> {
         self.invoke_with_delivery(request)
+            .await?
+            .into_response()
             .await
-            .map(DaemonInvocationResult::into_response)
     }
 
     #[tracing::instrument(name = "daemon.invocation.client", level = "trace", skip_all)]
@@ -778,14 +803,19 @@ impl DaemonInvocationClient {
         let result = self.invoke_on_connection(&mut lease, request).await;
         match result {
             Ok(response) => {
-                let delivery = if delivery_ack_required {
+                let delivery = if delivery_ack_required
+                    && matches!(
+                        &response.outcome,
+                        crate::contract::DaemonInvocationOutcome::WorkApplication { outcome, .. }
+                            if outcome.requires_delivery_ack()
+                    ) {
                     Some(DaemonInvocationDelivery {
                         lease,
                         target_request_id: request_id,
                         connection: self.connection.clone(),
                     })
                 } else {
-                    lease.release_to_pool();
+                    lease.release_after_response(&response);
                     None
                 };
                 Ok(DaemonInvocationResult { response, delivery })

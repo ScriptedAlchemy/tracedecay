@@ -30,7 +30,7 @@ async fn fact_store_probe_returns_connected_facts_and_typed_refusals() {
     let cg = setup_project().await;
     let project_id = cg
         .server
-        .cg()
+        .cg_snapshot()
         .await
         .store_layout()
         .identity
@@ -258,7 +258,7 @@ async fn fact_store_probe_reads_only_the_selected_registered_project() {
     let fixture = fact_store_cross_project_fixture().await;
     let active_project_id = fixture
         .active_server
-        .cg()
+        .cg_snapshot()
         .await
         .store_layout()
         .identity
@@ -268,7 +268,7 @@ async fn fact_store_probe_reads_only_the_selected_registered_project() {
         .to_owned();
     let target_project_id = fixture
         .target_server
-        .cg()
+        .cg_snapshot()
         .await
         .store_layout()
         .identity

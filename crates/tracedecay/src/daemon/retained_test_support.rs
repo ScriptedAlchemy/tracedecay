@@ -243,7 +243,7 @@ pub(crate) async fn register_project_retained_owner_for_test(
     service: &DaemonInvocationService,
     server: &crate::mcp::McpServer,
 ) -> Result<()> {
-    let graph = server.cg().await;
+    let graph = server.cg_snapshot().await;
     let project_root = graph.project_root().canonicalize()?;
     let project_id = graph
         .store_layout()
