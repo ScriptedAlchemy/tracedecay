@@ -1465,7 +1465,7 @@ async fn seed_retrieve_handle(
         }
     };
     let response_handle_root = server
-        .cg()
+        .cg_snapshot()
         .await
         .store_layout()
         .response_handle_root
@@ -2616,7 +2616,7 @@ pub(crate) async fn seed_context_scout_address(
     let graph = harness
         .server(project_root)
         .map_err(|error| format!("context scout project route unavailable: {error}"))?
-        .cg()
+        .cg_snapshot()
         .await;
     let owner = graph
         .context_scout_owner()
@@ -2722,7 +2722,12 @@ async fn seed_automation_run(
             return;
         }
     };
-    let dashboard_root = server.cg().await.store_layout().dashboard_root.clone();
+    let dashboard_root = server
+        .cg_snapshot()
+        .await
+        .store_layout()
+        .dashboard_root
+        .clone();
     let artifact = match write_run_artifact(
         &dashboard_root,
         RUN_ID,

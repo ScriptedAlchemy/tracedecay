@@ -163,7 +163,11 @@ async fn test_tools_list() {
         .expect("production tools/list server");
     let now = current_timestamp();
     let stored = store_response_handle(
-        &server.cg().await.store_layout().response_handle_root,
+        &server
+            .cg_snapshot()
+            .await
+            .store_layout()
+            .response_handle_root,
         "{\"items\":[1,2,3]}",
         now,
     )
@@ -989,7 +993,7 @@ async fn test_server_stats_include_response_handle_metrics() {
     let baseline_handles = &baseline["response_handles"];
     let baseline_counter = |key: &str| baseline_handles[key].as_u64().unwrap_or(0);
 
-    let cg = server.cg().await;
+    let cg = server.cg_snapshot().await;
     let mut last_fact = None;
     for i in 0..35 {
         let added = crate::support::handle_real_server_tool_call(
@@ -1711,7 +1715,7 @@ async fn assert_legacy_selectors_cannot_reroute_the_active_project() {
     let target_graph = harness
         .server(&target_project)
         .expect("target project server")
-        .cg()
+        .cg_snapshot()
         .await;
     let target_root = target_graph.project_root().to_string_lossy().into_owned();
     let target_project_id = target_graph
