@@ -24,6 +24,12 @@ impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
         Box::pin(async move {
             let root = canonical_existing_identity(&project_root)
                 .map_err(|_| LspRuntimeFailure::new("lsp-code-index-root-unavailable"))?;
+            // Ordinary LSP reads share search's bounded source-witness ladder.
+            // didSave alone does not notify the index of raw filesystem edits.
+            registry
+                .diagnostics_change_generation(&root)
+                .await
+                .ok_or_else(|| LspRuntimeFailure::new("lsp-code-index-generation-unavailable"))?;
             let identity_root = root.clone();
             let live_identity =
                 native_runtime::spawn_blocking(move || IndexingIdentityV1::resolve(&identity_root))
@@ -47,11 +53,20 @@ impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
                 live_identity.head_ref().cloned(),
             )
             .map_err(|_| LspRuntimeFailure::new("lsp-code-index-scope-unavailable"))?;
-            let current = registry
+            let (current, fresh) = registry
                 .retained_text_owner_freshness_for_scope(&scope)
                 .await
-                .map(|(current, _)| current)
                 .ok_or_else(|| LspRuntimeFailure::new("lsp-code-index-generation-unavailable"))?;
+            if !fresh {
+                return Err(LspRuntimeFailure::new(
+                    "lsp-code-index-generation-unavailable",
+                ));
+            }
+            if retained.metadata().manifest().generation_id
+                != current.metadata().manifest().generation_id
+            {
+                return Err(LspRuntimeFailure::new("lsp-code-index-identity-changed"));
+            }
             let confirmation_root = root.clone();
             let confirmed_identity = native_runtime::spawn_blocking(move || {
                 IndexingIdentityV1::resolve(&confirmation_root)

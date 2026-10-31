@@ -30,6 +30,7 @@ use tracedecay_application::operation_stream::{
     OperationKind, OperationStreamConfig,
 };
 use tracedecay_application::primitives::StorageStatusPrimitiveRequest;
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexHintPolicyV1;
 use tracedecay_contracts::feedback::{
     FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1, FEEDBACK_LIST_CAPABILITY_ID_V1,
     FeedbackDiagnosticsReadRequestV1,
@@ -204,6 +205,10 @@ async fn lsp_runtime_fixture() -> RuntimeFixture {
         &project,
     )
     .expect("copy writable fixture");
+    // Analyzer setup and managed tests write Cargo artifacts. They are not
+    // source changes in this fixture and must not invalidate its commit scope.
+    std::fs::write(project.join(".gitignore"), "/target/\n/Cargo.lock\n")
+        .expect("exclude generated Cargo artifacts from the LSP fixture revision");
     git(&project, &["init", "--quiet"]);
     git(&project, &["config", "user.name", "TraceDecay Test"]);
     git(
@@ -2731,6 +2736,18 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     let arbitrary_payload = poll_lsp_response(&mut session, 407).await;
     assert_eq!(arbitrary_payload["error"]["code"], -32602);
 
+    let status = std::process::Command::new(common::git_program())
+        .current_dir(&fixture.project)
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .output()
+        .expect("read LSP fixture status after compiler-backed navigation");
+    assert_command_success("git status", &status);
+    assert!(
+        status.stdout.is_empty(),
+        "compiler-backed navigation must preserve the committed fixture revision:\n{}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+
     let mut related_lsp_handles = Vec::new();
     for (kind, first_request_id) in [("postEditImpact", 102), ("affectedTests", 202)] {
         let related = poll_lsp_context(&mut session, &document_uri, kind, first_request_id).await;
@@ -3252,6 +3269,92 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     assert!(
         after_reconnect.get("result").is_some(),
         "reconnected client must retain standard navigation: {after_reconnect}"
+    );
+    // Ignoring build output must not make a saved source edit commit-eligible.
+    let edited_source = format!("{source}\n// saved source edit\n");
+    std::fs::write(fixture.project.join("src/auth/login.rs"), &edited_source)
+        .expect("edit tracked LSP source");
+    let dirty_status = std::process::Command::new(common::git_program())
+        .current_dir(&fixture.project)
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .output()
+        .expect("read edited LSP fixture status");
+    assert_command_success("git status", &dirty_status);
+    assert_eq!(
+        String::from_utf8_lossy(&dirty_status.stdout),
+        " M src/auth/login.rs\n",
+        "only the tracked source edit should dirty the fixture"
+    );
+    send_lsp(
+        &mut session,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": { "uri": document_uri, "version": 2 },
+                "contentChanges": [{ "text": edited_source }],
+            },
+        }),
+    )
+    .await;
+    send_lsp(
+        &mut session,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didSave",
+            "params": { "textDocument": { "uri": document_uri } },
+        }),
+    )
+    .await;
+    // didSave updates the overlay and feedback cache. Unhinted filesystem
+    // changes are observed by the ordinary read's existing source-witness
+    // ladder, not an immediate notification or a forced index refresh.
+    tokio::time::sleep(CodeIndexHintPolicyV1::default().staleness_threshold).await;
+    send_lsp(
+        &mut session,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 10_000,
+            "method": "tracedecay/context",
+            "params": { "kind": "postEditImpact", "documentUri": document_uri },
+        }),
+    )
+    .await;
+    let mut dirty_projection = poll_lsp_response(&mut session, 10_000).await;
+    assert_eq!(
+        dirty_projection["error"]["code"],
+        -32802,
+        "the observed edit must not pair the current overlay with the old committed scope: \
+         baseline={projection}; response={dirty_projection}; events={}",
+        fixture.daemon_log_tail()
+    );
+    if matches!(
+        dirty_projection["error"]["data"]["coverage"].as_str(),
+        Some("lsp-code-index-generation-unavailable" | "lsp-code-index-identity-changed")
+    ) {
+        // The read queued the canonical owner. Wait on the production status
+        // readiness signal if pending or if publication crossed the read's
+        // generation bracket, then ask the same document's commit-bound scope.
+        await_published_code_index(fixture.home(), &fixture.project);
+        send_lsp(
+            &mut session,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 10_001,
+                "method": "tracedecay/context",
+                "params": { "kind": "postEditImpact", "documentUri": document_uri },
+            }),
+        )
+        .await;
+        dirty_projection = poll_lsp_response(&mut session, 10_001).await;
+    }
+    assert_eq!(
+        dirty_projection["error"]["code"], -32802,
+        "{dirty_projection}"
+    );
+    assert_eq!(
+        dirty_projection["error"]["data"]["coverage"], "lsp-code-index-source-revision-unavailable",
+        "a saved source edit must still lose commit eligibility: {dirty_projection}"
     );
     shutdown_lsp(&mut session, 702).await;
 }
