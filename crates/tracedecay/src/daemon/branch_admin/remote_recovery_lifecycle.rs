@@ -269,7 +269,7 @@ pub(super) async fn retire_runtime_work(
             // delivery. Join it inside the tracked retirement deadline before
             // store retirement inspects live clients.
             for server in &servers {
-                let graph = server.cg().await;
+                let graph = server.cg_snapshot().await;
                 crate::daemon::hook_v2_replay_consumer::retire_hook_v2_replay_consumer(
                     &graph.hook_store_layout().data_root,
                     &Arc::downgrade(&graph),

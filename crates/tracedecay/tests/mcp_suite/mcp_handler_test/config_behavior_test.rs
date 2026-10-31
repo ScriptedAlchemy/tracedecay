@@ -225,7 +225,7 @@ async fn tracedecay_config_reports_literal_values_and_typed_failures() {
         .harness
         .server(&fixture.project_root)
         .expect("production config server");
-    let project_root = server.cg().await.project_root().to_path_buf();
+    let project_root = server.cg_snapshot().await.project_root().to_path_buf();
     assert_eq!(
         fs::read_to_string(project_root.join("app.toml")).unwrap(),
         APP_TOML

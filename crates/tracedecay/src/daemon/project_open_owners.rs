@@ -131,7 +131,7 @@ pub(crate) async fn install_project_open_source_edit_preview_owner(
 pub(crate) async fn install_project_open_source_edit_owners_for_test(
     server: &McpServer,
 ) -> Result<bool> {
-    let graph = server.cg().await;
+    let graph = server.cg_snapshot().await;
     if server.daemon_invocation_service().is_none() {
         return Ok(false);
     }
@@ -246,7 +246,7 @@ pub(super) async fn register_reset_required_route_code_read_owners(
         ProjectId::new(project_id.to_owned()).map_err(|_| TraceDecayError::Config {
             message: "project-open owners require an authoritative project identity".to_owned(),
         })?;
-    let graph = server.cg().await;
+    let graph = server.cg_snapshot().await;
     let scope =
         tracedecay_code_index_runtime::resolved_scope_for_project(project_root, &project_id)
             .map_err(|error| TraceDecayError::Config {
@@ -311,7 +311,7 @@ pub(super) async fn register_project_open_production_owners(
         ProjectId::new(project_id.to_owned()).map_err(|_| TraceDecayError::Config {
             message: "project-open owners require an authoritative project identity".to_owned(),
         })?;
-    let graph = server.cg().await;
+    let graph = server.cg_snapshot().await;
     let code_graph =
         server
             .code_graph_projection_read_port()

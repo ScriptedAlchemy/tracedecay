@@ -962,7 +962,7 @@ async fn mount_rmcp_target(
         .project_server(&handshake)
         .await
         .expect("mount target project server");
-    let graph = target.cg().await;
+    let graph = target.cg_snapshot().await;
     let project_id = graph
         .store_layout()
         .identity
@@ -1059,7 +1059,7 @@ async fn selected_target_rmcp_flushes_response_and_disconnect_cancels_selector_o
     // project's retained owner. Replace that owner in place, a second key
     // for the same project_id makes the resolver report ambiguous, and a
     // replacement without profile identity is filtered out of the mount set.
-    let graph = target_server.cg().await;
+    let graph = target_server.cg_snapshot().await;
     let profile_identity = fixture
         .engine
         .store_administration

@@ -728,7 +728,7 @@ async fn apply_project_setting_via_surface(
         .project_server(handshake)
         .await
         .expect("open project server before writing configuration");
-    let graph = server.cg().await;
+    let graph = server.cg_snapshot().await;
     let current = graph
         .configuration_runtime()
         .client()

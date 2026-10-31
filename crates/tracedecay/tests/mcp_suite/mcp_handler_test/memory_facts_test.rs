@@ -640,7 +640,7 @@ async fn memory_fact_store_supersede_retires_old_fact_from_default_surfaces() {
 #[tokio::test]
 async fn memory_fact_store_project_selector_targets_registered_project() {
     let fixture = fact_store_cross_project_fixture().await;
-    let target_graph = fixture.target_server.cg().await;
+    let target_graph = fixture.target_server.cg_snapshot().await;
     let target_project_id = target_graph
         .store_layout()
         .identity
@@ -815,7 +815,7 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
 #[tokio::test]
 async fn memory_status_project_selector_reports_registered_project_memory() {
     let fixture = fact_store_cross_project_fixture().await;
-    let target_graph = fixture.target_server.cg().await;
+    let target_graph = fixture.target_server.cg_snapshot().await;
     let target_project_id = target_graph
         .store_layout()
         .identity
