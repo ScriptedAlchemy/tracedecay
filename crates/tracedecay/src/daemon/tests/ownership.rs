@@ -1159,17 +1159,18 @@ async fn graph_pressure_retires_only_settled_response_idle_owners() {
     let core = key("core");
     let idle = key("idle");
     let active = key("active");
-    let mut registry =
-        DatabaseOwnerRegistry::<Arc<crate::mcp::server::ProjectServerResponseLifecycle>>::default();
+    let mut registry = DatabaseOwnerRegistry::<
+        Arc<tracedecay_mcp::server::ProjectServerResponseLifecycle>,
+    >::default();
     registry.insert_pending_route(
         route("pending"),
         pending.clone(),
-        Arc::new(crate::mcp::server::ProjectServerResponseLifecycle::default()),
+        Arc::new(tracedecay_mcp::server::ProjectServerResponseLifecycle::default()),
     );
     registry.insert_pending_route(
         route("core"),
         core.clone(),
-        Arc::new(crate::mcp::server::ProjectServerResponseLifecycle::default()),
+        Arc::new(tracedecay_mcp::server::ProjectServerResponseLifecycle::default()),
     );
     assert!(registry.mark_ready(&core));
     assert!(
@@ -1204,9 +1205,11 @@ async fn graph_pressure_retires_only_settled_response_idle_owners() {
     assert!(registry.get_route(&route("core")).is_none());
     assert!(registry.get(&pending).is_some());
 
-    let idle_lifecycle = Arc::new(crate::mcp::server::ProjectServerResponseLifecycle::default());
+    let idle_lifecycle =
+        Arc::new(tracedecay_mcp::server::ProjectServerResponseLifecycle::default());
     registry.insert_at(idle.clone(), idle_lifecycle, std::time::Instant::now());
-    let active_lifecycle = Arc::new(crate::mcp::server::ProjectServerResponseLifecycle::default());
+    let active_lifecycle =
+        Arc::new(tracedecay_mcp::server::ProjectServerResponseLifecycle::default());
     let active_request = Arc::clone(active_lifecycle.response_gate())
         .read_owned()
         .await;
@@ -1231,9 +1234,9 @@ async fn graph_pressure_retires_only_settled_response_idle_owners() {
     linked_active.project_root = PathBuf::from("/project/linked-owner-worktree");
     linked_active.scope_prefix = Some("worktree".to_owned());
     let linked_idle_lifecycle =
-        Arc::new(crate::mcp::server::ProjectServerResponseLifecycle::default());
+        Arc::new(tracedecay_mcp::server::ProjectServerResponseLifecycle::default());
     let linked_active_lifecycle =
-        Arc::new(crate::mcp::server::ProjectServerResponseLifecycle::default());
+        Arc::new(tracedecay_mcp::server::ProjectServerResponseLifecycle::default());
     let linked_request = Arc::clone(linked_active_lifecycle.response_gate())
         .read_owned()
         .await;
@@ -1266,7 +1269,7 @@ async fn graph_pressure_retires_only_settled_response_idle_owners() {
 
     let persistent = key("persistent-client");
     let persistent_lifecycle =
-        Arc::new(crate::mcp::server::ProjectServerResponseLifecycle::default());
+        Arc::new(tracedecay_mcp::server::ProjectServerResponseLifecycle::default());
     let persistent_client = Arc::clone(&persistent_lifecycle);
     let mut persistent_registry = DatabaseOwnerRegistry::default();
     persistent_registry.insert_at(

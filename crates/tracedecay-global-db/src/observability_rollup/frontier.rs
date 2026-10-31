@@ -75,7 +75,9 @@ impl RegisteredGlobalDb {
     /// Claims at most one completed quiet UTC day at or after this scope's
     /// first observable day. First mount starts at tomorrow's boundary, so
     /// startup never fabricates coverage for the partial current day or any
-    /// pre-installation history.
+    /// pre-installation history. As with dirty days, a claimant's own
+    /// unexpired lease is retryable because only an abandoned earlier pass
+    /// of that claimant can still hold it.
     pub async fn claim_observability_rollup_empty_day(
         &self,
         authorized_scope_ref: &str,
@@ -144,7 +146,7 @@ impl RegisteredGlobalDb {
                     next_day_start_seconds,
                 });
             }
-            if active_claimant.is_some()
+            if active_claimant.is_some_and(|active| active != claimant_id)
                 && lease_until_seconds.is_some_and(|lease| lease > now_seconds)
             {
                 return Ok(ObservabilityRollupEmptyDayClaimOutcomeV1::Leased {
@@ -188,7 +190,8 @@ impl RegisteredGlobalDb {
                     "UPDATE observability_rollup_frontiers
                  SET claimant_id = ?2, lease_until_seconds = unixepoch() + ?3
                  WHERE scope_ref = ?1 AND next_day_start_seconds = ?4
-                   AND (claimant_id IS NULL OR lease_until_seconds <= unixepoch())
+                   AND (claimant_id IS NULL OR claimant_id = ?2
+                        OR lease_until_seconds <= unixepoch())
                  RETURNING lease_until_seconds",
                     tracedecay_runtime_core::db::engine::params![
                         authorized_scope_ref,

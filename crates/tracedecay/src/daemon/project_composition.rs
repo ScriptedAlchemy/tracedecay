@@ -50,7 +50,7 @@ pub(super) struct ProductionProjectComposition {
 }
 
 pub(super) fn project_server_response_lifecycle_has_in_flight(
-    lifecycle: &crate::mcp::server::ProjectServerResponseLifecycle,
+    lifecycle: &tracedecay_mcp::server::ProjectServerResponseLifecycle,
 ) -> bool {
     Arc::clone(lifecycle.response_gate())
         .try_write_owned()
