@@ -15,11 +15,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use crate::common::{get_json, http_agent_with_timeout};
+use crate::common::{ReadRetry, get_json, http_agent_with_timeout, read_retry};
 
 /// The answer the slow sample eventually serves, so a retried read is
 /// distinguishable from a fixture that answered the first attempt.
 const BODY: &str = r#"{"served":"after the client timeout"}"#;
+
+/// The client gives up long before the first request is answered, and the
+/// retry has the same margin to reach the immediate answer.
+const CLIENT_TIMEOUT: Duration = Duration::from_millis(500);
+const SLOW_SAMPLE: Duration = Duration::from_millis(1200);
 
 #[test]
 fn a_state_read_retries_when_the_server_outlasts_the_client_timeout() {
@@ -40,7 +45,7 @@ fn a_state_read_retries_when_the_server_outlasts_the_client_timeout() {
                 let _ = stream.read(&mut request);
                 if ordinal == 0 {
                     // Still working when the client gives up on this sample.
-                    thread::sleep(Duration::from_millis(400));
+                    thread::sleep(SLOW_SAMPLE);
                     return;
                 }
                 write!(
@@ -54,7 +59,7 @@ fn a_state_read_retries_when_the_server_outlasts_the_client_timeout() {
         }
     });
 
-    let agent = http_agent_with_timeout(Duration::from_millis(150));
+    let agent = http_agent_with_timeout(CLIENT_TIMEOUT);
     let (status, payload) = get_json(
         &agent,
         &format!("http://{address}/api/automation/runs?limit=50"),
@@ -65,5 +70,41 @@ fn a_state_read_retries_when_the_server_outlasts_the_client_timeout() {
     assert!(
         served.load(Ordering::SeqCst) > 1,
         "the read must have retried the timed-out sample"
+    );
+}
+
+/// The timeout budget is its own. A read still gets the fixture's full
+/// connection-error budget — a freshly started server racing its readiness —
+/// no matter how many slow samples it already retried.
+#[test]
+fn a_state_read_keeps_the_full_connection_retry_budget() {
+    let refused = ureq::Error::ConnectionFailed;
+    let mut connection_failures = 0;
+    loop {
+        match read_retry(&refused, connection_failures, 0) {
+            ReadRetry::Retry(delay) => {
+                assert_eq!(
+                    delay,
+                    Duration::from_millis(25 * (connection_failures as u64 + 1)),
+                    "connection backoff keeps the fixture's schedule"
+                );
+                connection_failures += 1;
+            }
+            ReadRetry::Exhausted => break,
+            ReadRetry::Fatal => panic!("a connection-level failure is retryable"),
+        }
+    }
+    assert_eq!(
+        connection_failures + 1,
+        12,
+        "a read keeps the full connection-error attempt budget"
+    );
+
+    let timed_out = ureq::Error::Timeout(ureq::Timeout::Global);
+    assert!(matches!(read_retry(&timed_out, 0, 2), ReadRetry::Retry(_)));
+    assert_eq!(read_retry(&timed_out, 0, 3), ReadRetry::Exhausted);
+    assert!(
+        matches!(read_retry(&refused, 0, 3), ReadRetry::Retry(_)),
+        "spent timeout retries never shorten the connection budget"
     );
 }
