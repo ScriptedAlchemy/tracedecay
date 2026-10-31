@@ -9,7 +9,10 @@ use super::{
 impl RegisteredGlobalDb {
     /// Leases the oldest dirty execution-topology day for one exact scope.
     /// At most one bounded day is returned; expired leases are retryable and
-    /// a later accepted source event revokes the lease atomically.
+    /// a later accepted source event revokes the lease atomically. A
+    /// claimant's own unexpired lease is also retryable. One claimant runs
+    /// one maintenance pass at a time, so a lease it still holds belongs to
+    /// an earlier pass that was preempted or timed out before its release.
     #[tracing::instrument(
         name = "global_db.observability_rollup.persist.claim",
         level = "trace",
@@ -39,7 +42,8 @@ impl RegisteredGlobalDb {
                  WHERE rowid = (
                     SELECT rowid FROM observability_rollup_dirty_days
                     WHERE scope_ref = ?1
-                      AND (claimant_id IS NULL OR lease_until_seconds <= unixepoch())
+                      AND (claimant_id IS NULL OR claimant_id = ?2
+                           OR lease_until_seconds <= unixepoch())
                     ORDER BY day_start_seconds
                     LIMIT 1
                  )
