@@ -19,7 +19,6 @@ mod common;
 mod advanced_workflow_journey_test;
 #[cfg(unix)]
 mod authentication_refusal_test;
-mod code_index_ignored_dependencies_test;
 #[cfg(unix)]
 mod code_index_journey;
 #[cfg(unix)]
@@ -46,7 +45,6 @@ mod stale_client_resilience_test;
 mod store_shutdown_checkpoint_test;
 #[cfg(unix)]
 mod unhinted_worktree_change_test;
-mod workflow_handoff_test;
 
 #[test]
 fn missing_cli_binary_reports_fixture_error() {

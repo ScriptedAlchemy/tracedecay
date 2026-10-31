@@ -94,10 +94,10 @@ tracedecay-temporal-query = { path = "../tracedecay-temporal-query", optional = 
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 
 [dev-dependencies]
-# The session-temporal bench binary owns its tokio runtime.
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 rusqlite.workspace = true
 tempfile.workspace = true
+# The session-temporal bench binary owns its tokio runtime.
+tokio = { workspace = true, features = ["full", "test-util"] }
 tracedecay-application = { path = "../tracedecay-application", features = ["test-helpers"] }
 tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", features = ["test-helpers"] }
 tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false, features = ["test-helpers"] }
@@ -124,3 +124,7 @@ required-features = ["test-helpers"]
 name = "session_temporal_suite"
 path = "tests/session_temporal_suite/main.rs"
 required-features = ["test-helpers"]
+
+[[test]]
+name = "workflow_handoff_test"
+required-features = ["test-helpers", "test-transport"]
