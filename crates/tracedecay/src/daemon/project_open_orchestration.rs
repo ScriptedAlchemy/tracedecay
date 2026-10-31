@@ -4,8 +4,18 @@
 //! cached-open, warm-up and request paths, so a single route never opens twice
 //! and a draining daemon never starts a new one.
 
-use super::*;
+use super::branch_admin::StoreAdministration;
+use super::core_admission::park_admission;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::time::Instant;
+use tokio::time::Duration;
 use tracedecay_daemon_service::shutdown::DaemonLifecycle;
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_mcp::{JsonRpcRequest, JsonRpcResponse};
+use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 use tracedecay_runtime_core::path_safety::{plain_host_path, same_canonical_path};
@@ -31,7 +41,9 @@ where
     )
     .await
     .map_err(|error| match error {
-        TimeoutError::Elapsed => project_warming_error(project_path),
+        TimeoutError::Elapsed => {
+            crate::daemon::project_routing::project_warming_error(project_path)
+        }
         TimeoutError::TimerUnavailable(_) => TraceDecayError::Config {
             message: error.to_string(),
         },
@@ -46,7 +58,7 @@ where
 /// cache before it read the state, so a publication that raced the iteration
 /// is honored instead of answering a spurious failure.
 pub(super) async fn await_claimed_project_open<Published, PublishedFuture, Ready, ReadyFuture>(
-    claim: ProjectOpenTaskClaim,
+    claim: crate::daemon::project_open_admission::ProjectOpenTaskClaim,
     project_path: &Path,
     publication_deadline: Instant,
     published: Published,
@@ -59,7 +71,7 @@ where
     ReadyFuture: std::future::Future<Output = Result<Option<Arc<crate::mcp::McpServer>>>>,
 {
     match claim {
-        ProjectOpenTaskClaim::InFlight(state) => {
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::InFlight(state) => {
             let recorded = state.clone();
             let publication = async {
                 let mut state = state;
@@ -69,7 +81,7 @@ where
                     }
                     let current = state.borrow().clone();
                     match current {
-                        ProjectOpenTaskState::Opening => {
+                        crate::daemon::project_open_admission::ProjectOpenTaskState::Opening => {
                             tokio::select! {
                                 changed = state.changed() => {
                                     changed.map_err(|_| TraceDecayError::Config {
@@ -82,7 +94,7 @@ where
                                 }
                             }
                         }
-                        ProjectOpenTaskState::Ready => {
+                        crate::daemon::project_open_admission::ProjectOpenTaskState::Ready => {
                             if let Some(server) = ready().await? {
                                 return Ok(server);
                             }
@@ -91,7 +103,9 @@ where
                                     .to_string(),
                             });
                         }
-                        ProjectOpenTaskState::Failed(failure) => {
+                        crate::daemon::project_open_admission::ProjectOpenTaskState::Failed(
+                            failure,
+                        ) => {
                             return Err(failure.to_error());
                         }
                     }
@@ -101,7 +115,7 @@ where
             // released for the wait's duration so a tool that needs no project
             // owner is never shed by a queue of warming clients. The wait stays
             // bounded by PROJECT_OPEN_REQUEST_DEADLINE inside the helper.
-            prefer_recorded_open_failure(
+            crate::daemon::project_routing::prefer_recorded_open_failure(
                 park_admission(wait_for_project_open_publication(
                     project_path,
                     publication_deadline,
@@ -111,28 +125,34 @@ where
                 &recorded,
             )
         }
-        ProjectOpenTaskClaim::Failed(failure) => Err(failure.to_error()),
-        ProjectOpenTaskClaim::Saturated => Err(project_open_task_capacity_error()),
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(failure) => {
+            Err(failure.to_error())
+        }
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Saturated => {
+            Err(crate::daemon::project_routing::project_open_task_capacity_error())
+        }
     }
 }
 
 #[tracing::instrument(name = "daemon.project.orchestrate.start", level = "trace", skip_all)]
 pub(super) async fn start_lifecycle_project_open<OpenOperation, OpenFuture>(
-    tasks: &ProjectOpenTasks,
+    tasks: &crate::daemon::project_open_admission::ProjectOpenTasks,
     lifecycle: DaemonLifecycle,
-    route: ProjectRouteKey,
+    route: crate::daemon::project_open_admission::ProjectRouteKey,
     project_path: PathBuf,
     initialize_request: Option<JsonRpcRequest>,
     open_project_server: OpenOperation,
-) -> ProjectOpenTaskClaim
+) -> crate::daemon::project_open_admission::ProjectOpenTaskClaim
 where
     OpenOperation: FnOnce(CancellationToken) -> OpenFuture + Send + 'static,
     OpenFuture: std::future::Future<Output = Result<Arc<crate::mcp::McpServer>>> + Send + 'static,
 {
     if !lifecycle.accepting() {
-        return ProjectOpenTaskClaim::Failed(ProjectOpenFailure::untyped(
-            "daemon is draining before project warm-up".to_string(),
-        ));
+        return crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(
+            crate::daemon::project_open_admission::ProjectOpenFailure::untyped(
+                "daemon is draining before project warm-up".to_string(),
+            ),
+        );
     }
     tasks.start_cancellable(route, move |cancellation| async move {
         let Some(activity) = lifecycle.try_enter() else {
@@ -156,7 +176,9 @@ where
                     ("project", project_path.display().to_string()),
                 ],
             );
-            return Err(result.err().unwrap_or_else(project_open_cancellation_error));
+            return Err(result
+                .err()
+                .unwrap_or_else(crate::daemon::project_routing::project_open_cancellation_error));
         }
         match result {
             Ok(server) => {
@@ -427,7 +449,7 @@ pub(super) async fn durable_enrollment_resolves_existing_store(
 
 fn unenrolled_project_route_error(project_path: &Path) -> TraceDecayError {
     TraceDecayError::project_route(
-        PROJECT_NOT_ENROLLED_REASON_CODE,
+        tracedecay_daemon_protocol::PROJECT_NOT_ENROLLED_REASON_CODE,
         false,
         format!(
             "no TraceDecay index found at '{}': project is not enrolled in the authenticated \
@@ -443,10 +465,13 @@ fn unenrolled_project_route_error(project_path: &Path) -> TraceDecayError {
 pub(super) async fn portable_cached_project_server(
     store_administration: &StoreAdministration,
     canonical_project_path: &Path,
-    handshake: &DaemonHandshake,
-    requirement: ProjectServerRequirement,
+    handshake: &tracedecay_daemon_protocol::DaemonHandshake,
+    requirement: crate::daemon::project_open_admission::ProjectServerRequirement,
 ) -> Result<Option<Arc<crate::mcp::McpServer>>> {
-    let route = ProjectRouteKey::from_handshake(canonical_project_path, handshake)?;
+    let route = crate::daemon::project_open_admission::ProjectRouteKey::from_handshake(
+        canonical_project_path,
+        handshake,
+    )?;
     let server = {
         let mut servers = store_administration.project_servers().lock().await;
         servers
@@ -474,16 +499,19 @@ pub(super) async fn portable_cached_project_server(
 async fn begin_portable_project_open(
     lifecycle: DaemonLifecycle,
     store_administration: StoreAdministration,
-    project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
-    invocation: DaemonInvocationState,
-    http_application_registry: http_application::DaemonHttpApplicationRegistry,
-    handshake: DaemonHandshake,
+    project_open_gates: Arc<
+        tokio::sync::Mutex<crate::daemon::project_open_admission::ProjectOpenGates>,
+    >,
+    invocation: crate::daemon::invocation_state::DaemonInvocationState,
+    http_application_registry: crate::daemon::http_application::DaemonHttpApplicationRegistry,
+    handshake: tracedecay_daemon_protocol::DaemonHandshake,
     canonical_project_path: PathBuf,
-    route: ProjectRouteKey,
+    route: crate::daemon::project_open_admission::ProjectRouteKey,
     initialize_request: Option<JsonRpcRequest>,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
-) -> ProjectOpenTaskClaim {
-    let tasks = project_open_tasks(project_open_gates.as_ref()).await;
+) -> crate::daemon::project_open_admission::ProjectOpenTaskClaim {
+    let tasks =
+        crate::daemon::project_routing::project_open_tasks(project_open_gates.as_ref()).await;
     let open_project_path = canonical_project_path.clone();
     let open_gates = Arc::clone(&project_open_gates);
     Box::pin(start_lifecycle_project_open(
@@ -493,14 +521,14 @@ async fn begin_portable_project_open(
         canonical_project_path,
         initialize_request,
         move |cancellation| async move {
-            production_project_server(
+            crate::daemon::project_composition::production_project_server(
                 &store_administration,
                 open_gates.as_ref(),
                 &invocation,
                 &http_application_registry,
                 &open_project_path,
                 &handshake,
-                ProductionProjectCompositionRuntime::Portable {
+                crate::daemon::project_composition::ProductionProjectCompositionRuntime::Portable {
                     startup_catch_up: true,
                 },
                 &cancellation,
@@ -523,20 +551,25 @@ async fn begin_portable_project_open(
 pub(super) async fn schedule_portable_project_server_warmup(
     lifecycle: DaemonLifecycle,
     store_administration: StoreAdministration,
-    project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
-    invocation: DaemonInvocationState,
-    http_application_registry: http_application::DaemonHttpApplicationRegistry,
-    handshake: DaemonHandshake,
+    project_open_gates: Arc<
+        tokio::sync::Mutex<crate::daemon::project_open_admission::ProjectOpenGates>,
+    >,
+    invocation: crate::daemon::invocation_state::DaemonInvocationState,
+    http_application_registry: crate::daemon::http_application::DaemonHttpApplicationRegistry,
+    handshake: tracedecay_daemon_protocol::DaemonHandshake,
     initialize_request: Option<JsonRpcRequest>,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> Result<()> {
     let (canonical_project_path, route) =
-        project_route_for_handshake(&handshake, store_administration.owner_home()?)?;
+        crate::daemon::project_routing::project_route_for_handshake(
+            &handshake,
+            store_administration.owner_home()?,
+        )?;
     if portable_cached_project_server(
         &store_administration,
         &canonical_project_path,
         &handshake,
-        ProjectServerRequirement::Core,
+        crate::daemon::project_open_admission::ProjectServerRequirement::Core,
     )
     .await?
     .is_some()
@@ -558,9 +591,13 @@ pub(super) async fn schedule_portable_project_server_warmup(
     ))
     .await
     {
-        ProjectOpenTaskClaim::InFlight(_) => Ok(()),
-        ProjectOpenTaskClaim::Failed(failure) => Err(failure.to_error()),
-        ProjectOpenTaskClaim::Saturated => Err(project_open_task_capacity_error()),
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::InFlight(_) => Ok(()),
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(failure) => {
+            Err(failure.to_error())
+        }
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Saturated => {
+            Err(crate::daemon::project_routing::project_open_task_capacity_error())
+        }
     }
 }
 
@@ -573,15 +610,20 @@ pub(super) async fn schedule_portable_project_server_warmup(
 pub(super) async fn portable_project_server_for_request(
     lifecycle: DaemonLifecycle,
     store_administration: StoreAdministration,
-    project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
-    invocation: DaemonInvocationState,
-    http_application_registry: http_application::DaemonHttpApplicationRegistry,
-    handshake: &DaemonHandshake,
-    requirement: ProjectServerRequirement,
+    project_open_gates: Arc<
+        tokio::sync::Mutex<crate::daemon::project_open_admission::ProjectOpenGates>,
+    >,
+    invocation: crate::daemon::invocation_state::DaemonInvocationState,
+    http_application_registry: crate::daemon::http_application::DaemonHttpApplicationRegistry,
+    handshake: &tracedecay_daemon_protocol::DaemonHandshake,
+    requirement: crate::daemon::project_open_admission::ProjectServerRequirement,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> Result<Arc<crate::mcp::McpServer>> {
     let (canonical_project_path, route) =
-        project_route_for_handshake(handshake, store_administration.owner_home()?)?;
+        crate::daemon::project_routing::project_route_for_handshake(
+            handshake,
+            store_administration.owner_home()?,
+        )?;
     // Heap-allocate the cached-server probe: this future is embedded by value
     // in every connection-serving composition, and its resident frame
     // overflows the worker stack in perf-profile layouts when inlined.
@@ -617,7 +659,7 @@ pub(super) async fn portable_project_server_for_request(
         // The bound starts here, after the open is claimed. Starting it at
         // connection arrival let route enrollment spend it, and the request
         // then answered warming for a refusal already on the watch.
-        let publication_deadline = project_open_publication_deadline(Instant::now());
+        let publication_deadline = crate::daemon::project_open_publication_deadline(Instant::now());
         let probe = || {
             portable_cached_project_server(
                 &store_administration,
@@ -634,7 +676,7 @@ pub(super) async fn portable_project_server_for_request(
             probe,
         )
         .await;
-        if project_open_tasks(project_open_gates.as_ref())
+        if crate::daemon::project_routing::project_open_tasks(project_open_gates.as_ref())
             .await
             .admit_explicit_init_retry(
                 &route,
@@ -652,11 +694,14 @@ pub(super) async fn portable_project_server_for_request(
 
 #[cfg(any(not(unix), test))]
 pub(super) async fn portable_cached_project_open_failure(
-    project_open_gates: &tokio::sync::Mutex<ProjectOpenGates>,
-    handshake: &DaemonHandshake,
+    project_open_gates: &tokio::sync::Mutex<
+        crate::daemon::project_open_admission::ProjectOpenGates,
+    >,
+    handshake: &tracedecay_daemon_protocol::DaemonHandshake,
     owner_home: Option<&Path>,
-) -> Result<Option<ProjectOpenFailure>> {
-    let (_, route) = project_route_for_handshake(handshake, owner_home)?;
-    let tasks = project_open_tasks(project_open_gates).await;
+) -> Result<Option<crate::daemon::project_open_admission::ProjectOpenFailure>> {
+    let (_, route) =
+        crate::daemon::project_routing::project_route_for_handshake(handshake, owner_home)?;
+    let tasks = crate::daemon::project_routing::project_open_tasks(project_open_gates).await;
     Ok(tasks.cached_failure(&route))
 }

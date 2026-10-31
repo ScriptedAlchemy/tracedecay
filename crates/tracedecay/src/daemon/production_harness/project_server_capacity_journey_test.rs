@@ -1,7 +1,22 @@
+use super::super::MAX_CACHED_PROJECT_SERVERS;
+use super::super::core_handshake::binary_version;
+#[cfg(any(test, feature = "test-transport"))]
+use super::super::production_harness::ProductionProjectCompositionHarnessV1;
+use super::super::project_composition::{
+    ProductionProjectCompositionRuntime, production_project_server,
+};
+use super::super::project_routing::{project_route_for_handshake, project_server_capacity_error};
+use std::path::Path;
+use std::sync::Arc;
 use tempfile::TempDir;
+use tracedecay_daemon_protocol::{
+    DaemonClientIdentity, DaemonHandshake, PROJECT_SERVER_CAPACITY_REASON_CODE,
+};
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_mcp::JsonRpcRequest;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::path_safety::{canonical_existing_identity, canonical_root_identity};
 
-use super::*;
 use crate::daemon::project_composition::ProductionProjectComposition;
 use crate::test_support::git::git;
 use tracedecay_code_index_runtime::code_index_scheduler::{

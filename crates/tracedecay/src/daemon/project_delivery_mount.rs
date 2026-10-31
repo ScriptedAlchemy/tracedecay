@@ -1,8 +1,10 @@
 //! Project-open ordering for the delivery and observability authority.
 
-use super::*;
+use super::invocation_state::DaemonInvocationState;
+use std::path::Path;
 use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_contracts::ResolvedScope;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{ManifestDigest, canonical_sha256};
 
 #[tracing::instrument(name = "daemon.project.mount", level = "trace", skip_all)]

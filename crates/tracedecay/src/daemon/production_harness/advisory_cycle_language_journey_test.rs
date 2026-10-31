@@ -3,13 +3,14 @@
 //! like any other, so the explicit cycle must run over it instead of staying
 //! "not mounted yet" for the daemon's whole life.
 
+#[cfg(any(test, feature = "test-transport"))]
+use super::super::production_harness::ProductionProjectCompositionHarnessV1;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
 use super::journey_test_support::tool_answer;
-use super::*;
 use crate::test_support::git::git;
 
 const WARMING_CODE: &str = "feedback.advisory-cycle.unavailable";

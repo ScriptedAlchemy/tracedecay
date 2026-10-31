@@ -1,3 +1,5 @@
+#[cfg(any(test, feature = "test-transport"))]
+use super::super::production_harness::ProductionProjectCompositionHarnessV1;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;

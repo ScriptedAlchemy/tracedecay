@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use tracedecay_domain::ProjectId;
 use tracedecay_runtime_core::logging::log_daemon_event;
 
-use super::{StoreAdministration, http_application::DaemonHttpApplicationRegistry};
+use super::http_application::DaemonHttpApplicationRegistry;
+use crate::daemon::branch_admin::StoreAdministration;
 pub(super) use tracedecay_global_db::{RemoteDeletionFailureCode, RemoteDeletionPhase};
 
 const MAX_REMOTE_DELETION_BODY_BYTES: usize = 16 * 1024;
@@ -17,8 +18,9 @@ const MAX_REMOTE_DELETION_BODY_BYTES: usize = 16 * 1024;
 #[derive(Clone)]
 pub(super) struct RemoteDeletionRuntimeOwners {
     pub(super) administration: StoreAdministration,
-    pub(super) invocation: super::DaemonInvocationState,
-    pub(super) project_open_gates: std::sync::Arc<tokio::sync::Mutex<super::ProjectOpenGates>>,
+    pub(super) invocation: crate::daemon::invocation_state::DaemonInvocationState,
+    pub(super) project_open_gates:
+        std::sync::Arc<tokio::sync::Mutex<crate::daemon::project_open_admission::ProjectOpenGates>>,
 }
 
 pub(super) enum RemoteDeletionBootMode {

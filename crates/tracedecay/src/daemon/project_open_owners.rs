@@ -17,7 +17,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{ProjectId, UtcMicros, canonical_sha256};
 
-use super::DaemonInvocationState;
+use crate::daemon::invocation_state::DaemonInvocationState;
 use crate::mcp::McpServer;
 use tracedecay_agent_hosts::native_integration::{
     DaemonNativeIntegrationAnalysisV1, DaemonNativeIntegrationServiceRegistry,

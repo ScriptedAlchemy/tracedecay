@@ -5,18 +5,39 @@
 //! open stays backed off, so a repeated request neither stampedes nor retries a
 //! known-unrepairable store.
 
+use super::AbortTasksOnDrop;
+use super::MAX_CACHED_PROJECT_OPEN_FAILURES;
+use super::MAX_TRACKED_PROJECT_OPEN_TASKS;
+use super::PROJECT_OPEN_FAILURE_RETRY_BACKOFF;
+use super::PROJECT_OPEN_RESOURCE_RETRY_BACKOFF;
+use super::PROJECT_OPEN_RETRY_INTERVAL;
+use super::PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF;
 use super::project_open_handshake::is_missing_index_error;
-use super::*;
+use super::project_routing::project_warming_error;
+use super::projectless::projectless_tool_call;
+use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
+use std::time::Instant;
+use tokio::task::JoinHandle;
+use tokio::time::Duration;
 use tracedecay_contracts::project_open::{
     ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
 };
 use tracedecay_daemon_identity::authority;
+use tracedecay_daemon_protocol::{DaemonHandshake, PROJECT_SERVER_CAPACITY_REASON_CODE};
 use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
+use tracedecay_domain::errors::{ProjectOpenFailureKind, Result, TraceDecayError};
+use tracedecay_mcp::JsonRpcRequest;
+use tracedecay_mcp::server::{McpMethod, classify_mcp_method};
+use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::git_discovery::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE;
 use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
+use tracedecay_session_runtime::StoreOwnerKey;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct ProjectServerKey {
@@ -1214,7 +1235,7 @@ mod typed_failure_tests {
 
     #[test]
     fn cached_project_open_failure_preserves_capacity_reason() {
-        let error = super::super::project_server_capacity_error();
+        let error = crate::daemon::project_routing::project_server_capacity_error();
         let failure = ProjectOpenFailure::from_error(&error);
         let replayed = failure.to_error();
 

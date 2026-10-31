@@ -4,17 +4,41 @@
 //! resolves the roots they name, and runs the invocation on the Unix and
 //! portable executors.
 
+use super::PROJECT_REQUIRED_REASON_CODE;
+#[cfg(unix)]
+use super::TOOL_LIST_CHANGED_METHOD;
+use super::branch_admin::StoreAdministration;
+#[cfg(unix)]
+use super::engine::DaemonEngine;
+use super::error_is_project_open_retryable;
+use super::invocation_executor::invocation_is_git_operation;
+use super::invocation_state::DaemonInvocationState;
+use super::lsp_sessions::admitted_lsp_root_for_project_path;
 use super::project_open_admission::ProjectOpenWaitOutcome;
-use super::*;
+use super::project_open_admission::{ProjectOpenGates, ProjectRouteKey, ProjectServerRequirement};
+#[cfg(any(not(unix), test))]
+use super::project_open_orchestration::portable_project_server_for_request;
+use serde_json::json;
 use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use tokio::time::Duration;
 use tracedecay_code_index_runtime::git_transactions;
 use tracedecay_contracts::SharedProfileStoreLocatorV1;
+use tracedecay_daemon_protocol::{
+    DaemonHandshake, DaemonInvocationRequest, DaemonInvocationResponse,
+    PROJECT_NOT_ENROLLED_REASON_CODE,
+};
 #[cfg(any(not(unix), test))]
 use tracedecay_daemon_service::shutdown::DaemonLifecycle;
 use tracedecay_daemon_service::{
     DaemonInvocationOperation, DaemonInvocationPayload, DaemonInvocationProblem,
     DaemonInvocationService, Lease,
 };
+use tracedecay_domain::errors::Result;
+use tracedecay_mcp::McpTransport;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
@@ -64,7 +88,7 @@ async fn await_lsp_project_open_upgrade(
     deadline: &tracedecay_contracts::Deadline,
     request_cancellation: &CancellationToken,
 ) -> ProjectOpenWaitOutcome {
-    project_open_tasks(project_open_gates.as_ref())
+    crate::daemon::project_routing::project_open_tasks(project_open_gates.as_ref())
         .await
         .wait_for_lsp_upgrade(route, deadline, request_cancellation)
         .await
@@ -513,7 +537,7 @@ pub(super) async fn execute_portable_daemon_invocation(
     project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
     handshake: &DaemonHandshake,
     invocation: &DaemonInvocationState,
-    http_application_registry: http_application::DaemonHttpApplicationRegistry,
+    http_application_registry: crate::daemon::http_application::DaemonHttpApplicationRegistry,
     request: DaemonInvocationRequest,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> DaemonInvocationResponse {
@@ -545,9 +569,9 @@ pub(super) async fn execute_portable_daemon_invocation(
             ))
         },
         || {
-            store_administration
-                .owner_home()
-                .and_then(|owner_home| project_route_for_handshake(handshake, owner_home))
+            store_administration.owner_home().and_then(|owner_home| {
+                crate::daemon::project_routing::project_route_for_handshake(handshake, owner_home)
+            })
         },
         |selected_handshake| {
             let lifecycle = lifecycle.clone();
@@ -861,7 +885,9 @@ mod workflow_reset_tests {
 
     #[test]
     fn warming_project_open_is_retryable_unavailable_for_every_operation() {
-        let warming = project_warming_error(Path::new("/tmp/surface-fixture"));
+        let warming = crate::daemon::project_routing::project_warming_error(Path::new(
+            "/tmp/surface-fixture",
+        ));
         assert_eq!(
             project_open_problem(&warming, false, true),
             DaemonInvocationProblem::Unavailable,
@@ -875,7 +901,9 @@ mod workflow_reset_tests {
 
     #[test]
     fn warming_project_open_is_a_mounting_refusal_the_client_resends() {
-        let warming = project_warming_error(Path::new("/tmp/surface-fixture"));
+        let warming = crate::daemon::project_routing::project_warming_error(Path::new(
+            "/tmp/surface-fixture",
+        ));
         let response =
             project_open_refusal_response("request.warming".to_owned(), &warming, false, false);
         let tracedecay_daemon_protocol::DaemonInvocationOutcome::ApplicationProblem { problem } =

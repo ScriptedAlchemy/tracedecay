@@ -10,7 +10,7 @@ use tracedecay_code_index_runtime::code_index_scheduler::query_runtime::{
 };
 use tracedecay_contracts::ResolvedScope;
 
-use super::DaemonInvocationState;
+use crate::daemon::invocation_state::DaemonInvocationState;
 use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 /// Spawns the deferred query-authority waiter on the project owner.

@@ -1596,7 +1596,7 @@ mod tests {
             )),
             ..MaintenanceCoordinator::default()
         };
-        let administration = super::StoreAdministration::default();
+        let administration = crate::daemon::branch_admin::StoreAdministration::default();
         let schedulers =
             tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(
                 1,
@@ -1703,7 +1703,7 @@ mod tests {
                 .run_tick(
                     &profile_root,
                     &profile_database,
-                    &super::StoreAdministration::default(),
+                    &crate::daemon::branch_admin::StoreAdministration::default(),
                     &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
                     &tracedecay_configuration::RetentionConfig::default(),
                     super::BranchStoreGcCadenceV1 { branch_gc_days: 30 },
@@ -1815,7 +1815,7 @@ mod tests {
             assert!(super::retention_maintenance_enabled(&retention));
             let coordinator = MaintenanceCoordinator::spawn(
                 temp.path().join("profile"),
-                super::StoreAdministration::default(),
+                crate::daemon::branch_admin::StoreAdministration::default(),
                 tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
                 retention,
                 super::BranchStoreGcCadenceV1 { branch_gc_days: 30 },

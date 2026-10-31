@@ -93,7 +93,7 @@ async fn projectless_profile_capture_uses_the_daemon_profile_worker_plan() {
         .await
         .unwrap();
     let profile_registered = registry.profile_sessions().await.unwrap();
-    let invocation = crate::daemon::DaemonInvocationState::default();
+    let invocation = crate::daemon::invocation_state::DaemonInvocationState::default();
 
     let installed = invocation
         .install_profile_worker_plan_for_test(identity.clone(), profile_registered.clone())

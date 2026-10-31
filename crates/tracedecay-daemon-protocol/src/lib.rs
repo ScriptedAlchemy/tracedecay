@@ -55,6 +55,7 @@ pub mod contract;
 pub mod handshake;
 pub mod lsp_wire;
 pub mod output_format;
+pub mod reason_codes;
 pub mod request;
 pub mod surface;
 pub mod transport;
@@ -113,6 +114,11 @@ pub use lsp_wire::{
     MAX_LSP_WORKSPACE_ROOTS, ProcessLocalRequestSequence, SequenceExhausted,
 };
 pub use output_format::{RequestedOutputFormat, requested_output_format};
+pub use reason_codes::{
+    DOCTOR_REPORT_OWNER_WARMING_REASON, PROJECT_NOT_ENROLLED_REASON_CODE,
+    PROJECT_SERVER_CAPACITY_REASON_CODE, PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE,
+    PROJECT_WARMING_REASON_CODE, error_is_project_not_enrolled, error_is_project_warming,
+};
 pub use surface::GitReadSurfaceRequest;
 pub use transport::{
     AUTH_PREFACE_PROTOCOL, BrokerListener, BrokerReadHalf, BrokerStream, BrokerWriteHalf,

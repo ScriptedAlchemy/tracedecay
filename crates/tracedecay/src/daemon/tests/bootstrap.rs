@@ -1,8 +1,10 @@
+use super::super::project_open_admission::ProjectRouteKey;
 use super::*;
-use crate::daemon::ProductionProjectCompositionHarnessV1;
-use crate::daemon::{
-    AuthenticatedFirstRequest, ProjectServerRequirement, project_server_requirement,
-};
+use crate::daemon::AuthenticatedFirstRequest;
+use crate::daemon::production_harness::ProductionProjectCompositionHarnessV1;
+use crate::daemon::project_open_admission::{ProjectServerRequirement, project_server_requirement};
+use serde_json::json;
+use tracedecay_daemon_protocol::DaemonHandshake;
 #[cfg(unix)]
 use tracedecay_domain::errors::TraceDecayError;
 
@@ -175,7 +177,7 @@ fn hook_event_waits_for_registered_project_authority_publication() {
 #[cfg(unix)]
 fn assert_missing_enrollment_admission(error: &TraceDecayError) {
     assert!(
-        super::super::error_is_project_not_enrolled(error),
+        tracedecay_daemon_protocol::error_is_project_not_enrolled(error),
         "expected typed missing-enrollment admission error, got: {error}"
     );
     assert!(
@@ -228,8 +230,9 @@ fn daemon_project_route_rejects_the_user_profile_root() {
         ..test_handshake_defaults()
     };
 
-    let error = super::super::project_route_for_handshake(&handshake, Some(home.path()))
-        .expect_err("ambient home route must fail before project open");
+    let error =
+        crate::daemon::project_routing::project_route_for_handshake(&handshake, Some(home.path()))
+            .expect_err("ambient home route must fail before project open");
 
     assert!(error.to_string().contains("ambient user/filesystem root"));
     assert!(
@@ -249,7 +252,8 @@ fn daemon_project_route_uses_the_product_root_identity() {
     handshake.project_path = Some(project.path().join("nested").join(".."));
 
     let (project_root, route) =
-        super::super::project_route_for_handshake(&handshake, None).expect("resolve project route");
+        crate::daemon::project_routing::project_route_for_handshake(&handshake, None)
+            .expect("resolve project route");
 
     let real = std::fs::canonicalize(project.path()).expect("real project path");
     #[cfg(windows)]
@@ -442,7 +446,7 @@ async fn remote_project_deletion_stays_settling_until_transferred_reaper_joins()
         .registered_profile_database()
         .await
         .expect("profile database");
-    let key = ProjectServerKey {
+    let key = crate::daemon::project_open_admission::ProjectServerKey {
         owner: StoreOwnerKey {
             profile_root: profile_root.canonicalize().expect("canonical profile"),
             global_db_path: database.db_path().to_path_buf(),
@@ -771,7 +775,7 @@ async fn remote_account_deletion_removes_all_exact_profile_shards_and_fences_rep
         }
     });
     let identity = test_client_identity_for(profile_root);
-    let projectless = super::super::projectless_tools_call_response(
+    let projectless = crate::daemon::projectless::projectless_tools_call_response(
         serde_json::json!(1),
         Some(&params),
         &identity,
@@ -806,7 +810,9 @@ async fn remote_account_deletion_joins_admitted_open_before_enumeration_and_reco
         invocation: engine.invocation.clone(),
         project_open_gates: Arc::clone(&engine.project_open_gates),
     };
-    let tasks = super::super::project_open_tasks(engine.project_open_gates.as_ref()).await;
+    let tasks =
+        crate::daemon::project_routing::project_open_tasks(engine.project_open_gates.as_ref())
+            .await;
     let route = ProjectRouteKey {
         profile_root: profile_root.clone(),
         global_db_path: profile_root.join("global.db"),
@@ -830,11 +836,11 @@ async fn remote_account_deletion_joins_admitted_open_before_enumeration_and_reco
         Ok(())
     });
     let open = match open {
-        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
-        super::super::ProjectOpenTaskClaim::Failed(_) => {
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::InFlight(state) => state,
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(_) => {
             panic!("racing project open must be admitted before account deletion")
         }
-        super::super::ProjectOpenTaskClaim::Saturated => {
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Saturated => {
             panic!("racing project open must fit the bounded registry")
         }
     };
@@ -866,7 +872,7 @@ async fn remote_account_deletion_joins_admitted_open_before_enumeration_and_reco
         tracedecay_global_db::RemoteDeletionTarget::Account
     );
     release_tx.send(()).expect("release racing shard creation");
-    super::super::ProjectOpenTasks::wait_for_completion(open)
+    crate::daemon::project_open_admission::ProjectOpenTasks::wait_for_completion(open)
         .await
         .expect("racing open completed its owned write");
     deletion
@@ -882,7 +888,7 @@ async fn remote_account_deletion_joins_admitted_open_before_enumeration_and_reco
     assert!(
         matches!(
             tasks.start(late_route, async { Ok(()) }),
-            super::super::ProjectOpenTaskClaim::Failed(_)
+            crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(_)
         ),
         "account deletion must leave profile project-open admission closed"
     );
@@ -920,7 +926,7 @@ async fn remote_account_deletion_joins_admitted_open_before_enumeration_and_reco
 
 #[tokio::test]
 async fn remote_account_deletion_tombstone_persist_receipt_fails_when_never_settled() {
-    let administration = super::super::StoreAdministration::default();
+    let administration = crate::daemon::branch_admin::StoreAdministration::default();
     let receipt = administration.remote_account_deletion_tombstone_persist_receipt();
     drop(administration);
     let error = receipt
@@ -1022,7 +1028,7 @@ async fn account_tombstone_denies_projectless_memory_and_profile_automation() {
             "arguments": {"action": "automation_reconcile", "scope": "profile"}
         }),
     ] {
-        let response = super::super::projectless_tools_call_response(
+        let response = crate::daemon::projectless::projectless_tools_call_response(
             serde_json::json!(1),
             Some(&params),
             &identity,
@@ -1313,7 +1319,7 @@ async fn shutdown_fences_git_index_transactions_and_joins_store_actors() {
 
 #[tokio::test]
 async fn repeated_bootstrap_requests_share_one_bounded_invariant_open_failure() {
-    let tasks = super::super::ProjectOpenTasks::default();
+    let tasks = crate::daemon::project_open_admission::ProjectOpenTasks::default();
     let route = project_open_test_route("rejected");
     let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let first_attempts = Arc::clone(&attempts);
@@ -1325,11 +1331,11 @@ async fn repeated_bootstrap_requests_share_one_bounded_invariant_open_failure() 
         ))
     });
     let first = match first {
-        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
-        super::super::ProjectOpenTaskClaim::Failed(_) => {
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::InFlight(state) => state,
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(_) => {
             panic!("first route request must start one open task")
         }
-        super::super::ProjectOpenTaskClaim::Saturated => {
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Saturated => {
             panic!("first route request must fit the bounded task registry")
         }
     };
@@ -1348,8 +1354,8 @@ async fn repeated_bootstrap_requests_share_one_bounded_invariant_open_failure() 
         assert!(
             matches!(
                 claim,
-                super::super::ProjectOpenTaskClaim::InFlight(_)
-                    | super::super::ProjectOpenTaskClaim::Failed(_)
+                crate::daemon::project_open_admission::ProjectOpenTaskClaim::InFlight(_)
+                    | crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(_)
             ),
             "same route must reuse its one opening or cached failure"
         );
@@ -1359,7 +1365,7 @@ async fn repeated_bootstrap_requests_share_one_bounded_invariant_open_failure() 
         );
     }
 
-    let error = super::super::ProjectOpenTasks::wait_for_completion(first)
+    let error = crate::daemon::project_open_admission::ProjectOpenTasks::wait_for_completion(first)
         .await
         .expect_err("the injected invariant rejection must surface");
     assert!(
@@ -1380,11 +1386,13 @@ async fn repeated_bootstrap_requests_share_one_bounded_invariant_open_failure() 
         "cached invariant failure must return promptly"
     );
     let repeated_error = match claim {
-        super::super::ProjectOpenTaskClaim::Failed(failure) => failure.to_error(),
-        super::super::ProjectOpenTaskClaim::InFlight(_) => {
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(failure) => {
+            failure.to_error()
+        }
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::InFlight(_) => {
             panic!("cached invariant failure must not re-open the route")
         }
-        super::super::ProjectOpenTaskClaim::Saturated => {
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Saturated => {
             panic!("cached invariant failure must not be replaced by global saturation")
         }
     };
@@ -1406,7 +1414,10 @@ async fn repeated_bootstrap_requests_share_one_bounded_invariant_open_failure() 
         "the rejected route must retain one backoff entry"
     );
 
-    let response = super::super::project_open_error_response(serde_json::json!(17), &error);
+    let response = crate::daemon::project_open_handshake::project_open_error_response(
+        serde_json::json!(17),
+        &error,
+    );
     let data = response
         .error
         .expect("typed route rejection")
@@ -1421,14 +1432,17 @@ async fn repeated_bootstrap_requests_share_one_bounded_invariant_open_failure() 
 
 #[tokio::test]
 async fn project_open_task_registry_caps_distinct_inflight_routes() {
-    let tasks = super::super::ProjectOpenTasks::default();
+    let tasks = crate::daemon::project_open_admission::ProjectOpenTasks::default();
     for index in 0..super::super::MAX_TRACKED_PROJECT_OPEN_TASKS {
         let claim = tasks.start(
             project_open_test_route(&format!("bounded-{index}")),
             std::future::pending::<tracedecay_domain::errors::Result<()>>(),
         );
         assert!(
-            matches!(claim, super::super::ProjectOpenTaskClaim::InFlight(_)),
+            matches!(
+                claim,
+                crate::daemon::project_open_admission::ProjectOpenTaskClaim::InFlight(_)
+            ),
             "each route inside the configured bound must get one task"
         );
     }
@@ -1439,12 +1453,15 @@ async fn project_open_task_registry_caps_distinct_inflight_routes() {
 
     let overflow = tasks.start(project_open_test_route("overflow"), async { Ok(()) });
     assert!(
-        matches!(overflow, super::super::ProjectOpenTaskClaim::Saturated),
+        matches!(
+            overflow,
+            crate::daemon::project_open_admission::ProjectOpenTaskClaim::Saturated
+        ),
         "a new route must not create an unbounded detached task"
     );
-    let response = super::super::project_open_error_response(
+    let response = crate::daemon::project_open_handshake::project_open_error_response(
         serde_json::Value::Null,
-        &super::super::project_open_task_capacity_error(),
+        &crate::daemon::project_routing::project_open_task_capacity_error(),
     );
     let data = response
         .error
@@ -1466,7 +1483,7 @@ async fn project_open_task_registry_caps_distinct_inflight_routes() {
 
 #[tokio::test]
 async fn cached_project_open_failures_do_not_consume_inflight_capacity() {
-    let tasks = super::super::ProjectOpenTasks::default();
+    let tasks = crate::daemon::project_open_admission::ProjectOpenTasks::default();
     for index in 0..super::super::MAX_TRACKED_PROJECT_OPEN_TASKS {
         let state = match tasks.start(
             project_open_test_route(&format!("cached-failure-{index}")),
@@ -1476,15 +1493,15 @@ async fn cached_project_open_failures_do_not_consume_inflight_capacity() {
                 ))
             },
         ) {
-            super::super::ProjectOpenTaskClaim::InFlight(state) => state,
-            super::super::ProjectOpenTaskClaim::Failed(_) => {
+            crate::daemon::project_open_admission::ProjectOpenTaskClaim::InFlight(state) => state,
+            crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(_) => {
                 panic!("first route attempt must start")
             }
-            super::super::ProjectOpenTaskClaim::Saturated => {
+            crate::daemon::project_open_admission::ProjectOpenTaskClaim::Saturated => {
                 panic!("completed failures must not consume active-task capacity")
             }
         };
-        super::super::ProjectOpenTasks::wait_for_completion(state)
+        crate::daemon::project_open_admission::ProjectOpenTasks::wait_for_completion(state)
             .await
             .expect_err("injected authority failure must surface");
     }
@@ -1493,22 +1510,22 @@ async fn cached_project_open_failures_do_not_consume_inflight_capacity() {
         Ok(())
     });
     let state = match healthy {
-        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
-        super::super::ProjectOpenTaskClaim::Failed(_) => {
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::InFlight(state) => state,
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(_) => {
             panic!("independent healthy route must not reuse a failure")
         }
-        super::super::ProjectOpenTaskClaim::Saturated => {
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Saturated => {
             panic!("cached failures must not block an unrelated open")
         }
     };
-    super::super::ProjectOpenTasks::wait_for_completion(state)
+    crate::daemon::project_open_admission::ProjectOpenTasks::wait_for_completion(state)
         .await
         .expect("independent healthy route must open");
 }
 
 #[tokio::test]
 async fn project_open_failure_cache_is_bounded_separately() {
-    let tasks = super::super::ProjectOpenTasks::default();
+    let tasks = crate::daemon::project_open_admission::ProjectOpenTasks::default();
     for index in 0..(super::super::MAX_CACHED_PROJECT_OPEN_FAILURES + 8) {
         let state = match tasks.start(
             project_open_test_route(&format!("bounded-failure-{index}")),
@@ -1518,15 +1535,15 @@ async fn project_open_failure_cache_is_bounded_separately() {
                 ))
             },
         ) {
-            super::super::ProjectOpenTaskClaim::InFlight(state) => state,
-            super::super::ProjectOpenTaskClaim::Failed(_) => {
+            crate::daemon::project_open_admission::ProjectOpenTaskClaim::InFlight(state) => state,
+            crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(_) => {
                 panic!("each distinct route must start once")
             }
-            super::super::ProjectOpenTaskClaim::Saturated => {
+            crate::daemon::project_open_admission::ProjectOpenTaskClaim::Saturated => {
                 panic!("cached failures must not consume task capacity")
             }
         };
-        super::super::ProjectOpenTasks::wait_for_completion(state)
+        crate::daemon::project_open_admission::ProjectOpenTasks::wait_for_completion(state)
             .await
             .expect_err("injected authority failure must surface");
     }
@@ -1562,32 +1579,36 @@ async fn exhausted_code_runtime_capacity_backs_off_at_resource_cadence() {
         tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRegistryFailure::ProjectCodeBudgetExhausted { limit: 4 },
     );
     assert_eq!(
-        super::super::project_open_retry_backoff(&error),
+        crate::daemon::project_open_admission::project_open_retry_backoff(&error),
         Some(super::super::PROJECT_OPEN_RESOURCE_RETRY_BACKOFF)
     );
 
-    let tasks = super::super::ProjectOpenTasks::default();
+    let tasks = crate::daemon::project_open_admission::ProjectOpenTasks::default();
     let route = project_open_test_route("code-budget");
     let state = match tasks.start(route.clone(), async move { Err(error) }) {
-        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
-        super::super::ProjectOpenTaskClaim::Failed(_)
-        | super::super::ProjectOpenTaskClaim::Saturated => {
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::InFlight(state) => state,
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(_)
+        | crate::daemon::project_open_admission::ProjectOpenTaskClaim::Saturated => {
             panic!("the first open must start a tracked task")
         }
     };
-    let cached = super::super::ProjectOpenTasks::wait_for_completion(state)
-        .await
-        .expect_err("the budget refusal must surface");
+    let cached =
+        crate::daemon::project_open_admission::ProjectOpenTasks::wait_for_completion(state)
+            .await
+            .expect_err("the budget refusal must surface");
     let status = tasks.status(&route).expect("refused route status");
     assert_eq!(
         status.reason,
         tracedecay_contracts::project_open::ProjectOpenStatusReasonV1::RetryBackoff
     );
-    let data = super::super::project_open_error_response(serde_json::json!(5), &cached)
-        .error
-        .expect("backed-off route refusal")
-        .data
-        .expect("typed backoff data");
+    let data = crate::daemon::project_open_handshake::project_open_error_response(
+        serde_json::json!(5),
+        &cached,
+    )
+    .error
+    .expect("backed-off route refusal")
+    .data
+    .expect("typed backoff data");
     assert_eq!(data["kind"], "project_route_open_backoff");
     assert_eq!(data["retryable"], true);
     let retry_after_ms = data["retry_after_ms"]
@@ -1601,15 +1622,15 @@ async fn exhausted_code_runtime_capacity_backs_off_at_resource_cadence() {
 
 #[tokio::test]
 async fn project_server_capacity_refusal_reuses_the_failed_open() {
-    let tasks = super::super::ProjectOpenTasks::default();
+    let tasks = crate::daemon::project_open_admission::ProjectOpenTasks::default();
     let route = project_open_test_route("server-capacity");
     let state = match tasks.start(route.clone(), async {
-        Err(super::super::project_server_capacity_error())
+        Err(crate::daemon::project_routing::project_server_capacity_error())
     }) {
-        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::InFlight(state) => state,
         _ => panic!("first open must run"),
     };
-    super::super::ProjectOpenTasks::wait_for_completion(state)
+    crate::daemon::project_open_admission::ProjectOpenTasks::wait_for_completion(state)
         .await
         .expect_err("capacity refusal");
     let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1618,11 +1639,11 @@ async fn project_server_capacity_refusal_reuses_the_failed_open() {
         retried.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     });
-    let super::super::ProjectOpenTaskClaim::Failed(failure) = claim else {
+    let crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(failure) = claim else {
         panic!("resource refusal must be cached without reconstructing the project")
     };
     assert!(
-        matches!(failure.to_error(), tracedecay_domain::errors::TraceDecayError::ProjectRoute { reason_code, retryable: true, .. } if reason_code == super::super::PROJECT_SERVER_CAPACITY_REASON_CODE)
+        matches!(failure.to_error(), tracedecay_domain::errors::TraceDecayError::ProjectRoute { reason_code, retryable: true, .. } if reason_code == tracedecay_daemon_protocol::PROJECT_SERVER_CAPACITY_REASON_CODE)
     );
     assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 0);
 }
@@ -1630,14 +1651,14 @@ async fn project_server_capacity_refusal_reuses_the_failed_open() {
 #[test]
 fn authority_verdicts_back_off_unless_a_migration_can_clear_them() {
     assert_eq!(
-        super::super::project_open_retry_backoff(&authority_verdict(
+        crate::daemon::project_open_admission::project_open_retry_backoff(&authority_verdict(
             true,
             "session temporal receipts or cursor keys are mutable",
         )),
         Some(super::super::PROJECT_OPEN_FAILURE_RETRY_BACKOFF)
     );
     assert_eq!(
-        super::super::project_open_retry_backoff(&authority_verdict(
+        crate::daemon::project_open_admission::project_open_retry_backoff(&authority_verdict(
             false,
             "committed observation authority columns disagree with observation JSON",
         )),
@@ -1650,11 +1671,13 @@ fn transient_authority_failures_stay_immediately_retryable() {
     // A locked or unreadable database surfaces under the same operation but
     // clears without operator repair, so it must not be backed off.
     assert_eq!(
-        super::super::project_open_retry_backoff(&authority_invariant_error("database is locked",)),
+        crate::daemon::project_open_admission::project_open_retry_backoff(
+            &authority_invariant_error("database is locked",)
+        ),
         None
     );
     assert_eq!(
-        super::super::project_open_retry_backoff(
+        crate::daemon::project_open_admission::project_open_retry_backoff(
             &tracedecay_domain::errors::TraceDecayError::Database {
                 message: "invalid committed observation authority JSON: trailing characters"
                     .to_string(),
@@ -1668,7 +1691,7 @@ fn transient_authority_failures_stay_immediately_retryable() {
 
 #[tokio::test]
 async fn route_open_backoff_retries_after_deadline_without_cross_route_blocking() {
-    let tasks = super::super::ProjectOpenTasks::default();
+    let tasks = crate::daemon::project_open_admission::ProjectOpenTasks::default();
     let rejected = project_open_test_route("rejected");
     let healthy = project_open_test_route("healthy");
     let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1677,18 +1700,20 @@ async fn route_open_backoff_retries_after_deadline_without_cross_route_blocking(
     let rejected_state = match tasks.start(rejected.clone(), async move {
         rejected_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Err(tracedecay_domain::errors::TraceDecayError::project_route(
-            crate::daemon::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
+            tracedecay_runtime_core::git_discovery::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
             true,
             "strict route invariant",
         ))
     }) {
-        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
-        super::super::ProjectOpenTaskClaim::Failed(_) => {
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::InFlight(state) => state,
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(_) => {
             panic!("first rejected route attempt must start")
         }
-        super::super::ProjectOpenTaskClaim::Saturated => panic!("first rejected route must fit"),
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Saturated => {
+            panic!("first rejected route must fit")
+        }
     };
-    super::super::ProjectOpenTasks::wait_for_completion(rejected_state)
+    crate::daemon::project_open_admission::ProjectOpenTasks::wait_for_completion(rejected_state)
         .await
         .expect_err("rejected route must fail");
 
@@ -1697,15 +1722,15 @@ async fn route_open_backoff_retries_after_deadline_without_cross_route_blocking(
         healthy_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }) {
-        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
-        super::super::ProjectOpenTaskClaim::Failed(_) => {
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::InFlight(state) => state,
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(_) => {
             panic!("a rejected route must not poison another route")
         }
-        super::super::ProjectOpenTaskClaim::Saturated => {
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Saturated => {
             panic!("independent route must fit the bounded task registry")
         }
     };
-    super::super::ProjectOpenTasks::wait_for_completion(healthy_state)
+    crate::daemon::project_open_admission::ProjectOpenTasks::wait_for_completion(healthy_state)
         .await
         .expect("independent route must open while another is backed off");
 
@@ -1718,15 +1743,15 @@ async fn route_open_backoff_retries_after_deadline_without_cross_route_blocking(
         retry_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }) {
-        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
-        super::super::ProjectOpenTaskClaim::Failed(_) => {
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::InFlight(state) => state,
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(_) => {
             panic!("backoff expiry must allow a new route attempt")
         }
-        super::super::ProjectOpenTaskClaim::Saturated => {
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Saturated => {
             panic!("retry must fit after its completed failure is pruned")
         }
     };
-    super::super::ProjectOpenTasks::wait_for_completion(retry_state)
+    crate::daemon::project_open_admission::ProjectOpenTasks::wait_for_completion(retry_state)
         .await
         .expect("retry after route-specific backoff must open");
     assert_eq!(
@@ -1776,18 +1801,18 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
         let error = match engine
             .project_server_for_request(
                 &ordinary_handshake,
-                super::super::ProjectServerRequirement::Core,
+                crate::daemon::project_open_admission::ProjectServerRequirement::Core,
             )
             .await
         {
             Ok(_) => panic!("the warm-up open must not initialize a missing database"),
             Err(error) => error,
         };
-        if super::super::is_missing_index_error(&error) {
+        if crate::daemon::project_open_handshake::is_missing_index_error(&error) {
             break;
         }
         assert!(
-            super::super::error_is_project_warming(&error),
+            tracedecay_daemon_protocol::error_is_project_warming(&error),
             "the warm-up open must refuse the missing database: {error:?}"
         );
     }
@@ -1795,7 +1820,8 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
     let (_, route) = engine
         .project_route(&ordinary_handshake)
         .expect("project route");
-    let tasks = super::super::project_open_tasks(&engine.project_open_gates).await;
+    let tasks =
+        crate::daemon::project_routing::project_open_tasks(&engine.project_open_gates).await;
     // The terminal watch value is visible before the spawned route task's
     // JoinHandle necessarily reports finished. Let pruning observe both
     // before this fixture claims the same route for its controlled open.
@@ -1813,20 +1839,20 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
             ),
         ))
     }) {
-        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
-        super::super::ProjectOpenTaskClaim::Failed(_)
-        | super::super::ProjectOpenTaskClaim::Saturated => {
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::InFlight(state) => state,
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(_)
+        | crate::daemon::project_open_admission::ProjectOpenTaskClaim::Saturated => {
             panic!("ordinary warmup must own the route first")
         }
     };
 
     let ordinary_request = engine.project_server_for_request(
         &ordinary_handshake,
-        super::super::ProjectServerRequirement::Core,
+        crate::daemon::project_open_admission::ProjectServerRequirement::Core,
     );
     let init_request = engine.project_server_for_request(
         &init_handshake,
-        super::super::ProjectServerRequirement::Core,
+        crate::daemon::project_open_admission::ProjectServerRequirement::Core,
     );
     tokio::pin!(ordinary_request);
     tokio::pin!(init_request);
@@ -1857,7 +1883,7 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
     assert!(
         matches!(
             inflight.borrow().clone(),
-            super::super::ProjectOpenTaskState::Opening
+            crate::daemon::project_open_admission::ProjectOpenTaskState::Opening
         ),
         "the joined open must still be in flight when its failure is released"
     );
@@ -1867,7 +1893,12 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
     // classifies the recorded failure, not the warming hint.
     let mut published = inflight.clone();
     published
-        .wait_for(|state| !matches!(state, super::super::ProjectOpenTaskState::Opening))
+        .wait_for(|state| {
+            !matches!(
+                state,
+                crate::daemon::project_open_admission::ProjectOpenTaskState::Opening
+            )
+        })
         .await
         .expect("the released open must publish its outcome");
 
@@ -1878,12 +1909,16 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
     // What the released open recorded, so a refusal that did not come from it
     // names the state it came from instead.
     let recorded = match inflight.borrow().clone() {
-        super::super::ProjectOpenTaskState::Failed(failure) => failure.to_error().to_string(),
-        super::super::ProjectOpenTaskState::Opening => "still opening".to_owned(),
-        super::super::ProjectOpenTaskState::Ready => "ready".to_owned(),
+        crate::daemon::project_open_admission::ProjectOpenTaskState::Failed(failure) => {
+            failure.to_error().to_string()
+        }
+        crate::daemon::project_open_admission::ProjectOpenTaskState::Opening => {
+            "still opening".to_owned()
+        }
+        crate::daemon::project_open_admission::ProjectOpenTaskState::Ready => "ready".to_owned(),
     };
     assert!(
-        super::super::is_missing_index_error(&ordinary_error),
+        crate::daemon::project_open_handshake::is_missing_index_error(&ordinary_error),
         "ordinary missing-database open must stay classified as a missing index: \
          {ordinary_error:?}; the released open recorded: {recorded}"
     );
@@ -1911,7 +1946,7 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
             Err(error) => error,
         };
         assert!(
-            super::super::error_is_project_warming(&warming),
+            tracedecay_daemon_protocol::error_is_project_warming(&warming),
             "explicit init must retry with its own authorization: {warming:?}"
         );
         // Each retry parks on the admitted open's own publication, so this
@@ -1919,7 +1954,7 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
         init_outcome = engine
             .project_server_for_request(
                 &init_handshake,
-                super::super::ProjectServerRequirement::Core,
+                crate::daemon::project_open_admission::ProjectServerRequirement::Core,
             )
             .await;
     };
@@ -1949,10 +1984,8 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
 /// already the caller's answer and must pass through untouched.
 #[test]
 fn a_recorded_open_failure_replaces_only_the_warming_hint() {
-    use super::super::{
-        ProjectOpenFailure, ProjectOpenTaskState, prefer_recorded_open_failure,
-        project_warming_error,
-    };
+    use crate::daemon::project_open_admission::{ProjectOpenFailure, ProjectOpenTaskState};
+    use crate::daemon::project_routing::{prefer_recorded_open_failure, project_warming_error};
 
     let probe = std::path::Path::new("/tmp/tracedecay-warming-probe");
     let warming_message = project_warming_error(probe).to_string();
@@ -1983,9 +2016,9 @@ fn a_recorded_open_failure_replaces_only_the_warming_hint() {
         );
     }
 
-    let capacity = super::super::project_server_capacity_error();
+    let capacity = crate::daemon::project_routing::project_server_capacity_error();
     let passed_through = prefer_recorded_open_failure::<()>(
-        Err(super::super::project_server_capacity_error()),
+        Err(crate::daemon::project_routing::project_server_capacity_error()),
         &failed.1,
     )
     .expect_err("a refusal that is not the warming hint is the caller's answer");
@@ -2000,7 +2033,7 @@ fn a_recorded_open_failure_replaces_only_the_warming_hint() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn project_open_shutdown_waits_for_inflight_unit_then_joins() {
-    let tasks = super::super::ProjectOpenTasks::default();
+    let tasks = crate::daemon::project_open_admission::ProjectOpenTasks::default();
     let route = project_open_test_route("cooperative-shutdown");
     let lifecycle = DaemonLifecycle::default();
     let (cancellation_tx, cancellation_rx) = tokio::sync::oneshot::channel();
@@ -2027,9 +2060,13 @@ async fn project_open_shutdown_waits_for_inflight_unit_then_joins() {
             message: "project open cancelled after safe unit".to_string(),
         })
     }) {
-        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
-        super::super::ProjectOpenTaskClaim::Failed(_) => panic!("project open must start"),
-        super::super::ProjectOpenTaskClaim::Saturated => panic!("project open must fit"),
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::InFlight(state) => state,
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(_) => {
+            panic!("project open must start")
+        }
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Saturated => {
+            panic!("project open must fit")
+        }
     };
     let cancellation = cancellation_rx
         .await
@@ -2066,7 +2103,7 @@ async fn project_open_shutdown_waits_for_inflight_unit_then_joins() {
     .await
     .expect("client-drain lifecycle activity must be released");
     assert_eq!(tasks.tracked_route_count(), 0);
-    super::super::ProjectOpenTasks::wait_for_completion(state)
+    crate::daemon::project_open_admission::ProjectOpenTasks::wait_for_completion(state)
         .await
         .expect_err("cancelled project open must report a terminal failure");
 }
@@ -2078,7 +2115,7 @@ async fn project_open_shutdown_waits_for_inflight_unit_then_joins() {
 /// `project_open_shutdown_retains_synchronous_work_after_deadline` owns it.
 #[tokio::test]
 async fn project_open_shutdown_aborts_a_noncooperative_task_at_the_backstop() {
-    let tasks = super::super::ProjectOpenTasks::default();
+    let tasks = crate::daemon::project_open_admission::ProjectOpenTasks::default();
     let route = project_open_test_route("shutdown-backstop");
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -2087,9 +2124,13 @@ async fn project_open_shutdown_aborts_a_noncooperative_task_at_the_backstop() {
         release_rx.await.expect("release task");
         Ok(())
     }) {
-        super::super::ProjectOpenTaskClaim::InFlight(_) => {}
-        super::super::ProjectOpenTaskClaim::Failed(_) => panic!("pending task must start"),
-        super::super::ProjectOpenTaskClaim::Saturated => panic!("pending task must fit"),
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::InFlight(_) => {}
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(_) => {
+            panic!("pending task must start")
+        }
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Saturated => {
+            panic!("pending task must fit")
+        }
     }
     started_rx.await.expect("noncooperative task started");
 
@@ -2118,7 +2159,7 @@ async fn project_open_shutdown_aborts_a_noncooperative_task_at_the_backstop() {
 /// the open drained, so no write lands after shutdown returns `true`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn project_open_shutdown_joins_blocking_work_its_aborted_open_owns() {
-    let tasks = super::super::ProjectOpenTasks::default();
+    let tasks = crate::daemon::project_open_admission::ProjectOpenTasks::default();
     let route = project_open_test_route("shutdown-owned-blocking");
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
@@ -2133,9 +2174,13 @@ async fn project_open_shutdown_joins_blocking_work_its_aborted_open_owns() {
         .await
         .map_err(|message| tracedecay_domain::errors::TraceDecayError::Config { message })
     }) {
-        super::super::ProjectOpenTaskClaim::InFlight(_) => {}
-        super::super::ProjectOpenTaskClaim::Failed(_) => panic!("blocked open must start"),
-        super::super::ProjectOpenTaskClaim::Saturated => panic!("blocked open must fit"),
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::InFlight(_) => {}
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(_) => {
+            panic!("blocked open must start")
+        }
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Saturated => {
+            panic!("blocked open must fit")
+        }
     }
     started_rx.await.expect("binding write started");
 
@@ -2172,7 +2217,7 @@ async fn project_open_shutdown_joins_blocking_work_its_aborted_open_owns() {
 /// stays registered, so a later shutdown still joins it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn timed_out_shutdown_owner_aborts_the_project_open_task() {
-    let tasks = super::super::ProjectOpenTasks::default();
+    let tasks = crate::daemon::project_open_admission::ProjectOpenTasks::default();
     let route = project_open_test_route("timed-out-owner");
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (alive, task_dropped) = std::sync::mpsc::channel::<()>();
@@ -2182,9 +2227,13 @@ async fn timed_out_shutdown_owner_aborts_the_project_open_task() {
         std::future::pending::<()>().await;
         Ok(())
     }) {
-        super::super::ProjectOpenTaskClaim::InFlight(_) => {}
-        super::super::ProjectOpenTaskClaim::Failed(_) => panic!("pending task must start"),
-        super::super::ProjectOpenTaskClaim::Saturated => panic!("pending task must fit"),
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::InFlight(_) => {}
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(_) => {
+            panic!("pending task must start")
+        }
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Saturated => {
+            panic!("pending task must fit")
+        }
     }
     started_rx.await.expect("noncooperative task started");
 
@@ -2231,7 +2280,7 @@ async fn timed_out_shutdown_owner_aborts_the_project_open_task() {
 
 #[tokio::test]
 async fn project_open_identity_shutdown_ignores_unrelated_retiring_routes() {
-    let tasks = super::super::ProjectOpenTasks::default();
+    let tasks = crate::daemon::project_open_admission::ProjectOpenTasks::default();
     let unrelated = project_open_test_route("unrelated-retiring-open");
     let target = project_open_test_route("target-project-open");
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
@@ -2250,11 +2299,11 @@ async fn project_open_identity_shutdown_ignores_unrelated_retiring_routes() {
         Ok(())
     });
     let state = match state {
-        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
-        super::super::ProjectOpenTaskClaim::Failed(_) => {
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::InFlight(state) => state,
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(_) => {
             panic!("unrelated open must start")
         }
-        super::super::ProjectOpenTaskClaim::Saturated => {
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Saturated => {
             panic!("unrelated open must fit the bounded registry")
         }
     };
@@ -2284,7 +2333,7 @@ async fn project_open_identity_shutdown_ignores_unrelated_retiring_routes() {
     );
 
     release_tx.send(()).expect("release unrelated open");
-    super::super::ProjectOpenTasks::wait_for_completion(state)
+    crate::daemon::project_open_admission::ProjectOpenTasks::wait_for_completion(state)
         .await
         .expect("unrelated open completed");
     assert!(
@@ -2318,7 +2367,7 @@ async fn project_deletion_retires_rootless_open_by_persisted_project_identity() 
         project_path: project_root.canonicalize().expect("canonical project"),
         scope_prefix: None,
     };
-    let tasks = super::super::ProjectOpenTasks::default();
+    let tasks = crate::daemon::project_open_admission::ProjectOpenTasks::default();
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let _claim = tasks.start_cancellable(route, move |_| async move {
@@ -2356,7 +2405,7 @@ async fn project_deletion_retires_rootless_open_by_persisted_project_identity() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn project_open_shutdown_retains_synchronous_work_after_deadline() {
-    let tasks = super::super::ProjectOpenTasks::default();
+    let tasks = crate::daemon::project_open_admission::ProjectOpenTasks::default();
     let route = project_open_test_route("shutdown-synchronous-backstop");
     let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -2369,9 +2418,13 @@ async fn project_open_shutdown_retains_synchronous_work_after_deadline() {
         }
         Ok(())
     }) {
-        super::super::ProjectOpenTaskClaim::InFlight(_) => {}
-        super::super::ProjectOpenTaskClaim::Failed(_) => panic!("synchronous task must start"),
-        super::super::ProjectOpenTaskClaim::Saturated => panic!("synchronous task must fit"),
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::InFlight(_) => {}
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(_) => {
+            panic!("synchronous task must start")
+        }
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Saturated => {
+            panic!("synchronous task must fit")
+        }
     }
     while !started.load(std::sync::atomic::Ordering::Acquire) {
         tokio::task::yield_now().await;
@@ -2435,7 +2488,7 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
         .registered_profile_database()
         .await
         .expect("prewarm portable bootstrap profile registry");
-    super::super::prewarm_daemon_bootstrap_catalog()
+    crate::daemon::bootstrap_route::prewarm_daemon_bootstrap_catalog()
         .expect("prewarm portable static bootstrap catalog");
     // Daemon bootstrap installs the profile-scoped code-index worker plan
     // before publishing any transport endpoint
@@ -2443,14 +2496,14 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
     // outright without it. This test drives `serve_windows_broker_client`
     // directly, so it must reproduce that ordering itself or the warmup poll
     // fails with "profile code-index worker plan was not installed".
-    super::super::DaemonInvocationState::default()
+    crate::daemon::invocation_state::DaemonInvocationState::default()
         .install_worker_selection(
             &store_administration,
             tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::default(),
         )
         .expect("install portable broker profile worker plan");
     let gates = Arc::new(tokio::sync::Mutex::new(
-        super::super::ProjectOpenGates::default(),
+        crate::daemon::project_open_admission::ProjectOpenGates::default(),
     ));
     let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let lifecycle = DaemonLifecycle::default();
@@ -2487,14 +2540,16 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
             let attempts = Arc::clone(&server_attempts);
             let lifecycle = server_lifecycle.clone();
             clients.spawn(async move {
-                Box::pin(super::super::serve_windows_broker_client(
-                    stream,
-                    TEST_AUTH_TOKEN,
-                    &lifecycle,
-                    administration,
-                    gates,
-                    Some(attempts),
-                ))
+                Box::pin(
+                    crate::daemon::connection_serving::serve_windows_broker_client(
+                        stream,
+                        TEST_AUTH_TOKEN,
+                        &lifecycle,
+                        administration,
+                        gates,
+                        Some(attempts),
+                    ),
+                )
                 .await
             });
         }
@@ -2604,7 +2659,7 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
         1,
         "portable initialize warmup must singleflight one project open"
     );
-    let receipt = super::super::shutdown_project_servers(
+    let receipt = crate::daemon::project_server_lifecycle::shutdown_project_servers(
         std::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
         &store_administration,
         &super::super::http_application::DaemonHttpApplicationRegistry::default(),
@@ -2677,7 +2732,8 @@ async fn project_server_warmup_drops_lifecycle_activity_on_draining() {
     }
 
     idle_while_writer_held.expect("draining must cancel project warmup before writer release");
-    let tasks = super::super::project_open_tasks(&engine.project_open_gates).await;
+    let tasks =
+        crate::daemon::project_routing::project_open_tasks(&engine.project_open_gates).await;
     assert_eq!(
         tasks.tracked_task_count(),
         0,
@@ -2759,22 +2815,24 @@ async fn portable_project_warmup_rejects_after_shutdown_snapshot() {
         ))
         .with_profile_identity(profile_identity);
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(
-        super::super::ProjectOpenGates::default(),
+        crate::daemon::project_open_admission::ProjectOpenGates::default(),
     ));
     let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let lifecycle = DaemonLifecycle::default();
 
     lifecycle.begin_draining();
-    let error = Box::pin(super::super::schedule_portable_project_server_warmup(
-        lifecycle.clone(),
-        store_administration,
-        project_open_gates,
-        super::super::DaemonInvocationState::default(),
-        super::super::http_application::DaemonHttpApplicationRegistry::default(),
-        handshake,
-        Some(initialize_request),
-        Some(Arc::clone(&attempts)),
-    ))
+    let error = Box::pin(
+        crate::daemon::project_open_orchestration::schedule_portable_project_server_warmup(
+            lifecycle.clone(),
+            store_administration,
+            project_open_gates,
+            crate::daemon::invocation_state::DaemonInvocationState::default(),
+            super::super::http_application::DaemonHttpApplicationRegistry::default(),
+            handshake,
+            Some(initialize_request),
+            Some(Arc::clone(&attempts)),
+        ),
+    )
     .await
     .expect_err("draining must reject a new portable project warmup");
     assert!(error.to_string().contains("draining"), "{error}");
@@ -2813,7 +2871,7 @@ async fn project_warmup_settles_when_drain_is_simultaneously_ready() {
         let open_lifecycle = lifecycle.clone();
         let open_won = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let open_won_by_future = Arc::clone(&open_won);
-        let tasks = super::super::ProjectOpenTasks::default();
+        let tasks = crate::daemon::project_open_admission::ProjectOpenTasks::default();
         let claim = Box::pin(
             super::super::project_open_orchestration::start_lifecycle_project_open(
                 &tasks,
@@ -2833,11 +2891,11 @@ async fn project_warmup_settles_when_drain_is_simultaneously_ready() {
         )
         .await;
         let state = match claim {
-            super::super::ProjectOpenTaskClaim::InFlight(state) => state,
-            super::super::ProjectOpenTaskClaim::Failed(_) => {
+            crate::daemon::project_open_admission::ProjectOpenTaskClaim::InFlight(state) => state,
+            crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(_) => {
                 panic!("production warmup task must start before draining")
             }
-            super::super::ProjectOpenTaskClaim::Saturated => {
+            crate::daemon::project_open_admission::ProjectOpenTaskClaim::Saturated => {
                 panic!("production warmup task must fit")
             }
         };
@@ -2854,7 +2912,7 @@ async fn project_warmup_settles_when_drain_is_simultaneously_ready() {
             open_won.load(std::sync::atomic::Ordering::Acquire),
             "an admitted open must settle before draining releases its lifecycle activity"
         );
-        super::super::ProjectOpenTasks::wait_for_completion(state)
+        crate::daemon::project_open_admission::ProjectOpenTasks::wait_for_completion(state)
             .await
             .expect_err("draining production warmup must report cancellation");
         tasks.shutdown().await;
@@ -2883,7 +2941,8 @@ async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
         .registered_profile_database()
         .await
         .expect("prewarm bootstrap profile registry");
-    super::super::prewarm_daemon_bootstrap_catalog().expect("prewarm static bootstrap catalog");
+    crate::daemon::bootstrap_route::prewarm_daemon_bootstrap_catalog()
+        .expect("prewarm static bootstrap catalog");
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
         client_identity,
@@ -3019,8 +3078,10 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
     // `admit_route` phase of `production_project_server`, before the open
     // counts an attempt). The global store writer does not block route
     // publication and cannot hold this open.
-    let capacity_gate =
-        super::super::project_open_capacity_gate(engine.project_open_gates.as_ref()).await;
+    let capacity_gate = crate::daemon::project_routing::project_open_capacity_gate(
+        engine.project_open_gates.as_ref(),
+    )
+    .await;
     let capacity_admission = capacity_gate.lock().await;
 
     let request = json!({
@@ -3045,7 +3106,7 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
         .expect("warming error message");
     assert_eq!(
         response["error"]["data"]["reason_code"],
-        super::super::PROJECT_WARMING_REASON_CODE,
+        tracedecay_daemon_protocol::PROJECT_WARMING_REASON_CODE,
         "{response}"
     );
     assert!(message.contains("warming in the background"), "{message}");
@@ -3057,12 +3118,15 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
     // had to start a new open would show up as a second attempt.
     loop {
         match engine
-            .project_server_for_request(&handshake, super::super::ProjectServerRequirement::Core)
+            .project_server_for_request(
+                &handshake,
+                crate::daemon::project_open_admission::ProjectServerRequirement::Core,
+            )
             .await
         {
             Ok(_) => break,
             Err(error) => assert!(
-                super::super::error_is_project_warming(&error)
+                tracedecay_daemon_protocol::error_is_project_warming(&error)
                     || (super::super::error_is_repository_discovery_deferred(&error)
                         && error
                             .project_route_context()
@@ -3071,8 +3135,10 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
             ),
         }
     }
-    let route =
-        super::super::ProjectRouteKey::from_handshake(&project, &handshake).expect("project route");
+    let route = crate::daemon::project_open_admission::ProjectRouteKey::from_handshake(
+        &project, &handshake,
+    )
+    .expect("project route");
     assert!(
         engine
             .store_administration
@@ -3120,8 +3186,10 @@ async fn project_registry_read_does_not_wait_for_a_blocked_project_open() {
         ..test_handshake_defaults()
     };
 
-    let capacity_gate =
-        super::super::project_open_capacity_gate(engine.project_open_gates.as_ref()).await;
+    let capacity_gate = crate::daemon::project_routing::project_open_capacity_gate(
+        engine.project_open_gates.as_ref(),
+    )
+    .await;
     let capacity_admission = capacity_gate.lock().await;
 
     let request = json!({
@@ -3143,8 +3211,11 @@ async fn project_registry_read_does_not_wait_for_a_blocked_project_open() {
         .iter()
         .find(|response| response["id"] == json!(4))
         .expect("project list response");
-    let payload = super::super::tool_json_payload(&response["result"], "tracedecay_project_list")
-        .unwrap_or_else(|error| panic!("typed project-list payload: {error}; {response}"));
+    let payload = crate::daemon::core_client::tool_json_payload(
+        &response["result"],
+        "tracedecay_project_list",
+    )
+    .unwrap_or_else(|error| panic!("typed project-list payload: {error}; {response}"));
     assert_eq!(payload["status"], "ok", "payload: {payload}");
     let projects = payload["projects"].as_array().expect("projects array");
     assert_eq!(
@@ -3188,7 +3259,7 @@ fn foreground_project_open_wait_is_bounded_and_accepts_quick_publication() {
     .expect_err("an uncontended warm-up must not pin the foreground request");
     assert!(std::time::Instant::now() >= deadline);
     assert!(
-        super::super::error_is_project_warming(&warming),
+        tracedecay_daemon_protocol::error_is_project_warming(&warming),
         "{warming}"
     );
 }
@@ -3735,7 +3806,7 @@ async fn one_host_tool_call_records_one_analytics_event_and_one_shot_clients_non
         .expect("host search");
 
     let one_shot = |tool_name: &str, arguments: serde_json::Value| {
-        crate::daemon::one_shot_tool_call_params(
+        crate::daemon::core_client::one_shot_tool_call_params(
             tool_name,
             arguments,
             Some(std::time::Instant::now() + std::time::Duration::from_secs(60)),
@@ -3745,7 +3816,8 @@ async fn one_host_tool_call_records_one_analytics_event_and_one_shot_clients_non
         let result = response
             .result
             .unwrap_or_else(|| panic!("{tool_name} failed: {:?}", response.error));
-        crate::daemon::tool_json_payload(&result, tool_name).expect("tool JSON payload")
+        crate::daemon::core_client::tool_json_payload(&result, tool_name)
+            .expect("tool JSON payload")
     };
     let grep_arguments = json!({
         "pattern": "ATTRIBUTION_PROBE_",
@@ -3762,7 +3834,7 @@ async fn one_host_tool_call_records_one_analytics_event_and_one_shot_clients_non
         .expect("one-shot grep");
     let envelope = reply_payload(grep, "tracedecay_grep");
     assert!(
-        crate::daemon::is_truncation_envelope(&envelope),
+        crate::daemon::core_client::is_truncation_envelope(&envelope),
         "the fixture must truncate so the recovery pages are exercised: {envelope}"
     );
     let handle = envelope["handle"].as_str().expect("retrieval handle");

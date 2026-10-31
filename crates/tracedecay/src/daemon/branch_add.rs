@@ -1,7 +1,8 @@
-#[cfg(unix)]
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::Arc;
+#[cfg(unix)]
+use tracedecay_daemon_protocol::DaemonHandshake;
 
 #[cfg(unix)]
 use tracedecay_application::pr_tracking::{
@@ -26,7 +27,7 @@ use tracedecay_runtime_core::lifecycle_lease::canonical_or_original;
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_runtime_core::path_safety::same_canonical_path;
 
-use super::{DaemonHandshake, StoreAdministration};
+use crate::daemon::branch_admin::StoreAdministration;
 #[cfg(unix)]
 use tracedecay_session_temporal_store::SessionTemporalAccess;
 

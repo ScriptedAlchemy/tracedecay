@@ -10,14 +10,13 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tracedecay::daemon::{
-    PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE, PROJECT_WARMING_REASON_CODE,
-    REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE, call_tool, notify_hook_event,
-    tool_call_transport_error_is_retryable,
+use tracedecay::daemon::{call_tool, notify_hook_event, tool_call_transport_error_is_retryable};
+use tracedecay_daemon_protocol::{
+    DaemonHandshake, PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE, PROJECT_WARMING_REASON_CODE,
 };
-use tracedecay_daemon_protocol::DaemonHandshake;
 use tracedecay_domain::HostIntegrationIdV1;
 use tracedecay_hooks::core_events::{DaemonHookEvent, HookEventNotifyOutcomeV1};
+use tracedecay_runtime_core::git_discovery::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE;
 
 use crate::common::{DaemonProcess, tracedecay_command_with_home};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;

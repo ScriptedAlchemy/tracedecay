@@ -1,4 +1,7 @@
 use super::*;
+use serde_json::json;
+use std::sync::Arc;
+use tracedecay_daemon_protocol::DaemonHandshake;
 #[cfg(unix)]
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
@@ -35,14 +38,14 @@ async fn project_owner_wait_stops_when_the_client_disconnects() {
 
     let error = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        super::super::await_project_owner_or_disconnect(&mut transport, open),
+        crate::daemon::connection_serving::await_project_owner_or_disconnect(&mut transport, open),
     )
     .await
     .expect("disconnect detection must be bounded")
     .expect_err("a never-ready owner must return a warming error");
 
     assert!(
-        super::super::error_is_project_warming(&error),
+        tracedecay_daemon_protocol::error_is_project_warming(&error),
         "unexpected owner timeout: {error}"
     );
     assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
@@ -52,10 +55,13 @@ async fn project_owner_wait_stops_when_the_client_disconnects() {
 async fn project_owner_half_close_can_still_receive_a_bounded_result() {
     let (mut transport, input, _output) = tracedecay_mcp::transport::ChannelTransport::new();
     drop(input);
-    let result = super::super::await_project_owner_or_disconnect(&mut transport, async {
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        Ok::<_, tracedecay_domain::errors::TraceDecayError>(17)
-    })
+    let result = crate::daemon::connection_serving::await_project_owner_or_disconnect(
+        &mut transport,
+        async {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            Ok::<_, tracedecay_domain::errors::TraceDecayError>(17)
+        },
+    )
     .await
     .expect("half-closed owner lookup");
 
@@ -68,7 +74,7 @@ async fn project_owner_half_close_can_still_receive_a_bounded_result() {
 fn closed_feedback_list_request(
     request_id: &str,
     request_handle: &str,
-) -> super::super::DaemonInvocationRequest {
+) -> tracedecay_daemon_protocol::DaemonInvocationRequest {
     let observed_at = tracedecay_domain::UtcMicros(
         i64::try_from(
             std::time::SystemTime::now()
@@ -78,7 +84,7 @@ fn closed_feedback_list_request(
         )
         .unwrap_or(i64::MAX),
     );
-    super::super::DaemonInvocationRequest::feedback(
+    tracedecay_daemon_protocol::DaemonInvocationRequest::feedback(
         request_id,
         ApplicationSurfaceOperation::FeedbackList,
         request_handle.to_owned(),
@@ -101,7 +107,7 @@ fn tool_json_payload_requires_exactly_one_json_block() {
         ]
     });
     assert_eq!(
-        super::super::tool_json_payload(&valid, "test").unwrap(),
+        crate::daemon::core_client::tool_json_payload(&valid, "test").unwrap(),
         serde_json::json!({"ok": true})
     );
 
@@ -115,9 +121,11 @@ fn tool_json_payload_requires_exactly_one_json_block() {
             "returned no JSON payload",
         ),
     ] {
-        let error =
-            super::super::tool_json_payload(&serde_json::json!({"content": content}), "test")
-                .unwrap_err();
+        let error = crate::daemon::core_client::tool_json_payload(
+            &serde_json::json!({"content": content}),
+            "test",
+        )
+        .unwrap_err();
         assert!(error.to_string().contains(expected));
     }
 }
@@ -251,8 +259,11 @@ async fn projectless_project_list_reads_the_empty_profile_registry() {
         .expect("projectless response");
     let response: Value = serde_json::from_str(&line).expect("response json");
     assert_eq!(response["id"], json!(8));
-    let payload = super::super::tool_json_payload(&response["result"], "tracedecay_project_list")
-        .expect("typed project-list payload");
+    let payload = crate::daemon::core_client::tool_json_payload(
+        &response["result"],
+        "tracedecay_project_list",
+    )
+    .expect("typed project-list payload");
     assert_eq!(payload["status"], "ok", "payload: {payload}");
     assert_eq!(payload["projects"], json!([]));
     assert_eq!(payload["summary"]["project_count"], json!(0));
@@ -742,7 +753,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         deadline: &Deadline,
         cancellation: &CancellationContext,
     ) -> tracedecay_contracts::git::GitHunkPreviewInputV1 {
-        let read_request = super::super::DaemonInvocationRequest::git_read(
+        let read_request = tracedecay_daemon_protocol::DaemonInvocationRequest::git_read(
             request_id,
             ApplicationSurfaceOperation::GitHunks,
             GitReadSurfaceRequest {
@@ -793,7 +804,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
             .collect(),
     };
 
-    let preview_request = super::super::DaemonInvocationRequest::git_preview(
+    let preview_request = tracedecay_daemon_protocol::DaemonInvocationRequest::git_preview(
         "request.socket.preview",
         request,
         observed_at,
@@ -825,7 +836,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         preview_digest: preview.preview_digest.clone(),
         idempotency_key: IdempotencyKey::new("idempotency.socket-git").expect("idempotency"),
     };
-    let apply_request = super::super::DaemonInvocationRequest::git_apply(
+    let apply_request = tracedecay_daemon_protocol::DaemonInvocationRequest::git_apply(
         "request.socket.apply",
         apply.clone(),
         UtcMicros(1),
@@ -860,7 +871,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         assert_ne!(response["effect"]["execution"]["started_at"], 1);
     }
 
-    let stale = super::super::DaemonInvocationRequest::git_apply(
+    let stale = tracedecay_daemon_protocol::DaemonInvocationRequest::git_apply(
         "request.socket.stale",
         tracedecay_daemon_service::application_surface::GitApplySurfaceRequest {
             preview_id: apply.preview_id.clone(),
@@ -900,7 +911,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         &cancellation,
     )
     .await;
-    let recovery_preview_request = super::super::DaemonInvocationRequest::git_preview(
+    let recovery_preview_request = tracedecay_daemon_protocol::DaemonInvocationRequest::git_preview(
         "request.socket.recovery-preview",
         tracedecay_daemon_service::application_surface::GitPreviewSurfaceRequest {
             operation: GitIndexTransactionOperationV1::StageHunks,
@@ -942,7 +953,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         .quarantine_preview_for_test(repository.path(), &recovery_preview, observed_at)
         .await
         .unwrap();
-    let recovery_blocked = super::super::DaemonInvocationRequest::git_apply(
+    let recovery_blocked = tracedecay_daemon_protocol::DaemonInvocationRequest::git_apply(
         "request.socket.recovery-blocked",
         tracedecay_daemon_service::application_surface::GitApplySurfaceRequest {
             preview_id: recovery_preview.preview_id,
@@ -973,7 +984,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         "git_index.recovery_required"
     );
 
-    let cancelled = super::super::DaemonInvocationRequest::git_apply(
+    let cancelled = tracedecay_daemon_protocol::DaemonInvocationRequest::git_apply(
         "request.socket.cancelled",
         apply.clone(),
         observed_at,
@@ -996,7 +1007,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
     assert_eq!(response["status"], "application_problem");
     assert_eq!(response["problem"]["kind"], "cancelled");
 
-    let timed_out = super::super::DaemonInvocationRequest::git_apply(
+    let timed_out = tracedecay_daemon_protocol::DaemonInvocationRequest::git_apply(
         "request.socket.timed-out",
         apply,
         observed_at,
@@ -1038,16 +1049,18 @@ async fn portable_broker_routes_multiple_closed_invocations_without_falling_back
     let server = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept client");
         let lifecycle = DaemonLifecycle::default();
-        Box::pin(super::super::serve_windows_broker_client(
-            stream,
-            TOKEN,
-            &lifecycle,
-            store_administration,
-            Arc::new(tokio::sync::Mutex::new(
-                super::super::ProjectOpenGates::default(),
-            )),
-            None,
-        ))
+        Box::pin(
+            crate::daemon::connection_serving::serve_windows_broker_client(
+                stream,
+                TOKEN,
+                &lifecycle,
+                store_administration,
+                Arc::new(tokio::sync::Mutex::new(
+                    crate::daemon::project_open_admission::ProjectOpenGates::default(),
+                )),
+                None,
+            ),
+        )
         .await
     });
 

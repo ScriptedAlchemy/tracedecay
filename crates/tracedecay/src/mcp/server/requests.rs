@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 use super::*;
+use tracedecay_daemon_protocol::PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_mcp::server::{
     ApplicationCancellationRegistration, DispatchControl, DispatchControlRequest,
@@ -1417,7 +1418,7 @@ impl McpServer {
             .is_cancelled()
         {
             (
-                crate::daemon::PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE,
+                PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE,
                 "the retained project server was retired before response completion",
             )
         } else if self
@@ -1616,7 +1617,7 @@ impl McpServer {
                 .project_server_revoked_response(&id, &tool_name)
                 .unwrap_or_else(|| {
                     let error = TraceDecayError::project_route(
-                        crate::daemon::PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE,
+                        PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE,
                         true,
                         "the retained project server was retired before response admission",
                     );

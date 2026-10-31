@@ -1,6 +1,12 @@
 #![cfg(unix)]
 
+#[cfg(unix)]
+use super::super::engine::DaemonEngine;
+use super::super::project_open_admission::ProjectServerKey;
 use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tracedecay_daemon_protocol::DaemonHandshake;
 
 use tracedecay_code_index_retention::code_index_generations::{
     DurablePublicationPointerV1, code_text_artifacts_root, scoped_code_index_store_root,
@@ -953,7 +959,7 @@ async fn retiring_observability_owner_reopens_same_route_without_cached_degradat
         "{error}"
     );
     assert_eq!(
-        super::super::project_open_retry_backoff(&error),
+        crate::daemon::project_open_admission::project_open_retry_backoff(&error),
         Some(super::super::PROJECT_OPEN_RESOURCE_RETRY_BACKOFF)
     );
     assert!(

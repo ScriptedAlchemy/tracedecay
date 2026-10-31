@@ -30,7 +30,8 @@ use tracedecay_session_runtime::session_retrieval::DaemonSessionRetrievalRoot;
 use tracedecay_sessions::runtime::user_sessions_db_path;
 use tracedecay_store::StoreShardIdV1;
 
-use super::{StoreAdministration, await_user_profile_host_admission_replay_for_identity};
+use crate::daemon::branch_admin::StoreAdministration;
+use crate::daemon::project_server_lifecycle::await_user_profile_host_admission_replay_for_identity;
 
 /// Serve one profile-targeted retained request and settle its typed terminal.
 ///
