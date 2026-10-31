@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 #[cfg(test)]
-use tracedecay_mcp::server::RmcpConnectionAdapter;
+use tracedecay_mcp::server::{RmcpConnectionAdapter, RmcpInitializeResponseDecorator};
 
 #[cfg(test)]
 use super::McpServer;
@@ -15,8 +15,6 @@ use super::connection::ProductionMcpConnectionContext;
 #[cfg(all(test, unix))]
 use super::routing::SelectedProjectResponseLease;
 
-pub(crate) type RmcpInitializeResponseDecorator =
-    tracedecay_mcp::server::RmcpInitializeResponseDecorator;
 #[cfg(all(test, unix))]
 pub(crate) type RmcpSelectedProjectResponseAuthority =
     tracedecay_mcp::server::RmcpSelectedProjectResponseAuthority<SelectedProjectResponseLease>;

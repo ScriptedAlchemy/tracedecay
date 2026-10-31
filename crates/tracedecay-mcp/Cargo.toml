@@ -54,6 +54,7 @@ tracedecay-graph-query = { path = "../tracedecay-graph-query" }
 tracedecay-hooks = { path = "../tracedecay-hooks" }
 tracedecay-host-admission = { path = "../tracedecay-host-admission" }
 tracedecay-lcm = { path = "../tracedecay-lcm" }
+tracedecay-lsp = { path = "../tracedecay-lsp" }
 tracedecay-maintenance = { path = "../tracedecay-maintenance" }
 tracedecay-mcp-catalog = { path = "../tracedecay-mcp-catalog" }
 tracedecay-privacy = { path = "../tracedecay-privacy" }

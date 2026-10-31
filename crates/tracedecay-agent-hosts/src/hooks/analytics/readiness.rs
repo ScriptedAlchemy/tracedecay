@@ -504,3 +504,53 @@ fn host_admission_status_rank(status: HostAdmissionStatus) -> u8 {
         HostAdmissionStatus::NotApplicable => 8,
     }
 }
+
+struct HookReadinessProjection;
+
+impl tracedecay_application::analytics_bridge::HookReadinessProjectionPort
+    for HookReadinessProjection
+{
+    #[tracing::instrument(name = "hints.hook_aggregate", level = "trace", skip_all)]
+    fn aggregate_hook_completed_readiness(&self, rows: &[Value]) -> Value {
+        let distribution = aggregate_hook_completed_readiness(rows);
+        match serde_json::to_value(distribution) {
+            Ok(value) => value,
+            Err(error) => serde_json::json!({
+                "schema_version": 1,
+                "source_event": "hook_completed",
+                "collection_status": "unavailable",
+                "input_rows_received": rows.len(),
+                "input_rows_processed": 0,
+                "input_rows_dropped_at_cap": 0,
+                "events_considered": 0,
+                "events_skipped_non_completed": rows.len(),
+                "unavailable_metrics": [{
+                    "metric": "hook_readiness",
+                    "status": "unavailable",
+                    "blocker": format!(
+                        "hook readiness distribution failed to serialize: {error}"
+                    ),
+                }]
+            }),
+        }
+    }
+}
+
+#[tracing::instrument(name = "hints.hook_install", level = "trace", skip_all)]
+pub fn install_dashboard_hook_readiness_projection() -> tracedecay_domain::errors::Result<()> {
+    static INSTALLATION: std::sync::LazyLock<std::result::Result<(), String>> =
+        std::sync::LazyLock::new(|| {
+            tracedecay_application::analytics_bridge::install_hook_readiness_projection(
+                std::sync::Arc::new(HookReadinessProjection),
+            )
+            .map_err(|_| "dashboard hook readiness projection is already installed".to_owned())
+        });
+    INSTALLATION
+        .as_ref()
+        .map_err(
+            |message| tracedecay_domain::errors::TraceDecayError::Config {
+                message: message.clone(),
+            },
+        )
+        .copied()
+}

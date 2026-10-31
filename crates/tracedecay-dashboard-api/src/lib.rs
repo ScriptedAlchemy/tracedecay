@@ -144,6 +144,7 @@ pub use http_admission::{
     DashboardHttpRequestControlV1, RequestControl, RequestControlMissing,
     with_dashboard_http_admission,
 };
+pub use request_deadline::dashboard_http_request_deadline_micros;
 pub use routes::router;
 pub use server::{
     ConnectionExecutor, bind_dashboard, serve_http_connection, serve_loopback,

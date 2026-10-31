@@ -410,7 +410,7 @@ pub(crate) fn initialize_root_paths(params: Option<&Value>) -> Vec<PathBuf> {
         .flatten()
         .filter_map(|root| {
             let uri = root.get("uri").and_then(Value::as_str)?;
-            crate::serve::local_path_from_mcp_root_uri(uri)
+            tracedecay_mcp::server::local_path_from_mcp_root_uri(uri)
         })
         .collect()
 }

@@ -28,8 +28,8 @@ pub use project_host_admission_replay::{
     ProjectHostAdmissionReplayTask, ProjectHostAdmissionReplayWorker,
 };
 pub use protocol::{
-    McpMethod, classify_mcp_method, initialize_result, request_protocol_version,
-    resources_list_result, speaks_2026_07_28, stamp_2026_07_28_result,
+    McpMethod, classify_mcp_method, initialize_result, local_path_from_mcp_root_uri,
+    request_protocol_version, resources_list_result, speaks_2026_07_28, stamp_2026_07_28_result,
 };
 pub use read_coalescing::{
     IdenticalReadCoalescer, ReadCoalescingSnapshot, ReadFlight, ReadFlightClaim, ReadFlightLeader,
