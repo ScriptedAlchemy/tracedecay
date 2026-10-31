@@ -3,11 +3,19 @@ use std::time::{Duration, Instant};
 use crate::dashboard_api_support::*;
 use serde_json::{Value, json};
 
+const EXPLORER_QUERY_ROUTE: &str = "/api/explorer/queries";
+
+/// A run reaches a terminal state by the deadline admission binds to its
+/// create request, so the poll waits for that contract instead of a guess.
 fn wait_for_query(agent: &ureq::Agent, base_url: &str, run_id: &str) -> Value {
     let started = Instant::now();
-    let mut last_response = None;
-    for _ in 0..100 {
-        let (status, body) = get_json(agent, &format!("{base_url}/api/explorer/queries/{run_id}"));
+    let deadline_micros = u64::try_from(
+        tracedecay_dashboard_api::dashboard_http_request_deadline_micros(EXPLORER_QUERY_ROUTE),
+    )
+    .expect("dashboard admission deadlines are positive");
+    let limit = Duration::from_micros(deadline_micros) + Duration::from_secs(5);
+    loop {
+        let (status, body) = get_json(agent, &format!("{base_url}{EXPLORER_QUERY_ROUTE}/{run_id}"));
         assert_eq!(status, 200, "query status should resolve: {body}");
         if matches!(
             body["payload"]["state"].as_str(),
@@ -15,13 +23,14 @@ fn wait_for_query(agent: &ureq::Agent, base_url: &str, run_id: &str) -> Value {
         ) {
             return body;
         }
-        last_response = Some(body);
+        let elapsed = started.elapsed();
+        if elapsed >= limit {
+            panic!(
+                "explorer query {run_id} did not reach a terminal state after {elapsed:?}; last response: {body:?}"
+            );
+        }
         std::thread::sleep(Duration::from_millis(10));
     }
-    panic!(
-        "explorer query {run_id} did not reach a terminal state after {:?}; last response: {last_response:?}",
-        started.elapsed()
-    );
 }
 
 #[test]
@@ -33,7 +42,7 @@ fn explorer_query_coordinates_real_sources_without_inventing_a_merge() {
 
         let (status, accepted) = post_json_body(
             &agent,
-            &format!("{}/api/explorer/queries", fixture.base_url),
+            &format!("{}{EXPLORER_QUERY_ROUTE}", fixture.base_url),
             &json!({"query": "cache", "limit": 25, "offset": 0}),
         );
         assert_eq!(status, 202, "query should be admitted: {accepted}");
