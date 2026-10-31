@@ -960,11 +960,16 @@ fn historical_admission_view(status: &SessionProjectionServingStatus) -> Histori
             }
         },
         SessionProjectionServingState::Unavailable { reason } => match reason {
-            SessionProjectionUnavailableReason::WorkerRecovering => {
+            // `Stalled` is what `Recovering` becomes before any pass makes
+            // progress, so it is the state every restarted worker starts in
+            // when its first pass names a retry. That supervisor still owns
+            // the deferred unit and re-runs the pass, so the hand-off is
+            // scheduled rather than reported as history that cannot run.
+            SessionProjectionUnavailableReason::WorkerRecovering
+            | SessionProjectionUnavailableReason::WorkerStalled => {
                 HistoricalAdmissionView::Scheduled
             }
             SessionProjectionUnavailableReason::WorkerMissing
-            | SessionProjectionUnavailableReason::WorkerStalled
             | SessionProjectionUnavailableReason::WorkerStopped => {
                 HistoricalAdmissionView::Unavailable
             }
