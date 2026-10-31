@@ -28,6 +28,9 @@ pub mod kilo;
 pub mod kimi;
 pub mod kiro;
 mod mcp_registration;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod native_cache_fixture;
 pub mod opencode;
 pub mod pi;
 pub mod plugin_bundle;
