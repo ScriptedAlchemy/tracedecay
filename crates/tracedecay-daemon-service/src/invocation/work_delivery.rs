@@ -3,8 +3,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use super::*;
-use tracedecay_daemon_protocol::DaemonHandshake;
+use super::DaemonInvocationService;
+use tracedecay_daemon_protocol::{
+    DaemonHandshake, DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationRequest,
+    DaemonInvocationResponse, WorkApplicationOutcomeV1,
+};
 
 pub struct DaemonWorkDeliveryDescriptorV1 {
     owner_event_id: String,
@@ -109,8 +112,6 @@ impl DaemonWorkDeliveryDescriptorV1 {
     }
 
     pub fn is_successful_delivery(&self, response: &DaemonInvocationResponse) -> bool {
-        use tracedecay_daemon_protocol::{DaemonInvocationOutcome, WorkApplicationOutcomeV1};
-
         match (&self.kind, &response.outcome) {
             (
                 DaemonWorkDeliveryKindV1::Attempt,
@@ -195,8 +196,6 @@ impl DaemonWorkDeliveryDescriptorV1 {
         &self,
         response: &DaemonInvocationResponse,
     ) -> Vec<tracedecay_domain::WorkAttemptIdentityV1> {
-        use tracedecay_daemon_protocol::{DaemonInvocationOutcome, WorkApplicationOutcomeV1};
-
         if let Some(identity) = self.attempt_identity.as_ref() {
             return vec![identity.clone()];
         }
