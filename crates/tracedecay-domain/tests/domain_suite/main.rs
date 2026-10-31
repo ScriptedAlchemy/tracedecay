@@ -10,6 +10,7 @@
 
 mod branch_stack_contract;
 mod canonical_identity_wire_stability;
+mod code_intelligence_types;
 mod code_search_contract;
 mod configuration_contract;
 mod external_source_foundation_contract;
