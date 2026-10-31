@@ -37,7 +37,9 @@ use tracedecay_runtime_core::git::{GitCommandBounds, GitCommandError, bounded_co
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
+mod definitions;
 pub(crate) mod effect_receipt;
+pub use definitions::ScheduledJobDefinitions;
 
 const JOBS_FILENAME: &str = "automation_jobs.json";
 const JOBS_SCHEMA_VERSION: u32 = 1;
@@ -209,63 +211,65 @@ pub async fn load_jobs(dashboard_root: &Path) -> Result<Vec<AutomationJob>> {
     let path = jobs_path(dashboard_root);
     let read_path = path.clone();
     match crate::automation::blocking_fs(move || std::fs::read(read_path)).await {
-        Ok(bytes) => {
-            let file = serde_json::from_slice::<AutomationJobsRawFile>(&bytes).map_err(|_| {
-                TraceDecayError::Config {
-                    message: format!("invalid automation jobs envelope '{}'", path.display()),
-                }
-            })?;
-            let schema_version = file.schema_version.ok_or_else(|| TraceDecayError::Config {
-                message: format!(
-                    "automation jobs envelope '{}' is missing schema_version",
-                    path.display()
-                ),
-            })?;
-            let jobs = file.jobs.ok_or_else(|| TraceDecayError::Config {
-                message: format!(
-                    "automation jobs envelope '{}' is missing jobs",
-                    path.display()
-                ),
-            })?;
-            if schema_version != JOBS_SCHEMA_VERSION {
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "automation jobs envelope '{}' uses unsupported schema_version {}",
-                        path.display(),
-                        schema_version
-                    ),
-                });
-            }
-            let mut loaded = Vec::with_capacity(jobs.len());
-            for (index, entry) in jobs.into_iter().enumerate() {
-                let delivery = entry.get("delivery").cloned();
-                let job = match serde_json::from_value::<AutomationJob>(entry) {
-                    Ok(job) => job,
-                    Err(_) => {
-                        let issue = if delivery.is_some_and(|delivery| {
-                            serde_json::from_value::<JobDelivery>(delivery).is_err()
-                        }) {
-                            "invalid delivery"
-                        } else {
-                            "invalid job"
-                        };
-                        return Err(TraceDecayError::Config {
-                            message: format!(
-                                "automation jobs envelope '{}' contains {issue} at index {index}",
-                                path.display()
-                            ),
-                        });
-                    }
-                };
-                loaded.push(job);
-            }
-            Ok(loaded)
-        }
+        Ok(bytes) => decode_jobs(&path, &bytes),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(TraceDecayError::Config {
             message: format!("failed to read automation jobs '{}': {e}", path.display()),
         }),
     }
+}
+
+fn decode_jobs(path: &Path, bytes: &[u8]) -> Result<Vec<AutomationJob>> {
+    let file = serde_json::from_slice::<AutomationJobsRawFile>(bytes).map_err(|_| {
+        TraceDecayError::Config {
+            message: format!("invalid automation jobs envelope '{}'", path.display()),
+        }
+    })?;
+    let schema_version = file.schema_version.ok_or_else(|| TraceDecayError::Config {
+        message: format!(
+            "automation jobs envelope '{}' is missing schema_version",
+            path.display()
+        ),
+    })?;
+    let jobs = file.jobs.ok_or_else(|| TraceDecayError::Config {
+        message: format!(
+            "automation jobs envelope '{}' is missing jobs",
+            path.display()
+        ),
+    })?;
+    if schema_version != JOBS_SCHEMA_VERSION {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "automation jobs envelope '{}' uses unsupported schema_version {}",
+                path.display(),
+                schema_version
+            ),
+        });
+    }
+    let mut loaded = Vec::with_capacity(jobs.len());
+    for (index, entry) in jobs.into_iter().enumerate() {
+        let delivery = entry.get("delivery").cloned();
+        let job = match serde_json::from_value::<AutomationJob>(entry) {
+            Ok(job) => job,
+            Err(_) => {
+                let issue = if delivery.is_some_and(|delivery| {
+                    serde_json::from_value::<JobDelivery>(delivery).is_err()
+                }) {
+                    "invalid delivery"
+                } else {
+                    "invalid job"
+                };
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "automation jobs envelope '{}' contains {issue} at index {index}",
+                        path.display()
+                    ),
+                });
+            }
+        };
+        loaded.push(job);
+    }
+    Ok(loaded)
 }
 
 #[tracing::instrument(name = "automation.jobs.save", level = "trace", skip_all)]
@@ -309,6 +313,12 @@ pub fn validate_job(job: &AutomationJob) -> Result<()> {
 }
 
 pub fn admit_job(job: &AutomationJob) -> Result<AdmittedAutomationJob> {
+    validate_job_header(job)?;
+    let schedule = resolve_job_schedule(job)?;
+    finish_job_admission(job, schedule)
+}
+
+fn validate_job_header(job: &AutomationJob) -> Result<()> {
     validate_job_id(&job.id)?;
     if job.name.trim().is_empty() {
         return job_error("job name must not be empty");
@@ -319,17 +329,25 @@ pub fn admit_job(job: &AutomationJob) -> Result<AdmittedAutomationJob> {
     if matches!(job.interval_secs, Some(0)) {
         return job_error("job interval_secs must be greater than zero");
     }
-    let schedule = match resolve_schedule(job.schedule.as_deref(), job.interval_secs) {
-        Ok(schedule) => schedule,
+    Ok(())
+}
+
+fn resolve_job_schedule(job: &AutomationJob) -> Result<AutomationSchedule> {
+    match resolve_schedule(job.schedule.as_deref(), job.interval_secs) {
+        Ok(schedule) => Ok(schedule),
         Err(ScheduleResolutionError::IntervalRequired) => {
-            return job_error("job interval_secs is required when schedule is interval");
+            job_error("job interval_secs is required when schedule is interval")
         }
-        Err(ScheduleResolutionError::Invalid(error)) => {
-            return Err(TraceDecayError::Config {
-                message: error.to_string(),
-            });
-        }
-    };
+        Err(ScheduleResolutionError::Invalid(error)) => Err(TraceDecayError::Config {
+            message: error.to_string(),
+        }),
+    }
+}
+
+fn finish_job_admission(
+    job: &AutomationJob,
+    schedule: AutomationSchedule,
+) -> Result<AdmittedAutomationJob> {
     if matches!(job.cooldown_secs, Some(0)) {
         return job_error("job cooldown_secs must be greater than zero");
     }
@@ -413,42 +431,21 @@ pub fn job_is_schedulable(job: &AdmittedAutomationJob) -> bool {
     )
 }
 
-/// True when scheduler selection must admit this persisted job.
-///
-/// Disabled and manual entries are skipped so an unrelated inactive sibling
-/// cannot fail-close valid scheduled work. Enabled jobs whose schedule is
-/// interval, cron, or unresolvable still go through [`admit_job`] so a
-/// malformed scheduled definition stays fail-closed.
-fn job_requires_scheduler_admission(job: &AutomationJob) -> bool {
-    if !job.enabled {
-        return false;
-    }
-    !matches!(
-        resolve_schedule(job.schedule.as_deref(), job.interval_secs),
-        Ok(AutomationSchedule::Manual)
-    )
-}
-
-/// True when any persisted job needs the scheduler loop running.
-///
-/// A load/parse failure (e.g. a corrupt `automation_jobs.json`) is surfaced
-/// as an error rather than collapsed to `false`: reporting "no work" for a
-/// corrupt file would silently and permanently disable the scheduler loop.
-/// The caller retries next tick so a transiently bad file recovers.
-/// Inactive or manual siblings are not admitted; a malformed enabled
-/// schedule still fails closed.
-pub async fn jobs_configured_for_scheduler(dashboard_root: &Path) -> Result<bool> {
-    let jobs = load_admitted_jobs(dashboard_root).await?;
-    Ok(jobs.iter().any(job_is_schedulable))
-}
-
-pub async fn load_admitted_jobs(dashboard_root: &Path) -> Result<Vec<AdmittedAutomationJob>> {
+/// Admit enabled scheduled jobs without resolving a schedule a second time.
+/// Invalid inactive/manual siblings remain outside scheduler admission; a
+/// malformed enabled schedule is an error, never a manual fallback.
+fn admit_scheduled_jobs(jobs: Vec<AutomationJob>) -> Result<Vec<AdmittedAutomationJob>> {
     let mut admitted = Vec::new();
-    for job in load_jobs(dashboard_root).await? {
-        if !job_requires_scheduler_admission(&job) {
+    for job in jobs {
+        if !job.enabled {
             continue;
         }
-        admitted.push(admit_job(&job)?);
+        let schedule = resolve_job_schedule(&job);
+        if matches!(schedule, Ok(AutomationSchedule::Manual)) {
+            continue;
+        }
+        validate_job_header(&job)?;
+        admitted.push(finish_job_admission(&job, schedule?)?);
     }
     Ok(admitted)
 }
@@ -543,7 +540,7 @@ pub async fn run_user_job_with_backend_for_retained_settlement(
     dashboard_root: &Path,
     config: &AutomationSettingsV1,
     backend: &dyn AgentTaskBackend,
-    job: &AutomationJob,
+    job: &AdmittedAutomationJob,
     options: UserJobRunOptions,
 ) -> RetainedAutomationRun<UserJobAutomationRun> {
     let settlement_guard = AutomationRunSettlementGuard::new();
@@ -563,11 +560,10 @@ async fn run_retained_user_job(
     dashboard_root: &Path,
     config: &AutomationSettingsV1,
     backend: &dyn AgentTaskBackend,
-    job: &AutomationJob,
+    job: &AdmittedAutomationJob,
     options: UserJobRunOptions,
     settlement_guard: &AutomationRunSettlementGuard,
 ) -> super::AutomationRunResult<UserJobAutomationRun> {
-    let admitted_job = admit_job(job)?;
     let UserJobRunOptions {
         trigger,
         run_id,
@@ -634,7 +630,7 @@ async fn run_retained_user_job(
     };
     if let Some(scheduler_summary) = scheduler_summary.as_ref() {
         let now_secs = current_timestamp();
-        let decision = job_schedule_decision(&admitted_job, scheduler_summary.records(), now_secs);
+        let decision = job_schedule_decision(job, scheduler_summary.records(), now_secs);
         if let Some(reason) = decision {
             return ctx.skipped(reason).await.map_err(Into::into);
         }

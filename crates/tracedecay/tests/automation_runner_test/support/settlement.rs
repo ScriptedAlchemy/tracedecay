@@ -304,6 +304,7 @@ pub(crate) async fn settle_user_job(
     job: &AutomationJob,
     mut options: UserJobRunOptions,
 ) -> AutomationRunResult<UserJobAutomationRun> {
+    let job = tracedecay_automation_runtime::automation::jobs::admit_job(job)?;
     let run_id = admitted_run_id(options.run_id.take());
     let request = user_job_run_request(&run_id, &job.id).expect("user job request");
     let authority = admit(dashboard_root, None, request).await;
@@ -312,7 +313,7 @@ pub(crate) async fn settle_user_job(
         dashboard_root,
         config,
         backend,
-        job,
+        &job,
         options,
     )
     .await;

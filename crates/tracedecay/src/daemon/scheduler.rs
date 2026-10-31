@@ -2051,10 +2051,11 @@ async fn automation_scheduler_has_work(
     {
         return Ok(false);
     }
-    tracedecay_automation_runtime::automation::jobs::jobs_configured_for_scheduler(
-        &cg.store_layout().dashboard_root,
-    )
-    .await
+    Ok(cg
+        .scheduled_jobs()
+        .await?
+        .iter()
+        .any(tracedecay_automation_runtime::automation::jobs::job_is_schedulable))
 }
 
 /// Ticks every schedulable user-defined job with the same lock/cooldown
@@ -2081,24 +2082,21 @@ async fn run_user_jobs_scheduler_pass(
     first_error: &mut Option<TraceDecayError>,
 ) {
     let dashboard_root = cg.store_layout().dashboard_root.clone();
-    let jobs =
-        match tracedecay_automation_runtime::automation::jobs::load_admitted_jobs(&dashboard_root)
-            .await
-        {
-            Ok(jobs) => jobs,
-            Err(e) => {
-                log_daemon_event(
-                    "scheduler_user_jobs",
-                    &[
-                        ("project", project_path.display().to_string()),
-                        ("outcome", "error".to_string()),
-                        ("error", e.to_string()),
-                    ],
-                );
-                first_error.get_or_insert(e);
-                return;
-            }
-        };
+    let jobs = match cg.scheduled_jobs().await {
+        Ok(jobs) => jobs,
+        Err(e) => {
+            log_daemon_event(
+                "scheduler_user_jobs",
+                &[
+                    ("project", project_path.display().to_string()),
+                    ("outcome", "error".to_string()),
+                    ("error", e.to_string()),
+                ],
+            );
+            first_error.get_or_insert(e);
+            return;
+        }
+    };
     for job in jobs
         .iter()
         .filter(|job| tracedecay_automation_runtime::automation::jobs::job_is_schedulable(job))

@@ -357,6 +357,7 @@ async fn retained_disabled_user_job_run(
         updated_at: 1,
         extra: BTreeMap::default(),
     };
+    let job = tracedecay_automation_runtime::automation::jobs::admit_job(&job).unwrap();
     run_user_job_with_backend_for_retained_settlement(
         dashboard_root,
         &config,
