@@ -5,6 +5,7 @@ use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_sessions::admission::HostAdmissionScope;
+use tracedecay_sessions::serving::SessionRefreshWorkerPort;
 
 /// Database authorities retained by the owning MCP server for its lifetime.
 /// Hook and LCM handlers borrow these capabilities; they never rediscover or
@@ -22,6 +23,8 @@ pub struct SessionAuthorities<'a> {
     pub background_cpu: Option<std::sync::Arc<ProcessBackgroundCpuV1>>,
     pub project_lcm:
         Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
+    /// Joins the captured session's temporal publication before summary writes.
+    pub project_refresh: Option<&'a dyn SessionRefreshWorkerPort>,
 }
 
 impl<'a> SessionAuthorities<'a> {
@@ -35,6 +38,7 @@ impl<'a> SessionAuthorities<'a> {
             profile_identity: None,
             background_cpu: None,
             project_lcm: None,
+            project_refresh: None,
         }
     }
 
@@ -62,6 +66,15 @@ impl<'a> SessionAuthorities<'a> {
         project: Option<&'a dyn tracedecay_session_runtime::lcm_authority::MountedLcmAuthorityPort>,
     ) -> Self {
         self.project_lcm = project;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_project_refresh(
+        mut self,
+        project: Option<&'a dyn SessionRefreshWorkerPort>,
+    ) -> Self {
+        self.project_refresh = project;
         self
     }
 }

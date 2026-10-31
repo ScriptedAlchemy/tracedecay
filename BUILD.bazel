@@ -1,8 +1,8 @@
 load("@npm//:defs.bzl", "npm_link_all_packages")
-load("@rules_rust//rust:toolchain.bzl", "current_rustfmt_toolchain")
 
-current_rustfmt_toolchain(
+alias(
     name = "rustfmt_toolchain",
+    actual = "@rules_rust//rust/toolchain:current_rustfmt_toolchain",
     tags = ["manual"],
     visibility = ["//visibility:public"],
 )

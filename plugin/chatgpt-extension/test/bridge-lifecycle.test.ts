@@ -1,12 +1,13 @@
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AuthorityLookup, DaemonAuthorityRecord } from "../src/server/authority.js";
+import { daemonAuthorityRecordPath } from "../src/server/authority.js";
 import { DaemonBridge } from "../src/server/bridge.js";
 import { RegistryClient } from "../src/server/registry-client.js";
 import { ServeSession } from "../src/server/serve-client.js";
@@ -44,8 +45,10 @@ async function fixture(expectedCloseError?: Error) {
     auth_token: "isolated-fixture-token",
     profile_root: root,
   };
+  const recordPath = daemonAuthorityRecordPath(root);
+  await mkdir(path.dirname(recordPath), { recursive: true });
   const writeAuthority = (record: DaemonAuthorityRecord) =>
-    writeFile(path.join(root, "daemon-authority.json"), JSON.stringify(record));
+    writeFile(recordPath, JSON.stringify(record));
   await writeAuthority(authority);
   const bridge = new DaemonBridge({
     binary: path.join(PACKAGE_ROOT, "test", "fake-serve.mjs"),

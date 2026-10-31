@@ -100,7 +100,9 @@ beforeAll(async () => {
   });
   const billingProject = projects.find((project) => project.project_root === billing.root);
   const shippingProject = projects.find((project) => project.project_root === shipping.root);
-  if (!billingProject || !shippingProject) throw new Error("fixture projects were not registered");
+  if (!billingProject || !shippingProject) {
+    throw new Error(`fixture project roots differ: expected ${JSON.stringify([billing.root, shipping.root])}, received ${JSON.stringify(projects.map((project) => project.project_root))}`);
+  }
   billingProjectId = billingProject.project_id;
   shippingProjectId = shippingProject.project_id;
 });
@@ -247,7 +249,8 @@ describe("ChatGPT extension against a live TraceDecay daemon", () => {
     expect(symbol.graph.data.edges.length).toBe(2);
     expect(symbol.evidence).not.toBeNull();
     const authority = await fixture.readAuthority();
-    expect(symbol.provenance?.authority).toEqual({ profile_root: fixture.profileRoot, daemon_version: authority!.version, daemon_pid: authority!.pid });
+    expect(authority).not.toBeNull();
+    expect(symbol.provenance?.authority).toEqual({ profile_root: authority!.profile_root, daemon_version: authority!.version, daemon_pid: authority!.pid });
     expect(symbol.evidence!.markdown).toContain(`- Commit: ${billing.head()}`);
     expect(symbol.evidence!.markdown).toContain("src/report.ts::renderBillingReport");
     expect(symbol.evidence!.markdown).toContain(`- Generation: ${search.provenance!.generation}`);
@@ -409,7 +412,7 @@ export function taxTotal(invoices: Invoice[]): number {
           Object.entries(fixture.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
         ),
         cwd: fixture.home,
-        stdio: ["ignore", "ignore", "pipe"],
+        stdio: ["ignore", "ignore", "pipe", "ipc"],
       },
     );
     let stderr = "";
@@ -431,13 +434,16 @@ export function taxTotal(invoices: Invoice[]): number {
       }
       const ping = await rawPost(url, new URL(url).host, JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }), `Bearer ${token}`);
       expect(ping.status).toBe(200);
-      child.kill("SIGTERM");
-      await once(child, "exit");
+      const exited = once(child, "exit");
+      child.disconnect();
+      expect(await exited).toEqual([0, null]);
       await expect(stat(tokenPath)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(fetch(url)).rejects.toThrow();
     } finally {
-      if (child.exitCode === null) {
+      if (child.exitCode === null && child.signalCode === null) {
+        const exited = once(child, "exit");
         child.kill("SIGKILL");
-        await once(child, "exit");
+        await exited;
       }
     }
   });

@@ -133,6 +133,9 @@ impl BenchmarkConnection {
     ) -> Result<Self, String> {
         // rmcp's client runs on Tokio I/O, so this harness dials with Tokio
         // rather than the Asupersync `DaemonClientStream`.
+        #[cfg(not(unix))]
+        let DaemonEndpoint::Loopback(address) = endpoint;
+        #[cfg(unix)]
         let DaemonEndpoint::Loopback(address) = endpoint else {
             return Err("benchmark RMCP endpoint must be loopback".to_owned());
         };

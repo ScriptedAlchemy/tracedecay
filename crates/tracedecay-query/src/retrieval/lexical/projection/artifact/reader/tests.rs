@@ -1,5 +1,6 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -11,6 +12,7 @@ use tracedecay_domain::{
     CodeGenerationId, ComponentRevision, FreshnessCompatibilityV1, ManifestDigest, ScoreDomainId,
     SourceFreshness, SourceInstanceKey, SourceNamespace, UtcMicros,
 };
+#[cfg(unix)]
 use tracedecay_private_fs::{RewriteWitness, open_private_file};
 
 use super::super::format::{PostingListEncoderV1, encode_document_set};
@@ -183,12 +185,14 @@ fn content_addressed_integrity_reuses_the_publisher_proof() {
     assert!(quick_check_observed.load(Ordering::SeqCst));
 }
 
+#[cfg(unix)]
 struct MutateSqliteHeaderAtObservation {
     path: PathBuf,
     mutation_observation: usize,
     observations: AtomicUsize,
 }
 
+#[cfg(unix)]
 impl MutateSqliteHeaderAtObservation {
     fn new(path: PathBuf, mutation_observation: usize) -> Self {
         Self {
@@ -199,6 +203,7 @@ impl MutateSqliteHeaderAtObservation {
     }
 }
 
+#[cfg(unix)]
 impl CodeIndexExecutionControlV1 for MutateSqliteHeaderAtObservation {
     fn is_cancelled(&self) -> bool {
         let observation = self

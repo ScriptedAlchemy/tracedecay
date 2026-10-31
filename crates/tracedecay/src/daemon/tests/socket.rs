@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(unix)]
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 

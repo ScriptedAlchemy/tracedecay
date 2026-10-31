@@ -3,20 +3,28 @@ use tracedecay_automation_runtime::automation::effect_runtime::settlement::*;
 
 use std::collections::BTreeMap;
 use tracedecay_contracts::retained_surfaces::{
-    AutomationRunProblemV1, AutomationRunRequestV1, AutomationRunResultV1, AutomationRunSummaryV1,
-    AutomationRunTerminalV1, AutomationTaskRequestV1, AutomationTaskV1, MemoryCuratorRunInputV1,
-    RetainedSurfaceExecutionErrorV1, RetainedSurfaceOperation, UserJobRunInputV1,
-    retained_surface_application_operation, retained_surface_execution_problem,
+    AutomationRunProblemV1, AutomationRunRequestV1, AutomationTaskRequestV1,
+    MemoryCuratorRunInputV1, RetainedSurfaceExecutionErrorV1, RetainedSurfaceOperation,
+    UserJobRunInputV1, retained_surface_application_operation, retained_surface_execution_problem,
+};
+#[cfg(unix)]
+use tracedecay_contracts::retained_surfaces::{
+    AutomationRunResultV1, AutomationRunSummaryV1, AutomationRunTerminalV1, AutomationTaskV1,
 };
 
+#[cfg(unix)]
 use tracedecay_contracts::{
-    ApplicationOutcome, ApplicationProblemEnvelope, AuthorityReceipt, Deadline, DisclosureClass,
-    EffectId, EffectReceipt, EffectResult, EffectTermination, IdempotencyKey, OperationBudgetUsage,
-    OperationReceipt, PolicyDecisionRef, ReconciliationState, RequestId, ResolvedScope,
+    ApplicationOutcome, AuthorityReceipt, EffectId, EffectResult, OperationBudgetUsage,
+    OperationReceipt, PolicyDecisionRef, ReconciliationState,
 };
+use tracedecay_contracts::{
+    ApplicationProblemEnvelope, Deadline, DisclosureClass, EffectReceipt, EffectTermination,
+    IdempotencyKey, RequestId, ResolvedScope,
+};
+#[cfg(unix)]
+use tracedecay_domain::ComponentVersion;
 use tracedecay_domain::{
-    ActorId, ComponentVersion, FactOwnerV1, ProjectId, RepositoryId, RunId, UtcMicros, WorktreeId,
-    canonical_sha256,
+    ActorId, FactOwnerV1, ProjectId, RepositoryId, RunId, UtcMicros, WorktreeId, canonical_sha256,
 };
 use tracedecay_tool_catalog::EffectClass;
 
@@ -492,6 +500,7 @@ fn partial_receipt_template(request_id: &RequestId, scope: &ResolvedScope) -> Ef
     }
 }
 
+#[cfg(unix)]
 fn authority(scope: &ResolvedScope) -> AuthorityReceipt {
     AuthorityReceipt {
         grant_id: tracedecay_contracts::CapabilityGrantId::new("grant.memory-journal")
@@ -511,6 +520,7 @@ fn authority(scope: &ResolvedScope) -> AuthorityReceipt {
     }
 }
 
+#[cfg(unix)]
 fn success_terminal(
     admission: &DurableAutomationAdmission,
     result_run_id: &str,
@@ -530,6 +540,7 @@ fn success_terminal(
     )
 }
 
+#[cfg(unix)]
 fn result_terminal(
     admission: &DurableAutomationAdmission,
     result_run_id: &str,

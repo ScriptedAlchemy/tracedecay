@@ -136,13 +136,12 @@ impl ChildPipeWatch {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::io::Write;
 
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn abandon_returns_bytes_already_buffered() {
         let (mut reader, mut writer) = std::io::pipe().unwrap();

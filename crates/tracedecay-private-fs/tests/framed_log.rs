@@ -195,6 +195,7 @@ mod windows_publication {
             DirectorySyncPolicy::Strict,
         )
         .unwrap();
+        let permissions = fs::metadata(&destination).unwrap().permissions();
         let mut reader = fs::File::open(&destination).unwrap();
         publish(b"second").expect("publish read-only staging over an open reader");
         let mut displaced = Vec::new();
@@ -205,8 +206,6 @@ mod windows_publication {
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
         drop(reader);
 
-        let mut permissions = fs::metadata(&destination).unwrap().permissions();
-        permissions.set_readonly(false);
         fs::set_permissions(&destination, permissions.clone()).unwrap();
         let blocker = fs::OpenOptions::new()
             .read(true)

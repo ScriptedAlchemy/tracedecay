@@ -12,10 +12,10 @@ use tracedecay_mcp::server::{RmcpConnectionAdapter, RmcpInitializeResponseDecora
 use super::McpServer;
 #[cfg(test)]
 use super::connection::ProductionMcpConnectionContext;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use super::routing::SelectedProjectResponseLease;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) type RmcpSelectedProjectResponseAuthority =
     tracedecay_mcp::server::RmcpSelectedProjectResponseAuthority<SelectedProjectResponseLease>;
 
@@ -58,8 +58,13 @@ mod tests {
         let (listener, bound) = BrokerListener::bind(&default_loopback_endpoint())
             .await
             .expect("bind loopback broker");
-        let DaemonEndpoint::Loopback(address) = bound else {
-            panic!("loopback bind returned {bound}");
+        #[cfg(not(unix))]
+        let DaemonEndpoint::Loopback(address) = bound;
+        #[cfg(unix)]
+        let address = match bound {
+            DaemonEndpoint::Loopback(address) => address,
+            #[cfg(unix)]
+            DaemonEndpoint::Unix(_) => panic!("loopback bind returned {bound}"),
         };
         let client = tokio::net::TcpStream::connect(address)
             .await

@@ -95,10 +95,10 @@ fn staged_identity_matches(
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
         let handle_identity = tracedecay_private_fs::windows_file::information(file)
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-        return Ok(
+        Ok(
             path_identity.volume_serial_number == handle_identity.volume_serial_number
                 && path_identity.file_index == handle_identity.file_index,
-        );
+        )
     }
     #[cfg(unix)]
     {

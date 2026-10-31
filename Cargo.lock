@@ -6116,7 +6116,6 @@ dependencies = [
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
  "tracedecay-sdk",
- "tracedecay-search-eval",
  "tracedecay-session-memory",
  "tracedecay-session-runtime",
  "tracedecay-session-temporal-store",

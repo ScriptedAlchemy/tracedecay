@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
+#[cfg(unix)]
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_project::project::TraceDecayOpenOptions;
 #[cfg(unix)]
