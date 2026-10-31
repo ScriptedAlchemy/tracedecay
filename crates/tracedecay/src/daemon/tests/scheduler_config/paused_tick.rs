@@ -82,7 +82,7 @@ async fn paused_tick_scenario() {
         },
     )
     .await;
-    let cg = server.cg().await;
+    let cg = server.cg_snapshot().await;
 
     let run_control =
         tracedecay_automation_runtime::automation::AutomationRunControl::from_interrupted(

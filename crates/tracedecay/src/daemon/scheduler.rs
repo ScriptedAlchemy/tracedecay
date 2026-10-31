@@ -1092,7 +1092,7 @@ async fn retained_project_graph(
         let servers = engine.store_administration.project_servers().lock().await;
         servers.get(key).cloned()
     }?;
-    Some(server.cg().await)
+    Some(server.cg_snapshot().await)
 }
 
 #[allow(clippy::too_many_arguments)]

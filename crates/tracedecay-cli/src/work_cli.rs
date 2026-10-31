@@ -120,23 +120,7 @@ pub(crate) fn work_delivery_is_eligible(
     operation: WorkOperation,
     outcome: &WorkApplicationOutcomeV1,
 ) -> bool {
-    match (operation, outcome) {
-        (WorkOperation::StartAttempt, WorkApplicationOutcomeV1::StartAttempt(outcome))
-        | (WorkOperation::AttemptStatus, WorkApplicationOutcomeV1::AttemptStatus(outcome))
-        | (WorkOperation::CancelAttempt, WorkApplicationOutcomeV1::CancelAttempt(outcome)) => {
-            outcome.payload().is_some()
-        }
-        (WorkOperation::HydrateArtifacts, WorkApplicationOutcomeV1::HydrateArtifacts(outcome)) => {
-            outcome.payload().is_some_and(|hydration| {
-                matches!(
-                    hydration,
-                    tracedecay_contracts::WorkArtifactHydrationV1::Hydrated { attempts, .. }
-                        if !attempts.is_empty()
-                )
-            })
-        }
-        _ => false,
-    }
+    outcome.operation_key() == operation.operation_key() && outcome.requires_delivery_ack()
 }
 
 #[cfg(test)]
