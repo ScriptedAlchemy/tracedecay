@@ -475,5 +475,54 @@ class SharedPackageOwnershipTests(unittest.TestCase):
             )
 
 
+class RuntimeBinaryReachTests(unittest.TestCase):
+    SHARED = (
+        (
+            Path("common/mod.rs"),
+            "\n".join([
+                "pub fn tracedecay_bin() -> PathBuf {",
+                '    PathBuf::from(std::env::var_os("TRACEDECAY_TEST_BIN").unwrap())',
+                "}",
+                "",
+                "pub fn spawn_daemon(home: &Path) -> Child {",
+                "    Command::new(tracedecay_bin()).spawn().unwrap()",
+                "}",
+                "",
+                "pub fn start_fleet(home: &Path) -> Child {",
+                "    spawn_daemon(home)",
+                "}",
+                "",
+                "pub fn temp_home() -> TempDir {",
+                "    tempfile::tempdir().unwrap()",
+                "}",
+                "",
+            ]),
+        ),
+    )
+
+    def setUp(self) -> None:
+        gen = load_gen_builds()
+        self.reaches = lambda own_text: gen.reaches_runtime_binary(
+            next(p for v, _, p in gen.RUNTIME_BINARIES if v == "TRACEDECAY_TEST_BIN"),
+            ((Path("suite/main.rs"), own_text),),
+            self.SHARED,
+        )
+
+    def test_direct_call(self) -> None:
+        self.assertTrue(self.reaches("fn t() { Command::new(tracedecay_bin()); }"))
+
+    def test_call_through_shared_helper(self) -> None:
+        self.assertTrue(self.reaches("fn t() { spawn_daemon(home); }"))
+
+    def test_call_through_two_level_helper_chain(self) -> None:
+        self.assertTrue(self.reaches("fn t() { start_fleet(home); }"))
+
+    def test_shared_helpers_never_called(self) -> None:
+        self.assertFalse(self.reaches("fn t() { let home = temp_home(); }"))
+
+    def test_own_function_named_like_a_helper_is_a_definition(self) -> None:
+        self.assertFalse(self.reaches("fn spawn_daemon() {}\nfn t() { temp_home(); }"))
+
+
 if __name__ == "__main__":
     unittest.main()

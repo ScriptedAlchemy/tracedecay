@@ -575,10 +575,10 @@ fn valid_locator(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use tracedecay_domain::UserProfileId;
     use zeroize::Zeroizing;
@@ -589,8 +589,9 @@ mod tests {
         check_configured_github_review_sources_v1,
     };
     use crate::advisory::github_runtime::{
-        GitHubReadPermissionV1, ProfileGitHubReadOnlyCredentialMountOutcomeV1,
-        RegisteredGitHubReadOnlyCredentialV1,
+        GitHubReadOnlyCredentialAuthorityOutcomeV1, GitHubReadOnlyCredentialPermissionVerifierV1,
+        GitHubReadOnlyCredentialSecretV1, GitHubReadPermissionV1,
+        ProfileGitHubReadOnlyCredentialMountOutcomeV1, RegisteredGitHubReadOnlyCredentialV1,
         mount_profile_github_read_only_credential_authority_v1,
         resolve_registered_github_read_only_credential_v1,
     };
@@ -860,6 +861,112 @@ keyring_account = "read"
                 "explicit-public",
             ),
             ProfileGitHubReadOnlyCredentialMountOutcomeV1::NotConfigured
+        );
+    }
+
+    struct RecordingSecretReadV1 {
+        calls: Mutex<Vec<(String, String)>>,
+    }
+
+    impl GitHubSecretReadPortV1 for RecordingSecretReadV1 {
+        fn read_secret(
+            &self,
+            service: &str,
+            account: &str,
+        ) -> Result<Option<Zeroizing<String>>, GitHubSecretReadErrorV1> {
+            self.calls
+                .lock()
+                .expect("secret-read calls")
+                .push((service.to_owned(), account.to_owned()));
+            Ok(Some(Zeroizing::new("github-read-token".to_owned())))
+        }
+    }
+
+    struct ReadOnlyPermissionVerifierV1;
+
+    impl GitHubReadOnlyCredentialPermissionVerifierV1 for ReadOnlyPermissionVerifierV1 {
+        fn verify(
+            &self,
+            secret: &str,
+            repository_owner: &str,
+        ) -> GitHubReadOnlyCredentialAuthorityOutcomeV1 {
+            assert_eq!(secret, "github-read-token");
+            assert_eq!(repository_owner, "ScriptedAlchemy");
+            GitHubReadOnlyCredentialAuthorityOutcomeV1::Verified {
+                secret: GitHubReadOnlyCredentialSecretV1::from_zeroizing(Zeroizing::new(
+                    secret.to_owned(),
+                ))
+                .expect("non-empty credential"),
+                exact_permissions: BTreeSet::from([
+                    GitHubReadPermissionV1::Metadata,
+                    GitHubReadPermissionV1::PullRequests,
+                ]),
+            }
+        }
+    }
+
+    fn assert_verified() {
+        assert!(matches!(
+            resolve_registered_github_read_only_credential_v1(
+                "ScriptedAlchemy",
+                "private-repository"
+            ),
+            RegisteredGitHubReadOnlyCredentialV1::Verified(_)
+        ));
+    }
+
+    fn assert_cleared() {
+        assert!(matches!(
+            resolve_registered_github_read_only_credential_v1(
+                "ScriptedAlchemy",
+                "private-repository"
+            ),
+            RegisteredGitHubReadOnlyCredentialV1::Missing
+        ));
+    }
+
+    #[test]
+    fn injected_secret_reader_rereads_on_restart_and_shutdown_clears_registration() {
+        let temporary = tempfile::tempdir().expect("profile root");
+        let profile_root = temporary.path().join("profile");
+        std::fs::create_dir(&profile_root).expect("profile directory");
+        let profile_id = UserProfileId::new("profile.github.restart").expect("profile id");
+        std::fs::write(
+            profile_root.join("config.toml"),
+            r#"
+[[github_review_sources]]
+owner = "ScriptedAlchemy"
+repository = "private-repository"
+access = "os_keyring"
+keyring_service = "tracedecay.github"
+keyring_account = "review"
+"#,
+        )
+        .expect("credential configuration");
+        let secrets = Arc::new(RecordingSecretReadV1 {
+            calls: Mutex::new(Vec::new()),
+        });
+
+        for _ in 0..2 {
+            let lifecycle = GitHubReadOnlyCredentialLifecycleV1::with_permission_verifier(
+                Arc::new(ReadOnlyPermissionVerifierV1),
+            );
+            lifecycle.configure_profile(&profile_id, &profile_root, secrets.clone());
+            assert_eq!(
+                lifecycle.mount(&profile_id, "ScriptedAlchemy", "private-repository"),
+                ProfileGitHubReadOnlyCredentialMountOutcomeV1::Mounted
+            );
+            assert_verified();
+            lifecycle.shutdown();
+            assert_cleared();
+        }
+
+        assert_eq!(
+            secrets.calls.lock().expect("secret-read calls").as_slice(),
+            &[
+                ("tracedecay.github".to_owned(), "review".to_owned()),
+                ("tracedecay.github".to_owned(), "review".to_owned()),
+            ]
         );
     }
 

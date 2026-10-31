@@ -21,7 +21,10 @@ use tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRegistryFailur
 use tracedecay_rusqlite_runtime::remote::RemoteWriterPublicationErrorV1;
 use tracedecay_store::{FactReadControl, ProjectId, RetainedGraphStoreLeaseV1, StoreShardIdV1};
 
-use super::remote_mount_tests::{admission, grant, query_policy, replay_policy};
+use super::remote_fixtures::{
+    remote_enrollment_admission_fixture, remote_enrollment_grant_fixture,
+};
+use super::remote_mount_tests::{query_policy, replay_policy};
 use super::{
     DaemonSessionRuntimeRegistryV1, RemoteRecoveryAdmission, RemoteRecoveryProjectLifecycle,
     process_runtime_generation, registry_open_error,
@@ -173,10 +176,11 @@ async fn provisioned_writer_fixture() -> ProvisionedWriterFixture {
         }
     }))
     .expect("remote writer authority");
-    let mut grant = grant(identity.brain_id().clone(), node_id.clone(), &[5_u8; 32]);
+    let mut grant =
+        remote_enrollment_grant_fixture(identity.brain_id().clone(), node_id.clone(), &[5_u8; 32]);
     grant.scope = writer.scope.clone();
     registry
-        .provision_remote_node(grant.clone(), admission(&grant))
+        .provision_remote_node(grant.clone(), remote_enrollment_admission_fixture(&grant))
         .await
         .expect("provision RemoteNode");
     let recovery = registry

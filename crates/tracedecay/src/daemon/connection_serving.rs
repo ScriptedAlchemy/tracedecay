@@ -5,10 +5,12 @@
 //! and connection teardown for exactly one client.
 
 use super::*;
-use tracedecay_daemon_protocol::DaemonInvocationPayload;
 use tracedecay_daemon_service::ProfileHostAdmissionBootstrapStatus;
 use tracedecay_daemon_service::shutdown::{DaemonActivity, DaemonLifecycle};
-use tracedecay_daemon_service::{DaemonInvocationService, DaemonLspSessionAccess, Lease};
+use tracedecay_daemon_service::{
+    DaemonInvocationService, DaemonLspSessionAccess, DaemonWorkDeliveryDescriptorV1, Lease,
+    settle_daemon_work_delivery,
+};
 use tracedecay_mcp::BrokerSelectedResponseLease;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::logging::log_daemon_event;
@@ -34,11 +36,11 @@ type ProjectOwnerAwaitFutureV1<'a, T> = std::pin::Pin<
 >;
 
 type BrokerConnectionPhaseFutureV1<'a, T> =
-    std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send + 'a>>;
+    std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
 #[inline(never)]
 fn boxed_broker_connection_phase<'a, T>(
-    future: impl std::future::Future<Output = Result<T>> + Send + 'a,
+    future: impl std::future::Future<Output = T> + Send + 'a,
 ) -> BrokerConnectionPhaseFutureV1<'a, T>
 where
     T: Send + 'a,
@@ -400,295 +402,6 @@ const PROJECT_OWNER_HALF_CLOSE_GRACE: Duration = Duration::from_millis(750);
 /// This bound exists only so a stuck open can never pin a connection, its
 /// lifecycle activity permit and its admission slot for the life of the daemon.
 const PROFILE_IDENTITY_BIND_DEADLINE: Duration = Duration::from_secs(10);
-
-struct DaemonWorkDeliveryDescriptorV1 {
-    owner_event_id: String,
-    channel_ref: String,
-    valid_at: tracedecay_domain::UtcMicros,
-    event_class: tracedecay_domain::DeliveryEventClassV1,
-    kind: DaemonWorkDeliveryKindV1,
-    attempt_identity: Option<tracedecay_domain::WorkAttemptIdentityV1>,
-}
-
-#[derive(Clone, Copy)]
-enum DaemonWorkDeliveryKindV1 {
-    Attempt,
-    ArtifactPage,
-}
-
-impl DaemonWorkDeliveryDescriptorV1 {
-    fn from_request(
-        request: &DaemonInvocationRequest,
-        handshake: &DaemonHandshake,
-    ) -> Option<Self> {
-        let DaemonInvocationPayload::WorkApplication {
-            request: work_request,
-            observed_at,
-            ..
-        } = &request.payload
-        else {
-            return None;
-        };
-        let observed_at = *observed_at;
-        let (operation, event_class, kind, attempt_identity) = match work_request.as_ref() {
-            tracedecay_daemon_protocol::WorkApplicationInvocationV1::StartAttempt(command) => (
-                work_request.operation_key(),
-                tracedecay_domain::DeliveryEventClassV1::OperationTerminal,
-                DaemonWorkDeliveryKindV1::Attempt,
-                tracedecay_domain::WorkAttemptIdentityV1::new(
-                    command.task_id.clone(),
-                    command.run_id.clone(),
-                    command.attempt_id.clone(),
-                )
-                .ok(),
-            ),
-            tracedecay_daemon_protocol::WorkApplicationInvocationV1::AttemptStatus(command) => (
-                work_request.operation_key(),
-                tracedecay_domain::DeliveryEventClassV1::OperationTerminal,
-                DaemonWorkDeliveryKindV1::Attempt,
-                tracedecay_domain::WorkAttemptIdentityV1::new(
-                    command.task_id.clone(),
-                    command.run_id.clone(),
-                    command.attempt_id.clone(),
-                )
-                .ok(),
-            ),
-            tracedecay_daemon_protocol::WorkApplicationInvocationV1::CancelAttempt(command) => (
-                work_request.operation_key(),
-                tracedecay_domain::DeliveryEventClassV1::OperationTerminal,
-                DaemonWorkDeliveryKindV1::Attempt,
-                tracedecay_domain::WorkAttemptIdentityV1::new(
-                    command.task_id.clone(),
-                    command.run_id.clone(),
-                    command.attempt_id.clone(),
-                )
-                .ok(),
-            ),
-            tracedecay_daemon_protocol::WorkApplicationInvocationV1::HydrateArtifacts(_) => (
-                work_request.operation_key(),
-                tracedecay_domain::DeliveryEventClassV1::Activity,
-                DaemonWorkDeliveryKindV1::ArtifactPage,
-                None,
-            ),
-            _ => return None,
-        };
-        let project = handshake.project_path.as_ref()?.to_string_lossy();
-        let owner = tracedecay_domain::canonical_sha256(&(
-            "tracedecay.daemon-work-delivery.v1",
-            project.as_ref(),
-            request.request_id.as_str(),
-            operation,
-            observed_at,
-        ))
-        .ok()?;
-        let channel = tracedecay_domain::canonical_sha256(&(
-            "tracedecay.daemon-work-channel.v1",
-            project.as_ref(),
-            handshake.client_instance_id.as_str(),
-        ))
-        .ok()?;
-        Some(Self {
-            owner_event_id: format!(
-                "work:daemon-response:{}",
-                owner.as_str().trim_start_matches("sha256:")
-            ),
-            channel_ref: format!(
-                "cli:daemon:{}",
-                channel.as_str().trim_start_matches("sha256:")
-            ),
-            valid_at: observed_at,
-            event_class,
-            kind,
-            attempt_identity,
-        })
-    }
-
-    fn is_successful_delivery(&self, response: &DaemonInvocationResponse) -> bool {
-        use tracedecay_daemon_protocol::{DaemonInvocationOutcome, WorkApplicationOutcomeV1};
-
-        match (&self.kind, &response.outcome) {
-            (
-                DaemonWorkDeliveryKindV1::Attempt,
-                DaemonInvocationOutcome::WorkApplication {
-                    outcome:
-                        WorkApplicationOutcomeV1::StartAttempt(outcome)
-                        | WorkApplicationOutcomeV1::AttemptStatus(outcome)
-                        | WorkApplicationOutcomeV1::CancelAttempt(outcome),
-                    ..
-                },
-            ) => outcome.payload().is_some(),
-            (
-                DaemonWorkDeliveryKindV1::ArtifactPage,
-                DaemonInvocationOutcome::WorkApplication {
-                    outcome: WorkApplicationOutcomeV1::HydrateArtifacts(outcome),
-                    ..
-                },
-            ) => outcome.payload().is_some_and(|hydration| {
-                matches!(
-                    hydration,
-                    tracedecay_contracts::WorkArtifactHydrationV1::Hydrated { attempts, .. }
-                        if !attempts.is_empty()
-                )
-            }),
-            _ => false,
-        }
-    }
-
-    async fn attempts(
-        self,
-        service: &DaemonInvocationService,
-        project_root: Option<&Path>,
-        response: &DaemonInvocationResponse,
-    ) -> Vec<tracedecay_domain::DeliverySettlementAttemptV1> {
-        let identities = self.attempt_identities(response);
-        if identities.is_empty() {
-            return vec![self.settlement_attempt(self.owner_event_id.clone(), None)];
-        }
-        let mut attempts = Vec::with_capacity(identities.len());
-        for identity in identities {
-            let binding = service.work_fan_out_binding(project_root, &identity).await;
-            let Ok(owner) = tracedecay_domain::canonical_sha256(&(
-                "tracedecay.daemon-work-fan-out-delivery.v1",
-                self.owner_event_id.as_str(),
-                &identity,
-                binding.as_ref(),
-            )) else {
-                continue;
-            };
-            attempts.push(self.settlement_attempt(
-                format!(
-                    "work:fan-out-response:{}",
-                    owner.as_str().trim_start_matches("sha256:")
-                ),
-                Some(identity),
-            ));
-        }
-        attempts
-    }
-
-    fn settlement_attempt(
-        &self,
-        owner_event_id: String,
-        work_attempt: Option<tracedecay_domain::WorkAttemptIdentityV1>,
-    ) -> tracedecay_domain::DeliverySettlementAttemptV1 {
-        let attempted_at = std::cmp::max(self.valid_at, tracedecay_contracts::clock::now_micros());
-        tracedecay_domain::DeliverySettlementAttemptV1 {
-            owner_event_id,
-            event_class: self.event_class,
-            channel: tracedecay_domain::DeliveryChannelIdentityV1 {
-                surface: tracedecay_domain::DeliverySurfaceFamilyV1::Cli,
-                channel_ref: self.channel_ref.clone(),
-            },
-            work_attempt,
-            eligible: 1,
-            valid_at: self.valid_at,
-            attempted_at,
-        }
-    }
-
-    fn attempt_identities(
-        &self,
-        response: &DaemonInvocationResponse,
-    ) -> Vec<tracedecay_domain::WorkAttemptIdentityV1> {
-        use tracedecay_daemon_protocol::{DaemonInvocationOutcome, WorkApplicationOutcomeV1};
-
-        if let Some(identity) = self.attempt_identity.as_ref() {
-            return vec![identity.clone()];
-        }
-        let DaemonInvocationOutcome::WorkApplication {
-            outcome: WorkApplicationOutcomeV1::HydrateArtifacts(outcome),
-            ..
-        } = &response.outcome
-        else {
-            return Vec::new();
-        };
-        let Some(tracedecay_contracts::WorkArtifactHydrationV1::Hydrated { attempts, .. }) =
-            outcome.payload()
-        else {
-            return Vec::new();
-        };
-        attempts
-            .iter()
-            .map(|attempt| attempt.identity.clone())
-            .collect()
-    }
-}
-
-fn offer_daemon_work_delivery(
-    recorder: Option<
-        &Arc<tracedecay_application::observability::BoundedDeliverySettlementRecorderV1>,
-    >,
-    attempt: Option<tracedecay_domain::DeliverySettlementAttemptV1>,
-    outcome: tracedecay_domain::DeliverySettlementOutcomeV1,
-    drop_reason: Option<tracedecay_domain::DeliveryDropReasonV1>,
-) -> std::result::Result<(), tracedecay_daemon_protocol::DaemonInvocationDeliveryAckRejectReason> {
-    let (Some(recorder), Some(attempt)) = (recorder, attempt) else {
-        return Err(
-            tracedecay_daemon_protocol::DaemonInvocationDeliveryAckRejectReason::RecorderUnavailable,
-        );
-    };
-    let settlement = tracedecay_domain::DeliverySettlementV1 {
-        settled_at: std::cmp::max(
-            attempt.attempted_at,
-            tracedecay_contracts::clock::now_micros(),
-        ),
-        attempt,
-        outcome,
-        drop_reason,
-    };
-    match recorder.try_record(settlement) {
-        Ok(tracedecay_application::observability::DeliverySettlementRecordOutcomeV1::Enqueued) => {
-            Ok(())
-        }
-        Ok(tracedecay_application::observability::DeliverySettlementRecordOutcomeV1::DroppedAtCapacity) => {
-            tracing::warn!("daemon Work delivery receipt was dropped at recorder capacity");
-            Err(
-                tracedecay_daemon_protocol::DaemonInvocationDeliveryAckRejectReason::RecorderAtCapacity,
-            )
-        }
-        Err(error) => {
-            tracing::warn!(%error, "daemon Work delivery receipt was refused");
-            Err(
-                tracedecay_daemon_protocol::DaemonInvocationDeliveryAckRejectReason::RecorderUnavailable,
-            )
-        }
-    }
-}
-
-/// Settle the exact attempts resolved immediately before the daemon response
-/// was written.  In particular, do not resolve fan-out bindings again when a
-/// client ACK arrives: the Work response and its receipt must share one
-/// immutable identity even if the workflow owner changes in the meantime.
-/// `attempted_at` is response-write-adjacent; `settled_at` is stamped when
-/// this terminal ACK is observed by the daemon.
-fn settle_daemon_work_delivery(
-    attempts: Option<&[tracedecay_domain::DeliverySettlementAttemptV1]>,
-    recorder: Option<
-        &Arc<tracedecay_application::observability::BoundedDeliverySettlementRecorderV1>,
-    >,
-    outcome: tracedecay_domain::DeliverySettlementOutcomeV1,
-    drop_reason: Option<tracedecay_domain::DeliveryDropReasonV1>,
-) -> std::result::Result<(), tracedecay_daemon_protocol::DaemonInvocationDeliveryAckRejectReason> {
-    let Some(attempts) = attempts else {
-        return Err(
-            tracedecay_daemon_protocol::DaemonInvocationDeliveryAckRejectReason::RecorderUnavailable,
-        );
-    };
-    if attempts.is_empty() {
-        return Err(
-            tracedecay_daemon_protocol::DaemonInvocationDeliveryAckRejectReason::RecorderUnavailable,
-        );
-    }
-    let mut result = Ok(());
-    for attempt in attempts {
-        if let Err(error) =
-            offer_daemon_work_delivery(recorder, Some(attempt.clone()), outcome, drop_reason)
-        {
-            result = Err(error);
-        }
-    }
-    result
-}
 
 enum DaemonDeliveryAckWait {
     Line(Option<String>),
@@ -1687,6 +1400,608 @@ pub(super) async fn serve_windows_broker_client_with_class(
 }
 
 #[cfg(any(not(unix), test))]
+async fn authenticate_portable_broker(
+    stream: BrokerStream,
+    auth_token: &str,
+    lifecycle: &DaemonLifecycle,
+) -> Result<
+    Option<(
+        BrokerStreamTransport,
+        DaemonHandshake,
+        AuthenticatedFirstRequest,
+        DaemonActivity,
+    )>,
+> {
+    let mut transport = BrokerStreamTransport::new(stream);
+    let Some(preface_line) = read_line_handling_wire_oversized(&mut transport).await? else {
+        return Ok(None);
+    };
+    let authenticated = DaemonAuthPreface::from_line(&preface_line)
+        .is_ok_and(|preface| preface.authenticate(auth_token));
+    if !authenticated {
+        refuse_unauthenticated_client(&mut transport, binary_version()?).await;
+        return Ok(None);
+    }
+    let Some(handshake_line) = read_line_handling_wire_oversized(&mut transport).await? else {
+        return Ok(None);
+    };
+    let Some(setup_activity) = lifecycle.try_enter() else {
+        return Ok(None);
+    };
+    let handshake = match DaemonHandshake::from_line(&handshake_line) {
+        Ok(handshake) => handshake,
+        Err(_) => {
+            drop(setup_activity);
+            refuse_unparseable_handshake(&mut transport, &handshake_line, binary_version()?).await;
+            return Ok(None);
+        }
+    };
+    if refuse_incompatible_handshake(&mut transport, &handshake).await? {
+        drop(setup_activity);
+        return Ok(None);
+    }
+    let Some(first_request_line) = read_line_handling_wire_oversized(&mut transport).await? else {
+        return Ok(None);
+    };
+    let first_request = AuthenticatedFirstRequest::new(first_request_line);
+    if let Some(response) = daemon_shutdown_response(&first_request) {
+        lifecycle.begin_draining();
+        write_daemon_response(&mut transport, &response).await?;
+        drop(setup_activity);
+        return Ok(None);
+    }
+    Ok(Some((transport, handshake, first_request, setup_activity)))
+}
+
+#[cfg(any(not(unix), test))]
+struct PortableBrokerDispatch<'a> {
+    lifecycle: &'a DaemonLifecycle,
+    store_administration: StoreAdministration,
+    project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    invocation: DaemonInvocationState,
+    http_application_registry: http_application::DaemonHttpApplicationRegistry,
+    #[cfg(test)]
+    project_open_attempts: Option<Arc<AtomicUsize>>,
+}
+
+#[cfg(any(not(unix), test))]
+impl PortableBrokerDispatch<'_> {
+    async fn admit(
+        &mut self,
+        transport: &mut BrokerStreamTransport,
+        handshake: &mut DaemonHandshake,
+        first_request: &AuthenticatedFirstRequest,
+        setup_activity: DaemonActivity,
+        admission: (&DaemonPerClientAdmission, DaemonClientAdmissionClass),
+    ) -> Result<
+        Option<(
+            Option<super::core_admission::DaemonPerClientPermit>,
+            DaemonActivity,
+        )>,
+    > {
+        let (per_client_admission, admission_class) = admission;
+        let peer_full_close = peer_abandoned_first_request(transport, first_request.parsed());
+        tokio::pin!(peer_full_close);
+        let bound_administration = tokio::select! {
+            result = Box::pin(bind_authenticated_profile_identity_within_deadline(
+                handshake,
+                &self.store_administration,
+            )) => match result {
+                Ok(administration) => administration,
+                Err(error) if error_is_project_warming(&error) => {
+                    drop(setup_activity);
+                    refuse_warming_profile_identity(transport, first_request, &error).await?;
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            },
+            () = &mut peer_full_close => return Ok(None),
+        };
+        self.store_administration = bound_administration;
+        let reserved_control_request = is_reserved_control_request(first_request);
+        if admission_class == DaemonClientAdmissionClass::ReservedControl
+            && !reserved_control_request
+        {
+            drop(setup_activity);
+            reject_reserved_bulk_request(transport, first_request, MAX_CONCURRENT_DAEMON_CLIENTS)
+                .await?;
+            return Ok(None);
+        }
+        let _per_client_permit = if admission_class == DaemonClientAdmissionClass::General {
+            match per_client_admission.try_admit_request(handshake, first_request) {
+                Ok(permit) => Some(permit),
+                Err(response) => {
+                    drop(setup_activity);
+                    reject_admitted_request(transport, first_request, response).await?;
+                    return Ok(None);
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(cancellation) =
+            tracedecay_daemon_protocol::parse_daemon_invocation_cancellation_request(
+                first_request.raw(),
+            )
+        {
+            {
+                let _span = tracing::trace_span!("daemon.engine.transport.cancel").entered();
+                {
+                    self.invocation
+                        .service
+                        .request_cancellations()
+                        .cancel(cancellation.target_request_id());
+                }
+            };
+            drop(setup_activity);
+            return Ok(None);
+        }
+        Ok(Some((_per_client_permit, setup_activity)))
+    }
+    async fn serve_doctor(
+        &self,
+        transport: &mut BrokerStreamTransport,
+        handshake: &DaemonHandshake,
+        first_request: &AuthenticatedFirstRequest,
+        setup_activity: DaemonActivity,
+    ) -> Result<Option<DaemonActivity>> {
+        let (project_open, stalled_failure) = match handshake.project_path.as_deref() {
+            Some(project_path) => {
+                let route = ProjectRouteKey::from_handshake(project_path, handshake)?;
+                let tasks = project_open_tasks(self.project_open_gates.as_ref()).await;
+                (tasks.status(&route), tasks.stalled_failure(&route))
+            }
+            None => (None, None),
+        };
+        let Some(setup_activity) = Box::pin(serve_core_doctor_runtime_request(
+            transport,
+            handshake,
+            &self.store_administration,
+            CoreDoctorStatusV1 {
+                project_open,
+                stalled_failure,
+                git_watcher_health: None,
+            },
+            setup_activity,
+            first_request,
+            || async {
+                let (canonical_project_path, _) = project_route_for_handshake(
+                    handshake,
+                    self.store_administration.owner_home()?,
+                )?;
+                if let Some(server) = Box::pin(portable_cached_project_server(
+                    &self.store_administration,
+                    &canonical_project_path,
+                    handshake,
+                    ProjectServerRequirement::Core,
+                ))
+                .await?
+                {
+                    return Ok(server.doctor_report_ready());
+                }
+                // Only the project owner publishes the report, so a Doctor asking
+                // about an unopened project admits and opens it the way an
+                // initialize would.
+                Box::pin(schedule_portable_project_server_warmup(
+                    self.lifecycle.clone(),
+                    self.store_administration.clone(),
+                    Arc::clone(&self.project_open_gates),
+                    self.invocation.clone(),
+                    self.http_application_registry.clone(),
+                    handshake.clone(),
+                    None,
+                    #[cfg(test)]
+                    self.project_open_attempts.clone(),
+                ))
+                .await?;
+                Ok(false)
+            },
+        ))
+        .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(setup_activity))
+    }
+    async fn prepare_initialize_route(
+        &self,
+        transport: &mut BrokerStreamTransport,
+        handshake: &mut DaemonHandshake,
+        first_request: &AuthenticatedFirstRequest,
+        setup_activity: DaemonActivity,
+    ) -> Result<Option<(DaemonActivity, Option<InitializeRouteMetadata>)>> {
+        report_profile_host_admission_bootstrap_status(
+            Box::pin(schedule_user_profile_host_admission_replay_for_identity(
+                &self.store_administration,
+                &handshake.client_identity,
+            ))
+            .await,
+        );
+        // Same contract as the Unix broker path: a route-resolution failure is a
+        // typed response, never a dropped connection.
+        let initialize_route = match Box::pin(apply_daemon_initialize_route(
+            handshake,
+            first_request,
+            &self.store_administration,
+        ))
+        .await
+        {
+            Ok(route) => route,
+            Err(error) => {
+                drop(setup_activity);
+                write_project_open_error(
+                    transport,
+                    first_request,
+                    &handshake.client_instance_id,
+                    &error,
+                )
+                .await?;
+                return Ok(None);
+            }
+        };
+        Ok(Some((setup_activity, initialize_route)))
+    }
+
+    async fn serve_branch_request(
+        &self,
+        transport: &mut BrokerStreamTransport,
+        handshake: &DaemonHandshake,
+        first_request: &AuthenticatedFirstRequest,
+        setup_activity: DaemonActivity,
+    ) -> Result<Option<DaemonActivity>> {
+        if let Some(request) = parse_branch_admin_request(first_request.parsed()) {
+            let result = match request.action.clone() {
+                Ok(action) => {
+                    Box::pin(
+                        self.store_administration
+                            .execute_branch_admin_for_handshake(
+                                &self.invocation.code_index_schedulers,
+                                handshake,
+                                action,
+                            ),
+                    )
+                    .await
+                }
+                Err(message) => Err(TraceDecayError::Config { message }),
+            };
+            drop(setup_activity);
+            write_branch_admin_response(transport, request, result).await?;
+            return Ok(None);
+        }
+        if let Some(request) = parse_branch_add_request(first_request.parsed()) {
+            let response = match await_project_owner_or_disconnect(
+                transport,
+                Box::pin(portable_project_server_for_request(
+                    self.lifecycle.clone(),
+                    self.store_administration.clone(),
+                    Arc::clone(&self.project_open_gates),
+                    self.invocation.clone(),
+                    self.http_application_registry.clone(),
+                    handshake,
+                    ProjectServerRequirement::Core,
+                    #[cfg(test)]
+                    self.project_open_attempts.clone(),
+                )),
+            )
+            .await
+            {
+                Ok(Some(_)) => {
+                    Box::pin(branch_add_response(
+                        &self.store_administration,
+                        Some(&self.invocation.code_index_schedulers),
+                        handshake,
+                        &request,
+                    ))
+                    .await
+                }
+                Ok(None) => return Ok(None),
+                Err(error) => project_open_error_response(request.id.clone(), &error),
+            };
+            drop(setup_activity);
+            write_daemon_response(transport, &response).await?;
+            return Ok(None);
+        }
+        Ok(Some(setup_activity))
+    }
+    async fn cached_initialize_readiness(
+        &self,
+        handshake: &DaemonHandshake,
+        request: &JsonRpcRequest,
+    ) -> Result<(bool, Option<TraceDecayError>)> {
+        Ok(
+            if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
+                && handshake.project_path.is_some()
+            {
+                let (project_path, _) = project_route_for_handshake(
+                    handshake,
+                    self.store_administration.owner_home()?,
+                )?;
+                match Box::pin(portable_cached_project_server(
+                    &self.store_administration,
+                    &project_path,
+                    handshake,
+                    ProjectServerRequirement::Core,
+                ))
+                .await
+                {
+                    Ok(server) => (server.is_some(), None),
+                    Err(error) => (false, Some(error)),
+                }
+            } else {
+                (false, None)
+            },
+        )
+    }
+
+    async fn serve_bootstrap_request(
+        &self,
+        transport: &mut BrokerStreamTransport,
+        handshake: &DaemonHandshake,
+        first_request: &AuthenticatedFirstRequest,
+        setup_activity: DaemonActivity,
+        initialize_route: Option<&InitializeRouteMetadata>,
+    ) -> Result<Option<DaemonActivity>> {
+        if let Some(request) = first_request.parsed() {
+            let (initialized_project_server_ready, admission_refusal) =
+                self.cached_initialize_readiness(handshake, request).await?;
+            if !initialized_project_server_ready
+                && let Some(mut response) = daemon_bootstrap_response(request, initialize_route)
+            {
+                let project_open_error = match admission_refusal {
+                    Some(refusal) => initialize_project_open_error(refusal),
+                    None if handshake.project_path.is_some()
+                        && matches!(
+                            classify_mcp_method(&request.method),
+                            McpMethod::Initialize | McpMethod::ToolsList
+                        ) =>
+                    {
+                        match async {
+                            portable_cached_project_open_failure(
+                                self.project_open_gates.as_ref(),
+                                handshake,
+                                self.store_administration.owner_home()?,
+                            )
+                            .await
+                        }
+                        .await
+                        {
+                            Ok(Some(failure)) => Some(failure.to_error()),
+                            Ok(None)
+                                if matches!(
+                                    classify_mcp_method(&request.method),
+                                    McpMethod::Initialize
+                                ) =>
+                            {
+                                Box::pin(schedule_portable_project_server_warmup(
+                                    self.lifecycle.clone(),
+                                    self.store_administration.clone(),
+                                    Arc::clone(&self.project_open_gates),
+                                    self.invocation.clone(),
+                                    self.http_application_registry.clone(),
+                                    handshake.clone(),
+                                    Some(request.clone()),
+                                    #[cfg(test)]
+                                    self.project_open_attempts.clone(),
+                                ))
+                                .await
+                                .err()
+                                .and_then(initialize_project_open_error)
+                            }
+                            Ok(None) => None,
+                            Err(error) => Some(error),
+                        }
+                    }
+                    None => None,
+                };
+                if let Some(error) = project_open_error {
+                    response = request
+                        .id
+                        .clone()
+                        .map(|id| project_open_error_response(id, &error));
+                } else if let Some(response) = response.as_mut()
+                    && matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
+                {
+                    Box::pin(attach_reset_required_stores(
+                        response,
+                        &self.store_administration,
+                    ))
+                    .await;
+                }
+                drop(setup_activity);
+                if let Some(response) = response {
+                    write_daemon_response(transport, &response).await?;
+                }
+                return Ok(None);
+            }
+        }
+        Ok(Some(setup_activity))
+    }
+    async fn admit_file_edit(
+        &self,
+        transport: &mut BrokerStreamTransport,
+        handshake: &DaemonHandshake,
+        first_request: &AuthenticatedFirstRequest,
+        setup_activity: DaemonActivity,
+    ) -> Result<Option<DaemonActivity>> {
+        match Box::pin(super::core_hooks::admit_unmounted_file_edit(
+            &self.store_administration,
+            handshake,
+            first_request.parsed(),
+        ))
+        .await
+        {
+            Ok(Some(routed)) => {
+                let response = first_request
+                    .parsed()
+                    .and_then(|request| request.id.clone())
+                    .map(|id| JsonRpcResponse::success(id, serde_json::json!({})));
+                let written = match response {
+                    Some(response) => write_daemon_response(transport, &response).await,
+                    None => Ok(()),
+                };
+                if let Err(error) = Box::pin(schedule_portable_project_server_warmup(
+                    self.lifecycle.clone(),
+                    self.store_administration.clone(),
+                    Arc::clone(&self.project_open_gates),
+                    self.invocation.clone(),
+                    self.http_application_registry.clone(),
+                    routed,
+                    None,
+                    #[cfg(test)]
+                    self.project_open_attempts.clone(),
+                ))
+                .await
+                {
+                    tracing::warn!(%error, "durably admitted file edit awaits project publication");
+                }
+                written?;
+                return Ok(None);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                write_project_open_error(
+                    transport,
+                    first_request,
+                    &handshake.client_instance_id,
+                    &error,
+                )
+                .await?;
+                return Ok(None);
+            }
+        }
+        Ok(Some(setup_activity))
+    }
+    async fn serve_invocation(
+        &self,
+        transport: &mut BrokerStreamTransport,
+        handshake: &DaemonHandshake,
+        first_request: &AuthenticatedFirstRequest,
+    ) -> Option<Result<()>> {
+        if let Some(invocation_request) = parse_daemon_invocation_request(first_request.raw()) {
+            let mut owned_lsp_sessions = HashMap::new();
+            let service = self.invocation.service.clone();
+            let result = Box::pin(drive_retained_invocation_responses(
+                invocation_request,
+                transport,
+                &service,
+                handshake,
+                self.lifecycle,
+                &mut owned_lsp_sessions,
+                |request| {
+                    Box::pin(execute_portable_daemon_invocation(
+                        self.lifecycle.clone(),
+                        self.store_administration.clone(),
+                        Arc::clone(&self.project_open_gates),
+                        handshake,
+                        &self.invocation,
+                        self.http_application_registry.clone(),
+                        request,
+                        #[cfg(test)]
+                        self.project_open_attempts.clone(),
+                    ))
+                },
+            ))
+            .await;
+            cleanup_connection_lsp_sessions(&self.invocation, owned_lsp_sessions).await;
+            return Some(result);
+        }
+        None
+    }
+    async fn serve_routed_request(
+        self,
+        mut transport: BrokerStreamTransport,
+        handshake: DaemonHandshake,
+        first_request: AuthenticatedFirstRequest,
+        setup_activity: DaemonActivity,
+        initialize_route: Option<InitializeRouteMetadata>,
+    ) -> Result<()> {
+        let projectless_request = projectless_first_request(first_request.parsed());
+        if handshake.project_path.is_some() && !projectless_request {
+            // Heap-allocate the owner-await composition: embedded by value it
+            // dominates this serve future's resident frame and overflows the
+            // worker stack in perf-profile layouts.
+            let server = match Box::pin(await_project_owner_for_first_request(
+                &mut transport,
+                first_request.parsed(),
+                Box::pin(portable_project_server_for_request(
+                    self.lifecycle.clone(),
+                    self.store_administration.clone(),
+                    Arc::clone(&self.project_open_gates),
+                    self.invocation.clone(),
+                    self.http_application_registry,
+                    &handshake,
+                    project_server_requirement(first_request.parsed()),
+                    #[cfg(test)]
+                    self.project_open_attempts.clone(),
+                )),
+            ))
+            .await
+            {
+                Ok(Some(server)) => server,
+                Ok(None) => {
+                    drop(setup_activity);
+                    return Ok(());
+                }
+                Err(error) => {
+                    drop(setup_activity);
+                    write_project_open_error(
+                        &mut transport,
+                        &first_request,
+                        &handshake.client_instance_id,
+                        &error,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+            let (server, pending_lines) = server;
+            if opens_rmcp_session(first_request.parsed()) {
+                #[cfg(test)]
+                tests::record_mcp_route(
+                    &handshake.client_instance_id,
+                    tests::ObservedMcpRoute::Rmcp,
+                );
+                #[cfg(test)]
+                tests::record_first_request_replay(
+                    &handshake.client_instance_id,
+                    first_request.raw(),
+                );
+                Box::pin(serve_routed_rmcp_connection(
+                    server,
+                    transport,
+                    RoutedRmcpReplay {
+                        first_request_line: first_request.into_raw(),
+                        pending_lines,
+                        initialize_route,
+                    },
+                    handshake.timings,
+                    self.lifecycle,
+                    Some(setup_activity),
+                ))
+                .await?;
+            } else {
+                drop(setup_activity);
+                refuse_sessionless_request(&mut transport, &first_request).await?;
+            }
+        } else {
+            drop(setup_activity);
+            let mut transport = ReplayTransport::new(transport);
+            transport.push_replay(first_request.into_raw())?;
+            Box::pin(serve_projectless_client(
+                &mut transport,
+                &handshake.client_identity,
+                handshake.project_path.clone(),
+                handshake.timings,
+                self.lifecycle,
+                &self.store_administration,
+            ))
+            .await?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(not(unix), test))]
 // The foreground portable broker supplies one daemon-generation invocation state.
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(name = "daemon.engine.transport.dispatch", level = "trace", skip_all)]
@@ -1702,477 +2017,103 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     admission_class: DaemonClientAdmissionClass,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> Result<()> {
-    let mut transport = BrokerStreamTransport::new(stream);
-    let Some(preface_line) = read_line_handling_wire_oversized(&mut transport).await? else {
+    let Some((mut transport, mut handshake, first_request, setup_activity)) =
+        authenticate_portable_broker(stream, auth_token, lifecycle).await?
+    else {
         return Ok(());
     };
-    let authenticated = DaemonAuthPreface::from_line(&preface_line)
-        .is_ok_and(|preface| preface.authenticate(auth_token));
-    if !authenticated {
-        refuse_unauthenticated_client(&mut transport, binary_version()?).await;
-        return Ok(());
-    }
-    let Some(handshake_line) = read_line_handling_wire_oversized(&mut transport).await? else {
-        return Ok(());
+    let mut dispatch = PortableBrokerDispatch {
+        lifecycle,
+        store_administration,
+        project_open_gates,
+        invocation,
+        http_application_registry,
+        #[cfg(test)]
+        project_open_attempts,
     };
-    let Some(setup_activity) = lifecycle.try_enter() else {
-        return Ok(());
-    };
-    let mut handshake = match DaemonHandshake::from_line(&handshake_line) {
-        Ok(handshake) => handshake,
-        Err(_) => {
-            drop(setup_activity);
-            refuse_unparseable_handshake(&mut transport, &handshake_line, binary_version()?).await;
-            return Ok(());
-        }
-    };
-    if refuse_incompatible_handshake(&mut transport, &handshake).await? {
-        drop(setup_activity);
-        return Ok(());
-    }
-    let Some(first_request_line) = read_line_handling_wire_oversized(&mut transport).await? else {
-        return Ok(());
-    };
-    let first_request = AuthenticatedFirstRequest::new(first_request_line);
-    if let Some(response) = daemon_shutdown_response(&first_request) {
-        lifecycle.begin_draining();
-        write_daemon_response(&mut transport, &response).await?;
-        drop(setup_activity);
-        return Ok(());
-    }
-    let peer_full_close = peer_abandoned_first_request(&transport, first_request.parsed());
-    tokio::pin!(peer_full_close);
-    let store_administration = tokio::select! {
-        result = Box::pin(bind_authenticated_profile_identity_within_deadline(
-            &mut handshake,
-            &store_administration,
-        )) => match result {
-            Ok(store_administration) => store_administration,
-            Err(error) if error_is_project_warming(&error) => {
-                drop(setup_activity);
-                refuse_warming_profile_identity(&mut transport, &first_request, &error).await?;
-                return Ok(());
-            }
-            Err(error) => return Err(error),
-        },
-        () = &mut peer_full_close => return Ok(()),
-    };
-    let reserved_control_request = is_reserved_control_request(&first_request);
-    if admission_class == DaemonClientAdmissionClass::ReservedControl && !reserved_control_request {
-        drop(setup_activity);
-        reject_reserved_bulk_request(
+    let Some((_per_client_permit, setup_activity)) = dispatch
+        .admit(
             &mut transport,
+            &mut handshake,
             &first_request,
-            MAX_CONCURRENT_DAEMON_CLIENTS,
+            setup_activity,
+            (&per_client_admission, admission_class),
         )
-        .await?;
+        .await?
+    else {
         return Ok(());
-    }
-    let _per_client_permit = if admission_class == DaemonClientAdmissionClass::General {
-        match per_client_admission.try_admit_request(&handshake, &first_request) {
-            Ok(permit) => Some(permit),
-            Err(response) => {
-                drop(setup_activity);
-                reject_admitted_request(&mut transport, &first_request, response).await?;
-                return Ok(());
-            }
-        }
-    } else {
-        None
     };
-    if let Some(cancellation) =
-        tracedecay_daemon_protocol::parse_daemon_invocation_cancellation_request(
-            first_request.raw(),
-        )
-    {
-        {
-            let _span = tracing::trace_span!("daemon.engine.transport.cancel").entered();
-            {
-                invocation
-                    .service
-                    .request_cancellations()
-                    .cancel(cancellation.target_request_id());
-            }
-        };
-        drop(setup_activity);
-        return Ok(());
-    }
-    let (project_open, stalled_failure) = match handshake.project_path.as_deref() {
-        Some(project_path) => {
-            let route = ProjectRouteKey::from_handshake(project_path, &handshake)?;
-            let tasks = project_open_tasks(project_open_gates.as_ref()).await;
-            (tasks.status(&route), tasks.stalled_failure(&route))
-        }
-        None => (None, None),
-    };
-    let Some(setup_activity) = Box::pin(serve_core_doctor_runtime_request(
+    // Erase each phase at its existing heap boundary, as the Unix route does.
+    // Box::pin alone carries every nested future type into the tracing wrapper.
+    let Some(setup_activity) = boxed_broker_connection_phase(dispatch.serve_doctor(
         &mut transport,
         &handshake,
-        &store_administration,
-        CoreDoctorStatusV1 {
-            project_open,
-            stalled_failure,
-            git_watcher_health: None,
-        },
-        setup_activity,
         &first_request,
-        || async {
-            let (canonical_project_path, _) =
-                project_route_for_handshake(&handshake, store_administration.owner_home()?)?;
-            if let Some(server) = Box::pin(portable_cached_project_server(
-                &store_administration,
-                &canonical_project_path,
-                &handshake,
-                ProjectServerRequirement::Core,
-            ))
-            .await?
-            {
-                return Ok(server.doctor_report_ready());
-            }
-            // Only the project owner publishes the report, so a Doctor asking
-            // about an unopened project admits and opens it the way an
-            // initialize would.
-            Box::pin(schedule_portable_project_server_warmup(
-                lifecycle.clone(),
-                store_administration.clone(),
-                Arc::clone(&project_open_gates),
-                invocation.clone(),
-                http_application_registry.clone(),
-                handshake.clone(),
-                None,
-                #[cfg(test)]
-                project_open_attempts.clone(),
-            ))
-            .await?;
-            Ok(false)
-        },
+        setup_activity,
     ))
     .await?
     else {
         return Ok(());
     };
-    report_profile_host_admission_bootstrap_status(
-        Box::pin(schedule_user_profile_host_admission_replay_for_identity(
-            &store_administration,
-            &handshake.client_identity,
+    let Some((setup_activity, initialize_route)) =
+        boxed_broker_connection_phase(dispatch.prepare_initialize_route(
+            &mut transport,
+            &mut handshake,
+            &first_request,
+            setup_activity,
         ))
-        .await,
-    );
-    // Same contract as the Unix broker path: a route-resolution failure is a
-    // typed response, never a dropped connection.
-    let initialize_route = match Box::pin(apply_daemon_initialize_route(
-        &mut handshake,
+        .await?
+    else {
+        return Ok(());
+    };
+    let Some(setup_activity) = boxed_broker_connection_phase(dispatch.serve_branch_request(
+        &mut transport,
+        &handshake,
         &first_request,
-        &store_administration,
+        setup_activity,
+    ))
+    .await?
+    else {
+        return Ok(());
+    };
+    if let Some(result) = boxed_broker_connection_phase(dispatch.serve_invocation(
+        &mut transport,
+        &handshake,
+        &first_request,
     ))
     .await
     {
-        Ok(route) => route,
-        Err(error) => {
-            drop(setup_activity);
-            write_project_open_error(
-                &mut transport,
-                &first_request,
-                &handshake.client_instance_id,
-                &error,
-            )
-            .await?;
-            return Ok(());
-        }
-    };
-    if let Some(request) = parse_branch_admin_request(first_request.parsed()) {
-        let result = match request.action.clone() {
-            Ok(action) => {
-                Box::pin(store_administration.execute_branch_admin_for_handshake(
-                    &invocation.code_index_schedulers,
-                    &handshake,
-                    action,
-                ))
-                .await
-            }
-            Err(message) => Err(TraceDecayError::Config { message }),
-        };
-        drop(setup_activity);
-        write_branch_admin_response(&mut transport, request, result).await?;
-        return Ok(());
-    }
-    if let Some(request) = parse_branch_add_request(first_request.parsed()) {
-        let response = match await_project_owner_or_disconnect(
-            &mut transport,
-            Box::pin(portable_project_server_for_request(
-                lifecycle.clone(),
-                store_administration.clone(),
-                Arc::clone(&project_open_gates),
-                invocation.clone(),
-                http_application_registry.clone(),
-                &handshake,
-                ProjectServerRequirement::Core,
-                #[cfg(test)]
-                project_open_attempts.clone(),
-            )),
-        )
-        .await
-        {
-            Ok(Some(_)) => {
-                Box::pin(branch_add_response(
-                    &store_administration,
-                    Some(&invocation.code_index_schedulers),
-                    &handshake,
-                    &request,
-                ))
-                .await
-            }
-            Ok(None) => return Ok(()),
-            Err(error) => project_open_error_response(request.id.clone(), &error),
-        };
-        drop(setup_activity);
-        write_daemon_response(&mut transport, &response).await?;
-        return Ok(());
-    }
-    if let Some(invocation_request) = parse_daemon_invocation_request(first_request.raw()) {
-        let mut owned_lsp_sessions = HashMap::new();
-        let service = invocation.service.clone();
-        let lifecycle = lifecycle.clone();
-        let result = Box::pin(drive_retained_invocation_responses(
-            invocation_request,
-            &mut transport,
-            &service,
-            &handshake,
-            &lifecycle,
-            &mut owned_lsp_sessions,
-            |request| {
-                Box::pin(execute_portable_daemon_invocation(
-                    lifecycle.clone(),
-                    store_administration.clone(),
-                    Arc::clone(&project_open_gates),
-                    &handshake,
-                    &invocation,
-                    http_application_registry.clone(),
-                    request,
-                    #[cfg(test)]
-                    project_open_attempts.clone(),
-                ))
-            },
-        ))
-        .await;
-        cleanup_connection_lsp_sessions(&invocation, owned_lsp_sessions).await;
         return result;
     }
-    if let Some(request) = first_request.parsed() {
-        let (initialized_project_server_ready, admission_refusal) =
-            if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
-                && handshake.project_path.is_some()
-            {
-                let (project_path, _) =
-                    project_route_for_handshake(&handshake, store_administration.owner_home()?)?;
-                match Box::pin(portable_cached_project_server(
-                    &store_administration,
-                    &project_path,
-                    &handshake,
-                    ProjectServerRequirement::Core,
-                ))
-                .await
-                {
-                    Ok(server) => (server.is_some(), None),
-                    Err(error) => (false, Some(error)),
-                }
-            } else {
-                (false, None)
-            };
-        if !initialized_project_server_ready
-            && let Some(mut response) =
-                daemon_bootstrap_response(request, initialize_route.as_ref())
-        {
-            let project_open_error = match admission_refusal {
-                Some(refusal) => initialize_project_open_error(refusal),
-                None if handshake.project_path.is_some()
-                    && matches!(
-                        classify_mcp_method(&request.method),
-                        McpMethod::Initialize | McpMethod::ToolsList
-                    ) =>
-                {
-                    match async {
-                        portable_cached_project_open_failure(
-                            project_open_gates.as_ref(),
-                            &handshake,
-                            store_administration.owner_home()?,
-                        )
-                        .await
-                    }
-                    .await
-                    {
-                        Ok(Some(failure)) => Some(failure.to_error()),
-                        Ok(None)
-                            if matches!(
-                                classify_mcp_method(&request.method),
-                                McpMethod::Initialize
-                            ) =>
-                        {
-                            Box::pin(schedule_portable_project_server_warmup(
-                                lifecycle.clone(),
-                                store_administration.clone(),
-                                Arc::clone(&project_open_gates),
-                                invocation.clone(),
-                                http_application_registry.clone(),
-                                handshake.clone(),
-                                Some(request.clone()),
-                                #[cfg(test)]
-                                project_open_attempts.clone(),
-                            ))
-                            .await
-                            .err()
-                            .and_then(initialize_project_open_error)
-                        }
-                        Ok(None) => None,
-                        Err(error) => Some(error),
-                    }
-                }
-                None => None,
-            };
-            if let Some(error) = project_open_error {
-                response = request
-                    .id
-                    .clone()
-                    .map(|id| project_open_error_response(id, &error));
-            } else if let Some(response) = response.as_mut()
-                && matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
-            {
-                Box::pin(attach_reset_required_stores(
-                    response,
-                    &store_administration,
-                ))
-                .await;
-            }
-            drop(setup_activity);
-            if let Some(response) = response {
-                write_daemon_response(&mut transport, &response).await?;
-            }
-            return Ok(());
-        }
-    }
-    match Box::pin(super::core_hooks::admit_unmounted_file_edit(
-        &store_administration,
+    let Some(setup_activity) = boxed_broker_connection_phase(dispatch.serve_bootstrap_request(
+        &mut transport,
         &handshake,
-        first_request.parsed(),
+        &first_request,
+        setup_activity,
+        initialize_route.as_ref(),
+    ))
+    .await?
+    else {
+        return Ok(());
+    };
+    let Some(setup_activity) = boxed_broker_connection_phase(dispatch.admit_file_edit(
+        &mut transport,
+        &handshake,
+        &first_request,
+        setup_activity,
+    ))
+    .await?
+    else {
+        return Ok(());
+    };
+    boxed_broker_connection_phase(dispatch.serve_routed_request(
+        transport,
+        handshake,
+        first_request,
+        setup_activity,
+        initialize_route,
     ))
     .await
-    {
-        Ok(Some(routed)) => {
-            let response = first_request
-                .parsed()
-                .and_then(|request| request.id.clone())
-                .map(|id| JsonRpcResponse::success(id, serde_json::json!({})));
-            let written = match response {
-                Some(response) => write_daemon_response(&mut transport, &response).await,
-                None => Ok(()),
-            };
-            if let Err(error) = Box::pin(schedule_portable_project_server_warmup(
-                lifecycle.clone(),
-                store_administration.clone(),
-                Arc::clone(&project_open_gates),
-                invocation.clone(),
-                http_application_registry.clone(),
-                routed,
-                None,
-                #[cfg(test)]
-                project_open_attempts.clone(),
-            ))
-            .await
-            {
-                tracing::warn!(%error, "durably admitted file edit awaits project publication");
-            }
-            written?;
-            return Ok(());
-        }
-        Ok(None) => {}
-        Err(error) => {
-            write_project_open_error(
-                &mut transport,
-                &first_request,
-                &handshake.client_instance_id,
-                &error,
-            )
-            .await?;
-            return Ok(());
-        }
-    }
-    let projectless_request = projectless_first_request(first_request.parsed());
-    if handshake.project_path.is_some() && !projectless_request {
-        // Heap-allocate the owner-await composition: embedded by value it
-        // dominates this serve future's resident frame and overflows the
-        // worker stack in perf-profile layouts.
-        let server = match Box::pin(await_project_owner_for_first_request(
-            &mut transport,
-            first_request.parsed(),
-            Box::pin(portable_project_server_for_request(
-                lifecycle.clone(),
-                store_administration.clone(),
-                Arc::clone(&project_open_gates),
-                invocation.clone(),
-                http_application_registry,
-                &handshake,
-                project_server_requirement(first_request.parsed()),
-                #[cfg(test)]
-                project_open_attempts.clone(),
-            )),
-        ))
-        .await
-        {
-            Ok(Some(server)) => server,
-            Ok(None) => {
-                drop(setup_activity);
-                return Ok(());
-            }
-            Err(error) => {
-                drop(setup_activity);
-                write_project_open_error(
-                    &mut transport,
-                    &first_request,
-                    &handshake.client_instance_id,
-                    &error,
-                )
-                .await?;
-                return Ok(());
-            }
-        };
-        let (server, pending_lines) = server;
-        if opens_rmcp_session(first_request.parsed()) {
-            #[cfg(test)]
-            tests::record_mcp_route(&handshake.client_instance_id, tests::ObservedMcpRoute::Rmcp);
-            #[cfg(test)]
-            tests::record_first_request_replay(&handshake.client_instance_id, first_request.raw());
-            Box::pin(serve_routed_rmcp_connection(
-                server,
-                transport,
-                RoutedRmcpReplay {
-                    first_request_line: first_request.into_raw(),
-                    pending_lines,
-                    initialize_route,
-                },
-                handshake.timings,
-                lifecycle,
-                Some(setup_activity),
-            ))
-            .await?;
-        } else {
-            drop(setup_activity);
-            refuse_sessionless_request(&mut transport, &first_request).await?;
-        }
-    } else {
-        drop(setup_activity);
-        let mut transport = ReplayTransport::new(transport);
-        transport.push_replay(first_request.into_raw())?;
-        Box::pin(serve_projectless_client(
-            &mut transport,
-            &handshake.client_identity,
-            handshake.project_path.clone(),
-            handshake.timings,
-            lifecycle,
-            &store_administration,
-        ))
-        .await?;
-    }
-    Ok(())
 }
 
 /// A request parked on a barrier gives its connection's admission slot back

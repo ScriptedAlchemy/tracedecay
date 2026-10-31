@@ -70,19 +70,17 @@ pub(crate) use connection::ProductionMcpConnectionContext;
 pub(crate) use construction::*;
 pub(crate) use hook_writes::*;
 pub(crate) use ledger::McpToolErrorAnalyticsRequest;
-pub(crate) use rmcp::RmcpInitializeResponseDecorator;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) use rmcp::RmcpSelectedProjectResponseAuthority;
 pub(crate) use routing::*;
 use tracedecay_daemon_service::DaemonSessionRefreshService;
 use tracedecay_daemon_service::DaemonWorkflowIndexReadService;
-pub(crate) use tracedecay_mcp::server::ProjectServerResponseLifecycle;
 use tracedecay_mcp::server::{
     IdenticalReadCoalescer, McpBackgroundTaskOwner, McpDispatchRequest,
-    ProjectHostAdmissionReplayTask, RetainedDispatchAuthority, StartupCatchUpMachineV1,
-    ToolCallParams, join_required_live_transcript_refresh, needs_lazy_sync_before_dispatch,
+    ProjectHostAdmissionReplayTask, ProjectServerResponseLifecycle, RetainedDispatchAuthority,
+    StartupCatchUpMachineV1, ToolCallParams, join_required_live_transcript_refresh,
+    needs_lazy_sync_before_dispatch,
 };
-pub(crate) use tracedecay_mcp::server::{McpMethod, classify_mcp_method};
 
 /// The steering instructions advertised from the `initialize` handshake of a
 /// healthy server.
@@ -1129,6 +1127,7 @@ impl McpServer {
         }
     }
 
+    #[cfg(unix)]
     pub(crate) fn watcher_sync_config(&self) -> &tracedecay_configuration::SyncConfig {
         &self.sync_config
     }

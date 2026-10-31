@@ -7,7 +7,7 @@ use tracedecay_contracts::retrieval::{
     HookIngestTranscriptResultV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_domain::{ObservationScopeV1, ProjectId};
+use tracedecay_domain::{ObservationScopeV1, ProjectId, SessionId};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use tracedecay_project::project::TraceDecay;
@@ -22,6 +22,7 @@ use tracedecay_sessions::observation::ObservationCancellation;
 use tracedecay_sessions::runtime::source::TranscriptSource;
 
 use crate::handlers::SessionAuthorities;
+use crate::server::join_hook_ingest_refresh;
 
 use super::required_field;
 use crate::{
@@ -218,6 +219,9 @@ pub(super) async fn codex_compact(
             messages_upserted: 0,
         });
     };
+    let projection_session = SessionId::new(session_id.as_str())
+        .map_err(|error| config_error(format!("invalid Codex compaction session: {error}")))?;
+    let project_refresh = session_authorities.project_refresh;
     // The daemon compaction compresses the session's durable history, so the
     // rollout must land in the owning store through the canonical ingest
     // route before pressure evidence is evaluated; compacting an unfilled
@@ -227,6 +231,9 @@ pub(super) async fn codex_compact(
         tracing::trace_span!("mcp.hook_runtime.compact_ingest"),
     )
     .await?;
+    // Summary publication cannot activate above a temporal generation that
+    // is still adding rows for the transcript this hook just captured.
+    join_hook_ingest_refresh(false, Some(&projection_session), project_refresh, None).await?;
     let current_tokens = parsed
         .as_ref()
         .and_then(|event| event_i64(event, &["context_tokens", "current_tokens", "tokens"]));

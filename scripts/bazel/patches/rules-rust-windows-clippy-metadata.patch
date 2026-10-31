@@ -1,0 +1,38 @@
+diff --git a/rust/private/clippy.bzl b/rust/private/clippy.bzl
+--- a/rust/private/clippy.bzl
++++ b/rust/private/clippy.bzl
+@@ -169,6 +169,16 @@
+         crate_info_dict = structs.to_dict(crate_info)
+         crate_info_dict["rustc_output"] = clippy_diagnostics_file
+         crate_info = rust_common.create_crate_info(**crate_info_dict)
++
++    clippy_metadata = None
++    emit = ["dep-info", "metadata"]
++    if toolchain.exec_triple.system == "windows":
++        # Clippy must not overwrite the dependency compiler's sealed output.
++        clippy_metadata = ctx.actions.declare_file(
++            crate_info.output.basename + ".clippy.rmeta",
++            sibling = crate_info.output,
++        )
++        emit = ["dep-info", ("metadata", clippy_metadata)]
+ 
+     args, env = construct_arguments(
+         ctx = ctx,
+@@ -188,7 +198,7 @@
+         out_dir = out_dir,
+         build_env_files = build_env_files,
+         build_flags_files = build_flags_files,
+-        emit = ["dep-info", "metadata"],
++        emit = emit,
+         force_depend_on_metadata = True,
+         skip_expanding_rustc_env = True,
+         use_json_output = bool(clippy_diagnostics_file),
+@@ -202,7 +212,7 @@
+     # specified on the library.
+     clippy_flags += extra_clippy_flags
+ 
+-    outputs = []
++    outputs = [clippy_metadata] if clippy_metadata else []
+ 
+     if output != None:
+         args.process_wrapper_flags.add("--stderr-file", output)

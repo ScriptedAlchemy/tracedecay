@@ -134,7 +134,8 @@ impl McpServer {
             )
             .with_profile_identity(self.profile_identity.clone())
             .with_background_cpu(self.background_cpu.clone())
-            .with_project_lcm_authority(self.project_lcm_authority.as_deref()),
+            .with_project_lcm_authority(self.project_lcm_authority.as_deref())
+            .with_project_refresh(self.project_session_refresh_wake.as_deref()),
         }
     }
 

@@ -1,3 +1,5 @@
+//! Remote enrollment fixtures shared by store-runtime and composition-root tests.
+
 use tracedecay_contracts::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
 use tracedecay_contracts::{
     AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, PolicyDecisionRef,
@@ -9,7 +11,7 @@ use tracedecay_domain::{
     RepositoryId, RepositoryStateSnapshotId, UtcMicros, WorktreeId, canonical_sha256,
 };
 
-pub(crate) fn grant(
+pub fn remote_enrollment_grant_fixture(
     brain_id: tracedecay_domain::BrainId,
     node_id: BrainNodeId,
     secret: &[u8],
@@ -37,7 +39,9 @@ pub(crate) fn grant(
     }
 }
 
-pub(crate) fn admission(grant: &EnrollmentGrantV1) -> RemoteEnrollmentAdmissionEvidenceV1 {
+pub fn remote_enrollment_admission_fixture(
+    grant: &EnrollmentGrantV1,
+) -> RemoteEnrollmentAdmissionEvidenceV1 {
     let scope = ResolvedScope::new(
         grant.scope.project_id.clone(),
         grant.scope.repository_id.clone(),

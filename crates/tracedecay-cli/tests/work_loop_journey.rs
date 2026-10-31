@@ -52,6 +52,8 @@
 //! actually owns: the forwarded argv, the instructions on stdin, the sealed
 //! terminal state, and the requested-versus-actual route.
 
+#![cfg(unix)]
+
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};

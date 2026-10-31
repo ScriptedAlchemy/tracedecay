@@ -812,7 +812,9 @@ async fn run_worker(
                 // Control also preempts a pass in flight: each of its steps
                 // may wait a full persistence deadline, and shutdown owns its
                 // budget. A dropped step is a timed-out write that the
-                // terminal carrier or the writer fence settles.
+                // terminal carrier or the writer fence settles. A rollup
+                // lease the dropped pass held is reclaimed by this producer's
+                // shutdown pass, which shares its claimant identity.
                 let maintenance = run_one_rollup_maintenance(
                     &db,
                     &identity,

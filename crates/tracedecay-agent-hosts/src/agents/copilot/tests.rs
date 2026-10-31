@@ -14,6 +14,7 @@
 //! refuses instead of accepting the loss.
 
 use super::*;
+#[cfg(unix)]
 use tracedecay_domain::errors::TraceDecayError;
 #[cfg(unix)]
 use tracedecay_runtime_core::test_executable::write_executable_script;

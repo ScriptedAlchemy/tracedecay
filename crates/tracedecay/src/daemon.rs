@@ -16,12 +16,11 @@ use tokio::time::Duration;
 use tokio_stream::StreamExt;
 use tracedecay_lsp::{AdmittedRoot, AuthorizedLspWorkspace};
 
-use tracedecay_mcp::server::RmcpConnectionAdapter;
-
-use crate::mcp::server::{
-    McpMethod, ProductionMcpConnectionContext, RmcpInitializeResponseDecorator,
-    SERVER_INSTRUCTIONS, classify_mcp_method, initialize_result,
+use tracedecay_mcp::server::{
+    McpMethod, RmcpConnectionAdapter, RmcpInitializeResponseDecorator, classify_mcp_method,
 };
+
+use crate::mcp::server::{ProductionMcpConnectionContext, SERVER_INSTRUCTIONS, initialize_result};
 use branch_add::{branch_add_response, parse_branch_add_request};
 use branch_admin::{StoreAdministration, parse_branch_admin_request, write_branch_admin_response};
 #[cfg(all(unix, test))]
@@ -270,10 +269,9 @@ pub(crate) fn json_rpc_error_is_project_open_retryable(error: &serde_json::Value
         .is_some_and(project_open_retryable_reason)
 }
 
-/// True when a one-shot tool-call transport error should be retried by a
-/// journey (or any client riding out a transient open/retirement).
-///
-/// Keys only on typed reason codes, never on English detail prose.
+/// Identifies a transient tool-call transport refusal by typed reason code.
+/// A revoked response may follow a committed effect, so automatic replay also
+/// requires the tool's canonical read-only contract.
 pub fn tool_call_transport_error_is_retryable(error: &TraceDecayError) -> bool {
     matches!(
         error.project_route_context(),
@@ -358,7 +356,7 @@ pub(crate) use core_doctor::*;
 pub use core_handshake::*;
 pub use core_hooks::*;
 pub use core_proxy::*;
-mod github_credential_lifecycle;
+mod github_secret_reader;
 mod graph_resolution;
 use graph_resolution::retained_project_server_resolver;
 mod http_application;
@@ -427,6 +425,8 @@ mod project_open_admission;
 #[cfg(test)]
 use project_open_admission::project_open_retry_backoff;
 #[cfg(unix)]
+use project_open_admission::store_owner_key_from_paths;
+#[cfg(unix)]
 use project_open_admission::{
     MaintenanceRekeyOutcome, MaintenanceTransitionGate, MaintenanceTransitionGates,
     MaintenanceTransitionKey,
@@ -435,7 +435,6 @@ use project_open_admission::{
     ProjectOpenFailure, ProjectOpenGate, ProjectOpenGates, ProjectOpenTaskClaim,
     ProjectOpenTaskState, ProjectOpenTasks, ProjectRouteKey, ProjectServerKey,
     ProjectServerPublication, ProjectServerRequirement, project_server_requirement,
-    store_owner_key_from_paths,
 };
 pub(crate) use tracedecay_session_runtime::StoreOwnerKey;
 mod project_open_handshake;
@@ -449,12 +448,12 @@ mod project_open_orchestration;
 mod project_routing;
 mod project_server_lifecycle;
 #[cfg(unix)]
+use project_open_orchestration::durable_enrollment_resolves_existing_store;
+use project_open_orchestration::ensure_registered_project_route;
+#[cfg(unix)]
 use project_open_orchestration::{
     await_claimed_project_open, spawn_lifecycle_automation_scheduler_activation,
     start_lifecycle_project_open,
-};
-use project_open_orchestration::{
-    durable_enrollment_resolves_existing_store, ensure_registered_project_route,
 };
 #[cfg(any(not(unix), test))]
 use project_open_orchestration::{
@@ -466,14 +465,16 @@ use project_open_orchestration::{
 #[cfg(any(not(unix), test, feature = "test-transport"))]
 use project_routing::portable_database_owner_reconciler;
 #[cfg(unix)]
-use project_routing::{CatalogRefreshClientKey, maintenance_transition_gate};
 use project_routing::{
-    bind_authenticated_profile_identity, cached_or_bind_ready_project_server,
-    ensure_checkout_topology_before_admission, prefer_recorded_open_failure,
-    project_open_cancellation_checkpoint, project_open_cancellation_error,
-    project_open_capacity_gate, project_open_gate, project_open_task_capacity_error,
-    project_open_tasks, project_route_for_handshake, project_server_capacity_error,
-    project_server_retirement_blocked_error, project_warming_error, resolved_project_server_key,
+    CatalogRefreshClientKey, cached_or_bind_ready_project_server, maintenance_transition_gate,
+    resolved_project_server_key,
+};
+use project_routing::{
+    bind_authenticated_profile_identity, ensure_checkout_topology_before_admission,
+    prefer_recorded_open_failure, project_open_cancellation_checkpoint,
+    project_open_cancellation_error, project_open_capacity_gate, project_open_gate,
+    project_open_task_capacity_error, project_open_tasks, project_route_for_handshake,
+    project_server_capacity_error, project_server_retirement_blocked_error, project_warming_error,
 };
 #[cfg(test)]
 use project_server_lifecycle::replay_user_profile_host_admission_for_identity;
@@ -523,7 +524,3 @@ mod http_application_tests;
 #[cfg(all(test, unix))]
 #[allow(clippy::expect_used)]
 mod broker_stream_transport_tests;
-
-#[cfg(test)]
-#[allow(clippy::expect_used)]
-mod remote_protocol_tests;

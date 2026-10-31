@@ -5,13 +5,15 @@ use std::thread;
 use std::time::Duration;
 
 use tempfile::TempDir;
+#[cfg(unix)]
+use tracedecay_graph_db::GraphProjectionIdentity;
 use tracedecay_graph_db::{
     GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbLeaseV1, GraphDbOwnerRegistrationV1,
     GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, GraphDbRegistryStatus,
     GraphDbRetirementOutcome, GraphDbRetirementTarget, GraphEntity, GraphEntityId, GraphMutation,
-    GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphRelation, GraphRelationId,
-    GraphRelationKind, GraphTraversalDirection, GraphWatermark, GraphWriteBatch, NeverCancelled,
-    SourceGeneration, TraversalRequest,
+    GraphNamespace, GraphProjectionId, GraphRelation, GraphRelationId, GraphRelationKind,
+    GraphTraversalDirection, GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration,
+    TraversalRequest,
 };
 use tracedecay_store::{
     BrainId, CodeShardScopeV1, LocatorDigest, ProjectId, RepositoryId, RetainedGraphStoreLeaseV1,

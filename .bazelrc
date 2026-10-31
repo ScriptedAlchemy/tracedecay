@@ -10,6 +10,11 @@ common --show_progress_rate_limit=15
 build --experimental_remote_cache_ttl=0s
 # Cargo reads the unstable acquisition policy during repository evaluation.
 common --repo_env=RUSTC_BOOTSTRAP=1
+# Opt out of aspect_tools_telemetry's usage upload (and its per-build notice).
+common --repo_env=DO_NOT_TRACK=1
+# Python targets get only the __init__.py files the tree actually contains;
+# rules_python deprecated synthesizing them (bazel-contrib/rules_python#2945).
+build --incompatible_default_to_explicit_init_py
 # MODULE.bazel registers the pinned stable compiler.
 # Hosts can extend this repository profile with their private fleet settings.
 build --config=tracedecay
@@ -91,7 +96,7 @@ build:dist --@rules_rust//rust/settings:extra_rustc_flag=-Cembed-bitcode=yes
 # Hosted CI: keep going past one failure so a run reports every red target.
 build:ci --keep_going
 build:ci --show_timestamps
-test:ci --test_summary=terse
+test:ci --test_summary=short
 # Suites spawn host tools such as ast-grep, node, and git.
 test:ci --test_env=PATH
 

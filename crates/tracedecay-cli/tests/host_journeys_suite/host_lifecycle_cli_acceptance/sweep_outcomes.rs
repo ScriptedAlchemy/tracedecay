@@ -2,6 +2,7 @@
 //! post-update refresh.
 
 use std::fs;
+#[cfg(unix)]
 use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
@@ -9,7 +10,9 @@ use std::process::Output;
 #[cfg(unix)]
 use std::process::{Child, Command, Stdio};
 
-use tracedecay_agent_hosts::agents::host_bundle::{HostComponentV1, HostKindV1};
+#[cfg(unix)]
+use tracedecay_agent_hosts::agents::host_bundle::HostComponentV1;
+use tracedecay_agent_hosts::agents::host_bundle::HostKindV1;
 #[cfg(unix)]
 use tracedecay_daemon_control::{SOCKET_ENV, default_socket_path};
 #[cfg(unix)]
@@ -23,12 +26,12 @@ use tracedecay_runtime_core::test_executable::write_executable_script;
 
 #[cfg(unix)]
 use super::install_kimi_cli;
-use super::{
-    IsolatedCli, ROO_SETTINGS_RELATIVE, VERIFY_FAILURE_ENV, assert_receipt_digests,
-    assert_seeded_bytes, assert_success, host_case, latest_receipt, seed_host,
-};
+use super::{IsolatedCli, VERIFY_FAILURE_ENV, assert_success, host_case, seed_host};
+#[cfg(unix)]
+use super::{ROO_SETTINGS_RELATIVE, assert_receipt_digests, assert_seeded_bytes, latest_receipt};
 
 /// `EX_TEMPFAIL`: nothing failed, but a host needs an operator step.
+#[cfg(unix)]
 const PENDING_OPERATOR_ACTION_EXIT: i32 = 75;
 
 fn stderr(output: &Output) -> String {
@@ -60,6 +63,7 @@ fn tracked_agents(cli: &IsolatedCli) -> String {
     fs::read_to_string(cli.profile.join("config.toml")).unwrap()
 }
 
+#[cfg(unix)]
 fn copy_dir(from: &Path, to: &Path) {
     fs::create_dir_all(to).unwrap();
     for entry in fs::read_dir(from).unwrap() {
@@ -75,6 +79,7 @@ fn copy_dir(from: &Path, to: &Path) {
 
 /// What Kimi Code's interactive `/plugins install <staged>` writes: a managed
 /// copy of the staged source and an enabled `installed.json` entry for it.
+#[cfg(unix)]
 pub(super) fn complete_kimi_plugins_install(cli: &IsolatedCli, staged: &Path) {
     let code_home = cli.home.path().join(".kimi-code");
     let managed = code_home.join("plugins/managed/tracedecay");
@@ -310,9 +315,11 @@ fn post_update_skips_a_tracked_host_without_its_cli_beside_pending_kimi() {
 
 /// The operator's Kiro registry before TraceDecay touches it: a peer server
 /// and formatting TraceDecay does not own.
+#[cfg(unix)]
 const OPERATOR_KIRO_MCP: &str = "{\n  \"mcpServers\": {\n    \"operator\": {\n      \"command\": \"operator-mcp\",\n      \"args\": []\n    }\n  }\n}\n";
 
 /// `OPERATOR_KIRO_MCP` with TraceDecay registered beside the peer server.
+#[cfg(unix)]
 fn kiro_mcp_with_tracedecay(cli: &IsolatedCli) -> String {
     format!(
         "{{\n  \"mcpServers\": {{\n    \"operator\": {{\n      \"command\": \"operator-mcp\",\n      \"args\": []\n    }},\n    \"tracedecay\": {{\n      \"args\": [\n        \"serve\"\n      ],\n      \"command\": {},\n      \"disabled\": false\n    }}\n  }}\n}}\n",

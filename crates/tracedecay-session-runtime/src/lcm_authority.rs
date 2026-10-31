@@ -449,12 +449,15 @@ impl DaemonLcmAuthority {
                 None,
                 None,
             ),
-            Ok(Err(_)) => terminal_failure(
-                context,
-                LcmAuthorityOperation::Compact,
-                started_at,
-                "daemon compaction failed",
-            ),
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "daemon compaction failed");
+                terminal_failure(
+                    context,
+                    LcmAuthorityOperation::Compact,
+                    started_at,
+                    "daemon compaction failed",
+                )
+            }
             Err(interruption) => terminal_interruption(
                 context,
                 LcmAuthorityOperation::Compact,

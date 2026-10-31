@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
 use tracedecay_runtime_core::config::ProfileRoot;
 

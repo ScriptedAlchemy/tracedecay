@@ -15,7 +15,9 @@ use tracedecay_runtime_core::db::engine::{
 use tracedecay_runtime_core::path_safety::plain_git_args;
 
 use crate::RegisteredGlobalDb;
-use crate::tests::harness::{RegisteredGlobalDbHarness, RegisteredGlobalDbTestRuntime};
+use crate::tests::harness::RegisteredGlobalDbHarness;
+#[cfg(unix)]
+use crate::tests::harness::RegisteredGlobalDbTestRuntime;
 
 #[cfg(unix)]
 #[test]

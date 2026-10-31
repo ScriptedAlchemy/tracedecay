@@ -106,7 +106,7 @@ pub(crate) fn dashboard_retained_project_graph_resolver(
             };
             graph
                 .map(|(graph, profile, profile_sessions)| {
-                    crate::dashboard::dashboard_project_context(
+                    tracedecay_project::dashboard::dashboard_project_context(
                         &graph,
                         profile.as_ref(),
                         profile_sessions.as_ref(),
@@ -343,6 +343,7 @@ impl McpServerConstructionContext {
     }
 
     #[cfg(test)]
+    #[cfg(unix)]
     pub(crate) fn with_direct_profile_identity(
         mut self,
         profile_identity: LocalProfileIdentityAuthorityV1,

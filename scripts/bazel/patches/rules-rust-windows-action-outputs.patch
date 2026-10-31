@@ -1,0 +1,49 @@
+diff --git a/rust/private/rustc.bzl b/rust/private/rustc.bzl
+--- a/rust/private/rustc.bzl
++++ b/rust/private/rustc.bzl
+@@ -1372,6 +1372,11 @@
+     rustc_flags.add(compilation_mode.opt_level, format = "--codegen=opt-level=%s")
+     rustc_flags.add(compilation_mode.debug_info, format = "--codegen=debuginfo=%s")
+     rustc_flags.add(compilation_mode.strip_level, format = "--codegen=strip=%s")
++    if toolchain.target_abi == "msvc" and compilation_mode.strip_level != "none":
++        # Rustc can request /DEBUG before stripping the resulting PDB. That
++        # undeclared intermediate collides with read-only cached PDBs from
++        # earlier builds. Stripped actions must not produce a PDB at link time.
++        rustc_flags.add("--codegen=link-arg=/DEBUG:NONE")
+ 
+     # For determinism to help with build distribution and such
+     if remap_path_prefix != None:
+@@ -1920,9 +1925,15 @@
+     # When cc_common linking is enabled, emit a `.o` file, which is later
+     # passed to the cc_common.link action.
+     emit = ["dep-info", "link"]
++    link_metadata = None
+-    if build_metadata:
++    if toolchain.target_os == "windows" and crate_info.type in ("rlib", "lib") and not experimental_use_cc_common_link:
++        # Rustc writes intermediate metadata even for --emit=link. Give it
++        # a declared output distinct from the metadata action's cached file.
++        link_metadata = ctx.actions.declare_file(crate_info.output.basename + ".rmeta", sibling = crate_info.output)
++        emit.append(("metadata", link_metadata))
++    elif build_metadata:
+         emit.append("metadata")
+     if experimental_use_cc_common_link:
+         emit = ["obj"]
+ 
+     # Declares the outputs of the rustc compile action.
+@@ -1933,5 +1947,7 @@
+     # the main `.o` file (`output_o` below).
+     outputs = [crate_info.output]
++    if link_metadata:
++        outputs.append(link_metadata)
+ 
+     # The `.o` output file, only used for linking via cc_common.link.
+     # When output_hash is set (e.g. for rust_test targets), include it in the
+@@ -2025,7 +2041,7 @@
+             toolchain = toolchain,
+             tool_file = toolchain.rustc,
+             cc_toolchain = cc_toolchain,
+-            emit = emit,
++            emit = ["metadata" if type(kind) == "tuple" and kind[0] == "metadata" else kind for kind in emit],
+             feature_configuration = feature_configuration,
+             crate_info = crate_info,
+             dep_info = dep_info,

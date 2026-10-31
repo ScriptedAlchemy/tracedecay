@@ -846,7 +846,10 @@ fn now_unix_millis() -> u64 {
 
 mod readiness;
 
-pub use readiness::{HookCompletedReadinessDistributions, aggregate_hook_completed_readiness};
+pub use readiness::{
+    HookCompletedReadinessDistributions, aggregate_hook_completed_readiness,
+    install_dashboard_hook_readiness_projection,
+};
 #[cfg(test)]
 use readiness::{
     LATENCY_BUCKET_UPPER_US, MAX_DISPOSITION_SERIES, MAX_READINESS_INPUT_ROWS, MetricAvailability,
