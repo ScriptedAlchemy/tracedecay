@@ -1,6 +1,5 @@
 use std::time::Instant;
 
-#[cfg(unix)]
 use tokio::time::Duration;
 
 use tracedecay_daemon_protocol::{
@@ -178,9 +177,6 @@ mod connection_serving;
 #[cfg(feature = "rmcp-benchmark")]
 #[doc(hidden)]
 pub use connection_serving::rmcp_benchmark;
-#[cfg(unix)]
-#[cfg(not(unix))]
-use connection_serving::serve_windows_broker_client_with_class_and_invocation;
 #[cfg(any(test, feature = "test-transport"))]
 pub(crate) use connection_serving::{RoutedRmcpReplay, serve_routed_rmcp_connection};
 mod core_admission;
@@ -214,7 +210,6 @@ mod http_application;
 pub use http_application::live_remote_operational_status;
 mod http_application_router;
 mod invocation_dispatch;
-#[cfg(unix)]
 mod invocation_executor;
 pub(crate) mod invocation_state;
 mod lsp_sessions;
@@ -248,8 +243,6 @@ mod project_open_handshake;
 mod project_open_orchestration;
 mod project_routing;
 mod project_server_lifecycle;
-// The portable reconciler only exists off-unix (or under test transports), so
-// its import carries the same gate as its definition.
 #[cfg(unix)]
 mod scheduler;
 #[cfg(test)]

@@ -397,8 +397,10 @@ impl StoreAdministration {
                     receipt.tombstone_id = Some(tombstone.tombstone_id.clone());
                     receipt.tombstone_recorded = true;
                     self.settle_remote_account_deletion_tombstone_persist(&tombstone);
-                    let open_tasks =
-                        crate::daemon::project_routing::project_open_tasks(owners.project_open_gates.as_ref()).await;
+                    let open_tasks = crate::daemon::project_routing::project_open_tasks(
+                        owners.project_open_gates.as_ref(),
+                    )
+                    .await;
                     if !open_tasks
                         .shutdown_profile_with_deadline(
                             &profile_root,

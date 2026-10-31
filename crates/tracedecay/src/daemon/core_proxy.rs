@@ -25,11 +25,11 @@ use crate::daemon::core_admission::DaemonClientDeadline;
 #[cfg(unix)]
 use crate::daemon::core_client::connect_with_restart_grace;
 use crate::daemon::core_client::{
-    DAEMON_TOOL_LIVENESS_POLL_INTERVAL, connect_to_current_daemon_within,
-    next_daemon_response_line, write_daemon_preamble,
+    connect_to_current_daemon_within, next_daemon_response_line, write_daemon_preamble,
 };
 use tracedecay_contracts::catalog_composition::CatalogProfileName;
-use tracedecay_daemon_protocol::DAEMON_TOOL_RESPONSE_GRACE;
+use tracedecay_daemon_protocol::connection::{DAEMON_RESTART_GRACE, DAEMON_RESTART_POLL_INTERVAL};
+use tracedecay_daemon_protocol::{DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DAEMON_TOOL_RESPONSE_GRACE};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::JsonRpcRequest;
 use tracedecay_mcp::server::attach_stateless_request_context;
@@ -59,8 +59,8 @@ pub async fn should_proxy_serve_to_daemon(
         profile.data_dir(),
         socket_path,
         installed_socket.as_deref(),
-        crate::daemon::core_client::DAEMON_RESTART_GRACE,
-        crate::daemon::core_client::DAEMON_RESTART_POLL_INTERVAL,
+        DAEMON_RESTART_GRACE,
+        DAEMON_RESTART_POLL_INTERVAL,
     )
     .await
 }

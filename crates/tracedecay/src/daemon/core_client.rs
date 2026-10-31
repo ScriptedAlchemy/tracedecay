@@ -16,13 +16,13 @@ use tracedecay_daemon_identity::{
     DAEMON_AUTHORITY_UNAVAILABLE, ResolvedDaemonConnection, client_connection,
     current_daemon_connection,
 };
-pub(crate) use tracedecay_daemon_protocol::DAEMON_TOOL_LIVENESS_POLL_INTERVAL;
-pub(crate) use tracedecay_daemon_protocol::connection::{
+use tracedecay_daemon_protocol::connection::{
     DAEMON_RESTART_GRACE, DAEMON_RESTART_POLL_INTERVAL, daemon_connect_failure_advice,
     is_transient_daemon_connect_error,
 };
 use tracedecay_daemon_protocol::{
-    DaemonClientStream, daemon_tool_response_bound, tool_request_deadline,
+    DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DaemonClientStream, daemon_tool_response_bound,
+    tool_request_deadline,
 };
 use tracedecay_framing::BoundedLineReader;
 use tracedecay_mcp::server::attach_stateless_request_context;
