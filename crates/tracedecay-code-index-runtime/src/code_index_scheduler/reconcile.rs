@@ -4559,9 +4559,8 @@ const FIXTURE_WORKER_LOGICAL_CPUS: usize = 2;
 
 /// The worker runtime one scheduler and every text generation it binds run
 /// under. Production enters nothing: the composition root's process plan
-/// applies. A scheduler without a process plan (in-process test fixtures, each
-/// a separate owner) builds and enters its own runtime for
-/// [`FIXTURE_WORKER_LOGICAL_CPUS`], so no owner meters its work against
+/// applies. Every in-process fixture owner builds and enters its own runtime
+/// for [`FIXTURE_WORKER_LOGICAL_CPUS`], so no owner meters its work against
 /// another's plan.
 #[derive(Clone, Default)]
 pub(super) struct SchedulerWorkerRuntimeV1 {
@@ -4579,13 +4578,19 @@ impl SchedulerWorkerRuntimeV1 {
         if let Some(runtime) = self.owned.get() {
             return Ok(Some(runtime.enter()));
         }
-        if tracedecay_code_index::parallelism::installed_worker_status().is_some() {
-            return Ok(None);
-        }
         // The shared scheduler test sources also compile into the composition
         // root's test binary, where this crate is a dependency built with
         // `test-helpers` instead of `cfg(test)`; both spellings are the same
         // fixture surface, so the owned-runtime fallback must cover both.
+        //
+        // It must not defer to an installed process plan. Fixtures that
+        // install one (host admission, daemon bootstrap) coexist in one test
+        // process: sharing its single pool and background-CPU FIFO made one
+        // test's index pass queue behind unrelated tests' passes for seconds,
+        // and a publication that needs milliseconds of CPU then missed a
+        // caller's latency bound. Production has exactly one owner per
+        // process, so an owner-private runtime is what a fixture daemon runs
+        // with there.
         #[cfg(any(test, feature = "test-helpers"))]
         {
             let snapshot = resident_memory.snapshot();
@@ -4598,6 +4603,9 @@ impl SchedulerWorkerRuntimeV1 {
         }
         #[cfg(not(any(test, feature = "test-helpers")))]
         {
+            if tracedecay_code_index::parallelism::installed_worker_status().is_some() {
+                return Ok(None);
+            }
             let _ = resident_memory;
             Err(CodeIndexSchedulerErrorV1::WorkerPlanNotInstalled)
         }
