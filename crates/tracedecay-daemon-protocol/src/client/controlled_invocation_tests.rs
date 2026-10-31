@@ -15,11 +15,10 @@ use crate::contract::{
 };
 use crate::handshake::DaemonHandshake;
 use crate::lsp_wire::{FrameSend, LspSessionAccess, LspSessionCredential, LspSessionId};
-use tracedecay_contracts::{
-    CancellationContext, CancellationSignal, Deadline, WorkGraphReadRequestV1,
-    WorkProductSelectionScopeV1,
+use tracedecay_contracts::{CancellationContext, CancellationSignal, Deadline};
+use tracedecay_domain::{
+    AttemptId, ProjectId, RepositoryId, RunId, TaskId, UtcMicros, WorkAttemptIdentityV1, WorktreeId,
 };
-use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 const TEST_AUTH_TOKEN: &str = "controlled-invocation-test-token";
@@ -72,14 +71,61 @@ fn work_invocation_request(request_id: &str) -> DaemonInvocationRequest {
     let observed_at = now_micros();
     DaemonInvocationRequest::work_application(
         request_id,
-        WorkApplicationInvocationV1::Views(WorkGraphReadRequestV1::current(
-            WorkProductSelectionScopeV1::ProfileOwnedNoGit,
-            observed_at,
-        )),
+        WorkApplicationInvocationV1::HydrateArtifacts(
+            tracedecay_contracts::WorkArtifactHydrationRequestV1 {
+                page_size: 1,
+                cursor: None,
+            },
+        ),
         observed_at,
         deadline_after(Duration::from_secs(5)),
         CancellationContext::active(format!("cancel.{request_id}")).expect("request cancellation"),
     )
+}
+
+async fn write_work_delivery_response(
+    writer: &mut tokio::io::WriteHalf<crate::transport::BrokerStream>,
+    request_id: &str,
+) {
+    let scope = tracedecay_contracts::ResolvedScope::new(
+        ProjectId::new("project.work-delivery").unwrap(),
+        RepositoryId::new("repository.work-delivery").unwrap(),
+        WorktreeId::new("worktree.work-delivery").unwrap(),
+        None,
+    )
+    .unwrap();
+    let hydration = tracedecay_contracts::WorkArtifactHydrationV1::Hydrated {
+        topology: tracedecay_contracts::WorkAttemptTopologyBindingV1 {
+            generation: "generation.work-delivery".to_owned(),
+            task_count: 1,
+        },
+        attempts: vec![tracedecay_contracts::WorkAttemptArtifactsV1 {
+            identity: WorkAttemptIdentityV1::new(
+                TaskId::new("task.work-delivery").unwrap(),
+                RunId::new("run.work-delivery").unwrap(),
+                AttemptId::new("attempt.work-delivery").unwrap(),
+            )
+            .unwrap(),
+            artifacts: Vec::new(),
+            evidence: tracedecay_contracts::WorkAttemptEvidenceStateV1::Pending,
+        }],
+        coverage: tracedecay_contracts::WorkAttemptListCoverageV1::Complete { returned: 1 },
+    };
+    let response = DaemonInvocationResponse::with_outcome(
+        request_id.to_owned(),
+        DaemonInvocationOutcome::WorkApplication {
+            scope,
+            outcome: crate::WorkApplicationOutcomeV1::HydrateArtifacts(
+                tracedecay_contracts::ApplicationOutcome::Result(hydration),
+            ),
+        },
+    );
+    writer
+        .write_all(serde_json::to_string(&response).unwrap().as_bytes())
+        .await
+        .unwrap();
+    writer.write_all(b"\n").await.unwrap();
+    writer.flush().await.unwrap();
 }
 
 fn invocation_client(
@@ -408,7 +454,7 @@ async fn work_delivery_ack_uses_the_response_connection() {
         let request: DaemonInvocationRequest =
             serde_json::from_str(&request_line).expect("typed Work invocation");
         assert_eq!(request.request_id, REQUEST_ID);
-        write_unavailable_response(&mut writer, REQUEST_ID).await;
+        write_work_delivery_response(&mut writer, REQUEST_ID).await;
 
         let ack_line = lines
             .next_line()
@@ -470,7 +516,7 @@ async fn dropping_unacknowledged_work_delivery_closes_its_connection() {
             .await
             .expect("read Work invocation")
             .expect("Work invocation");
-        write_unavailable_response(&mut writer, REQUEST_ID).await;
+        write_work_delivery_response(&mut writer, REQUEST_ID).await;
         assert!(
             lines
                 .next_line()
@@ -495,6 +541,246 @@ async fn dropping_unacknowledged_work_delivery_closes_its_connection() {
         .expect("unacknowledged Work connection stayed open")
         .expect("Work connection close signal");
     server.await.expect("server task");
+}
+
+#[tokio::test]
+async fn ordinary_work_invocations_acknowledge_delivery_and_reuse_the_connection() {
+    let (listener, endpoint) =
+        crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
+            .await
+            .unwrap();
+    let (acknowledged, mut acknowledgements) = tokio::sync::mpsc::unbounded_channel();
+    let server = tokio::spawn(async move {
+        let stream = listener.accept().await.unwrap();
+        let (reader, mut writer) = tokio::io::split(stream);
+        let mut lines = authenticated_lines(reader).await;
+        lines.next_line().await.unwrap().expect("handshake");
+        for ordinal in 0..2 {
+            let request: DaemonInvocationRequest =
+                serde_json::from_str(&lines.next_line().await.unwrap().expect("invocation"))
+                    .unwrap();
+            write_work_delivery_response(&mut writer, &request.request_id).await;
+            let ack = lines.next_line().await.unwrap().expect(
+                "a consumed Work response must be acknowledged before its connection closes",
+            );
+            let ack = parse_daemon_invocation_delivery_ack_request(&ack).expect("delivery ACK");
+            assert_eq!(ack.target_request_id(), request.request_id);
+            assert_eq!(
+                ack.outcome(),
+                (
+                    tracedecay_domain::DeliverySettlementOutcomeV1::Delivered,
+                    None
+                )
+            );
+            let response =
+                crate::contract::DaemonInvocationDeliveryAckResponse::accepted(request.request_id);
+            writer
+                .write_all(serde_json::to_string(&response).unwrap().as_bytes())
+                .await
+                .unwrap();
+            writer.write_all(b"\n").await.unwrap();
+            writer.flush().await.unwrap();
+            acknowledged.send(ordinal).unwrap();
+        }
+    });
+    let client = invocation_client(endpoint, "client.work.consumed");
+    for ordinal in 0..2 {
+        let request = work_invocation_request(&format!("request.work.consumed.{ordinal}"));
+        if ordinal == 0 {
+            client.invoke(request).await.unwrap();
+        } else {
+            client
+                .invoke_controlled(
+                    request,
+                    deadline_after(Duration::from_secs(5)),
+                    CancellationSignal::active("cancel.work.consumed").unwrap(),
+                    InvocationCancellationPolicy::ReadOnly,
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), acknowledgements.recv())
+                .await
+                .expect("delivery acknowledgement must precede the next invocation"),
+            Some(ordinal)
+        );
+    }
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn work_refusals_reuse_the_connection_without_a_delivery_ack() {
+    let (listener, endpoint) =
+        crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
+            .await
+            .unwrap();
+    let server = tokio::spawn(async move {
+        let stream = listener.accept().await.unwrap();
+        let (reader, mut writer) = tokio::io::split(stream);
+        let mut lines = authenticated_lines(reader).await;
+        lines.next_line().await.unwrap().expect("handshake");
+        for ordinal in 0..3 {
+            let request: DaemonInvocationRequest = serde_json::from_str(
+                &lines
+                    .next_line()
+                    .await
+                    .unwrap()
+                    .expect("invocation, not an ACK"),
+            )
+            .unwrap();
+            if ordinal < 2 {
+                write_unavailable_response(&mut writer, &request.request_id).await;
+            } else {
+                let response = DaemonInvocationResponse::application_problem(
+                    request.request_id,
+                    tracedecay_contracts::ApplicationProblem::saturated(
+                        "daemon_per_client_capacity_saturated",
+                        "The owning TraceDecay daemon has no request capacity",
+                    ),
+                );
+                writer
+                    .write_all(serde_json::to_string(&response).unwrap().as_bytes())
+                    .await
+                    .unwrap();
+                writer.write_all(b"\n").await.unwrap();
+                writer.flush().await.unwrap();
+            }
+        }
+    });
+    let client = invocation_client(endpoint, "client.work.refused");
+    let result = client
+        .invoke_with_delivery(work_invocation_request("request.work.refused"))
+        .await
+        .unwrap();
+    let (_, delivery) = result.into_parts();
+    assert!(
+        delivery.is_none(),
+        "a refusal has no Work output to acknowledge"
+    );
+    assert_eq!(idle_pool_size(&client), 1);
+    client
+        .invoke(invocation_request(
+            "request.after-work-refusal",
+            deadline_after(Duration::from_secs(5)),
+        ))
+        .await
+        .unwrap();
+    let result = client
+        .invoke_with_delivery(work_invocation_request("request.work.saturated"))
+        .await
+        .unwrap();
+    let (response, delivery) = result.into_parts();
+    assert!(delivery.is_none());
+    assert!(
+        matches!(response.outcome, DaemonInvocationOutcome::ApplicationProblem { problem }
+        if problem.kind() == tracedecay_contracts::ApplicationProblemKind::Saturated)
+    );
+    assert_eq!(idle_pool_size(&client), 0, "saturation retires the stream");
+    server.await.unwrap();
+}
+
+async fn assert_work_delivery_ack_wait_interrupts(cancel: bool) {
+    let (listener, endpoint) =
+        crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
+            .await
+            .unwrap();
+    let (ack_received, received) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let stream = listener.accept().await.unwrap();
+        let (reader, mut writer) = tokio::io::split(stream);
+        let mut lines = authenticated_lines(reader).await;
+        lines.next_line().await.unwrap().expect("handshake");
+        lines.next_line().await.unwrap().expect("invocation");
+        write_work_delivery_response(&mut writer, "request.work.cancel-ack").await;
+        let ack = lines.next_line().await.unwrap().expect("delivery ACK");
+        assert!(parse_daemon_invocation_delivery_ack_request(&ack).is_some());
+        ack_received.send(()).unwrap();
+        assert!(lines.next_line().await.unwrap().is_none());
+    });
+    let client = invocation_client(endpoint, "client.work.cancel-ack");
+    let cancellation = CancellationSignal::active("cancel.work.cancel-ack").unwrap();
+    let signal = cancellation.clone();
+    let pending = tokio::spawn(async move {
+        client
+            .invoke_controlled(
+                work_invocation_request("request.work.cancel-ack"),
+                deadline_after(Duration::from_secs(if cancel { 5 } else { 2 })),
+                cancellation,
+                InvocationCancellationPolicy::ReadOnly,
+            )
+            .await
+    });
+    received.await.unwrap();
+    if cancel {
+        assert!(signal.cancel(now_micros()));
+    }
+    let result = tokio::time::timeout(Duration::from_secs(3), pending)
+        .await
+        .unwrap()
+        .unwrap();
+    if cancel {
+        assert!(matches!(
+            result,
+            Err(super::DaemonInvocationError::Cancelled {
+                stage: tracedecay_contracts::CancellationStage::DuringRead,
+            })
+        ));
+    } else {
+        assert!(matches!(
+            result,
+            Err(super::DaemonInvocationError::TimedOut {
+                stage: tracedecay_contracts::CancellationStage::DuringRead,
+            })
+        ));
+    }
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn controlled_work_delivery_ack_wait_observes_cancellation() {
+    assert_work_delivery_ack_wait_interrupts(true).await;
+}
+
+#[tokio::test]
+async fn controlled_work_delivery_ack_wait_observes_deadline() {
+    assert_work_delivery_ack_wait_interrupts(false).await;
+}
+
+#[tokio::test]
+async fn consumed_work_response_does_not_hide_delivery_ack_rejection() {
+    let (listener, endpoint) =
+        crate::transport::BrokerListener::bind(&crate::transport::default_loopback_endpoint())
+            .await
+            .unwrap();
+    let server = tokio::spawn(async move {
+        let stream = listener.accept().await.unwrap();
+        let (reader, mut writer) = tokio::io::split(stream);
+        let mut lines = authenticated_lines(reader).await;
+        lines.next_line().await.unwrap().expect("handshake");
+        lines.next_line().await.unwrap().expect("invocation");
+        write_work_delivery_response(&mut writer, "request.work.reject-ack").await;
+        let ack = lines.next_line().await.unwrap().expect("delivery ACK");
+        assert!(parse_daemon_invocation_delivery_ack_request(&ack).is_some());
+        let response = crate::contract::DaemonInvocationDeliveryAckResponse::rejected(
+            "request.work.reject-ack".to_owned(),
+            crate::contract::DaemonInvocationDeliveryAckRejectReason::RecorderUnavailable,
+        );
+        writer
+            .write_all(serde_json::to_string(&response).unwrap().as_bytes())
+            .await
+            .unwrap();
+        writer.write_all(b"\n").await.unwrap();
+        writer.flush().await.unwrap();
+    });
+    let client = invocation_client(endpoint, "client.work.reject-ack");
+    let error = client
+        .invoke(work_invocation_request("request.work.reject-ack"))
+        .await
+        .expect_err("a rejected delivery ACK must not become a successful Work response");
+    assert!(error.to_string().contains("RecorderUnavailable"), "{error}");
+    assert_eq!(idle_pool_size(&client), 0);
+    server.await.unwrap();
 }
 
 #[tokio::test]

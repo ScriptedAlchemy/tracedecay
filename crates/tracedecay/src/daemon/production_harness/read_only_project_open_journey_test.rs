@@ -37,7 +37,11 @@ async fn denying_work_generation_preserves_restart_index_and_search() {
     let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
         .await
         .expect("initial production composition");
-    let graph = harness.server(&project).expect("project server").cg().await;
+    let graph = harness
+        .server(&project)
+        .expect("project server")
+        .cg_snapshot()
+        .await;
     let target = graph.configuration_runtime().configuration_target().clone();
     let revision = graph
         .configuration_runtime()

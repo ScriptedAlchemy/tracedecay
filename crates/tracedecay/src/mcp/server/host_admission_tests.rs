@@ -581,7 +581,12 @@ async fn retained_file_edits_replay_once_on_each_exact_linked_worktree() {
     };
     *root = roots[1].clone();
     let outcome = server
-        .run_hook_event_plan(server.cg().await, project.path(), plans.remove(0), None)
+        .run_hook_event_plan(
+            server.cg_snapshot().await,
+            project.path(),
+            plans.remove(0),
+            None,
+        )
         .await;
     assert_eq!(outcome.reason_code, Some("project_route_stale"));
     assert_eq!(effects.lock().unwrap().len(), 3);

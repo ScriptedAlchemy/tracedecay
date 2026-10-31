@@ -183,8 +183,8 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         !Arc::ptr_eq(&primary_server, &linked_server),
         "each exact worktree route must retain its own project server"
     );
-    let primary_graph = primary_server.cg().await;
-    let linked_graph = linked_server.cg().await;
+    let primary_graph = primary_server.cg_snapshot().await;
+    let linked_graph = linked_server.cg_snapshot().await;
     assert!(
         !Arc::ptr_eq(&primary_graph, &linked_graph),
         "each project server must retain its exact worktree graph runtime"
@@ -431,7 +431,7 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         .project_server(&linked_handshake)
         .await
         .expect("linked worktree must reopen through the retained canonical runtime");
-    let reopened_linked_graph = reopened_linked_server.cg().await;
+    let reopened_linked_graph = reopened_linked_server.cg_snapshot().await;
     assert_eq!(
         reopened_linked_graph
             .db()
@@ -541,8 +541,8 @@ async fn opted_in_linked_worktree_indexes_reopens_and_shuts_down_beside_primary(
     let primary_server = primary_server.expect("primary project must open");
     let linked_server = linked_server
         .expect("opted-in linked worktree must concurrently open through the primary authority");
-    let primary_graph = primary_server.cg().await;
-    let linked_graph = linked_server.cg().await;
+    let primary_graph = primary_server.cg_snapshot().await;
+    let linked_graph = linked_server.cg_snapshot().await;
     assert_eq!(
         primary_graph.db_path(),
         linked_graph.db_path(),
@@ -647,7 +647,7 @@ async fn opted_in_linked_worktree_indexes_reopens_and_shuts_down_beside_primary(
         .project_server(&linked_handshake)
         .await
         .expect("indexed linked worktree must reopen through the retained canonical runtime");
-    let reopened_linked_graph = reopened_linked_server.cg().await;
+    let reopened_linked_graph = reopened_linked_server.cg_snapshot().await;
     assert_eq!(
         reopened_linked_graph
             .db()
@@ -743,8 +743,8 @@ async fn maintenance_reclaims_a_removed_linked_worktree_and_the_text_artifact_on
         .project_server(&linked_handshake)
         .await
         .expect("opted-in linked worktree must open");
-    let primary_graph = primary_server.cg().await;
-    let linked_graph = linked_server.cg().await;
+    let primary_graph = primary_server.cg_snapshot().await;
+    let linked_graph = linked_server.cg_snapshot().await;
 
     let code_index_root = primary_graph.store_layout().data_root.join("code-index-v1");
     let primary_scope = scoped_code_index_store_root(&code_index_root, &primary);
@@ -894,7 +894,7 @@ async fn retiring_observability_owner_reopens_same_route_without_cached_degradat
         ..test_handshake_defaults()
     };
     let server = engine.project_server(&handshake).await.unwrap();
-    let graph = server.cg().await;
+    let graph = server.cg_snapshot().await;
     let key = ProjectServerKey::from_open_project(&graph, &handshake).unwrap();
     let db = engine
         .store_administration
@@ -981,7 +981,7 @@ async fn retiring_observability_owner_reopens_same_route_without_cached_degradat
     })
     .await
     .expect("same route must recover after the writer releases");
-    let graph = reopened.cg().await;
+    let graph = reopened.cg_snapshot().await;
     let reopened_key = ProjectServerKey::from_open_project(&graph, &handshake).unwrap();
     assert_eq!(
         key, reopened_key,

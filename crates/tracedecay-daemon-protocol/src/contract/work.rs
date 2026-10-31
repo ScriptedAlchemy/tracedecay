@@ -127,3 +127,22 @@ application_operation_family! {
         AdvanceWorkJobRequestV1,
         ApplicationOutcome<AdvanceWorkJobResultV1>;
 }
+
+impl WorkApplicationOutcomeV1 {
+    /// Whether this terminal carries Work output whose delivery must settle
+    /// on the response connection before that connection can be reused.
+    pub fn requires_delivery_ack(&self) -> bool {
+        match self {
+            Self::StartAttempt(outcome)
+            | Self::AttemptStatus(outcome)
+            | Self::CancelAttempt(outcome) => outcome.payload().is_some(),
+            Self::HydrateArtifacts(outcome) => outcome.payload().is_some_and(|hydration| {
+                matches!(
+                    hydration,
+                    WorkArtifactHydrationV1::Hydrated { attempts, .. } if !attempts.is_empty()
+                )
+            }),
+            _ => false,
+        }
+    }
+}

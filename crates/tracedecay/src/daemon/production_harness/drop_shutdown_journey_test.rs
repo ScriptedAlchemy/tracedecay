@@ -98,7 +98,12 @@ async fn shutdown_waits_for_accepted_curator_settlement_and_lock_release() {
         .project_runtimes
         .clone();
     let server = harness.server(&project).expect("production curator server");
-    let dashboard_root = server.cg().await.store_layout().dashboard_root.clone();
+    let dashboard_root = server
+        .cg_snapshot()
+        .await
+        .store_layout()
+        .dashboard_root
+        .clone();
     drop(server);
 
     let (release, release_rx) = mpsc::channel();

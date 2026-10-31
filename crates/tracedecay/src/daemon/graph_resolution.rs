@@ -55,7 +55,7 @@ pub(super) fn retained_project_server_resolver(
                 };
                 let mut servers = Vec::with_capacity(mounted_servers.len());
                 for server in mounted_servers {
-                    servers.push((Arc::clone(&server), server.cg().await));
+                    servers.push((Arc::clone(&server), server.cg_snapshot().await));
                 }
                 let requested_root = authority::canonical_identity_path(
                     &request.requested_worktree_root,
