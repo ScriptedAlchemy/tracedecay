@@ -15,12 +15,14 @@ doctest = false
 
 [features]
 # Integration fixture surface: `HostAdmissionTestRuntimeV1`, the registered
-# database scaffolding it owns, and the explicit `TraceDecay::*_for_test`
-# constructors that open a project through it. Production code is never gated
-# by this feature; it compiles only under `cfg(test)` or when a consumer asks
-# for it explicitly.
+# database scaffolding it owns, the explicit `TraceDecay::*_for_test`
+# constructors that open a project through it, and the session-temporal
+# benchmark harness they drive. Production code is never gated by this
+# feature; it compiles only under `cfg(test)` or when a consumer asks for it
+# explicitly.
 test-helpers = [
     "dep:rusqlite",
+    "dep:tempfile",
     "tracedecay-automation-runtime/test-helpers",
     "tracedecay-code-index-runtime/test-helpers",
     "tracedecay-host-admission/test-helpers",
@@ -57,6 +59,8 @@ asupersync.workspace = true
 rusqlite = { version = "0.40.1", default-features = false, optional = true }
 serde_json.workspace = true
 sha2.workspace = true
+# The `test-helpers` session-temporal harness sandboxes host state per run.
+tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
 tracing.workspace = true
 tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts" }
@@ -92,6 +96,7 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 [dev-dependencies]
 rusqlite.workspace = true
 tempfile.workspace = true
+# The session-temporal bench binary owns its tokio runtime.
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracedecay-application = { path = "../tracedecay-application", features = ["test-helpers"] }
 tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", features = ["test-helpers"] }
@@ -106,6 +111,19 @@ tracedecay-session-runtime = { path = "../tracedecay-session-runtime", features 
 tracedecay-sessions = { path = "../tracedecay-sessions", features = ["test-helpers"] }
 tracedecay-store-runtime = { path = "../tracedecay-store-runtime", features = ["test-helpers"] }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", features = ["test-helpers"] }
+
+# The session-temporal evidence harness lives beside `test_support`; the bench
+# binary only drives its contract in a release measurement.
+[[bench]]
+name = "session_temporal"
+path = "benches/session_temporal.rs"
+harness = false
+required-features = ["test-helpers"]
+
+[[test]]
+name = "session_temporal_suite"
+path = "tests/session_temporal_suite/main.rs"
+required-features = ["test-helpers"]
 
 [[test]]
 name = "workflow_handoff_test"

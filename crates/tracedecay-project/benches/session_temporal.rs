@@ -2,7 +2,7 @@
 
 use std::env;
 
-use tracedecay::session_temporal_benchmark::{
+use tracedecay_project::test_support::session_temporal_benchmark::{
     refresh_contract, run_measurement, validate_contract,
 };
 

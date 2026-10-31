@@ -108,8 +108,8 @@ test-helpers = [
     "tracedecay-sessions/test-helpers",
     "tracedecay-store-runtime/test-helpers",
     "dep:tracedecay-temporal-query",
-    # The fixture surface under `src/test_support` and the session-temporal
-    # bench harness both sandbox host state in temp directories.
+    # The fixture surface under `src/test_support` sandboxes host state in
+    # temp directories.
     "dep:tempfile",
 ]
 
@@ -212,7 +212,7 @@ tracedecay-session-memory = { path = "../tracedecay-session-memory" }
 tracedecay-session-runtime = { path = "../tracedecay-session-runtime" }
 tracedecay-store-runtime = { path = "../tracedecay-store-runtime" }
 tracedecay-session-temporal-store = { path = "../tracedecay-session-temporal-store" }
-# Only the `test-helpers` session-temporal bench fixture names this crate.
+# Only the `test-helpers` integration lanes name this crate directly.
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", optional = true }
 tracedecay-lcm = { path = "../tracedecay-lcm" }
 tracedecay-sessions = { path = "../tracedecay-sessions" }
@@ -327,14 +327,6 @@ name = "large_repos"
 path = "benches/large_repos.rs"
 harness = false
 required-features = ["test-transport"]
-
-[[bench]]
-name = "session_temporal"
-path = "benches/session_temporal.rs"
-harness = false
-# The harness module is gated out of the shipped library, so the bench selects
-# it the same way the integration lanes do.
-required-features = ["test-helpers"]
 
 [[bench]]
 name = "transcript_ingest"

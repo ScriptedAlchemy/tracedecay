@@ -9,7 +9,7 @@
     "status": "accepted_for_harness"
   },
   "implementation": {
-    "path": "crates/tracedecay/benches/session_temporal/harness.rs"
+    "path": "crates/tracedecay-project/src/test_support/session_temporal_benchmark.rs"
   },
   "measurement_contract": {
     "measured_repetitions": 30,

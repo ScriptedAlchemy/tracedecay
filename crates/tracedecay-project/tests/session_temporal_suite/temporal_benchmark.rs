@@ -1,7 +1,7 @@
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use tracedecay::session_temporal_benchmark::IsolatedBenchmarkEnv;
+use tracedecay_project::test_support::session_temporal_benchmark::IsolatedBenchmarkEnv;
 
 /// Benchmark environments hand their home and data directory to the harness
 /// explicitly, so two of them run at the same time without sharing either.

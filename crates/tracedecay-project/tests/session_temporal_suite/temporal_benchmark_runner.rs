@@ -69,7 +69,10 @@ fn invoke_runner(uname: &str, mode: &str) -> RunnerInvocation {
 }
 
 fn repository_root() -> PathBuf {
-    crate::common::repository_root()
+    // Cargo and the Bazel launcher both start a suite in the crate directory,
+    // two levels below the workspace root.
+    std::path::absolute("../..")
+        .expect("absolute repository root")
         .canonicalize()
         .expect("canonical fixture repository root")
 }
@@ -91,7 +94,7 @@ fn diagnostic_runner_reaches_bazel_on_linux_and_macos() {
         assert_eq!(
             receipt.lines().next().expect("Bazel argument receipt"),
             format!(
-                "argv=<test><--config=release><--config=ci><//crates/tracedecay:session_temporal><--test_strategy=standalone><--nocache_test_results><--test_output=all><--test_env=TRACEDECAY_BENCHMARK_REPO_ROOT={}><--test_arg=--bench><--test_arg=--run>",
+                "argv=<test><--config=release><--config=ci><//crates/tracedecay-project:session_temporal><--test_strategy=standalone><--nocache_test_results><--test_output=all><--test_env=TRACEDECAY_BENCHMARK_REPO_ROOT={}><--test_arg=--bench><--test_arg=--run>",
                 repository_root().display()
             ),
             "{platform} Bazel receipt: {receipt}"

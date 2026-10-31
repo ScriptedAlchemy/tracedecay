@@ -10,7 +10,7 @@ load("//scripts:bazel/rust_test.bzl", "perf_rustc_flags", "rust_test")
 
 rust_library(
     name = "tracedecay",
-    srcs = glob(["src/**/*.rs"]) + glob(["benches/rmcp/**/*.rs", "benches/session_temporal/**/*.rs", "tests/common/**/*.rs"]) + ["//tests:support_sources"],
+    srcs = glob(["src/**/*.rs"]) + glob(["benches/rmcp/**/*.rs", "tests/common/**/*.rs"]) + ["//tests:support_sources"],
     crate_root = "src/lib.rs",
     crate_name = "tracedecay",
     edition = crate_edition(),
@@ -26,7 +26,7 @@ rust_library(
 
 rust_library(
     name = "tracedecay__+rmcp-benchmark_+test-helpers_+test-transport__dev",
-    srcs = glob(["src/**/*.rs"]) + glob(["benches/rmcp/**/*.rs", "benches/session_temporal/**/*.rs", "tests/common/**/*.rs"]) + ["//tests:support_sources"],
+    srcs = glob(["src/**/*.rs"]) + glob(["benches/rmcp/**/*.rs", "tests/common/**/*.rs"]) + ["//tests:support_sources"],
     crate_root = "src/lib.rs",
     crate_name = "tracedecay",
     edition = crate_edition(),
@@ -42,7 +42,7 @@ rust_library(
 
 rust_library(
     name = "tracedecay__bare__d0afcc18217",
-    srcs = glob(["src/**/*.rs"]) + glob(["benches/rmcp/**/*.rs", "benches/session_temporal/**/*.rs", "tests/common/**/*.rs"]) + ["//tests:support_sources"],
+    srcs = glob(["src/**/*.rs"]) + glob(["benches/rmcp/**/*.rs", "tests/common/**/*.rs"]) + ["//tests:support_sources"],
     crate_root = "src/lib.rs",
     crate_name = "tracedecay",
     edition = crate_edition(),
@@ -346,25 +346,8 @@ rust_test(
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(0),
     crate_features = ["default", "full", "lite", "production", "rmcp-benchmark", "test-helpers", "test-transport", "token-counting"],
-    compile_data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//benchmark_data:runtime_fixtures_project_src", "//benchmark_data:runtime_fixtures_project_tests", "//crates/tracedecay-hooks:fixtures_host_events_kimi", "//tests:fixtures_provider_normalization_codex"],
-    data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures"],
-)
-
-rust_test(
-    name = "session_temporal",
-    tags = ["manual"],
-    use_libtest_harness = False,
-    srcs = glob(["benches/**/*.rs"]),
-    crate_root = "benches/session_temporal.rs",
-    edition = crate_edition(),
-    version = "1.0.0-beta.94",
-    deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay:tracedecay__+rmcp-benchmark_+test-helpers_+test-transport__dev", "//crates/tracedecay-agent-hosts:tracedecay-agent-hosts__+test-transport_+token-counting__dev", "//crates/tracedecay-api:tracedecay-api__dev", "//crates/tracedecay-application:tracedecay-application__+test-helpers_+test-transport__dev", "//crates/tracedecay-automation-runtime:tracedecay-automation-runtime__+test-helpers_+test-transport__dev", "//crates/tracedecay-automation:tracedecay-automation__dev", "//crates/tracedecay-capture:tracedecay-capture__dev", "//crates/tracedecay-code-extraction:tracedecay-code-extraction__+test-helpers__dev", "//crates/tracedecay-code-index-retention:tracedecay-code-index-retention__+test-helpers__dev", "//crates/tracedecay-code-index-runtime:tracedecay-code-index-runtime__+full_+lite_+test-helpers_+test-transport__dev", "//crates/tracedecay-code-index:tracedecay-code-index__+eval-helpers_+lang-dockerfile_+test-helpers__dev", "//crates/tracedecay-configuration:tracedecay-configuration__+test-helpers__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-daemon-control:tracedecay-daemon-control__dev", "//crates/tracedecay-daemon-identity:tracedecay-daemon-identity__dev", "//crates/tracedecay-daemon-protocol:tracedecay-daemon-protocol__+test-helpers__dev", "//crates/tracedecay-daemon-service:tracedecay-daemon-service__+test-helpers__dev", "//crates/tracedecay-dashboard-api:tracedecay-dashboard-api__+test-transport_+token-counting__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-framing:tracedecay-framing__dev", "//crates/tracedecay-global-db:tracedecay-global-db__+test-helpers__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+eval-helpers_+test-helpers__dev", "//crates/tracedecay-graph-query:tracedecay-graph-query__+test-helpers__dev", "//crates/tracedecay-hooks:tracedecay-hooks__dev", "//crates/tracedecay-host-admission:tracedecay-host-admission__+test-helpers_+test-transport__dev", "//crates/tracedecay-lcm:tracedecay-lcm__+test-helpers__dev", "//crates/tracedecay-lsp:tracedecay-lsp__dev", "//crates/tracedecay-maintenance:tracedecay-maintenance__+test-helpers__dev", "//crates/tracedecay-mcp:tracedecay-mcp__+test-helpers_+test-transport__dev", "//crates/tracedecay-policy:tracedecay-policy__dev", "//crates/tracedecay-privacy:tracedecay-privacy__dev", "//crates/tracedecay-private-fs:tracedecay-private-fs__+test-helpers__dev", "//crates/tracedecay-project:tracedecay-project__+test-helpers_+test-transport__dev", "//crates/tracedecay-query:tracedecay-query__+production_+test-helpers__dev", "//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__dev", "//crates/tracedecay-rusqlite-runtime:tracedecay-rusqlite-runtime__+test-runtime_+test-transport__dev", "//crates/tracedecay-sdk:tracedecay-sdk__dev", "//crates/tracedecay-session-memory:tracedecay-session-memory__+test-transport__dev", "//crates/tracedecay-session-runtime:tracedecay-session-runtime__+test-helpers__dev", "//crates/tracedecay-session-temporal-store:tracedecay-session-temporal-store__+test-helpers_+test-transport__dev", "//crates/tracedecay-sessions:tracedecay-sessions__+test-helpers__dev", "//crates/tracedecay-store-runtime:tracedecay-store-runtime__+test-helpers__dev", "//crates/tracedecay-store:tracedecay-store__dev", "//crates/tracedecay-temporal-query:tracedecay-temporal-query__+test-helpers__dev", "//crates/tracedecay-tokenizer:tracedecay-tokenizer__dev", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog__dev"],
-    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
-    aliases = aliases(normal = True, normal_dev = True),
-    rustc_flags = perf_rustc_flags(0),
-    crate_features = ["default", "full", "lite", "production", "rmcp-benchmark", "test-helpers", "test-transport", "token-counting"],
-    compile_data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//benchmark_data:runtime_fixtures_project_src", "//benchmark_data:runtime_fixtures_project_tests", "//crates/tracedecay-hooks:fixtures_host_events_kimi", "//tests:fixtures_provider_normalization_codex"],
-    data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures"] + ["//benchmark_data:session-temporal"],
+    compile_data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//benchmark_data:runtime_fixtures_project_src", "//benchmark_data:runtime_fixtures_project_tests", "//crates/tracedecay-hooks:fixtures_host_events_kimi"],
+    data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
 )
 
 rust_test(
@@ -380,8 +363,8 @@ rust_test(
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(0),
     crate_features = ["default", "full", "lite", "production", "rmcp-benchmark", "test-helpers", "test-transport", "token-counting"],
-    compile_data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//benchmark_data:runtime_fixtures_project_src", "//benchmark_data:runtime_fixtures_project_tests", "//crates/tracedecay-hooks:fixtures_host_events_kimi", "//tests:fixtures_provider_normalization_codex"],
-    data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    compile_data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//benchmark_data:runtime_fixtures_project_src", "//benchmark_data:runtime_fixtures_project_tests", "//crates/tracedecay-hooks:fixtures_host_events_kimi"],
+    data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
 )
 
 rust_test(
@@ -397,8 +380,8 @@ rust_test(
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(0),
     crate_features = ["default", "full", "lite", "production", "rmcp-benchmark", "test-helpers", "test-transport", "token-counting"],
-    compile_data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//benchmark_data:runtime_fixtures_project_src", "//benchmark_data:runtime_fixtures_project_tests", "//crates/tracedecay-hooks:fixtures_host_events_kimi", "//tests:fixtures_provider_normalization_codex"],
-    data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    compile_data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//benchmark_data:runtime_fixtures_project_src", "//benchmark_data:runtime_fixtures_project_tests", "//crates/tracedecay-hooks:fixtures_host_events_kimi"],
+    data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
 )
 
 rust_test(
@@ -414,14 +397,14 @@ rust_test(
     aliases = aliases(normal = True, normal_dev = True),
     rustc_flags = perf_rustc_flags(0),
     crate_features = ["default", "full", "lite", "production", "rmcp-benchmark", "test-helpers", "test-transport", "token-counting"],
-    compile_data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//benchmark_data:runtime_fixtures_project_src", "//benchmark_data:runtime_fixtures_project_tests", "//crates/tracedecay-hooks:fixtures_host_events_kimi", "//tests:fixtures_provider_normalization_codex"],
-    data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    compile_data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True) + ["//benchmark_data:runtime_fixtures_project_src", "//benchmark_data:runtime_fixtures_project_tests", "//crates/tracedecay-hooks:fixtures_host_events_kimi"],
+    data = glob(["assets/**", "benches/**", "data/**", "fixtures/**", "resources/**", "tests/fixtures/**", "vendor/**"], allow_empty = True),
 )
 
 filegroup(
     name = "benchmark_binaries",
     testonly = True,
-    srcs = [":large_repos__binary", ":session_temporal__binary", ":transcript_ingest__binary", ":rmcp_connection_pipeline__binary", ":mcp_server_construction__binary"],
+    srcs = [":large_repos__binary", ":transcript_ingest__binary", ":rmcp_connection_pipeline__binary", ":mcp_server_construction__binary"],
 )
 
 rust_test(
@@ -437,13 +420,13 @@ rust_test(
     rustc_flags = perf_rustc_flags(0),
     compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True)
         + ["//crates/tracedecay-agent-hosts:src_agents_hermes_templates", "//tests:fixtures_provider_normalization_claude", "//tests:fixtures_provider_normalization_codex", "//tests:fixtures_provider_normalization_cursor", "//tests:fixtures_remote_tls"],
-    data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True) + ["//tests:fixtures"],
+    data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
     runfiles_env = {"TRACEDECAY_TEST_TYPESCRIPT_COMPILER": "//dashboard:typescript_compiler"},
 )
 
 filegroup(
     name = "rustfmt_sources_2024",
-    srcs = depset(["//tests:storage_runtime_rusqlite_suite_sources"] + glob(["benches/**/*.rs"]) + glob(["src/**/*.rs"]) + glob(["benches/rmcp/**/*.rs", "benches/session_temporal/**/*.rs", "tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/agent_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/automation_runner_test/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/claude_observation_benchmark/**/*.rs"]) + glob(["tests/cursor_observation_identity_fallback/**/*.rs"]) + glob(["tests/daemon_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/dashboard_api_test/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/hermes_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/hooks_lsp_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/mcp_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/memory_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/product_surface_suite/**/*.rs"]) + glob(["tests/runtime_acceptance_suite/**/*.rs"]) + glob(["tests/common/**/*.rs", "tests/session_suite/**/*.rs", "tests/session_suite/temporal_projection/**/*.rs", "tests/storage_suite/**/*.rs"]) + ["//crates/tracedecay-domain:tests_domain_suite_work_product_contract_sources", "//crates/tracedecay-domain:tests_sources", "//tests:support_sources"] + glob(["tests/session_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/storage_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/transcript_ingest_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/transport_acceptance_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"]).to_list(),
+    srcs = depset(["//tests:storage_runtime_rusqlite_suite_sources"] + glob(["benches/**/*.rs"]) + glob(["src/**/*.rs"]) + glob(["benches/rmcp/**/*.rs", "tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/agent_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/automation_runner_test/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/claude_observation_benchmark/**/*.rs"]) + glob(["tests/cursor_observation_identity_fallback/**/*.rs"]) + glob(["tests/daemon_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/dashboard_api_test/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/hermes_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/hooks_lsp_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/mcp_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/memory_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/product_surface_suite/**/*.rs"]) + glob(["tests/runtime_acceptance_suite/**/*.rs"]) + glob(["tests/common/**/*.rs", "tests/session_suite/**/*.rs", "tests/session_suite/temporal_projection/**/*.rs", "tests/storage_suite/**/*.rs"]) + ["//crates/tracedecay-domain:tests_domain_suite_work_product_contract_sources", "//crates/tracedecay-domain:tests_sources", "//tests:support_sources"] + glob(["tests/session_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/storage_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/transcript_ingest_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"] + glob(["tests/transport_acceptance_suite/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"]).to_list(),
     tags = ["manual"],
 )
 
