@@ -14,14 +14,8 @@ pub struct DaemonWorkDeliveryDescriptorV1 {
     channel_ref: String,
     valid_at: tracedecay_domain::UtcMicros,
     event_class: tracedecay_domain::DeliveryEventClassV1,
-    kind: DaemonWorkDeliveryKindV1,
+    operation: &'static str,
     attempt_identity: Option<tracedecay_domain::WorkAttemptIdentityV1>,
-}
-
-#[derive(Clone, Copy)]
-enum DaemonWorkDeliveryKindV1 {
-    Attempt,
-    ArtifactPage,
 }
 
 impl DaemonWorkDeliveryDescriptorV1 {
@@ -38,11 +32,10 @@ impl DaemonWorkDeliveryDescriptorV1 {
             return None;
         };
         let observed_at = *observed_at;
-        let (operation, event_class, kind, attempt_identity) = match work_request.as_ref() {
+        let (operation, event_class, attempt_identity) = match work_request.as_ref() {
             tracedecay_daemon_protocol::WorkApplicationInvocationV1::StartAttempt(command) => (
                 work_request.operation_key(),
                 tracedecay_domain::DeliveryEventClassV1::OperationTerminal,
-                DaemonWorkDeliveryKindV1::Attempt,
                 tracedecay_domain::WorkAttemptIdentityV1::new(
                     command.task_id.clone(),
                     command.run_id.clone(),
@@ -53,7 +46,6 @@ impl DaemonWorkDeliveryDescriptorV1 {
             tracedecay_daemon_protocol::WorkApplicationInvocationV1::AttemptStatus(command) => (
                 work_request.operation_key(),
                 tracedecay_domain::DeliveryEventClassV1::OperationTerminal,
-                DaemonWorkDeliveryKindV1::Attempt,
                 tracedecay_domain::WorkAttemptIdentityV1::new(
                     command.task_id.clone(),
                     command.run_id.clone(),
@@ -64,7 +56,6 @@ impl DaemonWorkDeliveryDescriptorV1 {
             tracedecay_daemon_protocol::WorkApplicationInvocationV1::CancelAttempt(command) => (
                 work_request.operation_key(),
                 tracedecay_domain::DeliveryEventClassV1::OperationTerminal,
-                DaemonWorkDeliveryKindV1::Attempt,
                 tracedecay_domain::WorkAttemptIdentityV1::new(
                     command.task_id.clone(),
                     command.run_id.clone(),
@@ -75,7 +66,6 @@ impl DaemonWorkDeliveryDescriptorV1 {
             tracedecay_daemon_protocol::WorkApplicationInvocationV1::HydrateArtifacts(_) => (
                 work_request.operation_key(),
                 tracedecay_domain::DeliveryEventClassV1::Activity,
-                DaemonWorkDeliveryKindV1::ArtifactPage,
                 None,
             ),
             _ => return None,
@@ -106,36 +96,16 @@ impl DaemonWorkDeliveryDescriptorV1 {
             ),
             valid_at: observed_at,
             event_class,
-            kind,
+            operation,
             attempt_identity,
         })
     }
 
     pub fn is_successful_delivery(&self, response: &DaemonInvocationResponse) -> bool {
-        match (&self.kind, &response.outcome) {
-            (
-                DaemonWorkDeliveryKindV1::Attempt,
-                DaemonInvocationOutcome::WorkApplication {
-                    outcome:
-                        WorkApplicationOutcomeV1::StartAttempt(outcome)
-                        | WorkApplicationOutcomeV1::AttemptStatus(outcome)
-                        | WorkApplicationOutcomeV1::CancelAttempt(outcome),
-                    ..
-                },
-            ) => outcome.payload().is_some(),
-            (
-                DaemonWorkDeliveryKindV1::ArtifactPage,
-                DaemonInvocationOutcome::WorkApplication {
-                    outcome: WorkApplicationOutcomeV1::HydrateArtifacts(outcome),
-                    ..
-                },
-            ) => outcome.payload().is_some_and(|hydration| {
-                matches!(
-                    hydration,
-                    tracedecay_contracts::WorkArtifactHydrationV1::Hydrated { attempts, .. }
-                        if !attempts.is_empty()
-                )
-            }),
+        match &response.outcome {
+            DaemonInvocationOutcome::WorkApplication { outcome, .. } => {
+                outcome.operation_key() == self.operation && outcome.requires_delivery_ack()
+            }
             _ => false,
         }
     }
