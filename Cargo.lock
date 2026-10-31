@@ -6121,7 +6121,6 @@ dependencies = [
  "tracedecay-session-runtime",
  "tracedecay-session-temporal-store",
  "tracedecay-sessions",
- "tracedecay-source-edit",
  "tracedecay-store",
  "tracedecay-store-runtime",
  "tracedecay-temporal-query",

@@ -86,6 +86,20 @@ cargo_build_script(
 )
 
 rust_binary(
+    name = "bench_extract",
+    srcs = glob(["examples/**/*.rs"]),
+    crate_root = "examples/bench_extract.rs",
+    edition = crate_edition(),
+    compile_data = glob(["src/**/*"], exclude=["src/**/*.rs"], allow_empty = True),
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-code-extraction:tracedecay-code-extraction__+test-helpers__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", ":build_script_build"],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    aliases = aliases(normal = True, normal_dev = True),
+    rustc_flags = perf_rustc_flags(2),
+    crate_features = ["default", "full", "lang-bash", "lang-batch", "lang-clojure", "lang-cobol", "lang-dart", "lang-dockerfile", "lang-elixir", "lang-erlang", "lang-fortran", "lang-fsharp", "lang-glsl", "lang-gwbasic", "lang-haskell", "lang-hlsl", "lang-json", "lang-julia", "lang-lean", "lang-lua", "lang-markdown", "lang-metal", "lang-msbasic2", "lang-nix", "lang-objc", "lang-ocaml", "lang-pascal", "lang-perl", "lang-php", "lang-powershell", "lang-protobuf", "lang-qbasic", "lang-quint", "lang-r", "lang-ruby", "lang-sql", "lang-toml", "lang-vbnet", "lang-wgsl", "lang-zig", "large-grammars", "lite", "medium", "medium-grammars", "test-helpers"],
+)
+
+rust_binary(
     name = "clone_attach_bench",
     srcs = glob(["examples/**/*.rs"]),
     crate_root = "examples/clone_attach_bench.rs",
