@@ -5,6 +5,7 @@ use std::time::Duration;
 use tracedecay_domain::{SessionId, UtcMicros};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
+use tracedecay_lcm::{LcmCompressionOverrides, LcmCompressionRequest, LcmError, LcmSummarizerMode};
 use tracedecay_session_temporal_store::{SessionRefreshRecoveryV1, SessionTemporalStore};
 use tracedecay_store::{
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshFrontierV1, SessionRefreshProgressV1,
@@ -28,6 +29,7 @@ use super::wake::{
 use super::worker::{
     apply_refresh_effect, run_session_temporal_refresh_pass, run_session_temporal_refresh_scheduler,
 };
+use crate::lcm_effects::DaemonLcmEffectService;
 use tracedecay_sessions::ProviderPassUnits;
 use tracedecay_sessions::serving::{
     SessionHistoryProgressState, SessionProjectionServingStatusPort,
@@ -46,6 +48,113 @@ async fn begin_empty_refreshes(
             .await
             .expect("running recovery");
     }
+}
+
+fn summary_request(session_id: &str) -> LcmCompressionRequest {
+    LcmCompressionRequest {
+        provider: "codex".to_owned(),
+        session_id: session_id.to_owned(),
+        messages: (0..4)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("message-{index}"),
+                    "role": if index % 2 == 0 { "user" } else { "assistant" },
+                    "content": format!("durable context message {index}"),
+                    "timestamp": index + 1,
+                })
+            })
+            .collect(),
+        current_tokens: Some(1_000),
+        focus_topic: None,
+        ignore_session_patterns: Vec::new(),
+        stateless_session_patterns: Vec::new(),
+        ignore_message_patterns: Vec::new(),
+        expected_current_frontier_store_id: None,
+        overrides: LcmCompressionOverrides {
+            threshold_tokens: Some(1),
+            fresh_tail_count: Some(1),
+            ..Default::default()
+        },
+        summarizer: LcmSummarizerMode::Provided {
+            summary_text: "Summary of the durable context".to_owned(),
+            route: None,
+            extraction_result: None,
+        },
+    }
+}
+
+#[tokio::test]
+async fn summary_publication_waits_for_its_session_refresh() {
+    let harness = RegisteredGlobalDbHarness::open("summary-refresh-settlement").await;
+    let store = SessionTemporalStore::new(harness.registered.as_ref());
+    let session_id = "summary-refresh-session";
+    begin_empty_refreshes(&store, [session_id, "unrelated-refused-session"]).await;
+    let state = Arc::new(SessionTemporalRefreshWakeState::default());
+    let service = DaemonLcmEffectService::new(
+        harness.registered.clone(),
+        None,
+        None,
+        Some(Arc::new(state.handle())),
+    );
+    let mut compression =
+        tokio::spawn(async move { service.compress(summary_request(session_id)).await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            result = &mut compression => panic!("summary must join its unfinished refresh: {result:?}"),
+            _ = state.wake.notified() => {},
+        }
+    }).await.expect("summary did not request projection settlement");
+
+    let worker = tokio::spawn(run_session_temporal_refresh_scheduler(
+        harness.registered.clone(),
+        Arc::clone(&state),
+        Arc::new(SessionRefusingProjector {
+            refused: SessionId::new("unrelated-refused-session").unwrap(),
+        }),
+        Arc::new(std::sync::RwLock::new(None)),
+        Arc::new(tokio::sync::Semaphore::new(0)),
+        SessionTemporalRefreshPolicy::default(),
+    ));
+    let response = tokio::time::timeout(Duration::from_secs(5), compression).await;
+    state.cancel();
+    worker.await.expect("refresh worker exits on cancellation");
+    let response = response.expect("summary did not settle").unwrap().unwrap();
+    assert_eq!(response.summary_nodes_created, 1);
+    let status = harness
+        .registered
+        .lcm_status("codex", Some(session_id))
+        .await
+        .unwrap();
+    assert_eq!(status.raw_message_count, 4);
+    assert_eq!(status.summary_node_count, 1);
+}
+
+#[tokio::test]
+async fn cancelled_refresh_does_not_publish_a_summary() {
+    let harness = RegisteredGlobalDbHarness::open("summary-refresh-cancelled").await;
+    let store = SessionTemporalStore::new(harness.registered.as_ref());
+    let session_id = "summary-cancelled-session";
+    begin_empty_refreshes(&store, [session_id]).await;
+    let state = Arc::new(SessionTemporalRefreshWakeState::default());
+    state.cancel();
+    let service = DaemonLcmEffectService::new(
+        harness.registered.clone(),
+        None,
+        None,
+        Some(Arc::new(state.handle())),
+    );
+    let error = service
+        .compress(summary_request(session_id))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, LcmError::StaleSummaryGeneration { .. }));
+    let status = harness
+        .registered
+        .lcm_status("codex", Some(session_id))
+        .await
+        .unwrap();
+    assert_eq!(status.summary_node_count, 0);
+    assert_eq!(status.raw_message_count, 0);
 }
 
 #[tokio::test]

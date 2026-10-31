@@ -40,7 +40,7 @@ async fn registered_authority() -> (
     )
     .await
     .unwrap();
-    let authority = DaemonLcmAuthority::registered(runtime.profile_database_arc());
+    let authority = DaemonLcmAuthority::registered(runtime.profile_database_arc(), None);
     (directory, runtime, authority)
 }
 
@@ -362,7 +362,7 @@ async fn unsupported_pressure_preflight_does_not_create_session_or_raw_messages(
     .await
     .unwrap();
     let database = runtime.profile_database_arc();
-    let authority = DaemonLcmAuthority::registered(database.clone());
+    let authority = DaemonLcmAuthority::registered(database.clone(), None);
     let mut request = preflight("cursor");
     request.messages = vec![serde_json::json!({
         "id": "message.must-not-persist",
@@ -445,7 +445,7 @@ async fn registered_doctor_reads_snapshot_while_writer_lane_is_held() {
     });
     writer_ready_rx.await.unwrap();
 
-    let authority = DaemonLcmAuthority::registered(database);
+    let authority = DaemonLcmAuthority::registered(database, None);
     let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Doctor, true);
     let response = tokio::time::timeout(
         std::time::Duration::from_secs(2),
@@ -488,7 +488,7 @@ async fn mounted_authority_rejects_identity_that_does_not_own_registered_shard()
         SessionRootId::new("root.profile.lcm-test").unwrap(),
     );
     let mounted =
-        mount_registered_lcm_authority(database.clone(), profile_identity, &shard).unwrap();
+        mount_registered_lcm_authority(database.clone(), profile_identity, &shard, None).unwrap();
     let first = mounted
         .execute(LcmAuthorityRequest::Status(LcmStatusQuery {
             provider: "claude".to_owned(),
@@ -520,7 +520,7 @@ async fn mounted_authority_rejects_identity_that_does_not_own_registered_shard()
             BranchId::new("branch.wrong-owner").unwrap(),
         ),
     );
-    assert!(mount_registered_lcm_authority(database, project_identity, &shard).is_none());
+    assert!(mount_registered_lcm_authority(database, project_identity, &shard, None).is_none());
 }
 
 #[test]

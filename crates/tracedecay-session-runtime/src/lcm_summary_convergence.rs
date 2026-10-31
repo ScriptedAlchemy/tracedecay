@@ -59,7 +59,8 @@ pub(crate) async fn run_summary_convergence_page(
     // Relation effects from a prior summary transaction are their own
     // session-bounded, work-budgeted page. The scheduler calls this function
     // only while holding the daemon-wide historical-work admission.
-    let effects = super::lcm_effects::DaemonLcmEffectService::new(database.clone(), None, None);
+    let effects =
+        super::lcm_effects::DaemonLcmEffectService::new(database.clone(), None, None, None);
     let relation_recovery: Pin<
         Box<
             dyn Future<
@@ -353,7 +354,7 @@ async fn process_candidate(
     }
 
     let bounded =
-        match super::lcm_effects::DaemonLcmEffectService::new(database.clone(), None, None)
+        match super::lcm_effects::DaemonLcmEffectService::new(database.clone(), None, None, None)
             .compress_retained_page(compression_request(&candidate), &candidate)
             .await
         {

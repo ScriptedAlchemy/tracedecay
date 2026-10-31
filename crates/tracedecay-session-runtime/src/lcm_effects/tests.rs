@@ -288,9 +288,10 @@ async fn compression_producer_apply_read_and_rollback_stay_one_authority() {
 
     let cancellation = CancellationSignal::active("cancellation.lcm-compress-journey").unwrap();
     assert!(cancellation.cancel(tracedecay_domain::UtcMicros(2)));
-    let service_cancelled = DaemonLcmEffectService::new(db.clone(), None, Some(&cancellation))
-        .compress(compression_request("compress-session"))
-        .await;
+    let service_cancelled =
+        DaemonLcmEffectService::new(db.clone(), None, Some(&cancellation), None)
+            .compress(compression_request("compress-session"))
+            .await;
     assert_eq!(service_cancelled.unwrap_err(), LcmError::Cancelled);
 
     let cancellation_control = execution_control();
@@ -309,7 +310,7 @@ async fn compression_producer_apply_read_and_rollback_stay_one_authority() {
     assert_eq!(rolled_back.raw_message_count, 8);
     assert_eq!(rolled_back.summary_node_count, 0);
 
-    let response = DaemonLcmEffectService::new(db.clone(), None, None)
+    let response = DaemonLcmEffectService::new(db.clone(), None, None, None)
         .compress(compression_request("compress-session"))
         .await
         .unwrap();
@@ -1154,7 +1155,7 @@ async fn providers_without_authoritative_summarizers_keep_frontiers_pending() {
                 .unwrap();
         }
 
-        let response = DaemonLcmEffectService::new(db.clone(), None, None)
+        let response = DaemonLcmEffectService::new(db.clone(), None, None, None)
             .compress(daemon_summary_request(provider, &session_id))
             .await
             .unwrap();
@@ -1380,7 +1381,7 @@ async fn retained_commit_defers_whole_session_replay_and_relation_application() 
     }
     let mut initial = compression_request(session_id);
     initial.summarizer = provided_summary("old whole-session replay sentinel");
-    DaemonLcmEffectService::new(db.clone(), None, None)
+    DaemonLcmEffectService::new(db.clone(), None, None, None)
         .compress(initial)
         .await
         .unwrap();
@@ -3515,7 +3516,7 @@ done
                     .await
                     .unwrap();
             }
-            let response = DaemonLcmEffectService::new(db.clone(), None, None)
+            let response = DaemonLcmEffectService::new(db.clone(), None, None, None)
                 .compress(daemon_summary_request(provider, &session_id))
                 .await
                 .unwrap();
@@ -3537,7 +3538,7 @@ async fn boundary_apply_and_cancelled_rollback_are_observable() {
     for session_id in ["old-session", "new-session", "cancelled-session"] {
         assert!(db.upsert_session(&session("cursor", session_id)).await);
     }
-    let service = DaemonLcmEffectService::new(db.clone(), None, None);
+    let service = DaemonLcmEffectService::new(db.clone(), None, None, None);
     let response = service
         .session_boundary(LcmSessionBoundaryRequest {
             provider: "cursor".to_string(),

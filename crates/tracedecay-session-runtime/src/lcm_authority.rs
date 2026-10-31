@@ -5,6 +5,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use tracedecay_contracts::{
     CancellationSignal, CancellationStage, OperationTermination, RequestAdmission, RequestContext,
@@ -28,6 +29,7 @@ use tracedecay_session_memory::session::lcm::{
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_session_temporal_store::SessionTemporalAccess;
+use tracedecay_sessions::serving::SessionRefreshWorkerPort;
 
 mod mount;
 mod receipt;
@@ -66,20 +68,32 @@ fn pressure_compression_request(preflight: LcmPreflightRequest) -> LcmCompressio
 /// committed LCM frontier/status from storage.
 pub(crate) struct DaemonLcmAuthority {
     database: RegisteredGlobalDbLeaseV1,
+    projection: Option<Arc<dyn SessionRefreshWorkerPort>>,
 }
 
 impl DaemonLcmAuthority {
-    pub(crate) fn registered(database: RegisteredGlobalDbLeaseV1) -> Self {
-        Self { database }
+    pub(crate) fn registered(
+        database: RegisteredGlobalDbLeaseV1,
+        projection: Option<Arc<dyn SessionRefreshWorkerPort>>,
+    ) -> Self {
+        Self {
+            database,
+            projection,
+        }
     }
 
     async fn compact(
         &self,
         request: LcmCompressionRequest,
     ) -> Result<LcmCompressionResponse, LcmError> {
-        super::lcm_effects::DaemonLcmEffectService::new(self.database.clone(), None, None)
-            .compress(request)
-            .await
+        super::lcm_effects::DaemonLcmEffectService::new(
+            self.database.clone(),
+            None,
+            None,
+            self.projection.clone(),
+        )
+        .compress(request)
+        .await
     }
 
     async fn status(&self, query: &LcmStatusQuery) -> Result<LcmStatus, LcmError> {
@@ -449,11 +463,11 @@ impl DaemonLcmAuthority {
                 None,
                 None,
             ),
-            Ok(Err(_)) => terminal_failure(
+            Ok(Err(error)) => terminal_failure(
                 context,
                 LcmAuthorityOperation::Compact,
                 started_at,
-                "daemon compaction failed",
+                &format!("daemon compaction failed: {error}"),
             ),
             Err(interruption) => terminal_interruption(
                 context,

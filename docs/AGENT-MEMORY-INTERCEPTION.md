@@ -90,7 +90,7 @@ hashes recorded under `[hooks.state]` in `config.toml`):
 | `UserPromptSubmit` | session id, cwd, **prompt text** | capture-only in TraceDecay | No |
 | `SubagentStart` | session id, agent type | capture-only in TraceDecay | No |
 | `PostToolUse` | tool name, command | `hookSpecificOutput.additionalContext` | **Yes** |
-| `PostCompact` | rollout path / pressure boundary | typed native-payload availability probe | No |
+| `PostCompact` | rollout path / pressure boundary | daemon-owned compaction outcome | No |
 | `Stop` | session id, cwd, final response metadata | capture-only in TraceDecay | No |
 
 Codex's mounted immediate-response journey is deliberately limited to the
@@ -223,9 +223,11 @@ marketplace entry (`install_codex_marketplace_entry`) and
   return only daemon-approved `additionalContext`; `UserPromptSubmit`,
   `SubagentStart`, and `Stop` remain capture-only. **No facts are fabricated or
   injected by the hook process.**
-- `PostCompact` forwards the native pressure boundary to the daemon. Because
-  the hook exposes no authenticated compacted payload, publication is typed
-  unavailable and no auxiliary summary is substituted.
+- `PostCompact` forwards the pressure boundary to the daemon. The daemon
+  ingests the rollout and compresses its durable messages through native
+  summary evidence or the configured Codex app-server summarizer. Summary
+  publication joins any competing temporal refresh before committing. The
+  hook fails open with a warning when the daemon cannot settle the effect.
 
 Codex transcripts (rollouts under `~/.codex/sessions/`) are ingested into the
 LCM store as well (session-recall skills cover "Cursor/Codex/agent

@@ -2102,6 +2102,7 @@ async fn project_retrieval_mounts_each_branch_of_a_shared_graph_store() {
                 database.clone(),
                 root.identity().clone(),
                 shard,
+                None,
             )
             .is_some()
         );

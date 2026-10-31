@@ -1,10 +1,12 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tracedecay_contracts::{CancellationSignal, Deadline};
 use tracedecay_temporal_query::execution::ExecutionControl;
 
+use tracedecay_domain::SessionId;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_lcm::{
     LcmCompressionOutcome, LcmCompressionRequest, LcmCompressionResponse, LcmError,
@@ -13,6 +15,7 @@ use tracedecay_lcm::{
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_lcm::{LcmSessionBoundaryRequest, LcmSessionBoundaryResponse};
 use tracedecay_session_temporal_store::SessionTemporalAccess;
+use tracedecay_sessions::serving::SessionRefreshWorkerPort;
 
 pub(super) const LCM_EFFECT_CEILING: Duration =
     tracedecay_daemon_protocol::DEFAULT_DAEMON_OPERATION_DEADLINE;
@@ -27,6 +30,7 @@ const LCM_EFFECT_WORK_LIMIT: usize = 4_096;
 pub(super) struct DaemonLcmEffectService {
     db: RegisteredGlobalDbLeaseV1,
     control: LcmEffectControl,
+    projection: Option<Arc<dyn SessionRefreshWorkerPort>>,
 }
 
 #[derive(Clone)]
@@ -97,10 +101,12 @@ impl DaemonLcmEffectService {
         db: RegisteredGlobalDbLeaseV1,
         deadline: Option<&Deadline>,
         cancellation: Option<&CancellationSignal>,
+        projection: Option<Arc<dyn SessionRefreshWorkerPort>>,
     ) -> Self {
         Self {
             db,
             control: LcmEffectControl::new(deadline, cancellation),
+            projection,
         }
     }
 
@@ -253,19 +259,44 @@ impl DaemonLcmEffectService {
         &self,
         request: &LcmCompressionRequest,
     ) -> Result<LcmCompressionResponse, LcmError> {
-        let execution = self.control.execution_control();
-        let before_commit = self.control.clone();
-        self.control
-            .execute(
-                &execution,
-                Box::pin(tracing::Instrument::instrument(
-                    self.db.lcm_compress_guarded(request, &execution, move || {
-                        before_commit.checkpoint()
-                    }),
-                    tracing::trace_span!("daemon.lcm.commit"),
-                )),
-            )
-            .await
+        loop {
+            let execution = self.control.execution_control();
+            let before_commit = self.control.clone();
+            let result = self
+                .control
+                .execute(
+                    &execution,
+                    Box::pin(tracing::Instrument::instrument(
+                        self.db.lcm_compress_guarded(request, &execution, move || {
+                            before_commit.checkpoint()
+                        }),
+                        tracing::trace_span!("daemon.lcm.commit"),
+                    )),
+                )
+                .await;
+            match result {
+                Err(error @ LcmError::StaleSummaryGeneration { expected, actual })
+                    if actual > expected =>
+                {
+                    let Some(projection) = &self.projection else {
+                        return Err(error);
+                    };
+                    let session_id = SessionId::new(request.session_id.clone())
+                        .map_err(|error| LcmError::Db(error.to_string()))?;
+                    let settled = projection
+                        .wake_and_wait_for_session_projection(
+                            &session_id,
+                            self.control.remaining()?,
+                        )
+                        .await;
+                    self.control.checkpoint()?;
+                    if !settled {
+                        return Err(error);
+                    }
+                }
+                result => return result,
+            }
+        }
     }
 
     async fn commit_retained_compression(
@@ -371,7 +402,7 @@ pub async fn lcm_compress_for_test(
     db: RegisteredGlobalDbLeaseV1,
     request: LcmCompressionRequest,
 ) -> Result<LcmCompressionResponse, LcmError> {
-    DaemonLcmEffectService::new(db, None, None)
+    DaemonLcmEffectService::new(db, None, None, None)
         .compress(request)
         .await
 }
@@ -382,7 +413,7 @@ pub async fn lcm_session_boundary_for_test(
     db: RegisteredGlobalDbLeaseV1,
     request: LcmSessionBoundaryRequest,
 ) -> Result<LcmSessionBoundaryResponse, LcmError> {
-    DaemonLcmEffectService::new(db, None, None)
+    DaemonLcmEffectService::new(db, None, None, None)
         .session_boundary(request)
         .await
 }

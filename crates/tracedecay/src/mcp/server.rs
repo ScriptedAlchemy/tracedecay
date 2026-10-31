@@ -970,6 +970,7 @@ impl McpServer {
                     database.clone(),
                     root.identity().clone(),
                     root.expected_runtime_shard()?,
+                    project_session_refresh_wake.clone(),
                 )
             });
         let server = Arc::new_cyclic(|dispatch_server| Self {
