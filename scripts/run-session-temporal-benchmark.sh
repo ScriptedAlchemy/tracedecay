@@ -90,7 +90,7 @@ require(stats.get("p99_label") == p99_label, "p99 label mismatch")
 require(workload.get("production_path", {}).get("available_to_benchmark_target") is True,
         "production path must be available")
 implementation = workload.get("implementation") or {}
-require(implementation.get("path") == "crates/tracedecay/benches/session_temporal/harness.rs",
+require(implementation.get("path") == "crates/tracedecay-project/src/test_support/session_temporal_benchmark.rs",
         "implementation path mismatch")
 require((root / implementation["path"]).is_file(), "implementation source missing")
 runner = workload.get("runner") or {}
@@ -132,7 +132,7 @@ elif provisional == "result-current.json":
             "current result workload manifest mismatch")
     identity = result.get("source_identity", {})
     require(identity.get("harness")
-            == "crates/tracedecay/benches/session_temporal/harness.rs",
+            == "crates/tracedecay-project/src/test_support/session_temporal_benchmark.rs",
             "current result harness identity mismatch")
     require(identity.get("runner") == "scripts/run-session-temporal-benchmark.sh",
             "current result runner identity mismatch")
@@ -188,7 +188,7 @@ run_benchmark() {
   esac
   # The Bazel test launcher owns HOME and TraceDecay profile isolation.
   # Local execution lets contract refresh publish into this exact checkout.
-  bazel test --config=release --config=ci //crates/tracedecay:session_temporal \
+  bazel test --config=release --config=ci //crates/tracedecay-project:session_temporal \
     --test_strategy=standalone --nocache_test_results --test_output=all \
     --test_env=TRACEDECAY_BENCHMARK_REPO_ROOT="$repo_root" \
     --test_arg=--bench --test_arg="$mode"
