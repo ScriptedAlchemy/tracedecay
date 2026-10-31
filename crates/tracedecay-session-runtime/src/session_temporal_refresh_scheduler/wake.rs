@@ -1233,6 +1233,57 @@ mod tests {
     }
 
     #[test]
+    fn a_retrying_worker_admits_historical_catch_up_before_its_first_progressing_pass() {
+        let state = Arc::new(SessionTemporalRefreshWakeState::default());
+        state.mark_running();
+        let wake = SessionTemporalRefreshWake::unavailable();
+        wake.bind(&state);
+        state.begin_pass();
+        state.mark_recovering(
+            SessionTemporalRefreshBlocker::Storage,
+            SessionTemporalRefreshRetryClass::Storage,
+        );
+
+        // Health keeps reporting this retry as stalled because no pass has
+        // made progress yet. Admission still belongs to the live supervisor
+        // that is about to re-run the pass.
+        assert_eq!(
+            state.status().unavailable_reason,
+            Some(SessionTemporalRefreshUnavailableReason::Stalled)
+        );
+        assert_eq!(
+            wake.schedule_historical_admission(),
+            HistoricalAdmissionView::Scheduled
+        );
+        assert!(state.take_historical_dirty());
+    }
+
+    #[test]
+    fn a_stopped_worker_refuses_historical_admission() {
+        let state = Arc::new(SessionTemporalRefreshWakeState::default());
+        state.mark_running();
+        let wake = SessionTemporalRefreshWake::unavailable();
+        wake.bind(&state);
+        state.mark_stopped();
+
+        assert_eq!(
+            wake.schedule_historical_admission(),
+            HistoricalAdmissionView::Unavailable
+        );
+        assert!(!state.take_historical_dirty());
+    }
+
+    #[test]
+    fn an_unbound_route_refuses_historical_admission() {
+        let wake = SessionTemporalRefreshWake::unavailable();
+
+        assert_eq!(
+            wake.schedule_historical_admission(),
+            HistoricalAdmissionView::Unavailable
+        );
+    }
+
+    #[test]
     fn cancellation_clears_pending_worker_instrumentation() {
         let state = SessionTemporalRefreshWakeState::default();
         state.requeue_projection();

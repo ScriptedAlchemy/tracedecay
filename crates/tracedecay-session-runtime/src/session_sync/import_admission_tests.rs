@@ -15,18 +15,26 @@ use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_sessions::serving::{
-    SessionProjectionServingState, SessionProjectionServingStatusPort, SessionProjectionStaleReason,
+    SessionProjectionServingState, SessionProjectionServingStatusPort,
+    SessionProjectionStaleReason, SessionProjectionUnavailableReason,
 };
 
 use crate::session_sync::{DaemonSessionSyncConfig, DaemonSessionSyncService};
 use crate::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
 use crate::session_temporal_refresh_scheduler::history::SessionHistoricalIngestOutcome;
-use crate::session_temporal_refresh_scheduler::wake::SessionTemporalRefreshWakeState;
+use crate::session_temporal_refresh_scheduler::wake::{
+    SessionTemporalRefreshBlocker, SessionTemporalRefreshRetryClass,
+    SessionTemporalRefreshWakeState,
+};
 
 #[derive(Clone, Copy)]
 enum CatchUp {
     Pending,
     Current,
+    /// A freshly mounted worker whose first pass named a retry before it
+    /// recorded any progressing pass, as a restarted daemon does when its
+    /// store makes the first write wait.
+    Recovering,
     Blocked,
 }
 
@@ -37,6 +45,13 @@ fn catch_up_state(kind: CatchUp) -> Arc<SessionTemporalRefreshWakeState> {
         CatchUp::Pending => state.mark_history_pending(),
         CatchUp::Current => {
             state.record_history_outcome(SessionHistoricalIngestOutcome::Complete);
+        }
+        CatchUp::Recovering => {
+            state.begin_pass();
+            state.mark_recovering(
+                SessionTemporalRefreshBlocker::Storage,
+                SessionTemporalRefreshRetryClass::Storage,
+            );
         }
         CatchUp::Blocked => {
             state.record_history_outcome(SessionHistoricalIngestOutcome::Blocked {
@@ -168,6 +183,28 @@ fn import_after_current_catch_up_defers_until_the_scheduled_pass_runs() {
             }
         );
         assert!(state.take_historical_dirty());
+    })
+    .expect("native runtime");
+}
+
+#[test]
+fn import_hands_history_to_a_worker_recovering_before_its_first_progressing_pass() {
+    native_runtime::block_on(async {
+        let (receipt, state) = import_receipt(CatchUp::Recovering, "import-recovering").await;
+
+        // A retrying supervisor still owns the deferred unit: it re-runs the
+        // pass that named the retry. Only a worker that is gone may fail the
+        // hand-off, so a retry without a progressing pass is not a failure.
+        assert_eq!(receipt.termination, OperationTermination::Partial);
+        assert!(receipt.failure_codes.is_empty());
+        assert_eq!(remaining_work(&receipt), 2);
+        assert!(state.take_historical_dirty());
+        assert_eq!(
+            bound_wake(&state).serving_status().state,
+            SessionProjectionServingState::Unavailable {
+                reason: SessionProjectionUnavailableReason::WorkerStalled,
+            }
+        );
     })
     .expect("native runtime");
 }
