@@ -358,7 +358,7 @@ pub(crate) use core_doctor::*;
 pub use core_handshake::*;
 pub use core_hooks::*;
 pub use core_proxy::*;
-mod github_credential_lifecycle;
+mod github_secret_reader;
 mod graph_resolution;
 use graph_resolution::retained_project_server_resolver;
 mod http_application;
