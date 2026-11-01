@@ -19,15 +19,17 @@ fn deploy_rendered_bundle(home: &Path, tracedecay_bin: &str) -> PathBuf {
     deploy_dir
 }
 
-fn copy_rendered_bundle_to_native_cache(home: &Path, tracedecay_bin: &str) {
-    let source = plugin_deploy_dir(home);
-    let cache = claude_current_cached_plugin_root(home);
-    for (relative, _) in rendered_plugin_files(tracedecay_bin, &ServeArgs::default()).unwrap() {
-        let target = cache.join(relative);
-        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-        let contents = std::fs::read(source.join(relative)).unwrap();
-        std::fs::write(target, contents).unwrap();
-    }
+fn copy_rendered_bundle_to_native_cache(
+    home: &Path,
+    tracedecay_bin: &str,
+) -> Vec<(&'static str, String)> {
+    let rendered = rendered_plugin_files(tracedecay_bin, &ServeArgs::default()).unwrap();
+    super::super::native_cache_fixture::materialize_cached_bundle(
+        &plugin_deploy_dir(home),
+        &claude_current_cached_plugin_root(home),
+        rendered.iter().map(|(relative, _)| *relative),
+    );
+    rendered
 }
 
 fn write_native_activation(home: &Path, tracedecay_bin: &str) {
@@ -159,18 +161,7 @@ fn native_cache_content_drift_and_binary_relocation_require_refresh() {
         .iter()
         .map(|(relative, _)| (*relative).to_owned())
         .collect::<Vec<_>>();
-    for (relative, expected) in rendered {
-        assert_eq!(
-            std::fs::read_to_string(source.join(relative)).unwrap(),
-            expected,
-            "relocated marketplace bytes differ at {relative}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(cache.join(relative)).unwrap(),
-            expected,
-            "refreshed native cache bytes differ at {relative}"
-        );
-    }
+    super::super::native_cache_fixture::assert_rendered_bundle_bytes(&source, &cache, &rendered);
     for root in [&source, &cache] {
         let unexpected = unexpected_bundle_entrypoints(
             root,
