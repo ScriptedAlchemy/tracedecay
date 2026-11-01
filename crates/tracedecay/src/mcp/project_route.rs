@@ -38,6 +38,17 @@ impl ResolvedProjectRoute {
             )
         })
     }
+
+    /// Rebinds this route to the owner that will execute the request.
+    ///
+    /// Admission can follow the route's current owner when a composition
+    /// upgrade retired the selected one before the request was dispatched.
+    /// The owner, profile, requested root, and scope identity stay unchanged;
+    /// only the retained-server handle moves, so no later reader reopens the
+    /// retired server through this route.
+    pub(crate) fn retarget_retained_server(&mut self, server: &Arc<crate::mcp::server::McpServer>) {
+        self.server = Arc::downgrade(server);
+    }
 }
 
 impl std::fmt::Debug for ResolvedProjectRoute {
@@ -840,6 +851,50 @@ mod tests {
         let newest_routed = newest.clone();
         assert_eq!(newest_routed, newest);
         assert!(newest_route.is_some(), "newest route must remain cached");
+    }
+
+    /// Admission can rebind a selected route to the owner that actually
+    /// executes the request. The rebinding keeps the route's owner and scope
+    /// identity and makes every later reader resolve the executing owner,
+    /// never the retired one.
+    #[tokio::test]
+    async fn retargeted_route_resolves_the_executing_owner() {
+        let retired = resolved_route_fixture("session.retarget", "thread.retarget").await;
+        let successor =
+            resolved_route_fixture("session.retarget-next", "thread.retarget-next").await;
+        let mut cache = HookProjectRouteCache::default();
+        retired
+            .server
+            .update_hook_workspace_route(&retired.event, &mut cache)
+            .await
+            .expect("hook route resolves");
+        let arguments = json!({
+            "layout": "flat",
+            "session_id": "session.retarget",
+            "thread_id": "thread.retarget"
+        });
+        let mut route = resolved_route_for_arguments(&cache, &arguments).expect("cached route");
+        let owner = route.owner.clone();
+        let scope = route.scope.clone();
+        assert!(
+            Arc::ptr_eq(
+                &route.retained_server().expect("retired owner is live"),
+                &retired.server
+            ),
+            "the fixture must start on the selected owner"
+        );
+
+        route.retarget_retained_server(&successor.server);
+
+        assert!(
+            Arc::ptr_eq(
+                &route.retained_server().expect("successor owner is live"),
+                &successor.server
+            ),
+            "a rebinding route must resolve the executing owner, never the retired one"
+        );
+        assert_eq!(route.owner, owner, "rebinding keeps the route owner");
+        assert_eq!(route.scope, scope, "rebinding keeps the route scope");
     }
 
     fn route_root(route: &super::WorkspaceProjectRoute) -> std::borrow::Cow<'_, str> {
