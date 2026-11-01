@@ -36,6 +36,8 @@ mod profile_lost_test;
 #[cfg(unix)]
 mod project_capacity_reuse_test;
 #[cfg(unix)]
+mod retired_project_owner_route_test;
+#[cfg(unix)]
 mod sealed_generation_crash_test;
 #[cfg(unix)]
 mod socket_lifecycle_test;

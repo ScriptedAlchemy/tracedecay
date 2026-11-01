@@ -1402,6 +1402,54 @@ impl McpServer {
         }
     }
 
+    /// Follows a project composition upgrade that retired the owner this
+    /// connection was bound to before the request reached a handler.
+    ///
+    /// A project open publishes a core owner and then replaces it with the
+    /// full owner, revoking the core after its admitted responses drain. A
+    /// connection routed to the core can still have its next request admitted
+    /// after that revocation; nothing has run for the request, so it belongs
+    /// to the route's current owner rather than to a retirement refusal.
+    ///
+    /// Only the same project store on the same served branch, with no loss of
+    /// session authority, may inherit the request. Every other case keeps the
+    /// typed retryable retirement refusal, because serving it elsewhere (or
+    /// replaying it later) would cross a route or an effect boundary.
+    async fn current_owner_after_retirement(
+        &self,
+        retired: &Arc<McpServer>,
+    ) -> Option<Arc<McpServer>> {
+        let resolver = self.retained_project_server_resolver.clone()?;
+        let retired_graph = retired.cg_snapshot().await;
+        let request =
+            tracedecay_dashboard_api::project_graph::RetainedProjectGraphRequest::for_mounted_root(
+                retired_graph.project_root().to_path_buf(),
+            );
+        let current = resolver(request).await.ok().flatten()?;
+        if Arc::ptr_eq(&current, retired)
+            || current
+                .project_server_lifecycle
+                .response_revoked()
+                .is_cancelled()
+            || (retired.project_session_db().is_some() && current.project_session_db().is_none())
+        {
+            return None;
+        }
+        let current_graph = current.cg_snapshot().await;
+        if retired_graph.db_path() != current_graph.db_path()
+            || retired_graph.store_layout().identity.project_id
+                != current_graph.store_layout().identity.project_id
+            || retired_graph.serving_branch() != current_graph.serving_branch()
+        {
+            return None;
+        }
+        tracing::info!(
+            project = %retired_graph.project_root().display(),
+            "re-routed a request from a retired project owner to the route's current owner"
+        );
+        Some(current)
+    }
+
     pub(super) fn project_server_revoked_response(
         &self,
         id: &Value,
@@ -1535,7 +1583,7 @@ impl McpServer {
                 );
             }
         };
-        let dispatch_server = match routed.selected_server.as_ref() {
+        let selected_dispatch_server = match routed.selected_server.as_ref() {
             Some(selected) => Arc::clone(selected),
             None => match self.dispatch_authority.server().upgrade() {
                 Some(server) => server,
@@ -1548,6 +1596,21 @@ impl McpServer {
                     return refuse(id, &error);
                 }
             },
+        };
+        // Nothing below has run yet. A connection bound to an owner a
+        // composition upgrade retired before this request was admitted follows
+        // the route's current owner, so a call that never reached a handler is
+        // not reported as a retired response.
+        let dispatch_server = if selected_dispatch_server
+            .project_server_lifecycle
+            .response_revoked()
+            .is_cancelled()
+        {
+            self.current_owner_after_retirement(&selected_dispatch_server)
+                .await
+                .unwrap_or(selected_dispatch_server)
+        } else {
+            selected_dispatch_server
         };
         connection.install_selected_request_server(Arc::clone(&dispatch_server));
         if let Some(response) = dispatch_server.project_server_revoked_response(&id, &tool_name) {
@@ -2103,5 +2166,124 @@ mod activity_dispatch_tests {
         .expect("detached activity persistence must complete after writer release");
 
         server.shutdown().await;
+    }
+}
+
+/// A composition upgrade publishes a core project owner and then replaces it
+/// with the full owner, revoking the core once its admitted responses drain.
+/// A connection bound to the core can have its next request admitted after that
+/// revocation; the request never reached a handler, so it belongs to the
+/// route's current owner, not to a retirement refusal.
+#[cfg(test)]
+mod retired_project_route_tests {
+    use super::*;
+
+    /// The bound server plus the resolver the daemon would install for later
+    /// owners. `current` is `None` when the route has no successor. The repo
+    /// directory stays with the caller because the server canonicalizes it on
+    /// every dispatch.
+    async fn retirement_fixture(
+        current: Option<Arc<McpServer>>,
+    ) -> (Arc<McpServer>, tempfile::TempDir) {
+        let (cg, repo, authority) =
+            crate::mcp::server::writer_test_support::init_indexed_repo().await;
+        let context = crate::mcp::server::writer_test_support::registered_context(cg, &authority)
+            .with_retained_project_server_resolver(
+                crate::mcp::server::install_retained_project_server_resolver(move |_request| {
+                    let current = current.clone();
+                    Box::pin(async move { Ok(current) })
+                }),
+            );
+        (McpServer::new_with_context(context).await, repo)
+    }
+
+    async fn dashboard_stop(server: &McpServer, id: i64) -> Option<JsonRpcResponse> {
+        server
+            .handle_request(&JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: Some(json!(id)),
+                method: "tools/call".to_owned(),
+                params: Some(json!({
+                    "name": "tracedecay_dashboard",
+                    "arguments": {"action": "stop"},
+                })),
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_request_retired_before_dispatch_is_served_by_the_current_owner() {
+        let (source, repo, authority) =
+            crate::mcp::server::writer_test_support::init_indexed_repo().await;
+        let current = McpServer::new_with_registered_test_context(
+            crate::mcp::server::writer_test_support::registered_context(
+                authority.reopen_project_graph(repo.path()).await,
+                &authority,
+            ),
+            Vec::new(),
+        )
+        .await
+        .expect("current owner");
+        let retired = McpServer::new_with_context(
+            crate::mcp::server::writer_test_support::registered_context(source, &authority)
+                .with_retained_project_server_resolver(
+                    crate::mcp::server::install_retained_project_server_resolver({
+                        let current = Arc::clone(&current);
+                        move |_request| {
+                            let current = Arc::clone(&current);
+                            Box::pin(async move { Ok(Some(current)) })
+                        }
+                    }),
+                ),
+        )
+        .await;
+        retired.revoke_project_server_responses();
+
+        let response = dashboard_stop(retired.as_ref(), 1)
+            .await
+            .expect("retired owner answered the tool call");
+        assert!(
+            response.error.is_none(),
+            "a request that never reached a handler must follow the route's \
+             current owner instead of a retirement refusal: {:?}",
+            response.error
+        );
+        let text = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("content"))
+            .and_then(Value::as_array)
+            .and_then(|content| content.iter().find_map(|block| block.get("text")?.as_str()))
+            .unwrap_or_else(|| panic!("dashboard stop returned no text payload: {response:?}"));
+        assert!(
+            text.contains("not_running"),
+            "the current owner must answer the dashboard stop: {text}"
+        );
+        assert!(
+            !current
+                .project_server_lifecycle
+                .response_revoked()
+                .is_cancelled()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retired_owner_without_a_current_owner_keeps_the_typed_refusal() {
+        let (retired, _repo) = retirement_fixture(None).await;
+        retired.revoke_project_server_responses();
+
+        let response = dashboard_stop(retired.as_ref(), 2)
+            .await
+            .expect("orphaned owner answered the tool call");
+        let error = response.error.expect("a retired owner must refuse");
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("reason_code"))
+                .and_then(Value::as_str),
+            Some(tracedecay_daemon_protocol::PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE),
+            "with no current owner the refusal stays the typed retirement state"
+        );
     }
 }
