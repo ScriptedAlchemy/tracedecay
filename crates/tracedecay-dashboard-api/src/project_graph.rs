@@ -29,6 +29,9 @@ pub struct RetainedProjectGraphRequest {
     pub requested_worktree_root: PathBuf,
     pub requested_git_common_dir: Option<PathBuf>,
     pub requested_branch: Option<String>,
+    /// None: unconstrained root lookup; Some(None): exact root scope;
+    /// Some(Some(prefix)): exact scoped owner lookup after retirement.
+    pub requested_scope_prefix: Option<Option<String>>,
 }
 
 impl RetainedProjectGraphRequest {
@@ -45,6 +48,7 @@ impl RetainedProjectGraphRequest {
                 &requested_worktree_root,
             ),
             requested_worktree_root,
+            requested_scope_prefix: None,
             owner: Some(owner),
         }
     }
@@ -55,8 +59,26 @@ impl RetainedProjectGraphRequest {
             requested_branch: tracedecay_runtime_core::branch::current_branch(&root),
             registered_root: root.clone(),
             requested_worktree_root: root,
+            requested_scope_prefix: None,
             owner: None,
         }
+    }
+
+    /// Resolve a replacement for one already-bound scope, not an arbitrary
+    /// server mounted on the same worktree root.
+    pub fn for_mounted_scope(root: PathBuf, scope_prefix: Option<String>) -> Self {
+        Self {
+            requested_scope_prefix: Some(scope_prefix),
+            ..Self::for_mounted_root(root)
+        }
+    }
+
+    /// An unconstrained dashboard lookup may select any uniquely mounted
+    /// owner; a retired connection must only rebind to its exact scope.
+    pub fn accepts_scope(&self, scope_prefix: Option<&str>) -> bool {
+        self.requested_scope_prefix
+            .as_ref()
+            .is_none_or(|expected| expected.as_deref() == scope_prefix)
     }
 }
 

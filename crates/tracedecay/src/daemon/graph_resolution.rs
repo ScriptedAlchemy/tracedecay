@@ -58,6 +58,9 @@ pub(super) fn retained_project_server_resolver(
                 };
                 let mut servers = Vec::with_capacity(mounted_servers.len());
                 for server in mounted_servers {
+                    if !request.accepts_scope(server.scope_prefix()) {
+                        continue;
+                    }
                     servers.push((Arc::clone(&server), server.cg_snapshot().await));
                 }
                 let requested_root = authority::canonical_identity_path(
