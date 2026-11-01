@@ -2539,7 +2539,9 @@ mod retired_project_route_tests {
         )
         .await;
         let mut retired_context = registered_context(source, &authority)
-            .with_retained_project_server_resolver(successor_resolver(Some(Arc::clone(&successor))));
+            .with_retained_project_server_resolver(successor_resolver(Some(Arc::clone(
+                &successor,
+            ))));
         retired_context.scope_prefix = Some("src".to_owned());
         let retired = McpServer::new_with_context(retired_context).await;
         retired.revoke_project_server_responses();
