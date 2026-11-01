@@ -1483,8 +1483,9 @@ impl McpServer {
         };
         let retired_graph = retired.cg_snapshot().await;
         let request =
-            tracedecay_dashboard_api::project_graph::RetainedProjectGraphRequest::for_mounted_root(
+            tracedecay_dashboard_api::project_graph::RetainedProjectGraphRequest::for_mounted_scope(
                 retired_graph.project_root().to_path_buf(),
+                retired.scope_prefix().map(str::to_owned),
             );
         let Some(current) = resolver(request).await? else {
             return Ok(None);
@@ -1495,6 +1496,7 @@ impl McpServer {
                 .response_revoked()
                 .is_cancelled()
             || !same_registered_profile(retired, &current)
+            || retired.scope_prefix() != current.scope_prefix()
             || (retired.project_session_db().is_some() && current.project_session_db().is_none())
         {
             return Ok(None);
@@ -2472,6 +2474,77 @@ mod retired_project_route_tests {
             "a cancelled request must not carry a handler result"
         );
         drop(release);
+    }
+
+    #[tokio::test]
+    async fn a_retired_scoped_owner_selects_only_its_scope_among_mounted_peers() {
+        let (source, repo, authority) = init_indexed_repo().await;
+        let mut current_context = registered_context(
+            authority.reopen_project_graph(repo.path()).await,
+            &authority,
+        );
+        current_context.scope_prefix = Some("src".to_owned());
+        let current = McpServer::new_with_registered_test_context(current_context, Vec::new())
+            .await
+            .expect("current scoped owner");
+        let other_scope = candidate_successor(
+            authority.reopen_project_graph(repo.path()).await,
+            &authority,
+            |context| context.scope_prefix = Some("tests".to_owned()),
+        )
+        .await;
+        let current_for_resolver = Arc::clone(&current);
+        let other_for_resolver = Arc::clone(&other_scope);
+        let resolver = install_retained_project_server_resolver(move |request| {
+            let candidates = [
+                Arc::clone(&current_for_resolver),
+                Arc::clone(&other_for_resolver),
+            ];
+            Box::pin(async move {
+                let mut matches = candidates
+                    .into_iter()
+                    .filter(|server| request.accepts_scope(server.scope_prefix()));
+                let selected = matches.next();
+                assert!(
+                    matches.next().is_none(),
+                    "one worktree with two scopes must select only its scoped successor"
+                );
+                Ok(selected)
+            })
+        });
+        let mut retired_context =
+            registered_context(source, &authority).with_retained_project_server_resolver(resolver);
+        retired_context.scope_prefix = Some("src".to_owned());
+        let retired = McpServer::new_with_context(retired_context).await;
+        retired.revoke_project_server_responses();
+        let current_before = total_requests(&current);
+        let other_before = total_requests(&other_scope);
+
+        let response = call(&retired, &dashboard_request(10, "stop")).await;
+        assert!(
+            response.error.is_none(),
+            "a scoped connection must follow its exact mounted successor: {response:?}"
+        );
+        assert_eq!(total_requests(&current), current_before + 1);
+        assert_eq!(total_requests(&other_scope), other_before);
+    }
+
+    #[tokio::test]
+    async fn a_successor_on_another_scope_of_the_same_root_is_refused() {
+        let (source, repo, authority) = init_indexed_repo().await;
+        let successor = candidate_successor(
+            authority.reopen_project_graph(repo.path()).await,
+            &authority,
+            |context| context.scope_prefix = Some("tests".to_owned()),
+        )
+        .await;
+        let mut retired_context = registered_context(source, &authority)
+            .with_retained_project_server_resolver(successor_resolver(Some(Arc::clone(&successor))));
+        retired_context.scope_prefix = Some("src".to_owned());
+        let retired = McpServer::new_with_context(retired_context).await;
+        retired.revoke_project_server_responses();
+
+        assert_successor_refused(&retired, Some(&successor), 11).await;
     }
 
     #[tokio::test]
