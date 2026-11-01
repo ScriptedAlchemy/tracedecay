@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tempfile::TempDir;
+use tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort;
 use tracedecay_code_index::graph_projection::{
     CodeGraphCatalogReleaseV1, CodeGraphEngineReleaseV1, CodeGraphReadinessRequirement,
 };
@@ -33,9 +34,9 @@ use tracedecay_code_index_runtime::mcp_admission::{
 use tracedecay_contracts::{
     CallableCodeOperationKind, CallableCodeQueryPort, CancellationContext, CapabilityGrantId,
     CapabilityGrantSnapshot, CodeQueryScope, CodeRelationRequest, Deadline, DisclosureClass,
-    PageRequest, RequestContext, RequestId, ResolvedScope, ResultProjection, RetrievalOrder,
-    RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta, callable_code_operation,
-    now_micros,
+    FreshnessState, PageRequest, RequestContext, RequestId, ResolvedScope, ResultProjection,
+    RetrievalOrder, RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta,
+    callable_code_operation, now_micros,
 };
 use tracedecay_daemon_protocol::DEFAULT_TOOL_REQUEST_DEADLINE;
 use tracedecay_domain::{
@@ -1055,6 +1056,39 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         );
 
         if dirty_before_restart {
+            let retained_identity = registry
+                .current_identity(fixture.path().to_path_buf(), None)
+                .await
+                .expect("dirty restart retains its immutable graph identity");
+            assert_eq!(retained_identity.code_generation_id, seeded_generation_id);
+            assert_eq!(retained_identity.source_freshness, FreshnessState::Unknown);
+            assert!(
+                retained_identity.source_revision.is_some(),
+                "retain the sealed commit attribution"
+            );
+            assert_eq!(
+                retained_identity
+                    .clone()
+                    .admit_worktree_scope(&scope)
+                    .unwrap()
+                    .code_generation_id,
+                seeded_generation_id
+            );
+            assert_eq!(
+                retained_identity
+                    .admit_commit_scope(&scope)
+                    .unwrap_err()
+                    .class(),
+                "lsp-code-index-generation-unavailable"
+            );
+            assert_eq!(
+                registry
+                    .current_identity(fixture.path().to_path_buf(), Some("src/lib.rs".to_owned()))
+                    .await
+                    .expect_err("dirty current document cannot borrow the retained revision")
+                    .class(),
+                "lsp-code-index-generation-unavailable"
+            );
             let stale_context = graph_request_context(scope.clone(), "restart-dirty-retained");
             let stale_deadline = std::time::Instant::now() + Duration::from_secs(5);
             loop {
@@ -1343,8 +1377,6 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
 /// Everything asserted below happens while it is held.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_seats_the_retained_graph_while_its_text_owner_still_projects() {
-    use tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort;
-
     let RestartedPublishedGraphHead {
         fixture,
         canonical_fixture,
@@ -1418,6 +1450,37 @@ async fn restart_seats_the_retained_graph_while_its_text_owner_still_projects() 
     assert_eq!(
         symbol_graph_identity.code_generation_id, seeded_generation_id,
         "symbol-graph identity must name the retained generation"
+    );
+    assert_eq!(
+        symbol_graph_identity.source_freshness,
+        FreshnessState::Unknown
+    );
+    assert_eq!(
+        symbol_graph_identity.source_revision,
+        identity_owner.metadata().snapshot().source_revision
+    );
+    let retained_graph_scope = symbol_graph_identity
+        .clone()
+        .admit_worktree_scope(&scope)
+        .expect("retained immutable graph scope");
+    assert_eq!(
+        retained_graph_scope.code_generation_id,
+        seeded_generation_id
+    );
+    assert_eq!(
+        symbol_graph_identity
+            .admit_commit_scope(&scope)
+            .unwrap_err()
+            .class(),
+        "lsp-code-index-generation-unavailable"
+    );
+    assert_eq!(
+        registry
+            .current_identity(canonical_fixture.clone(), Some("src/lib.rs".to_owned()))
+            .await
+            .expect_err("unverified source is not a current document identity")
+            .class(),
+        "lsp-code-index-generation-unavailable"
     );
     let port = project_code_graph_projection_read_port(
         registry.clone(),

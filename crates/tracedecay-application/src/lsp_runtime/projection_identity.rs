@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use tracedecay_contracts::ResolvedScope;
+use tracedecay_contracts::{FreshnessState, ResolvedScope};
 use tracedecay_domain::{
     CodeGenerationId, CommitId, ContentDigest, FileOccurrenceId, ManifestDigest, ProjectId, RefId,
     RepositoryId, WorktreeId,
@@ -22,6 +22,9 @@ pub struct LspCodeIndexProjectionIdentity {
     /// Distinct from `source_revision`: dirty sealed content belongs to no
     /// commit, while a managed test run still executes under the live HEAD.
     pub head_commit_id: Option<CommitId>,
+    /// Currency proved by the canonical source fence, separate from the
+    /// immutable sealed revision. Retained graphs may serve without this proof.
+    pub source_freshness: FreshnessState,
     pub source_revision: Option<CommitId>,
     pub code_generation_id: CodeGenerationId,
     pub snapshot_digest: ManifestDigest,
@@ -91,13 +94,20 @@ impl LspCodeIndexProjectionIdentity {
     /// Admit the sealed generation for commit-bound consumers (feedback
     /// projections, managed test results): everything
     /// [`Self::admit_worktree_scope`] checks, plus the exact HEAD commit the
-    /// sealed content came from. A dirty worktree has no such commit and
+    /// sealed content came from and canonical proof that its source is current.
+    /// A dirty worktree has no such commit and
     /// refuses with `lsp-code-index-source-revision-unavailable`.
     pub fn admit_commit_scope(
         self,
         scope: &ResolvedScope,
     ) -> Result<LspFeedbackProjectionScope, LspRuntimeFailure> {
+        let source_freshness = self.source_freshness;
         let worktree = self.admit_worktree_scope(scope)?;
+        if source_freshness != FreshnessState::Current {
+            return Err(LspRuntimeFailure::new(
+                "lsp-code-index-generation-unavailable",
+            ));
+        }
         let head_commit_id = worktree
             .source_revision
             .ok_or_else(|| LspRuntimeFailure::new("lsp-code-index-source-revision-unavailable"))?;
