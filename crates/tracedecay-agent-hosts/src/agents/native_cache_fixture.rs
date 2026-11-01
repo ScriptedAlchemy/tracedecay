@@ -12,13 +12,9 @@ use tracedecay_domain::canonical_text::sha256_hex;
 /// Materialize the rendered `relatives` from `source` into the host's native
 /// `cache` root.
 ///
-/// Deliberately reads and writes bytes instead of [`std::fs::copy`]. On Linux
-/// `fs::copy` takes the kernel copy-offload path (`copy_file_range` /
-/// `sendfile`), and the Linux CI filesystem has served a same-length cache file
-/// whose bytes were not the source's for a bundle the installer had just
-/// republished; macOS copies through `fcopyfile`, so the same fixture passed
-/// locally. The activation probes compare content digests, so only a byte copy
-/// is a faithful stand-in for the host's own copy.
+/// Deliberately read and write source bytes for cache fidelity: activation
+/// probes compare content digests. Same-length cache-byte divergence has been
+/// observed, but its underlying cause has not been established.
 pub(crate) fn materialize_cached_bundle<'a>(
     source: &Path,
     cache: &Path,
