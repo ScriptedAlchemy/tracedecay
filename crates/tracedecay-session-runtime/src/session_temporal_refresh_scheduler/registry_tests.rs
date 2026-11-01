@@ -20,7 +20,10 @@ use super::super::history::{
     SessionHistoricalCapacityRelease, SessionHistoricalIngestOutcome, SessionHistoricalIngestPass,
     SessionHistoricalIngestor, SharedSessionHistoricalIngestor,
 };
-use super::super::wake::{SessionTemporalRefreshWake, SessionTemporalRefreshWakeState};
+use super::super::wake::{
+    SessionTemporalRefreshBlocker, SessionTemporalRefreshWake, SessionTemporalRefreshWakeState,
+    enabled_idle_notification,
+};
 use super::SessionTemporalRefreshSchedulerRegistry;
 use crate::StoreOwnerKey;
 
@@ -143,18 +146,119 @@ async fn mount_held_project(
     history
 }
 
+/// Waits on the route's real worker lifecycle: an idle worker returns `true`,
+/// while a route whose worker stopped or disappeared returns `false` from the
+/// idle notification `mark_stopped` publishes. A slow pass therefore keeps
+/// waiting, but a terminated replacement fails instead of hanging.
+async fn wait_route_idle_or_terminated(wake: &SessionTemporalRefreshWake) -> bool {
+    let Some(state) = wake.target() else {
+        return false;
+    };
+    loop {
+        let idle = enabled_idle_notification(&state);
+        if worker_ended(wake) {
+            return false;
+        }
+        if state.is_idle() {
+            return !worker_ended(wake);
+        }
+        idle.await;
+    }
+}
+
+fn worker_ended(wake: &SessionTemporalRefreshWake) -> bool {
+    matches!(
+        wake.status().blocker,
+        Some(
+            SessionTemporalRefreshBlocker::WorkerStopped
+                | SessionTemporalRefreshBlocker::WorkerMissing
+        )
+    )
+}
+
+#[tokio::test]
+async fn an_unbound_route_fails_the_idle_wait_immediately() {
+    let wake = SessionTemporalRefreshWake::unavailable();
+    assert!(
+        !tokio::time::timeout(Duration::from_secs(1), wait_route_idle_or_terminated(&wake))
+            .await
+            .expect("an unbound route must fail without waiting for an idle event"),
+        "a missing worker must not report idle"
+    );
+}
+
+#[tokio::test]
+async fn a_stopped_replacement_worker_fails_the_route_idle_wait() {
+    let state = Arc::new(SessionTemporalRefreshWakeState::default());
+    let wake = state.handle();
+    state.mark_running();
+    state.requeue_projection();
+    let mut wait = std::pin::pin!(wait_route_idle_or_terminated(&wake));
+    assert!(
+        wait.as_mut().now_or_never().is_none(),
+        "the wait must block while the worker owns pending projection"
+    );
+
+    // Every supervisor terminal path marks its state stopped before returning.
+    state.mark_stopped();
+    assert!(
+        !tokio::time::timeout(Duration::from_secs(1), wait)
+            .await
+            .expect("a stopped worker must publish its idle notification"),
+        "a stopped worker must fail the idle wait instead of hanging"
+    );
+}
+
+#[tokio::test]
+async fn a_cancelled_replacement_worker_fails_the_route_idle_wait() {
+    let state = Arc::new(SessionTemporalRefreshWakeState::default());
+    let wake = state.handle();
+    state.mark_running();
+    state.requeue_projection();
+    let mut wait = std::pin::pin!(wait_route_idle_or_terminated(&wake));
+    assert!(
+        wait.as_mut().now_or_never().is_none(),
+        "the wait must block while the worker owns pending projection"
+    );
+
+    state.cancel();
+    assert!(
+        !tokio::time::timeout(Duration::from_secs(1), wait)
+            .await
+            .expect("cancellation must publish its idle notification"),
+        "a cancelled worker must fail the idle wait instead of hanging"
+    );
+}
+
 /// A replacement worker may consume a handed-off request before rekey returns.
-/// Join its real pass and require the durable completion, rather than racing
-/// the consumer for a transient queue length or dirty flag. These empty sessions
-/// have no observation history for discovery to reconstruct a lost request from.
+/// Require the route to target that worker, accept a wake through it, and join
+/// the worker's idle state before checking durable completion. Waiting on the
+/// state's real idle notification keeps a slow projection pass from turning
+/// into a route failure. These empty sessions have no observation history for
+/// discovery to reconstruct a lost request from.
 async fn assert_rekey_completed_requests(
+    registry: &SessionTemporalRefreshSchedulerRegistry,
     harness: &RegisteredGlobalDbHarness,
+    new_owner: &StoreOwnerKey,
     wake: &SessionTemporalRefreshWake,
     sessions: &[&str],
 ) {
+    let state = registry
+        .project_state(new_owner)
+        .await
+        .expect("replacement project entry");
     assert!(
-        wake.wake_and_wait_until_idle(Duration::from_secs(5)).await,
-        "the retained route must join the replacement worker's pass"
+        wake.target()
+            .is_some_and(|target| Arc::ptr_eq(&target, &state)),
+        "the retained route must join the replacement worker"
+    );
+    assert!(
+        wake.wake(),
+        "the retained route must reach the replacement worker"
+    );
+    assert!(
+        wait_route_idle_or_terminated(wake).await,
+        "the replacement worker must reach idle without terminating"
     );
     let store = SessionTemporalStore::new(harness.registered.as_ref());
     for name in sessions {
@@ -460,7 +564,14 @@ async fn a_retried_rekey_recovers_the_dropped_attempts_route_and_requests() {
         .project_state(&new_owner)
         .await
         .expect("new owner entry");
-    assert_rekey_completed_requests(&harness, &old_wake, &["session.dropped-rekey"]).await;
+    assert_rekey_completed_requests(
+        &registry,
+        &harness,
+        &new_owner,
+        &old_wake,
+        &["session.dropped-rekey"],
+    )
+    .await;
 
     registry.shutdown().await;
 }
@@ -828,7 +939,14 @@ async fn a_mapped_rekey_lands_the_workers_queued_requests() {
         .project_state(&new_owner)
         .await
         .expect("new owner entry");
-    assert_rekey_completed_requests(&harness, &old_wake, &["session.mapped-rekey"]).await;
+    assert_rekey_completed_requests(
+        &registry,
+        &harness,
+        &new_owner,
+        &old_wake,
+        &["session.mapped-rekey"],
+    )
+    .await;
 
     registry.shutdown().await;
 }
