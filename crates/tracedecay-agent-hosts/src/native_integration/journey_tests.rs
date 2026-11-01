@@ -25,6 +25,7 @@ use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_application::stack_coordinator::{
     DaemonGitHubStackCoordinatorV1, StackCoordinatorErrorV1, StackSignalDraftV1, StackSignalV1,
 };
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexOwnerSignalsV1;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_code_index_runtime::code_index_scheduler::identity::IndexingIdentityV1;
 use tracedecay_contracts::git::{
@@ -610,36 +611,46 @@ async fn mount_with_analysis_gate(
         .await
         .expect("mount canonical code-index scheduler");
     let memory = schedulers.process_resident_memory();
+    // The seat authority publishes every transition this wait depends on:
+    // serving-generation changes, owner passes and worker phase, pending wakes,
+    // sealed publications, mounts, and cadence receipts. Subscribe before the
+    // first probe so a seat installed between the probe and the wait still
+    // wakes it, and so no transition is sampled only on a timer.
+    let mut owner_signals = CodeIndexOwnerSignalsV1::subscribe(schedulers, &repository_root).await;
+    let owner_activity = schedulers
+        .subscribe_owner_activity(&repository_root)
+        .await
+        .expect("mounted code-index owner activity");
     let mut last_observation = "no owner observation completed".to_owned();
     let initial_generation = tokio::time::timeout(Duration::from_secs(5), async {
-        let owner_activity = schedulers.subscribe_owner_activity(&repository_root).await;
-        while schedulers
-            .latest_generation_id(&repository_root)
-            .await
-            .is_none()
-        {
-            let parked = schedulers
-                .convergence_park(&repository_root)
+        loop {
+            if schedulers
+                .latest_generation_id(&repository_root)
                 .await
-                .map(|parked| {
-                    (
-                        parked.reason.chars().take(200).collect::<String>(),
-                        parked.blocked_reason,
-                        parked.retries_on_wake,
-                        parked.observed_passes,
-                    )
-                });
-            let activity = owner_activity.as_ref().map(|activity| {
+                .is_some()
+            {
+                return;
+            }
+            let parked = schedulers.convergence_park(&repository_root).await;
+            let parked_present = parked.is_some();
+            let parked_observation = parked.map(|parked| {
                 (
-                    activity.worker_phase(),
-                    activity.passes(),
-                    activity.wake_pending(),
+                    parked.reason.chars().take(200).collect::<String>(),
+                    parked.blocked_reason,
+                    parked.remediation.chars().take(200).collect::<String>(),
+                    parked.retries_on_wake,
+                    parked.observed_passes,
                 )
             });
+            let activity = (
+                owner_activity.worker_phase(),
+                owner_activity.passes(),
+                owner_activity.wake_pending(),
+            );
             let pressure = memory.pressure().state();
             let ledger = memory.snapshot();
             last_observation = format!(
-                "parked={parked:?}; activity={activity:?}; pressure={pressure:?}; \
+                "parked={parked_observation:?}; activity={activity:?}; pressure={pressure:?}; \
                  ledger_used_bytes={}; ledger_limit_bytes={}; ledger_charge_count={}; \
                  process_shared_charge_count={}",
                 ledger.used_bytes,
@@ -647,7 +658,18 @@ async fn mount_with_analysis_gate(
                 ledger.charges.len(),
                 ledger.process_shared_charges.len()
             );
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            // A park the worker is no longer running against cannot install a
+            // generation; report it instead of spending the whole seat budget
+            // on a typed failure that is already decided.
+            if parked_present && owner_activity.pass_finished() {
+                panic!("initial code-index generation seat parked: {last_observation}");
+            }
+            // The seat authority already selects this worktree's owner
+            // activity and coalesces a burst of intra-pass updates into one
+            // wake, so this wait must not duplicate that receiver.
+            if owner_signals.changed().await.is_err() {
+                panic!("initial code-index generation seat owner closed: {last_observation}");
+            }
         }
     })
     .await;
