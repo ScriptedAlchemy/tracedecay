@@ -260,7 +260,7 @@ pub(crate) type CodeIndexPublicationIdentityResolver = Arc<
         + 'static,
 >;
 
-// Lock ordering: file_token_map -> method/resource/tool call counts (never nested)
+// Lock ordering: method/resource/tool call counts are taken one at a time, never nested.
 pub struct McpServer {
     /// The served code graph. Guarded so a mid-session `git checkout` can
     /// hot-swap the instance onto the new branch's DB
@@ -292,10 +292,6 @@ pub struct McpServer {
     tool_call_counts: std::sync::Mutex<HashMap<String, u64>>,
     identical_read_coalescer: IdenticalReadCoalescer,
     diagnostics_lsp: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
-    /// Approximate token count per indexed file (`file_path` -> tokens).
-    /// `Arc` so the retained background-refresh task can hold a cheap
-    /// clone and swap in the freshly synced map on completion.
-    file_token_map: Arc<std::sync::Mutex<HashMap<String, u64>>>,
     tokens_saved: Option<AtomicU64>,
     /// User-level database tracking all projects (best-effort). Wrapped in
     /// `Arc` so spawned savings-recording tasks can hold a cheap clone of
@@ -820,7 +816,6 @@ impl McpServer {
             #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime,
         } = context;
-        let file_token_map = HashMap::new();
         let persisted_tokens_saved = match cg.get_tokens_saved().await {
             Ok(persisted) => Some(persisted),
             Err(error) => {
@@ -984,7 +979,6 @@ impl McpServer {
             tool_call_counts: std::sync::Mutex::new(HashMap::new()),
             identical_read_coalescer: IdenticalReadCoalescer::default(),
             diagnostics_lsp,
-            file_token_map: Arc::new(std::sync::Mutex::new(file_token_map)),
             tokens_saved: persisted_tokens_saved.map(AtomicU64::new),
             global_db,
             accounting_db,
@@ -1323,10 +1317,6 @@ impl McpServer {
             .map(|counts| json!(*counts))
             .unwrap_or(json!({}));
         let read_coalescing = self.identical_read_coalescer.snapshot();
-        let file_token_entries = self
-            .file_token_map
-            .lock()
-            .map_or_default(|tokens| tokens.len());
         let ratio = |n: u64| {
             if total_requests == 0 {
                 0.0
@@ -1350,7 +1340,6 @@ impl McpServer {
                 "active_flights": read_coalescing.active_flights,
             },
             "retained_state_proxy": {
-                "file_token_entries": file_token_entries,
                 "database_authorities": {
                     "accounting": self.ledger_sink_is_mounted(),
                     "registry": self.registry_db.is_some(),

@@ -1,7 +1,6 @@
 //! Injectable detached read-refresh writer boundary used by daemon-coordinated
 //! construction.
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -29,14 +28,14 @@ pub(crate) struct BackgroundRefreshRequest {
 }
 
 pub(crate) enum BackgroundRefreshOutcome {
-    Admitted(Option<HashMap<String, u64>>),
+    /// The scheduler accepted the request. Acceptance is distinct from index
+    /// publication, so the caller learns nothing more than "queued".
+    Admitted,
     NotApplicable,
     LinkedWorktreeDisabled,
 }
 
 /// Injectable ownership boundary for detached reconciliation admission.
-/// Production returns no token map because scheduler acceptance is distinct
-/// from index publication; test writers may return one to verify injection.
 pub(crate) type BackgroundRefreshWriter = Arc<
     dyn Fn(
             BackgroundRefreshRequest,
@@ -100,7 +99,7 @@ pub(crate) async fn execute_background_refresh_direct(
             })?,
     };
     match accepted.await {
-        CodeIndexDemandAdmissionV1::Queued => Ok(BackgroundRefreshOutcome::Admitted(None)),
+        CodeIndexDemandAdmissionV1::Queued => Ok(BackgroundRefreshOutcome::Admitted),
         CodeIndexDemandAdmissionV1::NotApplicable => Ok(BackgroundRefreshOutcome::NotApplicable),
         CodeIndexDemandAdmissionV1::RefusedByPolicy => {
             Ok(BackgroundRefreshOutcome::LinkedWorktreeDisabled)

@@ -996,42 +996,37 @@ impl McpServer {
             .or_insert_with(|| json!(elapsed_us));
     }
 
-    /// Resolves the raw-read counterfactual from the retained cache, falling
-    /// back to bounded metadata reads for files owned by the current response.
+    /// Resolves the raw-read counterfactual by reading bounded metadata for
+    /// every touched file owned by the current response.
     ///
-    /// A cache miss is not evidence that a touched source file costs zero
-    /// tokens.
+    /// A touched source file costs its full read no matter which tool touched
+    /// it; this is the "before" in the tokens-saved ledger.
     #[tracing::instrument(
         name = "mcp.server.accounting.raw_file_tokens",
         level = "trace",
         skip_all
     )]
     async fn raw_file_tokens(&self, project_root: &Path, touched_files: &[String]) -> u64 {
-        let cached_tokens = self.estimate_raw_file_tokens(touched_files);
-        let uncached_files = {
-            let token_map = recover_lock(&self.file_token_map);
-            touched_files
-                .iter()
-                .filter(|path| !path.is_empty() && !token_map.contains_key(path.as_str()))
-                .cloned()
-                .collect::<HashSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>()
-        };
-        if uncached_files.is_empty() {
-            return cached_tokens;
+        let unique_touched_files = touched_files
+            .iter()
+            .filter(|path| !path.is_empty())
+            .cloned()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if unique_touched_files.is_empty() {
+            return 0;
         }
 
         let project_root = project_root.to_path_buf();
-        let uncached_tokens = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-            response_trailers::raw_file_tokens(&project_root, &uncached_files)
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+            response_trailers::raw_file_tokens(&project_root, &unique_touched_files)
         })
         .await
         .unwrap_or_else(|error| {
             tracing::warn!(%error, "raw-file token estimation task failed");
             0
-        });
-        cached_tokens.saturating_add(uncached_tokens)
+        })
     }
 
     async fn apply_token_accounting(
