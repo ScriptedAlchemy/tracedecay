@@ -157,9 +157,14 @@ async fn connect_with_restart_grace_reconnects_once_daemon_rebinds() {
         tokio::net::UnixListener::bind(&bind_path).expect("bind restarted daemon socket")
     });
 
-    crate::daemon::core_client::connect_with_restart_grace(
-        socket.parent().expect("socket parent"),
-        &socket,
+    tracedecay_daemon_protocol::connect_with_restart_grace_resolving(
+        || {
+            tracedecay_daemon_identity::client_connection(
+                socket.parent().expect("socket parent"),
+                &socket,
+            )
+        },
+        super::super::core_client::authority_absent,
         std::time::Duration::from_secs(8),
         std::time::Duration::from_millis(50),
     )
@@ -184,11 +189,12 @@ async fn connect_with_restart_grace_gives_up_with_restart_hint() {
     let mut attempts = 0_u32;
     let started = std::time::Instant::now();
 
-    let err = crate::daemon::core_client::connect_with_restart_grace_resolving(
+    let err = tracedecay_daemon_protocol::connect_with_restart_grace_resolving(
         || {
             attempts += 1;
             tracedecay_daemon_identity::client_connection(profile_root, &socket)
         },
+        super::super::core_client::authority_absent,
         grace,
         poll,
     )

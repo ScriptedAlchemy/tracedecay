@@ -14,6 +14,7 @@ use std::{
 
 use tempfile::TempDir;
 use tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
+use tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort;
 use tracedecay_code_index_retention::code_index_generations::acquire_code_generation_store_lock;
 use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexReadinessTargetV1,
@@ -3559,6 +3560,13 @@ async fn sealed_publication_identity_answers_before_the_generation_seats() {
             .await
             .expect("the retained generation answers identity while its text projection is held");
     assert_eq!(read_identity.generation_id(), sealed.generation_id());
+    let lsp_identity = registry
+        .current_identity(fixture.path().to_path_buf(), Some("src/lib.rs".to_owned()))
+        .await
+        .expect("LSP identity reads sealed source before lexical readiness");
+    assert_eq!(&lsp_identity.code_generation_id, sealed.generation_id());
+    assert_eq!(lsp_identity.source_revision, lsp_identity.head_commit_id);
+    assert!(lsp_identity.document_content_digest.is_some());
 
     release_projection
         .send(())
@@ -3573,6 +3581,63 @@ async fn sealed_publication_identity_answers_before_the_generation_seats() {
     assert_eq!(
         &serving.metadata().manifest().generation_id,
         sealed.generation_id()
+    );
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lsp_identity_observes_unhinted_source_edits_at_the_read_probe_boundary() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree_with_one_permit(&fixture, &store).await;
+    settle_text_projection(&registry, fixture.path()).await;
+    settled_owners_with_idle_admission(&registry, &[fixture.path()]).await;
+    let admission = quiesced_background_reconcile_admission(&registry, fixture.path()).await;
+    clear_pending_wake_until_quiet(&registry, &scope).await;
+    let clean = registry
+        .current_identity(fixture.path().to_path_buf(), Some("src/lib.rs".to_owned()))
+        .await
+        .expect("clean source identity");
+    assert_eq!(clean.source_revision, clean.head_commit_id);
+    assert!(clean.source_revision.is_some());
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    // Advance only the existing probe clock: raw filesystem edits have no
+    // notification and become observable at the ordinary read's source ladder.
+    registry
+        .source_freshness_for_root(fixture.path())
+        .await
+        .expect("mounted source fence")
+        .age_probe_clock_past_for_test(super::super::DEFAULT_STALENESS_THRESHOLD);
+    let refused = registry
+        .current_identity(fixture.path().to_path_buf(), Some("src/lib.rs".to_owned()))
+        .await
+        .expect_err("an observed edit cannot retain the committed LSP identity");
+    assert_eq!(refused.class(), "lsp-code-index-generation-unavailable");
+    assert!(
+        registry
+            .pending_wake_micros_for_scope(&scope)
+            .await
+            .is_some_and(|pending| pending != 0)
+    );
+    drop(admission);
+    let successor =
+        wait_for_generation_change(&registry, fixture.path(), &clean.code_generation_id).await;
+    settled_owners_with_idle_admission(&registry, &[fixture.path()]).await;
+    let dirty = registry
+        .current_identity(fixture.path().to_path_buf(), Some("src/lib.rs".to_owned()))
+        .await
+        .expect("the observed dirty generation has its own exact identity");
+    assert_eq!(dirty.code_generation_id, successor);
+    assert_eq!(dirty.head_commit_id, clean.head_commit_id);
+    assert_ne!(dirty.document_content_digest, clean.document_content_digest);
+    assert!(dirty.source_revision.is_none());
+    assert_eq!(
+        dirty
+            .admit_commit_scope(&scope)
+            .expect_err("dirty source is not commit eligible")
+            .class(),
+        "lsp-code-index-source-revision-unavailable"
     );
     registry.shutdown().await;
 }

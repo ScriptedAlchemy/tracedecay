@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
-use tracedecay_contracts::{ApplicationContractError, ResolvedScope};
+use tracedecay_contracts::{ApplicationContractError, FreshnessState, ResolvedScope};
 
 use crate::lsp_runtime::LspCodeIndexProjectionIdentityPort;
 
@@ -42,6 +42,11 @@ impl ManagedTestRunCurrentScopePort for ProductionManagedTestRunCurrentScope {
                 .map_err(|_| ApplicationContractError::Inconsistent {
                     field: "managed test result code generation",
                 })?;
+            if current.source_freshness != FreshnessState::Current {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "managed test result code generation",
+                });
+            }
             let head_commit_id =
                 current
                     .head_commit_id

@@ -255,6 +255,46 @@ async fn moved_source_proof_reads_the_publication_as_stale_until_renewed() {
     fixture.harness.shutdown().await;
 }
 
+/// A read whose retained code-index identity cannot be resolved at all is
+/// unavailable, not stale: there is no retained generation to pair the
+/// published finding with, so no source proof is being renewed.
+#[cfg(unix)]
+#[tokio::test]
+async fn unresolvable_code_index_identity_reads_unavailable() {
+    use crate::common::fixture::{TypeScriptFixtureCompiler, write_typescript_diagnostics_fixture};
+    use crate::support::production_composition_fixture_with_sources;
+
+    let fixture = production_composition_fixture_with_sources(|project| {
+        write_typescript_diagnostics_fixture(project, TypeScriptFixtureCompiler::Present);
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    wait_for_current_graph(&server).await;
+    let arguments = json!({"scope": "file", "path": "src/index.ts", "maximum_diagnostics": 10});
+    let published = await_published_diagnostics(&server, arguments.clone()).await;
+    assert_eq!(published_records(&published).len(), 1, "{published}");
+
+    // The publication remains in the store, but the checkout no longer
+    // resolves a code-index identity, so the read cannot name the retained
+    // generation the finding belongs to.
+    let git_dir = fixture.project_root.join(".git");
+    let moved_git_dir = fixture.project_root.join(".git-unavailable");
+    std::fs::rename(&git_dir, &moved_git_dir).expect("move the git identity");
+    let unavailable =
+        handle_real_server_tool_call(&server, "tracedecay_diagnostics", arguments).await;
+    std::fs::rename(&moved_git_dir, &git_dir).expect("restore the git identity");
+    assert_eq!(unavailable["isError"], json!(true), "{unavailable}");
+    assert_eq!(
+        unavailable["structuredContent"]["problem"]["code"], "application.diagnostics.unavailable",
+        "{unavailable}"
+    );
+
+    fixture.harness.shutdown().await;
+}
+
 /// The same project before `npm install`: the read must carry the exact setup
 /// command and a legal action, never `Legal actions: none`.
 #[cfg(unix)]
