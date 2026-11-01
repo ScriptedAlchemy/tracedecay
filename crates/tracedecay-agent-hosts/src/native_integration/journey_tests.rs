@@ -617,7 +617,7 @@ async fn mount_with_analysis_gate(
     // first probe so a seat installed between the probe and the wait still
     // wakes it, and so no transition is sampled only on a timer.
     let mut owner_signals = CodeIndexOwnerSignalsV1::subscribe(schedulers, &repository_root).await;
-    let mut owner_activity = schedulers
+    let owner_activity = schedulers
         .subscribe_owner_activity(&repository_root)
         .await
         .expect("mounted code-index owner activity");
@@ -664,23 +664,11 @@ async fn mount_with_analysis_gate(
             if parked_present && owner_activity.pass_finished() {
                 panic!("initial code-index generation seat parked: {last_observation}");
             }
-            tokio::select! {
-                changed = owner_signals.changed() => {
-                    if changed.is_err() {
-                        panic!(
-                            "initial code-index generation seat owner closed: \
-                             {last_observation}"
-                        );
-                    }
-                }
-                changed = owner_activity.changed() => {
-                    if changed.is_err() {
-                        panic!(
-                            "initial code-index generation seat owner activity closed: \
-                             {last_observation}"
-                        );
-                    }
-                }
+            // The seat authority already selects this worktree's owner
+            // activity and coalesces a burst of intra-pass updates into one
+            // wake, so this wait must not duplicate that receiver.
+            if owner_signals.changed().await.is_err() {
+                panic!("initial code-index generation seat owner closed: {last_observation}");
             }
         }
     })
