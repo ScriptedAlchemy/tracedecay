@@ -10,6 +10,7 @@
 
 use std::path::Path;
 use std::time::{Duration, Instant};
+use tracedecay_daemon_protocol::DaemonHandshake;
 
 use tempfile::TempDir;
 use tracedecay_daemon_service::ProjectRuntimePublicationStateV1;
@@ -24,7 +25,7 @@ use super::{
     enter_test_daemon_database_scope, git, initialize_test_project, test_client_identity_for,
     test_daemon_engine_for_profile, test_handshake_defaults,
 };
-use crate::daemon::{DaemonEngine, DaemonHandshake};
+use crate::daemon::engine::DaemonEngine;
 
 /// A committed repository, because repository discovery reads HEAD as well as
 /// the ancestor walk.
@@ -83,7 +84,7 @@ async fn blocked_repository_discovery_lets_other_projects_reach_ready() {
         matches!(
             blocked_error.project_route_context(),
             Some((
-                crate::daemon::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
+                tracedecay_runtime_core::git_discovery::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
                 true,
                 _
             ))
@@ -240,13 +241,14 @@ async fn warming_route_joins_its_open_without_rediscovering_repository() {
     let engine = test_daemon_engine_for_profile(&profile_root);
     let handshake = handshake_for(&project, &profile_root);
     let (_, route) = engine.project_route(&handshake).expect("registered route");
-    let tasks = crate::daemon::project_open_tasks(&engine.project_open_gates).await;
+    let tasks =
+        crate::daemon::project_routing::project_open_tasks(&engine.project_open_gates).await;
     let (release, blocked) = tokio::sync::oneshot::channel();
     let state = match tasks.start_cancellable(route, move |cancellation| async move {
         tokio::select! {
             biased;
             () = cancellation.cancelled() => {
-                Err(crate::daemon::project_open_cancellation_error())
+                Err(crate::daemon::project_routing::project_open_cancellation_error())
             }
             opened = blocked => {
                 opened.expect("release controlled open");
@@ -257,9 +259,9 @@ async fn warming_route_joins_its_open_without_rediscovering_repository() {
             }
         }
     }) {
-        crate::daemon::ProjectOpenTaskClaim::InFlight(state) => state,
-        crate::daemon::ProjectOpenTaskClaim::Failed(_)
-        | crate::daemon::ProjectOpenTaskClaim::Saturated => {
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::InFlight(state) => state,
+        crate::daemon::project_open_admission::ProjectOpenTaskClaim::Failed(_)
+        | crate::daemon::project_open_admission::ProjectOpenTaskClaim::Saturated => {
             panic!("the controlled open must own its route");
         }
     };
@@ -284,8 +286,10 @@ async fn warming_route_joins_its_open_without_rediscovering_repository() {
     observe_repository_discovery_for_test(&project);
     let mut joins = tasks.joins();
     let next_join = *joins.borrow_and_update() + 1;
-    let request = engine
-        .project_server_for_request(&handshake, crate::daemon::ProjectServerRequirement::Core);
+    let request = engine.project_server_for_request(
+        &handshake,
+        crate::daemon::project_open_admission::ProjectServerRequirement::Core,
+    );
     tokio::pin!(request);
     tokio::select! {
         biased;
@@ -311,9 +315,10 @@ async fn warming_route_joins_its_open_without_rediscovering_repository() {
     );
 
     release.send(()).expect("release controlled open");
-    let recorded = crate::daemon::ProjectOpenTasks::wait_for_completion(state)
-        .await
-        .expect_err("the controlled open must publish its failure");
+    let recorded =
+        crate::daemon::project_open_admission::ProjectOpenTasks::wait_for_completion(state)
+            .await
+            .expect_err("the controlled open must publish its failure");
     let refusal = match request.await {
         Ok(_) => panic!("a failed open must not publish a server"),
         Err(error) => error,
@@ -376,7 +381,7 @@ async fn timed_out_repository_discovery_defers_the_route() {
         matches!(
             refusal.project_route_context(),
             Some((
-                crate::daemon::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
+                tracedecay_runtime_core::git_discovery::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE,
                 true,
                 _
             ))

@@ -12,8 +12,8 @@ use tempfile::TempDir;
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 
-use super::ProductionProjectCompositionHarnessV1;
 use super::journey_test_support::{initialize_project, tool_payload};
+use crate::daemon::production_harness::ProductionProjectCompositionHarnessV1;
 use tracedecay_runtime_core::storage::default_profile_sharded_layout;
 
 /// True while another open file description holds the task lease exclusively.

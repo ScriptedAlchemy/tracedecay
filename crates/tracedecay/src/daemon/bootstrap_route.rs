@@ -4,10 +4,21 @@
 //! project-independent calls so a client can hand shake without paying for a
 //! project admission.
 
-use super::*;
+use super::AuthenticatedFirstRequest;
+use super::branch_admin::StoreAdministration;
+use super::core_proxy::{InitializeRouteMetadata, resolve_daemon_initialize_route};
+use crate::mcp::server::{SERVER_INSTRUCTIONS, initialize_result};
+use serde_json::json;
+use tracedecay_daemon_protocol::DaemonHandshake;
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_mcp::server::{McpMethod, classify_mcp_method};
 use tracedecay_mcp::server::{
     request_protocol_version, speaks_2026_07_28, stamp_2026_07_28_result,
 };
+use tracedecay_mcp::tools::catalog_discovery::{
+    catalog_discovery_tools_list_payload, default_catalog_discovery_authority,
+};
+use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, project_catalog_discovery_scope};
 
 fn bootstrap_tools_list_payload() -> Result<serde_json::Value> {
     let profile_id = tracedecay_tool_catalog::ProfileId::new(
@@ -67,10 +78,11 @@ fn apply_daemon_initialize_route_inner<'a>(
         // Discovery runs in the requesting client's profile, with the daemon
         // owner's home as the one ambient root no route may select.
         let owner = store_administration.owner_profile()?;
-        let discovery_profile = crate::daemon::daemon_transcript_source_profile(
-            owner,
-            &handshake.client_identity.profile_root,
-        );
+        let discovery_profile =
+            crate::daemon::project_composition::daemon_transcript_source_profile(
+                owner,
+                &handshake.client_identity.profile_root,
+            );
         let Some(route) = resolve_daemon_initialize_route(
             &discovery_profile,
             request.params.as_ref(),

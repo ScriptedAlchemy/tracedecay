@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use tracedecay_daemon_protocol::DaemonHandshake;
 
 use super::doctor_runtime_route_tests::initialize_test_project;
-use crate::daemon::{DaemonHandshake, StoreAdministration};
+use crate::daemon::branch_admin::StoreAdministration;
 use crate::mcp::McpServer;
 use crate::mcp::server::McpServerConstructionContext;
 use tracedecay_daemon_protocol::DaemonClientIdentity;
@@ -58,7 +59,7 @@ async fn live_runtime_snapshot_does_not_fabricate_store_metadata_after_observati
         "core-doctor-missing-live-store-metadata",
     )
     .expect("enter daemon database scope");
-    let graph = super::super::open_project_for_handshake(
+    let graph = crate::daemon::project_open_handshake::open_project_for_handshake(
         &project,
         &handshake,
         &store_administration,
@@ -66,8 +67,10 @@ async fn live_runtime_snapshot_does_not_fabricate_store_metadata_after_observati
     )
     .await
     .expect("open retained project graph");
-    let key = crate::daemon::ProjectServerKey::from_open_project(&graph, &handshake)
-        .expect("project server key");
+    let key = crate::daemon::project_open_admission::ProjectServerKey::from_open_project(
+        &graph, &handshake,
+    )
+    .expect("project server key");
     let server = McpServer::new_with_context(
         McpServerConstructionContext::direct(graph, None)
             .with_project_server_live(Arc::new(AtomicBool::new(true))),

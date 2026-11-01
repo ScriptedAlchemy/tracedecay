@@ -6,26 +6,30 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use tracedecay_daemon_protocol::{DaemonHandshake, PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE};
+use tracedecay_runtime_core::git_discovery::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 use asupersync::io::AsyncWriteExt;
 use asupersync::time::wall_now;
 use serde::{Deserialize, Serialize};
 
-#[cfg(unix)]
-use super::connect_with_restart_grace;
 use super::repeat_reads::RepeatReads;
 use super::repeated_queries::RepeatedQueries;
 use super::tool_surface::ToolSurface;
 use super::{
-    DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DaemonClientDeadline, DaemonHandshake,
-    PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL,
-    PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE, PROJECT_WARMING_RETRY_HINT,
-    REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE, connect_to_current_daemon_within,
-    json_rpc_error_is_project_open_retryable, next_daemon_response_line, write_daemon_preamble,
+    PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, PROJECT_WARMING_RETRY_HINT,
+    json_rpc_error_is_project_open_retryable,
+};
+use crate::daemon::core_admission::DaemonClientDeadline;
+#[cfg(unix)]
+use crate::daemon::core_client::connect_with_restart_grace;
+use crate::daemon::core_client::{
+    connect_to_current_daemon_within, next_daemon_response_line, write_daemon_preamble,
 };
 use tracedecay_contracts::catalog_composition::CatalogProfileName;
-use tracedecay_daemon_protocol::DAEMON_TOOL_RESPONSE_GRACE;
+use tracedecay_daemon_protocol::connection::{DAEMON_RESTART_GRACE, DAEMON_RESTART_POLL_INTERVAL};
+use tracedecay_daemon_protocol::{DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DAEMON_TOOL_RESPONSE_GRACE};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::JsonRpcRequest;
 use tracedecay_mcp::server::attach_stateless_request_context;
@@ -55,8 +59,8 @@ pub async fn should_proxy_serve_to_daemon(
         profile.data_dir(),
         socket_path,
         installed_socket.as_deref(),
-        super::DAEMON_RESTART_GRACE,
-        super::DAEMON_RESTART_POLL_INTERVAL,
+        DAEMON_RESTART_GRACE,
+        DAEMON_RESTART_POLL_INTERVAL,
     )
     .await
 }

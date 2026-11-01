@@ -9,10 +9,11 @@ use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexOwnerSignalsV1
 
 use super::super::{project_open_lsp_scope_grant, register_production_lsp_owner};
 use super::{
-    DaemonInvocationState, ProjectOpenDependentOwnerState, register_production_advisory_owner,
+    ProjectOpenDependentOwnerState, register_production_advisory_owner,
     register_production_feedback_and_advisory, register_production_feedback_cycle,
     selected_feedback_generation,
 };
+use crate::daemon::invocation_state::DaemonInvocationState;
 use tracedecay_contracts::{
     ApplicationProblem, ApplicationUnavailableClassV1, LegalAction, RetryDirective, SafeDiagnostic,
     now_micros,

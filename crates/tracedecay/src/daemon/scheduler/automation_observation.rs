@@ -5,7 +5,8 @@ use tracedecay_domain::ProjectId;
 
 use tracedecay_daemon_service::automation_observation::record_run_with_producer;
 
-use super::{DaemonEngine, log_daemon_scheduler_record};
+use super::log_daemon_scheduler_record;
+use crate::daemon::engine::DaemonEngine;
 
 pub(super) fn record_scheduler_run(
     engine: &DaemonEngine,

@@ -10,7 +10,13 @@ use tracedecay_daemon_service::{
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
-use super::*;
+use super::branch_admin::StoreAdministration;
+use super::invocation_state::DaemonInvocationState;
+use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
+use std::sync::Arc;
+use tracedecay_daemon_protocol::{DaemonInvocationRequest, DaemonInvocationResponse};
+use tracedecay_lsp::{AdmittedRoot, AuthorizedLspWorkspace};
 
 pub(super) fn invocation_lsp_session_transition(
     request: &DaemonInvocationRequest,

@@ -7,9 +7,9 @@ use std::sync::{Arc, Weak};
 use tracedecay_domain::{ProjectId, UserProfileId};
 use tracedecay_store_runtime::{RemoteRecoveryAdmission, RemoteRecoveryProjectLifecycle};
 
-use super::{
-    DatabaseOwnerRegistry, StoreAdministration, StoreWriterClass, StoreWriterGates, WriterScope,
-};
+use super::{StoreWriterClass, StoreWriterGates, WriterScope};
+use crate::daemon::branch_admin::StoreAdministration;
+use crate::daemon::database_owner_registry::DatabaseOwnerRegistry;
 use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -82,7 +82,9 @@ fn lifecycle_registry_unavailable() -> TraceDecayError {
 }
 
 impl RemoteRecoveryProjectLifecycleV1 {
-    pub(super) fn new(administration: &super::StoreAdministration) -> Result<Self> {
+    pub(super) fn new(
+        administration: &crate::daemon::branch_admin::StoreAdministration,
+    ) -> Result<Self> {
         let identity = administration.profile_identity()?.clone();
         Ok(Self {
             profile_id: identity.profile_id().clone(),
@@ -216,7 +218,7 @@ pub(super) async fn retire_runtime_work(
     temporal: &tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry,
     #[cfg(unix)] automation: &tokio::sync::Mutex<
         std::collections::HashMap<
-            super::super::ProjectServerKey,
+            crate::daemon::project_open_admission::ProjectServerKey,
             super::super::scheduler::AutomationSchedulerHandle,
         >,
     >,
@@ -306,7 +308,7 @@ pub(super) async fn retire_runtime_work(
 async fn retire_maintenance_tasks(
     automation: &tokio::sync::Mutex<
         std::collections::HashMap<
-            super::super::ProjectServerKey,
+            crate::daemon::project_open_admission::ProjectServerKey,
             super::super::scheduler::AutomationSchedulerHandle,
         >,
     >,
@@ -351,10 +353,13 @@ impl RemoteRecoveryProjectLifecycle for RemoteRecoveryProjectLifecycleV1 {
 
 #[cfg(unix)]
 fn matching_scheduler_keys<T>(
-    schedulers: &std::collections::HashMap<super::super::ProjectServerKey, T>,
+    schedulers: &std::collections::HashMap<
+        crate::daemon::project_open_admission::ProjectServerKey,
+        T,
+    >,
     profile_root: &Path,
     project_id: &str,
-) -> Vec<super::super::ProjectServerKey> {
+) -> Vec<crate::daemon::project_open_admission::ProjectServerKey> {
     schedulers
         .keys()
         .filter(|key| {
@@ -370,7 +375,7 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    use super::StoreAdministration;
+    use crate::daemon::branch_admin::StoreAdministration;
 
     fn profile_identity(
         root: &Path,

@@ -4,20 +4,62 @@
 //! Holds the store administration, invocation state, open gates, owner
 //! registries and lifecycle handles that one daemon generation owns.
 
-use super::*;
+#[cfg(unix)]
+use super::MAX_CATALOG_REFRESH_CLIENTS_PER_GENERATION;
+use super::branch_admin::StoreAdministration;
+use super::core_admission::{DaemonPerClientAdmission, valid_client_instance_id};
+use super::http_application;
+use super::invocation_state::DaemonInvocationState;
+use super::maintenance;
+use super::project_composition::{ProductionProjectCompositionRuntime, production_project_server};
+#[cfg(unix)]
+use super::project_open_admission::{
+    MaintenanceRekeyOutcome, MaintenanceTransitionGate, MaintenanceTransitionGates,
+};
+use super::project_open_admission::{
+    ProjectOpenFailure, ProjectOpenGates, ProjectOpenTaskClaim, ProjectRouteKey, ProjectServerKey,
+    ProjectServerRequirement,
+};
+use super::project_open_orchestration::ensure_registered_project_route;
+#[cfg(unix)]
+use super::project_open_orchestration::{
+    await_claimed_project_open, spawn_lifecycle_automation_scheduler_activation,
+    start_lifecycle_project_open,
+};
+use super::project_open_owners;
+use super::project_open_publication_deadline;
+#[cfg(unix)]
+use super::project_routing::{
+    CatalogRefreshClientKey, cached_or_bind_ready_project_server, maintenance_transition_gate,
+    resolved_project_server_key,
+};
+use super::project_routing::{
+    project_open_cancellation_checkpoint, project_open_task_capacity_error, project_open_tasks,
+    project_route_for_handshake,
+};
 #[cfg(unix)]
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 #[cfg(unix)]
 use tracedecay_code_index_runtime::{GitWatchSyncConfigV1, git_watch};
 #[cfg(unix)]
 use tracedecay_contracts::project_open::ProjectOpenStatusStateV1;
 #[cfg(unix)]
 use tracedecay_daemon_identity::profile_identity;
+use tracedecay_daemon_protocol::DaemonHandshake;
 #[cfg(unix)]
 #[cfg(unix)]
 use tracedecay_daemon_service::shutdown::{DAEMON_TASK_ABORT_DEADLINE, DaemonLifecycle};
+use tracedecay_domain::errors::{Result, TraceDecayError};
 #[cfg(unix)]
 use tracedecay_hooks::core_events::HOOK_EVENT_METHOD;
+use tracedecay_mcp::JsonRpcRequest;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 #[cfg(unix)]
 use tracedecay_runtime_core::logging::log_daemon_event;
@@ -83,8 +125,9 @@ pub(super) struct DaemonEngine {
     #[cfg(test)]
     pub(super) automation_configured_override: Arc<AtomicBool>,
     #[cfg(test)]
-    pub(super) automation_scheduler_exit_barrier:
-        Arc<tokio::sync::Mutex<Option<Arc<scheduler::AutomationSchedulerExitBarrier>>>>,
+    pub(super) automation_scheduler_exit_barrier: Arc<
+        tokio::sync::Mutex<Option<Arc<crate::daemon::scheduler::AutomationSchedulerExitBarrier>>>,
+    >,
     #[cfg(test)]
     pub(super) automation_scheduler_state_changed: Arc<tokio::sync::Notify>,
     /// Client processes already told to refresh their tool catalog during

@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
+use tracedecay_daemon_protocol::{
+    DaemonHandshake, DaemonInvocationOutcome, DaemonInvocationRequest,
+};
 
 use tempfile::TempDir;
 use tokio::sync::mpsc;
@@ -28,10 +31,10 @@ use super::{
     initialize_test_project, test_client_identity_for, test_daemon_engine_for_profile,
     test_handshake_defaults,
 };
-use crate::daemon::{
-    DaemonEngine, DaemonHandshake, DaemonInvocationOutcome, DaemonInvocationRequest,
-    MAX_CACHED_PROJECT_SERVERS, ProjectRouteKey, execute_daemon_invocation,
-};
+use crate::daemon::MAX_CACHED_PROJECT_SERVERS;
+use crate::daemon::engine::DaemonEngine;
+use crate::daemon::invocation_dispatch::execute_daemon_invocation;
+use crate::daemon::project_open_admission::ProjectRouteKey;
 
 struct CompilerRunCompleted(mpsc::UnboundedSender<()>);
 

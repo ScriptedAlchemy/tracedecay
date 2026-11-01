@@ -46,8 +46,8 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
-use super::StoreAdministration;
 use super::profile_retained::profile_session_scope;
+use crate::daemon::branch_admin::StoreAdministration;
 use crate::mcp::tools::graph_tool_error_problem;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 

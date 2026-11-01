@@ -266,15 +266,16 @@ async fn service_with_canonical_application(
     let broker = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind observation broker");
-    let broker_endpoint =
-        super::DaemonEndpoint::loopback(broker.local_addr().expect("observation broker address"))
-            .expect("loopback observation endpoint");
+    let broker_endpoint = tracedecay_daemon_protocol::DaemonEndpoint::loopback(
+        broker.local_addr().expect("observation broker address"),
+    )
+    .expect("loopback observation endpoint");
     let broker_task = tokio::spawn(async move {
         while let Ok((stream, _)) = broker.accept().await {
             drop(stream);
         }
     });
-    let handshake = crate::daemon::handshake_for_current_client(
+    let handshake = crate::daemon::core_handshake::handshake_for_current_client(
         &tracedecay_runtime_core::config::ProfileRoot::new(project.path().join("profile")),
         Some(project.path().to_path_buf()),
         None,

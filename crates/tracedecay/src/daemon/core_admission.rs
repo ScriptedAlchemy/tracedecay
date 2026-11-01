@@ -6,17 +6,21 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tracedecay_daemon_protocol::{
+    BrokerStream, DaemonAuthPreface, DaemonHandshake, parse_daemon_invocation_request,
+};
 use tracedecay_runtime_core::path_safety::{canonical_existing_identity, same_canonical_path};
 
-use super::{
-    AuthenticatedFirstRequest, BrokerStream, BrokerStreamTransport, DaemonAuthPreface,
-    DaemonHandshake, JsonRpcResponse, McpMethod, Result, StoreAdministration, TraceDecayError,
-    binary_version, classify_mcp_method, parse_daemon_invocation_request,
-    read_line_handling_wire_oversized, write_daemon_response,
-};
+use super::AuthenticatedFirstRequest;
+use crate::daemon::branch_admin::StoreAdministration;
+use crate::daemon::core_handshake::binary_version;
+use crate::daemon::wire_io::{read_line_handling_wire_oversized, write_daemon_response};
 use tracedecay_contracts::ApplicationProblem;
 use tracedecay_daemon_protocol::DAEMON_SHUTDOWN_METHOD;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::ErrorCode;
+use tracedecay_mcp::server::{McpMethod, classify_mcp_method};
+use tracedecay_mcp::{BrokerStreamTransport, JsonRpcResponse};
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::weak_registry::WeakRegistry;
@@ -449,20 +453,22 @@ impl DaemonClientSaturationResponse {
 fn invocation_saturation_response(
     request_line: &str,
     saturation: &DaemonClientSaturationResponse,
-) -> Option<super::DaemonInvocationResponse> {
+) -> Option<tracedecay_daemon_protocol::DaemonInvocationResponse> {
     let request = parse_daemon_invocation_request(request_line)?.ok()?;
-    Some(super::DaemonInvocationResponse::application_problem(
-        request.request_id,
-        ApplicationProblem::saturated(
-            saturation.kind.reason_code(),
-            "The owning TraceDecay daemon has no request capacity",
+    Some(
+        tracedecay_daemon_protocol::DaemonInvocationResponse::application_problem(
+            request.request_id,
+            ApplicationProblem::saturated(
+                saturation.kind.reason_code(),
+                "The owning TraceDecay daemon has no request capacity",
+            ),
         ),
-    ))
+    )
 }
 
 async fn write_invocation_response(
     transport: &mut impl tracedecay_mcp::McpTransport,
-    response: &super::DaemonInvocationResponse,
+    response: &tracedecay_daemon_protocol::DaemonInvocationResponse,
 ) -> Result<()> {
     transport
         .write_line(&serde_json::to_string(response)?)
@@ -507,7 +513,9 @@ pub(crate) fn is_reserved_control_request(request: &AuthenticatedFirstRequest) -
     if request.method != "tools/call" {
         return false;
     }
-    let Ok((tool_name, _)) = super::projectless_tool_call(request.params.as_ref()) else {
+    let Ok((tool_name, _)) =
+        crate::daemon::projectless::projectless_tool_call(request.params.as_ref())
+    else {
         return false;
     };
     matches!(

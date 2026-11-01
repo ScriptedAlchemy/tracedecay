@@ -3,15 +3,17 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use tracedecay_daemon_protocol::DaemonHandshake;
 
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 #[cfg(unix)]
-use super::DaemonEngine;
+use super::super::engine::DaemonEngine;
 #[cfg(any(not(unix), test, feature = "test-transport"))]
-use super::portable_database_owner_reconciler;
-use super::{DaemonHandshake, ProjectServerKey, StoreAdministration};
+use super::super::project_routing::portable_database_owner_reconciler;
+use crate::daemon::branch_admin::StoreAdministration;
+use crate::daemon::project_open_admission::ProjectServerKey;
 
 /// Binds the project database's graph runtime route to the registered
 /// project sessions authority.

@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use tracedecay_daemon_protocol::{DaemonHandshake, PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE};
 
 use asupersync::io::AsyncWriteExt;
 use asupersync::time::{sleep, timeout, wall_now};
@@ -15,13 +16,13 @@ use tracedecay_daemon_identity::{
     DAEMON_AUTHORITY_UNAVAILABLE, ResolvedDaemonConnection, client_connection,
     current_daemon_connection,
 };
-pub(crate) use tracedecay_daemon_protocol::DAEMON_TOOL_LIVENESS_POLL_INTERVAL;
-pub(crate) use tracedecay_daemon_protocol::connection::{
+use tracedecay_daemon_protocol::connection::{
     DAEMON_RESTART_GRACE, DAEMON_RESTART_POLL_INTERVAL, daemon_connect_failure_advice,
     is_transient_daemon_connect_error,
 };
 use tracedecay_daemon_protocol::{
-    DaemonClientStream, daemon_tool_response_bound, tool_request_deadline,
+    DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DaemonClientStream, daemon_tool_response_bound,
+    tool_request_deadline,
 };
 use tracedecay_framing::BoundedLineReader;
 use tracedecay_mcp::server::attach_stateless_request_context;
@@ -29,13 +30,13 @@ use tracedecay_mcp::tool_errors::tool_result_problem;
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use super::{
-    DaemonClientDeadline, DaemonHandshake, JsonRpcError, JsonRpcRequest, JsonRpcResponse,
-    PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL,
-    PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE, Result, TraceDecayError,
-    error_is_project_open_retryable,
+    PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, error_is_project_open_retryable,
 };
+use crate::daemon::core_admission::DaemonClientDeadline;
 #[cfg(unix)]
 use tracedecay_daemon_service::logging::unavailable_error;
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_mcp::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
 /// The caller's request deadline as an absolute wall-clock instant, for the
 /// wire.
@@ -815,11 +816,12 @@ mod tests {
     use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingId, SchemaId};
 
     use super::super::{
-        JsonRpcError, PROJECT_SERVER_CAPACITY_REASON_CODE,
-        PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE, PROJECT_WARMING_REASON_CODE,
-        error_is_project_open_retryable, tool_call_transport_error_is_retryable,
+        PROJECT_SERVER_CAPACITY_REASON_CODE, PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE,
+        PROJECT_WARMING_REASON_CODE, error_is_project_open_retryable,
+        tool_call_transport_error_is_retryable,
     };
     use super::daemon_tool_call_error;
+    use tracedecay_mcp::JsonRpcError;
 
     #[test]
     fn daemon_tool_call_error_round_trips_typed_warming_and_revoked() {
@@ -1075,7 +1077,7 @@ mod tests {
 
     #[test]
     fn daemon_tool_call_error_round_trips_project_open_backoff() {
-        let refusal = super::super::project_open_error_response(
+        let refusal = crate::daemon::project_open_handshake::project_open_error_response(
             json!(1),
             &tracedecay_domain::errors::TraceDecayError::project_open(
                 tracedecay_domain::errors::ProjectOpenFailureKind::BackedOff {

@@ -8,6 +8,9 @@ use std::pin::Pin;
 use std::process::Command;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
+use tracedecay_daemon_protocol::{
+    DaemonHandshake, DaemonInvocationOutcome, DaemonInvocationRequest,
+};
 
 use tempfile::TempDir;
 use tokio::io::AsyncWriteExt;
@@ -25,10 +28,8 @@ use super::{
     enter_test_daemon_database_scope, initialize_test_project, test_client_identity_for,
     test_daemon_engine_for_profile, test_handshake_defaults,
 };
-use crate::daemon::{
-    DaemonEngine, DaemonHandshake, DaemonInvocationOutcome, DaemonInvocationRequest,
-    execute_daemon_invocation,
-};
+use crate::daemon::engine::DaemonEngine;
+use crate::daemon::invocation_dispatch::execute_daemon_invocation;
 use tracedecay_application::primitives::{PrimitiveProjectRuntime, StorageStatusPrimitiveRequest};
 use tracedecay_contracts::retrieval::catalog::primitive_read_operation;
 use tracedecay_contracts::retrieval::{PrimitiveInvocation, PrimitiveRequest};
@@ -228,12 +229,14 @@ async fn aborted_socket_curator_preparation_keeps_its_writer_owned_through_shutd
     let (mut client, server) = tokio::net::UnixStream::pair().expect("curator socket pair");
     let server = tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(server)
         .expect("native curator socket");
-    let serving = Box::pin(crate::daemon::serve_authenticated_socket_client_with_class(
-        server,
-        engine.clone(),
-        super::TEST_AUTH_TOKEN.to_owned(),
-        crate::daemon::DaemonClientAdmissionClass::General,
-    ));
+    let serving = Box::pin(
+        crate::daemon::connection_serving::serve_authenticated_socket_client_with_class(
+            server,
+            engine.clone(),
+            super::TEST_AUTH_TOKEN.to_owned(),
+            crate::daemon::core_admission::DaemonClientAdmissionClass::General,
+        ),
+    );
     let mut clients = crate::daemon::bootstrap::ClientTasks::default();
     clients
         .spawn(async move { serving.await.map_err(|error| error.to_string()) })

@@ -10,7 +10,7 @@ use tracedecay_application::primitives::{
 };
 use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 
-use crate::daemon::DaemonInvocationState;
+use crate::daemon::invocation_state::DaemonInvocationState;
 use crate::mcp::McpServer;
 use tracedecay_contracts::retrieval::{
     RetrievalPortContext, SessionLookupRequest, TemporalRetrievalFailure, TemporalRetrievalFuture,
