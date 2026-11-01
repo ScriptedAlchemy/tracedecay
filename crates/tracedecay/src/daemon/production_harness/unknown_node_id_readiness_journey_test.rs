@@ -1,8 +1,11 @@
 use std::sync::{Arc, mpsc};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tracedecay_code_index::graph_projection::CodeGraphCatalogReleaseV1;
+use tracedecay_code_index::graph_projection::{
+    CodeGraphCatalogReleaseV1, CodeGraphReadinessRequirement,
+};
 use tracedecay_domain::{ProjectId, UtcMicros};
 use tracedecay_graph_db::NeverCancelled;
 
@@ -57,6 +60,14 @@ async fn unknown_node_ids_are_answered_while_the_released_catalog_cannot_rewarm(
         .await
         .unwrap();
     let store = serving.interactive_graph_store().unwrap();
+    // The lookup's drained park release may already have closed the engine;
+    // hold it from admission so the setup warm cannot race a background re-warm.
+    let admission = store
+        .await_rewarm_and_retain_for(
+            Duration::from_secs(5),
+            CodeGraphReadinessRequirement::Engine,
+        )
+        .unwrap();
     store
         .warm_interactive_catalog_with_cancellation(None, Arc::new(NeverCancelled))
         .unwrap();
@@ -122,6 +133,7 @@ async fn unknown_node_ids_are_answered_while_the_released_catalog_cannot_rewarm(
     let still_pending = store.await_rewarm(std::time::Duration::ZERO);
     drop(release_tx);
     holding.join().unwrap();
+    drop(admission);
     drop(store);
     drop(serving);
     harness.shutdown().await;
