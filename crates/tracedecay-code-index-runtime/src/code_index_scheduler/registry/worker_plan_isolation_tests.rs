@@ -10,9 +10,9 @@
 //! a mounted scheduler publishes while every unit of the process plan's budget
 //! is held by someone else.
 
-use std::num::NonZeroU64;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::num::{NonZeroU64, NonZeroUsize};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use tempfile::TempDir;
@@ -21,35 +21,100 @@ use tracedecay_code_index::parallelism::{
 };
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::CodeIndexWorkerSelectionV1;
+use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 
 use super::super::memory_tests::ledger_memory;
 use super::super::tests::commit_fixture_checkout;
 use super::super::{CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1};
 use super::CodeIndexSchedulerRegistryV1;
 
-/// A holder thread reports that its permit is held once it has acquired it.
-fn acquire_until_released(
-    background_cpu: Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
+#[derive(Default)]
+struct CpuPermitHolders {
     gate: Arc<(Mutex<bool>, Condvar)>,
-    acquired: Arc<AtomicUsize>,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        let _permit = background_cpu.acquire();
-        acquired.fetch_add(1, Ordering::AcqRel);
-        let (released, wake) = &*gate;
-        let mut released = released
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        while !*released {
-            released = wake
-                .wait(released)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+    holders: Vec<JoinHandle<()>>,
+}
+
+impl CpuPermitHolders {
+    fn hold_all(background_cpu: &Arc<ProcessBackgroundCpuV1>) -> Self {
+        let mut holders = Self::default();
+        let mut ready = Vec::with_capacity(background_cpu.width().get());
+        for _ in 0..background_cpu.width().get() {
+            ready.push(
+                holders
+                    .spawn(Arc::clone(background_cpu))
+                    .expect("spawn CPU permit holder"),
+            );
         }
-    })
+        for acquired in ready {
+            acquired
+                .recv_timeout(Duration::from_secs(5))
+                .expect("CPU permit holder acquires its unit");
+        }
+        holders
+    }
+
+    fn spawn(
+        &mut self,
+        background_cpu: Arc<ProcessBackgroundCpuV1>,
+    ) -> std::io::Result<mpsc::Receiver<()>> {
+        // Allocate before spawning so every created holder is immediately owned.
+        self.holders.reserve(1);
+        let gate = Arc::clone(&self.gate);
+        let (ready, acquired) = mpsc::channel();
+        let holder = thread::Builder::new().spawn(move || {
+            let (released, wake) = &*gate;
+            let Some(_permit) = background_cpu.acquire_cancellable(|| {
+                *released
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            }) else {
+                return;
+            };
+            if ready.send(()).is_err() {
+                return;
+            }
+            let mut released = released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !*released {
+                released = wake
+                    .wait(released)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        })?;
+        self.holders.push(holder);
+        Ok(acquired)
+    }
+
+    fn release_and_join(&mut self) -> bool {
+        let (released, wake) = &*self.gate;
+        *released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        wake.notify_all();
+        let mut clean = true;
+        for holder in self.holders.drain(..) {
+            clean &= holder.join().is_ok();
+        }
+        clean
+    }
+}
+
+impl Drop for CpuPermitHolders {
+    fn drop(&mut self) {
+        // Join every holder even if one panics; never panic during unwinding.
+        self.release_and_join();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_fixture_scheduler_publishes_while_the_process_worker_plan_is_fully_held() {
+    let root = TempDir::new().expect("fixture root");
+    let project = root.path().join("project");
+    std::fs::create_dir_all(project.join("src")).expect("create source root");
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("write source");
+    commit_fixture_checkout(&project);
+
     // The same plan every fixture that installs one requests, so this test and
     // its sibling share one process plan instead of racing two configurations.
     let installed = install_worker_plan(
@@ -57,27 +122,7 @@ async fn a_fixture_scheduler_publishes_while_the_process_worker_plan_is_fully_he
         16 * 1024 * 1024 * 1024,
     )
     .expect("process worker plan installs");
-    let width = installed.background_cpu.width().get();
-    let gate = Arc::new((Mutex::new(false), Condvar::new()));
-    let acquired = Arc::new(AtomicUsize::new(0));
-    let holders = (0..width)
-        .map(|_| {
-            acquire_until_released(
-                Arc::clone(&installed.background_cpu),
-                Arc::clone(&gate),
-                Arc::clone(&acquired),
-            )
-        })
-        .collect::<Vec<_>>();
-    while acquired.load(Ordering::Acquire) < width {
-        tokio::task::yield_now().await;
-    }
-
-    let root = TempDir::new().expect("fixture root");
-    let project = root.path().join("project");
-    std::fs::create_dir_all(project.join("src")).expect("create source root");
-    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("write source");
-    commit_fixture_checkout(&project);
+    let mut holders = CpuPermitHolders::hold_all(&installed.background_cpu);
 
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
@@ -105,21 +150,71 @@ async fn a_fixture_scheduler_publishes_while_the_process_worker_plan_is_fully_he
     })
     .await;
 
-    {
-        let (released, wake) = &*gate;
-        *released
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
-        wake.notify_all();
-    }
-    for holder in holders {
-        holder.join().expect("the budget holder releases cleanly");
-    }
+    assert!(
+        holders.release_and_join(),
+        "CPU permit holders join cleanly"
+    );
 
     published.expect(
         "a fixture scheduler's publication must not queue behind another owner's process budget",
     );
     registry.shutdown().await;
+}
+
+#[test]
+fn cpu_permit_holders_release_and_join_on_unwind() {
+    let background_cpu = Arc::new(ProcessBackgroundCpuV1::new(
+        NonZeroUsize::new(2).expect("positive width"),
+    ));
+    let unwound = std::panic::catch_unwind(|| {
+        let holders = CpuPermitHolders::hold_all(&background_cpu);
+        assert!(background_cpu.try_acquire().is_none(), "every unit is held");
+        // Also exercise poisoned-gate recovery while Drop is already unwinding.
+        let _locked = holders.gate.0.lock().expect("unpoisoned gate");
+        panic!("deliberate holder unwind");
+    });
+    let failure = unwound.expect_err("the deliberate unwind occurs after acquisition");
+    assert_eq!(
+        failure.downcast_ref::<&str>(),
+        Some(&"deliberate holder unwind")
+    );
+    assert_eq!(Arc::strong_count(&background_cpu), 1, "all holders exited");
+    assert_eq!(background_cpu.active_units(), 0);
+    let admitted: Option<Vec<_>> = (0..background_cpu.width().get())
+        .map(|_| background_cpu.try_acquire())
+        .collect();
+    assert!(
+        admitted.is_some(),
+        "the entire CPU budget is immediately reusable"
+    );
+}
+
+#[tokio::test]
+async fn cpu_permit_holders_cancel_queued_acquisition_on_drop() {
+    let background_cpu = Arc::new(ProcessBackgroundCpuV1::new(NonZeroUsize::MIN));
+    let occupied = background_cpu.acquire();
+    let mut holders = CpuPermitHolders::default();
+    let acquired = holders
+        .spawn(Arc::clone(&background_cpu))
+        .expect("spawn queued holder");
+    let queued = tokio::time::timeout(Duration::from_secs(5), async {
+        while background_cpu.waiting_work_units() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    drop(holders);
+
+    queued.expect("holder queues behind the occupied unit");
+    assert_eq!(acquired.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+    assert_eq!(background_cpu.waiting_work_units(), 0);
+    assert_eq!(
+        Arc::strong_count(&background_cpu),
+        2,
+        "queued holder exited"
+    );
+    drop(occupied);
+    assert!(background_cpu.try_acquire().is_some());
 }
 
 /// The plan a fixture scheduler runs must be sized against the resident-memory
