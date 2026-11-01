@@ -94,12 +94,18 @@ tracedecay-temporal-query = { path = "../tracedecay-temporal-query", optional = 
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 
 [dev-dependencies]
+hex.workspace = true
 rusqlite.workspace = true
+serde = { workspace = true, features = ["derive"] }
 tempfile.workspace = true
 # The session-temporal bench binary owns its tokio runtime.
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracedecay-application = { path = "../tracedecay-application", features = ["test-helpers"] }
 tracedecay-automation-runtime = { path = "../tracedecay-automation-runtime", features = ["test-helpers"] }
+# The cursor observation identity-fallback suite exercises `tracedecay-capture`'s
+# cursor identity material and the store's collision dispositions against the
+# registered fixture runtime.
+tracedecay-capture = { path = "../tracedecay-capture" }
 tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false, features = ["test-helpers"] }
 tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", default-features = false, features = ["test-helpers", "test-transport"] }
 tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", features = ["test-transport"] }
@@ -118,6 +124,24 @@ tracedecay-temporal-query = { path = "../tracedecay-temporal-query", features = 
 name = "session_temporal"
 path = "benches/session_temporal.rs"
 harness = false
+required-features = ["test-helpers"]
+
+# Cursor observation identity fallback: the capture-side identity material and
+# the observation store's collision dispositions, replayed through the
+# registered fixture runtime this crate owns.
+[[test]]
+name = "cursor_observation_identity_fallback"
+path = "tests/cursor_observation_identity_fallback/main.rs"
+required-features = ["test-helpers"]
+
+# Reproducible claude-observation pipeline baseline: the production host ingest
+# driven through the registered fixture runtime this crate owns. The
+# `#[ignore]`d measurement is driven by
+# `scripts/run-claude-observation-benchmark.sh`; the evidence-directory
+# contract checks run with the suite.
+[[test]]
+name = "claude_observation_benchmark"
+path = "tests/claude_observation_benchmark/main.rs"
 required-features = ["test-helpers"]
 
 [[test]]

@@ -399,11 +399,6 @@ path = "tests/session_suite/main.rs"
 required-features = ["test-helpers"]
 
 [[test]]
-name = "cursor_observation_identity_fallback"
-path = "tests/cursor_observation_identity_fallback/main.rs"
-required-features = ["test-helpers"]
-
-[[test]]
 name = "storage_suite"
 path = "tests/storage_suite/main.rs"
 required-features = ["test-helpers"]
@@ -415,14 +410,6 @@ required-features = ["test-helpers"]
 [[test]]
 name = "transcript_ingest_suite"
 path = "tests/transcript_ingest_suite/main.rs"
-required-features = ["test-helpers"]
-
-# Reproducible claude-observation pipeline baseline. The `#[ignore]`d
-# measurement is driven by `scripts/run-claude-observation-benchmark.sh`; the
-# evidence-directory contract checks run with the suite.
-[[test]]
-name = "claude_observation_benchmark"
-path = "tests/claude_observation_benchmark/main.rs"
 required-features = ["test-helpers"]
 
 [[test]]
