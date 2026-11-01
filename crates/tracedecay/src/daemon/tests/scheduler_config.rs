@@ -1,5 +1,9 @@
+use super::super::project_open_admission::ProjectServerKey;
 #[cfg(unix)]
+use serde_json::json;
+use std::sync::Arc;
 use std::time::Duration;
+use tracedecay_daemon_protocol::DaemonHandshake;
 
 #[cfg(unix)]
 use super::*;
@@ -46,12 +50,12 @@ fn automation_scheduler_starts_when_any_task_has_interval() {
         ..AutomationTaskSettingsV1::default()
     };
 
-    assert!(super::super::automation_scheduler_configured(
+    assert!(crate::daemon::scheduler::automation_scheduler_configured(
         &tracedecay_automation::config::admit_config(&config).unwrap()
     ));
 
     config.tasks.memory_curator.schedule = Some("manual".to_string());
-    assert!(!super::super::automation_scheduler_configured(
+    assert!(!crate::daemon::scheduler::automation_scheduler_configured(
         &tracedecay_automation::config::admit_config(&config).unwrap()
     ));
 
@@ -59,7 +63,7 @@ fn automation_scheduler_starts_when_any_task_has_interval() {
     config.tasks.memory_curator.interval_secs = None;
     assert!(tracedecay_automation::config::admit_config(&config).is_err());
     config.tasks.memory_curator.interval_secs = Some(300);
-    assert!(super::super::automation_scheduler_configured(
+    assert!(crate::daemon::scheduler::automation_scheduler_configured(
         &tracedecay_automation::config::admit_config(&config).unwrap()
     ));
 
@@ -71,7 +75,7 @@ fn automation_scheduler_starts_when_any_task_has_interval() {
         cooldown_secs: None,
         ..AutomationTaskSettingsV1::default()
     };
-    assert!(super::super::automation_scheduler_configured(
+    assert!(crate::daemon::scheduler::automation_scheduler_configured(
         &tracedecay_automation::config::admit_config(&config).unwrap()
     ));
 
@@ -83,26 +87,26 @@ fn automation_scheduler_starts_when_any_task_has_interval() {
         cooldown_secs: None,
         ..AutomationTaskSettingsV1::default()
     };
-    assert!(super::super::automation_scheduler_configured(
+    assert!(crate::daemon::scheduler::automation_scheduler_configured(
         &tracedecay_automation::config::admit_config(&config).unwrap()
     ));
 
     config.tasks.memory_curator.schedule = Some("every:5m".to_string());
     config.backend = AutomationBackendV1::Disabled;
     config.model_id = None;
-    assert!(!super::super::automation_scheduler_configured(
+    assert!(!crate::daemon::scheduler::automation_scheduler_configured(
         &tracedecay_automation::config::admit_config(&config).unwrap()
     ));
 
     config.backend = AutomationBackendV1::CodexAppServer;
     config.host_mode = AutomationHostModeV1::DelegatedHost;
-    assert!(!super::super::automation_scheduler_configured(
+    assert!(!crate::daemon::scheduler::automation_scheduler_configured(
         &tracedecay_automation::config::admit_config(&config).unwrap()
     ));
 
     config.host_mode = AutomationHostModeV1::Standalone;
     config.enabled = false;
-    assert!(!super::super::automation_scheduler_configured(
+    assert!(!crate::daemon::scheduler::automation_scheduler_configured(
         &tracedecay_automation::config::admit_config(&config).unwrap()
     ));
 }
@@ -137,10 +141,8 @@ async fn automation_scheduler_tick_secs_reads_pinned_project_configuration() {
     .await;
     let cg = server.cg_snapshot().await;
 
-    let tick_secs = Box::pin(super::super::automation_scheduler_tick_secs_for_project(
-        &cg,
-    ))
-    .await;
+    let tick_secs =
+        Box::pin(crate::daemon::scheduler::automation_scheduler_tick_secs_for_project(&cg)).await;
 
     assert_eq!(tick_secs, 17);
 }
@@ -174,7 +176,8 @@ async fn fresh_v2_project_starts_the_required_automation_scheduler() {
         .expect("open scheduler fixture through the daemon owner");
     let cg = server.cg_snapshot().await;
     let key =
-        super::super::ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
+        crate::daemon::project_open_admission::ProjectServerKey::from_open_project(&cg, &handshake)
+            .expect("owner key");
 
     engine
         .ensure_automation_scheduler(key.clone(), project, handshake)
@@ -210,7 +213,7 @@ async fn daemon_scheduler_discovery_without_work_does_not_wait_for_writer_gate()
         "scheduler-discovery-writer-gate-test",
     );
     let cg = Arc::new(
-        super::super::open_project_for_handshake(
+        crate::daemon::project_open_handshake::open_project_for_handshake(
             &project,
             &handshake,
             &engine.store_administration,
@@ -220,7 +223,8 @@ async fn daemon_scheduler_discovery_without_work_does_not_wait_for_writer_gate()
         .expect("open scheduler discovery fixture through daemon authority"),
     );
     let key =
-        super::super::ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
+        crate::daemon::project_open_admission::ProjectServerKey::from_open_project(&cg, &handshake)
+            .expect("owner key");
 
     let store_administration = engine.store_administration.clone();
     let writer_held = Arc::new(tokio::sync::Notify::new());
@@ -282,8 +286,9 @@ async fn daemon_scheduler_skips_stale_owner_key_after_rekey() {
     )
     .await;
     let cg = server.cg_snapshot().await;
-    let stale_key = super::super::ProjectServerKey::from_open_project(&cg, &handshake)
-        .expect("stale owner key");
+    let stale_key =
+        crate::daemon::project_open_admission::ProjectServerKey::from_open_project(&cg, &handshake)
+            .expect("stale owner key");
 
     let mut current_key = stale_key.clone();
     current_key.scope_prefix = Some("rekeyed".to_string());
@@ -632,7 +637,7 @@ async fn profile_reconcile_broadcasts_to_cached_projects_without_opening_uncache
             "format": "json"
         }
     });
-    let response = super::super::projectless_tools_call_response(
+    let response = crate::daemon::projectless::projectless_tools_call_response(
         json!(73),
         Some(&params),
         &client_identity,
@@ -687,7 +692,7 @@ async fn profile_reconcile_broadcasts_to_cached_projects_without_opening_uncache
     // The profile owner answers only the requests that select the profile;
     // a project action on a projectless connection names the project it
     // needs.
-    let project_action = super::super::projectless_tools_call_response(
+    let project_action = crate::daemon::projectless::projectless_tools_call_response(
         json!(74),
         Some(&json!({
             "name": "tracedecay_admin_project",
@@ -747,7 +752,8 @@ async fn cached_project_reconciles_cli_enabled_automation_without_cache_probe() 
         .expect("cache unconfigured project");
     let cg = server.cg_snapshot().await;
     let key =
-        super::super::ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
+        crate::daemon::project_open_admission::ProjectServerKey::from_open_project(&cg, &handshake)
+            .expect("owner key");
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         while engine
             .automation_config_probe_attempts
@@ -1034,7 +1040,8 @@ async fn cancel_stops_the_automation_loop_while_the_scheduler_map_is_held() {
         .expect("open scheduler fixture through the daemon owner");
     let cg = server.cg_snapshot().await;
     let key =
-        super::super::ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
+        crate::daemon::project_open_admission::ProjectServerKey::from_open_project(&cg, &handshake)
+            .expect("owner key");
     engine
         .ensure_automation_scheduler(key.clone(), project, handshake)
         .await;

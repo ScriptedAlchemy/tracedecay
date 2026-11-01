@@ -1,4 +1,4 @@
-#[cfg(unix)]
+use super::super::branch_admin::StoreAdministration;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -1541,7 +1541,7 @@ async fn unhosted_manual_activation_with_lifecycle(
 
 #[cfg(unix)]
 struct HostedManualBranchFixture {
-    engine: crate::daemon::DaemonEngine,
+    engine: crate::daemon::engine::DaemonEngine,
     graph: Arc<tracedecay_project::project::TraceDecay>,
     _profile: tempfile::TempDir,
     _scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
@@ -1689,7 +1689,7 @@ impl HostedManualBranchFixture {
         let identity =
             tracedecay_daemon_identity::profile_identity::load_or_create(profile.data_dir())
                 .unwrap();
-        let handshake = crate::daemon::handshake_for_current_client(
+        let handshake = crate::daemon::core_handshake::handshake_for_current_client(
             &profile,
             Some(repo.to_path_buf()),
             None,
@@ -1704,7 +1704,7 @@ impl HostedManualBranchFixture {
             "manual-branch-fixture",
         )
         .unwrap();
-        let engine = crate::daemon::DaemonEngine::default()
+        let engine = crate::daemon::engine::DaemonEngine::default()
             .with_owner_profile(profile.clone())
             .with_profile_identity(identity);
         engine
@@ -1715,12 +1715,14 @@ impl HostedManualBranchFixture {
             )
             .unwrap();
         let graph = Arc::new(
-            Box::pin(crate::daemon::open_project_for_handshake(
-                repo,
-                &handshake,
-                &engine.store_administration,
-                &tracedecay_runtime_core::cancellation::CancellationToken::new(),
-            ))
+            Box::pin(
+                crate::daemon::project_open_handshake::open_project_for_handshake(
+                    repo,
+                    &handshake,
+                    &engine.store_administration,
+                    &tracedecay_runtime_core::cancellation::CancellationToken::new(),
+                ),
+            )
             .await
             .unwrap(),
         );

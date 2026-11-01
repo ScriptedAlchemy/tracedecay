@@ -1,7 +1,8 @@
 use std::path::Path;
 use tracedecay_domain::errors::Result;
 
-use super::super::{StoreAdministration, remote_recovery_lifecycle};
+use super::super::remote_recovery_lifecycle;
+use crate::daemon::branch_admin::StoreAdministration;
 
 impl StoreAdministration {
     pub(super) async fn remote_deleted_project_roots(

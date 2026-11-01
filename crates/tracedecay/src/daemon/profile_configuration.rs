@@ -12,8 +12,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_domain::{ActorId, UtcMicros};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
-use super::StoreAdministration;
 use super::profile_retained::{authority_problem, profile_session_scope};
+use crate::daemon::branch_admin::StoreAdministration;
 
 const PROFILE_CONFIGURATION_ACTOR: &str = "actor.tracedecay-daemon.profile";
 

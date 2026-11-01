@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use tracedecay_daemon_protocol::DaemonHandshake;
 
 use tempfile::TempDir;
 use tracedecay_automation_runtime::automation::config::{
@@ -10,7 +11,7 @@ use tracedecay_automation_runtime::automation::scheduler::{
 };
 
 use super::super::{
-    DaemonHandshake, apply_project_automation_patch_via_surface, enter_test_daemon_database_scope,
+    apply_project_automation_patch_via_surface, enter_test_daemon_database_scope,
     initialize_test_project, test_client_identity_for, test_daemon_engine_for_profile,
     test_handshake_defaults,
 };
@@ -88,7 +89,7 @@ async fn paused_tick_scenario() {
         tracedecay_automation_runtime::automation::AutomationRunControl::from_interrupted(
             Arc::new(|| false),
         );
-    Box::pin(super::super::super::run_automation_scheduler_tick(
+    Box::pin(crate::daemon::scheduler::run_automation_scheduler_tick(
         &project,
         &cg,
         &handshake,

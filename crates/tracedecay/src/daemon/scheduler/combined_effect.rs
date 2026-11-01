@@ -18,7 +18,7 @@ use tracedecay_automation_runtime::automation::runner::{
 use tracedecay_automation_runtime::ports::project_runtime::AutomationProjectContext;
 
 use super::scheduler_automation_effect;
-use crate::daemon::DaemonEngine;
+use crate::daemon::engine::DaemonEngine;
 use tracedecay_automation_runtime::automation::effect_runtime::AutomationSettledTerminal;
 
 use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
@@ -816,12 +816,13 @@ mod tests {
     };
 
     use super::{
-        AutomationEffectAdmission, CombinedEffectAdmission, CombinedEffectOutcome, DaemonEngine,
-        TraceDecay, prepare_combined_effects, run_combined_scheduler_effect,
+        AutomationEffectAdmission, CombinedEffectAdmission, CombinedEffectOutcome, TraceDecay,
+        prepare_combined_effects, run_combined_scheduler_effect,
         run_session_reflector_with_backend_and_retrieval_for_retained_settlement,
         run_skill_writer_with_backend_and_retrieval_for_retained_settlement,
         scheduler_automation_effect,
     };
+    use crate::daemon::engine::DaemonEngine;
     use tracedecay_daemon_service::daemon_owned_project_source_access_at;
 
     struct CombinedAdmissionFixture {

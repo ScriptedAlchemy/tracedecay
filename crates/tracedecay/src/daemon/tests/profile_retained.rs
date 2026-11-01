@@ -1,6 +1,8 @@
 //! Profile-targeted retained requests travel as typed daemon invocations to
 //! the composition root's profile owner, with no project on the connection.
 
+#[cfg(unix)]
+use super::super::engine::DaemonEngine;
 use super::*;
 use tracedecay_contracts::retained_surfaces::{RetainedSurfaceOperation, RetainedSurfaceResultV1};
 use tracedecay_contracts::{ApplicationOutcome, ApplicationProblemKind, CancellationContext};
@@ -129,7 +131,7 @@ async fn projectless_mcp_memory_calls_answer_from_the_profile_owner() {
         let identity = &identity;
         let engine = &engine;
         async move {
-            let response = super::super::projectless_tools_call_response(
+            let response = crate::daemon::projectless::projectless_tools_call_response(
                 serde_json::json!(1),
                 Some(&params),
                 identity,

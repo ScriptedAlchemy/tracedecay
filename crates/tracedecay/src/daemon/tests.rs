@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(unix)]
 use std::sync::PoisonError;
+use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
 
 #[cfg(unix)]
 use serde_json::Value;
@@ -15,21 +16,19 @@ use tracedecay_runtime_core::native_runtime::NativeTask;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 #[cfg(unix)]
-use super::AutomationSchedulerHandle;
-#[cfg(unix)]
 use super::engine::DaemonEngine;
 #[cfg(unix)]
-use super::explicit_git_state;
-#[cfg(unix)]
 use super::scheduler::{AutomationSchedulerExitBarrier, AutomationSchedulerLifecycle};
+use crate::daemon::branch_admin::StoreAdministration;
+use crate::daemon::database_owner_registry::DatabaseOwnerRegistry;
 #[cfg(unix)]
-use super::store_owner_key_from_paths;
-use super::{
-    DaemonClientIdentity, DaemonHandshake, DatabaseOwnerRegistry, ProjectRouteKey,
-    ProjectServerKey, StoreAdministration, StoreOwnerKey, multi_root_family_allows,
-};
+use crate::daemon::invocation_executor::explicit_git_state;
+use crate::daemon::invocation_executor::multi_root_family_allows;
+#[cfg(unix)]
+use crate::daemon::scheduler::AutomationSchedulerHandle;
 use crate::test_support::git::git;
 use tracedecay_daemon_service::shutdown::DaemonLifecycle;
+use tracedecay_session_runtime::StoreOwnerKey;
 
 mod bootstrap;
 mod code_index_hydration;
@@ -377,13 +376,15 @@ async fn serve_authenticated_test_client(
     stream: tokio::net::UnixStream,
     engine: DaemonEngine,
 ) -> tracedecay_domain::errors::Result<()> {
-    Box::pin(super::serve_authenticated_socket_client_with_class(
-        tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(stream)
-            .expect("daemon end of the test socket"),
-        engine,
-        TEST_AUTH_TOKEN.to_owned(),
-        super::DaemonClientAdmissionClass::General,
-    ))
+    Box::pin(
+        crate::daemon::connection_serving::serve_authenticated_socket_client_with_class(
+            tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(stream)
+                .expect("daemon end of the test socket"),
+            engine,
+            TEST_AUTH_TOKEN.to_owned(),
+            crate::daemon::core_admission::DaemonClientAdmissionClass::General,
+        ),
+    )
     .await
 }
 
@@ -529,7 +530,10 @@ fn probed_native_test_task(
 async fn wait_for_automation_scheduler_state(
     engine: &DaemonEngine,
     mut matches: impl FnMut(
-        &std::collections::HashMap<ProjectServerKey, AutomationSchedulerHandle>,
+        &std::collections::HashMap<
+            crate::daemon::project_open_admission::ProjectServerKey,
+            AutomationSchedulerHandle,
+        >,
     ) -> bool,
 ) {
     loop {
@@ -745,7 +749,7 @@ async fn apply_project_setting_via_surface(
     let project_root = graph.project_root().to_path_buf();
     drop(graph);
 
-    let executor = super::InProcessDaemonInvocationExecutor::new(
+    let executor = crate::daemon::invocation_executor::InProcessDaemonInvocationExecutor::new(
         engine.invocation.clone(),
         engine.store_administration.clone(),
         project_root,

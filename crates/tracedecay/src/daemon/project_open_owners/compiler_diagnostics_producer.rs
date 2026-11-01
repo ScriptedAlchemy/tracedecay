@@ -23,7 +23,7 @@ use tracedecay_domain::CodeGenerationId;
 use tracedecay_lsp::{TypeScriptProject, typescript_projects};
 use tracedecay_runtime_core::logging::log_daemon_event;
 
-use super::DaemonInvocationState;
+use crate::daemon::invocation_state::DaemonInvocationState;
 
 /// The project store's directory for tsc's incremental build-info, one file
 /// per checked tsconfig; it leaves with the store.

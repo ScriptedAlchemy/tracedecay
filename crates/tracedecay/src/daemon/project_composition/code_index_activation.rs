@@ -4,7 +4,11 @@
 //! when the activation owner first admits indexing, and the three sinks stay
 //! reachable from the published MCP servers.
 
-use super::*;
+use super::super::invocation_state::DaemonInvocationState;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tracedecay_code_index_runtime::code_index_scheduler;
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeIndexDemandAdmissionV1, CodeIndexDemandV1,
     query_runtime::{
@@ -12,6 +16,7 @@ use tracedecay_code_index_runtime::code_index_scheduler::{
         retry_deferred_query_authority_until_serving,
     },
 };
+use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_session_temporal_store::SessionTemporalAccess;

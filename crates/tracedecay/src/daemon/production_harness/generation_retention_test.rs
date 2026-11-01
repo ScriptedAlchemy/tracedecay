@@ -1,3 +1,5 @@
+#[cfg(any(test, feature = "test-transport"))]
+use super::super::production_harness::ProductionProjectCompositionHarnessV1;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
@@ -7,7 +9,6 @@ use tracedecay_contracts::doctor::DoctorStorageFamilyReadV1;
 use tracedecay_contracts::storage::compaction::CompactionThresholdConfig;
 use tracedecay_domain::{CodeGenerationId, canonical_text::sha256_hex};
 
-use super::*;
 use crate::daemon::maintenance::project_store_maintenance_lease;
 use crate::test_support::git::git;
 use tracedecay_code_index_retention::code_index_generations::{

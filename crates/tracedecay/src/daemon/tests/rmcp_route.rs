@@ -1,7 +1,12 @@
+use super::super::branch_admin::StoreAdministration;
+#[cfg(unix)]
+use super::super::engine::DaemonEngine;
+use super::super::project_open_admission::{ProjectRouteKey, ProjectServerKey};
 use std::sync::Arc;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
+use tracedecay_daemon_protocol::DaemonHandshake;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -113,7 +118,7 @@ async fn rmcp_route_fixture_with_projects(
         // Daemon bootstrap installs the profile worker plan before any
         // project opens; the portable route is driven directly here, so it
         // reproduces that ordering or project open refuses.
-        let invocation = super::super::DaemonInvocationState::default();
+        let invocation = crate::daemon::invocation_state::DaemonInvocationState::default();
         invocation
             .install_worker_selection(
                 &store_administration,
@@ -121,7 +126,7 @@ async fn rmcp_route_fixture_with_projects(
             )
             .expect("install portable route profile worker plan");
         let gates = Arc::new(tokio::sync::Mutex::new(
-            super::super::ProjectOpenGates::default(),
+            crate::daemon::project_open_admission::ProjectOpenGates::default(),
         ));
         let applications = super::super::http_application::DaemonHttpApplicationRegistry::default();
         // The unix arm's `engine.project_server` awaits warm-up internally;
@@ -129,19 +134,21 @@ async fn rmcp_route_fixture_with_projects(
         // direct drive retries it the way production clients do.
         let server = tokio::time::timeout(PHASE_TIMEOUT, async {
             loop {
-                match Box::pin(super::super::portable_project_server_for_request(
-                    DaemonLifecycle::default(),
-                    store_administration.clone(),
-                    gates.clone(),
-                    invocation.clone(),
-                    applications.clone(),
-                    &handshake,
-                    super::super::ProjectServerRequirement::Core,
-                    None,
-                ))
+                match Box::pin(
+                    crate::daemon::project_open_orchestration::portable_project_server_for_request(
+                        DaemonLifecycle::default(),
+                        store_administration.clone(),
+                        gates.clone(),
+                        invocation.clone(),
+                        applications.clone(),
+                        &handshake,
+                        crate::daemon::project_open_admission::ProjectServerRequirement::Core,
+                        None,
+                    ),
+                )
                 .await
                 {
-                    Err(error) if super::super::error_is_project_warming(&error) => {
+                    Err(error) if tracedecay_daemon_protocol::error_is_project_warming(&error) => {
                         tokio::time::sleep(Duration::from_millis(50)).await;
                     }
                     outcome => break outcome,
@@ -448,13 +455,15 @@ async fn serve_proxy_host_session_is_served_only_over_rmcp() {
             let engine = engine.clone();
             let token = token.clone();
             tokio::spawn(async move {
-                Box::pin(super::super::serve_authenticated_socket_client_with_class(
-                    tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(stream)
-                        .expect("daemon end of the test socket"),
-                    engine,
-                    token,
-                    super::super::DaemonClientAdmissionClass::General,
-                ))
+                Box::pin(
+                    crate::daemon::connection_serving::serve_authenticated_socket_client_with_class(
+                        tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(stream)
+                            .expect("daemon end of the test socket"),
+                        engine,
+                        token,
+                        crate::daemon::core_admission::DaemonClientAdmissionClass::General,
+                    ),
+                )
                 .await
             });
         }
@@ -481,7 +490,12 @@ async fn serve_proxy_host_session_is_served_only_over_rmcp() {
     drop(host_lines);
     tokio::time::timeout(
         PHASE_TIMEOUT,
-        super::super::proxy_transport_to_daemon(&socket, &fixture.handshake, None, &mut host),
+        crate::daemon::core_proxy::proxy_transport_to_daemon(
+            &socket,
+            &fixture.handshake,
+            None,
+            &mut host,
+        ),
     )
     .await
     .expect("proxied host session timed out")
@@ -538,7 +552,7 @@ async fn wait_for_host_ingest_publication(fixture: &RmcpRouteFixture) {
                 .await
                 .get_route_and_touch_for(
                     &route,
-                    super::super::ProjectServerRequirement::RegisteredHostIngest,
+                    crate::daemon::project_open_admission::ProjectServerRequirement::RegisteredHostIngest,
                 )
                 .is_some()
             {
@@ -726,16 +740,18 @@ async fn portable_one_request(fixture: &RmcpRouteFixture, request: &Value) -> Ve
     let store_administration = fixture.store_administration.clone();
     let task = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept portable client");
-        Box::pin(super::super::serve_windows_broker_client(
-            stream,
-            AUTH_TOKEN,
-            &lifecycle,
-            store_administration,
-            Arc::new(tokio::sync::Mutex::new(
-                super::super::ProjectOpenGates::default(),
-            )),
-            None,
-        ))
+        Box::pin(
+            crate::daemon::connection_serving::serve_windows_broker_client(
+                stream,
+                AUTH_TOKEN,
+                &lifecycle,
+                store_administration,
+                Arc::new(tokio::sync::Mutex::new(
+                    crate::daemon::project_open_admission::ProjectOpenGates::default(),
+                )),
+                None,
+            ),
+        )
         .await
     });
     let (reader, mut writer) = tokio::io::split(super::connect_loopback_test_peer(&endpoint).await);
@@ -773,16 +789,18 @@ async fn portable_production_route_serves_initialize_and_stateless_requests_over
     let store_administration = fixture.store_administration.clone();
     let server_task = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept portable client");
-        Box::pin(super::super::serve_windows_broker_client(
-            stream,
-            AUTH_TOKEN,
-            &server_lifecycle,
-            store_administration,
-            Arc::new(tokio::sync::Mutex::new(
-                super::super::ProjectOpenGates::default(),
-            )),
-            None,
-        ))
+        Box::pin(
+            crate::daemon::connection_serving::serve_windows_broker_client(
+                stream,
+                AUTH_TOKEN,
+                &server_lifecycle,
+                store_administration,
+                Arc::new(tokio::sync::Mutex::new(
+                    crate::daemon::project_open_admission::ProjectOpenGates::default(),
+                )),
+                None,
+            ),
+        )
         .await
     });
     let (reader, mut writer) = tokio::io::split(super::connect_loopback_test_peer(&endpoint).await);
@@ -888,14 +906,14 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for ControlledCancellat
 impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ControlledCancellationExecutor {
     fn invoke_controlled(
         &self,
-        _request: super::super::DaemonInvocationRequest,
+        _request: tracedecay_daemon_protocol::DaemonInvocationRequest,
         _deadline: tracedecay_contracts::Deadline,
         cancellation: tracedecay_contracts::CancellationSignal,
         _policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
     ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
         '_,
         std::result::Result<
-            super::super::DaemonInvocationResponse,
+            tracedecay_daemon_protocol::DaemonInvocationResponse,
             tracedecay_daemon_protocol::DaemonInvocationError,
         >,
     > {
@@ -1268,7 +1286,7 @@ async fn mount_cancellation_executor(
         .project_path
         .as_deref()
         .expect("fixture project");
-    let cg = super::super::open_project_for_handshake(
+    let cg = crate::daemon::project_open_handshake::open_project_for_handshake(
         project_path,
         &fixture.handshake,
         &fixture.engine.store_administration,
@@ -1313,13 +1331,15 @@ async fn serve_proxy_cancels_running_and_queued_requests_without_host_disconnect
             let engine = engine.clone();
             let token = token.clone();
             tokio::spawn(async move {
-                Box::pin(super::super::serve_authenticated_socket_client_with_class(
-                    tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(stream)
-                        .expect("daemon end of the test socket"),
-                    engine,
-                    token,
-                    super::super::DaemonClientAdmissionClass::General,
-                ))
+                Box::pin(
+                    crate::daemon::connection_serving::serve_authenticated_socket_client_with_class(
+                        tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(stream)
+                            .expect("daemon end of the test socket"),
+                        engine,
+                        token,
+                        crate::daemon::core_admission::DaemonClientAdmissionClass::General,
+                    ),
+                )
                 .await
             });
         }
@@ -1328,7 +1348,8 @@ async fn serve_proxy_cancels_running_and_queued_requests_without_host_disconnect
         tracedecay_mcp::transport::ChannelTransport::new();
     let handshake = fixture.handshake.clone();
     let proxy = tokio::spawn(async move {
-        super::super::proxy_transport_to_daemon(&socket, &handshake, None, &mut host).await
+        crate::daemon::core_proxy::proxy_transport_to_daemon(&socket, &handshake, None, &mut host)
+            .await
     });
     host_lines
         .send(blocked_tool_request(10).to_string())

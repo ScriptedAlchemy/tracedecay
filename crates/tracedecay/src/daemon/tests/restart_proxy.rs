@@ -1,5 +1,8 @@
-#[cfg(unix)]
 use super::*;
+#[cfg(unix)]
+use serde_json::json;
+use tokio::task::JoinHandle;
+use tracedecay_daemon_protocol::DaemonHandshake;
 
 #[cfg(unix)]
 async fn await_test_task<T>(task: JoinHandle<T>, label: &str) -> T {
@@ -110,7 +113,8 @@ fn deferred_repository_discovery_is_project_open_retryable() {
         "a deferred discovery must classify as retryable, got: {error}"
     );
 
-    let response = super::super::project_open_error_response(json!(7), &error);
+    let response =
+        crate::daemon::project_open_handshake::project_open_error_response(json!(7), &error);
     let refusal = serde_json::to_value(response.error.expect("deferred discovery refusal"))
         .expect("serialize deferred refusal");
     assert!(
@@ -253,7 +257,7 @@ async fn stalled_daemon_response_is_typed_within_deadline() {
 
     let err = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        super::super::call_tool_within(
+        crate::daemon::core_client::call_tool_within(
             &socket,
             &test_handshake_defaults(),
             "tracedecay_status",
@@ -325,7 +329,7 @@ async fn long_lived_proxy_reloads_rotated_auth_after_daemon_restart() {
     let (mut transport, sender, mut receiver) = tracedecay_mcp::transport::ChannelTransport::new();
     let proxy_socket = socket.clone();
     let proxy = tokio::spawn(async move {
-        super::super::proxy_transport_to_daemon(
+        crate::daemon::core_proxy::proxy_transport_to_daemon(
             &proxy_socket,
             &test_handshake_defaults(),
             None,
@@ -419,13 +423,13 @@ async fn initialize_root_routing_replaces_cached_project_and_scope() {
     })
     .to_string();
 
-    super::super::reset_proxy_handshake_for_initialize(
+    crate::daemon::core_proxy::reset_proxy_handshake_for_initialize(
         &base_handshake,
         &mut routed_handshake,
         &line,
     );
     let first_request = super::super::AuthenticatedFirstRequest::new(line);
-    let route = super::super::apply_daemon_initialize_route(
+    let route = crate::daemon::bootstrap_route::apply_daemon_initialize_route(
         &mut routed_handshake,
         &first_request,
         &store_administration,
@@ -448,14 +452,14 @@ async fn initialize_root_routing_replaces_cached_project_and_scope() {
         "params": {}
     })
     .to_string();
-    super::super::reset_proxy_handshake_for_initialize(
+    crate::daemon::core_proxy::reset_proxy_handshake_for_initialize(
         &base_handshake,
         &mut routed_handshake,
         &rerun_without_roots,
     );
     let first_request = super::super::AuthenticatedFirstRequest::new(rerun_without_roots);
     assert!(
-        super::super::apply_daemon_initialize_route(
+        crate::daemon::bootstrap_route::apply_daemon_initialize_route(
             &mut routed_handshake,
             &first_request,
             &store_administration,
@@ -515,7 +519,7 @@ async fn daemon_resolves_registry_only_initialize_root_alias() {
     .to_string();
 
     let first_request = super::super::AuthenticatedFirstRequest::new(line);
-    let route = super::super::apply_daemon_initialize_route(
+    let route = crate::daemon::bootstrap_route::apply_daemon_initialize_route(
         &mut handshake,
         &first_request,
         &store_administration,
@@ -561,13 +565,13 @@ async fn initialize_root_routing_fails_closed_without_pinned_configuration() {
     let store_administration = test_store_administration_for_profile(profile.path());
     let _database_scope =
         enter_test_daemon_database_scope(profile.path(), "initialize-route-auto-init-test");
-    super::super::reset_proxy_handshake_for_initialize(
+    crate::daemon::core_proxy::reset_proxy_handshake_for_initialize(
         &base_handshake,
         &mut routed_handshake,
         &line,
     );
     let first_request = super::super::AuthenticatedFirstRequest::new(line);
-    super::super::apply_daemon_initialize_route(
+    crate::daemon::bootstrap_route::apply_daemon_initialize_route(
         &mut routed_handshake,
         &first_request,
         &store_administration,
@@ -592,7 +596,7 @@ async fn serve_proxies_when_socket_already_exists() {
     let _listener = tokio::net::UnixListener::bind(&socket).expect("bind daemon socket");
 
     assert!(
-        super::super::should_proxy_serve_to_daemon_with(
+        crate::daemon::core_proxy::should_proxy_serve_to_daemon_with(
             dir.path(),
             &socket,
             None,
@@ -614,7 +618,7 @@ async fn serve_stays_in_process_without_socket_or_installed_service() {
     // with a long grace configured, startup must not stall.
     let decision = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        super::super::should_proxy_serve_to_daemon_with(
+        crate::daemon::core_proxy::should_proxy_serve_to_daemon_with(
             dir.path(),
             &socket,
             None,
@@ -629,7 +633,7 @@ async fn serve_stays_in_process_without_socket_or_installed_service() {
     // A service installed for a different socket is not evidence either.
     let decision = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        super::super::should_proxy_serve_to_daemon_with(
+        crate::daemon::core_proxy::should_proxy_serve_to_daemon_with(
             dir.path(),
             &socket,
             Some(&other_socket),
@@ -659,7 +663,7 @@ async fn serve_waits_out_restart_window_when_service_owns_socket() {
     });
 
     assert!(
-        super::super::should_proxy_serve_to_daemon_with(
+        crate::daemon::core_proxy::should_proxy_serve_to_daemon_with(
             dir.path(),
             &socket,
             Some(&socket),
@@ -690,7 +694,7 @@ async fn serve_attaches_during_first_service_start_once_the_record_appears() {
     });
 
     assert!(
-        super::super::should_proxy_serve_to_daemon_with(
+        crate::daemon::core_proxy::should_proxy_serve_to_daemon_with(
             dir.path(),
             &socket,
             Some(&socket),
@@ -710,7 +714,7 @@ async fn serve_falls_back_when_installed_service_never_rebinds() {
     let socket = dir.path().join("daemon.sock");
 
     assert!(
-        !super::super::should_proxy_serve_to_daemon_with(
+        !crate::daemon::core_proxy::should_proxy_serve_to_daemon_with(
             dir.path(),
             &socket,
             Some(&socket),
@@ -769,9 +773,10 @@ async fn proxied_request_survives_daemon_restart_window() {
     }))
     .expect("request json");
 
-    let responses = super::super::send_daemon_request_line(&socket, &handshake, &request)
-        .await
-        .expect("request should succeed once the restarted daemon is back");
+    let responses =
+        crate::daemon::core_proxy::send_daemon_request_line(&socket, &handshake, &request)
+            .await
+            .expect("request should succeed once the restarted daemon is back");
 
     assert_eq!(responses.len(), 1);
     let response: Value = serde_json::from_str(responses[0].trim()).expect("proxied response json");
@@ -840,7 +845,7 @@ async fn proxy_retries_bounded_transient_project_reads() {
             tracedecay_mcp::transport::ChannelTransport::new();
         let proxy_socket = socket.clone();
         let proxy = tokio::spawn(async move {
-            super::super::proxy_transport_to_daemon(
+            crate::daemon::core_proxy::proxy_transport_to_daemon(
                 &proxy_socket,
                 &test_handshake_defaults(),
                 None,
@@ -977,8 +982,13 @@ async fn proxy_uses_daemon_initialize_route_without_registry_access() {
     };
     let proxy_socket = socket.clone();
     let proxy = tokio::spawn(async move {
-        super::super::proxy_transport_to_daemon(&proxy_socket, &handshake, None, &mut transport)
-            .await
+        crate::daemon::core_proxy::proxy_transport_to_daemon(
+            &proxy_socket,
+            &handshake,
+            None,
+            &mut transport,
+        )
+        .await
     });
     let responses = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         let mut responses = Vec::new();
@@ -1047,7 +1057,7 @@ async fn disconnected_client_does_not_outlive_a_daemon_that_never_answers() {
     let (mut transport, sender, mut receiver) = tracedecay_mcp::transport::ChannelTransport::new();
     let proxy_socket = socket.clone();
     let proxy = tokio::spawn(async move {
-        super::super::proxy_transport_to_daemon_with_drain_bound(
+        crate::daemon::core_proxy::proxy_transport_to_daemon_with_drain_bound(
             &proxy_socket,
             &test_handshake_defaults(),
             None,
@@ -1116,7 +1126,7 @@ async fn batch_client_closing_stdin_immediately_still_receives_its_response() {
     let (mut transport, sender, mut receiver) = tracedecay_mcp::transport::ChannelTransport::new();
     let proxy_socket = socket.clone();
     let proxy = tokio::spawn(async move {
-        super::super::proxy_transport_to_daemon(
+        crate::daemon::core_proxy::proxy_transport_to_daemon(
             &proxy_socket,
             &test_handshake_defaults(),
             None,
@@ -1230,7 +1240,7 @@ async fn requests_through_proxy(
     let (mut transport, sender, mut receiver) = tracedecay_mcp::transport::ChannelTransport::new();
     let proxy_socket = socket.clone();
     let proxy = tokio::spawn(async move {
-        super::super::proxy_transport_to_daemon_with_drain_bound(
+        crate::daemon::core_proxy::proxy_transport_to_daemon_with_drain_bound(
             &proxy_socket,
             &test_handshake_defaults(),
             None,

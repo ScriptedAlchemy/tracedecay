@@ -13,7 +13,8 @@ use super::super::remote_deletion::{
     RemoteDeletionExecutionError, RemoteDeletionFailureCode, RemoteDeletionPhase,
     RemoteDeletionReceipt, RemoteDeletionReceiptTarget,
 };
-use super::{StoreAdministration, destructive_reservation_error};
+use super::destructive_reservation_error;
+use crate::daemon::branch_admin::StoreAdministration;
 use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
 
 struct RemoteDeletionCleanupError {
@@ -396,8 +397,10 @@ impl StoreAdministration {
                     receipt.tombstone_id = Some(tombstone.tombstone_id.clone());
                     receipt.tombstone_recorded = true;
                     self.settle_remote_account_deletion_tombstone_persist(&tombstone);
-                    let open_tasks =
-                        super::super::project_open_tasks(owners.project_open_gates.as_ref()).await;
+                    let open_tasks = crate::daemon::project_routing::project_open_tasks(
+                        owners.project_open_gates.as_ref(),
+                    )
+                    .await;
                     if !open_tasks
                         .shutdown_profile_with_deadline(
                             &profile_root,
@@ -712,7 +715,9 @@ impl StoreAdministration {
                     error,
                 )
             })?;
-        let open_tasks = super::super::project_open_tasks(owners.project_open_gates.as_ref()).await;
+        let open_tasks =
+            crate::daemon::project_routing::project_open_tasks(owners.project_open_gates.as_ref())
+                .await;
         if !open_tasks
             .shutdown_project_identity(profile_root, project_id, &project_roots)
             .await

@@ -1,3 +1,5 @@
+#[cfg(any(test, feature = "test-transport"))]
+use super::super::production_harness::ProductionProjectCompositionHarnessV1;
 use std::collections::BTreeSet;
 
 use tempfile::TempDir;
@@ -11,7 +13,6 @@ use tracedecay_domain::configuration::{
 };
 
 use super::journey_test_support::tool_payload;
-use super::*;
 use crate::test_support::git::git;
 
 fn json_arguments(request: impl serde::Serialize) -> serde_json::Value {

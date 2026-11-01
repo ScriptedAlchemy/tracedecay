@@ -3,7 +3,6 @@ use super::{
     BackgroundRefreshModeV1, BackgroundRefreshRequest, BackgroundRefreshWriter, McpServer,
     McpServerConstructionContext,
 };
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -105,16 +104,12 @@ async fn lazy_stale_sync_is_detached_from_the_request() {
             let armed = Arc::clone(&armed);
             Box::pin(async move {
                 if !armed.load(Ordering::Acquire) {
-                    return Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(
-                        Some(HashMap::new()),
-                    ));
+                    return Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted);
                 }
                 entered.notify_one();
                 release.notified().await;
                 completed.fetch_add(1, Ordering::AcqRel);
-                Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(
-                    Some(HashMap::from([("detached.rs".to_string(), 7)])),
-                ))
+                Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted)
             })
         })
     };
@@ -149,7 +144,7 @@ async fn lazy_stale_sync_is_detached_from_the_request() {
         "the tool answered before the sync finished"
     );
 
-    // ...and the sync still completes, refreshing the token map.
+    // ...and the sync still completes behind the answered request.
     release.notify_one();
     tokio::time::timeout(Duration::from_secs(5), async {
         while server.background_refresh_running.load(Ordering::Acquire) {
@@ -159,10 +154,6 @@ async fn lazy_stale_sync_is_detached_from_the_request() {
     .await
     .expect("the detached sync settles");
     assert_eq!(completed.load(Ordering::Acquire), 1);
-    assert_eq!(
-        server.file_token_map_snapshot(),
-        HashMap::from([("detached.rs".to_string(), 7)])
-    );
     server.shutdown().await;
 }
 
@@ -197,9 +188,7 @@ async fn concurrent_startup_catchups_use_injected_writer_authority() {
                 .await
                 .expect("native timer");
                 active.fetch_sub(1, Ordering::AcqRel);
-                Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(
-                    Some(HashMap::new()),
-                ))
+                Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted)
             })
         })
     };
@@ -246,7 +235,7 @@ async fn parked_freshness_probe_logs_cause_and_remedy_as_fields() {
             let armed = armed.load(Ordering::Acquire);
             Box::pin(async move {
                 if !armed {
-                    return Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(None));
+                    return Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted);
                 }
                 request.freshness_probe_sink = Some(Arc::new(move |_root| {
                     let cause = cause.clone();
@@ -332,15 +321,11 @@ fn native_server_catch_up(
 }
 
 /// The catch-up a server dispatches at construction runs where no Tokio
-/// runtime exists and lands its token map.
+/// runtime exists and settles its admission machine.
 #[test]
 fn startup_catch_up_settles_without_a_tokio_runtime() {
     let refresh_writer: BackgroundRefreshWriter = Arc::new(|_request| {
-        Box::pin(async {
-            Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(
-                Some(HashMap::from([("startup.rs".to_string(), 3)])),
-            ))
-        })
+        Box::pin(async { Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted) })
     });
     native_server_catch_up(refresh_writer, async |server| {
         assert!(
@@ -348,10 +333,6 @@ fn startup_catch_up_settles_without_a_tokio_runtime() {
                 .wait_for_startup_catch_up(Duration::from_secs(30))
                 .await,
             "startup catch-up must settle off Tokio"
-        );
-        assert_eq!(
-            server.file_token_map_snapshot(),
-            HashMap::from([("startup.rs".to_string(), 3)])
         );
     });
 }

@@ -945,34 +945,29 @@ pub(crate) enum HistoricalAdmissionView {
     Unavailable,
 }
 
-fn historical_admission_view(status: &SessionProjectionServingStatus) -> HistoricalAdmissionView {
-    match &status.state {
-        SessionProjectionServingState::Current => HistoricalAdmissionView::Scheduled,
-        SessionProjectionServingState::Stale { reason } => match reason {
-            SessionProjectionStaleReason::HistoricalConvergence
-            | SessionProjectionStaleReason::HistoricalRetry { .. } => {
-                HistoricalAdmissionView::Scheduled
-            }
-            SessionProjectionStaleReason::HistoricalBlocked { reason_code } => {
+fn historical_admission_view(
+    telemetry: &SessionTemporalRefreshWorkerTelemetry,
+) -> HistoricalAdmissionView {
+    match telemetry.unavailable_reason {
+        Some(
+            SessionTemporalRefreshUnavailableReason::Missing
+            | SessionTemporalRefreshUnavailableReason::Stopped,
+        ) => HistoricalAdmissionView::Unavailable,
+        // A recovering supervisor still owns deferred history, but projection
+        // availability cannot establish whether that history is terminally blocked.
+        Some(
+            SessionTemporalRefreshUnavailableReason::Recovering
+            | SessionTemporalRefreshUnavailableReason::Stalled,
+        )
+        | None => match &telemetry.historical_state {
+            SessionHistoricalServingState::Blocked(reason_code) => {
                 HistoricalAdmissionView::Blocked {
                     reason_code: reason_code.clone(),
                 }
             }
-        },
-        SessionProjectionServingState::Unavailable { reason } => match reason {
-            // `Stalled` is what `Recovering` becomes before any pass makes
-            // progress, so it is the state every restarted worker starts in
-            // when its first pass names a retry. That supervisor still owns
-            // the deferred unit and re-runs the pass, so the hand-off is
-            // scheduled rather than reported as history that cannot run.
-            SessionProjectionUnavailableReason::WorkerRecovering
-            | SessionProjectionUnavailableReason::WorkerStalled => {
-                HistoricalAdmissionView::Scheduled
-            }
-            SessionProjectionUnavailableReason::WorkerMissing
-            | SessionProjectionUnavailableReason::WorkerStopped => {
-                HistoricalAdmissionView::Unavailable
-            }
+            SessionHistoricalServingState::Current
+            | SessionHistoricalServingState::Pending
+            | SessionHistoricalServingState::Retryable(_) => HistoricalAdmissionView::Scheduled,
         },
     }
 }
@@ -1112,9 +1107,24 @@ impl SessionTemporalRefreshWake {
         let Some(state) = self.target() else {
             return HistoricalAdmissionView::Unavailable;
         };
-        let view = historical_admission_view(&state.serving_status());
+        let view = {
+            let mut telemetry = state
+                .telemetry
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if state.cancelled.load(Ordering::Acquire) {
+                return HistoricalAdmissionView::Unavailable;
+            }
+            let view = historical_admission_view(&telemetry);
+            if view == HistoricalAdmissionView::Scheduled {
+                // Keep the blocker check and transition together so a worker's
+                // terminal outcome cannot be overwritten between them.
+                telemetry.historical_state = SessionHistoricalServingState::Pending;
+                telemetry.quiescent = false;
+            }
+            view
+        };
         if view == HistoricalAdmissionView::Scheduled {
-            state.mark_history_pending();
             state.wake_history();
         }
         view
@@ -1264,6 +1274,64 @@ mod tests {
     }
 
     #[test]
+    fn admission_preserves_historical_blocker_while_projection_recovers() {
+        for made_progress in [false, true] {
+            let state = Arc::new(SessionTemporalRefreshWakeState::default());
+            state.mark_running();
+            state.record_history_outcome(SessionHistoricalIngestOutcome::Blocked {
+                reason_code: "invalid_observation_contract".to_owned(),
+                made_progress: false,
+            });
+            state.record_pass(14, made_progress);
+            state.mark_recovering(
+                SessionTemporalRefreshBlocker::Storage,
+                SessionTemporalRefreshRetryClass::Storage,
+            );
+            let wake = state.handle();
+            let worker = wake.status();
+            assert_eq!(
+                wake.serving_status().state,
+                SessionProjectionServingState::Unavailable {
+                    reason: if made_progress {
+                        SessionProjectionUnavailableReason::WorkerRecovering
+                    } else {
+                        SessionProjectionUnavailableReason::WorkerStalled
+                    },
+                }
+            );
+
+            for _ in 0..2 {
+                assert_eq!(
+                    wake.schedule_historical_admission(),
+                    HistoricalAdmissionView::Blocked {
+                        reason_code: "invalid_observation_contract".to_owned(),
+                    }
+                );
+                assert!(state.history_is_blocked());
+                assert!(!state.take_historical_dirty());
+                assert_eq!(wake.status(), worker);
+            }
+
+            state.mark_running();
+            assert_eq!(
+                wake.serving_status().state,
+                SessionProjectionServingState::Stale {
+                    reason: SessionProjectionStaleReason::HistoricalBlocked {
+                        reason_code: "invalid_observation_contract".to_owned(),
+                    },
+                }
+            );
+
+            state.record_history_outcome(SessionHistoricalIngestOutcome::Complete);
+            assert_eq!(
+                wake.schedule_historical_admission(),
+                HistoricalAdmissionView::Scheduled
+            );
+            assert!(state.take_historical_dirty());
+        }
+    }
+
+    #[test]
     fn a_stopped_worker_refuses_historical_admission() {
         let state = Arc::new(SessionTemporalRefreshWakeState::default());
         state.mark_running();
@@ -1286,6 +1354,38 @@ mod tests {
             wake.schedule_historical_admission(),
             HistoricalAdmissionView::Unavailable
         );
+    }
+
+    #[test]
+    fn a_retired_worker_refuses_historical_admission() {
+        let state = Arc::new(SessionTemporalRefreshWakeState::default());
+        state.mark_running();
+        let wake = state.handle();
+        drop(state);
+
+        assert_eq!(
+            wake.schedule_historical_admission(),
+            HistoricalAdmissionView::Unavailable
+        );
+    }
+
+    #[test]
+    fn a_cancelled_worker_preserves_blocked_history_without_admitting_it() {
+        let state = Arc::new(SessionTemporalRefreshWakeState::default());
+        state.mark_running();
+        state.record_history_outcome(SessionHistoricalIngestOutcome::Blocked {
+            reason_code: "invalid_observation_contract".to_owned(),
+            made_progress: false,
+        });
+        let wake = state.handle();
+        state.cancel();
+
+        assert_eq!(
+            wake.schedule_historical_admission(),
+            HistoricalAdmissionView::Unavailable
+        );
+        assert!(state.history_is_blocked());
+        assert!(!state.take_historical_dirty());
     }
 
     #[test]

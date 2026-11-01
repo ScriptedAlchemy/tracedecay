@@ -7,8 +7,11 @@
 //! The resolver returns the selected retained server rather than reconstructing
 //! a graph-only authority from registry paths.
 
-use super::*;
+use super::branch_admin::StoreAdministration;
+use std::path::Path;
+use std::sync::Arc;
 use tracedecay_daemon_identity::authority;
+use tracedecay_domain::errors::TraceDecayError;
 
 fn sole_mounted_server_matching(
     servers: &[(

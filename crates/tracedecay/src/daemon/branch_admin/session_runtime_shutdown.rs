@@ -1,6 +1,7 @@
 use std::sync::{Arc, atomic::Ordering};
 
-use super::{SessionRuntimeRegistryEntryV1, StoreAdministration};
+use super::SessionRuntimeRegistryEntryV1;
+use crate::daemon::branch_admin::StoreAdministration;
 use tracedecay_daemon_identity::authority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_store_runtime::RemoteRecoveryProjectLifecycle;
