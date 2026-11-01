@@ -117,7 +117,6 @@ TEST_DATA = {
     ],
     ("tracedecay", "memory_suite"): ["//evals/memory:scenarios"],
     ("tracedecay", "session_suite"): ["//scripts:run-session-temporal-benchmark.sh"],
-    ("tracedecay", "session_temporal"): ["benchmark_data/session-temporal/workload-v1.json"],
     ("tracedecay-agent-hosts", "unit_test"): ["//plugin:sources"],
     ("tracedecay-capture", "capture_suite"): [
         "benchmark_data/runtime/fixtures/providers/home/.codex/sessions/2026/07/fixture-session.jsonl",
@@ -142,6 +141,12 @@ TEST_DATA = {
     ],
     ("tracedecay-code-index", "partitioned_codec"): [
         "//benchmark_data:index-bench",
+    ],
+    ("tracedecay-project", "session_temporal"): [
+        "benchmark_data/session-temporal/workload-v1.json",
+    ],
+    ("tracedecay-project", "session_temporal_suite"): [
+        "//scripts:run-session-temporal-benchmark.sh",
     ],
     ("tracedecay-query", "index_bench_workload"): [
         "benchmark_data/index-bench/README.md",
