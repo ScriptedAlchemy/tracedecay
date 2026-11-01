@@ -583,13 +583,19 @@ impl SessionTemporalRefreshWakeState {
     }
 
     pub fn mark_stopped(&self) {
-        let mut telemetry = self
-            .telemetry
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        telemetry.blocker = Some(SessionTemporalRefreshBlocker::WorkerStopped);
-        telemetry.retry_class = None;
-        telemetry.unavailable_reason = Some(SessionTemporalRefreshUnavailableReason::Stopped);
+        {
+            let mut telemetry = self
+                .telemetry
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            telemetry.blocker = Some(SessionTemporalRefreshBlocker::WorkerStopped);
+            telemetry.retry_class = None;
+            telemetry.unavailable_reason = Some(SessionTemporalRefreshUnavailableReason::Stopped);
+        }
+        // Every supervisor terminal path marks its state stopped. Publish that
+        // transition so a waiter blocked on the worker's idle event observes
+        // the terminated worker instead of waiting for an idle that never comes.
+        self.idle.notify_waiters();
     }
 
     pub fn observe_durable_backlog(&self, backlog: usize) {
