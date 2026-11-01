@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use tracedecay_contracts::FreshnessState;
 use tracedecay_lsp::{LspRuntimeFailure, LspRuntimeFuture};
 
 use super::super::identity::IndexingIdentityV1;
@@ -57,7 +58,10 @@ impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
                 .retained_text_owner_freshness_for_scope(&scope)
                 .await
                 .ok_or_else(|| LspRuntimeFailure::new("lsp-code-index-generation-unavailable"))?;
-            if !fresh {
+            // A root-only graph cursor names immutable retained bytes. Document
+            // reads require current source; root commit and managed-result
+            // consumers enforce the same proof when admitting this identity.
+            if !fresh && document_relative_path.is_some() {
                 return Err(LspRuntimeFailure::new(
                     "lsp-code-index-generation-unavailable",
                 ));
@@ -111,6 +115,11 @@ impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
                     worktree: snapshot.worktree.clone(),
                     reference: snapshot.reference.clone(),
                     head_commit_id: confirmed_identity.head_commit().cloned(),
+                    source_freshness: if fresh {
+                        FreshnessState::Current
+                    } else {
+                        FreshnessState::Unknown
+                    },
                     source_revision: snapshot.source_revision.clone(),
                     code_generation_id: generation.manifest().generation_id.clone(),
                     snapshot_digest: generation.manifest().snapshot_digest.clone(),

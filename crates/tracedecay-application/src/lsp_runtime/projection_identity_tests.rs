@@ -1,5 +1,5 @@
 use super::LspCodeIndexProjectionIdentity;
-use tracedecay_contracts::ResolvedScope;
+use tracedecay_contracts::{FreshnessState, ResolvedScope};
 use tracedecay_domain::{
     CodeGenerationId, CommitId, ContentDigest, FileOccurrenceId, ManifestDigest, ProjectId, RefId,
     RepositoryId, WorktreeId,
@@ -25,6 +25,7 @@ fn identity() -> LspCodeIndexProjectionIdentity {
         worktree: Some(id("worktree.lsp-scope")),
         reference: Some(id("ref.main")),
         head_commit_id: Some(id("commit.lsp-scope")),
+        source_freshness: FreshnessState::Current,
         source_revision: Some(id("commit.lsp-scope")),
         code_generation_id: id::<CodeGenerationId>("generation.lsp.scope.7"),
         snapshot_digest: id::<ManifestDigest>(&digest('a')),
@@ -72,7 +73,8 @@ fn projection_scope_rejects_project_repository_worktree_and_reference_mismatch()
         ),
     ];
 
-    for (identity, expected) in cases {
+    for (mut identity, expected) in cases {
+        identity.source_freshness = FreshnessState::Unknown;
         let error = identity
             .clone()
             .admit_commit_scope(&scope())
@@ -148,4 +150,21 @@ fn projection_scope_requires_and_uses_the_sealed_generation_identity() {
         Some(id::<FileOccurrenceId>("file.lsp-scope"))
     );
     assert_eq!(admitted.generation, 7);
+}
+
+#[test]
+fn retained_source_currency_does_not_change_graph_identity_or_admit_commit_feedback() {
+    let expected_graph = identity().admit_worktree_scope(&scope()).unwrap();
+    for source_freshness in [FreshnessState::Unknown, FreshnessState::Stale] {
+        let mut retained = identity();
+        retained.source_freshness = source_freshness;
+        assert_eq!(
+            retained.clone().admit_worktree_scope(&scope()).unwrap(),
+            expected_graph
+        );
+        assert_eq!(
+            retained.admit_commit_scope(&scope()).unwrap_err().class(),
+            "lsp-code-index-generation-unavailable"
+        );
+    }
 }
