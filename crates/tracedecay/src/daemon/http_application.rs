@@ -576,7 +576,7 @@ pub fn live_remote_operational_status(
 pub(super) fn live_local_http(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
 ) -> Result<(String, String, ureq::Agent)> {
-    let connection = super::current_profile_daemon_connection(profile)?;
+    let connection = crate::daemon::core_client::current_profile_daemon_connection(profile)?;
     let Some(endpoint) = connection.http_application_endpoint() else {
         return Err(TraceDecayError::Config {
             message: "TraceDecay daemon HTTP application endpoint is not published. Start or restart the daemon.".to_owned(),

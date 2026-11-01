@@ -4,6 +4,13 @@
 //! generated enum, so an unrelated phase's temporaries inflate the whole
 //! future. These probes read the compiled size without polling anything.
 
+use super::super::branch_admin::StoreAdministration;
+use super::super::project_composition::production_project_server;
+use super::super::project_delivery_mount;
+use super::super::project_open_handshake::open_project_for_handshake;
+use super::super::project_open_orchestration::ensure_registered_project_route;
+use super::super::project_open_owners;
+use super::super::project_server_lifecycle::schedule_project_server_retirement;
 use std::future::Future;
 use std::mem::size_of;
 

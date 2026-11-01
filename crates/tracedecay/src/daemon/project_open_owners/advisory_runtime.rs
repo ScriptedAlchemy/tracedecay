@@ -85,7 +85,8 @@ use tracedecay_lsp::{
 };
 use tracedecay_runtime_core::cancellation::MonotonicDeadline;
 
-use super::{DaemonInvocationState, POLICY_REVISION_V1, register_project_query_authority};
+use super::{POLICY_REVISION_V1, register_project_query_authority};
+use crate::daemon::invocation_state::DaemonInvocationState;
 use crate::mcp::McpServer;
 use tracedecay_agent_hosts::agents::context_scout::address_registry::{
     ContextScoutAuthorityPinV1, ContextScoutCanonicalInputAssemblerV1,

@@ -12,13 +12,14 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tracedecay_daemon_protocol::DaemonHandshake;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::{
-    DaemonHandshake, enter_test_daemon_database_scope, git, test_client_identity_for,
+    enter_test_daemon_database_scope, git, test_client_identity_for,
     test_daemon_engine_for_profile, test_handshake_defaults,
 };
 

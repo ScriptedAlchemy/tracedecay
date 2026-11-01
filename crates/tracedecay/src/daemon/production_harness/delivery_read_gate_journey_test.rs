@@ -5,6 +5,8 @@
 //! mount gate instead of a generic missing-authority answer. The gate must
 //! stay readable while the feedback/advisory owners remain deferred.
 
+#[cfg(any(test, feature = "test-transport"))]
+use super::super::production_harness::ProductionProjectCompositionHarnessV1;
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
@@ -23,7 +25,6 @@ use tracedecay_contracts::{
 use tracedecay_domain::{ActorId, CommitId, ManifestDigest, UtcMicros};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use super::*;
 use crate::test_support::git::git;
 
 #[tokio::test]

@@ -16,8 +16,21 @@ use std::sync::{
 use super::bootstrap::set_owner_only_permissions;
 // The parent `daemon` module imports this under `cfg(test)` only, so
 // `use super::*` cannot carry it into a `test-transport` build.
+use super::branch_admin::StoreAdministration;
+use super::core_handshake::binary_version;
+use super::http_application;
+use super::http_application_router::install_http_application_cold_resolver;
+use super::invocation_state::DaemonInvocationState;
+use super::project_composition::{ProductionProjectCompositionRuntime, production_project_server};
+use super::project_open_admission::ProjectOpenGates;
+use super::project_routing::project_route_for_handshake;
 use super::project_server_lifecycle::{detach_project_servers, shutdown_detached_project_servers};
-use super::*;
+use serde_json::json;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::time::Duration;
 use tokio::time::timeout;
 #[cfg(unix)]
 use tracedecay_application::pr_tracking::acquire_manual_branch_lifecycle;
@@ -29,6 +42,10 @@ use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexWorktreeSchedu
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay_code_index_runtime::git_transactions;
 use tracedecay_daemon_identity::profile_identity;
+use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_mcp::{JsonRpcRequest, JsonRpcResponse};
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 #[cfg(unix)]
 use tracedecay_runtime_core::logging::log_daemon_event;

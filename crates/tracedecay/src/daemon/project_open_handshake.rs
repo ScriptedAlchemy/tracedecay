@@ -4,9 +4,24 @@
 //! never-enrolled identity and a missing index - apart from genuine
 //! conflicts, and renders the client-visible refusal.
 
-use super::*;
+use super::AuthenticatedFirstRequest;
+use super::branch_admin::StoreAdministration;
+use super::project_open_capacity_limit;
+use super::project_open_retryable_reason;
+use super::project_routing::project_open_cancellation_checkpoint;
+use super::wire_io::write_daemon_response;
 #[cfg(any(test, feature = "test-helpers"))]
 use crate::test_support::hold_after_project_sessions_for_test;
+use serde_json::json;
+use std::path::Path;
+use std::sync::Arc;
+use tracedecay_daemon_protocol::{
+    DaemonHandshake, PROJECT_NOT_ENROLLED_REASON_CODE, error_is_project_not_enrolled,
+};
+use tracedecay_domain::errors::{ProjectOpenFailureKind, Result, TraceDecayError};
+use tracedecay_mcp::server::{McpMethod, classify_mcp_method};
+use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 /// Each store it mounts is one transactionally safe unit that cannot observe
 /// `cancellation` from inside; the token is checked between them so a
@@ -18,7 +33,7 @@ pub(super) async fn open_project_for_handshake(
     store_administration: &StoreAdministration,
     cancellation: &CancellationToken,
 ) -> Result<tracedecay_project::project::TraceDecay> {
-    let open_options = crate::daemon::handshake_open_options(handshake);
+    let open_options = crate::daemon::core_handshake::handshake_open_options(handshake);
     let registry_database = store_administration.registered_profile_database().await?;
     let (store_layout, first_touch) = match Box::pin(
         tracedecay_project::project::TraceDecay::resolve_registered_configuration_layout(

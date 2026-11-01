@@ -1,13 +1,15 @@
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
+use tracedecay_daemon_protocol::DaemonHandshake;
 
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_project::project::TraceDecay;
 
-use super::{DaemonEngine, DaemonHandshake, effective_automation_config_for_project};
+use super::effective_automation_config_for_project;
+use crate::daemon::engine::DaemonEngine;
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 const HOST_RECEIPT_REVIEW_BATCH_LIMIT: usize = 8;
@@ -266,9 +268,10 @@ mod tests {
     use tracedecay_hooks::{HookRouteMetadata, HookTerminalReceipt};
 
     use super::{
-        DaemonEngine, HOST_RECEIPT_REVIEW_BATCH_LIMIT, HostReceiptReviewProgress,
-        drain_ready_host_receipts, run_one_host_receipt_review,
+        HOST_RECEIPT_REVIEW_BATCH_LIMIT, HostReceiptReviewProgress, drain_ready_host_receipts,
+        run_one_host_receipt_review,
     };
+    use crate::daemon::engine::DaemonEngine;
 
     #[tokio::test]
     async fn one_review_pass_drains_multiple_ready_receipts() {

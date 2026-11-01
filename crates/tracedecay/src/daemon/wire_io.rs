@@ -3,11 +3,11 @@
 //! Oversized input is rejected with a typed non-durable error without
 //! retaining payload bytes; the bound tests live beside that guarantee.
 
-use super::*;
+use tracedecay_domain::errors::Result;
 
 /// Writes one JSON-RPC, invocation, or delivery-ack response frame.
 pub(super) async fn write_daemon_response(
-    transport: &mut impl McpTransport,
+    transport: &mut impl tracedecay_mcp::McpTransport,
     response: &impl serde::Serialize,
 ) -> Result<()> {
     let payload = {
@@ -22,7 +22,7 @@ pub(super) async fn write_daemon_response(
 /// separate from `daemon.wire.encode_response` so a report can distinguish
 /// serialization cost from a peer that is slow to drain the socket.
 async fn write_response_payload(
-    transport: &mut impl McpTransport,
+    transport: &mut impl tracedecay_mcp::McpTransport,
     payload: &str,
 ) -> std::io::Result<()> {
     tracing::Instrument::instrument(
@@ -40,12 +40,12 @@ async fn write_response_payload(
 /// rejection and returns `Ok(None)` without retaining payload bytes.
 #[tracing::instrument(name = "daemon.wire.read_line", level = "trace", skip_all)]
 pub(super) async fn read_line_handling_wire_oversized(
-    transport: &mut (impl McpTransport + Send),
+    transport: &mut (impl tracedecay_mcp::McpTransport + Send),
 ) -> Result<Option<String>> {
     read_line_handling_wire_oversized_inner(transport).await
 }
 
-fn read_line_handling_wire_oversized_inner<T: McpTransport + std::marker::Send>(
+fn read_line_handling_wire_oversized_inner<T: tracedecay_mcp::McpTransport + std::marker::Send>(
     transport: &mut T,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<String>>> + Send + '_>> {
     // Erase the deeply nested future before it reaches the measured wrapper
@@ -69,13 +69,12 @@ fn read_line_handling_wire_oversized_inner<T: McpTransport + std::marker::Send>(
 mod wire_bound_tests {
     use std::sync::Arc;
 
-    use super::{
-        BrokerStreamTransport, RoutedRmcpReplay, read_line_handling_wire_oversized,
-        serve_routed_rmcp_connection,
-    };
+    use crate::daemon::connection_serving::{RoutedRmcpReplay, serve_routed_rmcp_connection};
+    use crate::daemon::wire_io::read_line_handling_wire_oversized;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     use tracedecay_daemon_service::shutdown::DaemonLifecycle;
     use tracedecay_framing::{WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error};
+    use tracedecay_mcp::BrokerStreamTransport;
     use tracedecay_mcp::McpTransport;
 
     use tracedecay_daemon_protocol::{BrokerListener, default_loopback_endpoint};

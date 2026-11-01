@@ -28,10 +28,10 @@ use tracedecay_code_index::test_attribution::{
     GenerationTestJoinPartialReasonV1, GenerationTestJoinRecordV1, GenerationTestJoinV1,
     TestAttributionJoinInputCoverageV1, TestAttributionOccurrenceV1, TestAttributionWatermarkV1,
 };
-use tracedecay_contracts::ResolvedScope;
 use tracedecay_contracts::retrieval::{
     AffectedTestAttributionV1, AffectedTestsRequest, RetrievalPortContext,
 };
+use tracedecay_contracts::{FreshnessState, ResolvedScope};
 use tracedecay_temporal_query::cursor::InMemoryCursorAuthenticator;
 
 struct AttributionFixture {
@@ -305,6 +305,7 @@ struct PublishedCodeIndexIdentity {
     /// matches the indexed content.
     source_revision: Option<tracedecay_domain::CommitId>,
     published: Mutex<(CodeGenerationId, ManifestDigest)>,
+    source_freshness: Mutex<FreshnessState>,
 }
 
 struct RefusingCodeIndexIdentity;
@@ -356,6 +357,7 @@ impl LspCodeIndexProjectionIdentityPort for PublishedCodeIndexIdentity {
             worktree: Some(self.scope.worktree_id.clone()),
             reference: self.scope.reference.clone(),
             head_commit_id: self.source_revision.clone(),
+            source_freshness: *self.source_freshness.lock().expect("source freshness"),
             source_revision: self.source_revision.clone(),
             code_generation_id,
             snapshot_digest,
@@ -401,6 +403,7 @@ fn symbol_graph_cursor_authority_at(
     let code_index = Arc::new(PublishedCodeIndexIdentity {
         scope: scope.clone(),
         source_revision,
+        source_freshness: Mutex::new(FreshnessState::Current),
         published: Mutex::new((
             CodeGenerationId::new("generation.symbol-graph.code.11").expect("generation"),
             digest('d'),
@@ -459,9 +462,10 @@ async fn symbol_graph_cursors_resume_across_production_minted_request_ids() {
     let authenticator = Arc::new(
         InMemoryCursorAuthenticator::new(key.clone(), vec![9_u8; 32]).expect("authenticator"),
     );
-    let (_code_index, snapshots) = symbol_graph_cursor_authority(key);
+    let (code_index, snapshots) = symbol_graph_cursor_authority(key);
     let adapter = AuthenticatedSymbolGraphCursorAdapter::new(Arc::new(snapshots), authenticator);
 
+    *code_index.source_freshness.lock().unwrap() = FreshnessState::Unknown;
     let issuing = symbol_graph_context(
         tracedecay_contracts::request_identity::mcp_connection_request_id(
             &serde_json::json!(1),
@@ -491,6 +495,7 @@ async fn symbol_graph_cursors_resume_across_production_minted_request_ids() {
         .await
         .expect("a production request must be able to issue a page cursor")
         .expect("a page with more to serve mints a continuation");
+    *code_index.source_freshness.lock().unwrap() = FreshnessState::Current;
     assert_eq!(
         adapter
             .claim_page(&resuming, &lane("search"), Some(&cursor), observed_at)

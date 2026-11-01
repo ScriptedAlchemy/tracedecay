@@ -3,7 +3,13 @@
 //! Builds the dashboard/API router for one project and installs the cold
 //! resolver the registry uses to mount it on demand.
 
-use super::*;
+use super::branch_admin::StoreAdministration;
+use super::http_application;
+use super::invocation_state::DaemonInvocationState;
+use super::project_open_admission::ProjectOpenGates;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
@@ -29,14 +35,14 @@ async fn build_http_application_router(
     native_runtime::spawn_blocking(move || {
         #[cfg(test)]
         tests::spend_injected_build_cpu(project_id.as_str());
-        let handshake = crate::daemon::handshake_for_current_client(
+        let handshake = crate::daemon::core_handshake::handshake_for_current_client(
             &owner,
             Some(project_path),
             None,
             false,
             false,
         )?;
-        let client = crate::daemon::invocation_client_for_current(&owner, handshake)?;
+        let client = crate::daemon::core_client::invocation_client_for_current(&owner, handshake)?;
         tracedecay_daemon_service::application_surface::http_application_router(
             client,
             tracedecay_daemon_service::daemon_operation_event_authority(),

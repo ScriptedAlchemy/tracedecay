@@ -15,7 +15,7 @@ use tracedecay_contracts::retrieval::{
     SymbolPrimitiveRecord,
 };
 use tracedecay_contracts::{
-    ApplicationProblem, EvidenceDomain, OmissionReason, RetrievalPortOutcome,
+    ApplicationProblem, EvidenceDomain, FreshnessState, OmissionReason, RetrievalPortOutcome,
 };
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{CursorBindingMismatchV1, CursorBindingV1, ProjectId};
@@ -939,12 +939,15 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                         return diagnostics_unavailable(finished_at, OmissionReason::Unsupported);
                     }
                 };
+                // A durable publication is read through the retained
+                // generation identity, not a current-document binding: the
+                // finding's file occurrence and digest come from the
+                // publication authority below. Document-bound callers still
+                // fail closed, while this read can name the retained
+                // generation and its source currency.
                 let current_index = match self
                     .code_index
-                    .current_identity(
-                        self.source_runtime.project_root().to_path_buf(),
-                        document_path.clone(),
-                    )
+                    .current_identity(self.source_runtime.project_root().to_path_buf(), None)
                     .await
                 {
                     Ok(identity) => identity,
@@ -952,6 +955,13 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                         return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
                     }
                 };
+                // The publication persisted for this generation is still
+                // valid while the retained source proof is being renewed; a
+                // non-current identity is stale evidence, not a missing
+                // authority.
+                if current_index.source_freshness != FreshnessState::Current {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Stale);
+                }
                 if current_index.code_generation_id != current_generation {
                     return diagnostics_unavailable(finished_at, OmissionReason::Stale);
                 }

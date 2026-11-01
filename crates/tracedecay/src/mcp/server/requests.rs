@@ -4,6 +4,8 @@
 use std::collections::BTreeMap;
 
 use super::*;
+use tracedecay_contracts::ProfileIdentityReadPort;
+use tracedecay_daemon_protocol::PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_mcp::server::{
     ApplicationCancellationRegistration, DispatchControl, DispatchControlRequest,
@@ -51,6 +53,27 @@ struct ToolActivityPublishRunning(Arc<AtomicBool>);
 impl Drop for ToolActivityPublishRunning {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
+    }
+}
+
+/// Whether two servers answer for the same registered profile identity.
+///
+/// Daemon-owned project servers carry a profile identity; a direct or test
+/// server may carry none. A successor may only inherit a cross-owner request
+/// when both name the same identity, or when neither names one: direct servers
+/// have no profile contract to cross.
+fn same_registered_profile(retired: &McpServer, current: &McpServer) -> bool {
+    match (
+        retired
+            .profile_identity()
+            .map(ProfileIdentityReadPort::profile_id),
+        current
+            .profile_identity()
+            .map(ProfileIdentityReadPort::profile_id),
+    ) {
+        (Some(retired), Some(current)) => retired == current,
+        (None, None) => true,
+        (Some(_), None) | (None, Some(_)) => false,
     }
 }
 
@@ -1401,6 +1424,96 @@ impl McpServer {
         }
     }
 
+    /// The owner that executes this tool call.
+    ///
+    /// A connection can outlive the composition upgrade that retired the
+    /// owner it was bound to. Until a request reaches a handler, the route's
+    /// current owner serves it instead of failing a call that never ran. The
+    /// caller keeps this inside the request's cancellation boundary because
+    /// successor resolution awaits registry and graph locks.
+    async fn resolved_dispatch_server(
+        &self,
+        selected: Option<&Arc<McpServer>>,
+    ) -> Result<Arc<McpServer>> {
+        let selected = match selected {
+            Some(server) => Arc::clone(server),
+            None => self.dispatch_authority.server().upgrade().ok_or_else(|| {
+                TraceDecayError::project_route(
+                    "tool_dispatch_shutdown",
+                    true,
+                    "MCP server was released before retained dispatch admission",
+                )
+            })?,
+        };
+        if !selected
+            .project_server_lifecycle
+            .response_revoked()
+            .is_cancelled()
+        {
+            return Ok(selected);
+        }
+        Ok(self
+            .current_owner_after_retirement(&selected)
+            .await?
+            .unwrap_or(selected))
+    }
+
+    /// Follows a project composition upgrade that retired the owner this
+    /// connection was bound to before the request reached a handler.
+    ///
+    /// A project open publishes a core owner and then replaces it with the
+    /// full owner, revoking the core after its admitted responses drain. A
+    /// connection routed to the core can still have its next request admitted
+    /// after that revocation; nothing has run for the request, so it belongs
+    /// to the route's current owner rather than to a retirement refusal.
+    ///
+    /// Only the same registered profile serving the same project store on the
+    /// same branch, with no loss of session authority, may inherit the
+    /// request. A resolver refusal keeps its typed authority error (ambiguous,
+    /// unavailable, denied) instead of collapsing into a retirement, and every
+    /// other case keeps the typed retryable retirement refusal, because
+    /// serving it elsewhere (or replaying it later) would cross a route or an
+    /// effect boundary.
+    async fn current_owner_after_retirement(
+        &self,
+        retired: &Arc<McpServer>,
+    ) -> Result<Option<Arc<McpServer>>> {
+        let Some(resolver) = self.retained_project_server_resolver.clone() else {
+            return Ok(None);
+        };
+        let retired_graph = retired.cg_snapshot().await;
+        let request =
+            tracedecay_dashboard_api::project_graph::RetainedProjectGraphRequest::for_mounted_root(
+                retired_graph.project_root().to_path_buf(),
+            );
+        let Some(current) = resolver(request).await? else {
+            return Ok(None);
+        };
+        if Arc::ptr_eq(&current, retired)
+            || current
+                .project_server_lifecycle
+                .response_revoked()
+                .is_cancelled()
+            || !same_registered_profile(retired, &current)
+            || (retired.project_session_db().is_some() && current.project_session_db().is_none())
+        {
+            return Ok(None);
+        }
+        let current_graph = current.cg_snapshot().await;
+        if retired_graph.db_path() != current_graph.db_path()
+            || retired_graph.store_layout().identity.project_id
+                != current_graph.store_layout().identity.project_id
+            || retired_graph.serving_branch() != current_graph.serving_branch()
+        {
+            return Ok(None);
+        }
+        tracing::info!(
+            project = %retired_graph.project_root().display(),
+            "re-routed a request from a retired project owner to the route's current owner"
+        );
+        Ok(Some(current))
+    }
+
     pub(super) fn project_server_revoked_response(
         &self,
         id: &Value,
@@ -1412,7 +1525,7 @@ impl McpServer {
             .is_cancelled()
         {
             (
-                crate::daemon::PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE,
+                PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE,
                 "the retained project server was retired before response completion",
             )
         } else if self
@@ -1498,20 +1611,32 @@ impl McpServer {
         // therefore cannot leave request authority on the active server.
         //
         // Route resolution can await registry reads and retained-server
-        // construction, so the transport token is sampled *around* it, not
-        // only after it: a client that cancels mid-route reads its typed
-        // cancelled terminal instead of waiting for routing to finish. No
-        // request authority exists yet, so abandoning the route future is the
-        // complete unwind.
-        let routing = self.route_tool_arguments(
-            &id,
-            &tool_name,
-            arguments,
-            &connection.route_cache,
-            connection.initialize_route(),
-            &memory_request_scope,
-        );
-        let routed = match tracedecay_mcp::server::await_route_with_cancellation(
+        // construction, and a retired owner's successor resolution awaits the
+        // same registry. The transport token is sampled *around* both, not
+        // only after them: a client that cancels mid-route or mid-successor
+        // reads its typed cancelled terminal instead of waiting. No request
+        // authority exists yet, so abandoning the future is the complete
+        // unwind.
+        let routing = async {
+            let mut routed = self
+                .route_tool_arguments(
+                    &id,
+                    &tool_name,
+                    arguments,
+                    &connection.route_cache,
+                    connection.initialize_route(),
+                    &memory_request_scope,
+                )
+                .await?;
+            let dispatch_server = self
+                .resolved_dispatch_server(routed.selected_server.as_ref())
+                .await?;
+            if let Some(route) = routed.selected_project.as_mut() {
+                route.retarget_retained_server(&dispatch_server);
+            }
+            Ok::<_, TraceDecayError>((routed, dispatch_server))
+        };
+        let (routed, dispatch_server) = match tracedecay_mcp::server::await_route_with_cancellation(
             routing,
             cancellation.cancelled(),
         )
@@ -1533,20 +1658,6 @@ impl McpServer {
                     Some(json!({"reason_code": "request_cancelled"})),
                 );
             }
-        };
-        let dispatch_server = match routed.selected_server.as_ref() {
-            Some(selected) => Arc::clone(selected),
-            None => match self.dispatch_authority.server().upgrade() {
-                Some(server) => server,
-                None => {
-                    let error = TraceDecayError::project_route(
-                        "tool_dispatch_shutdown",
-                        true,
-                        "MCP server was released before retained dispatch admission",
-                    );
-                    return refuse(id, &error);
-                }
-            },
         };
         connection.install_selected_request_server(Arc::clone(&dispatch_server));
         if let Some(response) = dispatch_server.project_server_revoked_response(&id, &tool_name) {
@@ -1611,7 +1722,7 @@ impl McpServer {
                 .project_server_revoked_response(&id, &tool_name)
                 .unwrap_or_else(|| {
                     let error = TraceDecayError::project_route(
-                        crate::daemon::PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE,
+                        PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE,
                         true,
                         "the retained project server was retired before response admission",
                     );
@@ -2102,5 +2213,478 @@ mod activity_dispatch_tests {
         .expect("detached activity persistence must complete after writer release");
 
         server.shutdown().await;
+    }
+}
+
+/// A composition upgrade publishes a core project owner and then replaces it
+/// with the full owner, revoking the core once its admitted responses drain.
+/// A connection bound to the core can have its next request admitted after that
+/// revocation; the request never reached a handler, so it belongs to the
+/// route's current owner, not to a retirement refusal.
+#[cfg(test)]
+mod retired_project_route_tests {
+    use crate::mcp::server::writer_test_support::{
+        WriterTestFixtureAuthority, init_indexed_repo, registered_context,
+    };
+    use crate::mcp::server::{
+        McpServerConstructionContext, RetainedProjectServerResolver,
+        install_retained_project_server_resolver,
+    };
+
+    use super::*;
+
+    fn successor_resolver(successor: Option<Arc<McpServer>>) -> RetainedProjectServerResolver {
+        install_retained_project_server_resolver(move |_request| {
+            let successor = successor.clone();
+            Box::pin(async move { Ok(successor) })
+        })
+    }
+
+    async fn retired_server(
+        graph: TraceDecay,
+        authority: &WriterTestFixtureAuthority,
+        resolver: RetainedProjectServerResolver,
+    ) -> Arc<McpServer> {
+        McpServer::new_with_context(
+            registered_context(graph, authority).with_retained_project_server_resolver(resolver),
+        )
+        .await
+    }
+
+    /// A server that is never the executing owner: it only stands in as the
+    /// route's candidate successor, so it needs no retained-owner transport.
+    async fn candidate_successor(
+        graph: TraceDecay,
+        authority: &WriterTestFixtureAuthority,
+        configure: impl FnOnce(&mut McpServerConstructionContext),
+    ) -> Arc<McpServer> {
+        let mut context = registered_context(graph, authority);
+        configure(&mut context);
+        McpServer::new_with_context(context).await
+    }
+
+    fn dashboard_request(id: i64, action: &str) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: "2.0".to_owned(),
+            id: Some(json!(id)),
+            method: "tools/call".to_owned(),
+            params: Some(json!({
+                "name": "tracedecay_dashboard",
+                "arguments": {"action": action},
+            })),
+        }
+    }
+
+    async fn call(server: &McpServer, request: &JsonRpcRequest) -> JsonRpcResponse {
+        server
+            .handle_request(request)
+            .await
+            .expect("tool call answered")
+    }
+
+    fn total_requests(server: &McpServer) -> u64 {
+        server.stats.total_requests.load(Ordering::Acquire)
+    }
+
+    /// A transport refusal carries the JSON-RPC `error` member.
+    fn transport_refusal(response: &JsonRpcResponse) -> (&str, bool) {
+        assert!(
+            response.result.is_none(),
+            "a refused request must not carry a handler result: {response:?}"
+        );
+        let error = response.error.as_ref().expect("typed refusal");
+        let data = error.data.as_ref().expect("typed refusal data");
+        (
+            data.get("reason_code")
+                .and_then(Value::as_str)
+                .expect("typed refusal names its reason"),
+            data.get("retryable")
+                .and_then(Value::as_bool)
+                .expect("typed refusal states whether it is retryable"),
+        )
+    }
+
+    /// An authority refusal reaches the caller as a typed problem tool result.
+    fn problem_refusal(response: &JsonRpcResponse) -> (&str, bool) {
+        assert!(
+            response.error.is_none(),
+            "an authority refusal must not replace the tool result: {response:?}"
+        );
+        let result = response.result.as_ref().expect("typed problem result");
+        assert_eq!(
+            result.get("isError").and_then(Value::as_bool),
+            Some(true),
+            "a typed problem result is an error result"
+        );
+        let problem = result
+            .get("structuredContent")
+            .and_then(|value| value.get("problem"))
+            .expect("typed problem envelope");
+        (
+            problem
+                .get("code")
+                .and_then(Value::as_str)
+                .expect("typed problem names its code"),
+            problem
+                .get("retryable")
+                .and_then(Value::as_bool)
+                .expect("typed problem states whether it is retryable"),
+        )
+    }
+
+    fn assert_retirement_refusal(response: &JsonRpcResponse) {
+        assert_eq!(
+            transport_refusal(response),
+            (PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE, true),
+            "a successor that cannot inherit the route keeps the typed retirement refusal"
+        );
+    }
+
+    async fn assert_successor_refused(
+        retired: &Arc<McpServer>,
+        successor: Option<&Arc<McpServer>>,
+        id: i64,
+    ) {
+        let successor_before = successor.map(|successor| total_requests(successor));
+        let response = call(retired, &dashboard_request(id, "stop")).await;
+        assert_retirement_refusal(&response);
+        if let (Some(successor), Some(before)) = (successor, successor_before) {
+            assert_eq!(
+                total_requests(successor),
+                before,
+                "a denied successor must never receive the request"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_retired_before_dispatch_is_served_by_the_current_owner() {
+        let (source, repo, authority) = init_indexed_repo().await;
+        let current = McpServer::new_with_registered_test_context(
+            registered_context(
+                authority.reopen_project_graph(repo.path()).await,
+                &authority,
+            ),
+            Vec::new(),
+        )
+        .await
+        .expect("current owner");
+        let retired = retired_server(
+            source,
+            &authority,
+            successor_resolver(Some(Arc::clone(&current))),
+        )
+        .await;
+        retired.revoke_project_server_responses();
+        let retired_before = total_requests(&retired);
+        let current_before = total_requests(&current);
+
+        let response = call(&retired, &dashboard_request(1, "stop")).await;
+        assert!(
+            response.error.is_none(),
+            "a request that never reached a handler must follow the route's \
+             current owner instead of a retirement refusal: {:?}",
+            response.error
+        );
+        let text = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("content"))
+            .and_then(Value::as_array)
+            .and_then(|content| content.iter().find_map(|block| block.get("text")?.as_str()))
+            .unwrap_or_else(|| panic!("dashboard stop returned no text payload: {response:?}"));
+        assert!(
+            text.contains("not_running"),
+            "the current owner must answer the dashboard stop: {text}"
+        );
+        assert_eq!(
+            total_requests(&current),
+            current_before + 1,
+            "the successor must own the admitted request"
+        );
+        assert_eq!(
+            total_requests(&retired),
+            retired_before,
+            "the retired owner must not dispatch the admitted request"
+        );
+        assert!(
+            !current
+                .project_server_lifecycle
+                .response_revoked()
+                .is_cancelled()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_cancelled_while_successor_resolution_is_pending_reads_its_cancelled_terminal()
+     {
+        let (source, _repo, authority) = init_indexed_repo().await;
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let resolver = install_retained_project_server_resolver({
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            move |_request| {
+                let entered = Arc::clone(&entered);
+                let release = Arc::clone(&release);
+                Box::pin(async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    Ok(None)
+                })
+            }
+        });
+        let retired = retired_server(source, &authority, resolver).await;
+        retired.revoke_project_server_responses();
+        let request = dashboard_request(7, "start");
+        let mut connection = retired
+            .new_connection_route_state()
+            .expect("connection route state");
+        let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
+        let dispatch = retired.dispatch_envelope(
+            McpDispatchRequest::raw(&request),
+            false,
+            &mut connection,
+            cancellation.clone(),
+        );
+        tokio::pin!(dispatch);
+        tokio::select! {
+            () = entered.notified() => {}
+            response = dispatch.as_mut() => {
+                panic!("dispatch finished before the successor resolver was entered: {response:?}")
+            }
+        }
+        cancellation.cancel();
+
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), dispatch.as_mut())
+            .await
+            .expect("cancellation must abandon a pending successor resolution")
+            .expect("a cancelled tool call still answers");
+        let error = response.error.expect("cancelled terminal");
+        assert_eq!(error.code, ErrorCode::RequestCancelled.as_i32());
+        let data = error.data.expect("cancelled terminal data");
+        assert_eq!(
+            data.get("reason_code").and_then(Value::as_str),
+            Some("request_cancelled")
+        );
+        assert!(
+            response.result.is_none(),
+            "a cancelled request must not carry a handler result"
+        );
+        drop(release);
+    }
+
+    #[tokio::test]
+    async fn a_successor_from_another_store_and_project_is_refused() {
+        let (source, _repo, authority) = init_indexed_repo().await;
+        let (other_graph, _other_repo, other_authority) = init_indexed_repo().await;
+        let successor = candidate_successor(other_graph, &other_authority, |_| {}).await;
+        let retired = retired_server(
+            source,
+            &authority,
+            successor_resolver(Some(Arc::clone(&successor))),
+        )
+        .await;
+        retired.revoke_project_server_responses();
+
+        assert_successor_refused(&retired, Some(&successor), 2).await;
+    }
+
+    #[tokio::test]
+    async fn a_successor_serving_another_branch_is_refused() {
+        let (source, repo, authority) = init_indexed_repo().await;
+        let retired_branch = source.serving_branch().map(str::to_owned);
+        let retired_store = source.db_path();
+        // A second branch only serves when it is tracked: the open resolves
+        // the serving branch from the project's branch metadata, not from the
+        // checkout alone. Track it the way `branch add` would, with this
+        // checkout's exact publication provenance.
+        let layout = source.store_layout().clone();
+        let project_id = layout
+            .identity
+            .project_id
+            .clone()
+            .expect("fixture project identity");
+        let head = crate::test_support::git::git(repo.path(), &["rev-parse", "HEAD"]);
+        let mut meta = tracedecay_runtime_core::branch_meta::load_branch_meta(&layout.data_root)
+            .expect("fixture branch metadata");
+        meta.branches.insert(
+            "other".to_owned(),
+            tracedecay_runtime_core::branch_meta::BranchEntry {
+                parent: Some("main".to_owned()),
+                created_at: tracedecay_runtime_core::tracedecay::unix_secs().to_string(),
+                last_synced_at: tracedecay_runtime_core::tracedecay::unix_secs().to_string(),
+                gc_protected: false,
+                graph_source: Some(tracedecay_runtime_core::branch_meta::BranchGraphSourceV1 {
+                    publication_epoch: tracedecay_domain::BranchGraphPublicationEpochV1::new(1)
+                        .expect("branch publication epoch"),
+                    project_id: project_id.clone(),
+                    repository_id: format!("repository.fixture.{project_id}"),
+                    worktree_id: format!("worktree.fixture.{project_id}"),
+                    worktree_root: repo.path().display().to_string(),
+                    reference: "refs/heads/other".to_owned(),
+                    source_oid: head,
+                }),
+            },
+        );
+        tracedecay_runtime_core::branch_meta::save_branch_meta(&layout.data_root, &meta)
+            .expect("track the second branch");
+        let data_root = layout.data_root;
+        assert!(
+            tracedecay_runtime_core::branch_meta::load_branch_meta(&data_root)
+                .expect("fixture branch metadata")
+                .is_query_eligible("other"),
+            "the fixture's second branch must be tracked"
+        );
+        crate::test_support::git::git(repo.path(), &["branch", "other"]);
+        crate::test_support::git::git(repo.path(), &["checkout", "--quiet", "other"]);
+        assert_eq!(
+            tracedecay_runtime_core::branch::current_branch(repo.path()).as_deref(),
+            Some("other"),
+            "the fixture checkout must serve the second branch"
+        );
+        let successor_graph = authority.reopen_project_graph(repo.path()).await;
+        assert_eq!(
+            successor_graph.serving_branch().map(str::to_owned),
+            Some("other".to_owned()),
+            "the fixture's successor must be served on another branch"
+        );
+        assert_eq!(
+            successor_graph.db_path(),
+            retired_store,
+            "the branch denial must not be a store denial"
+        );
+        assert_ne!(retired_branch.as_deref(), successor_graph.serving_branch());
+        let successor = candidate_successor(successor_graph, &authority, |_| {}).await;
+        let retired = retired_server(
+            source,
+            &authority,
+            successor_resolver(Some(Arc::clone(&successor))),
+        )
+        .await;
+        retired.revoke_project_server_responses();
+
+        assert_successor_refused(&retired, Some(&successor), 3).await;
+    }
+
+    #[tokio::test]
+    async fn a_successor_without_the_retired_session_authority_is_refused() {
+        let (source, repo, authority) = init_indexed_repo().await;
+        let successor = candidate_successor(
+            authority.reopen_project_graph(repo.path()).await,
+            &authority,
+            |context| context.project_session_db = None,
+        )
+        .await;
+        let retired = retired_server(
+            source,
+            &authority,
+            successor_resolver(Some(Arc::clone(&successor))),
+        )
+        .await;
+        assert!(
+            retired.project_session_db().is_some(),
+            "the retired owner must carry session authority for this denial"
+        );
+        assert!(
+            successor.project_session_db().is_none(),
+            "the successor must drop session authority for this denial"
+        );
+        retired.revoke_project_server_responses();
+
+        assert_successor_refused(&retired, Some(&successor), 4).await;
+    }
+
+    #[tokio::test]
+    async fn a_successor_from_another_profile_is_refused() {
+        let (source, repo, authority) = init_indexed_repo().await;
+        let other_profile = tempfile::TempDir::new().expect("other profile root");
+        let other_profile_root = other_profile.path().join("profile");
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&other_profile_root)
+            .expect("private profile root");
+        let other_identity =
+            tracedecay_daemon_identity::profile_identity::load_or_create(&other_profile_root)
+                .expect("other profile identity");
+        let successor = candidate_successor(
+            authority.reopen_project_graph(repo.path()).await,
+            &authority,
+            move |context| context.profile_identity = Some(Arc::new(other_identity)),
+        )
+        .await;
+        let retired = retired_server(
+            source,
+            &authority,
+            successor_resolver(Some(Arc::clone(&successor))),
+        )
+        .await;
+        assert_ne!(
+            retired
+                .profile_identity()
+                .map(ProfileIdentityReadPort::profile_id),
+            successor
+                .profile_identity()
+                .map(ProfileIdentityReadPort::profile_id),
+            "the successor must answer for another registered profile"
+        );
+        retired.revoke_project_server_responses();
+
+        assert_successor_refused(&retired, Some(&successor), 5).await;
+    }
+
+    #[tokio::test]
+    async fn a_revoked_successor_is_refused() {
+        let (source, repo, authority) = init_indexed_repo().await;
+        let successor = candidate_successor(
+            authority.reopen_project_graph(repo.path()).await,
+            &authority,
+            |_| {},
+        )
+        .await;
+        successor.revoke_project_server_responses();
+        let retired = retired_server(
+            source,
+            &authority,
+            successor_resolver(Some(Arc::clone(&successor))),
+        )
+        .await;
+        retired.revoke_project_server_responses();
+
+        assert_successor_refused(&retired, Some(&successor), 6).await;
+    }
+
+    #[tokio::test]
+    async fn a_typed_successor_resolution_refusal_is_preserved() {
+        let (source, _repo, authority) = init_indexed_repo().await;
+        let retired = retired_server(
+            source,
+            &authority,
+            install_retained_project_server_resolver(|_request| {
+                Box::pin(async {
+                    Err(TraceDecayError::project_route(
+                        "project_route_ambiguous",
+                        false,
+                        "multiple mounted project servers claim the registered project",
+                    ))
+                })
+            }),
+        )
+        .await;
+        retired.revoke_project_server_responses();
+
+        let response = call(&retired, &dashboard_request(8, "stop")).await;
+        assert_eq!(
+            problem_refusal(&response),
+            ("project_route_ambiguous", false),
+            "the resolver's typed authority refusal must not collapse into a retirement"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retired_owner_without_a_successor_keeps_the_typed_refusal() {
+        let (source, _repo, authority) = init_indexed_repo().await;
+        let retired = retired_server(source, &authority, successor_resolver(None)).await;
+        retired.revoke_project_server_responses();
+
+        assert_successor_refused(&retired, None, 9).await;
     }
 }

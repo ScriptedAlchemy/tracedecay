@@ -67,7 +67,8 @@ const HISTORICAL_RESULT_PATH: &str = "benchmark_data/session-temporal/result-pro
 const HISTORICAL_RESULT_FILE_NAME: &str = "result-provisional.json";
 const HISTORICAL_HARNESS_PATH: &str = "src/sessions/session_temporal_benchmark.rs";
 const RUNNER_PATH: &str = "scripts/run-session-temporal-benchmark.sh";
-const HARNESS_PATH: &str = "crates/tracedecay/benches/session_temporal/harness.rs";
+const HARNESS_PATH: &str =
+    "crates/tracedecay-project/src/test_support/session_temporal_benchmark.rs";
 const SOURCE_MODE_CLEAN: &str = "clean_git_worktree_v1";
 const SANITIZATION_RECEIPT_PATH: &str =
     "benchmark_data/session-temporal/fixtures/codex-sanitization-receipt.json";
@@ -677,7 +678,7 @@ fn measurement_result(source_identity: Value, measurement: Value) -> Value {
 /// benchmark-private handle.
 fn ensure_admission_resource_authorities()
 -> Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1> {
-    tracedecay_project::test_support::host_admission::ensure_process_background_cpu_authority()
+    crate::test_support::host_admission::ensure_process_background_cpu_authority()
         .expect("install process capture authorities for the benchmark")
 }
 
@@ -1134,7 +1135,7 @@ fn require_json_value(actual: &Value, expected: Value, label: &str) -> BenchResu
 }
 
 fn repository_root() -> PathBuf {
-    // The product package sits at `crates/tracedecay`; this benchmark reads git
+    // Every member crate sits at `crates/<member>`, and this harness reads git
     // metadata and fixtures that live at the workspace root above it.
     if let Some(root) = std::env::var_os("TRACEDECAY_BENCHMARK_REPO_ROOT") {
         return PathBuf::from(root);
@@ -1144,7 +1145,7 @@ fn repository_root() -> PathBuf {
     )
     .parent()
     .and_then(Path::parent)
-    .expect("workspace root above crates/tracedecay")
+    .expect("workspace root above crates/<member>")
     .to_owned()
 }
 

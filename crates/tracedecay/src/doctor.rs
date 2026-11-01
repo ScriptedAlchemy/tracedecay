@@ -9,6 +9,11 @@ use tracedecay_contracts::project_open::{
     ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
 };
 use tracedecay_contracts::storage::{SchemaConvergenceFindingV1, SchemaConvergenceStateV1};
+use tracedecay_daemon_protocol::{
+    DOCTOR_REPORT_OWNER_WARMING_REASON, PROJECT_SERVER_CAPACITY_REASON_CODE,
+    error_is_project_not_enrolled, error_is_project_warming,
+};
+use tracedecay_daemon_service::reject_stalled_project_open_status;
 use tracedecay_domain::errors::ProjectOpenFailureKind;
 
 use tracedecay_agent_hosts::agents::{self, DoctorCounters, HealthcheckContext};
@@ -242,7 +247,7 @@ fn render_current_project_daemon_status(
             dc.warn(&format!("{RUNTIME_TELEMETRY_PENDING} within {RUNTIME_TELEMETRY_WARMUP:?}; health remains unknown until the project is admitted"));
             DoctorDaemonFindingsV1::unread("daemon_storage_telemetry_pending")
         }
-        Some(Ok(Some(status))) => match crate::daemon::reject_stalled_project_open_status(status) {
+        Some(Ok(Some(status))) => match reject_stalled_project_open_status(status) {
             Ok(()) => render_daemon_status(dc, status)?,
             Err(error) => classify_daemon_status_or_reset(
                 dc,
@@ -540,7 +545,7 @@ fn canonical_daemon_doctor_report(
             if doctor_report
                 .get("reason")
                 .and_then(serde_json::Value::as_str)
-                == Some(crate::daemon::DOCTOR_REPORT_OWNER_WARMING_REASON) =>
+                == Some(DOCTOR_REPORT_OWNER_WARMING_REASON) =>
         {
             return Ok(CanonicalDoctorReport::Mounting);
         }
@@ -739,12 +744,12 @@ fn classify_daemon_status_error(
         dc.warn(&message);
         return DoctorDaemonFindingsV1::unread("daemon_warming");
     }
-    if crate::daemon::error_is_project_not_enrolled(error) {
+    if error_is_project_not_enrolled(error) {
         report_project_not_enrolled(dc, project_path);
         return DoctorDaemonFindingsV1::unread("project_not_enrolled");
     }
     if let Some((reason, _, detail)) = error.project_route_context()
-        && reason == crate::daemon::PROJECT_SERVER_CAPACITY_REASON_CODE
+        && reason == PROJECT_SERVER_CAPACITY_REASON_CODE
     {
         dc.fail(&format!("Project open stalled: {detail}"));
         return DoctorDaemonFindingsV1::unread("project_server_capacity_reached");
@@ -774,7 +779,7 @@ fn daemon_warming_doctor_message(
             repository_discovery_block_path(error, project_path)
         ));
     }
-    if crate::daemon::error_is_project_warming(error) {
+    if error_is_project_warming(error) {
         return Some("daemon is still warming: profile runtime is warming".to_owned());
     }
     None

@@ -9,8 +9,8 @@ use std::path::Path;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use super::ProductionProjectCompositionHarnessV1;
 use super::journey_test_support::{initialize_project, tool_answer};
+use crate::daemon::production_harness::ProductionProjectCompositionHarnessV1;
 
 const SETTING_KEY: &str = "telemetry.timings.v1";
 const ACCEPTED_KEY: &str = "configuration.idempotency.mcp-configuration-set";

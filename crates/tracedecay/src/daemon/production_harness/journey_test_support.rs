@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use tracedecay_mcp::JsonRpcResponse;
 
-use super::ProductionProjectCompositionHarnessV1;
+use crate::daemon::production_harness::ProductionProjectCompositionHarnessV1;
 use crate::test_support::git::git;
 
 /// A one-function Git project for configuration journeys.

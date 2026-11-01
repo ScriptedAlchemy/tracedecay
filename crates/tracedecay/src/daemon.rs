@@ -1,55 +1,14 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-#[cfg(test)]
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use serde_json::json;
-#[cfg(unix)]
-use tokio::net::UnixStream;
-use tokio::task::JoinHandle;
 use tokio::time::Duration;
-use tokio_stream::StreamExt;
-use tracedecay_lsp::{AdmittedRoot, AuthorizedLspWorkspace};
 
-use tracedecay_mcp::server::{
-    McpMethod, RmcpConnectionAdapter, RmcpInitializeResponseDecorator, classify_mcp_method,
+use tracedecay_daemon_protocol::{
+    PROJECT_SERVER_CAPACITY_REASON_CODE, PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE,
+    PROJECT_WARMING_REASON_CODE,
 };
-
-use crate::mcp::server::{ProductionMcpConnectionContext, SERVER_INSTRUCTIONS, initialize_result};
-use branch_add::{branch_add_response, parse_branch_add_request};
-use branch_admin::{StoreAdministration, parse_branch_admin_request, write_branch_admin_response};
-#[cfg(all(unix, test))]
-use scheduler::{
-    AutomationSchedulerHandle, automation_scheduler_configured,
-    automation_scheduler_tick_secs_for_project, run_automation_scheduler_tick,
-};
-use tracedecay_contracts::project_open::{
-    ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
-};
-#[cfg(unix)]
-pub(crate) use tracedecay_daemon_protocol::ensure_private_socket_parent;
-#[allow(unused_imports)]
-pub(crate) use tracedecay_daemon_protocol::{
-    BrokerListener, BrokerStream, DaemonAuthPreface, DaemonEndpoint, DaemonInvocationOutcome,
-    DaemonInvocationRequest, DaemonInvocationResponse, default_loopback_endpoint,
-    parse_daemon_invocation_request,
-};
-pub(crate) use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
-use tracedecay_domain::errors::{ProjectOpenFailureKind, Result, TraceDecayError};
-use tracedecay_mcp::project_catalog_discovery_scope;
-use tracedecay_mcp::tools::catalog_discovery::{
-    catalog_discovery_tools_list_payload, default_catalog_discovery_authority,
-};
-use tracedecay_mcp::transport::ReplayTransport;
-use tracedecay_mcp::{
-    BrokerStreamTransport, ErrorCode, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpTransport,
-};
-use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_mcp::JsonRpcRequest;
+use tracedecay_runtime_core::git_discovery::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE;
 
 /// Human-facing detail fragment for a still-warming project/profile owner.
 ///
@@ -58,78 +17,9 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 /// prose.
 pub(crate) const PROJECT_WARMING_RETRY_HINT: &str =
     "is warming in the background; retry the same tool shortly";
-/// Typed reason a project/profile/owner open has not finished yet.
-pub const PROJECT_WARMING_REASON_CODE: &str = "project_warming";
-/// Typed reason the runtime's Doctor report is absent: the project runtime
-/// that owns the report is still mounting.
-pub(crate) const DOCTOR_REPORT_OWNER_WARMING_REASON: &str = "doctor_report_owner_warming";
-/// Typed reason a repository-identity probe deferred past its budget.
-pub use tracedecay_runtime_core::git_discovery::REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE;
-/// Typed reason a retained project server was retired mid-response.
-pub const PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE: &str = "project_server_response_revoked";
 /// Typed reason the in-flight project-open task table is full.
 pub const PROJECT_OPEN_TASK_CAPACITY_REASON_CODE: &str = "project_open_task_capacity_reached";
-/// Typed reason the cached project-server table is full.
-pub const PROJECT_SERVER_CAPACITY_REASON_CODE: &str = "project_server_capacity_reached";
 
-/// Typed error for a stalled `project_open` snapshot. Status, Doctor, and
-/// the CLI all use this so a stalled open is never a successful empty report.
-/// `RetryBackoff` covers capacity, code-runtime-budget, and observability
-/// stalls alike, so it maps to the honest typed backoff that keeps the
-/// recorded detail, never to a fabricated capacity verdict. Callers that
-/// hold the exact `ProjectOpenFailure` replay it instead of this fallback.
-pub fn stalled_project_open_error(status: &ProjectOpenStatusV1) -> TraceDecayError {
-    let detail = status
-        .detail
-        .clone()
-        .unwrap_or_else(|| "project open stalled".to_owned());
-    match status.reason {
-        ProjectOpenStatusReasonV1::DeferredRepositoryDiscovery => {
-            TraceDecayError::project_route(REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE, true, detail)
-        }
-        ProjectOpenStatusReasonV1::UnrepairableVerdict => TraceDecayError::project_open(
-            ProjectOpenFailureKind::AuthorityVerdict {
-                migration_pending: false,
-            },
-            detail,
-        ),
-        ProjectOpenStatusReasonV1::RetryBackoff
-        | ProjectOpenStatusReasonV1::Unavailable
-        | ProjectOpenStatusReasonV1::Converging
-        | ProjectOpenStatusReasonV1::Ready => TraceDecayError::project_open(
-            ProjectOpenFailureKind::BackedOff {
-                retry_after_ms: status.retry_after_ms.unwrap_or(0),
-            },
-            detail,
-        ),
-    }
-}
-
-/// Reject a successful status/Doctor payload that still carries a stalled
-/// `project_open` snapshot. CLI status and Doctor both use this so a leaked
-/// snapshot cannot stay a printed success or a warning.
-pub fn reject_stalled_project_open_status(daemon_status: &serde_json::Value) -> Result<()> {
-    let Some(project_open) = daemon_status
-        .get("project_open")
-        .cloned()
-        .filter(|value| !value.is_null())
-        .map(serde_json::from_value::<ProjectOpenStatusV1>)
-        .transpose()?
-    else {
-        return Ok(());
-    };
-    if project_open.state != ProjectOpenStatusStateV1::Stalled {
-        return Ok(());
-    }
-    Err(stalled_project_open_error(&project_open))
-}
-
-/// Typed reason a handshake route names a directory the authenticated profile
-/// has not enrolled (no `tracedecay init`, no registry row, no durable store).
-/// It is a client state, not a daemon failure: `initialize` and `tools/list`
-/// still answer, and every `tools/call` re-derives this refusal until
-/// enrollment succeeds.
-pub const PROJECT_NOT_ENROLLED_REASON_CODE: &str = "project_not_enrolled";
 /// Typed reason a project-scoped request arrived on a handshake that names no
 /// project at all (no `--project`, and no enrolled project above the cwd).
 pub const PROJECT_REQUIRED_REASON_CODE: &str = "project_required";
@@ -206,27 +96,11 @@ impl AuthenticatedFirstRequest {
 pub(crate) const PROJECT_OPEN_RETRY_GRACE: Duration = Duration::from_secs(15);
 pub(crate) const PROJECT_OPEN_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
-/// True when a daemon error is the typed project/profile/owner warming refusal.
-pub(crate) fn error_is_project_warming(error: &TraceDecayError) -> bool {
-    matches!(
-        error.project_route_context(),
-        Some((PROJECT_WARMING_REASON_CODE, true, _))
-    )
-}
-
 /// True when repository discovery deferred or blocked this route.
 pub(crate) fn error_is_repository_discovery_deferred(error: &TraceDecayError) -> bool {
     matches!(
         error.project_route_context(),
         Some((REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE, _, _))
-    )
-}
-
-/// True when route admission refused the handshake path as not enrolled.
-pub(crate) fn error_is_project_not_enrolled(error: &TraceDecayError) -> bool {
-    matches!(
-        error.project_route_context(),
-        Some((PROJECT_NOT_ENROLLED_REASON_CODE, false, _))
     )
 }
 
@@ -297,51 +171,26 @@ impl Drop for AbortTasksOnDrop {
 
 mod bootstrap;
 mod bootstrap_route;
-use bootstrap_route::{
-    apply_daemon_initialize_route, attach_initialize_route_metadata, attach_reset_required_stores,
-    daemon_bootstrap_response, prewarm_daemon_bootstrap_catalog,
-};
 mod branch_add;
 mod branch_admin;
-use tracedecay_code_index_runtime::code_index_branch_diff::code_index_branch_diff_executor;
-use tracedecay_code_index_runtime::code_index_executor::{
-    code_index_redundancy_executor, code_index_search_executor, code_index_similar_executor,
-};
-#[cfg(test)]
-use tracedecay_code_index_runtime::code_index_executor::{
-    code_index_search_display_binding, code_index_text_search_display_binding,
-};
 mod connection_serving;
 #[cfg(feature = "rmcp-benchmark")]
 #[doc(hidden)]
 pub use connection_serving::rmcp_benchmark;
-#[cfg(unix)]
-use connection_serving::serve_authenticated_socket_client_with_class;
-#[cfg(not(unix))]
-use connection_serving::serve_windows_broker_client_with_class_and_invocation;
 #[cfg(any(test, feature = "test-transport"))]
 pub(crate) use connection_serving::{RoutedRmcpReplay, serve_routed_rmcp_connection};
-#[cfg(test)]
-use connection_serving::{
-    await_project_owner_or_disconnect, serve_windows_broker_client,
-    serve_windows_broker_client_with_class,
-};
 mod core_admission;
-mod engine;
-#[cfg(unix)]
-use engine::DaemonEngine;
-use engine::ensure_context_scout_owner_before_advertising;
 mod core_client;
 mod core_doctor;
 mod core_handshake;
 mod core_hooks;
 mod core_proxy;
-mod database_owner_registry;
-use database_owner_registry::DatabaseOwnerRegistry;
 pub(crate) mod dashboard_automation;
 #[cfg(feature = "test-transport")]
 #[path = "../tests/common/dashboard_configuration_test_runtime.rs"]
 mod dashboard_configuration_test_runtime;
+mod database_owner_registry;
+mod engine;
 pub(crate) mod hook_v2_replay_consumer;
 pub(crate) mod project_open_owners;
 #[cfg(feature = "test-transport")]
@@ -352,45 +201,18 @@ pub(crate) use dashboard_configuration_test_runtime::{
 pub(crate) mod retained_test_support;
 pub(crate) use core_admission::*;
 pub use core_client::*;
-pub(crate) use core_doctor::*;
 pub use core_handshake::*;
 pub use core_hooks::*;
 pub use core_proxy::*;
 mod github_secret_reader;
 mod graph_resolution;
-use graph_resolution::retained_project_server_resolver;
 mod http_application;
 pub use http_application::live_remote_operational_status;
 mod http_application_router;
-use http_application_router::{
-    install_http_application_cold_resolver, install_remote_http_application_router,
-    mount_http_application_router,
-};
 mod invocation_dispatch;
-#[cfg(any(not(unix), test))]
-use invocation_dispatch::execute_portable_daemon_invocation;
-#[cfg(unix)]
-use invocation_dispatch::{execute_daemon_invocation, write_tool_list_changed_notification};
-use invocation_dispatch::{
-    git_service_for_project_path, invalid_multi_root_invocation_response,
-    native_integration_service_for_project_path, resolve_multi_root_projects,
-};
 mod invocation_executor;
-use invocation_executor::{
-    FederatedSurfaceRequestV1, InProcessDaemonInvocationExecutor, PrecomputedMultiRootQueryPort,
-    denied_root_generation, explicit_git_state, extract_work_application_payload,
-    frozen_root_generation, invocation_is_git_operation,
-    invocation_is_native_integration_operation, multi_root_family_allows,
-    unavailable_root_generation,
-};
-mod invocation_state;
-pub(crate) use invocation_state::DaemonInvocationState;
+pub(crate) mod invocation_state;
 mod lsp_sessions;
-use lsp_sessions::{
-    admitted_lsp_root_for_project_path, admitted_lsp_workspace_for_request,
-    cleanup_connection_lsp_sessions, invocation_lsp_session_transition,
-    settle_pending_lsp_workspace_mutation, update_connection_lsp_sessions,
-};
 mod maintenance;
 pub mod pr_autotrack;
 #[cfg(any(test, feature = "test-transport"))]
@@ -411,78 +233,16 @@ mod remote_deletion;
 mod remote_drain;
 mod remote_join;
 mod remote_revocation;
-#[cfg(test)]
-use projectless::projectless_tools_call_response;
-use projectless::{projectless_first_request, projectless_tool_call, serve_projectless_client};
 pub use remote_drain::{RemoteNodeDrainReceiptV1, live_remote_drain};
 pub use remote_join::{RemoteNodeJoinRequestV1, live_remote_join};
 pub use remote_revocation::{RemoteNodeRevocationV1, live_remote_node_revocation};
 mod project_composition;
 mod project_delivery_mount;
-pub(crate) use project_composition::daemon_transcript_source_profile;
-use project_composition::{ProductionProjectCompositionRuntime, production_project_server};
 mod project_open_admission;
-#[cfg(test)]
-use project_open_admission::project_open_retry_backoff;
-#[cfg(unix)]
-use project_open_admission::store_owner_key_from_paths;
-#[cfg(unix)]
-use project_open_admission::{
-    MaintenanceRekeyOutcome, MaintenanceTransitionGate, MaintenanceTransitionGates,
-    MaintenanceTransitionKey,
-};
-use project_open_admission::{
-    ProjectOpenFailure, ProjectOpenGate, ProjectOpenGates, ProjectOpenTaskClaim,
-    ProjectOpenTaskState, ProjectOpenTasks, ProjectRouteKey, ProjectServerKey,
-    ProjectServerPublication, ProjectServerRequirement, project_server_requirement,
-};
-pub(crate) use tracedecay_session_runtime::StoreOwnerKey;
 mod project_open_handshake;
-#[cfg(test)]
-use project_open_handshake::is_missing_index_error;
-use project_open_handshake::{
-    initialize_project_open_error, open_project_for_handshake, project_open_error_response,
-    write_project_open_error,
-};
 mod project_open_orchestration;
 mod project_routing;
 mod project_server_lifecycle;
-#[cfg(unix)]
-use project_open_orchestration::durable_enrollment_resolves_existing_store;
-use project_open_orchestration::ensure_registered_project_route;
-#[cfg(unix)]
-use project_open_orchestration::{
-    await_claimed_project_open, spawn_lifecycle_automation_scheduler_activation,
-    start_lifecycle_project_open,
-};
-#[cfg(any(not(unix), test))]
-use project_open_orchestration::{
-    portable_cached_project_open_failure, portable_cached_project_server,
-    portable_project_server_for_request, schedule_portable_project_server_warmup,
-};
-// The portable reconciler only exists off-unix (or under test transports), so
-// its import carries the same gate as its definition.
-#[cfg(any(not(unix), test, feature = "test-transport"))]
-use project_routing::portable_database_owner_reconciler;
-#[cfg(unix)]
-use project_routing::{
-    CatalogRefreshClientKey, cached_or_bind_ready_project_server, maintenance_transition_gate,
-    resolved_project_server_key,
-};
-use project_routing::{
-    bind_authenticated_profile_identity, ensure_checkout_topology_before_admission,
-    prefer_recorded_open_failure, project_open_cancellation_checkpoint,
-    project_open_cancellation_error, project_open_capacity_gate, project_open_gate,
-    project_open_task_capacity_error, project_open_tasks, project_route_for_handshake,
-    project_server_capacity_error, project_server_retirement_blocked_error, project_warming_error,
-};
-#[cfg(test)]
-use project_server_lifecycle::replay_user_profile_host_admission_for_identity;
-use project_server_lifecycle::{
-    await_user_profile_host_admission_replay_for_identity, cancel_retained_session_history,
-    schedule_project_server_retirement, schedule_user_profile_host_admission_replay_for_identity,
-    shutdown_project_servers,
-};
 #[cfg(unix)]
 mod scheduler;
 #[cfg(test)]
@@ -497,7 +257,6 @@ mod tool_surface;
 mod wire_io;
 #[cfg(test)]
 mod work_evidence_retrieval_tests;
-use wire_io::{read_line_handling_wire_oversized, write_daemon_response};
 
 pub use bootstrap::{DaemonRunEnd, PROFILE_LOST_EXIT_CODE, run_foreground};
 

@@ -2,6 +2,7 @@
 //! accept/serve loop, socket preparation, and client-task draining.
 
 #[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,7 +18,41 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
 use tracedecay_runtime_core::native_runtime::{self, NativeTaskOutcome};
 
-use super::*;
+use super::bootstrap_route::prewarm_daemon_bootstrap_catalog;
+use super::branch_admin::StoreAdministration;
+#[cfg(unix)]
+use super::connection_serving::serve_authenticated_socket_client_with_class;
+#[cfg(not(unix))]
+use super::connection_serving::serve_windows_broker_client_with_class_and_invocation;
+#[cfg(not(unix))]
+use super::core_admission::{
+    DaemonClientAdmission, DaemonClientAdmissionOutcome, DaemonPerClientAdmission,
+    MAX_CONCURRENT_DAEMON_CLIENTS, reject_saturated_daemon_client, with_connection_admission,
+};
+use super::core_handshake::binary_version;
+#[cfg(unix)]
+use super::engine::DaemonEngine;
+use super::hook_v2_replay_consumer;
+use super::http_application;
+use super::http_application_router::{
+    install_http_application_cold_resolver, install_remote_http_application_router,
+};
+use super::invocation_state::DaemonInvocationState;
+use super::maintenance;
+use super::pr_autotrack;
+#[cfg(not(unix))]
+use super::project_open_admission::ProjectOpenGates;
+#[cfg(not(unix))]
+use super::project_routing::project_open_tasks;
+#[cfg(not(unix))]
+use super::project_server_lifecycle::{cancel_retained_session_history, shutdown_project_servers};
+use super::remote_deletion;
+#[cfg(unix)]
+use tokio::net::UnixStream;
+#[cfg(unix)]
+use tracedecay_daemon_protocol::ensure_private_socket_parent;
+#[cfg(not(unix))]
+use tracedecay_daemon_protocol::{BrokerListener, default_loopback_endpoint};
 #[cfg(unix)]
 use tracedecay_daemon_service::bounded_stderr_log::BoundedStderrLog;
 use tracedecay_daemon_service::shutdown::DAEMON_CLIENT_DRAIN_DEADLINE;
@@ -756,7 +791,7 @@ async fn run_foreground_unix(
     let bootstrap_started = Instant::now();
     let profile_root = profile.data_dir().to_path_buf();
     let catalog_prewarm = native_runtime::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
-    let endpoint = DaemonEndpoint::Unix(socket_path);
+    let endpoint = tracedecay_daemon_protocol::DaemonEndpoint::Unix(socket_path);
     let _lifecycle = {
         let _span = tracing::trace_span!("daemon.bootstrap.lifecycle_lease").entered();
         {
@@ -804,8 +839,8 @@ async fn run_foreground_unix(
     worker_plan?;
     log_catalog_prewarm_task(catalog_prewarm);
     let socket_path = match authority.endpoint() {
-        DaemonEndpoint::Unix(path) => path.clone(),
-        DaemonEndpoint::Loopback(_) => {
+        tracedecay_daemon_protocol::DaemonEndpoint::Unix(path) => path.clone(),
+        tracedecay_daemon_protocol::DaemonEndpoint::Loopback(_) => {
             return Err(TraceDecayError::Config {
                 message: "Unix daemon requires a Unix socket endpoint".to_string(),
             });
@@ -837,7 +872,7 @@ async fn run_foreground_unix(
     prepare_socket_path(&authority).await?;
 
     let (listener, bound_endpoint) = tracing::Instrument::instrument(
-        BrokerListener::bind(authority.endpoint()),
+        tracedecay_daemon_protocol::BrokerListener::bind(authority.endpoint()),
         tracing::trace_span!("daemon.bootstrap.listener_bind"),
     )
     .await?;
@@ -941,7 +976,9 @@ async fn run_foreground_unix(
     let lateness_canary = spawn_lateness_canary();
     let spooled_hook_opener =
         hook_v2_replay_consumer::spawn_spooled_hook_opener(engine.clone(), profile.clone());
-    let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
+    let admission = crate::daemon::core_admission::DaemonClientAdmission::new(
+        crate::daemon::core_admission::MAX_CONCURRENT_DAEMON_CLIENTS,
+    );
     let mut client_tasks = ClientTasks::default();
     // launchd appends this daemon's stderr to a plain file with no rotation
     // of its own; the journal (systemd) or a terminal is not a regular file
@@ -1006,9 +1043,10 @@ async fn run_foreground_unix(
             },
         };
         let permit = match admission.try_admit() {
-            DaemonClientAdmissionOutcome::Admitted(permit) => permit,
-            DaemonClientAdmissionOutcome::Saturated(response) => {
-                reject_saturated_daemon_client(stream, response).await;
+            crate::daemon::core_admission::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
+            crate::daemon::core_admission::DaemonClientAdmissionOutcome::Saturated(response) => {
+                crate::daemon::core_admission::reject_saturated_daemon_client(stream, response)
+                    .await;
                 continue;
             }
         };
@@ -1025,7 +1063,7 @@ async fn run_foreground_unix(
         ));
         if let Err(error) = client_tasks.spawn(
             tracing::Instrument::instrument(
-                with_connection_admission(permit, client),
+                crate::daemon::core_admission::with_connection_admission(permit, client),
                 tracing::trace_span!("daemon.bootstrap.socket_connection"),
             )
             .map_err(|error| error.to_string()),
@@ -1046,11 +1084,14 @@ async fn run_foreground_unix(
     }
     // Stop accepting and unlink the socket before draining so clients that
     // connect during shutdown get NotFound/ConnectionRefused (which they retry
-    // via `connect_with_restart_grace`) instead of a queued connection that
-    // will never be served.
+    // through the daemon restart-grace connect kernel) instead of a queued
+    // connection that will never be served.
     drop(listener);
     let endpoint_cleanup = authority.cleanup_owned_endpoint();
-    cancel_retained_session_history(&engine.store_administration).await;
+    crate::daemon::project_server_lifecycle::cancel_retained_session_history(
+        &engine.store_administration,
+    )
+    .await;
     let shutdown_deadline = Instant::now() + DAEMON_SHUTDOWN_COORDINATION_DEADLINE;
     // Keep auxiliary process creation blocked until every scheduler and client
     // task is drained or abandoned. A killed app-server call may retry before
@@ -1283,8 +1324,8 @@ fn remove_stale_socket(socket_path: &Path) -> Result<()> {
 async fn prepare_socket_path(authority: &authority::DaemonAuthority) -> Result<()> {
     authority.ensure_current()?;
     let socket_path = match authority.endpoint() {
-        DaemonEndpoint::Unix(path) => path,
-        DaemonEndpoint::Loopback(_) => {
+        tracedecay_daemon_protocol::DaemonEndpoint::Unix(path) => path,
+        tracedecay_daemon_protocol::DaemonEndpoint::Loopback(_) => {
             return Err(TraceDecayError::Config {
                 message: "Unix daemon requires a Unix socket endpoint".to_string(),
             });
@@ -1371,7 +1412,7 @@ mod tests {
             .bind(&socket2::SockAddr::unix(&socket).expect("stale socket address"))
             .expect("bind stale socket");
 
-        let endpoint = DaemonEndpoint::Unix(socket.clone());
+        let endpoint = tracedecay_daemon_protocol::DaemonEndpoint::Unix(socket.clone());
         let authority = authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
             .expect("daemon authority");
         let error = prepare_socket_path(&authority)

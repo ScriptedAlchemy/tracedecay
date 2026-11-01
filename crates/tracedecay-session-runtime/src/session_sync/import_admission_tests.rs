@@ -36,6 +36,7 @@ enum CatchUp {
     /// store makes the first write wait.
     Recovering,
     Blocked,
+    BlockedRecovering,
 }
 
 fn catch_up_state(kind: CatchUp) -> Arc<SessionTemporalRefreshWakeState> {
@@ -53,11 +54,17 @@ fn catch_up_state(kind: CatchUp) -> Arc<SessionTemporalRefreshWakeState> {
                 SessionTemporalRefreshRetryClass::Storage,
             );
         }
-        CatchUp::Blocked => {
+        CatchUp::Blocked | CatchUp::BlockedRecovering => {
             state.record_history_outcome(SessionHistoricalIngestOutcome::Blocked {
                 reason_code: "invalid_observation_contract".to_owned(),
                 made_progress: false,
             });
+            if matches!(kind, CatchUp::BlockedRecovering) {
+                state.mark_recovering(
+                    SessionTemporalRefreshBlocker::Storage,
+                    SessionTemporalRefreshRetryClass::Storage,
+                );
+            }
         }
     }
     state
@@ -221,6 +228,36 @@ fn import_keeps_a_blocked_catch_up_as_a_failure() {
                 .failure_codes
                 .iter()
                 .any(|code| code == "invalid_observation_contract")
+        );
+    })
+    .expect("native runtime");
+}
+
+#[test]
+fn import_preserves_historical_blocker_while_projection_recovers() {
+    native_runtime::block_on(async {
+        let (receipt, state) =
+            import_receipt(CatchUp::BlockedRecovering, "import-blocked-recovering").await;
+
+        assert_eq!(
+            receipt.termination,
+            OperationTermination::Failed,
+            "failure codes: {:?}",
+            receipt.failure_codes
+        );
+        assert!(
+            receipt
+                .failure_codes
+                .iter()
+                .any(|code| code == "invalid_observation_contract")
+        );
+        assert!(state.history_is_blocked());
+        assert!(!state.take_historical_dirty());
+        assert_eq!(
+            bound_wake(&state).serving_status().state,
+            SessionProjectionServingState::Unavailable {
+                reason: SessionProjectionUnavailableReason::WorkerStalled,
+            }
         );
     })
     .expect("native runtime");

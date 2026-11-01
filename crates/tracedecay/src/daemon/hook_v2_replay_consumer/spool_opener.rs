@@ -19,11 +19,11 @@ use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_runtime_core::native_runtime::NativeTask;
 
 use super::spool_watch::{SpooledProject, consumer_attached, install_opener, watch_project};
-#[cfg(not(unix))]
-use crate::daemon::DaemonInvocationState;
 use crate::daemon::branch_admin::StoreAdministration;
 #[cfg(unix)]
 use crate::daemon::engine::DaemonEngine;
+#[cfg(not(unix))]
+use crate::daemon::invocation_state::DaemonInvocationState;
 #[cfg(not(unix))]
 use crate::daemon::project_open_admission::ProjectOpenGates;
 #[cfg(unix)]
@@ -231,7 +231,7 @@ async fn open_for_spooled_hooks(
     profile: &ProfileRoot,
     project: &SpooledProject,
 ) -> Result<()> {
-    let mut handshake = crate::daemon::handshake_for_current_client(
+    let mut handshake = crate::daemon::core_handshake::handshake_for_current_client(
         profile,
         Some(project.project_root.clone()),
         None,

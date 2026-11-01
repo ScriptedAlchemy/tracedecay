@@ -16,6 +16,7 @@ use tracedecay_contracts::project_open::{
 use tracedecay_contracts::retained_surfaces::{FactCommitOwnerV1, MemoryStatusV1};
 use tracedecay_contracts::retrieval::StatusCodeIndexFreshnessV1;
 use tracedecay_contracts::storage::{SchemaConvergenceFindingV1, SchemaConvergenceStateV1};
+use tracedecay_daemon_service::reject_stalled_project_open_status;
 use tracedecay_runtime_core::native_runtime::{TimeoutError, timeout_at};
 
 use crate::commands::{reject_problem_envelope, reject_truncation_envelope};
@@ -334,12 +335,12 @@ async fn handle_status_command_within(
     reject_truncation_envelope(&daemon_status, "tracedecay_status")?;
     if json {
         reject_problem_envelope(&daemon_status, "tracedecay_status")?;
-        tracedecay::daemon::reject_stalled_project_open_status(&daemon_status)?;
+        reject_stalled_project_open_status(&daemon_status)?;
         println!("{}", serde_json::to_string_pretty(&daemon_status)?);
         return Ok(());
     }
     reject_problem_envelope(&daemon_status, "tracedecay_status")?;
-    tracedecay::daemon::reject_stalled_project_open_status(&daemon_status)?;
+    reject_stalled_project_open_status(&daemon_status)?;
     if let Some(project_open) = daemon_status
         .get("project_open")
         .cloned()
@@ -506,9 +507,9 @@ fn status_branch_info(
 #[cfg(test)]
 mod tests {
     use super::{
-        await_daemon_tool_result, project_open_line, reject_truncation_envelope,
-        schema_convergence_line, status_branch_info, status_command_deadline_from,
-        status_server_request_budget,
+        await_daemon_tool_result, project_open_line, reject_stalled_project_open_status,
+        reject_truncation_envelope, schema_convergence_line, status_branch_info,
+        status_command_deadline_from, status_server_request_budget,
     };
     use serde_json::json;
     use std::time::Duration;
@@ -649,8 +650,7 @@ mod tests {
                 "detail": "daemon project server capacity reached (capacity=8); retiring idle project 'project.capacity' is blocked: ClientLeases / ProjectSessions",
             }
         });
-        let error = tracedecay::daemon::reject_stalled_project_open_status(&stalled)
-            .expect_err("stalled must fail");
+        let error = reject_stalled_project_open_status(&stalled).expect_err("stalled must fail");
         // The snapshot records retry_backoff, which does not identify its
         // cause, so the fallback rejects with the honest typed backoff
         // rather than a fabricated capacity verdict.
@@ -662,10 +662,7 @@ mod tests {
                 }
             )
         );
-        assert!(
-            tracedecay::daemon::reject_stalled_project_open_status(&json!({ "node_count": 1 }))
-                .is_ok()
-        );
+        assert!(reject_stalled_project_open_status(&json!({ "node_count": 1 })).is_ok());
     }
 
     #[test]

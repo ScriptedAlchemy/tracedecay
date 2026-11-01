@@ -1,3 +1,5 @@
+#[cfg(any(test, feature = "test-transport"))]
+use super::super::production_harness::ProductionProjectCompositionHarnessV1;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -7,7 +9,6 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::journey_test_support::{resolved, tool_answer};
-use super::*;
 use crate::test_support::git::git;
 
 const CONVERGENCE_DEADLINE: Duration = Duration::from_secs(90);

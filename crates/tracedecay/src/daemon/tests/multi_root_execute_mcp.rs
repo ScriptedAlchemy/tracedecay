@@ -12,15 +12,15 @@ use tracedecay_contracts::{
     ApplicationOutcome, MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasStatusV1,
     RegisteredRootSelectorV1, RequestId,
 };
+use tracedecay_daemon_protocol::DaemonHandshake;
 use tracedecay_domain::{ProjectId, ScopeSetId, UtcMicros};
 
 use super::{
     enter_test_daemon_database_scope, test_client_identity_for, test_daemon_engine_for_profile,
     test_handshake_defaults,
 };
-use crate::daemon::{
-    DaemonHandshake, InProcessDaemonInvocationExecutor, execute_daemon_invocation,
-};
+use crate::daemon::invocation_dispatch::execute_daemon_invocation;
+use crate::daemon::invocation_executor::InProcessDaemonInvocationExecutor;
 use crate::mcp::tools::{ToolCallRegistryOptions, handle_tool_call_with_registry_options};
 use tracedecay_daemon_protocol::DaemonInvocationExecutor;
 use tracedecay_daemon_service::{DaemonInvocationOutcome, DaemonInvocationRequest};

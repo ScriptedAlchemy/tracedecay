@@ -1,6 +1,9 @@
 //! Daemon-owned LSP lease reclamation and shutdown behavior.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use tracedecay_daemon_protocol::{DaemonInvocationOutcome, DaemonInvocationRequest};
+use tracedecay_lsp::AdmittedRoot;
 
 use super::*;
 use tokio::sync::Mutex;

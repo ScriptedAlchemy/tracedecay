@@ -55,6 +55,7 @@ pub mod contract;
 pub mod handshake;
 pub mod lsp_wire;
 pub mod output_format;
+pub mod reason_codes;
 pub mod request;
 pub mod surface;
 pub mod transport;
@@ -82,12 +83,12 @@ pub use client_identity::DaemonClientIdentity;
 pub use connection::{
     DAEMON_CONNECT_DOWN, DAEMON_CONNECT_SATURATED, DAEMON_RESPONSE_STALLED,
     DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DAEMON_TOOL_RESPONSE_GRACE,
-    DEFAULT_DAEMON_OPERATION_DEADLINE, DEFAULT_TOOL_REQUEST_DEADLINE, DaemonConnection,
-    DaemonLivenessProbe, MAX_TOOL_REQUEST_DEADLINE, TOOL_REQUEST_DEADLINE_ENV,
-    connect_to_daemon_connection, daemon_connect_failure, daemon_response_stalled,
-    daemon_response_stalled_during, daemon_tool_response_bound, next_daemon_response_line,
-    poll_daemon_response_line, tool_request_deadline, write_daemon_handshake_preamble,
-    write_daemon_preamble,
+    DEFAULT_DAEMON_OPERATION_DEADLINE, DEFAULT_TOOL_REQUEST_DEADLINE, DaemonConnectTarget,
+    DaemonConnection, DaemonLivenessProbe, MAX_TOOL_REQUEST_DEADLINE, TOOL_REQUEST_DEADLINE_ENV,
+    connect_to_daemon_connection, connect_with_restart_grace_resolving, daemon_connect_failure,
+    daemon_response_stalled, daemon_response_stalled_during, daemon_tool_response_bound,
+    next_daemon_response_line, poll_daemon_response_line, tool_request_deadline,
+    write_daemon_handshake_preamble, write_daemon_preamble,
 };
 pub use contract::{
     DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DAEMON_SHUTDOWN_METHOD,
@@ -113,6 +114,11 @@ pub use lsp_wire::{
     MAX_LSP_WORKSPACE_ROOTS, ProcessLocalRequestSequence, SequenceExhausted,
 };
 pub use output_format::{RequestedOutputFormat, requested_output_format};
+pub use reason_codes::{
+    DOCTOR_REPORT_OWNER_WARMING_REASON, PROJECT_NOT_ENROLLED_REASON_CODE,
+    PROJECT_SERVER_CAPACITY_REASON_CODE, PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE,
+    PROJECT_WARMING_REASON_CODE, error_is_project_not_enrolled, error_is_project_warming,
+};
 pub use surface::GitReadSurfaceRequest;
 pub use transport::{
     AUTH_PREFACE_PROTOCOL, BrokerListener, BrokerReadHalf, BrokerStream, BrokerWriteHalf,

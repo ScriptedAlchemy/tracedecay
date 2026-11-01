@@ -4,8 +4,33 @@
 //! warming), the handshake-to-route mapping, the open and maintenance gates,
 //! and the portable owner reconciler.
 
-use super::*;
+use super::MAX_CACHED_PROJECT_SERVERS;
+use super::MAX_TRACKED_PROJECT_OPEN_TASKS;
+use super::PROJECT_OPEN_TASK_CAPACITY_REASON_CODE;
+use super::PROJECT_REQUIRED_REASON_CODE;
+use super::PROJECT_WARMING_RETRY_HINT;
+use super::branch_admin::StoreAdministration;
+#[cfg(unix)]
+use super::project_open_admission::{
+    MaintenanceTransitionGate, MaintenanceTransitionGates, MaintenanceTransitionKey,
+    store_owner_key_from_paths,
+};
+use super::project_open_admission::{
+    ProjectOpenGate, ProjectOpenGates, ProjectOpenTaskState, ProjectOpenTasks, ProjectRouteKey,
+    ProjectServerKey, ProjectServerRequirement,
+};
+#[cfg(unix)]
+use super::project_open_orchestration::durable_enrollment_resolves_existing_store;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracedecay_daemon_identity::{authority, profile_identity};
+use tracedecay_daemon_protocol::{
+    DaemonClientIdentity, DaemonHandshake, PROJECT_SERVER_CAPACITY_REASON_CODE,
+    PROJECT_WARMING_REASON_CODE, error_is_project_warming,
+};
+use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_session_runtime::StoreOwnerKey;
 
 pub(super) fn project_server_capacity_error() -> TraceDecayError {
     TraceDecayError::project_route(
@@ -243,7 +268,7 @@ pub(super) async fn resolved_project_server_key(
     let Ok(layout) =
         tracedecay_project::project::TraceDecay::resolve_registered_configuration_layout(
             canonical_project_path,
-            &crate::daemon::handshake_open_options(handshake),
+            &crate::daemon::core_handshake::handshake_open_options(handshake),
             registry_database.as_ref(),
         )
         .await
@@ -333,7 +358,7 @@ pub(super) async fn maintenance_transition_gate(
 pub(super) fn portable_database_owner_reconciler(
     store_administration: StoreAdministration,
     current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
-    route_registered: Arc<AtomicBool>,
+    route_registered: Arc<std::sync::atomic::AtomicBool>,
     route_cancellation: CancellationToken,
     handshake: DaemonHandshake,
 ) -> crate::mcp::DatabaseOwnerReconciler {
@@ -350,7 +375,7 @@ pub(super) fn portable_database_owner_reconciler(
             );
             let transition = store_administration
                 .with_writer_in(scope, || async {
-                    if !route_registered.load(Ordering::Acquire) {
+                    if !route_registered.load(std::sync::atomic::Ordering::Acquire) {
                         return None;
                     }
                     let new_key = match ProjectServerKey::from_open_project(&fresh, &handshake) {
@@ -376,7 +401,7 @@ pub(super) fn portable_database_owner_reconciler(
                         // Terminal revocation: this route can never serve
                         // again, so drop its fence and end everything that
                         // waits on its lifetime.
-                        route_registered.store(false, Ordering::Release);
+                        route_registered.store(false, std::sync::atomic::Ordering::Release);
                         route_cancellation.cancel();
                     }
                     *current = new_key.clone();

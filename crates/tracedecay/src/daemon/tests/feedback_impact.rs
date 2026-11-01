@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use tracedecay_mcp::JsonRpcResponse;
 
 use super::git;
-use crate::daemon::ProductionProjectCompositionHarnessV1;
+use crate::daemon::production_harness::ProductionProjectCompositionHarnessV1;
 
 const IMPACT_TOOL: &str = "tracedecay_feedback_impact";
 const IMPACT_RESULT_SCHEMA: &str = "schema.application.feedback.impact.result";

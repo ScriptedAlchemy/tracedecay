@@ -1,3 +1,6 @@
+use super::super::invocation_executor::InProcessDaemonInvocationExecutor;
+#[cfg(any(test, feature = "test-transport"))]
+use super::super::production_harness::ProductionProjectCompositionHarnessV1;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -17,7 +20,6 @@ use tracedecay_sdk::operations::{ApplicationConfigurationSet, TypedOperation};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use super::journey_test_support::{initialize_project, tool_payload};
-use super::*;
 use tracedecay_daemon_service::daemon_operation_event_authority;
 
 const HTTP_AUTH_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
