@@ -762,16 +762,17 @@ fn install_codex_personal_bootstrap(home: &Path, tracedecay_bin: &str) -> Result
     Ok(install_dir)
 }
 
-fn copy_rendered_bundle_to_native_cache(home: &Path, tracedecay_bin: &str) {
-    let source = codex_plugin_install_dir(home);
-    let cache = codex_plugin_current_cached_install_dir(home);
-    for (relative, _) in
-        rendered_global_plugin_files(tracedecay_bin, &ServeArgs::default()).unwrap()
-    {
-        let target = cache.join(relative);
-        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-        std::fs::copy(source.join(relative), target).unwrap();
-    }
+fn copy_rendered_bundle_to_native_cache(
+    home: &Path,
+    tracedecay_bin: &str,
+) -> Vec<(&'static str, String)> {
+    let rendered = rendered_global_plugin_files(tracedecay_bin, &ServeArgs::default()).unwrap();
+    super::super::native_cache_fixture::materialize_cached_bundle(
+        &codex_plugin_install_dir(home),
+        &codex_plugin_current_cached_install_dir(home),
+        rendered.iter().map(|(relative, _)| *relative),
+    );
+    rendered
 }
 
 fn write_exact_native_activation(home: &Path, tracedecay_bin: &str) {
@@ -1048,7 +1049,12 @@ fn native_cache_content_drift_and_binary_relocation_require_refresh() {
         "binary relocation must require refresh: {}",
         native_activation_diagnostics(profile, home.path(), new_bin),
     );
-    copy_rendered_bundle_to_native_cache(home.path(), new_bin);
+    let rendered = copy_rendered_bundle_to_native_cache(home.path(), new_bin);
+    super::super::native_cache_fixture::assert_rendered_bundle_bytes(
+        &codex_plugin_install_dir(home.path()),
+        &codex_plugin_current_cached_install_dir(home.path()),
+        &rendered,
+    );
     assert!(
         codex_plugin_is_natively_active(
             profile,
@@ -1058,6 +1064,69 @@ fn native_cache_content_drift_and_binary_relocation_require_refresh() {
         .unwrap(),
         "refreshing relocated bundle must reactivate: {}",
         native_activation_diagnostics(profile, home.path(), new_bin),
+    );
+}
+
+#[test]
+fn native_cache_same_size_unchanged_mtime_content_drift_deactivates() {
+    let home = tempfile::tempdir().unwrap();
+    let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
+    write_exact_native_activation(home.path(), TEST_BIN);
+    assert!(
+        codex_plugin_is_natively_active(
+            profile,
+            home.path(),
+            Some((TEST_BIN, &ServeArgs::default()))
+        )
+        .unwrap(),
+        "initial native activation: {}",
+        native_activation_diagnostics(profile, home.path(), TEST_BIN),
+    );
+
+    let rendered = rendered_global_plugin_files(TEST_BIN, &ServeArgs::default()).unwrap();
+    let relative = rendered
+        .iter()
+        .find(|(relative, _)| relative.starts_with("skills/"))
+        .map(|(relative, _)| *relative)
+        .expect("the Codex bundle ships at least one skill file");
+    let cached = codex_plugin_current_cached_install_dir(home.path()).join(relative);
+    let original = std::fs::read(&cached).unwrap();
+    let modified = std::fs::metadata(&cached).unwrap().modified().unwrap();
+    let mut drifted = original.clone();
+    let letter = drifted
+        .iter()
+        .rposition(u8::is_ascii_alphabetic)
+        .expect("a rendered skill file contains letters");
+    drifted[letter] = if drifted[letter] == b'a' { b'b' } else { b'a' };
+    assert_eq!(
+        drifted.len(),
+        original.len(),
+        "the drift must keep {relative} the same size"
+    );
+    assert_ne!(drifted, original);
+
+    std::fs::write(&cached, &drifted).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&cached)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    assert_eq!(
+        std::fs::metadata(&cached).unwrap().modified().unwrap(),
+        modified,
+        "the drift must keep {relative}'s mtime"
+    );
+
+    assert!(
+        !codex_plugin_is_natively_active(
+            profile,
+            home.path(),
+            Some((TEST_BIN, &ServeArgs::default()))
+        )
+        .unwrap(),
+        "a same-size byte change with an unchanged mtime must deactivate: {}",
+        native_activation_diagnostics(profile, home.path(), TEST_BIN),
     );
 }
 

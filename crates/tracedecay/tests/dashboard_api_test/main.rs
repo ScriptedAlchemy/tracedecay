@@ -24,6 +24,7 @@ mod delivery;
 mod doctor;
 mod explorer;
 mod graph;
+mod http_read_retry;
 mod loom;
 mod memory_curation;
 mod projects;
