@@ -2,8 +2,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(test)]
-use std::time::Instant;
 use tracedecay_domain::SessionId;
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_store::SessionRefreshBeginOrJoinRequestV1;
@@ -1068,36 +1066,6 @@ impl SessionTemporalRefreshWake {
             .await,
             Ok(Ok(true))
         )
-    }
-
-    #[cfg(test)]
-    pub(super) async fn wake_and_wait_until_idle(&self, timeout: std::time::Duration) -> bool {
-        let Some(state) = self.target() else {
-            return false;
-        };
-        let before = state.pass_count.load(Ordering::Acquire);
-        state.wake();
-        let deadline = Instant::now() + timeout;
-        loop {
-            let idle = tracing::Instrument::instrument(
-                enabled_idle_notification(&state),
-                tracing::trace_span!("daemon.scheduler.session_temporal.idle_wait"),
-            );
-            let pass_count = state.pass_count.load(Ordering::Acquire);
-            let busy = state.busy.load(Ordering::Acquire);
-            let dirty = state.dirty.load(Ordering::Acquire);
-            let pending = state.has_requests();
-            if pass_count > before && !busy && !dirty && !pending {
-                return true;
-            }
-            if native_runtime::timeout_at(deadline, idle).await.is_err() {
-                let pass_count = state.pass_count.load(Ordering::Acquire);
-                return pass_count > before
-                    && !state.busy.load(Ordering::Acquire)
-                    && !state.dirty.load(Ordering::Acquire)
-                    && !state.has_requests();
-            }
-        }
     }
 
     /// Marks historical catch-up pending and wakes its worker, unless the

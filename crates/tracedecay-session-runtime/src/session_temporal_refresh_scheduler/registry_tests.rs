@@ -144,18 +144,32 @@ async fn mount_held_project(
 }
 
 /// A replacement worker may consume a handed-off request before rekey returns.
-/// Join its real pass and require the durable completion, rather than racing
-/// the consumer for a transient queue length or dirty flag. These empty sessions
-/// have no observation history for discovery to reconstruct a lost request from.
+/// Require the route to target that worker, accept a wake through it, and join
+/// the worker's idle state before checking durable completion. Waiting on the
+/// state's real idle notification keeps a slow projection pass from turning
+/// into a route failure. These empty sessions have no observation history for
+/// discovery to reconstruct a lost request from.
 async fn assert_rekey_completed_requests(
+    registry: &SessionTemporalRefreshSchedulerRegistry,
     harness: &RegisteredGlobalDbHarness,
+    new_owner: &StoreOwnerKey,
     wake: &SessionTemporalRefreshWake,
     sessions: &[&str],
 ) {
+    let state = registry
+        .project_state(new_owner)
+        .await
+        .expect("replacement project entry");
     assert!(
-        wake.wake_and_wait_until_idle(Duration::from_secs(5)).await,
-        "the retained route must join the replacement worker's pass"
+        wake.target()
+            .is_some_and(|target| Arc::ptr_eq(&target, &state)),
+        "the retained route must join the replacement worker"
     );
+    assert!(
+        wake.wake(),
+        "the retained route must reach the replacement worker"
+    );
+    registry.wait_project_idle(new_owner).await;
     let store = SessionTemporalStore::new(harness.registered.as_ref());
     for name in sessions {
         let session_id = SessionId::new(*name).expect("session id");
@@ -460,7 +474,14 @@ async fn a_retried_rekey_recovers_the_dropped_attempts_route_and_requests() {
         .project_state(&new_owner)
         .await
         .expect("new owner entry");
-    assert_rekey_completed_requests(&harness, &old_wake, &["session.dropped-rekey"]).await;
+    assert_rekey_completed_requests(
+        &registry,
+        &harness,
+        &new_owner,
+        &old_wake,
+        &["session.dropped-rekey"],
+    )
+    .await;
 
     registry.shutdown().await;
 }
@@ -828,7 +849,14 @@ async fn a_mapped_rekey_lands_the_workers_queued_requests() {
         .project_state(&new_owner)
         .await
         .expect("new owner entry");
-    assert_rekey_completed_requests(&harness, &old_wake, &["session.mapped-rekey"]).await;
+    assert_rekey_completed_requests(
+        &registry,
+        &harness,
+        &new_owner,
+        &old_wake,
+        &["session.mapped-rekey"],
+    )
+    .await;
 
     registry.shutdown().await;
 }
