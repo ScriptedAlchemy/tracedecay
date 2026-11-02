@@ -570,6 +570,191 @@ fn installing_a_head_retires_every_superseded_generation_it_no_longer_needs() {
     assert_eq!(recovered.generation().as_str(), "sup-g3");
 }
 
+/// Cancellation after one tombstone must not leave the unvisited candidates
+/// reserved forever. Retry against the same resident owner: closing it would
+/// reset the generation state and hide leaked retirement fences.
+#[test]
+fn cancelled_superseded_retirement_releases_unvisited_fences_for_a_live_retry() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let registered = RegisteredGraph::new_mounted(root).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = canonical_projection("worktree.retirement-retry");
+    let mut head = None;
+    let mut reader = None;
+    let mut keys = Vec::new();
+    for (index, input) in ['1', '2', '3', '4', '5'].into_iter().enumerate() {
+        let (record, commit) = publish_generation(
+            &registered,
+            root,
+            &mut authority,
+            &identity,
+            &format!("retry-g{}", index + 1),
+            head.take(),
+            input,
+        );
+        head = Some(commit.head.clone());
+        keys.push(record.publication.key);
+        if index == 0 {
+            reader = Some(commit);
+        }
+    }
+    assert_eq!(sealed_generation_count(root), 5);
+    let projection = &keys[4].projection;
+    let cancellation = Arc::new(AtomicU8::new(0));
+    authority.cancel_after_retire = Some(Arc::clone(&cancellation));
+    let mut cancelled_registration = registration(registered.binding.clone(), root);
+    cancelled_registration.cancellation =
+        Arc::new(AtomicTestCancellation(Arc::clone(&cancellation)));
+    let (control, probe) = control_and_probe();
+    assert_eq!(
+        registered.registry.retire_superseded_projection_replays(
+            cancelled_registration,
+            &mut authority,
+            &fresh_context(&control, &probe),
+            projection,
+        ),
+        Err(GraphDbError::Cancelled)
+    );
+    assert!(
+        authority.retired[&keys[1]]
+            .canonical_replay_source
+            .is_some(),
+        "the first unretained candidate was tombstoned before cancellation"
+    );
+    assert!(authority.records.contains_key(&keys[2]));
+    assert!(authority.records.contains_key(&keys[3]));
+    assert_eq!(sealed_generation_count(root), 5);
+    assert!(staging_engine_is_open(&registered, root));
+
+    cancellation.store(0, Ordering::SeqCst);
+    authority.cancel_after_retire = None;
+    let (control, probe) = control_and_probe();
+    let receipt = registered
+        .registry
+        .retire_superseded_projection_replays(
+            registration(registered.binding.clone(), root),
+            &mut authority,
+            &fresh_context(&control, &probe),
+            projection,
+        )
+        .unwrap();
+    assert_eq!(
+        receipt,
+        SupersededReplayRetirement {
+            retired: 3,
+            retained: 1,
+            pending: 0,
+        },
+        "the retry finishes the tombstone and every unvisited candidate"
+    );
+    assert_eq!(sealed_generation_count(root), 2);
+    assert!(authority.records.contains_key(&keys[0]));
+    assert_eq!(authority.heads.get(projection), head.as_ref());
+
+    drop(reader);
+    let (control, probe) = control_and_probe();
+    let receipt = registered
+        .registry
+        .retire_superseded_projection_replays(
+            registration(registered.binding.clone(), root),
+            &mut authority,
+            &fresh_context(&control, &probe),
+            projection,
+        )
+        .unwrap();
+    assert_eq!(receipt.retired, 1);
+    assert_eq!(sealed_generation_count(root), 1);
+    assert_eq!(authority.head_retirement_calls, 0);
+    let (control, probe) = control_and_probe();
+    let recovered = registered
+        .registry
+        .recover_verified_snapshot(
+            registration(registered.binding.clone(), root),
+            &mut authority,
+            &fresh_context(&control, &probe),
+            projection,
+        )
+        .unwrap();
+    assert_eq!(recovered.generation().as_str(), "retry-g5");
+}
+
+/// The whole selected batch remains retryable when the staging engine fails
+/// to reopen before any retirement starts. Keep the same issued lease so an
+/// owner teardown cannot clear the leaked fences on behalf of the pass.
+#[test]
+fn failed_retirement_engine_open_releases_the_entire_selected_batch() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let registered = RegisteredGraph::new_mounted_lazy(root).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = canonical_projection("worktree.retirement-open-retry");
+    let mut head = None;
+    for (index, input) in ['1', '2', '3', '4'].into_iter().enumerate() {
+        let (_, commit) = publish_generation(
+            &registered,
+            root,
+            &mut authority,
+            &identity,
+            &format!("open-retry-g{}", index + 1),
+            head.take(),
+            input,
+        );
+        head = Some(commit.head.clone());
+    }
+    let head = head.unwrap();
+    let database = registered
+        .registry
+        .resolve(registration(registered.binding.clone(), root))
+        .unwrap();
+    assert!(!database.staging_engine_is_open());
+    assert_eq!(sealed_generation_count(root), 4);
+
+    // Move, rather than copy, the fixture's closed container and temporarily
+    // occupy its filename with a directory. This causes the real lazy open
+    // to fail without corrupting the valid bytes needed by the retry.
+    let container = support::graph_path(root);
+    let held_container = root.join("temporarily-unavailable.grafeo");
+    std::fs::rename(&container, &held_container).unwrap();
+    std::fs::create_dir(&container).unwrap();
+    let (control, probe) = control_and_probe();
+    let failed = registered
+        .registry
+        .retire_superseded_projection_replays_with_lease(
+            &database,
+            &mut authority,
+            &fresh_context(&control, &probe),
+            &head.key.projection,
+        );
+    std::fs::remove_dir(&container).unwrap();
+    std::fs::rename(&held_container, &container).unwrap();
+    assert!(matches!(failed, Err(GraphDbError::Unavailable { .. })));
+    assert!(authority.retired.is_empty());
+    assert_eq!(sealed_generation_count(root), 4);
+
+    let (control, probe) = control_and_probe();
+    let receipt = registered
+        .registry
+        .retire_superseded_projection_replays_with_lease(
+            &database,
+            &mut authority,
+            &fresh_context(&control, &probe),
+            &head.key.projection,
+        )
+        .unwrap();
+    assert_eq!(
+        receipt,
+        SupersededReplayRetirement {
+            retired: 3,
+            retained: 0,
+            pending: 0,
+        },
+        "every selected candidate remains eligible after the open failure"
+    );
+    assert_eq!(sealed_generation_count(root), 1);
+    assert_eq!(authority.heads.get(&head.key.projection), Some(&head));
+}
+
 /// A generation large enough that its rows dominate the container.
 fn bulk_manifest(
     identity: &GraphProjectionIdentity,

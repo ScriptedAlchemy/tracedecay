@@ -74,7 +74,9 @@ pub(crate) struct VerifiedGenerationState {
     pub(crate) quarantined: BTreeSet<GenerationLocator>,
     pub(crate) stored: BTreeMap<GenerationLocator, Vec<GenerationLocator>>,
     pub(crate) sealed_only: BTreeSet<GenerationLocator>,
-    pub(crate) retiring: BTreeSet<GenerationLocator>,
+    /// Each fence carries its reservation identity so abandoned work cannot
+    /// clear a successor's fence after hibernation resets this state.
+    pub(crate) retiring: BTreeMap<GenerationLocator, Arc<()>>,
     pub(crate) collected: BTreeSet<GenerationLocator>,
 }
 
@@ -121,7 +123,7 @@ impl VerifiedGenerationState {
         &mut self,
         lease: &Arc<VerifiedGenerationLease>,
     ) -> Result<(), GraphDbError> {
-        if self.retiring.contains(&lease.locator) || self.collected.contains(&lease.locator) {
+        if self.retiring.contains_key(&lease.locator) || self.collected.contains(&lease.locator) {
             return Err(GraphDbError::conflict("lease.remember"));
         }
         self.quarantined.remove(&lease.locator);
