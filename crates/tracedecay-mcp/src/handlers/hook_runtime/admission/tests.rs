@@ -296,8 +296,6 @@ fn redelivered_producer_event_with_pending_work_is_an_exact_duplicate() {
     assert_eq!(pending_work(data_root.path()), vec![envelope.clone()]);
     // Exercise the eviction/reopen path explicitly instead of relying on
     // parallel tests to displace this ledger by accident.
-    drop(first);
-    drop(again);
     restart_ledger(data_root.path());
     assert_eq!(
         hook_v2_pending_work_envelopes(data_root.path(), envelope.producer, hook_now()).unwrap(),
