@@ -24,6 +24,9 @@ inputs:
   windows-redirect-temp:
     description: Put Windows test temporary files on the runner workspace drive.
     default: "false"
+  existing-tailnet:
+    description: Use the isolated runner VM's existing Tailscale connection.
+    default: "false"
   tailscale-client-id:
     description: OIDC client for trusted Linux/macOS/Windows CI; empty keeps the hosted-only build.
     default: ""
@@ -134,11 +137,11 @@ runs:
       id: fleet
       shell: bash
       env:
-        TAILSCALE_OUTCOME: ${{ steps.tailscale.outcome }}
+        TAILSCALE_OUTCOME: ${{ inputs.existing-tailnet == 'true' && 'success' || steps.tailscale.outcome }}
       run: |
         if [[ "$TAILSCALE_OUTCOME" == success ]]; then
           # Resolve the peer through the local API without changing runner DNS.
-          tailscale_cli=/usr/local/bin/tailscale
+          tailscale_cli=$(command -v tailscale || true)
           if [[ "$RUNNER_OS" == Windows ]]; then
             tailscale_cli="/c/Program Files/Tailscale/tailscale.exe"
           fi
