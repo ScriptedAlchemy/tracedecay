@@ -46,7 +46,7 @@ runs:
   using: composite
   steps:
     - name: Verify Windows build runner configuration
-      if: runner.os == 'Windows'
+      if: runner.os == 'Windows' && runner.environment == 'github-hosted'
       shell: pwsh
       env:
         REDIRECT_TEMP: ${{ inputs.windows-redirect-temp }}
@@ -73,8 +73,11 @@ runs:
         node <<'JS'
         const fs = require('node:fs');
         const os = require('node:os');
+        const windowsRoot = process.platform === 'win32'
+          ? require('node:path').win32.parse(process.env.GITHUB_WORKSPACE).root.replace(/\\/g, '/')
+          : '';
         const path = process.platform === 'win32'
-          ? 'D:/b-disk'
+          ? `${windowsRoot}b-disk`
           : `${os.homedir().replace(/\\/g, '/')}/.cache/bazel-disk`;
         const names = [process.env.CACHE_NAME, ...(process.env.EXTRA_RESTORE_KEYS || '')
           .split(',')
@@ -84,7 +87,7 @@ runs:
           `setup-bazel-1-${process.platform}-${os.arch()}-disk-${name}-`);
         fs.appendFileSync(
           process.env.GITHUB_OUTPUT,
-          `path=${path}\nprefix=${prefixes[0]}\nrestore-keys<<EOF\n${prefixes.join('\n')}\nEOF\n`,
+          `path=${path}\noutput-base=${windowsRoot ? `${windowsRoot}b` : ''}\nprefix=${prefixes[0]}\nrestore-keys<<EOF\n${prefixes.join('\n')}\nEOF\n`,
         );
         JS
 
@@ -97,9 +100,8 @@ runs:
           build --disk_cache=${{ steps.disk-cache-config.outputs.path }}
         cache-save: ${{ github.ref == 'refs/heads/master' && inputs.cache-save == 'true' }}
         # Windows build-script runfiles nest each vendored crate's sources
-        # under its repository name twice; a short output base (default
-        # D:/_bazel) keeps MSVC's header paths under MAX_PATH.
-        output-base: ${{ runner.os == 'Windows' && 'D:/b' || '' }}
+        # under its repository name twice; keep the output base short.
+        output-base: ${{ steps.disk-cache-config.outputs.output-base }}
 
     - name: Preserve the runner network environment for Tailscale
       if: runner.os == 'Linux' && inputs.tailscale-client-id != ''
