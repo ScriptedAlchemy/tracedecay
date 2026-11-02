@@ -3241,7 +3241,7 @@ mod historical_publication_reuse_tests {
             database.wait_verified_generations_write(),
             Err(GraphDbError::Unavailable { .. })
         ));
-        let poisoned = database.inner.verified_generations.read().unwrap_err();
+        let poisoned = database.inner.verified_generations.read().err().expect("lock poisoned");
         assert!(poisoned
             .into_inner()
             .retiring
