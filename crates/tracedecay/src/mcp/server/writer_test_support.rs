@@ -76,7 +76,7 @@ pub(super) fn registered_context(
     .expect("registered MCP server context");
     // These fixtures assert exact code-index reconcile-sink accounting.
     // Startup catch-up admits one reconciliation through that same sink
-    // (its contract is covered by `background_refresh_writer_tests`), so it
+    // (its contract is covered by `refresh_admission_tests`), so it
     // must not race those counters.
     context.startup_catch_up_enabled = false;
     context

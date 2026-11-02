@@ -6,9 +6,7 @@
 
 use super::MAX_CACHED_PROJECT_SERVERS;
 use super::branch_admin::StoreAdministration;
-use super::core_admission::{
-    coordinated_background_refresh_writer, coordinated_dashboard_automation_writer,
-};
+use super::core_admission::coordinated_dashboard_automation_writer;
 use super::engine::ensure_context_scout_owner_before_advertising;
 use super::graph_resolution::retained_project_server_resolver;
 use super::http_application;
@@ -1111,9 +1109,8 @@ impl ProjectOpenInputs<'_> {
                     registry: core.registered_profile_db.clone(),
                     database_owner_reconciler: Arc::clone(&core.database_owner_reconciler),
                     project_routes: self.store_administration.project_routes(),
-                    writers: crate::mcp::server::McpServerWriters::daemon_owned(
-                        coordinated_dashboard_automation_writer(self.store_administration.clone()),
-                        coordinated_background_refresh_writer(self.store_administration.clone()),
+                    dashboard_automation_writer: coordinated_dashboard_automation_writer(
+                        self.store_administration.clone(),
                     ),
                 },
             ),
@@ -1551,13 +1548,8 @@ impl ProjectOpenInputs<'_> {
                         session_sync_service,
                         database_owner_reconciler: Arc::clone(&core.database_owner_reconciler),
                         project_routes: self.store_administration.project_routes(),
-                        writers: crate::mcp::server::McpServerWriters::daemon_owned(
-                            coordinated_dashboard_automation_writer(
-                                self.store_administration.clone(),
-                            ),
-                            coordinated_background_refresh_writer(
-                                self.store_administration.clone(),
-                            ),
+                        dashboard_automation_writer: coordinated_dashboard_automation_writer(
+                            self.store_administration.clone(),
                         ),
                         delivery_settlement_authority,
                         delivery_settlement_recorder,
