@@ -190,6 +190,11 @@ impl Fixture {
         faulting_passes: usize,
     ) -> Arc<ReconcileFaultInjectionV1> {
         let fault = Arc::new(ReconcileFaultInjectionV1::new(kind, faulting_passes));
+        self.install_fault_instance(Arc::clone(&fault)).await;
+        fault
+    }
+
+    async fn install_fault_instance(&self, fault: Arc<ReconcileFaultInjectionV1>) {
         let canonical = canonical_existing_identity(&self.project).expect("canonical project");
         let mounted = self.registry.mounted.lock().await;
         let worktree = mounted.get(&canonical).expect("mounted worktree");
@@ -197,8 +202,7 @@ impl Fixture {
             .scheduler
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .install_reconcile_fault_for_test(Arc::clone(&fault));
-        fault
+            .install_reconcile_fault_for_test(fault);
     }
 
     /// One wake that carries no new input: the control epoch does not advance,
@@ -427,6 +431,51 @@ async fn changed_input_lifts_a_quarantined_reconcile() {
         "changed input must earn another attempt; stayed at {quarantined_at}"
     );
 
+    fixture.registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn input_changed_during_the_last_panicking_pass_is_not_quarantined() {
+    struct ResumeOnDrop(Arc<ReconcileFaultInjectionV1>);
+    impl Drop for ResumeOnDrop {
+        fn drop(&mut self) {
+            self.0.resume();
+        }
+    }
+
+    let fixture = Fixture::mount("project.reconcile-panic-racing-epoch").await;
+    let bound = MAX_CONSECUTIVE_RECONCILE_PANICS_V1 as usize;
+    let fault = Arc::new(
+        ReconcileFaultInjectionV1::new(ReconcileFaultKindV1::Panic, bound)
+            .pausing_on_attempt(bound),
+    );
+    fixture.install_fault_instance(Arc::clone(&fault)).await;
+    let release = ResumeOnDrop(Arc::clone(&fault));
+    fixture.wake_without_new_input().await;
+
+    let deadline = tokio::time::Instant::now() + SETTLE_DEADLINE;
+    while !fault.is_paused() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        fault.is_paused(),
+        "the final failed pass must reach its gate"
+    );
+    assert_eq!(fault.attempts(), bound);
+    // Deliver the source observation through its real admission path while
+    // the failed pass is held. A separate filesystem write could also yield
+    // a later watcher epoch and hide a quarantine that adopted this one.
+    let admission = fixture
+        .registry
+        .notify_hook_paths(&fixture.project, &["src/main.rs".to_owned()])
+        .await;
+    drop(release);
+    assert!(matches!(admission, CodeIndexDemandAdmissionV1::Queued));
+
+    assert!(
+        wait_for_attempts(&fault, bound + 1).await > bound,
+        "the failure must quarantine its starting epoch, not the newer input"
+    );
     fixture.registry.shutdown().await;
 }
 

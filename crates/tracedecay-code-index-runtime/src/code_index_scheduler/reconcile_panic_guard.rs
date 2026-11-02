@@ -12,7 +12,7 @@
 //! This policy makes that failure degrade instead of loop: repeated panics
 //! back off exponentially, and after a bounded number of consecutive panics
 //! the worker stops re-attempting until the input actually changes (the
-//! code-index control epoch advances) or a pass makes progress. The shape
+//! code-index control epoch advances). The shape
 //! mirrors the sealed-generation activation backoff already used by the
 //! registry worker; tests shrink the clock, not the shape. A typed failure
 //! the same input reproduces shares the quarantine without the backoff.
@@ -46,8 +46,8 @@ pub const MAX_CONSECUTIVE_RECONCILE_PANICS_V1: u32 = 4;
 pub enum ReconcilePanicDecisionV1 {
     /// Re-arm a wake after this delay and try the same input again.
     RetryAfter(Duration),
-    /// The bound is exhausted. Stop re-arming; only changed input or a
-    /// progressing pass resumes reconciles.
+    /// The bound is exhausted. Stop re-arming; only changed input resumes
+    /// reconciles.
     Quarantine,
 }
 
@@ -94,7 +94,8 @@ impl ReconcilePanicGuardV1 {
     }
 
     /// Record a panicking pass and decide whether the same input is worth
-    /// another attempt.
+    /// another attempt. `epoch` is captured before the pass runs: an input
+    /// observation delivered while it ran must still allow a later pass.
     pub fn record_panic(&mut self, now: Instant, epoch: u64) -> ReconcilePanicDecisionV1 {
         self.consecutive_panics = self.consecutive_panics.saturating_add(1);
         if self.consecutive_panics >= MAX_CONSECUTIVE_RECONCILE_PANICS_V1 {
@@ -271,6 +272,7 @@ pub struct ReconcileFaultInjectionV1 {
     /// Passes to fault before behaving normally; `usize::MAX` never recovers.
     faulting_passes: usize,
     attempts: std::sync::atomic::AtomicUsize,
+    pause_at_attempt: std::sync::atomic::AtomicUsize,
     paused: std::sync::Mutex<bool>,
     resumed: std::sync::Condvar,
 }
@@ -282,6 +284,7 @@ impl ReconcileFaultInjectionV1 {
             kind,
             faulting_passes,
             attempts: std::sync::atomic::AtomicUsize::new(0),
+            pause_at_attempt: std::sync::atomic::AtomicUsize::new(0),
             paused: std::sync::Mutex::new(false),
             resumed: std::sync::Condvar::new(),
         }
@@ -294,8 +297,22 @@ impl ReconcileFaultInjectionV1 {
         fault
     }
 
+    /// Hold one exact admitted pass before delivering its fault, so a source
+    /// observation can race with the failing work without relying on timing.
+    pub fn pausing_on_attempt(mut self, attempt: usize) -> Self {
+        *self.pause_at_attempt.get_mut() = attempt;
+        self
+    }
+
+    pub fn is_paused(&self) -> bool {
+        *self.paused.lock().expect("reconcile pause lock")
+    }
+
     pub fn resume(&self) {
-        *self.paused.lock().expect("reconcile pause lock") = false;
+        let mut paused = self.paused.lock().expect("reconcile pause lock");
+        self.pause_at_attempt
+            .store(0, std::sync::atomic::Ordering::Release);
+        *paused = false;
         self.resumed.notify_all();
     }
 
@@ -310,6 +327,13 @@ impl ReconcileFaultInjectionV1 {
             .attempts
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let mut paused = self.paused.lock().expect("reconcile pause lock");
+        if self
+            .pause_at_attempt
+            .load(std::sync::atomic::Ordering::Acquire)
+            == seen + 1
+        {
+            *paused = true;
+        }
         while *paused {
             paused = self
                 .resumed

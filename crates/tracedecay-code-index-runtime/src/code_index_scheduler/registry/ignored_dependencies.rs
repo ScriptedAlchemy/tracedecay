@@ -201,6 +201,15 @@ fn clone_production_error(error: &CodeIndexProductionErrorV1) -> CodeIndexProduc
         CodeIndexProductionErrorV1::Parallelism(error) => {
             CodeIndexProductionErrorV1::Parallelism(error.clone())
         }
+        CodeIndexProductionErrorV1::SourceFilePanicked {
+            logical_path,
+            content_digest,
+            source,
+        } => CodeIndexProductionErrorV1::SourceFilePanicked {
+            logical_path: logical_path.clone(),
+            content_digest: content_digest.clone(),
+            source: Box::new(clone_production_error(source)),
+        },
     }
 }
 

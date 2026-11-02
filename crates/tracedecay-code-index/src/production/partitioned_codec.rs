@@ -1798,13 +1798,17 @@ fn decode_file_evidence(
     let mut buffers =
         vec![Vec::new(); CodeIndexPublishedGenerationV1::partitioned_decode_window_files()];
     let mut restored = FileEvidenceV1::default();
-    for lineage in collect_bounded_ordered(&without_evidence, |file| {
-        identity_lineage(
-            file,
-            lineage_prior_generation,
-            &generation.manifest.generation_id,
-        )
-    })? {
+    for lineage in collect_source_files_bounded_ordered(
+        &without_evidence,
+        |file| (&file.authority.logical_path, &file.authority.content_digest),
+        |file| {
+            identity_lineage(
+                file,
+                lineage_prior_generation,
+                &generation.manifest.generation_id,
+            )
+        },
+    )? {
         restored.lineage.extend(lineage);
     }
     for descriptors in generation.file_evidence.chunks(buffers.len()) {
@@ -1830,14 +1834,18 @@ fn decode_file_evidence(
             .zip(&buffers)
             .map(|((descriptor, file), bytes)| (descriptor, file, bytes.as_slice()))
             .collect::<Vec<_>>();
-        let expanded = collect_bounded_ordered(&segments, |(descriptor, file, bytes)| {
-            decode_file_evidence_segment(descriptor, bytes)?.expand(
-                file,
-                &present_files,
-                lineage_prior_generation,
-                &generation.manifest.generation_id,
-            )
-        })?;
+        let expanded = collect_source_files_bounded_ordered(
+            &segments,
+            |(_, file, _)| (&file.authority.logical_path, &file.authority.content_digest),
+            |(descriptor, file, bytes)| {
+                decode_file_evidence_segment(descriptor, bytes)?.expand(
+                    file,
+                    &present_files,
+                    lineage_prior_generation,
+                    &generation.manifest.generation_id,
+                )
+            },
+        )?;
         for evidence in expanded {
             restored.cross_file_edges.extend(evidence.cross_file_edges);
             restored.unresolved_calls.extend(evidence.unresolved_calls);
@@ -2852,7 +2860,11 @@ impl CodeIndexPublishedGenerationV1 {
         for window in self.files.chunks(window_files) {
             let plans = {
                 let _span = tracing::trace_span!("code_index.sealed_encode.file_window").entered();
-                collect_bounded_ordered(window, |file| plan_file(file))
+                collect_source_files_bounded_ordered(
+                    window,
+                    |file| (&file.authority.logical_path, &file.authority.content_digest),
+                    |file| plan_file(file),
+                )
             }?;
             for plan in plans {
                 let descriptor = match plan {
@@ -2970,15 +2982,19 @@ impl CodeIndexPublishedGenerationV1 {
             .zip(&persisted)
             .filter(|(_, evidence)| !evidence.is_empty())
             .collect::<Vec<_>>();
-        let encoded = collect_bounded_ordered(&owned, |(file, evidence)| {
-            let occurrence = &file.extraction.file_occurrence_id;
-            let file_key = file_keys.get(occurrence).copied().ok_or_else(|| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed file evidence file is absent from its snapshot".to_owned(),
-                )
-            })?;
-            encode_file_evidence_segment(file_key, occurrence, evidence)
-        })?;
+        let encoded = collect_source_files_bounded_ordered(
+            &owned,
+            |(file, _)| (&file.authority.logical_path, &file.authority.content_digest),
+            |(file, evidence)| {
+                let occurrence = &file.extraction.file_occurrence_id;
+                let file_key = file_keys.get(occurrence).copied().ok_or_else(|| {
+                    CodeIndexProductionErrorV1::Contract(
+                        "sealed file evidence file is absent from its snapshot".to_owned(),
+                    )
+                })?;
+                encode_file_evidence_segment(file_key, occurrence, evidence)
+            },
+        )?;
         let mut descriptors = Vec::with_capacity(encoded.len());
         for (descriptor, bytes) in encoded {
             if stored.insert(descriptor.segment_digest.clone()) {

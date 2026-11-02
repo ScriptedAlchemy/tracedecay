@@ -19,7 +19,7 @@ use super::resolution_view::SymbolsByNameV1;
 use super::sealed_parent::SealedParentGenerationV1;
 use super::sparse_resolution::{SparseDefinitionWindowV1, SparseSymbolsByNameV1};
 use super::typescript_resolution::ImportBindingOutcomeV1;
-use super::worker_tests::{worker_config, worker_id};
+use super::worker_tests::{PanicOnFileWorker, worker_config, worker_id};
 use super::*;
 
 const RUST: &str = "rust";
@@ -272,6 +272,46 @@ fn a_comment_on_a_called_module_reseals_over_the_parent() {
     assert!(
         sparse.projection().request().changes.reused_count > 0,
         "carried chunks are reused"
+    );
+}
+
+#[test]
+fn sparse_file_panic_identifies_the_changed_source_and_preserves_the_parent() {
+    let store = MemorySealedPublicationStoreV1::default();
+    let mut incremental = owner(&store);
+    let parent = publish(&mut incremental, &rust_tree(UTIL, MAIN), 1_100_000);
+    let edited = format!("{UTIL}// È\n");
+    let request = request_capturing(&rust_tree(&edited, MAIN), &["src/util.rs"], 1_200_000);
+    let expected_digest = content_digest(edited.as_bytes());
+    let error = incremental
+        .build_and_publish(request.clone(), &PanicOnFileWorker::new())
+        .expect_err("the changed file checkpoint panics");
+    assert!(matches!(
+        error,
+        CodeIndexProductionErrorV1::SourceFilePanicked {
+            logical_path,
+            content_digest,
+            ..
+        } if logical_path == "src/util.rs" && content_digest == expected_digest
+    ));
+    assert_eq!(
+        store
+            .load_active(&scope())
+            .expect("active publication")
+            .expect("parent remains active")
+            .metadata()
+            .expect("verified parent")
+            .manifest()
+            .generation_id,
+        parent.manifest().generation_id
+    );
+    let successor = incremental
+        .build_and_publish(request, &UninterruptibleCodeIndexControlV1)
+        .expect("the sparse owner can retry after a file panic");
+    assert_eq!(successor.cold_reason(), None);
+    assert_ne!(
+        successor.manifest().generation_id,
+        parent.manifest().generation_id
     );
 }
 

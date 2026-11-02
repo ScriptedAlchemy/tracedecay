@@ -3648,10 +3648,8 @@ impl CodeIndexSchedulerRegistryV1 {
                             // Bound it instead of re-dispatching the identical
                             // unit on every wake.
                             capacity_retry.record_progress();
-                            let decision = panic_guard.record_panic(
-                                Instant::now(),
-                                worker_control_epoch.load(Ordering::Acquire),
-                            );
+                            let decision =
+                                panic_guard.record_panic(Instant::now(), pass_control_epoch);
                             match decision {
                                 ReconcilePanicDecisionV1::RetryAfter(delay) => {
                                     tracing::warn!(
