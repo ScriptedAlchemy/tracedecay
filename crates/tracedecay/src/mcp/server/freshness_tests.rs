@@ -278,10 +278,10 @@ async fn read_refresh_is_non_blocking_and_single_flighted() {
     // Reset the read cooldown so the next spawn is eligible regardless of
     // any startup timing.
     server
-        .last_background_refresh_at
+        .last_read_refresh_admission_at
         .store(0, Ordering::Release);
     server
-        .background_refresh_running
+        .refresh_admission_running
         .store(false, Ordering::Release);
 
     // Make the tree stale: a new committed source file, as the
@@ -307,7 +307,9 @@ async fn read_refresh_is_non_blocking_and_single_flighted() {
     // (It may already have finished on a very fast machine; in that case
     // the cooldown stamp still advanced, which we assert below.)
     assert_ne!(
-        server.last_background_refresh_at.load(Ordering::Acquire),
+        server
+            .last_read_refresh_admission_at
+            .load(Ordering::Acquire),
         0,
         "cooldown stamp must advance when a refresh is kicked"
     );
@@ -316,9 +318,13 @@ async fn read_refresh_is_non_blocking_and_single_flighted() {
     // stamp just advanced (and/or a refresh is running), no second task is
     // spawned. We verify by confirming the stamp does not change to a new
     // value on a back-to-back call within the cooldown window.
-    let stamp_after_first = server.last_background_refresh_at.load(Ordering::Acquire);
+    let stamp_after_first = server
+        .last_read_refresh_admission_at
+        .load(Ordering::Acquire);
     server.maybe_spawn_read_refresh(&cg_snapshot, &cg_snapshot.branch_memo());
-    let stamp_after_second = server.last_background_refresh_at.load(Ordering::Acquire);
+    let stamp_after_second = server
+        .last_read_refresh_admission_at
+        .load(Ordering::Acquire);
     assert_eq!(
         stamp_after_first, stamp_after_second,
         "second read within cooldown must not re-kick (single-flight)"

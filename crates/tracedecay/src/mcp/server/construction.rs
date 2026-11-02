@@ -18,10 +18,6 @@ use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_sessions::serving::{SessionProjectionServingStatusPort, SessionRefreshWorkerPort};
 
-use super::hook_writes::BackgroundRefreshWriter;
-#[cfg(any(test, feature = "test-transport"))]
-use super::hook_writes::direct_background_refresh_writer;
-
 fn wrap_profile_identity(
     identity: LocalProfileIdentityAuthorityV1,
 ) -> Arc<dyn ProfileIdentityReadPort> {
@@ -169,7 +165,6 @@ pub(crate) struct McpServerConstructionContext {
         Option<tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader>,
     pub(crate) diagnostics_lsp:
         Option<Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>>,
-    pub(crate) background_refresh_writer: BackgroundRefreshWriter,
     pub(crate) code_index_hook_sink: Option<super::CodeIndexHookSink>,
     pub(crate) code_index_reconcile_sink: Option<super::CodeIndexReconcileSink>,
     pub(crate) code_index_freshness_probe_sink: Option<super::CodeIndexFreshnessProbeSink>,
@@ -210,11 +205,6 @@ pub(crate) struct McpServerConstructionContext {
         Option<Arc<tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1>>,
 }
 
-pub(crate) struct McpServerWriters {
-    dashboard_automation: tracedecay_dashboard_api::DashboardAutomationWriter,
-    background_refresh: BackgroundRefreshWriter,
-}
-
 pub(crate) struct McpServerDaemonDatabases {
     pub(crate) accounting: Option<RegisteredGlobalDbLeaseV1>,
     pub(crate) registry: RegisteredGlobalDbLeaseV1,
@@ -236,7 +226,7 @@ pub(crate) struct McpServerDaemonAuthority {
         std::sync::Weak<dyn tracedecay_contracts::session_sync::SessionSyncServicePort>,
     pub(crate) database_owner_reconciler: DatabaseOwnerReconciler,
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
-    pub(crate) writers: McpServerWriters,
+    pub(crate) dashboard_automation_writer: tracedecay_dashboard_api::DashboardAutomationWriter,
     pub(crate) delivery_settlement_authority:
         Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
     pub(crate) delivery_settlement_recorder:
@@ -250,19 +240,7 @@ pub(crate) struct McpServerDaemonCoreAuthority {
     pub(crate) registry: RegisteredGlobalDbLeaseV1,
     pub(crate) database_owner_reconciler: DatabaseOwnerReconciler,
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
-    pub(crate) writers: McpServerWriters,
-}
-
-impl McpServerWriters {
-    pub(crate) fn daemon_owned(
-        dashboard_automation: tracedecay_dashboard_api::DashboardAutomationWriter,
-        background_refresh: BackgroundRefreshWriter,
-    ) -> Self {
-        Self {
-            dashboard_automation,
-            background_refresh,
-        }
-    }
+    pub(crate) dashboard_automation_writer: tracedecay_dashboard_api::DashboardAutomationWriter,
 }
 
 impl McpServerConstructionContext {
@@ -302,7 +280,6 @@ impl McpServerConstructionContext {
             dashboard_feedback_status_reader: None,
             dashboard_pr_autotrack_reader: None,
             diagnostics_lsp: None,
-            background_refresh_writer: direct_background_refresh_writer(),
             code_index_hook_sink: None,
             code_index_reconcile_sink: None,
             code_index_freshness_probe_sink: None,
@@ -377,7 +354,7 @@ impl McpServerConstructionContext {
             session_sync_service,
             database_owner_reconciler,
             project_routes,
-            writers,
+            dashboard_automation_writer,
             delivery_settlement_authority,
             delivery_settlement_recorder,
         } = authority;
@@ -391,7 +368,7 @@ impl McpServerConstructionContext {
                 registry: databases.registry,
                 database_owner_reconciler,
                 project_routes,
-                writers,
+                dashboard_automation_writer,
             },
         );
         server.project_session_db = Some(databases.project_sessions);
@@ -421,7 +398,7 @@ impl McpServerConstructionContext {
             registry,
             database_owner_reconciler,
             project_routes,
-            writers,
+            dashboard_automation_writer,
         } = authority;
         Self {
             cg: cg.into(),
@@ -442,14 +419,13 @@ impl McpServerConstructionContext {
             startup_catch_up_enabled: false,
             automation_scheduler_reconciler: None,
             database_owner_reconciler: Some(database_owner_reconciler),
-            dashboard_automation_writer: writers.dashboard_automation,
+            dashboard_automation_writer,
             remote_operational_status: None,
             dashboard_code_index_freshness_reader: None,
             code_index_readiness_waiter: None,
             dashboard_feedback_status_reader: None,
             dashboard_pr_autotrack_reader: None,
             diagnostics_lsp: None,
-            background_refresh_writer: writers.background_refresh,
             code_index_hook_sink: None,
             code_index_reconcile_sink: None,
             code_index_freshness_probe_sink: None,
@@ -694,15 +670,6 @@ impl McpServerConstructionContext {
         reconciler: DatabaseOwnerReconciler,
     ) -> Self {
         self.database_owner_reconciler = Some(reconciler);
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_background_refresh_writer(
-        mut self,
-        writer: BackgroundRefreshWriter,
-    ) -> Self {
-        self.background_refresh_writer = writer;
         self
     }
 }

@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 use tracedecay_daemon_protocol::{
     BrokerStream, DaemonAuthPreface, DaemonHandshake, parse_daemon_invocation_request,
 };
-use tracedecay_runtime_core::path_safety::{canonical_existing_identity, same_canonical_path};
 
 use super::AuthenticatedFirstRequest;
 use crate::daemon::branch_admin::StoreAdministration;
@@ -687,39 +686,5 @@ pub(super) fn coordinated_dashboard_automation_writer(
     Arc::new(move |operation| {
         let administration = administration.clone();
         Box::pin(async move { administration.with_writer(operation).await })
-    })
-}
-
-pub(super) fn coordinated_background_refresh_writer(
-    administration: StoreAdministration,
-) -> crate::mcp::server::BackgroundRefreshWriter {
-    Arc::new(move |mut request| {
-        let administration = administration.clone();
-        Box::pin(async move {
-            let canonical_root = canonical_existing_identity(&request.project_root)
-                .unwrap_or_else(|_| request.project_root.clone());
-            let active_branch = tracedecay_runtime_core::branch::current_branch(&canonical_root);
-            let graph = administration
-                .mounted_project_graphs()
-                .await
-                .into_iter()
-                .find(|graph| {
-                    same_canonical_path(graph.project_root(), &canonical_root)
-                        && graph.active_branch() == active_branch.as_deref()
-                })
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: "retained background refresh graph is unavailable".to_string(),
-                })?;
-            let scope = crate::daemon::branch_admin::graph_writer_scope(
-                &graph,
-                crate::daemon::branch_admin::StoreWriterClass::Content,
-            );
-            request.graph = graph;
-            administration
-                .with_writer_in(scope, || async move {
-                    crate::mcp::server::execute_background_refresh_direct(request).await
-                })
-                .await
-        })
     })
 }

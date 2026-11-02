@@ -23,9 +23,70 @@ fn warn_reconcile_not_admitted(error: &TraceDecayError, message: &str) {
     }
 }
 
-struct ReadRefreshRunningGuard(Arc<AtomicBool>);
+/// Admit one bounded request through the route's canonical scheduler port.
+/// No store writer is acquired: the scheduler owns reconciliation and publication.
+pub(super) async fn admit_refresh(
+    graph: &TraceDecay,
+    admit: impl FnOnce(PathBuf) -> Option<CodeIndexHookNotifyFuture>,
+) -> Result<CodeIndexDemandAdmissionV1> {
+    let canonical_root =
+        graph
+            .project_root()
+            .canonicalize()
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "could not resolve retained refresh root {}: {error}",
+                    graph.project_root().display()
+                ),
+            })?;
+    let active_branch = tracedecay_runtime_core::branch::current_branch(&canonical_root);
+    if !tracedecay_runtime_core::path_safety::same_canonical_path(
+        graph.project_root(),
+        &canonical_root,
+    ) || graph.active_branch() != active_branch.as_deref()
+    {
+        return Err(TraceDecayError::Config {
+            message: "retained refresh graph is stale".to_owned(),
+        });
+    }
+    let admission = admit(canonical_root).ok_or_else(|| {
+        code_index_unavailable_error(CodeIndexDemandUnavailableV1::SchedulerUnmounted)
+    })?;
+    Ok(admission.await)
+}
 
-impl Drop for ReadRefreshRunningGuard {
+/// Keep admission and publication distinct, preserving the scheduler's refusal
+/// cause and the full operator remedy of a terminal park.
+fn report_refresh_admission(
+    admission: Result<CodeIndexDemandAdmissionV1>,
+    failure_message: &str,
+) -> bool {
+    let error = match admission {
+        Ok(CodeIndexDemandAdmissionV1::Queued) => return true,
+        Ok(CodeIndexDemandAdmissionV1::NotApplicable) => {
+            tracing::debug!("code-index refresh does not apply without Git identity");
+            return true;
+        }
+        Ok(CodeIndexDemandAdmissionV1::RefusedByPolicy) => {
+            tracing::info!(
+                reason = "linked_worktree_disabled",
+                "automatic code-index refresh disabled by watch policy"
+            );
+            return true;
+        }
+        Ok(CodeIndexDemandAdmissionV1::Terminal(parked)) => {
+            parked.publication_authority_corrupt_error()
+        }
+        Ok(CodeIndexDemandAdmissionV1::Unavailable(cause)) => code_index_unavailable_error(cause),
+        Err(error) => error,
+    };
+    warn_reconcile_not_admitted(&error, failure_message);
+    false
+}
+
+struct RefreshAdmissionGuard(Arc<AtomicBool>);
+
+impl Drop for RefreshAdmissionGuard {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
     }
@@ -125,9 +186,9 @@ impl McpServer {
     ///, the one that noticed the drift included, serves the last complete
     /// snapshot until the swap lands.
     ///
-    /// If reopening fails the previous instance is kept, the effect-time
-    /// branch identity check in the hook writer and
-    /// [`Self::maybe_sync_if_stale`] still protect writes.
+    /// If reopening fails the previous instance is kept. Refresh admission
+    /// checks its branch again before reaching the scheduler, and effect-time
+    /// writer fences still protect mutations.
     pub(crate) async fn reopen_if_branch_drifted(&self) -> Arc<TraceDecay> {
         self.reopen_if_branch_drifted_memoized().await.0
     }
@@ -253,35 +314,25 @@ impl McpServer {
     #[tracing::instrument(name = "mcp.server.startup_catch_up", level = "trace", skip_all)]
     pub async fn run_startup_catch_up_sync(&self) {
         self.startup_catch_up.begin_sync();
+        if !self.background_tasks.admits() {
+            self.startup_catch_up.settle();
+            return;
+        }
 
         let cg = self.cg_snapshot().await;
-        let refresh = Arc::clone(&self.background_refresh_writer);
-        let request = BackgroundRefreshRequest {
-            graph: Arc::clone(&cg),
-            project_root: cg.project_root().to_path_buf(),
-            mode: super::BackgroundRefreshModeV1::ForceReconcile,
-            reconcile_sink: self.code_index_reconcile_sink.clone(),
-            freshness_probe_sink: self.code_index_freshness_probe_sink.clone(),
-        };
-        match refresh(request).await {
-            Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted) => {}
-            Ok(super::hook_writes::BackgroundRefreshOutcome::NotApplicable) => {
-                tracing::debug!("startup code-index catch-up does not apply without Git identity");
-            }
-            Ok(super::hook_writes::BackgroundRefreshOutcome::LinkedWorktreeDisabled) => {
-                tracing::info!(
-                    reason = "linked_worktree_disabled",
-                    "automatic code-index refresh disabled by watch policy"
-                );
-            }
-            Err(e) => {
-                warn_reconcile_not_admitted(&e, "startup catch-up admission failed");
-                self.startup_catch_up.settle();
-                return;
-            }
+        let admission = admit_refresh(&cg, |root| {
+            self.code_index_reconcile_sink
+                .as_ref()
+                .map(|sink| sink(root, CodeIndexDemandV1::Reconcile))
+        })
+        .await;
+        if !report_refresh_admission(admission, "startup catch-up admission failed") {
+            self.startup_catch_up.settle();
+            return;
         }
         let now = tracedecay_runtime_core::tracedecay::current_timestamp();
-        self.last_staleness_check_at.store(now, Ordering::Release);
+        self.last_edit_refresh_admission_at
+            .store(now, Ordering::Release);
 
         self.startup_catch_up.settle();
     }
@@ -311,7 +362,7 @@ impl McpServer {
 
     /// Claim the lazy-reconciliation window for edit-shaped tools and enqueue it
     /// in the background, but only if at least 30 s have passed since the last
-    /// successful admission. The cooldown is the gate: while it holds, this returns
+    /// admission attempt. The cooldown is the gate: while it holds, this returns
     /// immediately, so dropping it into every `tools/call` handler is cheap.
     ///
     /// **Never blocks.** This used to perform a full project tree walk and then
@@ -325,7 +376,7 @@ impl McpServer {
     /// the code-index authority after reconciliation completes.
     ///
     /// Concurrent callers are serialized via
-    /// `Self::last_staleness_check_at`: the first caller stamps `now`
+    /// `Self::last_edit_refresh_admission_at`: the first caller stamps `now`
     /// into the field with `compare_exchange`; later callers within the
     /// same window see the stamp and bail. If admission fails, the stamp still
     /// advances so every subsequent tool call does not retry immediately.
@@ -336,7 +387,7 @@ impl McpServer {
         }
         let cg = self.cg_snapshot().await;
         let now = tracedecay_runtime_core::tracedecay::current_timestamp();
-        if !try_claim_cooldown(&self.last_staleness_check_at, now, 30) {
+        if !try_claim_cooldown(&self.last_edit_refresh_admission_at, now, 30) {
             return;
         }
 
@@ -361,7 +412,7 @@ impl McpServer {
         // refresh is already running, the cooldown claim above has done its job
         // and this call serves the current snapshot.
         if self
-            .background_refresh_running
+            .refresh_admission_running
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
@@ -375,13 +426,13 @@ impl McpServer {
     ///
     /// If read-refresh is enabled and the read cooldown has elapsed since the
     /// last background spawn, this `compare_exchange`s
-    /// [`background_refresh_running`](Self::background_refresh_running) to
+    /// [`refresh_admission_running`](Self::refresh_admission_running) to
     /// `true` and spawns a retained refresh, then returns immediately so the
     /// caller serves the current answer with zero added latency. Completion and
     /// freshness remain owned by the code-index scheduler.
     ///
     /// Single-flighted by the `read_cooldown_secs` stamp and the
-    /// `background_refresh_running` flag. At most one admission runs at a time.
+    /// `refresh_admission_running` flag. At most one admission runs at a time.
     ///
     /// R4: this runs before any cooldown claim, so it is on the hot path of
     /// every read tool call. It takes the caller's request-scoped branch memo
@@ -406,13 +457,13 @@ impl McpServer {
         let now = tracedecay_runtime_core::tracedecay::current_timestamp();
         let cooldown = self.sync_config.read_cooldown_secs as i64;
         // Reserve the cooldown slot. If another read call won the race, bail.
-        if !try_claim_cooldown(&self.last_background_refresh_at, now, cooldown) {
+        if !try_claim_cooldown(&self.last_read_refresh_admission_at, now, cooldown) {
             return;
         }
         // Reserve the single-flight slot. If a refresh is already running
         // (e.g. a slow prior spawn that outlived its cooldown), don't stack.
         if self
-            .background_refresh_running
+            .refresh_admission_running
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
@@ -423,50 +474,21 @@ impl McpServer {
     }
 
     /// Spawns the retained D4 refresh task. The task owns cheap `Arc` clones
-    /// of the background-refresh flag and the admission-completion stamp, so no
+    /// of the admission flag and the scheduler demand sink, so no
     /// `Arc<Self>` receiver is needed. The scheduler owns worktree traversal,
     /// coalescing, and publication after accepting the request.
     ///
-    /// The caller MUST have already set `background_refresh_running` to
+    /// The caller MUST have already set `refresh_admission_running` to
     /// `true`; this task clears it on completion.
     pub(crate) fn spawn_read_refresh_task(&self, cg: &Arc<TraceDecay>) {
-        let running = Arc::clone(&self.background_refresh_running);
-        let running_guard = ReadRefreshRunningGuard(Arc::clone(&running));
-        let done_at = Arc::clone(&self.last_background_refresh_done_at);
-        let refresh = Arc::clone(&self.background_refresh_writer);
-        let request = BackgroundRefreshRequest {
-            graph: Arc::clone(cg),
-            project_root: cg.project_root().to_path_buf(),
-            mode: super::BackgroundRefreshModeV1::FreshnessProbe,
-            reconcile_sink: self.code_index_reconcile_sink.clone(),
-            freshness_probe_sink: self.code_index_freshness_probe_sink.clone(),
-        };
+        let running = Arc::clone(&self.refresh_admission_running);
+        let running_guard = RefreshAdmissionGuard(Arc::clone(&running));
+        let graph = Arc::clone(cg);
+        let probe = self.code_index_freshness_probe_sink.clone();
         let _admitted = self.background_tasks.spawn(async move {
             let _running = running_guard;
-            match refresh(request).await {
-                Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted) => {}
-                Ok(super::hook_writes::BackgroundRefreshOutcome::NotApplicable) => {
-                    tracing::debug!(
-                        "background code-index reconciliation does not apply without Git identity"
-                    );
-                }
-                Ok(super::hook_writes::BackgroundRefreshOutcome::LinkedWorktreeDisabled) => {
-                    tracing::info!(
-                        reason = "linked_worktree_disabled",
-                        "automatic code-index refresh disabled by watch policy"
-                    );
-                }
-                Err(e) => {
-                    warn_reconcile_not_admitted(
-                        &e,
-                        "background read reconciliation was not admitted",
-                    );
-                }
-            }
-            done_at.store(
-                tracedecay_runtime_core::tracedecay::current_timestamp(),
-                Ordering::Release,
-            );
+            let admission = admit_refresh(&graph, |root| probe.map(|sink| sink(root))).await;
+            report_refresh_admission(admission, "background read reconciliation was not admitted");
         });
     }
 }

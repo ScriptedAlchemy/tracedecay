@@ -57,7 +57,6 @@ mod construction;
 mod files_resource;
 mod graph_tool_owner;
 mod hook_dispatch;
-mod hook_writes;
 mod ledger;
 mod lifecycle;
 mod project_open_access;
@@ -68,7 +67,6 @@ mod status_resource;
 
 pub(crate) use connection::ProductionMcpConnectionContext;
 pub(crate) use construction::*;
-pub(crate) use hook_writes::*;
 pub(crate) use ledger::McpToolErrorAnalyticsRequest;
 #[cfg(all(test, unix))]
 pub(crate) use rmcp::RmcpSelectedProjectResponseAuthority;
@@ -353,7 +351,6 @@ pub struct McpServer {
         Option<tracedecay_dashboard_api::feedback_api::FeedbackStatusReader>,
     dashboard_pr_autotrack_reader:
         Option<tracedecay_dashboard_api::PrAutoTrackManagedSummaryReader>,
-    background_refresh_writer: BackgroundRefreshWriter,
     /// Bridge delivering after-edit hook paths into the daemon-owned code-index
     /// scheduler queue. `None` for direct servers with no scheduler registry.
     code_index_hook_sink: Option<CodeIndexHookSink>,
@@ -405,7 +402,7 @@ pub struct McpServer {
     /// the server. Read-modify-update via `compare_exchange` in
     /// [`maybe_sync_if_stale`](Self::maybe_sync_if_stale) so concurrent
     /// tool calls don't pile on the same walk.
-    last_staleness_check_at: AtomicI64,
+    last_edit_refresh_admission_at: AtomicI64,
     /// Cached worktree-vs-index mismatch detection for this session. `None`
     /// when no mismatch exists (the common case) or detection was skipped
     /// (not a git repo / git missing). Computed once at startup so we
@@ -416,26 +413,16 @@ pub struct McpServer {
     /// task handle, and readiness state behind one lock. Historical session
     /// convergence is owned by the daemon scheduler, not this server.
     startup_catch_up: Arc<StartupCatchUpMachineV1>,
-    /// `true` while a retained sync-on-read refresh is in flight.
-    /// Single-flights the background refresh: `compare_exchange`d to `true`
-    /// before spawning and cleared on completion. Also read by the
-    /// staleness banner so an in-progress refresh emits the informational
-    /// "refresh in progress" note instead of the manual-sync warning.
-    /// `Arc` so the retained refresh task holds a cheap clone to clear it on
-    /// completion.
-    background_refresh_running: Arc<AtomicBool>,
+    /// `true` while one retained refresh admission is in flight. The task
+    /// clears this when admission settles; only the scheduler can report
+    /// indexing progress or freshness.
+    refresh_admission_running: Arc<AtomicBool>,
     /// UNIX timestamp (secs) of the most recent sync-on-read background
     /// refresh spawn. Gates the read-refresh cooldown independently of
-    /// [`last_staleness_check_at`](Self::last_staleness_check_at), which
-    /// gates the *blocking* edit-tool path, the two cooldowns must not
+    /// [`last_edit_refresh_admission_at`](Self::last_edit_refresh_admission_at), which
+    /// gates detached edit-tool admission. The two cooldowns must not
     /// share a stamp or one path would starve the other.
-    last_background_refresh_at: AtomicI64,
-    /// UNIX timestamp (secs) at which the most recent background refresh
-    /// *completed*. `0` = never. Read by the staleness banner so a refresh
-    /// that finished within `read_cooldown_secs` suppresses the banner
-    /// entirely (the index is as fresh as auto-sync can make it). `Arc` so
-    /// the retained refresh task can stamp it on completion.
-    last_background_refresh_done_at: Arc<AtomicI64>,
+    last_read_refresh_admission_at: AtomicI64,
     /// The `[sync]` config resolved once at construction from the project's
     /// pinned runtime configuration. Cached so the read hot path never
     /// re-resolves configuration per `tools/call`.
@@ -791,7 +778,6 @@ impl McpServer {
             dashboard_feedback_status_reader,
             dashboard_pr_autotrack_reader,
             diagnostics_lsp,
-            background_refresh_writer,
             code_index_hook_sink,
             code_index_reconcile_sink,
             code_index_freshness_probe_sink,
@@ -1007,7 +993,6 @@ impl McpServer {
             code_index_readiness_waiter,
             dashboard_feedback_status_reader,
             dashboard_pr_autotrack_reader,
-            background_refresh_writer,
             code_index_hook_sink,
             code_index_reconcile_sink,
             code_index_freshness_probe_sink,
@@ -1030,12 +1015,11 @@ impl McpServer {
             scope_prefix,
             shutdown: tracedecay_daemon_service::ShutdownCoordinatorV1::default(),
             timings_enabled: AtomicBool::new(telemetry_config.timings),
-            last_staleness_check_at: AtomicI64::new(0),
+            last_edit_refresh_admission_at: AtomicI64::new(0),
             worktree_mismatch,
             startup_catch_up: Arc::new(StartupCatchUpMachineV1::default()),
-            background_refresh_running: Arc::new(AtomicBool::new(false)),
-            last_background_refresh_at: AtomicI64::new(0),
-            last_background_refresh_done_at: Arc::new(AtomicI64::new(0)),
+            refresh_admission_running: Arc::new(AtomicBool::new(false)),
+            last_read_refresh_admission_at: AtomicI64::new(0),
             sync_config,
             ledger_writes_started: Arc::new(AtomicU64::new(0)),
             ledger_writes_finished: Arc::new(AtomicU64::new(0)),
@@ -1417,13 +1401,6 @@ mod lcm_claude_recall_tests;
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod graph_tool_owner_mounting_tests;
 
-/// Staleness-banner, startup catch-up, and sync-on-read behavioural tests.
-/// The pure-logic banner tests need no server; the server tests build
-/// a real indexed `TraceDecay` over a temp git repo, mirroring the
-/// `indexing.rs` test idiom.
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod background_refresh_writer_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod freshness_tests;
@@ -1436,6 +1413,13 @@ mod host_admission_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod query_scope_tests;
+/// Staleness-banner, startup catch-up, and sync-on-read behavioural tests.
+/// The pure-logic banner tests need no server; the server tests build
+/// a real indexed `TraceDecay` over a temp git repo, mirroring the
+/// `indexing.rs` test idiom.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod refresh_admission_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 pub(crate) mod writer_test_support;
