@@ -100,6 +100,9 @@ impl Drop for SupersededRetirementBatchV1<'_> {
         if self.is_empty() {
             return;
         }
+        // Successful retirement drains the batch. This fallback releases
+        // reservations only after an error or unwind. Taking the poisoned guard
+        // leaves poison set, so ordinary reads still report the typed lock failure.
         let mut state = self
             .database
             .inner
