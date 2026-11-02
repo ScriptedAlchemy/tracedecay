@@ -115,6 +115,123 @@ impl From<crate::parallelism::CodeIndexParallelismErrorV1> for WorkerTestError {
     }
 }
 
+/// Fail at the real file worker's first checkpoint, leaving caller-thread
+/// planning and admission intact.
+pub(super) struct PanicOnFileWorker(std::thread::ThreadId);
+
+impl PanicOnFileWorker {
+    pub(super) fn new() -> Self {
+        Self(std::thread::current().id())
+    }
+}
+
+impl CodeIndexExecutionControlV1 for PanicOnFileWorker {
+    fn is_cancelled(&self) -> bool {
+        assert_eq!(
+            std::thread::current().id(),
+            self.0,
+            "injected source file panic"
+        );
+        false
+    }
+
+    fn is_deadline_exceeded(&self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn cold_file_panic_identifies_the_source_and_does_not_publish() {
+    let store = WorkerPublicationStore::default();
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(worker_config(), store.clone()).expect("production owner");
+    let request = worker_request_with_source(
+        "file.worker.panic-source",
+        1_100_000,
+        "pub fn target() {} // È\n".as_bytes(),
+    );
+    let expected = request.snapshot.files[0].clone();
+    let scope = CodeIndexGenerationScopeV1::for_snapshot(&request.snapshot);
+    let error = owner
+        .build_and_publish(request.clone(), &PanicOnFileWorker::new())
+        .expect_err("the file checkpoint panics");
+    let rendered = error.to_string();
+    let CodeIndexProductionErrorV1::SourceFilePanicked {
+        logical_path,
+        content_digest,
+        source,
+    } = error
+    else {
+        panic!("the failing source must be identified: {rendered}");
+    };
+    assert_eq!(logical_path, expected.logical_path);
+    assert_eq!(content_digest, expected.content_digest);
+    assert!(source.to_string().contains("injected source file panic"));
+    assert!(rendered.contains(&logical_path));
+    assert!(rendered.contains(content_digest.as_str()));
+    assert!(
+        store
+            .load_active(&scope)
+            .expect("active publication")
+            .is_none()
+    );
+
+    let published = owner
+        .build_and_publish(request, &UninterruptibleCodeIndexControlV1)
+        .expect("the owner can retry after a file panic");
+    assert_eq!(
+        published.cold_reason(),
+        Some(CodeIndexColdBuildReasonV1::NoParent)
+    );
+}
+
+#[test]
+fn contained_chunk_panic_keeps_its_own_index_and_owning_file() {
+    let first = worker_request_with_source("file.first", 1_100_000, b"pub fn first() {}\n")
+        .snapshot
+        .files
+        .remove(0);
+    let mut second = worker_request_with_source("file.second", 1_100_000, b"pub fn second() {}\n")
+        .snapshot
+        .files
+        .remove(0);
+    second.logical_path = "src/second.rs".to_owned();
+    let files = [first, second];
+    let error = collect_source_files_bounded_ordered(
+        &files,
+        |file| (&file.logical_path, &file.content_digest),
+        |file| {
+            if file.logical_path == "src/second.rs" {
+                // This is the production result of contain_chunk_unit. The
+                // chunk index deliberately exceeds the file-window length.
+                Err(CodeIndexProductionErrorV1::Chunk(
+                    ChunkingFailureV1::WorkerPanic {
+                        index: 64,
+                        message: "contained chunk panic".to_owned(),
+                    },
+                ))
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .expect_err("the contained chunk failure must stay a failure");
+    let CodeIndexProductionErrorV1::SourceFilePanicked {
+        logical_path,
+        content_digest,
+        source,
+    } = error
+    else {
+        panic!("a contained chunk panic must name its source file");
+    };
+    assert_eq!(logical_path, "src/second.rs");
+    assert_eq!(content_digest, files[1].content_digest);
+    assert!(matches!(
+        *source,
+        CodeIndexProductionErrorV1::Chunk(ChunkingFailureV1::WorkerPanic { index: 64, .. })
+    ));
+}
+
 fn construction_ledger(limit: u64) -> Arc<ProcessResidentMemoryV1> {
     let limit = NonZeroU64::new(limit).expect("nonzero test budget");
     let pressure = Arc::new(ResidentMemoryPressureV1::with_sampler(

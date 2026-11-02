@@ -14,7 +14,7 @@ use tracedecay_code_extraction::incremental::{ParseDocumentIdentity, ParseError}
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId,
     CodeGenerationManifestV1, CodeGenerationSourceCommitmentsV1, CodeIndexCapabilityManifestV1,
-    ComponentVersion, CoverageSummaryV1, ExtractorRevision, FileOccurrenceId,
+    ComponentVersion, ContentDigest, CoverageSummaryV1, ExtractorRevision, FileOccurrenceId,
     GenerationTestAttributionV1, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId,
     ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1,
     ProviderEvaluationStateV1, RefId, RelationEdgeKindV1, RepositoryId, SanitizedCodeFileV1,
@@ -905,6 +905,52 @@ where
         results.into_iter().collect()
     })
     .map_err(E::from)?
+}
+
+/// Attach the captured source identity to a contained per-file panic. The
+/// parallel collector's index is local to its current window, so it cannot
+/// identify the failing input once that window has been dropped.
+fn collect_source_files_bounded_ordered<T, R, F>(
+    items: &[T],
+    source: impl Fn(&T) -> (&str, &ContentDigest) + Sync,
+    operation: F,
+) -> Result<Vec<R>, CodeIndexProductionErrorV1>
+where
+    T: Sync,
+    R: Send,
+    F: Fn(&T) -> Result<R, CodeIndexProductionErrorV1> + Sync,
+{
+    let identify = |item: &T, error: CodeIndexProductionErrorV1| match error {
+        error @ (CodeIndexProductionErrorV1::Parallelism(
+            crate::parallelism::CodeIndexParallelismErrorV1::WorkerPanic { .. },
+        )
+        | CodeIndexProductionErrorV1::Chunk(ChunkingFailureV1::WorkerPanic { .. })) => {
+            let (logical_path, content_digest) = source(item);
+            CodeIndexProductionErrorV1::SourceFilePanicked {
+                logical_path: logical_path.to_owned(),
+                content_digest: content_digest.clone(),
+                source: Box::new(error),
+            }
+        }
+        error => error,
+    };
+    // A chunk sweep can already have contained the panic. Attribute that
+    // typed failure while its owning file is still in scope; its chunk index
+    // must never be interpreted as an index into the file window.
+    collect_bounded_ordered(items, |item| {
+        operation(item).map_err(|error| identify(item, error))
+    })
+    .map_err(|error| match &error {
+        CodeIndexProductionErrorV1::Parallelism(
+            crate::parallelism::CodeIndexParallelismErrorV1::WorkerPanic { index, .. },
+        ) => match items.get(*index) {
+            Some(item) => identify(item, error),
+            None => CodeIndexProductionErrorV1::Contract(format!(
+                "panicking source worker index {index} is outside its input window"
+            )),
+        },
+        _ => error,
+    })
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1906,48 +1952,53 @@ impl CodeIndexPublishedGenerationV1 {
             .collect::<HashMap<_, _>>();
         {
             let _span = tracing::trace_span!("code_index.collect.validate_files").entered();
-            collect_bounded_ordered(&files, |file| {
-                {
-                    file.artifacts
-                        .validate()
-                        .map_err(CodeIndexProductionErrorV1::Chunk)?;
-                }
-                let occurrence = occurrences_by_id
-                    .get(&file.artifacts.chunks.document.file_occurrence_id)
-                    .copied();
-                if file.authority.project_id != self.manifest.project_id {
-                    return Err(CodeIndexProductionErrorV1::Contract(
+            collect_source_files_bounded_ordered(
+                &files,
+                |file| (&file.authority.logical_path, &file.authority.content_digest),
+                |file| {
+                    {
+                        file.artifacts
+                            .validate()
+                            .map_err(CodeIndexProductionErrorV1::Chunk)?;
+                    }
+                    let occurrence = occurrences_by_id
+                        .get(&file.artifacts.chunks.document.file_occurrence_id)
+                        .copied();
+                    if file.authority.project_id != self.manifest.project_id {
+                        return Err(CodeIndexProductionErrorV1::Contract(
                         "published file authority project does not match the generation manifest"
                             .to_owned(),
                     ));
-                }
-                if file.authority.repository_id != self.snapshot.repository
-                    || occurrence.is_none_or(|occurrence| {
-                        occurrence.logical_path != file.authority.logical_path
-                            || occurrence.content_digest != file.authority.content_digest
-                    })
-                    || file
-                        .artifacts
-                        .schema_evidence
-                        .as_ref()
-                        .is_some_and(|evidence| {
-                            evidence.logical_path != file.authority.logical_path
+                    }
+                    if file.authority.repository_id != self.snapshot.repository
+                        || occurrence.is_none_or(|occurrence| {
+                            occurrence.logical_path != file.authority.logical_path
+                                || occurrence.content_digest != file.authority.content_digest
                         })
-                    || file.extraction.content_digest != file.authority.content_digest
-                    || file.extraction.file_occurrence_id
-                        != file.artifacts.chunks.document.file_occurrence_id
-                    || file.artifacts.chunks.document.generation_id != file.extraction.generation_id
-                {
-                    return Err(CodeIndexProductionErrorV1::Contract(
+                        || file
+                            .artifacts
+                            .schema_evidence
+                            .as_ref()
+                            .is_some_and(|evidence| {
+                                evidence.logical_path != file.authority.logical_path
+                            })
+                        || file.extraction.content_digest != file.authority.content_digest
+                        || file.extraction.file_occurrence_id
+                            != file.artifacts.chunks.document.file_occurrence_id
+                        || file.artifacts.chunks.document.generation_id
+                            != file.extraction.generation_id
+                    {
+                        return Err(CodeIndexProductionErrorV1::Contract(
                     "extraction authority does not match its published project, repository, scope, path, or content"
                         .to_owned(),
                 ));
-                }
-                file.exact_authority
-                    .validate_all(&file.artifacts.chunks.chunks)
-                    .map_err(CodeIndexProductionErrorV1::Chunk)?;
-                Ok(())
-            })
+                    }
+                    file.exact_authority
+                        .validate_all(&file.artifacts.chunks.chunks)
+                        .map_err(CodeIndexProductionErrorV1::Chunk)?;
+                    Ok(())
+                },
+            )
         }?;
         {
             let _span = tracing::trace_span!("code_index.collect.validate_aggregates").entered();
@@ -2094,6 +2145,12 @@ pub enum CodeIndexProductionErrorV1 {
     Contract(String),
     #[error("code-index parallel worker runtime failed: {0}")]
     Parallelism(#[from] crate::parallelism::CodeIndexParallelismErrorV1),
+    #[error("code-index source file {logical_path:?} ({content_digest}) panicked: {source}")]
+    SourceFilePanicked {
+        logical_path: String,
+        content_digest: ContentDigest,
+        source: Box<CodeIndexProductionErrorV1>,
+    },
 }
 
 /// Every sealed manifest carries the source commitments its seal
@@ -2584,56 +2641,62 @@ where
         let retained_parses = &self.retained_parses;
         for window in present.chunks(width) {
             lexical_page_source::checkpoint(control)?;
-            let artifacts = collect_bounded_ordered(window, |(key, file)| {
-                let (reuse_key, artifact, clone_stats) = materialize_present_file(
-                    config,
-                    physical_artifacts,
-                    retained_parses,
-                    intake,
-                    capability,
-                    &manifest,
-                    extractor,
-                    chunker,
-                    &repository_parse_identity,
-                    parent,
-                    file,
-                    &captured_files,
-                    control,
-                )?;
-                let key = u32::try_from(*key).map_err(|_| {
-                    CodeIndexProductionErrorV1::Contract("snapshot file key exceeds u32".to_owned())
-                })?;
-                let prior = parent.and_then(|parent| {
-                    let descriptor = parent.file_segment(&file.logical_path)?;
-                    let prior_file = parent
-                        .generation()
-                        .snapshot
-                        .files
-                        .get(descriptor.file_key as usize)?;
-                    Some((parent.manifest(), prior_file, descriptor))
-                });
-                let mut identity_memory = ConstructionMemoryV1::new(worker_operation.clone())?;
-                let encoded = match partitioned_codec::reusable_file_segment(
-                    &manifest,
-                    file,
-                    &artifact,
-                    key,
-                    prior,
-                    &mut |bytes| identity_memory.resize(bytes),
-                )? {
-                    Some(descriptor) => (descriptor, None),
-                    None => {
-                        let (descriptor, bytes) = partitioned_codec::encode_file_segment(
-                            &manifest.generation_id,
-                            &scope,
-                            &artifact,
-                            key,
-                        )?;
-                        (descriptor, Some(bytes))
-                    }
-                };
-                Ok::<_, CodeIndexProductionErrorV1>((reuse_key, artifact, encoded, clone_stats))
-            })?;
+            let artifacts = collect_source_files_bounded_ordered(
+                window,
+                |(_, file)| (&file.logical_path, &file.content_digest),
+                |(key, file)| {
+                    let (reuse_key, artifact, clone_stats) = materialize_present_file(
+                        config,
+                        physical_artifacts,
+                        retained_parses,
+                        intake,
+                        capability,
+                        &manifest,
+                        extractor,
+                        chunker,
+                        &repository_parse_identity,
+                        parent,
+                        file,
+                        &captured_files,
+                        control,
+                    )?;
+                    let key = u32::try_from(*key).map_err(|_| {
+                        CodeIndexProductionErrorV1::Contract(
+                            "snapshot file key exceeds u32".to_owned(),
+                        )
+                    })?;
+                    let prior = parent.and_then(|parent| {
+                        let descriptor = parent.file_segment(&file.logical_path)?;
+                        let prior_file = parent
+                            .generation()
+                            .snapshot
+                            .files
+                            .get(descriptor.file_key as usize)?;
+                        Some((parent.manifest(), prior_file, descriptor))
+                    });
+                    let mut identity_memory = ConstructionMemoryV1::new(worker_operation.clone())?;
+                    let encoded = match partitioned_codec::reusable_file_segment(
+                        &manifest,
+                        file,
+                        &artifact,
+                        key,
+                        prior,
+                        &mut |bytes| identity_memory.resize(bytes),
+                    )? {
+                        Some(descriptor) => (descriptor, None),
+                        None => {
+                            let (descriptor, bytes) = partitioned_codec::encode_file_segment(
+                                &manifest.generation_id,
+                                &scope,
+                                &artifact,
+                                key,
+                            )?;
+                            (descriptor, Some(bytes))
+                        }
+                    };
+                    Ok::<_, CodeIndexProductionErrorV1>((reuse_key, artifact, encoded, clone_stats))
+                },
+            )?;
             for (reuse_key, artifact, (descriptor, bytes), clone_stats) in artifacts {
                 clones_reused = clones_reused.saturating_add(clone_stats.reused);
                 clones_computed = clones_computed.saturating_add(clone_stats.computed);

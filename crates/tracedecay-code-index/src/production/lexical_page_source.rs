@@ -2259,14 +2259,18 @@ impl VerifiedSealedLexicalPageSourceV1 {
             control,
         )?;
         let inputs = files.into_iter().enumerate().collect::<Vec<_>>();
-        let admitted = super::collect_bounded_ordered(&inputs, |(index, file)| {
-            let next_offset = u64::try_from(start + index + 1).map_err(|_| {
-                CodeIndexProductionErrorV1::Contract(
-                    "sealed lexical file ordinal exceeds u64".to_owned(),
-                )
-            })?;
-            admit_file_generation_artifacts(file, &snapshot_digest, next_offset, control)
-        })?;
+        let admitted = collect_source_files_bounded_ordered(
+            &inputs,
+            |(_, file)| (&file.authority.logical_path, &file.authority.content_digest),
+            |(index, file)| {
+                let next_offset = u64::try_from(start + index + 1).map_err(|_| {
+                    CodeIndexProductionErrorV1::Contract(
+                        "sealed lexical file ordinal exceeds u64".to_owned(),
+                    )
+                })?;
+                admit_file_generation_artifacts(file, &snapshot_digest, next_offset, control)
+            },
+        )?;
         for (index, file) in admitted.into_iter().enumerate() {
             let offset = u64::try_from(start + index).map_err(|_| {
                 CodeIndexProductionErrorV1::Contract(
