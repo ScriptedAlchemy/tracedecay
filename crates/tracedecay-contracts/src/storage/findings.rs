@@ -44,7 +44,28 @@ const fn kind_slug(kind: DoctorStorageFindingKindV1) -> &'static str {
         DoctorStorageFindingKindV1::TableGrowth => "table_growth",
         DoctorStorageFindingKindV1::SchemaConvergenceIncomplete => "schema_convergence_incomplete",
         DoctorStorageFindingKindV1::WalCheckpointPinned => "wal_checkpoint_pinned",
+        DoctorStorageFindingKindV1::GraphStoreFaulted => "graph_store_faulted",
     }
+}
+
+/// A terminal fault the graph store's owning runtime still retains. The
+/// finding observes that store exactly; it makes no claim that unopened
+/// stores were checked or that an operator repair has already succeeded.
+pub fn graph_store_faulted_finding(
+    store: &StoreKeyV1,
+    detail: &str,
+    coverage_statement: &str,
+) -> Result<DoctorStorageFindingV1, ApplicationContractError> {
+    let kind = DoctorStorageFindingKindV1::GraphStoreFaulted;
+    let finding = problem_finding(
+        kind,
+        store,
+        DoctorEvidenceStateV1::Degraded,
+        DoctorCoverageCompletenessV1::Complete,
+        detail,
+        coverage_statement,
+    )?;
+    DoctorStorageFindingV1::new(kind, finding)
 }
 
 /// Report a store whose WAL checkpoint outlived its fence: `holders` names

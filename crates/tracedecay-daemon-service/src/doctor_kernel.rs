@@ -42,6 +42,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::CodeGenerationId;
 use tracedecay_global_db::{GlobalDbNativeIntegrationStore, RegisteredGlobalDb};
+use tracedecay_graph_db::{GraphDbError, GraphDbRegistryFaultV1};
 
 use crate::DaemonFeedbackRuntimeRegistrar;
 use tracedecay_maintenance::telemetry::GuardedStoreTelemetryPort;
@@ -316,9 +317,71 @@ pub fn wal_checkpoint_pinned_read(
     storage_family_read(findings)
 }
 
-pub struct SchemaConvergenceDoctorReadV1 {
+/// Retained graph faults remain visible after their original log event. This
+/// read consumes only the owning registry's snapshot, never a filesystem
+/// probe, a corruption lock's presence, or an attempt to open the store.
+#[must_use]
+pub fn graph_store_faults_read(
+    faults: &Result<Vec<GraphDbRegistryFaultV1>, GraphDbError>,
+) -> DoctorStorageFamilyReadV1 {
+    use tracedecay_contracts::storage::{StoreKeyV1, graph_store_faulted_finding};
+
+    let Ok(faults) = faults else {
+        return DoctorStorageFamilyReadV1::Unknown;
+    };
+    let mut findings = Vec::with_capacity(faults.len());
+    for fault in faults {
+        let (kind, remedy) = match &fault.error {
+            GraphDbError::Corrupt { .. } => (
+                "corrupt",
+                "Move the medium or rebuild this store from its canonical replay authorities.",
+            ),
+            GraphDbError::ResetRequired { .. } | GraphDbError::FormatSuperseded { .. } => (
+                "reset_required",
+                "Rebuild this store from its canonical replay authorities.",
+            ),
+            GraphDbError::DurabilityUncertain { .. } => (
+                "durability_uncertain",
+                "Inspect the storage medium and rebuild this store from its canonical replay authorities.",
+            ),
+            // The registry only publishes terminal store verdicts. An
+            // inconsistent producer must not manufacture an empty/healthy read.
+            _ => return DoctorStorageFamilyReadV1::Unknown,
+        };
+        let Ok(identity) = tracedecay_domain::canonical_sha256(&fault.shard_id) else {
+            return DoctorStorageFamilyReadV1::Unknown;
+        };
+        let Ok(store) = StoreKeyV1::new(format!("graph.{}", identity.as_str())) else {
+            return DoctorStorageFamilyReadV1::Unknown;
+        };
+        let path = bounded_graph_fault_detail(&fault.canonical_path.display().to_string(), 200);
+        let reason = bounded_graph_fault_detail(&fault.error.to_string(), 120);
+        let detail = format!("{kind}.{reason}");
+        let statement = format!("Graph store at {path}: {reason}. {remedy}");
+        let Ok(finding) = graph_store_faulted_finding(&store, &detail, &statement) else {
+            return DoctorStorageFamilyReadV1::Unknown;
+        };
+        findings.push(finding);
+    }
+    storage_family_read(findings)
+}
+
+fn bounded_graph_fault_detail(value: &str, max_bytes: usize) -> String {
+    let folded = tracedecay_domain::fold_control_characters(value);
+    let trimmed = folded.trim();
+    if trimmed.len() <= max_bytes {
+        trimmed.to_owned()
+    } else {
+        format!(
+            "{}...",
+            tracedecay_domain::utf8_prefix_at_or_before(trimmed, max_bytes.saturating_sub(3)),
+        )
+    }
+}
+
+pub struct RegisteredStorageDoctorReadV1 {
     pub storage: DoctorStorageFamilyReadV1,
-    pub findings: Vec<SchemaConvergenceFindingV1>,
+    pub schema_convergences: Vec<SchemaConvergenceFindingV1>,
 }
 
 // === Language server/analyzer (LanguageServer family) ========================
@@ -1059,7 +1122,7 @@ pub fn production_doctor_report_reader(
     profile_root: PathBuf,
     host_profile: tracedecay_runtime_core::config::ProfileRoot,
     remote_operational: Arc<dyn Fn() -> RemoteOperationalReadV1 + Send + Sync>,
-    schema_convergence: Arc<dyn Fn() -> SchemaConvergenceDoctorReadV1 + Send + Sync>,
+    registered_storage: Arc<dyn Fn() -> RegisteredStorageDoctorReadV1 + Send + Sync>,
     retention: tracedecay_configuration::RetentionConfig,
     schedulers: CodeIndexSchedulerRegistryV1,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
@@ -1077,7 +1140,7 @@ pub fn production_doctor_report_reader(
         let profile_root = profile_root.clone();
         let host_profile = host_profile.clone();
         let remote_operational = Arc::clone(&remote_operational);
-        let schema_convergence = Arc::clone(&schema_convergence);
+        let registered_storage = Arc::clone(&registered_storage);
         let retention = retention.clone();
         let schedulers = schedulers.clone();
         let diagnostic_broker = Arc::clone(&diagnostic_broker);
@@ -1262,7 +1325,7 @@ pub fn production_doctor_report_reader(
             )
             .await;
             let quick_check_ok = quick_check.ok().map(|problem| problem.is_none());
-            let schema_convergence = schema_convergence();
+            let registered_storage = registered_storage();
             let footprint_keys = profile_footprint
                 .iter()
                 .flat_map(|footprint| footprint.entries.iter().map(|entry| entry.key.as_str()))
@@ -1288,7 +1351,7 @@ pub fn production_doctor_report_reader(
                 profile_retention_backlog,
                 project_retention_backlog,
                 code_generation_retention,
-                schema_convergence.storage,
+                registered_storage.storage,
             ]
             .into_iter()
             .reduce(merge_storage_reads)
@@ -1344,7 +1407,7 @@ pub fn production_doctor_report_reader(
             Ok(
                 tracedecay_dashboard_api::AdmittedDoctorReportV1::new(report)
                     .with_table_growth_evidence(store_telemetry.table_growth_evidence)
-                    .with_schema_convergences(schema_convergence.findings)
+                    .with_schema_convergences(registered_storage.schema_convergences)
                     .with_language_servers(inputs.language_server),
             )
         })

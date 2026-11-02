@@ -17,6 +17,107 @@ use tracedecay_contracts::doctor::{
 
 use super::*;
 
+fn graph_fault(project: &str, path: &str, error: GraphDbError) -> GraphDbRegistryFaultV1 {
+    GraphDbRegistryFaultV1 {
+        shard_id: tracedecay_store::StoreShardIdV1::project(
+            tracedecay_domain::BrainId::new("brain.doctor-fault").unwrap(),
+            tracedecay_domain::UserProfileId::new("profile.doctor-fault").unwrap(),
+            tracedecay_domain::ProjectId::new(project).unwrap(),
+        ),
+        canonical_path: path.into(),
+        error,
+    }
+}
+
+#[test]
+fn graph_fault_findings_preserve_each_store_and_bound_untrusted_details() {
+    use tracedecay_contracts::doctor::{DoctorEvidenceStateV1, DoctorStorageFindingKindV1};
+
+    let faults = vec![
+        graph_fault(
+            "project.first",
+            "/profile/first.grafeo",
+            GraphDbError::Corrupt {
+                message: "first checksum A; second checksum B".to_owned(),
+            },
+        ),
+        graph_fault(
+            "project.second",
+            "/profile/second.grafeo",
+            GraphDbError::ResetRequired {
+                message: "unsupported format".to_owned(),
+            },
+        ),
+        graph_fault(
+            "project.third",
+            &format!("/profile/{}/graph.grafeo", "長い".repeat(150)),
+            GraphDbError::DurabilityUncertain {
+                message: format!("write failed\n\t{}", "é".repeat(300)),
+            },
+        ),
+        graph_fault(
+            "project.fourth",
+            "/profile/fourth.grafeo",
+            GraphDbError::Corrupt {
+                message: "first checksum A; second checksum B".to_owned(),
+            },
+        ),
+    ];
+    let DoctorStorageFamilyReadV1::Observed { findings } = graph_store_faults_read(&Ok(faults))
+    else {
+        panic!("retained faults must remain observed");
+    };
+    assert_eq!(findings.len(), 4);
+    let evidence = findings
+        .iter()
+        .map(|finding| {
+            assert_eq!(
+                finding.kind(),
+                DoctorStorageFindingKindV1::GraphStoreFaulted
+            );
+            let finding = finding.finding();
+            assert_eq!(finding.state(), DoctorEvidenceStateV1::Degraded);
+            assert_eq!(
+                finding.coverage().completeness(),
+                DoctorCoverageCompletenessV1::Complete
+            );
+            let statement = finding.coverage().statement();
+            assert!(statement.len() <= 512 && !statement.chars().any(char::is_control));
+            assert!(statement.contains("rebuild") || statement.contains("Rebuild"));
+            finding.evidence()[0].reference().as_str().to_owned()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        evidence.len(),
+        4,
+        "two stores with the same terminal verdict must retain distinct evidence identities"
+    );
+    assert!(
+        findings[0]
+            .finding()
+            .coverage()
+            .statement()
+            .contains("/profile/first.grafeo")
+    );
+    assert!(
+        findings[0]
+            .finding()
+            .coverage()
+            .statement()
+            .contains("Move the medium")
+    );
+    assert_eq!(
+        graph_store_faults_read(&Ok(Vec::new())),
+        DoctorStorageFamilyReadV1::Absent
+    );
+    assert_eq!(
+        graph_store_faults_read(&Err(GraphDbError::Unavailable {
+            message: "registry lock poisoned".to_owned()
+        })),
+        DoctorStorageFamilyReadV1::Unknown,
+    );
+}
+
 #[test]
 fn configuration_read_from_pin_absent_on_cold_cache() {
     let missing: Result<tracedecay_configuration::config::PinnedRuntimeConfiguration, &str> =
@@ -441,12 +542,63 @@ async fn composed_report_carries_real_states_and_enumerates_coverage() {
             }],
         },
         storage: merge_storage_reads(
-            storage_family_read(vec![orphan_storage]),
-            DoctorStorageFamilyReadV1::Unknown,
+            merge_storage_reads(
+                storage_family_read(vec![orphan_storage]),
+                DoctorStorageFamilyReadV1::Unknown,
+            ),
+            graph_store_faults_read(&Ok(vec![graph_fault(
+                "project.doctor-kernel-compose-test",
+                "/profile/project/graph.grafeo",
+                GraphDbError::Corrupt {
+                    message: "drifting checksums".to_owned(),
+                },
+            )])),
         ),
     };
 
     let report = compose_doctor_report(&ctx, &inputs).await.expect("report");
+
+    // Both CLI and dashboard present this canonical projection. A peer
+    // producer's Unknown must weaken coverage without dropping the store's
+    // observed corruption or its operator action.
+    let projected = tracedecay_dashboard_api::doctor_findings(
+        &report,
+        Vec::new(),
+        Some(DoctorFindingFamilyV1::Storage),
+    );
+    let graph_entries = projected
+        .payload
+        .entries
+        .iter()
+        .filter(|entry| entry.storage_kind() == Some(DoctorStorageFindingKindV1::GraphStoreFaulted))
+        .collect::<Vec<_>>();
+    assert_eq!(graph_entries.len(), 1);
+    assert_eq!(
+        graph_entries[0].finding().state(),
+        DoctorEvidenceStateV1::Degraded
+    );
+    assert!(
+        graph_entries[0]
+            .finding()
+            .coverage()
+            .statement()
+            .contains("Move the medium")
+    );
+    let graph_status = projected
+        .payload
+        .storage_kind_statuses
+        .iter()
+        .find(|status| status.kind == DoctorStorageFindingKindV1::GraphStoreFaulted)
+        .unwrap();
+    assert_eq!(graph_status.observed_entries, 1);
+    assert_eq!(
+        serde_json::to_value(graph_status).unwrap()["state"],
+        "partial"
+    );
+    let encoded = serde_json::to_value(&projected.payload).unwrap();
+    assert!(encoded["entries"].as_array().unwrap().iter().any(|entry| {
+        entry["storage_kind"] == "graph_store_faulted" && entry["finding"]["state"] == "degraded"
+    }));
 
     assert_eq!(report.coverage().families().len(), 8);
 

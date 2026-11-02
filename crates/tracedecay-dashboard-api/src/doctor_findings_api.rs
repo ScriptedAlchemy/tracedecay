@@ -28,13 +28,14 @@ use super::read_model::{
     DashboardDomainStateV1, DashboardEnvelopeV1, DashboardScopeV1, scope_from_state,
 };
 
-const STORAGE_KINDS: [DoctorStorageFindingKindV1; 6] = [
+const STORAGE_KINDS: [DoctorStorageFindingKindV1; 7] = [
     DoctorStorageFindingKindV1::OverBudgetStore,
     DoctorStorageFindingKindV1::OrphanStore,
     DoctorStorageFindingKindV1::IncidentDebrisPresent,
     DoctorStorageFindingKindV1::RetentionBacklog,
     DoctorStorageFindingKindV1::TableGrowth,
     DoctorStorageFindingKindV1::SchemaConvergenceIncomplete,
+    DoctorStorageFindingKindV1::GraphStoreFaulted,
 ];
 
 /// The canonical Doctor report projection for the read-only dashboard.

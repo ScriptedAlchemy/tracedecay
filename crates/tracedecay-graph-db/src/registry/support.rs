@@ -246,45 +246,44 @@ pub(super) fn check_registration_request(
     )
 }
 
-pub(super) fn retains_fault(error: &GraphDbError) -> bool {
-    matches!(
-        error,
-        GraphDbError::ResetRequired { .. }
-            | GraphDbError::FormatSuperseded { .. }
-            | GraphDbError::Corrupt { .. }
-            | GraphDbError::DurabilityUncertain { .. }
-    )
-}
-
-pub(super) fn status(entry: &RegistryEntry) -> GraphDbRegistryStatus {
-    match entry {
+pub(super) fn status(entry: &RegistryEntry) -> Result<GraphDbRegistryStatus, GraphDbError> {
+    Ok(match entry {
         RegistryEntry::Opening { .. } => GraphDbRegistryStatus::Opening,
         RegistryEntry::Closing { .. } | RegistryEntry::Retiring { .. } => {
             GraphDbRegistryStatus::Closing
         }
-        RegistryEntry::Ready { owner, .. } => match owner.runtime_state() {
-            GraphDbRuntimeState::Ready => GraphDbRegistryStatus::Ready,
-            GraphDbRuntimeState::Closed => GraphDbRegistryStatus::Closed,
-            GraphDbRuntimeState::DurabilityUncertain => GraphDbRegistryStatus::DurabilityUncertain,
+        RegistryEntry::Ready { owner, .. } => match owner.retained_store_fault()? {
+            Some(error) => fault_status(&error),
+            None => match owner.runtime_state() {
+                GraphDbRuntimeState::Ready => GraphDbRegistryStatus::Ready,
+                GraphDbRuntimeState::Closed => GraphDbRegistryStatus::Closed,
+                GraphDbRuntimeState::DurabilityUncertain => {
+                    GraphDbRegistryStatus::DurabilityUncertain
+                }
+            },
         },
-        RegistryEntry::Faulted { error, .. } => match error {
-            GraphDbError::ResetRequired { .. } | GraphDbError::FormatSuperseded { .. } => {
-                GraphDbRegistryStatus::ResetRequired
-            }
-            GraphDbError::Corrupt { .. } => GraphDbRegistryStatus::Corrupt,
-            GraphDbError::DurabilityUncertain { .. } => GraphDbRegistryStatus::DurabilityUncertain,
-            GraphDbError::Cancelled
-            | GraphDbError::InvalidRequest { .. }
-            | GraphDbError::Conflict { .. }
-            | GraphDbError::BudgetExhausted { .. }
-            | GraphDbError::DeadlineExceeded
-            | GraphDbError::ProjectionMismatch { .. }
-            | GraphDbError::GenerationMismatch { .. }
-            | GraphDbError::Unavailable { .. }
-            | GraphDbError::SealedRevisionIncompatible { .. }
-            | GraphDbError::SealSuperseded
-            | GraphDbError::SealedStoreImmutable { .. }
-            | GraphDbError::Closed => GraphDbRegistryStatus::Closed,
-        },
+        RegistryEntry::Faulted { error, .. } => fault_status(error),
+    })
+}
+
+fn fault_status(error: &GraphDbError) -> GraphDbRegistryStatus {
+    match error {
+        GraphDbError::ResetRequired { .. } | GraphDbError::FormatSuperseded { .. } => {
+            GraphDbRegistryStatus::ResetRequired
+        }
+        GraphDbError::Corrupt { .. } => GraphDbRegistryStatus::Corrupt,
+        GraphDbError::DurabilityUncertain { .. } => GraphDbRegistryStatus::DurabilityUncertain,
+        GraphDbError::Cancelled
+        | GraphDbError::InvalidRequest { .. }
+        | GraphDbError::Conflict { .. }
+        | GraphDbError::BudgetExhausted { .. }
+        | GraphDbError::DeadlineExceeded
+        | GraphDbError::ProjectionMismatch { .. }
+        | GraphDbError::GenerationMismatch { .. }
+        | GraphDbError::Unavailable { .. }
+        | GraphDbError::SealedRevisionIncompatible { .. }
+        | GraphDbError::SealSuperseded
+        | GraphDbError::SealedStoreImmutable { .. }
+        | GraphDbError::Closed => GraphDbRegistryStatus::Closed,
     }
 }

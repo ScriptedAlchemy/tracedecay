@@ -436,6 +436,10 @@ impl GraphDbOwner {
         self.source.database.runtime_state()
     }
 
+    pub(crate) fn retained_store_fault(&self) -> Result<Option<GraphDbError>, GraphDbError> {
+        self.source.database.retained_store_fault()
+    }
+
     pub(crate) fn engine_is_open(&self) -> Result<bool, GraphDbError> {
         self.source
             .database

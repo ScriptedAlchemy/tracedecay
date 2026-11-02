@@ -12,7 +12,7 @@ use parking_lot::{
 use crate::lease::VerifiedGenerationState;
 use crate::location::{PersistentGraphStoreState, ValidatedOpen};
 use crate::recovery::{
-    load_quarantined_projections, map_open_error, projection_mismatch,
+    is_database_fault, load_quarantined_projections, map_open_error, projection_mismatch,
     validate_or_initialize_format,
 };
 use crate::state::{
@@ -52,12 +52,19 @@ pub struct GraphDb {
     pub(crate) inner: Arc<Inner>,
 }
 
+struct LazyGraphStoreState {
+    persistent: PersistentGraphStoreState,
+    /// A settled native-open fault remains observable until a later open
+    /// succeeds. A cancelled or unavailable retry proves no recovery.
+    fault: Option<GraphDbError>,
+}
+
 pub(crate) struct Inner {
     pub(crate) database: RwLock<Option<GrafeoDB>>,
     state: RwLock<Option<FormatState>>,
     pub(crate) durability: GraphDurability,
     pub(crate) reopen: Option<ValidatedOpen>,
-    lazy_store_state: Mutex<Option<PersistentGraphStoreState>>,
+    lazy_store_state: Mutex<Option<LazyGraphStoreState>>,
     pub(crate) snapshot_gate: Arc<ParkingRwLock<()>>,
     pub(crate) verified_generations: RwLock<VerifiedGenerationState>,
     pub(crate) quarantined_projections: RwLock<BTreeSet<(GraphNamespace, GraphProjectionId)>>,
@@ -323,7 +330,10 @@ impl GraphDb {
                 state: RwLock::new(None),
                 durability: validated.durability,
                 reopen: Some(validated),
-                lazy_store_state: Mutex::new(Some(persistent_store_state)),
+                lazy_store_state: Mutex::new(Some(LazyGraphStoreState {
+                    persistent: persistent_store_state,
+                    fault: None,
+                })),
                 snapshot_gate: Arc::new(ParkingRwLock::new(())),
                 verified_generations: RwLock::new(VerifiedGenerationState::default()),
                 quarantined_projections: RwLock::new(BTreeSet::new()),
@@ -1569,6 +1579,19 @@ impl GraphDb {
             .map_err(|_| GraphDbError::unavailable("graph database read lock is poisoned"))
     }
 
+    pub(crate) fn retained_store_fault(&self) -> Result<Option<GraphDbError>, GraphDbError> {
+        if let Err(error) = self.ensure_available()
+            && is_database_fault(&error)
+        {
+            return Ok(Some(error));
+        }
+        self.inner
+            .lazy_store_state
+            .lock()
+            .map(|state| state.as_ref().and_then(|state| state.fault.clone()))
+            .map_err(|_| GraphDbError::unavailable("lazy graph state lock is poisoned"))
+    }
+
     #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
     #[must_use]
     pub fn staging_engine_is_open(&self) -> bool {
@@ -1730,13 +1753,29 @@ impl GraphDb {
             .lazy_store_state
             .lock()
             .map_err(|_| GraphDbError::unavailable("lazy graph state lock is poisoned"))?
+            .as_ref()
+            .map(|state| state.persistent)
             .ok_or_else(|| {
                 GraphDbError::unavailable(
                     "graph database closed after its native engine was opened",
                 )
             })?;
         validated.preexisting_store = persistent_store_state == PersistentGraphStoreState::Existing;
-        let opened = open_lazy_engine(&validated, persistent_store_state)?;
+        let opened = match open_lazy_engine(&validated, persistent_store_state) {
+            Ok(opened) => opened,
+            Err(error) => {
+                if is_database_fault(&error) {
+                    let mut state = self.inner.lazy_store_state.lock().map_err(|_| {
+                        GraphDbError::unavailable("lazy graph state lock is poisoned")
+                    })?;
+                    let state = state.as_mut().ok_or_else(|| {
+                        GraphDbError::unavailable("lazy graph open lost its retained state")
+                    })?;
+                    state.fault = Some(error.clone());
+                }
+                return Err(error);
+            }
+        };
         if let Some(path) = validated.config.path.as_deref() {
             crate::sealed_store::sweep_abandoned_sealed_staging(path);
         }
@@ -1763,7 +1802,10 @@ impl GraphDb {
             .lazy_store_state
             .lock()
             .map_err(|_| GraphDbError::unavailable("lazy graph state lock is poisoned"))? =
-            Some(PersistentGraphStoreState::Existing);
+            Some(LazyGraphStoreState {
+                persistent: PersistentGraphStoreState::Existing,
+                fault: None,
+            });
         drop(database);
         self.record_memory_checkpoint(crate::observe::GrafeoMemoryPhase::Open);
         Ok(())

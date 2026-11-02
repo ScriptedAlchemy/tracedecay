@@ -30,6 +30,7 @@ use crate::generation_runtime::{GenerationContentsDeletion, GenerationStageOutco
 use crate::lease::{
     GenerationLocator, VerifiedGenerationLease, VerifiedGraphSnapshot, generation_lease,
 };
+use crate::recovery::is_database_fault;
 use crate::{
     GraphCommit, GraphDb, GraphDbError, GraphDbLeaseV1, GraphGenerationManifestIdentity,
     GraphGenerationReplaySource, GraphGenerationRowSpill, GraphGenerationRows, GraphNamespace,
@@ -1869,7 +1870,7 @@ impl GraphDbRegistry {
         let (commit, recovered_digest) = match verified {
             Ok(verified) => verified,
             Err(error) => {
-                if super::retains_fault(&error)
+                if is_database_fault(&error)
                     && let Err(retain_error) =
                         self.retain_verification_fault_for_lease(operation.database(), &error)
                 {

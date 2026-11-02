@@ -92,6 +92,10 @@ pub enum DoctorStorageFindingKindV1 {
     /// this daemon or another process, named in the evidence. Writes run
     /// until the WAL reaches its ceiling, then wait.
     WalCheckpointPinned,
+    /// A registered graph owner retains a terminal corruption, reset, or
+    /// durability verdict. Each store is reported separately with the
+    /// operator action needed before its graph can be trusted again.
+    GraphStoreFaulted,
 }
 
 /// Exact Doctor evidence states.

@@ -71,6 +71,23 @@ describe('Observatory storage read models', () => {
           },
           storage_kind: 'over_budget_store',
         },
+        {
+          finding: {
+            family: 'storage',
+            state: 'degraded',
+            evidence: [
+              {
+                family: 'storage',
+                reference: 'storage.graph_store_faulted.graph.fixture.corrupt',
+              },
+            ],
+            coverage: {
+              completeness: 'complete',
+              statement: 'Graph store at /profile/project/graph.grafeo is corrupt. Move the medium or rebuild this store.',
+            },
+          },
+          storage_kind: 'graph_store_faulted',
+        },
       ],
       report_coverage: {
         families: [{ family: 'storage', consultation: { status: 'consulted' } }],
@@ -94,6 +111,7 @@ describe('Observatory storage read models', () => {
           'incident_debris_present',
           'retention_backlog',
           'table_growth',
+          'graph_store_faulted',
         ] as const
       ).map(storageFindingLabel),
     ).toEqual([
@@ -102,8 +120,11 @@ describe('Observatory storage read models', () => {
       'Incident debris',
       'Retention backlog',
       'Table growth',
+      'Faulted graph stores',
     ]);
     expect(payload.entries[0]?.storage_kind).toBe('over_budget_store');
+    expect(payload.entries[1]?.storage_kind).toBe('graph_store_faulted');
+    expect(payload.entries[1]?.finding.coverage.statement).toContain('Move the medium');
     expect(payload.entries[0]?.finding.coverage.statement).toBe(
       'store size observed against soft budget',
     );

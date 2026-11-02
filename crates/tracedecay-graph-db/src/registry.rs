@@ -10,6 +10,7 @@ use tracedecay_store::{
 };
 
 use crate::generation::InlineOnlyGraphGenerationManifestProvider;
+use crate::recovery::is_database_fault;
 use crate::{
     GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbLeaseV1, GraphDbOwner,
     GraphDbOwnerAttachmentId, GraphDbOwnerAttachmentV1, GraphDbOwnerId,
@@ -24,7 +25,7 @@ use self::identity::{
 use self::path::canonical_graph_database_file;
 use self::support::{
     check_registration_request, check_request, open_registered_graph, open_registered_graph_lazy,
-    reject_path_alias, retains_fault, status,
+    reject_path_alias, status,
 };
 
 #[path = "registry/code_graph_namespace.rs"]
@@ -154,6 +155,15 @@ pub enum GraphDbRegistryStatus {
     ResetRequired,
     Corrupt,
     DurabilityUncertain,
+}
+
+/// The last settled terminal fault of one exact registered graph owner.
+/// Observing it neither acquires a client lease nor opens the native engine.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphDbRegistryFaultV1 {
+    pub shard_id: StoreShardIdV1,
+    pub canonical_path: PathBuf,
+    pub error: GraphDbError,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1201,7 +1211,7 @@ impl GraphDbRegistry {
                 Ok(attachment)
             }
             Err(error) => {
-                if retains_fault(&error) {
+                if is_database_fault(&error) {
                     state.entries.insert(
                         shard_id,
                         RegistryEntry::Faulted {
@@ -1517,7 +1527,34 @@ impl GraphDbRegistry {
                 GraphFormatVersion::current(),
             ),
         )?;
-        Ok(Some(status(entry)))
+        Ok(Some(status(entry)?))
+    }
+
+    /// Terminal store verdicts still retained by this registry's exact
+    /// owners. Lazy mounts settle native-open faults on the owner itself,
+    /// while eager failures settle in a `Faulted` registry entry. Read both
+    /// authorities without opening stores or interpreting sidecar files.
+    pub fn retained_faults(&self) -> Result<Vec<GraphDbRegistryFaultV1>, GraphDbError> {
+        let state = self.state_lock()?;
+        let mut faults = Vec::new();
+        for entry in state.entries.values() {
+            let error = match entry {
+                RegistryEntry::Faulted { error, .. } if is_database_fault(error) => {
+                    Some(error.clone())
+                }
+                RegistryEntry::Ready { owner, .. } => owner.retained_store_fault()?,
+                _ => None,
+            };
+            if let Some(error) = error {
+                let (binding, _, path, _) = binding(entry);
+                faults.push(GraphDbRegistryFaultV1 {
+                    shard_id: binding.shard_id.clone(),
+                    canonical_path: path.to_path_buf(),
+                    error,
+                });
+            }
+        }
+        Ok(faults)
     }
 
     /// Canonical physical-open headroom, including ready owners the registry
@@ -2299,8 +2336,8 @@ mod tests {
 
     use super::{
         CloseReservation, GraphDbOwnerRegistrationV1, GraphDbRegistration, GraphDbRegistry,
-        GraphDbRegistryConfig, GraphDbRegistryStatus, GraphDbRetirementOutcome, RegistryEntry,
-        reserve_capacity_eviction,
+        GraphDbRegistryConfig, GraphDbRegistryFaultV1, GraphDbRegistryStatus,
+        GraphDbRetirementOutcome, RegistryEntry, reserve_capacity_eviction,
     };
     use crate::{
         GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbLocation, GraphDbOpenOptions,
@@ -2433,6 +2470,146 @@ mod tests {
 
         assert!(matches!(
             registry.resolve(registration(temporary.path())),
+            Err(GraphDbError::Unavailable { .. })
+        ));
+    }
+
+    #[test]
+    fn retained_faults_observe_eager_and_lazy_failures_without_opening_stores() {
+        let eager_root = TempDir::new().unwrap();
+        let lazy_root = TempDir::new().unwrap();
+        let healthy_root = TempDir::new().unwrap();
+        let seed = |root: &std::path::Path, version| {
+            let database = GraphDbOwner::open(GraphDbOpenOptions {
+                location: GraphDbLocation::Persistent(root.join("graph.grafeo")),
+                expected_format: version,
+                durability: GraphDurability::WalSync,
+                cancellation: Arc::new(NeverCancelled),
+            })
+            .unwrap();
+            database.close().unwrap();
+        };
+        let future_format =
+            GraphFormatVersion::new(GraphFormatVersion::current().get() + 1).unwrap();
+        seed(eager_root.path(), future_format);
+        seed(lazy_root.path(), future_format);
+
+        let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 3 }).unwrap();
+        let eager = registration_for(eager_root.path(), "project.fault-eager");
+        let lazy = registration_for(lazy_root.path(), "project.fault-lazy");
+        let healthy = registration_for(healthy_root.path(), "project.fault-healthy");
+        let eager_error = registry
+            .resolve_owner_attachment(owner_registration(eager.clone()))
+            .unwrap_err();
+        assert!(matches!(eager_error, GraphDbError::ResetRequired { .. }));
+        let lazy_owner = registry
+            .resolve_lazy_owner_attachment(owner_registration(lazy.clone()))
+            .unwrap();
+        let _healthy_owner = registry
+            .resolve_lazy_owner_attachment(owner_registration(healthy.clone()))
+            .unwrap();
+        let lease = lazy_owner.issue_lease().unwrap();
+        let lazy_error = lease.snapshot().unwrap_err();
+        assert!(matches!(lazy_error, GraphDbError::ResetRequired { .. }));
+        let faults = registry.retained_faults().unwrap();
+        assert_eq!(
+            faults,
+            vec![
+                GraphDbRegistryFaultV1 {
+                    shard_id: eager.binding().shard_id.clone(),
+                    canonical_path: super::path::canonical_graph_database_file(
+                        eager.canonical_path()
+                    )
+                    .unwrap(),
+                    error: eager_error,
+                },
+                GraphDbRegistryFaultV1 {
+                    shard_id: lazy.binding().shard_id.clone(),
+                    canonical_path: super::path::canonical_graph_database_file(
+                        lazy.canonical_path()
+                    )
+                    .unwrap(),
+                    error: lazy_error,
+                },
+            ]
+        );
+        assert_eq!(
+            registry.status(&lazy).unwrap(),
+            Some(GraphDbRegistryStatus::ResetRequired)
+        );
+        assert_eq!(registry.resident_engine_count().unwrap(), 0);
+        assert!(!healthy.canonical_path().exists());
+
+        // A retry blocked by another native file owner has not proved the
+        // previous store fault gone.
+        let competing_owner = GraphDbOwner::open(GraphDbOpenOptions {
+            location: GraphDbLocation::Persistent(lazy.canonical_path().to_path_buf()),
+            expected_format: future_format,
+            durability: GraphDurability::WalSync,
+            cancellation: Arc::new(NeverCancelled),
+        })
+        .unwrap();
+        assert!(matches!(
+            lease.snapshot(),
+            Err(GraphDbError::Unavailable { .. })
+        ));
+        assert_eq!(registry.retained_faults().unwrap(), faults);
+        competing_owner.close().unwrap();
+
+        // Simulate rebuilding only this fixture's container family. The
+        // existing lazy owner must clear its diagnosis only after opening
+        // the repaired store; the eager owner's independent fault remains.
+        std::fs::remove_dir_all(lazy_root.path()).unwrap();
+        std::fs::create_dir(lazy_root.path()).unwrap();
+        seed(lazy_root.path(), GraphFormatVersion::current());
+        assert_eq!(registry.retained_faults().unwrap(), faults);
+        drop(lease.snapshot().unwrap());
+        assert_eq!(registry.retained_faults().unwrap(), faults[..1]);
+        assert_eq!(
+            registry.status(&lazy).unwrap(),
+            Some(GraphDbRegistryStatus::Ready)
+        );
+        assert!(!healthy.canonical_path().exists());
+    }
+
+    #[test]
+    fn retained_corruption_is_exact_and_a_poisoned_registry_is_not_an_empty_census() {
+        let root = TempDir::new().unwrap();
+        let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+        let registration = registration(root.path());
+        let owner = registry
+            .resolve_owner_attachment(owner_registration(registration.clone()))
+            .unwrap();
+        std::fs::write(root.path().join("graph.grafeo.corruption-lock"), "").unwrap();
+        assert!(registry.retained_faults().unwrap().is_empty());
+
+        let error = GraphDbError::Corrupt {
+            message: "drifting fault: first checksum A, second checksum B".to_owned(),
+        };
+        owner.inject_retirement_finish_failure(error.clone());
+        registry
+            .reserve_retirement_batch(vec![owner.retirement_target()])
+            .unwrap()
+            .commit(
+                Arc::new(NeverCancelled),
+                Instant::now() + Duration::from_secs(30),
+            )
+            .unwrap();
+        assert_eq!(
+            registry.retained_faults().unwrap(),
+            vec![GraphDbRegistryFaultV1 {
+                shard_id: registration.binding().shard_id.clone(),
+                canonical_path: super::path::canonical_graph_database_file(
+                    registration.canonical_path()
+                )
+                .unwrap(),
+                error,
+            }]
+        );
+
+        poison_registry_state_before_terminal_completion(&registry);
+        assert!(matches!(
+            registry.retained_faults(),
             Err(GraphDbError::Unavailable { .. })
         ));
     }

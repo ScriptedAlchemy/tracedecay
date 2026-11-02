@@ -16,6 +16,7 @@ use tracedecay_domain::errors::{
     StoreResetRequiredV1, TraceDecayError,
 };
 use tracedecay_global_db::schema_stages::RegisteredSchemaConvergence;
+use tracedecay_graph_db::{GraphDbError, GraphDbRegistryFaultV1};
 use tracedecay_runtime_core::native_runtime::{self, NativeTask};
 use tracedecay_runtime_core::storage::profile_root_of_sharded_data_root;
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1, StoreShardScopeV1};
@@ -771,6 +772,15 @@ impl DaemonSessionRuntimeRegistryV1 {
     #[must_use]
     pub fn registered_schema_convergence_observations(&self) -> Vec<SchemaConvergenceFindingV1> {
         self.registered_schema_convergence.observations()
+    }
+
+    /// Observe the sole graph registry's retained verdicts without mounting
+    /// or reopening any project store. A failed read stays typed so Doctor
+    /// cannot mistake an unavailable authority for an empty fault census.
+    pub fn retained_graph_store_faults(
+        &self,
+    ) -> std::result::Result<Vec<GraphDbRegistryFaultV1>, GraphDbError> {
+        self.graph_registry.retained_faults()
     }
 
     #[cfg(any(test, feature = "test-helpers"))]

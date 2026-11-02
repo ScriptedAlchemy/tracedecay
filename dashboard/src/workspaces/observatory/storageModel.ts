@@ -16,6 +16,7 @@ const FINDING_LABELS: Partial<Record<DoctorStorageFindingKindV1, string>> = {
   incident_debris_present: 'Incident debris',
   retention_backlog: 'Retention backlog',
   table_growth: 'Table growth',
+  graph_store_faulted: 'Faulted graph stores',
 };
 
 export function storageFindingLabel(kind: DoctorStorageFindingKindV1): string {

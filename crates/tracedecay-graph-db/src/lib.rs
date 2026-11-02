@@ -91,7 +91,7 @@ pub use registry::{
 };
 pub use registry::{
     GraphDbOwnerRegistrationV1, GraphDbRegistration, GraphDbRegistry, GraphDbRegistryCapacity,
-    GraphDbRegistryConfig, GraphDbRegistryStatus, GraphDbRetirementCommit,
+    GraphDbRegistryConfig, GraphDbRegistryFaultV1, GraphDbRegistryStatus, GraphDbRetirementCommit,
     GraphDbRetirementOutcome, GraphDbRetirementRefusal, GraphDbRetirementReservation,
     GraphPublicationPreparationV1, ProvenGraphPublicationV1,
 };

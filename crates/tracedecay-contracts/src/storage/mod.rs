@@ -35,9 +35,9 @@ pub use convergence::{
 };
 pub use debris::{IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1};
 pub use findings::{
-    code_generation_retention_finding, incident_debris_finding, orphan_store_finding,
-    over_budget_finding, retention_backlog_finding, schema_convergence_incomplete_finding,
-    table_growth_finding, wal_checkpoint_pinned_finding,
+    code_generation_retention_finding, graph_store_faulted_finding, incident_debris_finding,
+    orphan_store_finding, over_budget_finding, retention_backlog_finding,
+    schema_convergence_incomplete_finding, table_growth_finding, wal_checkpoint_pinned_finding,
 };
 pub use identity::{
     FreePageRatioV1, RelativeArtifactPathV1, StorageByteSizeV1, StoreKeyV1, TableNameV1,
