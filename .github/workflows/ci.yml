@@ -1,6 +1,9 @@
 name: CI
 run-name: >-
   ${{ github.event_name == 'pull_request' && format('CI for PR #{0}', github.event.pull_request.number) || format('CI for {0}', github.ref_name) }}
+  ${{ vars.PRIVATE_WINDOWS_CI == 'true' && github.actor_id == '25274700' && github.triggering_actor == 'ScriptedAlchemy' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '[private-windows]' || '' }}
+  ${{ vars.PRIVATE_MACOS_CI == 'true' && github.actor_id == '25274700' && github.triggering_actor == 'ScriptedAlchemy' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '[private-macos]' || '' }}
+  [native=${{ inputs.run_os && inputs.native_platform || 'none' }}] [targets=${{ inputs.native_targets || '//...' }}]
 
 on:
   pull_request:
@@ -325,7 +328,7 @@ jobs:
       contents: read
       id-token: write
     name: Test macOS
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_os && (inputs.native_platform == 'all' || inputs.native_platform == 'macos') }}
+    if: ${{ !(vars.PRIVATE_MACOS_CI == 'true' && github.actor_id == '25274700' && github.triggering_actor == 'ScriptedAlchemy' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && github.event_name == 'workflow_dispatch' && inputs.run_os && (inputs.native_platform == 'all' || inputs.native_platform == 'macos') }}
     runs-on: macos-26
     timeout-minutes: 330
     steps:
@@ -673,7 +676,7 @@ jobs:
     # Branch protection requires this check name.
     name: Test Windows
     if: >-
-      ${{ !cancelled() && needs.change-scope.outputs.bazel != 'false' &&
+      ${{ !(vars.PRIVATE_WINDOWS_CI == 'true' && github.actor_id == '25274700' && github.triggering_actor == 'ScriptedAlchemy' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && !cancelled() && needs.change-scope.outputs.bazel != 'false' &&
       (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
       (github.event_name != 'workflow_dispatch' ||
       (inputs.run_os &&
