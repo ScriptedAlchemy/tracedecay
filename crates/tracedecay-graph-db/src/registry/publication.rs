@@ -3224,8 +3224,11 @@ mod historical_publication_reuse_tests {
         let mut abandoned = super::SupersededRetirementBatchV1 {
             database: &database,
             reservation: Arc::clone(&reservation),
-            pending: vec![(locator.clone(), fixture.authority.records[&fixture.key].clone())]
-                .into_iter(),
+            pending: vec![(
+                locator.clone(),
+                fixture.authority.records[&fixture.key].clone(),
+            )]
+            .into_iter(),
         };
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _state = database.inner.verified_generations.write().unwrap();
@@ -3241,12 +3244,19 @@ mod historical_publication_reuse_tests {
             database.wait_verified_generations_write(),
             Err(GraphDbError::Unavailable { .. })
         ));
-        let poisoned = database.inner.verified_generations.read().err().expect("lock poisoned");
-        assert!(poisoned
-            .into_inner()
-            .retiring
-            .get(&locator)
-            .is_some_and(|token| Arc::ptr_eq(token, &reservation)));
+        let poisoned = database
+            .inner
+            .verified_generations
+            .read()
+            .err()
+            .expect("lock poisoned");
+        assert!(
+            poisoned
+                .into_inner()
+                .retiring
+                .get(&locator)
+                .is_some_and(|token| Arc::ptr_eq(token, &reservation))
+        );
     }
 
     #[test]
