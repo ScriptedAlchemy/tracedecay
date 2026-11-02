@@ -92,11 +92,48 @@ fn quarantined_apply_result(
     .unwrap()
 }
 
-fn admitted_fact(content: &str, validation: serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        "add_fact_request": request(content),
-        "validation": validation,
-    })
+fn admitted_fact(content: &str, validation: serde_json::Value) -> AdmittedAutomaticFact {
+    AdmittedAutomaticFact {
+        add_fact_request: request(content),
+        item: None,
+        validation: Some(validation),
+    }
+}
+
+#[test]
+fn admitted_fact_preserves_report_shape_and_durable_apply_identity() {
+    let mut fact = admitted_fact(
+        "Preserve admitted fact identity",
+        serde_json::json!({"status": "accepted", "dedupe": {"source_index": 2}}),
+    );
+    let mut report = serde_json::json!({
+        "add_fact_request": request("Preserve admitted fact identity"),
+        "validation": {"status": "accepted", "dedupe": {"source_index": 2}},
+    });
+    assert_eq!(serde_json::to_value(&fact).unwrap(), report);
+    assert_eq!(
+        automatic_fact_apply_id("run-admitted-identity", 2, &fact).unwrap(),
+        "fact_5263d20461c230de",
+        "the persisted identity must keep the original JSON bytes and accepted ordinal"
+    );
+
+    let item = serde_json::json!({
+        "content": "Preserve admitted fact identity",
+        "source_span": {"session_id": "session", "message_id": "message"},
+    });
+    fact.item = Some(item.clone());
+    report["item"] = item;
+    assert_eq!(serde_json::to_value(&fact).unwrap(), report);
+    let identity = automatic_fact_apply_id("run-admitted-identity", 2, &fact).unwrap();
+    assert_eq!(identity, "fact_01f1987ecc534361");
+    assert_ne!(
+        identity,
+        automatic_fact_apply_id("run-admitted-identity", 1, &fact).unwrap(),
+    );
+    assert_ne!(
+        identity,
+        automatic_fact_apply_id("another-run", 2, &fact).unwrap(),
+    );
 }
 
 #[test]
@@ -343,74 +380,37 @@ async fn automatic_apply_collapses_semantic_duplicates_without_losing_first_evid
         "  keep terminal receipt evidence with the FIRST automatic fact effect  ",
         serde_json::json!({"source_index": 1}),
     );
+    let next = admitted_fact(
+        "Retain the accepted ordinal after a duplicate is skipped",
+        serde_json::json!({"source_index": 2}),
+    );
+    let next_id = automatic_fact_apply_id("run-semantic-duplicate", 2, &next).unwrap();
 
     let batch = record_session_automatic_facts(
         &memory,
         &run_control,
         "run-semantic-duplicate",
         Some("evidence-hash-duplicate"),
-        &[first, duplicate],
+        &[first, duplicate, next],
     )
     .await
     .unwrap();
 
     assert!(batch.retry_error.is_none());
-    assert_eq!(batch.receipts.len(), 1);
+    assert_eq!(batch.receipts.len(), 2);
     assert_eq!(
         batch.receipts[0].validation,
         Some(serde_json::json!({"source_index": 0}))
     );
+    assert_eq!(batch.receipts[1].apply_id, next_id);
     assert_eq!(
         list_automatic_fact_receipts(&memory, None, 10, run_control.read_control())
             .await
             .unwrap()
             .len(),
-        1
+        2
     );
-    assert_eq!(canonical_fact_count(&memory, &run_control).await, 1);
-}
-
-#[tokio::test]
-async fn invalid_automatic_command_rejects_invalid_canonical_trust() {
-    let temp = tempfile::tempdir().unwrap();
-    let db = database(
-        &temp.path().join("memory.db"),
-        TestDatabaseRuntimeMode::Initialize,
-    )
-    .await;
-    let memory = MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&db)).unwrap();
-    let (run_control, _) = test_run_control(false);
-    let admitted = serde_json::json!({
-        "add_fact_request": {
-            "content": "Reject invalid automatic fact trust at the typed boundary",
-            "category": "project",
-            "source_label": "automatic-fact-test",
-            "tags": ["automation"],
-            "entities": ["TraceDecay"],
-            "trust": 1.1,
-            "metadata": {"fixture": "automatic-fact-receipt"}
-        },
-        "validation": {"status": "accepted"},
-    });
-
-    let error = match record_session_automatic_facts(
-        &memory,
-        &run_control,
-        "run-invalid-command",
-        Some("evidence-hash-invalid-command"),
-        &[admitted],
-    )
-    .await
-    {
-        Ok(_) => panic!("invalid automatic command must fail before authority apply"),
-        Err(error) => error,
-    };
-
-    let TraceDecayError::Config { message } = error else {
-        panic!("invalid wire request must fail at canonical deserialization");
-    };
-    assert!(message.contains("invalid admitted automatic fact request"));
-    assert!(message.contains("confidence must be finite and within [0.0, 1.0]"));
+    assert_eq!(canonical_fact_count(&memory, &run_control).await, 2);
 }
 
 #[tokio::test]

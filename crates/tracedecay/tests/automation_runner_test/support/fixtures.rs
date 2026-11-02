@@ -4,14 +4,17 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use serde_json::{Value, json};
-use tracedecay_automation_runtime::automation::automatic_facts::record_session_automatic_facts;
+use tracedecay_automation_runtime::automation::automatic_facts::{
+    AdmittedAutomaticFact, record_session_automatic_facts,
+};
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, read_run_artifact_payload,
 };
-use tracedecay_domain::FactOwnerV1;
+use tracedecay_domain::{Confidence, FactCategoryV1, FactOwnerV1};
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
+use tracedecay_session_memory::memory::ProjectMemoryFactAddRequest;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
@@ -301,18 +304,19 @@ pub(crate) async fn seed_duplicate_facts(cg: &TraceDecay) -> SeededDuplicateFact
             &test_automation_run_control(Arc::new(AtomicBool::new(false))),
             &format!("run.memory-curator-seed-{index}"),
             Some("evidence.memory-curator-seed"),
-            &[json!({
-                "add_fact_request": {
-                    "content": content,
-                    "category": "project",
-                    "source_label": "memory-curator-test-seed",
-                    "tags": ["cache", "policy"],
-                    "entities": [],
-                    "trust": trust,
-                    "metadata": {},
+            &[AdmittedAutomaticFact {
+                add_fact_request: ProjectMemoryFactAddRequest {
+                    content: content.to_owned(),
+                    category: FactCategoryV1::Project,
+                    source_label: Some("memory-curator-test-seed".to_owned()),
+                    tags: vec!["cache".to_owned(), "policy".to_owned()],
+                    entities: Vec::new(),
+                    trust: Some(Confidence::new(trust).unwrap()),
+                    metadata: json!({}),
                 },
-                "validation": {"status": "accepted"},
-            })],
+                item: None,
+                validation: Some(json!({"status": "accepted"})),
+            }],
         )
         .await
         .unwrap();

@@ -4,9 +4,11 @@ use std::sync::atomic::AtomicBool;
 use serde_json::json;
 use tempfile::tempdir;
 use tracedecay_automation_runtime::automation::automatic_facts::{
-    AutomaticFactState, list_automatic_fact_receipts, load_automatic_fact_receipt,
-    record_session_automatic_facts,
+    AdmittedAutomaticFact, AutomaticFactState, list_automatic_fact_receipts,
+    load_automatic_fact_receipt, record_session_automatic_facts,
 };
+use tracedecay_domain::{Confidence, FactCategoryV1};
+use tracedecay_session_memory::memory::ProjectMemoryFactAddRequest;
 
 use crate::support::{init_project, project_memory_owner, test_automation_run_control};
 
@@ -21,21 +23,21 @@ async fn session_automatic_facts_keep_paraphrases_distinct() {
     )
     .unwrap();
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let fact = |content: &str| {
-        json!({
-            "add_fact_request": {
-                "content": content,
-                "category": "project",
-                "source_label": "session_reflector",
-                "tags": ["session-reflector"],
-                "entities": ["merge discipline"],
-                "trust": 0.9,
-                "metadata": {
-                    "source_span": { "session_id": "s", "message_id": "m" },
-                    "trust_reason": "repeated evidence"
-                }
-            }
-        })
+    let fact = |content: &str| AdmittedAutomaticFact {
+        add_fact_request: ProjectMemoryFactAddRequest {
+            content: content.to_owned(),
+            category: FactCategoryV1::Project,
+            source_label: Some("session_reflector".to_owned()),
+            tags: vec!["session-reflector".to_owned()],
+            entities: vec!["merge discipline".to_owned()],
+            trust: Some(Confidence::new(0.9).unwrap()),
+            metadata: json!({
+                "source_span": { "session_id": "s", "message_id": "m" },
+                "trust_reason": "repeated evidence"
+            }),
+        },
+        item: None,
+        validation: None,
     };
     let batch = vec![
         fact(
@@ -137,21 +139,24 @@ async fn session_automatic_fact_receipts_remain_immutable_when_paraphrases_apply
         &run_control,
         "run-old",
         Some("evidence-old"),
-        &[json!({
-            "add_fact_request": {
-                "content": "Never merge a PR batch after a single flaky green pass; require stable \
-                            aggregate verification and a live PR-state recheck before merging",
-                "category": "project",
-                "source_label": "session_reflector",
-                "tags": ["session-reflector"],
-                "entities": ["merge discipline"],
-                "trust": 0.9,
-                "metadata": {
+        &[AdmittedAutomaticFact {
+            add_fact_request: ProjectMemoryFactAddRequest {
+                content: "Never merge a PR batch after a single flaky green pass; require stable \
+                            aggregate verification and a live PR-state recheck before merging"
+                    .to_owned(),
+                category: FactCategoryV1::Project,
+                source_label: Some("session_reflector".to_owned()),
+                tags: vec!["session-reflector".to_owned()],
+                entities: vec!["merge discipline".to_owned()],
+                trust: Some(Confidence::new(0.9).unwrap()),
+                metadata: json!({
                     "source_span": { "session_id": "s", "message_id": "m" },
                     "trust_reason": "repeated evidence"
-                }
-            }
-        })],
+                }),
+            },
+            item: None,
+            validation: None,
+        }],
     )
     .await
     .unwrap();
@@ -164,21 +169,24 @@ async fn session_automatic_fact_receipts_remain_immutable_when_paraphrases_apply
             .unwrap()
             .expect("applied automatic fact receipt");
 
-    let paraphrase = json!({
-        "add_fact_request": {
-            "content": "Before merging a PR batch, require stable aggregate verification and a \
-                        live PR-state recheck, a single flaky green pass is never enough to merge",
-            "category": "project",
-            "source_label": "session_reflector",
-            "tags": ["session-reflector"],
-            "entities": ["merge discipline"],
-            "trust": 0.9,
-            "metadata": {
+    let paraphrase = AdmittedAutomaticFact {
+        add_fact_request: ProjectMemoryFactAddRequest {
+            content: "Before merging a PR batch, require stable aggregate verification and a \
+                        live PR-state recheck, a single flaky green pass is never enough to merge"
+                .to_owned(),
+            category: FactCategoryV1::Project,
+            source_label: Some("session_reflector".to_owned()),
+            tags: vec!["session-reflector".to_owned()],
+            entities: vec!["merge discipline".to_owned()],
+            trust: Some(Confidence::new(0.9).unwrap()),
+            metadata: json!({
                 "source_span": { "session_id": "s", "message_id": "m" },
                 "trust_reason": "repeated evidence"
-            }
-        }
-    });
+            }),
+        },
+        item: None,
+        validation: None,
+    };
     let recorded = record_session_automatic_facts(
         &memory,
         &run_control,

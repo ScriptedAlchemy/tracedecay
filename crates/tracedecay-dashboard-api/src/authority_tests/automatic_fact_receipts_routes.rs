@@ -5,13 +5,14 @@ use serde_json::{Map, Value, json};
 use tower::ServiceExt;
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 use tracedecay_automation_runtime::automation::automatic_facts::{
-    AutomaticFactState, record_session_automatic_facts,
+    AdmittedAutomaticFact, AutomaticFactState, record_session_automatic_facts,
 };
 use tracedecay_domain::{
     ComponentVersion, Confidence, FactCategoryV1, PayloadReferenceV1, ProvenanceId,
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
     SensitivityV1,
 };
+use tracedecay_session_memory::memory::ProjectMemoryFactAddRequest;
 use tracedecay_store::{ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryFactAddMaterialV1};
 
 use crate::tracedecay::facts::memory_application_for_db;
@@ -21,19 +22,20 @@ use axum::response::Response;
 
 use super::{DashboardStateFixture, admitted_request, admitted_router};
 
-fn admitted_fact(content: &str, metadata: Value) -> Value {
-    json!({
-        "add_fact_request": {
-            "content": content,
-            "category": "project",
-            "source_label": "dashboard-route-test",
-            "tags": ["automation"],
-            "entities": ["TraceDecay"],
-            "trust": 0.9,
-            "metadata": metadata,
+fn admitted_fact(content: &str, metadata: Value) -> AdmittedAutomaticFact {
+    AdmittedAutomaticFact {
+        add_fact_request: ProjectMemoryFactAddRequest {
+            content: content.to_owned(),
+            category: FactCategoryV1::Project,
+            source_label: Some("dashboard-route-test".to_owned()),
+            tags: vec!["automation".to_owned()],
+            entities: vec!["TraceDecay".to_owned()],
+            trust: Some(Confidence::new(0.9).unwrap()),
+            metadata,
         },
-        "validation": {"status": "accepted"},
-    })
+        item: None,
+        validation: Some(json!({"status": "accepted"})),
+    }
 }
 
 async fn response_json(response: Response) -> Value {

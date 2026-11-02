@@ -1,8 +1,11 @@
 use super::{
-    SessionFactCurationOutcome, session_fact_finalization_failure_summary,
+    SessionFactCurationOutcome, fact_collection_summary, session_fact_finalization_failure_summary,
     session_fact_ledger_summary, validation_repairs_summary,
 };
+use crate::automation::automatic_facts::AdmittedAutomaticFact;
 use serde_json::json;
+use tracedecay_domain::FactCategoryV1;
+use tracedecay_session_memory::memory::ProjectMemoryFactAddRequest;
 
 #[test]
 fn session_fact_receipt_outcome_tracks_terminal_effects_and_retry_need() {
@@ -27,11 +30,39 @@ fn session_fact_receipt_outcome_tracks_terminal_effects_and_retry_need() {
 fn durable_session_fact_summaries_hash_instead_of_persisting_payloads() {
     let hostile_secret = "sk-live-ledger-do-not-persist";
     let proposed = vec![json!({"content": hostile_secret})];
-    let accepted = vec![json!({"content": hostile_secret, "status": "accepted"})];
+    let accepted = vec![AdmittedAutomaticFact {
+        add_fact_request: ProjectMemoryFactAddRequest {
+            content: hostile_secret.to_owned(),
+            category: FactCategoryV1::Project,
+            source_label: None,
+            tags: Vec::new(),
+            entities: Vec::new(),
+            trust: None,
+            metadata: json!({}),
+        },
+        item: None,
+        validation: Some(json!({"status": "accepted"})),
+    }];
     let quarantined = vec![json!({"content": hostile_secret, "reason": hostile_secret})];
 
     let summary = session_fact_ledger_summary(&proposed, &accepted, &accepted, &quarantined)
         .expect("structural fact summary");
+    let report_values = accepted
+        .iter()
+        .map(|fact| serde_json::to_value(fact).unwrap())
+        .collect::<Vec<_>>();
+    let expected_digest = crate::automation::artifact_refs::sha256_bytes(
+        &serde_json::to_vec(&report_values).unwrap(),
+    );
+    assert_eq!(
+        summary["accepted"],
+        json!({"count": 1, "sha256": expected_digest}),
+        "the durable summary retains the original report JSON digest"
+    );
+    assert_eq!(
+        fact_collection_summary(&accepted).unwrap(),
+        fact_collection_summary(&report_values).unwrap(),
+    );
     let repairs = validation_repairs_summary(&[json!({"repair": hostile_secret})])
         .expect("structural repair summary");
 

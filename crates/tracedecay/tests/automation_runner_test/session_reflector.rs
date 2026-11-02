@@ -1,9 +1,10 @@
 use crate::support::*;
 #[cfg(feature = "test-transport")]
 use sha2::{Digest, Sha256};
-use tracedecay_domain::SessionId;
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
+use tracedecay_domain::{Confidence, FactCategoryV1, SessionId};
+use tracedecay_session_memory::memory::ProjectMemoryFactAddRequest;
 
 #[path = "session_reflector/automatic_fact_receipts.rs"]
 mod automatic_fact_receipts;
@@ -89,7 +90,9 @@ async fn retained_session_reflector_preserves_retrieval_and_defers_ledger_public
     drop(guard);
 }
 
-use tracedecay_automation_runtime::automation::automatic_facts::record_session_automatic_facts;
+use tracedecay_automation_runtime::automation::automatic_facts::{
+    AdmittedAutomaticFact, record_session_automatic_facts,
+};
 
 #[tokio::test]
 async fn session_reflector_runner_skips_when_task_is_disabled() {
@@ -476,17 +479,19 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
         "run.session-reflector-duplicate-seed",
         Some("evidence.session-reflector-duplicate-seed"),
-        &[json!({
-            "add_fact_request": {
-                "content": "Cache invalidation policy must be explicit",
-                "category": "project",
-                "source_label": "session-reflector-test-seed",
-                "tags": ["cache", "policy"],
-                "entities": [],
-                "trust": 0.97,
-                "metadata": {},
-            }
-        })],
+        &[AdmittedAutomaticFact {
+            add_fact_request: ProjectMemoryFactAddRequest {
+                content: "Cache invalidation policy must be explicit".to_owned(),
+                category: FactCategoryV1::Project,
+                source_label: Some("session-reflector-test-seed".to_owned()),
+                tags: vec!["cache".to_owned(), "policy".to_owned()],
+                entities: Vec::new(),
+                trust: Some(Confidence::new(0.97).unwrap()),
+                metadata: json!({}),
+            },
+            item: None,
+            validation: None,
+        }],
     )
     .await
     .unwrap();
@@ -1125,28 +1130,29 @@ async fn session_automatic_facts_replay_same_run_idempotently() {
     )
     .unwrap();
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let accepted = json!({
-        "add_fact_request": {
-            "content": "Repeated session evidence should produce one durable fact action",
-            "category": "project",
-            "source_label": "session_reflector",
-            "tags": ["session-reflector"],
-            "entities": ["session reflector"],
-            "trust": 0.91,
-            "metadata": {
+    let accepted = AdmittedAutomaticFact {
+        add_fact_request: ProjectMemoryFactAddRequest {
+            content: "Repeated session evidence should produce one durable fact action".to_owned(),
+            category: FactCategoryV1::Project,
+            source_label: Some("session_reflector".to_owned()),
+            tags: vec!["session-reflector".to_owned()],
+            entities: vec!["session reflector".to_owned()],
+            trust: Some(Confidence::new(0.91).unwrap()),
+            metadata: json!({
                 "source_span": {
                     "session_id": "session-a",
                     "message_id": "message-a"
                 },
                 "trust_reason": "same durable fact repeated"
-            }
+            }),
         },
-        "validation": {
+        item: None,
+        validation: Some(json!({
             "dedupe": {
                 "nearest_existing_fact_id": null
             }
-        }
-    });
+        })),
+    };
 
     let first = record_session_automatic_facts(
         &memory,

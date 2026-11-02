@@ -24,6 +24,18 @@ use tracedecay_session_memory::memory::{
 };
 use tracedecay_session_memory::memory::{MemoryMutationError, ProjectMemoryFactAddRequest};
 
+/// A validated candidate carried to policy and application without decoding
+/// its command again. Admission does not bypass the memory authority's
+/// sanitization, authorization, conflict checks, or receipt validation.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AdmittedAutomaticFact {
+    pub add_fact_request: ProjectMemoryFactAddRequest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation: Option<Value>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AutomaticFactState {
@@ -93,7 +105,7 @@ pub async fn record_session_automatic_facts<A: ProjectMemoryFactStore>(
     run_control: &AutomationRunControl,
     run_id: &str,
     evidence_hash: Option<&str>,
-    admitted_facts: &[Value],
+    admitted_facts: &[AdmittedAutomaticFact],
 ) -> Result<AutomaticFactApplyBatch> {
     let outer_run_id = RunId::new(run_id.to_owned()).map_err(store_error)?;
     let mut receipts = Vec::with_capacity(admitted_facts.len());
@@ -103,20 +115,11 @@ pub async fn record_session_automatic_facts<A: ProjectMemoryFactStore>(
     let mut semantic_keys = HashSet::new();
     let mut apply_ids = HashSet::new();
 
-    for (index, value) in admitted_facts.iter().enumerate() {
-        let apply_id = automatic_fact_apply_id(run_id, index, value);
-        let request = value
-            .get("add_fact_request")
-            .cloned()
-            .ok_or_else(|| config_error("admitted automatic fact is missing add_fact_request"))
-            .and_then(|request| {
-                serde_json::from_value::<ProjectMemoryFactAddRequest>(request).map_err(|error| {
-                    config_error(format!("invalid admitted automatic fact request: {error}"))
-                })
-            })?;
+    for (index, fact) in admitted_facts.iter().enumerate() {
+        let apply_id = automatic_fact_apply_id(run_id, index, fact)?;
         let command = automatic_fact_add_command(
             memory.owner().clone(),
-            request,
+            fact.add_fact_request.clone(),
             run_id,
             &apply_id,
             Some(actor.clone()),
@@ -137,8 +140,8 @@ pub async fn record_session_automatic_facts<A: ProjectMemoryFactStore>(
         let authoritative_id = ProvenanceId::new(apply_id).map_err(store_error)?;
         let evidence = ProjectMemoryAutomaticFactEvidenceV1::new(
             evidence_hash.clone(),
-            value.get("item").cloned(),
-            value.get("validation").cloned(),
+            fact.item.clone(),
+            fact.validation.clone(),
         )
         .map_err(store_error)?;
         let write_control = run_control.write_control();
@@ -415,15 +418,21 @@ fn bounded_metadata_text(value: Option<&str>, maximum: usize) -> Option<String> 
         .filter(|sanitized| !sanitized.trim().is_empty() && sanitized.len() <= maximum)
 }
 
-fn automatic_fact_apply_id(run_id: &str, index: usize, value: &Value) -> String {
+fn automatic_fact_apply_id(
+    run_id: &str,
+    index: usize,
+    fact: &AdmittedAutomaticFact,
+) -> Result<String> {
     let mut hasher = Sha256::new();
     let index = index.to_string();
-    let value = value.to_string();
+    // Durable apply identities use the JSON value's key ordering, including
+    // the nested request. Direct struct serialization would change those bytes.
+    let value = serde_json::to_value(fact)?.to_string();
     for component in [run_id.as_bytes(), index.as_bytes(), value.as_bytes()] {
         hasher.update((component.len() as u64).to_be_bytes());
         hasher.update(component);
     }
-    format!("fact_{}", &hex::encode(hasher.finalize())[..16])
+    Ok(format!("fact_{}", &hex::encode(hasher.finalize())[..16]))
 }
 
 fn normalize_fact_content(content: &str) -> String {

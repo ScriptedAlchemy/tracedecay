@@ -480,7 +480,7 @@ pub(crate) async fn record_dashboard_automatic_fact(
 ) -> DashboardAutomaticFactReceipt {
     use tracedecay_automation_runtime::automation::AutomationRunControl;
     use tracedecay_automation_runtime::automation::automatic_facts::{
-        AutomaticFactState, record_session_automatic_facts,
+        AdmittedAutomaticFact, AutomaticFactState, record_session_automatic_facts,
     };
     use tracedecay_session_memory::fact_store::DatabaseFactStore;
     use tracedecay_session_memory::memory::MemoryApplication;
@@ -506,10 +506,11 @@ pub(crate) async fn record_dashboard_automatic_fact(
         &run_control,
         run_id,
         Some("dashboard-outcome-test"),
-        &[serde_json::json!({
-            "add_fact_request": request,
-            "validation": { "fixture": "dashboard-outcome-test" },
-        })],
+        &[AdmittedAutomaticFact {
+            add_fact_request: request,
+            item: None,
+            validation: Some(serde_json::json!({ "fixture": "dashboard-outcome-test" })),
+        }],
     )
     .await
     .unwrap_or_else(|error| panic!("record outcome automatic fact receipt: {error}"));

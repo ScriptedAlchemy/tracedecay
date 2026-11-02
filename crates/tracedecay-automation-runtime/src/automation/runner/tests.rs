@@ -6,18 +6,24 @@ use tracedecay_automation::backend::{
     AgentTaskKind, agent_task_contract, extract_response_json_object,
 };
 use tracedecay_contracts::retained_surfaces::MemoryAutomationFactEvidenceItemV1;
+use tracedecay_domain::configuration::{ConfigurationRevisionId, UserProfileId};
 use tracedecay_domain::{
-    FactOwnerV1, RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalCoverageCountsV1,
+    ActorId, Confidence, FactCategoryV1, FactOwnerV1, RetrievalAnchorId, RetrievalGrainV1,
+    SessionId, TemporalCoverageCountsV1, canonical_sha256,
 };
-use tracedecay_session_memory::memory::MemoryApplication;
+use tracedecay_policy::CurationApplyAuthorityV1;
+use tracedecay_session_memory::memory::{MemoryApplication, ProjectMemoryFactAddRequest};
 use tracedecay_session_memory::session::{
     SessionFreshnessPolicy, SessionRetrievalOutcome, SessionTemporalQuery,
 };
 use tracedecay_temporal_query::TemporalKernelResult;
 use tracedecay_temporal_query::ranking::RankedCandidate;
 
-use super::super::automatic_facts::{AutomaticFactState, record_session_automatic_facts};
+use super::super::automatic_facts::{
+    AdmittedAutomaticFact, AutomaticFactState, record_session_automatic_facts,
+};
 use super::super::run_ledger::AutomationRunLedgerRecord;
+use super::curation::evaluate_session_curation;
 use super::evidence::{
     AutomationEvidenceFilters, SESSION_REPLAY_SNIPPET_CHARS, build_session_reflector_evidence,
     build_skill_writer_evidence, serialize_automation_temporal_evidence,
@@ -963,7 +969,10 @@ async fn proposal_validation_canonicalizes_public_evidence_before_commit() {
         .unwrap();
         assert_eq!(validated.0.len(), 1);
         assert_eq!(validated.1.len(), 0);
-        let item = validated.0[0]["item"].clone();
+        let item = validated.0[0]
+            .item
+            .clone()
+            .expect("validated evidence item");
         assert_eq!(item["content"], "Canonical evidence reaches the store");
         assert_eq!(item["category"], "project");
         assert_eq!(item["tags"], json!(["automation"]));
@@ -1004,6 +1013,9 @@ async fn fact_response_envelopes_preserve_valid_siblings_and_quarantine_invalid_
             json!({"store_id": 7, "session_id": "session", "message_id": "message"}),
         ),
         ("extra proposal field", "unknown", json!(true)),
+        ("invalid trust", "trust", json!(1.1)),
+        ("foreign citation", "source_span", json!({"store_id": 8})),
+        ("missing citation", "source_span", json!({})),
     ] {
         let mut proposal = valid.clone();
         proposal["content"] = json!(format!("A proposal with {label} must not become memory"));
@@ -1066,7 +1078,7 @@ async fn fact_response_envelopes_preserve_valid_siblings_and_quarantine_invalid_
                     .is_some_and(|reason| !reason.is_empty())
             );
         }
-        let canonical_item = &accepted[0]["item"];
+        let canonical_item = accepted[0].item.as_ref().expect("validated evidence item");
         assert_eq!(canonical_item["content"], valid["content"]);
         assert_eq!(canonical_item["tags"], json!([]));
         assert_eq!(canonical_item["entities"], json!([]));
@@ -1074,6 +1086,40 @@ async fn fact_response_envelopes_preserve_valid_siblings_and_quarantine_invalid_
         assert_eq!(canonical_item["source_span"], json!({"store_id": 7}));
         serde_json::from_value::<MemoryAutomationFactEvidenceItemV1>(canonical_item.clone())
             .expect("accepted evidence retains the public receipt grammar");
+
+        let config = crate::automation::config::AutomationSettingsV1::default();
+        let mut curation_authority = CurationApplyAuthorityV1 {
+            actor_id: ActorId::new("automation:session-reflector").unwrap(),
+            project_id: None,
+            profile_id: UserProfileId::new("profile.fact-envelope").unwrap(),
+            configuration_revision_id: ConfigurationRevisionId::new("config.fact-envelope.v1")
+                .unwrap(),
+        };
+        let decision = evaluate_session_curation(
+            &config,
+            &curation_authority,
+            Some(&evidence_hash),
+            &accepted,
+        )
+        .unwrap();
+        assert!(decision.allows_apply());
+        assert_eq!(
+            decision.output_digest,
+            canonical_sha256(&serde_json::to_value(&accepted).unwrap()).unwrap(),
+            "typed admission retains the policy identity of the report JSON"
+        );
+        curation_authority.actor_id = ActorId::new("automation:skill-writer").unwrap();
+        assert!(
+            !evaluate_session_curation(
+                &config,
+                &curation_authority,
+                Some(&evidence_hash),
+                &accepted,
+            )
+            .unwrap()
+            .allows_apply(),
+            "a typed fact does not grant application authority"
+        );
 
         let applied = record_session_automatic_facts(
             &memory,
@@ -1183,7 +1229,7 @@ async fn fact_response_envelopes_preserve_unicode_content_and_evidence_limits() 
         .await
         .unwrap();
         assert_eq!(accepted.len(), 1, "{task:?}: {quarantined:?}");
-        assert_eq!(accepted[0]["item"], valid);
+        assert_eq!(accepted[0].item.as_ref(), Some(&valid));
         assert_eq!(quarantined.len(), proposals.len() - 1, "{task:?}");
         for (rejection, proposal) in quarantined.iter().zip(&proposals[1..]) {
             assert_eq!(&rejection["item"], proposal, "{task:?}");
@@ -1213,17 +1259,19 @@ async fn automatic_session_curation_records_one_terminal_effect() {
         let interrupted = Arc::clone(&interrupted);
         Arc::new(move || interrupted.load(std::sync::atomic::Ordering::Acquire))
     });
-    let accepted = json!({
-        "add_fact_request": {
-            "content": "Validated session curation records one terminal effect",
-            "category": "project",
-            "source_label": "automation-test",
-            "tags": ["automation"],
-            "entities": ["TraceDecay"],
-            "trust": 0.9,
-            "metadata": {}
-        }
-    });
+    let accepted = AdmittedAutomaticFact {
+        add_fact_request: ProjectMemoryFactAddRequest {
+            content: "Validated session curation records one terminal effect".to_owned(),
+            category: FactCategoryV1::Project,
+            source_label: Some("automation-test".to_owned()),
+            tags: vec!["automation".to_owned()],
+            entities: vec!["TraceDecay".to_owned()],
+            trust: Some(Confidence::new(0.9).unwrap()),
+            metadata: json!({}),
+        },
+        item: None,
+        validation: None,
+    };
     let applied = record_session_automatic_facts(
         &memory,
         &run_control,
