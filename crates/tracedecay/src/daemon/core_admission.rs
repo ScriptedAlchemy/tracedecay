@@ -16,7 +16,7 @@ use crate::daemon::core_handshake::binary_version;
 use crate::daemon::wire_io::{read_line_handling_wire_oversized, write_daemon_response};
 use tracedecay_contracts::ApplicationProblem;
 use tracedecay_daemon_protocol::DAEMON_SHUTDOWN_METHOD;
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::Result;
 use tracedecay_mcp::ErrorCode;
 use tracedecay_mcp::server::{McpMethod, classify_mcp_method};
 use tracedecay_mcp::{BrokerStreamTransport, JsonRpcResponse};
