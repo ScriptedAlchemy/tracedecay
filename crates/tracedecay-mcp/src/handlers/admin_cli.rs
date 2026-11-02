@@ -30,6 +30,8 @@ use tracedecay_project::project::TraceDecay;
 
 use crate::handlers::SessionAuthorities;
 
+mod git_sync_graph;
+
 struct AdminCliContext<'a> {
     global_db: &'a RegisteredGlobalDbLeaseV1,
     accounting_db: Option<&'a RegisteredGlobalDb>,
@@ -774,6 +776,16 @@ async fn execute_session_sync(
         cancellation,
         command,
     );
+    let project = context.require_project()?;
+    let registry = project.store_runtime_registry();
+    if let Some(outcome) = git_sync_graph::settle_git_sync_graph(
+        &request,
+        registry.settle_project_memory_graph(&project_id),
+    )
+    .await?
+    {
+        return Ok(outcome.into());
+    }
     Ok(service.execute(request).await.into())
 }
 
