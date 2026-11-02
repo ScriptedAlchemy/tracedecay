@@ -248,11 +248,13 @@ async fn seed_activated_skill(profile_root: &Path) {
 
 async fn seed_applied_fact_database(database_path: &Path) -> tracedecay_runtime_core::db::Database {
     use crate::automation::AutomationRunControl;
-    use crate::automation::automatic_facts::{AutomaticFactState, record_session_automatic_facts};
-    use tracedecay_domain::FactOwnerV1;
+    use crate::automation::automatic_facts::{
+        AdmittedAutomaticFact, AutomaticFactState, record_session_automatic_facts,
+    };
+    use tracedecay_domain::{Confidence, FactCategoryV1, FactOwnerV1};
     use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
     use tracedecay_session_memory::fact_store::DatabaseFactStore;
-    use tracedecay_session_memory::memory::MemoryApplication;
+    use tracedecay_session_memory::memory::{MemoryApplication, ProjectMemoryFactAddRequest};
 
     crate::register_test_schema_installer();
     let authority =
@@ -276,17 +278,19 @@ async fn seed_applied_fact_database(database_path: &Path) -> tracedecay_runtime_
         &run_control,
         "run-outcome-lock",
         None,
-        &[json!({
-            "add_fact_request": {
-                "content": "Keep automation outcome snapshots atomically consistent",
-                "category": "project",
-                "source_label": "outcome-test",
-                "tags": ["automation"],
-                "entities": ["TraceDecay"],
-                "trust": 0.9,
-                "metadata": {}
-            }
-        })],
+        &[AdmittedAutomaticFact {
+            add_fact_request: ProjectMemoryFactAddRequest {
+                content: "Keep automation outcome snapshots atomically consistent".to_owned(),
+                category: FactCategoryV1::Project,
+                source_label: Some("outcome-test".to_owned()),
+                tags: vec!["automation".to_owned()],
+                entities: vec!["TraceDecay".to_owned()],
+                trust: Some(Confidence::new(0.9).unwrap()),
+                metadata: json!({}),
+            },
+            item: None,
+            validation: None,
+        }],
     )
     .await
     .unwrap();

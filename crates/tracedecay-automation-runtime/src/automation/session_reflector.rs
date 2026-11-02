@@ -16,7 +16,7 @@ use tracedecay_store::{
     ProjectMemoryFactSearchQuery, ProjectMemoryFactStore,
 };
 
-use super::normalized_non_empty;
+use super::{automatic_facts::AdmittedAutomaticFact, normalized_non_empty};
 use crate::automation::lifecycle::AutomationRunControl;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_session_memory::memory::MemoryApplication;
@@ -39,7 +39,7 @@ pub(crate) async fn validate_fact_candidates<A: ProjectMemoryFactStore>(
     run_control: &AutomationRunControl,
     proposals: &[Value],
     evidence: &Value,
-) -> Result<(Vec<Value>, Vec<Value>)> {
+) -> Result<(Vec<AdmittedAutomaticFact>, Vec<Value>)> {
     let citations = EvidenceCitationSet::from_evidence(evidence);
     let mut accepted = Vec::new();
     let mut quarantined = Vec::new();
@@ -60,7 +60,7 @@ pub(crate) async fn validate_fact_candidates<A: ProjectMemoryFactStore>(
 }
 
 enum FactCandidateValidation {
-    Accepted(Value),
+    Accepted(AdmittedAutomaticFact),
     Quarantined(Value),
 }
 
@@ -360,10 +360,10 @@ async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
             "trust_reason": reason,
         }),
     };
-    Ok(FactCandidateValidation::Accepted(json!({
-        "add_fact_request": request,
-        "item": evidence_item,
-        "validation": {
+    Ok(FactCandidateValidation::Accepted(AdmittedAutomaticFact {
+        add_fact_request: request,
+        item: Some(evidence_item),
+        validation: Some(json!({
             "status": "accepted",
             "dedupe": {
                 "nearest": nearest,
@@ -373,8 +373,8 @@ async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
                 "source": "apply_time_add_fact_diff",
                 "note": "TraceDecay::add_fact reports possible_conflict during automatic apply",
             },
-        },
-    })))
+        })),
+    }))
 }
 
 /// Trust syntax is decoded by the proposal contract. Bucket policy remains

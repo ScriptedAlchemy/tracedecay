@@ -6,7 +6,7 @@ use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
 use tracedecay_store::ProjectMemoryFactStore;
 
 use crate::automation::automatic_facts::{
-    AutomaticFactReceipt, AutomaticFactState, SettledAutomaticFactReceipt,
+    AdmittedAutomaticFact, AutomaticFactReceipt, AutomaticFactState, SettledAutomaticFactReceipt,
     record_session_automatic_facts,
 };
 use crate::automation::backend::{
@@ -312,7 +312,7 @@ pub(super) async fn validate_session_fact_candidates<A: ProjectMemoryFactStore>(
     run_control: &AutomationRunControl,
     proposals: &[Value],
     evidence: &Value,
-) -> Result<(Vec<Value>, Vec<Value>)> {
+) -> Result<(Vec<AdmittedAutomaticFact>, Vec<Value>)> {
     validate_fact_candidates(memory, run_control, proposals, evidence).await
 }
 
@@ -407,7 +407,9 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
     let admitted_facts = if curation_decision.allows_apply() {
         accepted_facts.as_slice()
     } else {
-        terminal_rejections.extend(accepted_facts.iter().cloned());
+        for fact in &accepted_facts {
+            terminal_rejections.push(serde_json::to_value(fact)?);
+        }
         &[]
     };
     let admitted_count = admitted_facts.len();

@@ -1,3 +1,4 @@
+use serde::Serialize;
 use serde_json::{Value, json};
 use tracedecay_automation::backend::extract_json_object_prefix;
 use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
@@ -7,6 +8,7 @@ use tracedecay_policy::{
     CurationApplySubjectV1, CurationValidationDispositionV1, evaluate_curation_apply,
 };
 
+use crate::automation::automatic_facts::AdmittedAutomaticFact;
 use crate::automation::backend::{
     AgentTaskKind, AgentTaskResponse, agent_task_contract, prompt_version, task_key,
 };
@@ -20,7 +22,7 @@ pub(super) fn evaluate_session_curation(
     config: &AutomationSettingsV1,
     authority: &CurationApplyAuthorityV1,
     evidence_hash: Option<&str>,
-    accepted_facts: &[Value],
+    accepted_facts: &[AdmittedAutomaticFact],
 ) -> Result<CurationApplyDecisionV1> {
     evaluate_curation_output(
         config,
@@ -48,11 +50,11 @@ pub(super) fn evaluate_skill_curation(
     )
 }
 
-fn evaluate_curation_output(
+fn evaluate_curation_output<T: Serialize>(
     config: &AutomationSettingsV1,
     authority: &CurationApplyAuthorityV1,
     evidence_hash: Option<&str>,
-    output: &[Value],
+    output: &[T],
     subject: CurationApplySubjectV1,
     identity_label: &str,
 ) -> Result<CurationApplyDecisionV1> {
