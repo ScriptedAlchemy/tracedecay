@@ -54,12 +54,11 @@ pub(super) async fn settle_git_sync_graph(
     if let Some(outcome) = admission_refusal(request, observed_at) {
         return Ok(Some(outcome));
     }
-    let remaining = u64::try_from(
-        i128::from(request.deadline().expires_at.0) - i128::from(observed_at.0),
-    )
-    .map_err(|_| TraceDecayError::Config {
-        message: "session Git sync deadline is outside the supported range".to_owned(),
-    })?;
+    let remaining =
+        u64::try_from(i128::from(request.deadline().expires_at.0) - i128::from(observed_at.0))
+            .map_err(|_| TraceDecayError::Config {
+                message: "session Git sync deadline is outside the supported range".to_owned(),
+            })?;
     let deadline = started
         .checked_add(Duration::from_micros(remaining))
         .ok_or_else(|| TraceDecayError::Config {
@@ -148,9 +147,7 @@ mod tests {
     async fn expired_or_cancelled_repeat_replays_the_completed_receipt() {
         for cancelled in [false, true] {
             let request = request(
-                SessionSyncCommandV1::SynchronizeGit(
-                    SessionGitSyncV1::new(0, 1, false).unwrap(),
-                ),
+                SessionSyncCommandV1::SynchronizeGit(SessionGitSyncV1::new(0, 1, false).unwrap()),
                 if cancelled {
                     UtcMicros(now_micros().0 + 30_000_000)
                 } else {
@@ -180,12 +177,8 @@ mod tests {
             let status = completion.clone();
             let replay = completion.clone();
             assert_eq!(
-                replay_existing_git_sync(
-                    &request,
-                    async move { status },
-                    async move { replay },
-                )
-                .await,
+                replay_existing_git_sync(&request, async move { status }, async move { replay },)
+                    .await,
                 Some(completion),
                 "a repeated Git write must preserve its receipt"
             );

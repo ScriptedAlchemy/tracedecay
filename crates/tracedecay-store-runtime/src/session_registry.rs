@@ -2890,7 +2890,10 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// Awaits settlement (attached or detached) of the project memory graph
     /// that `project_memory` opens as bounded background work.
     pub async fn settle_project_memory_graph(&self, project_id: &ProjectId) -> Result<()> {
-        let mounted = self.project_owners.wait_for_memory_graph(project_id).await?;
+        let mounted = self
+            .project_owners
+            .wait_for_memory_graph(project_id)
+            .await?;
         if mounted {
             // The background opener publishes settlement before binding project
             // sessions. Complete the same idempotent bind before a Git sync can
