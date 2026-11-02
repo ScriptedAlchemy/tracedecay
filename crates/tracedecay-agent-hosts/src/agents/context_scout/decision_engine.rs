@@ -907,18 +907,15 @@ mod tests {
             )],
         );
         let server = fake_decision_engine(200, &body, Duration::ZERO);
-        let answers = answered(client(&server.url).ask_blocking(&request(
-            "state",
-            vec![choice("route", &["none", "code"])],
-        )));
+        let answers = answered(
+            client(&server.url)
+                .ask_blocking(&request("state", vec![choice("route", &["none", "code"])])),
+        );
         assert_eq!(
             answers.answers["route"],
             DecisionAnswerV1::Choice {
                 chosen: Some("none".to_owned()),
-                probabilities: BTreeMap::from([
-                    ("code".to_owned(), 0.0),
-                    ("none".to_owned(), 1.0)
-                ]),
+                probabilities: BTreeMap::from([("code".to_owned(), 0.0), ("none".to_owned(), 1.0)]),
             }
         );
     }
