@@ -68,7 +68,8 @@ pub enum DecisionAnswerV1 {
     /// Probability in `[0, 1]`.
     Noul(f64),
     /// `chosen` is the server's pick when it named one; `probabilities` holds
-    /// every probability the server reported for a requested option.
+    /// exactly one bounded probability for every requested option. Missing
+    /// values are never inferred, and unrequested options are rejected.
     Choice {
         chosen: Option<String>,
         probabilities: BTreeMap<String, f64>,
@@ -461,20 +462,16 @@ fn parse_answer(
             {
                 return None;
             }
-            let reported = ["probs", "probabilities", "options"]
-                .iter()
-                .find_map(|key| answer.get(*key))
-                .map(|value| value.as_object())
-                .map(|map| map.map(|map| choice_probabilities(map, options)));
-            let probabilities = match reported {
-                Some(Some(Some(probabilities))) => probabilities,
-                // A reported map that is not an object, or that carries an
-                // out-of-range value, poisons the whole answer.
-                Some(_) => return None,
-                None => BTreeMap::new(),
-            };
-            if chosen.is_none() && probabilities.is_empty() {
-                return None;
+            let mut reported = ["probs", "probabilities", "options"]
+                .into_iter()
+                .filter_map(|key| answer.get(key));
+            let probabilities = choice_probabilities(reported.next()?.as_object()?, options)?;
+            // Aliases describe the same answer. A second spelling cannot
+            // hide a malformed map or contradict the first one's values.
+            for alias in reported {
+                if choice_probabilities(alias.as_object()?, options)? != probabilities {
+                    return None;
+                }
             }
             Some(DecisionAnswerV1::Choice {
                 chosen,
@@ -493,18 +490,19 @@ fn parse_answer(
     }
 }
 
-/// Probabilities for the requested options; keys the request did not name are
-/// ignored, a requested option with a bad value voids the map.
+/// Exactly the requested options, each with a probability in `[0, 1]`.
+/// Missing, extra or invalid entries void the answer rather than being
+/// dropped or filled with an invented probability.
 fn choice_probabilities(
     reported: &Map<String, Value>,
     options: &[String],
 ) -> Option<BTreeMap<String, f64>> {
+    if reported.len() != options.len() {
+        return None;
+    }
     let mut probabilities = BTreeMap::new();
-    for (label, value) in reported {
-        if !options.contains(label) {
-            continue;
-        }
-        probabilities.insert(label.clone(), unit_interval(value)?);
+    for label in options {
+        probabilities.insert(label.clone(), unit_interval(reported.get(label)?)?);
     }
     Some(probabilities)
 }
@@ -822,6 +820,107 @@ mod tests {
         };
         assert_eq!(*chosen, None);
         assert_eq!(probabilities.len(), 2);
+    }
+
+    #[test]
+    fn choice_answers_require_exact_option_coverage() {
+        let cases = [
+            json!({"choice": "code"}),
+            json!({"choice": "code", "probs": {}}),
+            json!({"choice": "code", "probs": {"code": 0.7}}),
+            json!({"probabilities": {"memory": 0.3}}),
+            json!({"options": {"code": 0.7, "other": 0.3}}),
+            json!({"probs": {"code": 0.7, "memory": 0.3, "other": 0.0}}),
+            json!({"probs": {"code": "0.7", "memory": 0.3}}),
+        ];
+        for answer in cases {
+            let body = json!({"answers": {"route": answer}}).to_string();
+            let server = fake_decision_engine(200, &body, Duration::ZERO);
+            assert_eq!(
+                client(&server.url).ask_blocking(&request(
+                    "state",
+                    vec![choice("route", &["code", "memory"])],
+                )),
+                DecisionEngineOutcomeV1::Malformed,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn choice_probability_aliases_must_agree_and_be_well_formed() {
+        let complete = json!({"code": 0.7, "memory": 0.3});
+        let body = json!({"answers": {"route": {
+            "probs": complete,
+            "probabilities": complete,
+            "options": complete
+        }}})
+        .to_string();
+        let server = fake_decision_engine(200, &body, Duration::ZERO);
+        let answers = answered(client(&server.url).ask_blocking(&request(
+            "state",
+            vec![choice("route", &["memory", "code"])],
+        )));
+        assert_eq!(
+            answers.answers["route"],
+            DecisionAnswerV1::Choice {
+                chosen: None,
+                probabilities: BTreeMap::from([
+                    ("code".to_owned(), 0.7),
+                    ("memory".to_owned(), 0.3)
+                ]),
+            }
+        );
+
+        for alias in [
+            json!({"code": 0.2, "memory": 0.8}),
+            json!({"code": 0.7}),
+            json!({"code": 0.7, "memory": 0.3, "other": 0.0}),
+            json!({"code": 1.2, "memory": 0.3}),
+            Value::Null,
+            json!([0.7, 0.3]),
+        ] {
+            let body = json!({"answers": {"route": {
+                "probs": complete,
+                "probabilities": alias
+            }}})
+            .to_string();
+            let server = fake_decision_engine(200, &body, Duration::ZERO);
+            assert_eq!(
+                client(&server.url).ask_blocking(&request(
+                    "state",
+                    vec![choice("route", &["code", "memory"])],
+                )),
+                DecisionEngineOutcomeV1::Malformed,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_none_option_preserves_boundary_probabilities() {
+        let body = answers_body(
+            None,
+            &[(
+                "route",
+                choice_answer(Some("none"), "options", &[("code", 0.0), ("none", 1.0)]),
+            )],
+        );
+        let server = fake_decision_engine(200, &body, Duration::ZERO);
+        let answers = answered(client(&server.url).ask_blocking(&request(
+            "state",
+            vec![choice("route", &["none", "code"])],
+        )));
+        assert_eq!(
+            answers.answers["route"],
+            DecisionAnswerV1::Choice {
+                chosen: Some("none".to_owned()),
+                probabilities: BTreeMap::from([
+                    ("code".to_owned(), 0.0),
+                    ("none".to_owned(), 1.0)
+                ]),
+            }
+        );
     }
 
     #[test]
