@@ -86,8 +86,7 @@ where
             self.lifecycle
                 .gateway
                 .bind_dynamic_diagnostics(false, false, false);
-            self.diagnostics.workspace_snapshots.clear();
-            self.diagnostics.workspace_failures.clear();
+            self.clear_workspace_diagnostics();
             match self.dynamic_diagnostics.state.clone() {
                 DynamicDiagnosticState::Registering { request_id } => {
                     self.require_dynamic_diagnostic_unregistration(Some(request_id));

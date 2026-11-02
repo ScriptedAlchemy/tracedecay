@@ -671,6 +671,10 @@ impl DiagnosticSnapshotPort for DiagnosticSnapshotAdapter {
     ) -> DiagnosticRefreshAdmission {
         self.workspace.request(workspace, root, overlays)
     }
+
+    fn retire_workspace_refresh(&self, root: &AdmittedRoot, operation_id: &str) -> bool {
+        self.workspace.retire(root, operation_id)
+    }
 }
 
 /// A scheduled document diagnostic operation. The protocol session turns a

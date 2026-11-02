@@ -1,6 +1,15 @@
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use std::task::{Context, Poll, Waker};
 
+use crate::gateway::{LspRuntimeFailure, LspRuntimeFuture, LspRuntimeSpawner, LspRuntimeTask};
+use crate::overlay::{
+    CanonicalDiagnosticRefreshRequest, CanonicalDiagnosticSnapshotAuthority,
+    DiagnosticSnapshotAdapter,
+};
+use crate::workspace_diagnostics::{
+    CanonicalWorkspaceDiagnosticRefreshRequest, MAX_WORKSPACE_DIAGNOSTIC_FANOUT,
+};
 use tracedecay_domain::test_fixtures::digest;
 
 fn initialize_workspace<D>(
@@ -716,4 +725,255 @@ fn partial_workspace_retry_replaces_roots_from_the_changed_generation() {
         .filter_map(|item| item["message"].as_str())
         .collect::<BTreeSet<_>>();
     assert_eq!(messages, BTreeSet::from(["new-left", "new-right"]));
+}
+
+#[derive(Default)]
+struct ControlledWorkspaceRuntime(Mutex<Vec<Arc<ControlledWorkspaceTask>>>);
+
+struct ControlledWorkspaceTask {
+    future: Mutex<Option<LspRuntimeFuture<()>>>,
+    aborted: AtomicBool,
+}
+
+impl LspRuntimeTask for Arc<ControlledWorkspaceTask> {
+    fn abort(&self) {
+        // Aborting result ownership does not settle accepted analyzer work.
+        // Tests can finish it later and observe that its result is discarded.
+        self.aborted.store(true, Ordering::Release);
+    }
+}
+
+impl LspRuntimeSpawner for ControlledWorkspaceRuntime {
+    fn spawn(&self, future: LspRuntimeFuture<()>) -> Box<dyn LspRuntimeTask> {
+        let task = Arc::new(ControlledWorkspaceTask {
+            future: Mutex::new(Some(future)),
+            aborted: AtomicBool::new(false),
+        });
+        self.0.lock().unwrap().push(Arc::clone(&task));
+        Box::new(task)
+    }
+}
+
+impl ControlledWorkspaceRuntime {
+    fn complete(&self, index: usize) {
+        let task = Arc::clone(&self.0.lock().unwrap()[index]);
+        let mut future = task.future.lock().unwrap().take().unwrap();
+        assert_eq!(
+            future
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(())
+        );
+    }
+
+    fn started(&self) -> usize {
+        self.0.lock().unwrap().len()
+    }
+
+    fn aborted(&self, index: usize) -> bool {
+        self.0.lock().unwrap()[index]
+            .aborted
+            .load(Ordering::Acquire)
+    }
+}
+
+struct WorkspaceAuthority;
+
+impl CanonicalDiagnosticSnapshotAuthority for WorkspaceAuthority {
+    fn refresh(
+        &self,
+        _request: CanonicalDiagnosticRefreshRequest,
+    ) -> LspRuntimeFuture<Result<GenerationDiagnostics, LspRuntimeFailure>> {
+        Box::pin(async { Err(LspRuntimeFailure::new("document-refresh-finished")) })
+    }
+
+    fn supports_workspace_diagnostics(&self) -> bool {
+        true
+    }
+
+    fn refresh_workspace(
+        &self,
+        _request: CanonicalWorkspaceDiagnosticRefreshRequest,
+    ) -> LspRuntimeFuture<Result<WorkspaceGenerationDiagnostics, LspRuntimeFailure>> {
+        Box::pin(async {
+            Ok(WorkspaceGenerationDiagnostics {
+                code_generation_id: "current-generation".to_owned(),
+                snapshot_digest: digest('f'),
+                documents: Vec::new(),
+            })
+        })
+    }
+}
+
+#[test]
+fn workspace_root_replacement_releases_abandoned_operation_capacity() {
+    let runtime = Arc::new(ControlledWorkspaceRuntime::default());
+    let adapter = Arc::new(DiagnosticSnapshotAdapter::new(
+        runtime.clone(),
+        Arc::new(WorkspaceAuthority),
+    ));
+    let primary = AdmittedRoot::authorized("file:///primary", digest('a'));
+    let mut secondary = AdmittedRoot::authorized("file:///secondary-0", digest('b'));
+    let mut session = initialize_workspace(
+        vec![primary.clone(), secondary.clone()],
+        Arc::clone(&adapter),
+    );
+
+    for ordinal in 0..MAX_WORKSPACE_DIAGNOSTIC_FANOUT * 2 {
+        let first_task = runtime.started();
+        let pending = session.pull_workspace_diagnostics(&json!({})).unwrap_err();
+        assert_eq!(pending.data["coverage"], "workspace-roots-ready=0/2");
+        assert_eq!(runtime.started(), first_task + 2);
+        assert_eq!(session.diagnostics.workspace_refreshes.len(), 2);
+
+        let next =
+            AdmittedRoot::authorized(format!("file:///secondary-{}", ordinal + 1), digest('b'));
+        session
+            .handle_workspace_folders_changed(&json!({ "event": {
+                "added": [{ "uri": next.uri() }],
+                "removed": [{ "uri": secondary.uri() }],
+            }}))
+            .unwrap();
+        let mutation = session.pending_workspace_folder_mutation().unwrap();
+        session
+            .apply_workspace_folder_mutation(
+                &mutation,
+                AuthorizedLspWorkspace::new(
+                    Some(digest(if ordinal % 2 == 0 { 'd' } else { 'c' })),
+                    vec![primary.clone(), next.clone()],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(session.diagnostics.workspace_refreshes.is_empty());
+        for task in first_task..first_task + 2 {
+            assert!(runtime.aborted(task));
+            runtime.complete(task);
+        }
+        assert!(matches!(
+            adapter.workspace_diagnostics(session.workspace(), &secondary, &[]),
+            WorkspaceDiagnosticSnapshotOutcome::Partial { .. }
+        ));
+        secondary = next;
+    }
+}
+
+#[test]
+fn workspace_overlay_retirement_is_exact_and_discards_late_completion() {
+    let runtime = Arc::new(ControlledWorkspaceRuntime::default());
+    let adapter = Arc::new(DiagnosticSnapshotAdapter::new(
+        runtime.clone(),
+        Arc::new(WorkspaceAuthority),
+    ));
+    let root = AdmittedRoot::authorized("file:///root", digest('a'));
+    let mut session = initialize_workspace(vec![root.clone()], Arc::clone(&adapter));
+    let uri = "file:///root/lib.rs";
+    session
+        .handle_did_open(
+            &json!({ "textDocument": {
+                "uri": uri, "languageId": "rust", "version": 1, "text": "fn first() {}"
+            }}),
+            2,
+        )
+        .unwrap();
+    assert!(session.pull_workspace_diagnostics(&json!({})).is_err());
+    let old_identity = session.diagnostics.workspace_refreshes[root.uri()]
+        .identity
+        .clone();
+    assert!(session.pull_workspace_diagnostics(&json!({})).is_err());
+    assert_eq!(runtime.started(), 1, "unchanged refreshes must coalesce");
+
+    session
+        .handle_did_change(
+            &json!({
+                "textDocument": { "uri": uri, "version": 2 },
+                "contentChanges": [{ "text": "fn second() {}" }],
+            }),
+            3,
+        )
+        .unwrap();
+    assert!(runtime.aborted(0));
+    assert!(session.diagnostics.workspace_refreshes.is_empty());
+    assert!(session.pull_workspace_diagnostics(&json!({})).is_err());
+    let current = session.diagnostics.workspace_refreshes[root.uri()]
+        .identity
+        .clone();
+    assert_ne!(old_identity.operation_id, current.operation_id);
+    assert!(!adapter.retire_workspace_refresh(&root, &old_identity.operation_id));
+    assert!(!adapter.retire_workspace_refresh(
+        &AdmittedRoot::authorized(root.uri(), digest('b')),
+        &current.operation_id,
+    ));
+
+    runtime.complete(0);
+    let overlays = session
+        .overlays()
+        .snapshots_for_root(session.workspace(), &root);
+    assert_eq!(
+        adapter.workspace_diagnostics(session.workspace(), &root, &overlays),
+        WorkspaceDiagnosticSnapshotOutcome::Refreshing(current),
+    );
+    assert!(!runtime.aborted(1));
+    runtime.complete(1);
+    assert_eq!(
+        session.pull_workspace_diagnostics(&json!({})).unwrap()["tracedecay"]["complete"],
+        true
+    );
+    assert!(session.diagnostics.workspace_refreshes.is_empty());
+
+    assert!(session.pull_workspace_diagnostics(&json!({})).is_err());
+    session
+        .handle_did_close(&json!({ "textDocument": { "uri": uri } }), 4)
+        .unwrap();
+    assert!(runtime.aborted(2));
+    runtime.complete(2);
+    assert!(matches!(
+        adapter.workspace_diagnostics(session.workspace(), &root, &[]),
+        WorkspaceDiagnosticSnapshotOutcome::Partial { .. }
+    ));
+}
+
+#[test]
+fn ending_a_session_retires_operations_even_when_the_provider_outlives_it() {
+    let root = AdmittedRoot::authorized("file:///root", digest('a'));
+    for ending in ["shutdown", "expire", "drop"] {
+        let runtime = Arc::new(ControlledWorkspaceRuntime::default());
+        let adapter = Arc::new(DiagnosticSnapshotAdapter::new(
+            runtime.clone(),
+            Arc::new(WorkspaceAuthority),
+        ));
+        let mut session = initialize_workspace(vec![root.clone()], Arc::clone(&adapter));
+        let workspace = session.workspace().clone();
+        assert!(session.pull_workspace_diagnostics(&json!({})).is_err());
+        assert_eq!(
+            session.request_diagnostic_refresh("file:///root/lib.rs", None, None),
+            None
+        );
+        assert_eq!(runtime.started(), 2);
+        match ending {
+            "shutdown" => session.handle_shutdown_request(json!(2)),
+            "expire" => session.expire(),
+            "drop" => drop(session),
+            _ => unreachable!(),
+        }
+        for task in 0..2 {
+            assert!(
+                runtime.aborted(task),
+                "{ending} must retire operation {task}"
+            );
+            runtime.complete(task);
+        }
+        assert!(matches!(
+            adapter.workspace_diagnostics(&workspace, &root, &[]),
+            WorkspaceDiagnosticSnapshotOutcome::Partial { .. }
+        ));
+        assert!(matches!(
+            adapter.document_diagnostics(&root, "file:///root/lib.rs", None),
+            DiagnosticSnapshotOutcome::Partial { .. }
+        ));
+        assert!(matches!(
+            adapter.request_workspace_refresh(&workspace, &root, &[]),
+            DiagnosticRefreshAdmission::Started(_)
+        ));
+    }
 }

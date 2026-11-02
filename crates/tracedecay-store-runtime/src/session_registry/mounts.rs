@@ -83,7 +83,8 @@ impl SessionGraphPublicationTestGate {
     /// Awaits the graph-open task reaching the post-publication hold.
     pub async fn wait_until_blocked(&self) {
         loop {
-            let notified = self.state.blocked_notify.notified();
+            let mut notified = Box::pin(self.state.blocked_notify.notified());
+            let _ = notified.as_mut().enable();
             if self.state.blocked.load(Ordering::Acquire) {
                 return;
             }
@@ -273,6 +274,8 @@ impl DaemonSessionRuntimeRegistryV1 {
             long_lived_session_maintenance,
             #[cfg(any(test, feature = "test-helpers"))]
             session_graph_publication_gate: std::sync::Mutex::new(None),
+            #[cfg(any(test, feature = "test-helpers"))]
+            memory_graph_binding_gate: std::sync::Mutex::new(None),
         };
         let mounted_nodes: Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> =
             Box::pin(registry.mount_registered_remote_nodes());
@@ -477,6 +480,22 @@ impl DaemonSessionRuntimeRegistryV1 {
         });
         *self
             .session_graph_publication_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&state));
+        SessionGraphPublicationTestGate { state }
+    }
+
+    /// Hold the memory opener after it publishes settlement and before
+    /// its asynchronous attempt to bind to the project sessions authority.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn block_memory_graph_binding_for_test(&self) -> SessionGraphPublicationTestGate {
+        let state = Arc::new(SessionGraphPublicationTestGateState {
+            blocked: AtomicBool::new(false),
+            blocked_notify: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        *self
+            .memory_graph_binding_gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&state));
         SessionGraphPublicationTestGate { state }
@@ -793,6 +812,12 @@ impl DaemonSessionRuntimeRegistryV1 {
             _ => None,
         };
         let project_owners = self.project_owners.clone();
+        #[cfg(any(test, feature = "test-helpers"))]
+        let task_memory_graph_binding_gate = self
+            .memory_graph_binding_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let retained = self.retained_hook_tasks.retain(
             "memory-graph-open",
             &graph_open_task_key,
@@ -854,6 +879,10 @@ impl DaemonSessionRuntimeRegistryV1 {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = state;
                 task_graph_settled.notify_waiters();
+                #[cfg(any(test, feature = "test-helpers"))]
+                if let Some(gate) = task_memory_graph_binding_gate {
+                    gate.block().await;
+                }
                 if let Some(project_id) = task_project_id
                     && let Err(error) =
                         bind_ready_project_memory_graph(&project_owners, &project_id)

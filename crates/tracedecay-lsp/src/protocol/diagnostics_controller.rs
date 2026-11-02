@@ -3,7 +3,9 @@ use super::diagnostic_snapshots::{
     PendingDiagnosticRefresh, RetainedDiagnosticSnapshot,
 };
 use super::outbound_controller::{PublicationRejection, PublicationTag};
-use super::workspace_diagnostics_controller::WorkspaceDiagnosticResultIdentity;
+use super::workspace_diagnostics_controller::{
+    PendingWorkspaceDiagnosticRefresh, WorkspaceDiagnosticResultIdentity,
+};
 use super::{
     BTreeMap, ConnectionLocalRequestSequence, DaemonLspProtocolSession, DebouncedDiagnosticKind,
     Deserialize, DiagnosticMerge, DiagnosticRefreshAdmission, DiagnosticRefreshIdentity,
@@ -51,6 +53,7 @@ where
     pub(super) refresh_request: Option<LspRequestId>,
     pub(super) refresh_needed: bool,
     pub(super) active_refreshes: BTreeMap<String, PendingDiagnosticRefresh>,
+    pub(super) workspace_refreshes: BTreeMap<String, PendingWorkspaceDiagnosticRefresh>,
     pub(super) workspace_results: BTreeMap<String, WorkspaceDiagnosticResultIdentity>,
     pub(super) workspace_snapshots: BTreeMap<String, WorkspaceGenerationDiagnostics>,
     pub(super) workspace_failures: BTreeMap<String, WorkspaceDiagnosticRootFailure>,
@@ -72,9 +75,29 @@ where
             refresh_request: None,
             refresh_needed: false,
             active_refreshes: BTreeMap::new(),
+            workspace_refreshes: BTreeMap::new(),
             workspace_results: BTreeMap::new(),
             workspace_snapshots: BTreeMap::new(),
             workspace_failures: BTreeMap::new(),
+        }
+    }
+}
+
+impl<D: DiagnosticSnapshotPort> Drop for DiagnosticsController<D> {
+    fn drop(&mut self) {
+        // The provider can outlive this session through Arc or a federated
+        // adapter. Dropping the actor must still release its exact operations.
+        for (uri, pending) in &self.active_refreshes {
+            let _ = self.provider.retire_document_refresh(
+                &pending.document.root,
+                uri,
+                &pending.identity.operation_id,
+            );
+        }
+        for pending in self.workspace_refreshes.values() {
+            let _ = self
+                .provider
+                .retire_workspace_refresh(&pending.root, &pending.identity.operation_id);
         }
     }
 }

@@ -549,6 +549,12 @@ impl DiagnosticSnapshotPort for FederatedDiagnostics {
             |port| port.request_workspace_refresh(workspace, root, overlays),
         )
     }
+
+    fn retire_workspace_refresh(&self, root: &AdmittedRoot, operation_id: &str) -> bool {
+        self.roots
+            .get(root.uri())
+            .is_some_and(|port| port.retire_workspace_refresh(root, operation_id))
+    }
 }
 
 struct FederatedCancellation {
@@ -856,7 +862,9 @@ mod tests {
         assert_eq!(forwarded.deadline, Some(deadline));
     }
 
-    struct RootWorkspaceDiagnostics;
+    struct RootWorkspaceDiagnostics {
+        root_uri: &'static str,
+    }
 
     impl DiagnosticSnapshotPort for RootWorkspaceDiagnostics {
         fn document_diagnostics(
@@ -897,6 +905,10 @@ mod tests {
                 failure_class: root.uri().to_owned(),
             }
         }
+
+        fn retire_workspace_refresh(&self, root: &AdmittedRoot, operation_id: &str) -> bool {
+            root.uri() == self.root_uri && operation_id == "admitted-workspace-refresh"
+        }
     }
 
     #[test]
@@ -907,13 +919,15 @@ mod tests {
             roots: BTreeMap::from([
                 (
                     primary.uri().to_owned(),
-                    Arc::new(RootWorkspaceDiagnostics)
-                        as Arc<dyn DiagnosticSnapshotPort + Send + Sync>,
+                    Arc::new(RootWorkspaceDiagnostics {
+                        root_uri: "file:///primary",
+                    }) as Arc<dyn DiagnosticSnapshotPort + Send + Sync>,
                 ),
                 (
                     secondary.uri().to_owned(),
-                    Arc::new(RootWorkspaceDiagnostics)
-                        as Arc<dyn DiagnosticSnapshotPort + Send + Sync>,
+                    Arc::new(RootWorkspaceDiagnostics {
+                        root_uri: "file:///secondary",
+                    }) as Arc<dyn DiagnosticSnapshotPort + Send + Sync>,
                 ),
             ]),
         };
@@ -929,6 +943,12 @@ mod tests {
             provider.request_workspace_refresh(&workspace, &secondary, &[]),
             DiagnosticRefreshAdmission::Rejected { failure_class }
                 if failure_class == secondary.uri()
+        ));
+        assert!(provider.retire_workspace_refresh(&secondary, "admitted-workspace-refresh"));
+        assert!(!provider.retire_workspace_refresh(&secondary, "superseded-workspace-refresh"));
+        assert!(!provider.retire_workspace_refresh(
+            &AdmittedRoot::new("file:///unregistered"),
+            "admitted-workspace-refresh",
         ));
         assert!(matches!(
             provider.workspace_diagnostics(
