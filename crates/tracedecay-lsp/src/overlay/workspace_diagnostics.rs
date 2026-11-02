@@ -65,19 +65,26 @@ impl WorkspaceDiagnosticAdapter {
                 failure_class: "workspace-diagnostic-identity-unavailable".to_owned(),
             };
         };
+        // Admission and retirement share this lock so a completed poll cannot
+        // release the active key of a successor admitted with the same input.
+        let mut active_keys = self.active_keys();
         match self.operations.poll(&key) {
             OperationPoll::Ready {
                 metadata: _,
                 result,
             } => {
-                self.release_key(&key);
+                if active_keys.get(&key.root_uri) == Some(&key) {
+                    active_keys.remove(&key.root_uri);
+                }
                 result
             }
             OperationPoll::Pending(identity) => {
                 WorkspaceDiagnosticSnapshotOutcome::Refreshing(identity)
             }
             OperationPoll::Dropped(_) => {
-                self.release_key(&key);
+                if active_keys.get(&key.root_uri) == Some(&key) {
+                    active_keys.remove(&key.root_uri);
+                }
                 WorkspaceDiagnosticSnapshotOutcome::Failed {
                     code_generation_id: None,
                     failure_class: "workspace-diagnostic-operation-dropped".to_owned(),
@@ -104,15 +111,25 @@ impl WorkspaceDiagnosticAdapter {
         let Some(key) = workspace_key(workspace, root, overlays) else {
             return rejected("workspace-diagnostic-identity-unavailable");
         };
-        self.adopt_key(&key);
+        // Hold ownership through admission: otherwise a superseding request
+        // can cancel before its predecessor has actually entered the table.
+        let mut active_keys = self.active_keys();
+        if let Some(previous) = active_keys
+            .get(&key.root_uri)
+            .filter(|previous| *previous != &key)
+        {
+            self.operations.cancel(previous);
+            active_keys.remove(&key.root_uri);
+        }
         let request = CanonicalWorkspaceDiagnosticRefreshRequest {
             workspace: workspace.clone(),
             root: root.clone(),
             overlays: overlays.to_vec(),
         };
         let authority = Arc::clone(&self.authority);
-        let admission: Result<_, tracedecay_daemon_protocol::SequenceExhausted> =
-            self.operations.admit_with(key, self.runtime.as_ref(), || {
+        let admission: Result<_, tracedecay_daemon_protocol::SequenceExhausted> = self
+            .operations
+            .admit_with(key.clone(), self.runtime.as_ref(), || {
                 let operation_id = self
                     .next_operation
                     .next_string("lsp-workspace-diagnostic-")?;
@@ -144,9 +161,11 @@ impl WorkspaceDiagnosticAdapter {
             });
         match admission {
             Ok(OperationAdmission::Started(identity)) => {
+                active_keys.insert(key.root_uri.clone(), key);
                 DiagnosticRefreshAdmission::Started(identity)
             }
             Ok(OperationAdmission::Existing(identity)) => {
+                active_keys.insert(key.root_uri.clone(), key);
                 DiagnosticRefreshAdmission::AlreadyRunning(identity)
             }
             Ok(OperationAdmission::Saturated) => rejected("workspace-diagnostic-capacity"),
@@ -160,23 +179,17 @@ impl WorkspaceDiagnosticAdapter {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn adopt_key(&self, key: &WorkspaceDiagnosticOperationKey) {
+    pub(super) fn retire(&self, root: &AdmittedRoot, operation_id: &str) -> bool {
         let mut active_keys = self.active_keys();
-        if let Some(previous) = active_keys
-            .get(&key.root_uri)
-            .filter(|previous| *previous != key)
-            .cloned()
-        {
-            self.operations.cancel(&previous);
+        let retired = self.operations.cancel_matching(|key, identity| {
+            key.root_uri == root.uri()
+                && key.scope_digest.as_ref() == root.scope_digest()
+                && identity.operation_id == operation_id
+        });
+        if retired {
+            active_keys.remove(root.uri());
         }
-        active_keys.insert(key.root_uri.clone(), key.clone());
-    }
-
-    fn release_key(&self, key: &WorkspaceDiagnosticOperationKey) {
-        let mut active_keys = self.active_keys();
-        if active_keys.get(&key.root_uri) == Some(key) {
-            active_keys.remove(&key.root_uri);
-        }
+        retired
     }
 }
 
@@ -322,5 +335,53 @@ mod tests {
             adapter.active_keys.lock().unwrap().is_empty(),
             "the finished operation releases its active key"
         );
+    }
+
+    #[test]
+    fn saturation_keeps_only_admitted_keys_and_retirement_releases_one_slot() {
+        let adapter = WorkspaceDiagnosticAdapter::new(Arc::new(InlineSpawner), Arc::new(Authority));
+        let roots = (0..=MAX_WORKSPACE_DIAGNOSTIC_FANOUT)
+            .map(|index| AdmittedRoot::new(format!("file:///root-{index}")))
+            .collect::<Vec<_>>();
+        let mut identities = Vec::new();
+        for root in roots.iter().take(MAX_WORKSPACE_DIAGNOSTIC_FANOUT) {
+            let admission =
+                adapter.request(&AuthorizedLspWorkspace::single(root.clone()), root, &[]);
+            let DiagnosticRefreshAdmission::Started(identity) = admission else {
+                panic!("available capacity must admit a refresh: {admission:?}");
+            };
+            identities.push(identity);
+        }
+        let rejected_root = &roots[MAX_WORKSPACE_DIAGNOSTIC_FANOUT];
+        let workspace = AuthorizedLspWorkspace::single(rejected_root.clone());
+        assert_eq!(
+            adapter.request(&workspace, rejected_root, &[]),
+            rejected("workspace-diagnostic-capacity")
+        );
+        assert_eq!(adapter.active_keys().len(), MAX_WORKSPACE_DIAGNOSTIC_FANOUT);
+        assert!(adapter.retire(&roots[0], &identities[0].operation_id));
+        assert!(!adapter.retire(&roots[0], &identities[0].operation_id));
+        let DiagnosticRefreshAdmission::Started(completed) =
+            adapter.request(&workspace, rejected_root, &[])
+        else {
+            panic!("retiring one operation must release capacity");
+        };
+        assert_eq!(adapter.active_keys().len(), MAX_WORKSPACE_DIAGNOSTIC_FANOUT);
+        assert!(matches!(
+            adapter.snapshot(&workspace, rejected_root, &[]),
+            WorkspaceDiagnosticSnapshotOutcome::Failed { .. }
+        ));
+        assert_eq!(
+            adapter.active_keys().len(),
+            MAX_WORKSPACE_DIAGNOSTIC_FANOUT - 1
+        );
+        let DiagnosticRefreshAdmission::Started(successor) =
+            adapter.request(&workspace, rejected_root, &[])
+        else {
+            panic!("polling the completed operation must release capacity");
+        };
+        assert_ne!(completed.operation_id, successor.operation_id);
+        assert!(!adapter.retire(rejected_root, &completed.operation_id));
+        assert!(adapter.retire(rejected_root, &successor.operation_id));
     }
 }

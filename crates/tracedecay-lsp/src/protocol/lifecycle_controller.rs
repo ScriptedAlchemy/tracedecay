@@ -276,8 +276,7 @@ where
         self.diagnostics.refresh_request = None;
         self.diagnostics.refresh_needed = false;
         self.diagnostics.workspace_results.clear();
-        self.diagnostics.workspace_snapshots.clear();
-        self.diagnostics.workspace_failures.clear();
+        self.clear_workspace_diagnostics();
         self.context.subscriptions.clear();
         self.context.currentness.clear();
         self.context.pending_requests.clear();
@@ -290,6 +289,9 @@ where
     /// removed. Nothing here re-derives authority: the removed roots are the
     /// exact ones the owner authorized dropping.
     pub(super) fn clear_removed_workspace_root_state(&mut self, removed: &[AdmittedRoot]) {
+        for root in removed {
+            self.retire_workspace_diagnostic_refresh(root.uri());
+        }
         let belongs_to_removed_root =
             |uri: &str| removed.iter().any(|root| root.contains_document(uri));
         let diagnostic_documents = self
@@ -458,6 +460,7 @@ where
         match self.lifecycle.control.shutdown() {
             Ok(()) => {
                 self.clear_document_diagnostics();
+                self.clear_workspace_diagnostics();
                 self.diagnostics.published.clear();
                 self.diagnostics.debounce.clear();
                 let _ = self.enqueue_value(success_response(response_id, Value::Null));

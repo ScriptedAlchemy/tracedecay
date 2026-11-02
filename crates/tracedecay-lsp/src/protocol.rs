@@ -287,8 +287,7 @@ where
         self.clear_removed_workspace_root_state(&removed_roots);
         self.clear_document_diagnostics();
         self.diagnostics.published.clear();
-        self.diagnostics.workspace_snapshots.clear();
-        self.diagnostics.workspace_failures.clear();
+        self.clear_workspace_diagnostics();
         self.lifecycle.gateway.replace_workspace(workspace);
         self.pending_workspace_mutation = None;
         Ok(())
@@ -495,6 +494,7 @@ where
     fn invalidate_document(&mut self, uri: &str, root: &AdmittedRoot) {
         self.invalidate_root_diagnostics(root);
         self.invalidate_document_diagnostics(uri);
+        self.retire_workspace_diagnostic_refresh(root.uri());
         self.diagnostics.workspace_snapshots.clear();
         self.diagnostics.workspace_failures.clear();
         self.discard_document_context(uri);
