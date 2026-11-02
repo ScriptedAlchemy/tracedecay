@@ -201,18 +201,33 @@ async fn startup_refresh_coalesces_at_the_scheduler_and_waits_only_for_admission
         .await
         .expect("real scheduler publication")
         .unwrap();
-    assert_eq!(publication.project_root, dir.path().canonicalize().unwrap());
-    let generation = registry.latest_generation_id(dir.path()).await.unwrap();
+    let expected_root = dir.path().canonicalize().unwrap();
+    assert_eq!(publication.project_root, expected_root);
+    // Publication precedes the serving-seat swap. Its receipt names what
+    // was sealed; MCP must subsequently observe an actually published ID.
+    // Retain later receipts too: a watch may coalesce serving-seat changes.
+    let mut published =
+        std::collections::BTreeSet::from([publication.generation_id.as_str().to_owned()]);
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let current = reader(dir.path().to_path_buf()).await.unwrap().unwrap();
-            if current.latest_generation_id.as_deref() == Some(generation.as_str()) {
+            if current
+                .latest_generation_id
+                .as_ref()
+                .is_some_and(|generation| published.contains(generation))
+            {
                 break;
             }
-            serving
-                .changed()
-                .await
-                .expect("serving owner remains mounted");
+            tokio::select! {
+                changed = serving.changed() => {
+                    changed.expect("serving owner remains mounted");
+                }
+                publication = publications.recv() => {
+                    let publication = publication.expect("real scheduler publication");
+                    assert_eq!(publication.project_root, expected_root);
+                    published.insert(publication.generation_id.as_str().to_owned());
+                }
+            }
         }
     })
     .await
