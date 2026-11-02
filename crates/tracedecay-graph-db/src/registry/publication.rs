@@ -93,22 +93,11 @@ impl SupersededRetirementBatchV1<'_> {
     fn next(&mut self) -> Option<(GenerationLocator, GraphPublicationReplayRecordV1)> {
         self.pending.next()
     }
-}
 
-impl Drop for SupersededRetirementBatchV1<'_> {
-    fn drop(&mut self) {
-        if self.is_empty() {
-            return;
-        }
-        // Successful retirement drains the batch. This fallback releases
-        // reservations only after an error or unwind. Taking the poisoned guard
-        // leaves poison set, so ordinary reads still report the typed lock failure.
-        let mut state = self
-            .database
-            .inner
-            .verified_generations
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    /// An ordinary completion must observe a poisoned generation-state lock
+    /// as a typed error, even if the batch was fully consumed.
+    fn release_pending(&mut self) -> Result<(), GraphDbError> {
+        let mut state = self.database.wait_verified_generations_write()?;
         for (locator, _) in self.pending.as_slice() {
             if state
                 .retiring
@@ -117,6 +106,23 @@ impl Drop for SupersededRetirementBatchV1<'_> {
             {
                 state.retiring.remove(locator);
             }
+        }
+        drop(state);
+        self.pending = Vec::new().into_iter();
+        Ok(())
+    }
+}
+
+impl Drop for SupersededRetirementBatchV1<'_> {
+    fn drop(&mut self) {
+        if self.is_empty() {
+            return;
+        }
+        // An early return or unwind still releases healthy reservations.
+        // A poisoned state must stay poisoned rather than being edited through
+        // an unchecked guard; subsequent graph operations fail closed.
+        if let Err(error) = self.release_pending() {
+            tracing::warn!(%error, "abandoned graph retirement fences could not be released");
         }
     }
 }
@@ -1084,6 +1090,10 @@ impl GraphDbRegistry {
         );
         // Release unvisited fences before hibernation can retire the native
         // generation state. The current item already settled its own fence.
+        // On the success path a poisoned lock must be returned as a typed
+        // failure, not silently recovered in the batch destructor. Preserve
+        // the original retirement error when both operations fail.
+        let cleanup = selected.release_pending();
         drop(selected);
         if opened_for_retirement && let Err(error) = database.hibernate_if_lazy() {
             tracing::warn!(
@@ -1093,7 +1103,11 @@ impl GraphDbRegistry {
                 "staging engine opened for superseded retirement could not hibernate again"
             );
         }
-        receipt
+        match (receipt, cleanup) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(receipt), Ok(())) => Ok(receipt),
+        }
     }
 
     /// Runs the retirements the census selected, with the engine already in
@@ -3188,6 +3202,51 @@ mod historical_publication_reuse_tests {
                 "the successor's fence must still refuse a new reader"
             );
         }
+    }
+
+    /// A panic while holding the reader-fence state poisons the lock.
+    /// Explicit cleanup must report Unavailable; the destructor must not
+    /// silently recover the poisoned state or withdraw its reservation.
+    #[test]
+    fn abandoned_retirement_cleanup_reports_poison_without_mutating_fences() {
+        let fixture = published_fixture();
+        let database = fixture
+            .registry
+            .resolve(registration(fixture.binding.clone(), &fixture.root))
+            .unwrap();
+        let locator = GenerationLocator::new(fixture.projection.clone(), fixture.generation);
+        let reservation = Arc::new(());
+        database
+            .wait_verified_generations_write()
+            .unwrap()
+            .retiring
+            .insert(locator.clone(), Arc::clone(&reservation));
+        let mut abandoned = super::SupersededRetirementBatchV1 {
+            database: &database,
+            reservation: Arc::clone(&reservation),
+            pending: vec![(locator.clone(), fixture.authority.records[&fixture.key].clone())]
+                .into_iter(),
+        };
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _state = database.inner.verified_generations.write().unwrap();
+            panic!("poison generation-state lock during retirement");
+        }));
+        assert!(panic.is_err());
+        assert!(matches!(
+            abandoned.release_pending(),
+            Err(GraphDbError::Unavailable { .. })
+        ));
+        drop(abandoned);
+        assert!(matches!(
+            database.wait_verified_generations_write(),
+            Err(GraphDbError::Unavailable { .. })
+        ));
+        let poisoned = database.inner.verified_generations.read().unwrap_err();
+        assert!(poisoned
+            .into_inner()
+            .retiring
+            .get(&locator)
+            .is_some_and(|token| Arc::ptr_eq(token, &reservation)));
     }
 
     #[test]
