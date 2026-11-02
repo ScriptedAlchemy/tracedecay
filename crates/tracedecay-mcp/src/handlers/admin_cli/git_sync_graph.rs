@@ -12,6 +12,28 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 
+/// Check the canonical service journal before a Git write waits for graph
+/// activation. Status proves only that a key exists; execute revalidates the
+/// source and replays the exact receipt. A missing key proceeds to settlement.
+pub(super) async fn replay_existing_git_sync(
+    request: &SessionSyncRequestV1,
+    status: impl Future<Output = SessionSyncOutcomeV1> + Send,
+    replay: impl Future<Output = SessionSyncOutcomeV1> + Send,
+) -> Option<SessionSyncOutcomeV1> {
+    if !matches!(
+        request.command(),
+        SessionSyncCommandV1::SynchronizeGit(options) if !options.dry_run()
+    ) {
+        return None;
+    }
+    match status.await {
+        SessionSyncOutcomeV1::Unavailable {
+            reason_code: "session_sync_operation_not_found",
+        } => None,
+        _ => Some(replay.await),
+    }
+}
+
 /// Join the exact project's existing graph activation before admitting a Git
 /// write. Dropping this wait does not cancel the registry-owned activation.
 /// Settlement is not a successful graph probe: detached or retired authorities
@@ -83,15 +105,18 @@ mod tests {
     use std::task::Poll;
 
     use tracedecay_contracts::session_sync::{
-        SessionGitSyncV1, SessionSyncCommandV1, SessionSyncOutcomeV1, SessionSyncRequestV1,
-        SessionSyncScopeV1, SessionTranscriptImportV1,
+        SessionGitSyncV1, SessionSyncAdmissionReceiptV1, SessionSyncCommandV1,
+        SessionSyncCompletionReceiptV1, SessionSyncOutcomeV1, SessionSyncRequestV1,
+        SessionSyncScopeV1, SessionSyncSourceV1, SessionSyncStatsV1, SessionTranscriptImportV1,
     };
-    use tracedecay_contracts::{CancellationSignal, Deadline, IdempotencyKey, RequestId, now_micros};
+    use tracedecay_contracts::{
+        CancellationSignal, Deadline, IdempotencyKey, OperationTermination, RequestId, now_micros,
+    };
     use tracedecay_domain::errors::{Result, TraceDecayError};
     use tracedecay_domain::{ProjectId, UserProfileId, UtcMicros};
     use tracedecay_runtime_core::native_runtime;
 
-    use super::settle_git_sync_graph;
+    use super::{replay_existing_git_sync, settle_git_sync_graph};
 
     fn request(command: SessionSyncCommandV1, expires_at: UtcMicros) -> SessionSyncRequestV1 {
         match native_runtime::install(native_runtime::default_builder()) {
@@ -117,6 +142,72 @@ mod tests {
             SessionSyncCommandV1::SynchronizeGit(SessionGitSyncV1::new(0, 1, false).unwrap()),
             UtcMicros(now_micros().0 + 30_000_000),
         )
+    }
+
+    #[tokio::test]
+    async fn expired_or_cancelled_repeat_replays_the_completed_receipt() {
+        for cancelled in [false, true] {
+            let request = request(
+                SessionSyncCommandV1::SynchronizeGit(
+                    SessionGitSyncV1::new(0, 1, false).unwrap(),
+                ),
+                if cancelled {
+                    UtcMicros(now_micros().0 + 30_000_000)
+                } else {
+                    now_micros()
+                },
+            );
+            if cancelled {
+                request.cancellation().cancel(now_micros());
+            }
+            let completion = SessionSyncOutcomeV1::Complete {
+                source: SessionSyncSourceV1::SynchronizeGit,
+                receipt: SessionSyncCompletionReceiptV1 {
+                    admission: SessionSyncAdmissionReceiptV1 {
+                        operation_id: request.operation_id().clone(),
+                        idempotency_key: request.idempotency_key().clone(),
+                        accepted_at: now_micros(),
+                    },
+                    coalesced_primary: None,
+                    completed_at: now_micros(),
+                    termination: OperationTermination::Completed,
+                    stats: SessionSyncStatsV1::default(),
+                    coverage: Vec::new(),
+                    source_frontiers: Vec::new(),
+                    failure_codes: Vec::new(),
+                },
+            };
+            let status = completion.clone();
+            let replay = completion.clone();
+            assert_eq!(
+                replay_existing_git_sync(
+                    &request,
+                    async move { status },
+                    async move { replay },
+                )
+                .await,
+                Some(completion),
+                "a repeated Git write must preserve its receipt"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_git_sync_waits_only_when_the_journal_is_absent() {
+        let request = write_request();
+        assert_eq!(
+            replay_existing_git_sync(
+                &request,
+                async {
+                    SessionSyncOutcomeV1::Unavailable {
+                        reason_code: "session_sync_operation_not_found",
+                    }
+                },
+                async { panic!("an unjournaled Git sync must not replay") },
+            )
+            .await,
+            None
+        );
     }
 
     #[tokio::test]

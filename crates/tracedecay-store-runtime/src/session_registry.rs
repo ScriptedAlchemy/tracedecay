@@ -408,7 +408,8 @@ impl ProjectRuntimeOwnerRegistryV1 {
             return Ok(true);
         };
         loop {
-            let notified = graph_settled.notified();
+            let mut notified = Box::pin(graph_settled.notified());
+            let _ = notified.as_mut().enable();
             let warming = matches!(
                 &*graph
                     .lock()
@@ -2734,6 +2735,9 @@ pub struct DaemonSessionRuntimeRegistryV1 {
     /// open task publishes its settled state.
     #[cfg(any(test, feature = "test-helpers"))]
     session_graph_publication_gate: StdMutex<Option<Arc<SessionGraphPublicationTestGateState>>>,
+    /// Test-only hold after memory graph settlement, before session binding.
+    #[cfg(any(test, feature = "test-helpers"))]
+    memory_graph_binding_gate: StdMutex<Option<Arc<SessionGraphPublicationTestGateState>>>,
 }
 
 // Each field is `Send + Sync`, but proving the registry walks those fields
@@ -2775,6 +2779,8 @@ const _: fn(&DaemonSessionRuntimeRegistryV1) = |value| {
         long_lived_session_maintenance,
         #[cfg(any(test, feature = "test-helpers"))]
         session_graph_publication_gate,
+        #[cfg(any(test, feature = "test-helpers"))]
+        memory_graph_binding_gate,
     } = value;
     assert_send_sync(identity);
     assert_send_sync(incarnation);
@@ -2806,6 +2812,8 @@ const _: fn(&DaemonSessionRuntimeRegistryV1) = |value| {
     assert_send_sync(long_lived_session_maintenance);
     #[cfg(any(test, feature = "test-helpers"))]
     assert_send_sync(session_graph_publication_gate);
+    #[cfg(any(test, feature = "test-helpers"))]
+    assert_send_sync(memory_graph_binding_gate);
 };
 
 impl DaemonSessionRuntimeRegistryV1 {
@@ -2882,10 +2890,14 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// Awaits settlement (attached or detached) of the project memory graph
     /// that `project_memory` opens as bounded background work.
     pub async fn settle_project_memory_graph(&self, project_id: &ProjectId) -> Result<()> {
-        self.project_owners
-            .wait_for_memory_graph(project_id)
-            .await
-            .map(drop)
+        let mounted = self.project_owners.wait_for_memory_graph(project_id).await?;
+        if mounted {
+            // The background opener publishes settlement before binding project
+            // sessions. Complete the same idempotent bind before a Git sync can
+            // read the port; concurrent bind attempts share exact authority.
+            bind_ready_project_memory_graph(&self.project_owners, project_id)?;
+        }
+        Ok(())
     }
 
     /// Waits for the project's background relation-graph open and requires an

@@ -368,6 +368,51 @@ async fn mount_installs_the_project_graph_binding_and_rebinds_stay_idempotent() 
 }
 
 #[tokio::test]
+async fn graph_settlement_binds_sessions_before_background_binder_resumes() {
+    let fixture = ContractFixture::new("settlement-binding").await;
+    let project_id = project_id("settlement-binding");
+    let roots = fixture.project_roots(&project_id);
+    for root in &roots {
+        std::fs::create_dir_all(root).expect("worktree root");
+        tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+            root,
+            project_id.as_str(),
+        )
+        .expect("project enrollment");
+    }
+    // Mount sessions first so the background opener owns the initial bind.
+    let sessions = fixture
+        .registry
+        .project_sessions(project_id.clone(), roots.clone())
+        .await
+        .expect("project sessions owner");
+    let gate = fixture.registry.block_memory_graph_binding_for_test();
+    let memory = fixture
+        .registry
+        .project_memory(project_id.clone(), roots)
+        .await
+        .expect("project memory owner");
+    tokio::time::timeout(std::time::Duration::from_mins(1), gate.wait_until_blocked())
+        .await
+        .expect("memory opener reaches the post-settlement hold");
+    assert!(
+        sessions.project_graph_runtime().is_none(),
+        "the background binder must remain held"
+    );
+    fixture
+        .registry
+        .settle_project_memory_graph(&project_id)
+        .await
+        .expect("settled graph binds the exact session authority");
+    let bound = sessions
+        .project_graph_runtime()
+        .expect("settlement must publish the exact graph port");
+    let resolved = memory.memory_graph_runtime().expect("activated graph port");
+    assert!(bound.shares_runtime_with(&resolved));
+    gate.release();
+}
+
+#[tokio::test]
 async fn memory_graph_operations_remain_isolated_by_exact_relational_identity() {
     let fixture = ContractFixture::new("memory-binding").await;
     let first_id = project_id("memory-binding-first");

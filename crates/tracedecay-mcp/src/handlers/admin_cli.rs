@@ -776,16 +776,29 @@ async fn execute_session_sync(
         cancellation,
         command,
     );
-    let project = context.require_project()?;
-    let registry = project.store_runtime_registry();
-    if let Some(outcome) = git_sync_graph::settle_git_sync_graph(
+    // An existing journal owns its receipt even when a retry has expired or
+    // been cancelled. Delegate replay to the service, which checks the exact
+    // journal source and idempotency key before examining caller controls.
+    let control =
+        SessionSyncControlV1::new(request.scope().clone(), request.idempotency_key().clone());
+    if let Some(outcome) = git_sync_graph::replay_existing_git_sync(
         &request,
-        registry.settle_project_memory_graph(&project_id),
+        service.status(control),
+        service.execute(request.clone()),
     )
-    .await?
+    .await
     {
         return Ok(outcome.into());
     }
+    let project = context.require_project()?;
+    let registry = project.store_runtime_registry();
+    // On timeout or cancellation, the service still performs journal-first
+    // admission: a concurrent completed receipt must not be hidden.
+    let _ = git_sync_graph::settle_git_sync_graph(
+        &request,
+        registry.settle_project_memory_graph(&project_id),
+    )
+    .await?;
     Ok(service.execute(request).await.into())
 }
 
