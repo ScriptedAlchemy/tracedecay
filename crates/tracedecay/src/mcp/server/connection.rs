@@ -224,7 +224,7 @@ impl McpServer {
 }
 
 impl McpServer {
-    /// Persists the tokens-saved counter, checkpoints the WAL, and logs a
+    /// Drains accounting writes, checkpoints the WAL, and logs a
     /// session summary.
     ///
     /// Idempotent, safe to call multiple times. `run` invokes it once when
@@ -255,30 +255,27 @@ impl McpServer {
 
         let uptime = self.stats.started_at.elapsed();
         let tool_calls = self.stats.tool_calls.load(Ordering::Relaxed);
-        let tokens_saved = self
-            .tokens_saved
-            .as_ref()
-            .map(|tokens| tokens.load(Ordering::Relaxed));
-
         let cg = self.cg_snapshot().await;
-        if let Some(tokens_saved) = tokens_saved {
-            if let Err(e) = cg.set_tokens_saved(tokens_saved).await {
-                tracing::warn!(error = %e, "failed to persist tokens saved during shutdown");
-                failures.push(format!("persist tokens saved: {e}"));
+        let tokens_saved = match cg.get_tokens_saved().await {
+            Ok(total) => Some(total),
+            Err(error) => {
+                tracing::warn!(%error, "failed to read committed token savings during shutdown");
+                failures.push(format!("read committed token savings: {error}"));
+                None
             }
-
-            // A failed global-ledger flush joins the shutdown failure report
-            // beside the local persistence failures instead of vanishing.
-            if let Some(gdb) = self.accounting_db.as_ref().or(self.global_db.as_ref()) {
-                if let Err(error) = gdb
-                    .try_upsert_project_tokens(cg.project_root(), tokens_saved)
+        };
+        if let Some(gdb) = self.accounting_db.as_ref().or(self.global_db.as_ref()) {
+            // Reconcile a failed background projection from committed authority,
+            // never from a server's independently retained display total.
+            if let Some(total) = tokens_saved
+                && let Err(error) = gdb
+                    .try_upsert_project_tokens(cg.project_root(), total)
                     .await
-                {
-                    tracing::warn!(error = %error, "failed to flush tokens saved to the global ledger during shutdown");
-                    failures.push(format!("flush global ledger tokens saved: {error}"));
-                }
-                gdb.checkpoint().await;
+            {
+                tracing::warn!(%error, "failed to project committed token savings during shutdown");
+                failures.push(format!("project committed token savings: {error}"));
             }
+            gdb.checkpoint().await;
         }
 
         // Checkpoint WAL to merge it into the main database file
@@ -315,7 +312,7 @@ impl McpServer {
         }
     }
 
-    async fn shutdown_background_tasks_until(&self, _deadline: std::time::Instant) -> Vec<String> {
+    async fn shutdown_background_tasks_until(&self, deadline: std::time::Instant) -> Vec<String> {
         let mut failures = Vec::new();
         // The hosted dashboard is daemon-process state (`DASHBOARD_MANAGER`),
         // not project-server state. `tracedecay_dashboard` starts against the
@@ -328,6 +325,14 @@ impl McpServer {
             worker.shutdown().await;
         }
         self.shutdown_startup_catch_up_sync().await;
+        if !self
+            .ledger_writes_settled_within(
+                deadline.saturating_duration_since(std::time::Instant::now()),
+            )
+            .await
+        {
+            failures.push("token accounting writes did not settle before shutdown".to_owned());
+        }
         failures
     }
 

@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::project::TraceDecay;
 use tracedecay_application::tracedecay::{
-    add_local_counter, get_local_counter, get_tokens_saved, reset_local_counter, set_tokens_saved,
+    get_local_counter, get_tokens_saved, record_token_savings, reset_local_counter,
 };
 use tracedecay_configuration::config::RuntimeTraceDecayConfig;
 use tracedecay_domain::errors::Result;
@@ -13,9 +13,10 @@ impl TraceDecay {
         get_tokens_saved(&self.db).await
     }
 
-    /// Persists the tokens-saved counter to the database.
-    pub async fn set_tokens_saved(&self, value: u64) -> Result<()> {
-        set_tokens_saved(&self.db, value).await
+    /// Atomically credits lifetime and resettable savings for one response.
+    /// Returns the committed lifetime total.
+    pub async fn record_token_savings(&self, delta: u64) -> Result<u64> {
+        record_token_savings(&self.db, delta).await
     }
 
     /// Returns the resettable project-local token counter.
@@ -26,11 +27,6 @@ impl TraceDecay {
     /// Resets the project-local token counter to zero.
     pub async fn reset_local_counter(&self) -> Result<()> {
         reset_local_counter(&self.db).await
-    }
-
-    /// Increments the project-local token counter by the given amount.
-    pub async fn add_local_counter(&self, delta: u64) -> Result<()> {
-        add_local_counter(&self.db, delta).await
     }
 
     /// Checkpoints the WAL and closes the database connection.

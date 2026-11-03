@@ -18,6 +18,8 @@ impl RegisteredGlobalDb {
         project_path: &Path,
         tokens_saved: u64,
     ) -> tracedecay_domain::errors::Result<()> {
+        let tokens_saved = i64::try_from(tokens_saved)
+            .map_err(|error| global_db_operation_error("encode project token total", error))?;
         let path = super::project_path_alias_key(project_path);
         self.transact(async move |transaction| {
             transaction
@@ -25,10 +27,7 @@ impl RegisteredGlobalDb {
                     "INSERT INTO projects (path, tokens_saved) VALUES (?1, ?2)
                      ON CONFLICT(path) DO UPDATE SET
                         tokens_saved = MAX(tokens_saved, excluded.tokens_saved)",
-                    tracedecay_runtime_core::db::engine::params![
-                        path.as_str(),
-                        tokens_saved as i64
-                    ],
+                    tracedecay_runtime_core::db::engine::params![path.as_str(), tokens_saved],
                 )
                 .await
                 .map_err(|error| global_db_operation_error("update project token total", error))?;
