@@ -140,28 +140,6 @@ impl IndexPathPolicyV1 {
         &self.include
     }
 
-    /// Whether a path, or one of its parents, is explicitly selected by an
-    /// index.include.v1 rule. Unlike excludes(), this does not treat an
-    /// unrestricted ordinary file as an explicit submodule opt-in.
-    #[must_use]
-    pub fn explicitly_includes(&self, logical_path: &str) -> bool {
-        matches_path_or_parent(&self.include_set, logical_path)
-    }
-
-    /// Whether any compiled include may select a child of this directory.
-    /// A wildcard before the first literal segment conservatively admits
-    /// traversal; the canonical compiled matcher still decides actual files.
-    #[must_use]
-    pub fn include_can_reach(&self, logical_directory: &str) -> bool {
-        let directory = std::path::Path::new(logical_directory);
-        self.include_prefixes.iter().any(|prefix| {
-            prefix.as_deref().is_none_or(|prefix| {
-                let prefix = std::path::Path::new(prefix);
-                prefix.starts_with(directory) || directory.starts_with(prefix)
-            })
-        })
-    }
-
     /// Whether `logical_path` is left out of the index and source walks.
     #[must_use]
     pub fn excludes(&self, logical_path: &str) -> bool {
@@ -248,23 +226,6 @@ mod tests {
             include.iter().map(|value| (*value).to_owned()).collect(),
         )
         .expect("valid patterns")
-    }
-
-    #[test]
-    fn explicit_include_reachability_keeps_narrow_submodule_scopes() {
-        let precise = policy(&[], &["app/src/feature.rs"]);
-        assert!(precise.include_can_reach("app"));
-        assert!(precise.include_can_reach("app/src"));
-        assert!(precise.include_can_reach("app/src/feature.rs"));
-        assert!(!precise.include_can_reach("foreign"));
-        assert!(precise.explicitly_includes("app/src/feature.rs"));
-        assert!(!precise.explicitly_includes("app/src/other.rs"));
-        assert!(!precise.explicitly_includes("app"));
-
-        let wildcard = policy(&[], &["**/src/*.rs"]);
-        assert!(wildcard.include_can_reach("app"));
-        assert!(wildcard.explicitly_includes("app/src/feature.rs"));
-        assert!(!wildcard.explicitly_includes("app/docs/other.md"));
     }
 
     #[test]
