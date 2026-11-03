@@ -10,3 +10,15 @@ py_test(
     ],
     main = "test_run_http.py",
 )
+
+py_test(
+    name = "scoring_test",
+    size = "small",
+    srcs = [
+        "common.py",
+        "compare.py",
+        "score.py",
+        "test_score.py",
+    ],
+    main = "test_score.py",
+)
