@@ -48,7 +48,9 @@ fn external_connection_probe() {
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .expect("open existing database in another process");
-    connection.busy_timeout(Duration::ZERO).expect("no lock wait");
+    connection
+        .busy_timeout(Duration::ZERO)
+        .expect("no lock wait");
     let result = match operation.as_str() {
         "write" => connection.execute_batch("BEGIN IMMEDIATE; ROLLBACK"),
         "journal" => connection
@@ -163,7 +165,9 @@ fn path_checks_keep_pinned_identity_and_reject_missing_or_replaced_files() {
     std::os::unix::fs::symlink(&path, &symlink).expect("symlink");
     pinned.verify_current_path(&path).expect("original inode");
     pinned.verify_current_path(&alias).expect("hard-link inode");
-    pinned.verify_current_path(&symlink).expect("symlink target");
+    pinned
+        .verify_current_path(&symlink)
+        .expect("symlink target");
 
     fs::remove_file(&path).expect("unlink original path");
     assert_eq!(
