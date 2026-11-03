@@ -298,8 +298,7 @@ impl<'a> ProjectProviderRun<'a> {
                 tracing::trace_span!("sessions.ingest.project.codex.convergence_check"),
             )
             .await
-            .transpose()
-            else {
+            .transpose() else {
                 continue;
             };
             if persisted_day.is_some_and(|day| path.parent() != Some(day)) {
