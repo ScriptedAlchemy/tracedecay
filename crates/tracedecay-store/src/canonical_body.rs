@@ -38,6 +38,16 @@ pub const UPSERT_CANONICAL_BODY_SQL: &str = "INSERT OR IGNORE INTO session_canon
 pub const LOAD_CANONICAL_BODY_SQL: &str = "SELECT encoding, body, uncompressed_bytes
          FROM session_canonical_bodies WHERE content_hash = ?1";
 
+/// Reads the distinct references of one observation in one SQL dispatch. The
+/// JSON array parameter avoids a variable per hash; the left join keeps a
+/// missing body visible, in reference order, instead of silently dropping it.
+/// Callers still verify every returned body with [`unpack_body`].
+pub const LOAD_CANONICAL_BODIES_SQL: &str = "SELECT requested.value, body.encoding,
+                body.body, body.uncompressed_bytes
+         FROM json_each(?1) AS requested
+         LEFT JOIN session_canonical_bodies AS body ON body.content_hash = requested.value
+         ORDER BY requested.key";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredCanonicalBody {
     pub content_hash: String,
