@@ -218,10 +218,10 @@ impl McpServer {
     pub async fn ledger_writes_settled_within(&self, timeout: std::time::Duration) -> bool {
         let wait = async {
             loop {
-                // A Notify::notified() future does not register with
-                // notify_waiters() until it is polled or enabled. Enable it
-                // before reading counters or a final write could finish in
-                // that gap and leave shutdown waiting until its deadline.
+                // Arm the waiter before reading counters and retain it across
+                // the check and await. Tokio already guarantees notify_waiters()
+                // delivery from future creation; explicit enabling also registers
+                // this waiter for a notify_one() completion signal.
                 let notified = self.ledger_write_notify.notified();
                 tokio::pin!(notified);
                 notified.as_mut().enable();
