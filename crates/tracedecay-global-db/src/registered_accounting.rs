@@ -87,6 +87,14 @@ impl RegisteredGlobalDb {
         after_tokens: u64,
         timestamp: i64,
     ) -> tracedecay_domain::errors::Result<()> {
+        // SQLite's signed INTEGER cannot represent every u64. Refuse before
+        // writing rather than wrapping a valid token count into a negative.
+        let before_tokens = i64::try_from(before_tokens).map_err(|error| {
+            global_db_operation_error("encode savings ledger before tokens", error)
+        })?;
+        let after_tokens = i64::try_from(after_tokens).map_err(|error| {
+            global_db_operation_error("encode savings ledger after tokens", error)
+        })?;
         let project_path = RegisteredGlobalDb::canonical_project_key(Path::new(project_path));
         let tool_name = tool_name.to_owned();
         self.transact(async move |transaction| {
@@ -99,8 +107,8 @@ impl RegisteredGlobalDb {
                         timestamp,
                         project_path.as_str(),
                         tool_name.as_str(),
-                        before_tokens as i64,
-                        after_tokens as i64
+                        before_tokens,
+                        after_tokens
                     ],
                 )
                 .await
