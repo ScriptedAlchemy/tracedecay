@@ -564,7 +564,7 @@ def _check_canonical_metadata(plugin, plugin_dir: Path, ctx):
     assert plugin.READ_ONLY_TOOL_NAMES.isdisjoint(
         {"tracedecay_str_replace", "tracedecay_fact_store_add", "tracedecay_fact_store_curate"}
     ), sorted(plugin.READ_ONLY_TOOL_NAMES)
-    assert set(plugin.FACT_STORE_EXACT_ROUTES) >= set(plugin.MEMORY_FACT_ACTIONS.values())
+    assert {"add", "search"} <= plugin.FACT_STORE_EXACT_ROUTES.keys()
     assert all(
         route == f"tracedecay_fact_store_{action}" and route in plugin.TOOL_SCHEMAS_BY_NAME
         for action, route in plugin.FACT_STORE_EXACT_ROUTES.items()
@@ -732,6 +732,91 @@ def _check_lcm_retrieval_scope(plugin, ctx, host_home: Path, runtime_project: Pa
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
     ]
+
+
+def _check_lcm_handler_configuration(plugin, host_home: Path, runtime_project: Path):
+    ctx = StubCtx()
+    ctx.hermes_home = str(host_home)
+    ctx.config = {
+        "expansion_model": "registered-model",
+        "expansion_context_tokens": 2048,
+        "expansion_timeout_ms": 3000,
+    }
+    plugin.register(ctx)
+    handler = ctx.tools["lcm_expand_query"]["handler"]
+    requests, config_homes, syntheses = [], [], []
+    real_tool = plugin.tools.call_tracedecay_tool
+    real_block = plugin.tools.plugin_config_block
+    env_keys = ("LCM_EXPANSION_MODEL", "LCM_EXPANSION_CONTEXT_TOKENS", "LCM_EXPANSION_TIMEOUT_MS")
+    saved_env = {key: os.environ.pop(key, None) for key in env_keys}
+
+    class Client:
+        def call_llm(self, **kwargs):
+            syntheses.append(kwargs)
+            return "grounded answer"
+
+    class Agent:
+        auxiliary_client = Client()
+
+    def retrieve(name, args, **kwargs):
+        requests.append((name, dict(args), kwargs))
+        payload = {"needs_synthesis": True, "prompt": args["prompt"], "context_blocks": []}
+        return json.dumps({"content": [{"type": "text", "text": json.dumps(payload)}]})
+
+    def profile_config(home):
+        config_homes.append(home)
+        return {
+            "expansion_model": "profile-model",
+            "expansion_context_tokens": 1024,
+            "expansion_timeout_ms": 2000,
+        }
+
+    override = {
+        "expansion_model": "call-model",
+        "expansion_context_tokens": 4096,
+        "expansion_timeout_ms": 6000,
+    }
+    args = {"prompt": "What did we decide?"}
+    try:
+        plugin.tools.call_tracedecay_tool = retrieve
+        plugin.tools.plugin_config_block = profile_config
+        for index, (kwargs, model, budget, timeout) in enumerate((
+            ({}, "registered-model", 2048, 3),
+            ({"config": override}, "call-model", 4096, 6),
+            ({"config": None}, "profile-model", 1024, 2),
+            ({"config": {}}, "profile-model", 1024, 2),
+            ({}, "registered-model", 2048, 3),
+        )):
+            session = f"configuration-session-{index}"
+            result = json.loads(handler(
+                args, session_id=session, cwd=str(host_home),
+                hermes_home=str(runtime_project), agent=Agent(), **kwargs,
+            ))
+            assert result["answer"] == "grounded answer", result
+            assert requests[-1] == (
+                "tracedecay_lcm_expand_query",
+                {
+                    "prompt": args["prompt"], "provider": "hermes", "session_id": session,
+                    "storage_scope": "user", "context_max_tokens": budget,
+                },
+                {},
+            ), requests[-1]
+            assert syntheses[-1]["model"] == model, syntheses[-1]
+            assert syntheses[-1]["timeout"] == timeout, syntheses[-1]
+            assert config_homes[-1] == str(host_home), config_homes
+        assert len(requests) == len(syntheses) == len(config_homes) == 5
+        assert args == {"prompt": "What did we decide?"}
+        assert ctx.config["expansion_model"] == "registered-model"
+        assert override["expansion_model"] == "call-model"
+    finally:
+        plugin.tools.call_tracedecay_tool = real_tool
+        plugin.tools.plugin_config_block = real_block
+        for key, value in saved_env.items():
+            if value is not None:
+                os.environ[key] = value
+            else:
+                os.environ.pop(key, None)
+    ok("LCM call configuration overrides registration defaults without changing profile or session")
 
 
 def _check_expand_query_degradation(plugin):
@@ -1146,6 +1231,7 @@ def run_checks(work: Path):
     _check_canonical_metadata(plugin, plugin_dir, ctx)
     _check_response_envelope_table(plugin)
     messages = _check_lcm_retrieval_scope(plugin, ctx, host_home, runtime_project)
+    _check_lcm_handler_configuration(plugin, host_home, runtime_project)
     _check_expand_query_degradation(plugin)
     _check_no_hermes_storage_routing(plugin)
     _check_provider_verbs(plugin, ctx, host_home, messages)

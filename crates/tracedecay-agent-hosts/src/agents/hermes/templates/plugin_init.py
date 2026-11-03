@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 from collections import deque
+from functools import partial
 from pathlib import Path
 
 from . import schemas, tools
@@ -223,7 +224,8 @@ LCM_NATIVE_SCHEMAS = [
                     "type": "string",
                     "description": "Optional session id override (for example, expand a cross-session grep hit in its owning session).",
                 },
-                "max_tokens": {"type": "integer", "description": "Token budget for returned content.", "default": 4000},
+                "max_tokens": {"type": "integer", "description": "Token budget for returned content.",
+                    "default": 4000},
                 "source_limit": {
                     "type": "integer",
                     "minimum": 1,
@@ -353,10 +355,10 @@ def _active_memory_provider(ctx=None):
     return None
 
 def _make_wrapped_lcm_handler(tool_name: str, config=None, hermes_home=None):
-    def _wrapped(args: dict, **kwargs) -> str:
-        return _handle_lcm_tool_call(tool_name, args, config=config, **kwargs)
     return _make_project_safe_handler(
-        LCM_TOOL_ALIASES[tool_name], _wrapped, hermes_home
+        LCM_TOOL_ALIASES[tool_name],
+        partial(_handle_lcm_tool_call, tool_name, config=config),
+        hermes_home,
     )
 
 _NUDGE_CODE_REQUEST_RE = re.compile(
