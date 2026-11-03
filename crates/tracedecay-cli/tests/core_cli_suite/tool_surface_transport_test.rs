@@ -881,7 +881,12 @@ fn tool_json_reports_argument_refusals_as_typed_problems() {
         (
             "configuration_get",
             r#"{"key":"sweep"}"#,
-            "application surface request does not match its reviewed schema: configuration surface request is inconsistent with the application contract",
+            "application surface request does not match its reviewed schema: configuration surface request is invalid: configuration setting key is not canonical",
+        ),
+        (
+            "configuration_set",
+            r#"{"layer":{"kind":"project"},"key":"telemetry.timings.v1","value":{"kind":"boolean","value":true},"expected_revision":"revision.missing-project-id","idempotency_key":"configuration.missing-project-id"}"#,
+            "application surface request does not match its reviewed schema: configuration surface request is invalid: missing field `project_id`",
         ),
         (
             "str_replace",

@@ -178,12 +178,13 @@ fn invocation_payload_decode_rejects_the_tagged_envelope() {
         }),
     )
     .expect_err("envelope must not admit as a get body");
-    assert_eq!(
+    assert!(matches!(
         error,
-        ApplicationContractError::Inconsistent {
+        ApplicationContractError::InvalidRequest {
             field: "configuration surface request",
-        }
-    );
+            detail,
+        } if detail.contains("unknown field `operation`")
+    ));
 }
 
 #[test]
@@ -191,8 +192,9 @@ fn invocation_payload_decode_covers_every_configuration_operation_name() {
     for name in configuration_surface_operation_names() {
         match configuration_wire_request_from_invocation_payload(name, serde_json::json!({})) {
             Ok(_) => {}
-            Err(ApplicationContractError::Inconsistent {
+            Err(ApplicationContractError::InvalidRequest {
                 field: "configuration surface request",
+                ..
             }) => {}
             Err(error) => panic!("{name} must be a known configuration operation: {error}"),
         }

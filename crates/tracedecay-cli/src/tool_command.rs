@@ -1106,10 +1106,7 @@ fn tool_result_process_outcome(result_value: &Value, tool_name: &str) -> Result<
             CodeIndexReadinessWaitOutcomeV1::Reached => None,
             CodeIndexReadinessWaitOutcomeV1::TimedOut { last_state } => Some((
                 CODE_INDEX_READINESS_WAIT_TIMED_OUT,
-                format!(
-                    "wait_for timed out before the index reached the requested state; last \
-                     state: {last_state}"
-                ),
+                format!("wait: timed_out; last state: {last_state}"),
             )),
             CodeIndexReadinessWaitOutcomeV1::Unavailable { reason } => Some((
                 CODE_INDEX_READINESS_WAIT_UNAVAILABLE,

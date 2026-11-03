@@ -1516,6 +1516,55 @@ fn application_problem_makes_the_tool_command_fail() {
     );
 }
 
+#[test]
+fn configuration_project_layer_requires_explicit_project_id() {
+    let operation = ApplicationSurfaceOperation::ConfigurationSet;
+    let parse = |payload: &Value| {
+        let parsed = parse_whole_payload_invocation(&[
+            "--args".to_owned(),
+            payload.to_string(),
+            "--json".to_owned(),
+        ])
+        .expect("whole-payload CLI arguments")
+        .expect("whole-payload invocation");
+        let (request, format, output) =
+            cli_surface_invocation(operation.mcp_tool_name(), parsed.tool_args, parsed.raw_json)
+                .expect("transport arguments");
+        assert_eq!(format, RequestedOutputFormat::Json);
+        assert_eq!(output, CliToolOutput::Document);
+        parse_application_surface_request(operation, request)
+            .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)
+    };
+    let mut payload = json!({
+        "layer": {"kind": "project"},
+        "key": "telemetry.timings.v1",
+        "value": {"kind": "boolean", "value": true},
+        "expected_revision": "revision.cli-project-layer",
+        "idempotency_key": "configuration.cli-project-layer"
+    });
+
+    let error = parse(&payload).expect_err("a project layer requires its identity");
+    assert_eq!(
+        error.project_route_context(),
+        Some((
+            "application_surface_invalid_request",
+            false,
+            "application surface request does not match its reviewed schema: \
+             configuration surface request is invalid: missing field `project_id`",
+        )),
+    );
+
+    payload["layer"]["project_id"] = json!("project.cli-configuration");
+    let request = parse(&payload).expect("the same request with a project id is valid");
+    let tracedecay_daemon_protocol::ApplicationSurfaceRequest::Configuration(
+        tracedecay_contracts::ConfigurationWireRequestV1::Set(request),
+    ) = request
+    else {
+        panic!("configuration_set must retain its canonical request");
+    };
+    assert_eq!(serde_json::to_value(request).unwrap(), payload);
+}
+
 /// Documented read-only invocations from `tracedecay tool <name> --help`, each
 /// paired with the `format: "json"` presentation key the help text advertises.
 fn documented_json_invocations() -> Vec<(&'static str, Value)> {
@@ -1929,18 +1978,24 @@ fn tool_status_exit_follows_the_wait_outcome() {
     let refusal = |wait: Value| {
         tool_result_process_outcome(&status(wait), "tracedecay_status")
             .expect_err("an unreached wait exits non-zero")
-            .to_string()
     };
 
+    let timed_out = refusal(json!({"outcome": "timed_out", "last_state": "warming"}));
+    assert!(matches!(
+        &timed_out,
+        TraceDecayError::ToolRefused(refusal)
+            if refusal.code.as_deref() == Some(CODE_INDEX_READINESS_WAIT_TIMED_OUT)
+    ));
     assert_eq!(
-        refusal(json!({"outcome": "timed_out", "last_state": "warming"})),
+        timed_out.to_string(),
         format!(
             "tracedecay_status refused the request ({CODE_INDEX_READINESS_WAIT_TIMED_OUT}): \
-             wait_for timed out before the index reached the requested state; last state: warming"
+             wait: timed_out; last state: warming"
         )
     );
+    assert!(!timed_out.to_string().contains("reached"));
     assert_eq!(
-        refusal(json!({"outcome": "unavailable", "reason": "scheduler_not_mounted"})),
+        refusal(json!({"outcome": "unavailable", "reason": "scheduler_not_mounted"})).to_string(),
         format!(
             "tracedecay_status refused the request ({CODE_INDEX_READINESS_WAIT_UNAVAILABLE}): \
              wait_for cannot reach the requested state: scheduler_not_mounted"

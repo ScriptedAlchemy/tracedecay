@@ -284,11 +284,12 @@ fn wrap_configuration_inner<T: DeserializeOwned>(
     payload: Value,
     wrap: fn(T) -> ConfigurationWireRequestV1,
 ) -> Result<ConfigurationWireRequestV1, ApplicationContractError> {
-    serde_json::from_value(payload)
-        .map(wrap)
-        .map_err(|_| ApplicationContractError::Inconsistent {
+    serde_json::from_value(payload).map(wrap).map_err(|error| {
+        ApplicationContractError::InvalidRequest {
             field: "configuration surface request",
-        })
+            detail: error.to_string(),
+        }
+    })
 }
 
 struct ConfigurationSurfaceSpec {
