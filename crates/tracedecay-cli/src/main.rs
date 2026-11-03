@@ -1071,19 +1071,11 @@ async fn dispatch_project_command(
             path,
             path_flag,
             adopt_project,
-            fresh,
             wait,
         } => {
             // clap enforces that at most one of these is present.
-            commands::handle_init(
-                profile,
-                path.or(path_flag),
-                adopt_project,
-                fresh,
-                assume_yes,
-                wait,
-            )
-            .await?;
+            commands::handle_init(profile, path.or(path_flag), adopt_project, assume_yes, wait)
+                .await?;
         }
         Commands::Sync { path, verbose } => {
             commands::handle_sync(profile, path, verbose).await?;

@@ -69,7 +69,6 @@ pub(crate) async fn handle_init(
     profile: &ProfileRoot,
     path: Option<String>,
     adopt_project: Option<String>,
-    fresh: bool,
     assume_yes: bool,
     wait: bool,
 ) -> tracedecay_domain::errors::Result<()> {
@@ -80,7 +79,7 @@ pub(crate) async fn handle_init(
     {
         return Err(tracedecay_domain::errors::TraceDecayError::Config { message });
     }
-    let adoption = moved_store_adoption_request(adopt_project, fresh, assume_yes)?;
+    let adoption = moved_store_adoption_request(adopt_project, assume_yes)?;
     let mut handshake = tracedecay::daemon::handshake_for_current_client(
         profile,
         Some(project_path.clone()),
@@ -118,30 +117,22 @@ fn init_daemon_available(profile: &ProfileRoot) -> bool {
     )
 }
 
-/// Maps explicit `tracedecay init` flags to the adoption request the daemon
-/// honors. Only init escalates past `Never`: `--adopt-project` names the
-/// project, bare `--yes` confirms a unique candidate, `--fresh` opts out of
-/// adoption entirely, and no flags means candidates are offered in a typed
-/// refusal instead of silently remapped.
+/// Only a named project authorizes adoption. Refuse the former `init --yes`
+/// selection so an old command cannot silently mint a different identity.
 fn moved_store_adoption_request(
     adopt_project: Option<String>,
-    fresh: bool,
     assume_yes: bool,
 ) -> tracedecay_domain::errors::Result<tracedecay_project::project::MovedStoreAdoption> {
-    if fresh && adopt_project.is_some() {
+    if assume_yes && adopt_project.is_none() {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: "--fresh mints a new project identity and contradicts --adopt-project; \
-                      pass exactly one"
+            message: "init --yes no longer selects a moved project; use --adopt-project <id> \
+                      to adopt a named project, or omit --yes to initialize a fresh identity"
                 .to_owned(),
         });
     }
-    Ok(match (adopt_project, fresh, assume_yes) {
-        (Some(project_id), _, _) => {
-            tracedecay_project::project::MovedStoreAdoption::AdoptNamed(project_id)
-        }
-        (None, true, _) => tracedecay_project::project::MovedStoreAdoption::Never,
-        (None, false, true) => tracedecay_project::project::MovedStoreAdoption::AdoptUnique,
-        (None, false, false) => tracedecay_project::project::MovedStoreAdoption::OfferCandidates,
+    Ok(match adopt_project {
+        Some(project_id) => tracedecay_project::project::MovedStoreAdoption::AdoptNamed(project_id),
+        None => tracedecay_project::project::MovedStoreAdoption::Never,
     })
 }
 
@@ -609,6 +600,24 @@ mod daemon_precondition_tests {
     use tracedecay_contracts::retrieval::StatusCodeIndexFreshnessV1;
     use tracedecay_domain::errors::TraceDecayError;
     use tracedecay_mcp::handlers::info::readiness_wait_outcome;
+    use tracedecay_project::project::MovedStoreAdoption;
+
+    #[test]
+    fn init_adoption_requires_a_named_identity() {
+        assert_eq!(
+            super::moved_store_adoption_request(None, false).unwrap(),
+            MovedStoreAdoption::Never
+        );
+        for assume_yes in [false, true] {
+            assert_eq!(
+                super::moved_store_adoption_request(Some("proj_selected".to_owned()), assume_yes,)
+                    .unwrap(),
+                MovedStoreAdoption::AdoptNamed("proj_selected".to_owned())
+            );
+        }
+        let error = super::moved_store_adoption_request(None, true).unwrap_err();
+        assert!(error.to_string().contains("--adopt-project <id>"));
+    }
 
     pub(super) struct SocketEnvGuard {
         previous: Option<std::ffi::OsString>,

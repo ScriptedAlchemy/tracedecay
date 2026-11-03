@@ -20,6 +20,8 @@ use super::project_open_admission::{
     ProjectOpenFailure, ProjectOpenGates, ProjectOpenTaskClaim, ProjectRouteKey, ProjectServerKey,
     ProjectServerRequirement,
 };
+#[cfg(unix)]
+use super::project_open_handshake::check_named_adoption_identity;
 use super::project_open_orchestration::ensure_registered_project_route;
 #[cfg(unix)]
 use super::project_open_orchestration::{
@@ -455,12 +457,17 @@ impl DaemonEngine {
             // aliases, so the next request re-enters the admission path
             // below). Re-checking enrollment per request re-derived registry
             // and repository identity on every tool call.
-            if let Some(server) = {
+            if let Some((key, server)) = {
                 let mut servers = self.store_administration.project_servers().lock().await;
                 servers
                     .get_route_and_touch_for(&route, requirement)
-                    .map(|(_, server)| Arc::clone(server))
+                    .map(|(key, server)| (key.clone(), Arc::clone(server)))
             } {
+                check_named_adoption_identity(
+                    &project_path,
+                    handshake,
+                    key.owner.project_id.as_deref(),
+                )?;
                 return Ok(Some(
                     self.activate_project_server(project_path, server).await,
                 ));
@@ -484,7 +491,7 @@ impl DaemonEngine {
             else {
                 return Ok(None);
             };
-            let Some((_, server)) = cached_or_bind_ready_project_server(
+            let Some((key, server)) = cached_or_bind_ready_project_server(
                 &self.store_administration,
                 &route,
                 Some(&key),
@@ -494,6 +501,11 @@ impl DaemonEngine {
             else {
                 return Ok(None);
             };
+            check_named_adoption_identity(
+                &project_path,
+                handshake,
+                key.owner.project_id.as_deref(),
+            )?;
             Ok(Some(
                 self.activate_project_server(project_path, server).await,
             ))
@@ -522,12 +534,19 @@ impl DaemonEngine {
             let mut servers = self.store_administration.project_servers().lock().await;
             servers
                 .get_route_and_touch_for(&route, requirement)
-                .map(|(_, server)| Arc::clone(server))
+                .map(|(key, server)| (key.clone(), Arc::clone(server)))
         };
         match bound {
-            Some(server) => Ok(Some(
-                self.activate_project_server(project_path, server).await,
-            )),
+            Some((key, server)) => {
+                check_named_adoption_identity(
+                    &project_path,
+                    handshake,
+                    key.owner.project_id.as_deref(),
+                )?;
+                Ok(Some(
+                    self.activate_project_server(project_path, server).await,
+                ))
+            }
             None => Ok(None),
         }
     }

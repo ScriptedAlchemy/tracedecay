@@ -47,7 +47,11 @@ without a systemd user bus, keep `tracedecay daemon run` running in another \
 terminal. Storage is daemon-owned. Run once \
 per repository; afterwards `tracedecay sync` keeps the index fresh \
 incrementally. Indexes what Git sees (tracked files and untracked files \
-.gitignore does not ignore) minus the project's `index.exclude.v1` patterns.";
+.gitignore does not ignore) minus the project's `index.exclude.v1` patterns. \
+For a moved non-git project, use `tracedecay projects list` to find its id and \
+pass `--adopt-project <id>`; retry the same command after an interrupted \
+adoption. Without that flag, an unregistered path gets a fresh identity. \
+`--yes` no longer selects a moved project, and `--fresh` has been removed.";
 
 pub(crate) const INIT_AFTER_HELP: &str = "\
 Examples:
@@ -55,9 +59,8 @@ Examples:
   tracedecay init                                Enroll and request the first index
   tracedecay init --wait                         Enroll and hold until the first generation is ready
   tracedecay init /path/to/repo                  Enroll another repository
+  tracedecay projects list                      Find a registered project id
   tracedecay init /new/path --adopt-project proj_abc123
-  tracedecay init /new/path --yes                Adopt the unique moved non-git store
-  tracedecay init /new/path --fresh              Mint a new identity, never adopt
 
 Related: tracedecay daemon (the daemon init requires), tracedecay sync
 (incremental refresh), tracedecay status, tracedecay wipe (delete local \

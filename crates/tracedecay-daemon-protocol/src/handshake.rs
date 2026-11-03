@@ -12,15 +12,9 @@ use tracedecay_domain::errors::Result;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MovedStoreAdoption {
-    /// Mint a fresh identity without consulting moved-store candidates.
+    /// Mint a fresh identity without consulting other registered projects.
     #[default]
     Never,
-    /// Explicit `tracedecay init` without adoption flags: mint fresh when no
-    /// moved store could claim this root; otherwise refuse with the candidates.
-    OfferCandidates,
-    /// `tracedecay init --yes`: adopt when candidates identify exactly one
-    /// moved store; anything ambiguous remains a typed refusal.
-    AdoptUnique,
     /// `tracedecay init --adopt-project <id>`: adopt exactly this project.
     AdoptNamed(String),
 }
@@ -316,6 +310,20 @@ mod handshake_refusal_tests {
 mod decoding_tests {
     use super::{DaemonHandshake, MovedStoreAdoption};
     use std::path::PathBuf;
+
+    #[test]
+    fn moved_store_adoption_rejects_implicit_selection_on_the_wire() {
+        for retired in ["offer_candidates", "adopt_unique"] {
+            let encoded = serde_json::to_string(retired).unwrap();
+            assert!(serde_json::from_str::<MovedStoreAdoption>(&encoded).is_err());
+        }
+        let named = MovedStoreAdoption::AdoptNamed("proj_selected".to_owned());
+        assert_eq!(
+            serde_json::from_str::<MovedStoreAdoption>(&serde_json::to_string(&named).unwrap())
+                .unwrap(),
+            named
+        );
+    }
 
     /// Every non-optional handshake field is required: a sender that omits one
     /// is refused (as `unsupported_revision` on the wire) instead of decoded with

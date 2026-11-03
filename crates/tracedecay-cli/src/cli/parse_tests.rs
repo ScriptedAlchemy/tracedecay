@@ -186,6 +186,7 @@ fn init_accepts_short_and_long_path_flag_like_dashboard_does() {
 #[test]
 fn brokered_index_commands_refuse_flags_the_daemon_never_honors_at_parse_time() {
     for argv in [
+        &["tracedecay", "init", "--fresh"][..],
         &["tracedecay", "init", "--skip-folder", "vendor"][..],
         &["tracedecay", "init", "--include-folder", "dist/generated"][..],
         &["tracedecay", "sync", "--skip-folder", "vendor"][..],
@@ -205,6 +206,25 @@ fn brokered_index_commands_refuse_flags_the_daemon_never_honors_at_parse_time() 
             .command,
         Some(Commands::Sync { path, verbose: true, .. }) if path.as_deref() == Some("/tmp/project")
     ));
+}
+
+#[test]
+fn init_preserves_the_explicit_adoption_identity() {
+    let cli = Cli::try_parse_from([
+        "tracedecay",
+        "init",
+        "/new/project",
+        "--adopt-project",
+        "proj_selected",
+    ])
+    .expect("named adoption should parse");
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Init { path, adopt_project, .. })
+            if path.as_deref() == Some("/new/project")
+                && adopt_project.as_deref() == Some("proj_selected")
+    ));
+    assert!(Cli::try_parse_from(["tracedecay", "init", "--adopt-project"]).is_err());
 }
 
 #[test]

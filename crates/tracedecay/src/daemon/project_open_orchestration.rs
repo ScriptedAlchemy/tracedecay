@@ -476,11 +476,16 @@ pub(super) async fn portable_cached_project_server(
         let mut servers = store_administration.project_servers().lock().await;
         servers
             .get_route_and_touch_for(&route, requirement)
-            .map(|(_, server)| Arc::clone(server))
+            .map(|(key, server)| (key.clone(), Arc::clone(server)))
     };
-    let Some(server) = server else {
+    let Some((key, server)) = server else {
         return Ok(None);
     };
+    super::project_open_handshake::check_named_adoption_identity(
+        canonical_project_path,
+        handshake,
+        key.owner.project_id.as_deref(),
+    )?;
     // Boxed for the same reason as the callers: the registration route is a
     // mega-future whose by-value frame overflows perf-profile worker stacks.
     Box::pin(ensure_registered_project_route(
