@@ -1169,7 +1169,8 @@ impl<'a> ArtifactQueryV1<'a> {
 
     /// The candidate document set for one lexical request: every phrase
     /// match plus the term sources `admit_candidate_sources` keeps under
-    /// `MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1`.
+    /// `MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1`. A term requested through both
+    /// whole and subtoken channels is charged once for their document union.
     fn lexical_documents(
         &self,
         request: &LexicalLaneRequest<'_>,
@@ -1197,31 +1198,16 @@ impl<'a> ArtifactQueryV1<'a> {
             .iter()
             .map(|subtoken| normalize_lexical(subtoken))
             .collect::<Vec<_>>();
-        let mut sources = Vec::with_capacity(whole_terms.len() + subtokens.len());
-        for term in whole_terms {
-            if stats.postings.by_term.contains_key(&term) {
-                sources.push((stats.whole_term_documents(&term), (term, false)));
-            }
-        }
-        for subtoken in subtokens {
-            if stats.postings.by_term.contains_key(&subtoken) {
-                sources.push((
-                    stats.document_frequency(LexicalFieldV1::Subtoken, &subtoken),
-                    (subtoken, true),
-                ));
-            }
-        }
+        let sources = stats.candidate_sources(whole_terms, subtokens)?;
         let mut documents = phrase_queries
             .values()
             .fold(RoaringBitmap::new(), |union, documents| union | documents);
-        for (term, subtoken) in admit_candidate_sources(sources, |frequency, (term, _)| {
-            pruned.push((term.clone(), frequency as u64));
+        for source in admit_candidate_sources(sources, |frequency, source| {
+            pruned.push((source.term.clone(), frequency as u64));
         }) {
             documents |= stats
                 .postings
-                .documents(&term, |field| {
-                    (field == LexicalFieldV1::Subtoken) == subtoken
-                })
+                .documents(&source.term, |field| source.fields.admits(field))
                 .map_err(map_query_artifact_error)?;
         }
         Ok(documents)
@@ -1607,6 +1593,28 @@ struct LexicalStatsCacheV1 {
     postings: RequestTermPostingsV1,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CandidateSourceFieldsV1 {
+    Whole,
+    Subtoken,
+    All,
+}
+
+impl CandidateSourceFieldsV1 {
+    fn admits(self, field: LexicalFieldV1) -> bool {
+        match self {
+            Self::Whole => field != LexicalFieldV1::Subtoken,
+            Self::Subtoken => field == LexicalFieldV1::Subtoken,
+            Self::All => true,
+        }
+    }
+}
+
+struct LexicalCandidateSourceV1 {
+    term: String,
+    fields: CandidateSourceFieldsV1,
+}
+
 fn lexical_terms(
     prepared: &PreparedLexicalQueryV1<'_>,
     fuzzy: &FuzzyExpansionsV1,
@@ -1662,6 +1670,54 @@ impl LexicalStatsCacheV1 {
             .filter(|(field, _)| **field != LexicalFieldV1::Subtoken)
             .map(|(_, frequencies)| frequencies.get(term).copied().unwrap_or_default())
             .fold(0usize, usize::saturating_add)
+    }
+
+    /// Charge a normalized term only once when both scoring channels name it.
+    /// Their actual document union, not the larger individual frequency, is
+    /// required: the channels may overlap completely or be disjoint. Scoring
+    /// retains the original field postings and frequencies. Only one transient
+    /// bitmap is needed here; admitted sources are decoded into the final set.
+    fn candidate_sources(
+        &self,
+        whole_terms: Vec<String>,
+        subtokens: Vec<String>,
+    ) -> Result<Vec<(usize, LexicalCandidateSourceV1)>, RetrievalPortError> {
+        let mut subtokens = subtokens.into_iter().collect::<BTreeSet<_>>();
+        let mut seen = BTreeSet::new();
+        let mut sources = Vec::with_capacity(whole_terms.len() + subtokens.len());
+        for term in whole_terms {
+            if !seen.insert(term.clone()) || !self.postings.by_term.contains_key(&term) {
+                continue;
+            }
+            let (frequency, fields) = if subtokens.remove(&term) {
+                let documents = self
+                    .postings
+                    .documents(&term, |_| true)
+                    .map_err(map_query_artifact_error)?;
+                (
+                    usize::try_from(documents.len()).map_err(contract_error)?,
+                    CandidateSourceFieldsV1::All,
+                )
+            } else {
+                (
+                    self.whole_term_documents(&term),
+                    CandidateSourceFieldsV1::Whole,
+                )
+            };
+            sources.push((frequency, LexicalCandidateSourceV1 { term, fields }));
+        }
+        for term in subtokens {
+            if self.postings.by_term.contains_key(&term) {
+                sources.push((
+                    self.document_frequency(LexicalFieldV1::Subtoken, &term),
+                    LexicalCandidateSourceV1 {
+                        term,
+                        fields: CandidateSourceFieldsV1::Subtoken,
+                    },
+                ));
+            }
+        }
+        Ok(sources)
     }
 }
 
@@ -1966,5 +2022,148 @@ impl EditDistanceScratchV1 {
             std::mem::swap(&mut self.previous, &mut self.current);
         }
         (self.previous[width - 1] <= limit).then_some(self.previous[width - 1])
+    }
+}
+
+#[cfg(test)]
+mod candidate_source_tests {
+    use std::collections::BTreeMap;
+    use std::ops::Range;
+
+    use roaring::RoaringBitmap;
+
+    use super::super::super::format::PostingListEncoderV1;
+    use super::{
+        CandidateSourceFieldsV1, LexicalStatsCacheV1, RequestTermPostingsV1, TermFieldPostingsV1,
+    };
+    use crate::retrieval::lexical::{LexicalFieldV1, admit_candidate_sources};
+
+    fn stats(entries: &[(&str, LexicalFieldV1, Range<u32>)]) -> LexicalStatsCacheV1 {
+        let mut stats = LexicalStatsCacheV1 {
+            field_totals: BTreeMap::new(),
+            document_frequencies: BTreeMap::new(),
+            postings: RequestTermPostingsV1::default(),
+        };
+        for (term, field, documents) in entries {
+            let mut encoder = PostingListEncoderV1::new(true);
+            for document in documents.clone() {
+                encoder.push(document, 1).expect("ordered posting");
+            }
+            stats
+                .document_frequencies
+                .entry(*field)
+                .or_default()
+                .insert((*term).to_owned(), documents.clone().count());
+            stats
+                .postings
+                .by_term
+                .entry((*term).to_owned())
+                .or_default()
+                .push(TermFieldPostingsV1 {
+                    field: *field,
+                    postings: encoder.finish().expect("nonempty postings"),
+                });
+        }
+        stats
+    }
+
+    fn candidates(
+        stats: &LexicalStatsCacheV1,
+        whole: &[&str],
+        subtokens: &[&str],
+    ) -> (RoaringBitmap, Vec<(String, usize)>) {
+        let sources = stats
+            .candidate_sources(
+                whole.iter().map(|term| (*term).to_owned()).collect(),
+                subtokens.iter().map(|term| (*term).to_owned()).collect(),
+            )
+            .expect("candidate sources");
+        let mut pruned = Vec::new();
+        let admitted = admit_candidate_sources(sources, |frequency, source| {
+            pruned.push((source.term.clone(), frequency));
+        });
+        let mut documents = RoaringBitmap::new();
+        for source in admitted {
+            documents |= stats
+                .postings
+                .documents(&source.term, |field| source.fields.admits(field))
+                .expect("decode admitted postings");
+        }
+        (documents, pruned)
+    }
+
+    #[test]
+    fn overlapping_prose_channels_do_not_crowd_out_a_distinct_word() {
+        let stats = stats(&[
+            ("needle", LexicalFieldV1::BodyText, 0..100),
+            ("needle", LexicalFieldV1::Subtoken, 0..100),
+            ("target", LexicalFieldV1::BodyText, 100..16_350),
+            ("target", LexicalFieldV1::Subtoken, 100..16_350),
+        ]);
+        let (documents, pruned) =
+            candidates(&stats, &["needle", "target"], &["needle", "target"]);
+        assert!(pruned.is_empty(), "{pruned:?}");
+        assert_eq!(documents.len(), 16_350);
+        assert!(
+            documents.contains(16_349),
+            "the target-only document must remain eligible"
+        );
+        // Admission grouping must leave both channels available to scoring.
+        let mut cursors = stats.postings.cursors().unwrap();
+        let target_channels = cursors
+            .iter_mut()
+            .filter(|cursor| cursor.term == "target")
+            .map(|cursor| (cursor.field, cursor.frequency_at(16_349).unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            target_channels,
+            vec![
+                (LexicalFieldV1::BodyText, Some(1)),
+                (LexicalFieldV1::Subtoken, Some(1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn disjoint_channels_are_charged_for_their_full_union() {
+        let stats = stats(&[
+            ("needle", LexicalFieldV1::BodyText, 0..100),
+            ("needle", LexicalFieldV1::Subtoken, 100..200),
+            ("target", LexicalFieldV1::BodyText, 200..16_400),
+            ("target", LexicalFieldV1::Subtoken, 200..16_400),
+        ]);
+        let (documents, pruned) =
+            candidates(&stats, &["needle", "target"], &["needle", "target"]);
+        assert_eq!(documents.len(), 200);
+        assert_eq!(pruned, vec![("target".to_owned(), 16_200)]);
+        assert!(!documents.contains(16_399));
+    }
+
+    #[test]
+    fn repeated_sources_are_deduplicated_without_widening_requested_fields() {
+        let stats = stats(&[
+            ("needle", LexicalFieldV1::BodyText, 0..100),
+            ("needle", LexicalFieldV1::Subtoken, 100..200),
+            ("part", LexicalFieldV1::Subtoken, 200..210),
+        ]);
+        let sources = stats
+            .candidate_sources(
+                vec!["needle".to_owned(), "needle".to_owned()],
+                vec!["part".to_owned(), "part".to_owned()],
+            )
+            .unwrap();
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].0, 100);
+        assert_eq!(sources[0].1.fields, CandidateSourceFieldsV1::Whole);
+        assert_eq!(sources[1].0, 10);
+        assert_eq!(sources[1].1.fields, CandidateSourceFieldsV1::Subtoken);
+        let (documents, pruned) = candidates(&stats, &["needle", "needle"], &["part", "part"]);
+        assert!(pruned.is_empty());
+        assert_eq!(documents.len(), 110);
+        assert!(
+            !documents.contains(100),
+            "unrequested subtoken channel stays excluded"
+        );
+        assert!(documents.contains(209));
     }
 }
