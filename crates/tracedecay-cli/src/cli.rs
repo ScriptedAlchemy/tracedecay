@@ -145,14 +145,10 @@ pub enum Commands {
         path_flag: Option<String>,
         /// Adopt this registered project id onto the new path when its moved
         /// non-git store no longer resolves at its recorded root. Adoption
-        /// never happens without this flag or `--yes`; a root that already
+        /// never happens without this flag; a root that already
         /// belongs to a different project is refused.
         #[arg(long = "adopt-project")]
         adopt_project: Option<String>,
-        /// Mint a fresh project identity even when a moved non-git store
-        /// could be adopted at this root.
-        #[arg(long)]
-        fresh: bool,
         /// Hold until the first code generation is ready, for as long as the
         /// daemon reports indexing, restoration, or source verification in
         /// flight. Without this flag, init returns a typed not-ready receipt

@@ -16,7 +16,8 @@ use serde_json::json;
 use std::path::Path;
 use std::sync::Arc;
 use tracedecay_daemon_protocol::{
-    DaemonHandshake, PROJECT_NOT_ENROLLED_REASON_CODE, error_is_project_not_enrolled,
+    DaemonHandshake, MovedStoreAdoption, PROJECT_NOT_ENROLLED_REASON_CODE,
+    error_is_project_not_enrolled,
 };
 use tracedecay_domain::errors::{ProjectOpenFailureKind, Result, TraceDecayError};
 use tracedecay_mcp::server::{McpMethod, classify_mcp_method};
@@ -84,6 +85,7 @@ pub(super) async fn open_project_for_handshake(
                 message: "registered project open requires an authoritative project identity"
                     .to_owned(),
             })?;
+    check_named_adoption_identity(project_path, handshake, Some(project_id))?;
     project_open_cancellation_checkpoint(cancellation)?;
     // First-touch enrollment: persist the minted identity in the `.git/`
     // repository identity marker so a subsequent open resolves the same
@@ -144,6 +146,28 @@ pub(super) async fn open_project_for_handshake(
         }
         Err(open_err) => Err(open_err),
     }
+}
+
+/// Cold opens and retained route owners must honor the same exact requested
+/// identity. Checking the owner returned by a cache lookup also covers a
+/// named request that joined another client's in-flight open.
+pub(super) fn check_named_adoption_identity(
+    project_path: &Path,
+    handshake: &DaemonHandshake,
+    project_id: Option<&str>,
+) -> Result<()> {
+    if let MovedStoreAdoption::AdoptNamed(requested) = &handshake.moved_store_adoption
+        && project_id != Some(requested.as_str())
+    {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "cannot adopt project '{requested}' onto root '{}': its resolved \
+                 project identity is {project_id:?}",
+                project_path.display(),
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Whether `err` is the specific fail-closed error raised when identity

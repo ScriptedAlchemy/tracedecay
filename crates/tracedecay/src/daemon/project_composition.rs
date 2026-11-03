@@ -18,7 +18,7 @@ use super::project_open_admission;
 use super::project_open_admission::{
     ProjectOpenGate, ProjectOpenGates, ProjectRouteKey, ProjectServerKey,
 };
-use super::project_open_handshake::open_project_for_handshake;
+use super::project_open_handshake::{check_named_adoption_identity, open_project_for_handshake};
 use super::project_open_orchestration::ensure_registered_project_route;
 use super::project_open_owners;
 use super::project_routing::{
@@ -774,6 +774,11 @@ impl ProjectOpenInputs<'_> {
         if let Some((cached_key, cached_server)) =
             cached_route_server(self.store_administration, &route).await
         {
+            check_named_adoption_identity(
+                self.canonical_project_path,
+                self.handshake,
+                cached_key.owner.project_id.as_deref(),
+            )?;
             return Ok(RouteAdmission::Cached(cached_project_composition(
                 self.canonical_project_path,
                 cached_key,
@@ -803,6 +808,11 @@ impl ProjectOpenInputs<'_> {
         if let Some((cached_key, cached_server)) =
             cached_route_server(self.store_administration, &route).await
         {
+            check_named_adoption_identity(
+                self.canonical_project_path,
+                self.handshake,
+                cached_key.owner.project_id.as_deref(),
+            )?;
             return Ok(RouteAdmission::Cached(cached_project_composition(
                 self.canonical_project_path,
                 cached_key,

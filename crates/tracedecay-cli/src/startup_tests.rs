@@ -243,7 +243,6 @@ fn representative_commands_route_to_their_dispatch_family() {
                 path: None,
                 path_flag: None,
                 adopt_project: None,
-                fresh: false,
                 wait: false,
             },
             CommandFamily::Project,

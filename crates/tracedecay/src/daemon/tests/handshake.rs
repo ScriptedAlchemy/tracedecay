@@ -209,6 +209,128 @@ fn missing_index_classifier_matches_the_kind_not_the_message() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn named_adoption_refuses_another_project_on_cold_and_retained_routes() {
+    let home = TempDir::new().expect("home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let project = root.join("already-registered");
+    std::fs::create_dir_all(&project).expect("project root");
+    let client_identity = test_client_identity_for(root.join("profile"));
+    let layout = initialize_test_project(&project, &client_identity).await;
+    let registered_id = layout
+        .identity
+        .project_id
+        .as_deref()
+        .expect("registered project identity");
+    let manifest_path = layout.manifest_path.as_ref().expect("store manifest path");
+    let manifest_before = std::fs::read(manifest_path).expect("store manifest");
+    let requested_id = "proj_explicit_moved_project";
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity: client_identity.clone(),
+        allow_init: true,
+        moved_store_adoption: tracedecay_daemon_protocol::MovedStoreAdoption::AdoptNamed(
+            requested_id.to_owned(),
+        ),
+        ..test_handshake_defaults()
+    };
+    let _database_scope = enter_test_daemon_database_scope(
+        &client_identity.profile_root,
+        "named adoption registered root conflict",
+    );
+    let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
+    let store_administration = &engine.store_administration;
+    let error = match Box::pin(
+        crate::daemon::project_open_handshake::open_project_for_handshake(
+            &project,
+            &handshake,
+            store_administration,
+            &tracedecay_runtime_core::cancellation::CancellationToken::new(),
+        ),
+    )
+    .await
+    {
+        Ok(opened) => {
+            opened.close();
+            panic!("a named adoption must not open a different registered identity");
+        }
+        Err(error) => error,
+    };
+    assert!(matches!(
+        &error,
+        tracedecay_domain::errors::TraceDecayError::Config { message }
+            if message.contains(requested_id) && message.contains(registered_id)
+    ));
+    assert_eq!(
+        std::fs::read(manifest_path).expect("store manifest after refusal"),
+        manifest_before,
+        "refusing a different named identity must not rewrite the registered store"
+    );
+    let registry = store_administration
+        .registered_profile_database()
+        .await
+        .expect("profile registry");
+    let retained = registry
+        .project_registry_context_by_alias(&project)
+        .await
+        .expect("registered root lookup")
+        .expect("registered project survives refusal");
+    assert_eq!(retained.project.project_id, registered_id);
+    assert_eq!(
+        std::path::Path::new(&retained.project.canonical_root),
+        project.as_path()
+    );
+
+    let ordinary = DaemonHandshake {
+        moved_store_adoption: tracedecay_daemon_protocol::MovedStoreAdoption::Never,
+        ..handshake.clone()
+    };
+    let (_, _, server, _) = engine
+        .open_project_server(&ordinary)
+        .await
+        .expect("open the actual registered project");
+    let wrong_named_cache = engine.cached_project_server(&handshake).await;
+    assert!(matches!(
+        wrong_named_cache,
+        Err(tracedecay_domain::errors::TraceDecayError::Config { .. })
+    ));
+    let wrong_named_portable_cache =
+        crate::daemon::project_open_orchestration::portable_cached_project_server(
+            store_administration,
+            &project,
+            &handshake,
+            crate::daemon::project_open_admission::ProjectServerRequirement::Core,
+        )
+        .await;
+    assert!(matches!(
+        wrong_named_portable_cache,
+        Err(tracedecay_domain::errors::TraceDecayError::Config { .. })
+    ));
+    let wrong_named_direct_open = engine.open_project_server(&handshake).await;
+    assert!(matches!(
+        wrong_named_direct_open,
+        Err(tracedecay_domain::errors::TraceDecayError::Config { .. })
+    ));
+    let matching = DaemonHandshake {
+        moved_store_adoption: tracedecay_daemon_protocol::MovedStoreAdoption::AdoptNamed(
+            registered_id.to_owned(),
+        ),
+        ..handshake
+    };
+    let matching_server = engine
+        .cached_project_server(&matching)
+        .await
+        .expect("matching named request remains valid")
+        .expect("the same registered server remains cached");
+    assert!(Arc::ptr_eq(&server, &matching_server));
+    drop((server, matching_server));
+    assert!(
+        engine.shutdown_all().await.project_servers.is_clean(),
+        "the retained project owners must shut down cleanly"
+    );
+}
+
 /// A client whose handshake this daemon cannot decode (wire drift between
 /// build revisions) must read one typed refusal frame and a clean EOF,
 /// never a raw `Connection reset by peer` from a dropped socket.
