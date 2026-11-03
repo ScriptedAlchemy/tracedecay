@@ -159,6 +159,56 @@ class RunHttpTest(unittest.TestCase):
                 self.partial.write_text(contents)
                 self.assert_refused_unchanged()
 
+    def test_resume_rejects_invalid_metrics_before_network_or_publication(self):
+        self.interrupt()
+        header, saved = self.partial.read_text().splitlines()
+        row = json.loads(saved)
+        for field, value in (
+            ("ms", float("nan")), ("server_ms", float("inf")),
+            ("ms", -1), ("ms", "5"), ("server_ms", False),
+            ("state_tokens", None), ("state_tokens", 1.5),
+            ("state_tokens", True), ("dropped", -1), ("dropped", "0"),
+            ("extra", {"nonfinite": float("nan")}),
+        ):
+            with self.subTest(field=field, value=value):
+                invalid = {**row, field: value}
+                self.partial.write_text(header + "\n" + json.dumps(invalid) + "\n")
+                self.assert_refused_unchanged()
+
+    def test_new_invalid_metrics_do_not_publish_samples_or_completed_rows(self):
+        self.interrupt()
+        before = self.partial.read_bytes()
+        sample = self.root / "first-response.json"
+        for field, value in (("latency_ms", -1), ("latency_ms", "0"),
+                             ("latency_ms", True), ("input_tokens", -1),
+                             ("input_tokens", 1.5), ("input_tokens", False)):
+            response, elapsed = self.response("", {"questions": run_http.noul_questions()})
+            if field == "input_tokens":
+                response["usage"][field] = value
+            else:
+                response[field] = value
+            with self.subTest(field=field, value=value):
+                with patch.object(run_http, "post", return_value=(response, elapsed)):
+                    with self.assertRaises(ValueError):
+                        self.run_main(["--sample-out", str(sample)])
+                self.assertEqual(self.partial.read_bytes(), before)
+                self.assertFalse(self.output.exists())
+                self.assertFalse(sample.exists())
+
+    def test_unknown_server_latency_and_zero_token_count_resume(self):
+        self.interrupt()
+        header, saved = self.partial.read_text().splitlines()
+        row = json.loads(saved)
+        row.update(server_ms=None, state_tokens=0, dropped=0)
+        self.partial.write_text(header + "\n" + json.dumps(row) + "\n")
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main()
+        post.assert_called_once()
+        result = json.loads(self.output.read_text())
+        self.assertIsNone(result["rows"][0]["server_ms"])
+        self.assertEqual(result["rows"][0]["state_tokens"], 0)
+        self.assertFalse(self.partial.exists())
+
     def test_invalid_settings_are_refused_without_inference(self):
         for value in ("0", "-1", "nan", "inf"):
             with self.subTest(temperature=value), patch.object(run_http, "post") as post:

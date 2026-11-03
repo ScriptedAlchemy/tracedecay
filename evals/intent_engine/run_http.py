@@ -113,6 +113,26 @@ def calibrated(probability, temperature):
     return exp_odds / (1 + exp_odds)
 
 
+def serialize_result(row, questions):
+    """Admit fresh and resumed rows before any durable output is changed."""
+    probabilities(row.get("probs"), questions)
+    for field in ("ms", "server_ms", "state_tokens", "dropped"):
+        if field not in row:
+            raise ValueError(f"result row is missing {field} for {row.get('id')}")
+        value = row[field]
+        if field == "server_ms" and value is None:
+            continue  # The server may legitimately omit its own timing.
+        if field in ("state_tokens", "dropped"):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{field} must be a nonnegative integer")
+        elif (isinstance(value, bool) or not isinstance(value, (int, float))
+              or value < 0 or (isinstance(value, float) and not math.isfinite(value))):
+            raise ValueError(f"{field} must be a finite nonnegative number")
+    # json.loads accepts NaN/Infinity, including in extra nested fields. Reject
+    # them while validating the partial log, not after opening the final file.
+    return json.dumps(row, allow_nan=False)
+
+
 def resume_rows(partial, header, cases, requests, questions):
     """Validate the whole existing log before appending or issuing HTTP work."""
     first = partial.readline()
@@ -131,11 +151,7 @@ def resume_rows(partial, header, cases, requests, questions):
                 or row.get("labels") != case["labels"]
                 or row.get("context_needed") != case["context_needed"]):
             raise ValueError(f"partial output has mismatched case evidence for {case_id}")
-        probabilities(row.get("probs"), questions)
-        # A valid request fingerprint alone is not a completed result row.
-        for field in ("ms", "server_ms", "state_tokens", "dropped"):
-            if field not in row:
-                raise ValueError(f"partial output is missing {field} for {case_id}")
+        serialize_result(row, questions)
         done[case_id] = row
     return done
 
@@ -240,7 +256,7 @@ def main(argv=None):
                 # Refuse malformed row and raw-sample data before publishing
                 # either. A non-finite response must not leave a sample file
                 # that a later valid retry mistakes for a completed capture.
-                serialized_row = json.dumps(row, allow_nan=False)
+                serialized_row = serialize_result(row, questions)
                 if args.sample_out and not os.path.exists(args.sample_out):
                     serialized_sample = json.dumps(
                         {"request": body, "response": response}, indent=1, allow_nan=False
