@@ -62,6 +62,11 @@ impl SessionSyncProjectContext {
             }
         };
         let Some(runtime) = project_sessions.project_graph_runtime() else {
+            tracing::warn!(
+                event = "git_topology_publication_unavailable",
+                stage = "project graph runtime",
+                "git topology publication failed"
+            );
             return GitTopologySyncOutcome::Finished(Err(GitTopologySyncFailure::Unavailable));
         };
         let runtime: Arc<dyn VerifiedGraphRuntimePortV1> = Arc::new(runtime.clone());
@@ -113,6 +118,22 @@ impl GraphCancellation for GitTopologySyncCancellation {
     }
 }
 
+/// Keeps the operator-facing failure code stable while recording which step
+/// failed and why, which the code alone cannot say.
+fn unavailable<E: std::fmt::Debug>(
+    stage: &'static str,
+) -> impl FnOnce(E) -> GitTopologySyncFailure {
+    move |error| {
+        tracing::warn!(
+            event = "git_topology_publication_unavailable",
+            stage,
+            ?error,
+            "git topology publication failed"
+        );
+        GitTopologySyncFailure::Unavailable
+    }
+}
+
 pub fn publish_native_topology(
     runtime: Arc<dyn VerifiedGraphRuntimePortV1>,
     project_root: PathBuf,
@@ -122,23 +143,23 @@ pub fn publish_native_topology(
     cancelled: Arc<AtomicBool>,
 ) -> Result<(), GitTopologySyncFailure> {
     let identity = git_topology_projection_identity(
-        git_topology_namespace(&repository).map_err(|_| GitTopologySyncFailure::Unavailable)?,
+        git_topology_namespace(&repository).map_err(unavailable("projection namespace"))?,
     )
-    .map_err(|_| GitTopologySyncFailure::Unavailable)?;
+    .map_err(unavailable("projection identity"))?;
     let read_cancelled = Arc::clone(&cancelled);
     let current = runtime
         .verified_snapshot(
             &identity,
             FactReadControl::new(Arc::new(move || read_cancelled.load(Ordering::Acquire))),
         )
-        .map_err(|_| GitTopologySyncFailure::Unavailable)?;
+        .map_err(unavailable("verified snapshot read"))?;
     let (branch_stacks, worktree_occupancies) = match current {
         Some(snapshot) => {
             let store = GitTopologyProjectionStore::from_verified_snapshot_verified(
                 snapshot,
                 Arc::new(GitTopologySyncCancellation(Arc::clone(&cancelled))),
             )
-            .map_err(|_| GitTopologySyncFailure::Unavailable)?;
+            .map_err(unavailable("retained projection load"))?;
             validate_retained_declared_topology(
                 &repository,
                 &project_root,
@@ -156,11 +177,11 @@ pub fn publish_native_topology(
     let adapter = NativeGitIntelligence::new(project_root, repository.clone(), worktree);
     let projection = adapter
         .topology_projection(GIT_HISTORY_MAX_COUNT_LIMIT)
-        .map_err(|_| GitTopologySyncFailure::Unavailable)?
+        .map_err(unavailable("git topology read"))?
         .with_declared_topology(branch_stacks, worktree_occupancies)
-        .map_err(|_| GitTopologySyncFailure::Unavailable)?;
+        .map_err(unavailable("declared topology merge"))?;
     let revision = GraphProjectorRevision::try_from(GIT_TOPOLOGY_PROJECTOR_REVISION_V1.to_owned())
-        .map_err(|_| GitTopologySyncFailure::Unavailable)?;
+        .map_err(unavailable("projector revision"))?;
     let check = || {
         if cancelled.load(Ordering::Relaxed) {
             Err(GraphDbError::Cancelled)
@@ -169,12 +190,12 @@ pub fn publish_native_topology(
         }
     };
     let manifest = build_git_topology_manifest_checked(identity, &projection, &revision, &check)
-        .map_err(|_| GitTopologySyncFailure::Unavailable)?;
+        .map_err(unavailable("manifest build"))?;
     let idempotency = git_topology_idempotency_key(&projection, &revision)
-        .map_err(|_| GitTopologySyncFailure::Unavailable)?;
+        .map_err(unavailable("idempotency key"))?;
     runtime
         .publish_verified_manifest(&manifest, idempotency, cancelled)
-        .map_err(|_| GitTopologySyncFailure::Unavailable)?;
+        .map_err(unavailable("manifest publication"))?;
     Ok(())
 }
 
