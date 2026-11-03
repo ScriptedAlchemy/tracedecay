@@ -6283,6 +6283,49 @@ fn duplicate_whole_terms_do_not_consume_the_global_fuzzy_budget() {
     );
 }
 
+
+#[test]
+fn prose_query_recovers_camel_case_symbol_from_real_sealed_subtoken_postings() {
+    let artifact = rust_artifact(&[
+        "pub fn fetchWidgetAutoTagItemsForwardTotal() {}\n",
+        "pub fn widget() {}\n",
+        "pub fn tag() {}\n",
+    ]);
+    let query = "widget auto tag items forward total";
+    let parts = tracedecay_query::retrieval::lexical::lexical_query_parts(query)
+        .expect("parse multiword query");
+    let mut request = artifact.request(query, &[], &[], &[], 0, 32);
+    request.whole_terms = Cow::Owned(parts.whole_terms);
+    request.subtokens = Cow::Owned(parts.subtokens);
+    request.phrases = Cow::Owned(parts.phrases);
+    let results = complete(
+        artifact
+            .lane()
+            .retrieve_lexical(&request)
+            .expect("sealed lexical search"),
+    );
+    assert!(
+        candidate_files(&results.candidates).contains(&0),
+        "the camelCase symbol must not be absent from the bounded page: {results:?}"
+    );
+    assert!(
+        results.candidates.iter().any(|candidate| {
+            candidate.file_occurrence_id.as_ref().is_some_and(|file| {
+                file.as_str() == "file.fixture.0"
+                    && ["widget", "auto", "tag", "items", "forward", "total"]
+                        .iter()
+                        .all(|term| {
+                            results.evidence_by_occurrence[&candidate.source_occurrence_id]
+                                .matched_subtokens
+                                .iter()
+                                .any(|matched| matched == term)
+                        })
+            })
+        }),
+        "the long symbol must match every query word in the subtoken field"
+    );
+}
+
 #[test]
 fn lexical_artifact_reports_freshness_coverage_and_page_cutoff() {
     let sources = ["pub fn target() {}\n"; 3];

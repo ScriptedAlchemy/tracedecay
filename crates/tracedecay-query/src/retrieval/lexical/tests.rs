@@ -181,12 +181,7 @@ fn query_tokenization_matches_index_tokenization_for_separator_terms() {
 
     let mut expected_subtokens: Vec<String> = index_tokens
         .iter()
-        .flat_map(|token| {
-            let lowercase = token.to_ascii_lowercase();
-            split_subtokens(token)
-                .into_iter()
-                .filter(move |part| part != &lowercase)
-        })
+        .flat_map(|token| split_subtokens(token))
         .collect();
     expected_subtokens.sort();
     expected_subtokens.dedup();
@@ -197,6 +192,36 @@ fn query_tokenization_matches_index_tokenization_for_separator_terms() {
             "{subtoken} must be reachable as a subtoken"
         );
     }
+}
+
+
+#[test]
+fn prose_words_can_match_identifier_subtokens_without_broadening_single_term_queries() {
+    let query = "widget auto tag items forward total";
+    let parts = lexical_query_parts(query).expect("prose search");
+    assert_eq!(
+        parts.subtokens,
+        ["auto", "forward", "items", "tag", "total", "widget"]
+            .map(str::to_owned)
+            .to_vec()
+    );
+    assert_eq!(parts.whole_terms.len(), 6);
+
+    let hyphenated =
+        lexical_query_parts("widget-tool auto-tag query rows per item").expect("hyphenated prose");
+    for word in ["widget", "tool", "auto", "tag", "query", "rows", "per", "item"] {
+        assert!(
+            hyphenated.subtokens.contains(&word.to_owned()),
+            "{word} must reach a camelCase subtoken posting"
+        );
+    }
+    assert!(
+        lexical_query_parts("fetchWidgetAutoTagItemsForwardTotal")
+            .expect("single identifier")
+            .subtokens
+            .is_empty(),
+        "single-term queries must retain their narrow admission"
+    );
 }
 
 fn budget(max_candidates_per_lane: u32) -> RetrievalBudget {
