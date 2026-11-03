@@ -38,15 +38,35 @@ this is not a crash-durable database or a concurrent-writer protocol. If final
 output publication itself is interrupted, the partial log remains, but an
 incomplete final file requires operator inspection before retrying that tag.
 
+## Token and truncation evidence
+
+Each result records `usage.input_tokens` as `input_tokens`,
+`usage.state_tokens` as `state_tokens`, and `usage.state_tokens_dropped` as
+`dropped`. These are distinct server measurements; total input tokens are never
+substituted for state tokens. Omitted or null telemetry stays JSON `null`.
+Reported zeroes stay zero, and reported counts must be nonnegative integers.
+
+`score.py` computes token statistics only from measured cases and reports
+`input_tokens_measured_cases`, `state_tokens_measured_cases`, and
+`truncation_measured_cases` alongside `total_cases`. The full-cohort
+`cases_truncated` is unknown unless every case reports a dropped-token count;
+`observed_cases_truncated` counts only confirmed truncation in measured cases.
+No measurements means unknown token statistics, not a zero-token result.
+
+The experiment identity is version 2. Version-1 partial logs are refused before
+inference or append: their default-zero truncation and mislabeled input counts
+cannot be recovered as measurements. Use a new tag; do not relabel old logs.
+Version-1 completed HTTP results are also refused by the scorer. Historical
+reports are not rewritten or retrospectively qualified.
+
 The runner still uses the historical nine-category evaluation in `common.py`.
-This change does not establish runtime-renderer parity, qualified labels,
-held-out quality, or accurate missing token/truncation telemetry. Those remain
-separate qualification work; existing score fields are not reinterpreted here.
+Runtime-renderer parity, qualified labels, held-out quality, and independent
+verification of server-reported telemetry remain separate qualification work.
 
 Run the no-inference persistence regressions with:
 
 ```sh
-bazel test //evals/intent_engine:http_runner_test --test_output=errors
+bazel test //evals/intent_engine:http_runner_test //evals/intent_engine:scoring_test --test_output=errors
 ```
 
 The tests exercise the actual runner and filesystem with substituted HTTP

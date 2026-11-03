@@ -6,6 +6,7 @@ py_test(
     srcs = [
         "common.py",
         "run_http.py",
+        "score.py",
         "test_run_http.py",
     ],
     main = "test_run_http.py",

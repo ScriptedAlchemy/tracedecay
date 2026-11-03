@@ -116,13 +116,13 @@ def calibrated(probability, temperature):
 def serialize_result(row, questions, temperature):
     """Admit fresh and resumed rows before any durable output is changed."""
     probabilities(row.get("probs"), questions)
-    for field in ("ms", "server_ms", "state_tokens", "dropped"):
+    for field in ("ms", "server_ms", "input_tokens", "state_tokens", "dropped"):
         if field not in row:
             raise ValueError(f"result row is missing {field} for {row.get('id')}")
         value = row[field]
-        if field == "server_ms" and value is None:
-            continue  # The server may legitimately omit its own timing.
-        if field in ("state_tokens", "dropped"):
+        if field != "ms" and value is None:
+            continue  # Omitted server telemetry is unknown, not a measured zero.
+        if field in ("input_tokens", "state_tokens", "dropped"):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{field} must be a nonnegative integer")
         elif (isinstance(value, bool) or not isinstance(value, (int, float))
@@ -215,7 +215,7 @@ def main(argv=None):
                 body["model"] = args.send_model
             requests[case["id"]] = (body, hashlib.sha256(request_bytes(body)).hexdigest())
         identity = {
-            "version": 1,
+            "version": 2,
             "config": cfg,
             "dataset_sha256": dataset_sha,
             "case_ids": list(cases),
@@ -250,12 +250,18 @@ def main(argv=None):
                 server_ms = response.get("latency_ms")
                 if server_ms is None:
                     server_ms = (response.get("timing") or {}).get("inference_ms")
+                usage = response.get("usage")
+                if usage is None:
+                    usage = {}
+                if not isinstance(usage, dict):
+                    raise ValueError("response usage must be an object or null")
                 row = {
                     "id": case["id"], "request_sha256": request_sha,
                     "labels": case["labels"], "context_needed": case["context_needed"],
                     "ms": ms, "server_ms": server_ms,
-                    "state_tokens": response.get("usage", {}).get("input_tokens", 0),
-                    "dropped": 0, "probs": probs,
+                    "input_tokens": usage.get("input_tokens"),
+                    "state_tokens": usage.get("state_tokens"),
+                    "dropped": usage.get("state_tokens_dropped"), "probs": probs,
                 }
                 if args.noul_temperature is not None:
                     row["probs_raw"] = probs

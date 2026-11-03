@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_http
+import score
 
 
 class RunHttpTest(unittest.TestCase):
@@ -86,6 +87,90 @@ class RunHttpTest(unittest.TestCase):
         self.assertEqual(result["rows"][0]["server_ms"], 0)
         self.assertFalse(self.partial.exists())
 
+
+    def test_input_tokens_do_not_fabricate_state_or_truncation_measurements(self):
+        self.interrupt()
+        with patch.object(run_http, "post", side_effect=self.response):
+            self.run_main()
+        result = json.loads(self.output.read_text())
+        self.assertEqual(result["experiment"]["version"], 2)
+        for row in result["rows"]:
+            self.assertEqual(row["input_tokens"], 12)
+            self.assertIsNone(row["state_tokens"])
+            self.assertIsNone(row["dropped"])
+        timing = score.score_config(result)["latency"]
+        self.assertEqual(timing["median_input_tokens"], 12)
+        self.assertEqual(timing["input_tokens_measured_cases"], 2)
+        self.assertIsNone(timing["median_state_tokens"])
+        self.assertIsNone(timing["cases_truncated"])
+        self.assertEqual(timing["truncation_measured_cases"], 0)
+
+    def test_reported_usage_and_zero_counts_survive_resume(self):
+        response, elapsed = self.response("", {"questions": run_http.noul_questions()})
+        response["usage"] = {"input_tokens": 12, "state_tokens": 8, "state_tokens_dropped": 3}
+        with patch.object(self, "response", return_value=(response, elapsed)):
+            self.interrupt()
+        response = copy.deepcopy(response)
+        response["usage"] = {"input_tokens": 0, "state_tokens": 0, "state_tokens_dropped": 0}
+        with patch.object(run_http, "post", return_value=(response, elapsed)) as post:
+            self.run_main()
+        post.assert_called_once()
+        result = json.loads(self.output.read_text())
+        self.assertEqual(
+            [(row["input_tokens"], row["state_tokens"], row["dropped"]) for row in result["rows"]],
+            [(12, 8, 3), (0, 0, 0)],
+        )
+        timing = score.score_config(result)["latency"]
+        self.assertEqual(timing["median_state_tokens"], 4)
+        self.assertEqual(timing["median_input_tokens"], 6)
+        self.assertEqual(timing["truncation_measured_cases"], 2)
+        self.assertEqual(timing["cases_truncated"], 1)
+
+    def test_missing_usage_survives_resume_and_scoring(self):
+        response, elapsed = self.response("", {"questions": run_http.noul_questions()})
+        response["usage"] = None
+        with patch.object(self, "response", return_value=(response, elapsed)):
+            self.interrupt()
+        del response["usage"]
+        with patch.object(run_http, "post", return_value=(response, elapsed)) as post:
+            self.run_main()
+        post.assert_called_once()
+        result = json.loads(self.output.read_text())
+        for row in result["rows"]:
+            for field in ("input_tokens", "state_tokens", "dropped"):
+                self.assertIsNone(row[field], field)
+        timing = score.score_config(result)["latency"]
+        self.assertEqual(timing["total_cases"], 2)
+        self.assertEqual(timing["median_ms"], 5)
+        self.assertEqual(timing["state_tokens_measured_cases"], 0)
+        self.assertEqual(timing["input_tokens_measured_cases"], 0)
+        self.assertEqual(timing["truncation_measured_cases"], 0)
+        self.assertIsNone(timing["cases_truncated"])
+
+    def test_resume_refuses_prior_telemetry_contract(self):
+        self.interrupt()
+        header, row = map(json.loads, self.partial.read_text().splitlines())
+        header["experiment"]["version"] = 1
+        header["experiment_sha256"] = run_http.digest(header["experiment"])
+        # Old logs mislabeled input tokens and invented zero dropped tokens.
+        row.pop("input_tokens", None)
+        row.update(state_tokens=12, dropped=0)
+        self.partial.write_text(json.dumps(header) + "\n" + json.dumps(row) + "\n")
+        self.assert_refused_unchanged()
+
+    def test_malformed_usage_is_refused_without_writes(self):
+        self.interrupt()
+        before = self.partial.read_bytes()
+        for usage in ([], "unknown", 0, False):
+            response, elapsed = self.response("", {"questions": run_http.noul_questions()})
+            response["usage"] = usage
+            with self.subTest(usage=usage):
+                with patch.object(run_http, "post", return_value=(response, elapsed)):
+                    with self.assertRaisesRegex(ValueError, "usage"):
+                        self.run_main()
+                self.assertEqual(self.partial.read_bytes(), before)
+                self.assertFalse(self.output.exists())
+
     def test_model_endpoint_and_calibration_changes_refuse_resume(self):
         self.interrupt()
         for extra in (["--send-model", "another-model"], ["--noul-temperature", "2"],
@@ -149,6 +234,7 @@ class RunHttpTest(unittest.TestCase):
             {**row, "id": "foreign"}, {**row, "request_sha256": "wrong"},
             {**row, "labels": []}, {**row, "probs": {}},
             {key: value for key, value in row.items() if key != "ms"},
+            {key: value for key, value in row.items() if key != "input_tokens"},
         ]
         for bad in bad_rows:
             with self.subTest(row=bad):
@@ -166,8 +252,9 @@ class RunHttpTest(unittest.TestCase):
         for field, value in (
             ("ms", float("nan")), ("server_ms", float("inf")),
             ("ms", -1), ("ms", "5"), ("server_ms", False),
-            ("state_tokens", None), ("state_tokens", 1.5),
+            ("state_tokens", "12"), ("state_tokens", 1.5),
             ("state_tokens", True), ("dropped", -1), ("dropped", "0"),
+            ("input_tokens", -1), ("input_tokens", True), ("input_tokens", 1.5),
             ("extra", {"nonfinite": float("nan")}),
         ):
             with self.subTest(field=field, value=value):
@@ -181,9 +268,11 @@ class RunHttpTest(unittest.TestCase):
         sample = self.root / "first-response.json"
         for field, value in (("latency_ms", -1), ("latency_ms", "0"),
                              ("latency_ms", True), ("input_tokens", -1),
-                             ("input_tokens", 1.5), ("input_tokens", False)):
+                             ("input_tokens", 1.5), ("input_tokens", False),
+                             ("state_tokens", -1), ("state_tokens", "12"),
+                             ("state_tokens_dropped", True), ("state_tokens_dropped", -1)):
             response, elapsed = self.response("", {"questions": run_http.noul_questions()})
-            if field == "input_tokens":
+            if field in ("input_tokens", "state_tokens", "state_tokens_dropped"):
                 response["usage"][field] = value
             else:
                 response[field] = value

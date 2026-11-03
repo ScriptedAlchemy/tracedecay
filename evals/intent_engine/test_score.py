@@ -149,6 +149,64 @@ class ScoringTests(unittest.TestCase):
             self.assertIn("no rows to score", result.stderr)
             self.assertEqual(summary.read_bytes(), b"existing summary\n")
 
+
+    def test_prior_http_telemetry_is_not_scored_as_measured_usage(self):
+        for experiment in ({"version": 1}, {"version": 3}, {}, None):
+            with self.subTest(experiment=experiment):
+                with self.assertRaisesRegex(ValueError, "telemetry version"):
+                    score.score_config({
+                        "config": "old-http", "experiment": experiment,
+                        "rows": [row("a")],
+                    })
+
+    def test_partial_usage_reports_observed_coverage_not_invented_zeroes(self):
+        rows = [
+            {**row("missing"), "input_tokens": 12, "state_tokens": None, "dropped": None},
+            {**row("truncated"), "input_tokens": 100, "state_tokens": 40, "dropped": 2},
+            {**row("zero"), "input_tokens": None, "state_tokens": 0, "dropped": 0},
+        ]
+        timing = score.score_config({"config": "partial", "rows": rows})["latency"]
+        self.assertEqual(timing["total_cases"], 3)
+        self.assertEqual(timing["median_state_tokens"], 20)
+        self.assertEqual(timing["max_state_tokens"], 40)
+        self.assertEqual(timing["state_tokens_measured_cases"], 2)
+        self.assertEqual(timing["median_input_tokens"], 56)
+        self.assertEqual(timing["max_input_tokens"], 100)
+        self.assertEqual(timing["input_tokens_measured_cases"], 2)
+        self.assertEqual(timing["truncation_measured_cases"], 2)
+        self.assertEqual(timing["observed_cases_truncated"], 1)
+        self.assertIsNone(timing["cases_truncated"])
+        self.assertEqual(json.loads(json.dumps(timing, allow_nan=False)), timing)
+
+    def test_absent_usage_remains_unknown_in_cli_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.stage_scripts(root)
+            (root / "results").mkdir()
+            (root / "results" / "unknown.json").write_text(json.dumps({
+                "config": "unknown",
+                "rows": [{**row("a"), "state_tokens": None, "input_tokens": None, "dropped": None}],
+            }), encoding="utf-8")
+            scored = self.run_script(root, "score.py")
+            self.assertEqual(scored.returncode, 0, scored.stderr)
+            timing = json.loads((root / "summary.json").read_text())["unknown"]["latency"]
+            for field in ("state_tokens", "input_tokens"):
+                self.assertIsNone(timing[f"median_{field}"])
+                self.assertIsNone(timing[f"max_{field}"])
+                self.assertEqual(timing[f"{field}_measured_cases"], 0)
+            self.assertIsNone(timing["cases_truncated"])
+            self.assertEqual(timing["truncation_measured_cases"], 0)
+            self.assertEqual(timing["observed_cases_truncated"], 0)
+            compared = self.run_script(root, "compare.py", "unknown")
+            self.assertEqual(compared.returncode, 0, compared.stderr)
+
+    def test_invalid_usage_is_not_silently_discarded_as_missing(self):
+        for field in ("state_tokens", "input_tokens", "dropped"):
+            for value in (True, -1, 1.5, "12", float("nan")):
+                with self.subTest(field=field, value=value):
+                    with self.assertRaisesRegex(ValueError, field):
+                        score.lat([{**row("invalid"), field: value}])
+
     @staticmethod
     def stage_scripts(root):
         for name in ("score.py", "compare.py", "common.py"):

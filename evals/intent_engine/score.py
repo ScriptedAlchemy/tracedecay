@@ -62,12 +62,34 @@ def reliability(rows, cats=CATS):
 
 def lat(rows):
     ms = sorted(r["ms"] for r in rows)
-    return {"median_ms": round(statistics.median(ms)), "p90_ms": round(ms[int(0.9 * (len(ms) - 1))]),
-            "median_state_tokens": statistics.median(r["state_tokens"] for r in rows),
-            "max_state_tokens": max(r["state_tokens"] for r in rows),
-            "cases_truncated": sum(r["dropped"] > 0 for r in rows)}
+    counts = {}
+    for field in ("input_tokens", "state_tokens", "dropped"):
+        values = [r[field] for r in rows if r.get(field) is not None]
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in values):
+            raise ValueError(f"{field} must be a nonnegative integer or null")
+        counts[field] = values
+    dropped = counts["dropped"]
+    observed_truncated = sum(value > 0 for value in dropped)
+    result = {
+        "median_ms": round(statistics.median(ms)),
+        "p90_ms": round(ms[int(0.9 * (len(ms) - 1))]),
+        "total_cases": len(rows),
+        "cases_truncated": observed_truncated if len(dropped) == len(rows) else None,
+        "observed_cases_truncated": observed_truncated,
+        "truncation_measured_cases": len(dropped),
+    }
+    for field in ("input_tokens", "state_tokens"):
+        values = counts[field]
+        result[f"median_{field}"] = statistics.median(values) if values else None
+        result[f"max_{field}"] = max(values) if values else None
+        result[f"{field}_measured_cases"] = len(values)
+    return result
 
 def score_config(res, fixed_t=None):
+    if "experiment" in res:
+        experiment = res["experiment"]
+        if not isinstance(experiment, dict) or experiment.get("version") != 2:
+            raise ValueError("HTTP result telemetry version is unsupported; rerun with a new tag")
     rows = res["rows"]
     if not rows:
         raise ValueError("configuration %r has no rows to score" % res.get("config"))
