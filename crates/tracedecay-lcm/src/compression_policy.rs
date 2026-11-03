@@ -103,7 +103,7 @@ pub fn overflow_recovery_assembly_cap(input: OverflowRecoveryCapInput<'_>) -> Op
     let message_tokens = input
         .messages
         .iter()
-        .map(crate::lcm_message_budget_tokens)
+        .map(crate::lcm_replay_message_budget_tokens)
         .sum::<i64>();
     let overhead_tokens = (current_tokens - message_tokens).max(0);
     Some((assembly_cap - overhead_tokens).max(1))

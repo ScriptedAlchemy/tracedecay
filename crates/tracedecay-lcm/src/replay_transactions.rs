@@ -153,18 +153,11 @@ fn active_replay_value(message: &LcmRawMessage) -> Option<Value> {
     active_replay_message_from_metadata(message)
 }
 
-fn replay_message_tokens(message: &LcmRawMessage) -> i64 {
-    let mut tokens = crate::lcm_budget_tokens(&message.content);
-    if let Some(mut replay) = active_replay_value(message) {
-        if let Some(object) = replay.as_object_mut() {
-            object.remove("content");
-            object.remove("role");
-            object.remove("store_id");
-        }
-        let serialized = replay.to_string();
-        tokens += serialized.len().div_ceil(4) as i64;
+pub(crate) fn replay_message_tokens(message: &LcmRawMessage) -> i64 {
+    match active_replay_value(message) {
+        Some(replay) => crate::lcm_replay_message_budget_tokens(&replay),
+        None => crate::lcm_budget_tokens(&message.content),
     }
-    tokens
 }
 
 #[tracing::instrument(name = "sessions.lcm.normalize_pairs", level = "trace", skip_all)]
