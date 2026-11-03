@@ -156,6 +156,8 @@ jobs:
   private-linux-status:
     name: Request private Linux capacity
     needs: change-scope
+    outputs:
+      enabled: ${{ steps.request.outputs.enabled }}
     permissions:
       contents: read
       statuses: write
@@ -167,6 +169,7 @@ jobs:
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     steps:
       - name: Record the private Linux request
+        id: request
         env:
           GH_TOKEN: ${{ github.token }}
           ENABLED: ${{ needs.change-scope.outputs.private-linux }}
@@ -182,6 +185,9 @@ jobs:
           gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$SOURCE_SHA" \
             -f state="$state" -f context='Private Linux CI' -f description="$description" \
             -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          # Only an acknowledged request may suppress the hosted test lane.
+          # A failed POST exits before this output exists.
+          echo "enabled=$ENABLED" >> "$GITHUB_OUTPUT"
 
   # One dev-profile `tracedecay` binary for the explicitly requested stock
   # host integrations. Ordinary Linux validation needs no CLI artifact, so
@@ -478,14 +484,15 @@ jobs:
   # Hosted-only runs retain their shards so local CPU and disk limits do not
   # serialize the entire workspace. Both routes feed the Test Linux check.
   linux-test:
-    needs: change-scope
+    needs: [change-scope, private-linux-status]
     permissions:
       contents: read
       id-token: write
     name: Test Linux (${{ matrix.shard }})
-    # A failed scope decision keeps the Bazel checks enabled.
+    # Failed/skipped private requests retain the hosted lane. !cancelled()
+    # also permits this fallback when a prerequisite failed or was skipped.
     if: >-
-      ${{ !cancelled() && needs.change-scope.outputs.private-linux != 'true' && needs.change-scope.outputs.bazel != 'false'
+      ${{ !cancelled() && !(needs.private-linux-status.result == 'success' && needs.private-linux-status.outputs.enabled == 'true') && needs.change-scope.outputs.bazel != 'false'
       && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
     timeout-minutes: 240
@@ -707,8 +714,8 @@ jobs:
   # Preserves the "Test Linux" check name for branch protection.
   linux-test-result:
     name: Test Linux
-    needs: [change-scope, linux-test]
-    if: ${{ always() && !cancelled() && needs.change-scope.outputs.private-linux != 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
+    needs: [change-scope, private-linux-status, linux-test]
+    if: ${{ always() && !cancelled() && !(needs.private-linux-status.result == 'success' && needs.private-linux-status.outputs.enabled == 'true') && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
