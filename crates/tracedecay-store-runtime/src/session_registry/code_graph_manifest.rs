@@ -807,7 +807,11 @@ impl<'a> GraphSegmentReadPassV1<'a> {
         buffer: &mut Vec<u8>,
     ) -> Result<(), CodeIndexProductionErrorV1> {
         let (digest, _, _, _) = partitioned_segment_request(request)?;
-        if let Some(position) = self.pinned.iter().position(|pinned| pinned.digest == digest) {
+        if let Some(position) = self
+            .pinned
+            .iter()
+            .position(|pinned| pinned.digest == digest)
+        {
             let pinned = self.pinned.remove(position).ok_or_else(|| {
                 CodeIndexProductionErrorV1::Contract(
                     "sealed graph segment cache lost its retained handle".to_owned(),
