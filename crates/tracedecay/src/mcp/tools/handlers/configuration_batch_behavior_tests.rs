@@ -180,7 +180,7 @@ fn assert_schema_refusal(response: &JsonRpcResponse) {
         problem["diagnostic"],
         json!({
             "code": "application_surface_invalid_request",
-            "message": "application surface request does not match its reviewed schema: configuration surface request is inconsistent with the application contract"
+            "message": "application surface request does not match its reviewed schema: configuration surface request is invalid: unknown field `repository_path`, expected one of `mutations`, `expected_revision`, `idempotency_key`"
         })
     );
 }

@@ -11,6 +11,8 @@ pub enum ApplicationContractError {
     InvalidRange { field: &'static str },
     #[error("{field} is inconsistent with the application contract")]
     Inconsistent { field: &'static str },
+    #[error("{field} is invalid: {detail}")]
+    InvalidRequest { field: &'static str, detail: String },
     #[error("{field} contains a duplicate value")]
     Duplicate { field: &'static str },
     #[error("domain contract rejected application input: {0}")]
