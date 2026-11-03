@@ -72,6 +72,61 @@ pub enum GraphPublicationPreparationV1 {
     Proven(Box<ProvenGraphPublicationV1>),
 }
 
+/// Fences selected by one superseded-retirement pass whose work has not
+/// started. An open failure or an earlier candidate's failure must release
+/// these reservations so the next pass can select them again.
+///
+/// Taking the next candidate transfers its fence to the existing per-item
+/// retirement path. This guard never clears that candidate again: another
+/// pass may already have reserved it after a per-item refusal released it.
+struct SupersededRetirementBatchV1<'a> {
+    database: &'a GraphDb,
+    reservation: Arc<()>,
+    pending: std::vec::IntoIter<(GenerationLocator, GraphPublicationReplayRecordV1)>,
+}
+
+impl SupersededRetirementBatchV1<'_> {
+    fn is_empty(&self) -> bool {
+        self.pending.len() == 0
+    }
+
+    fn next(&mut self) -> Option<(GenerationLocator, GraphPublicationReplayRecordV1)> {
+        self.pending.next()
+    }
+
+    /// An ordinary completion must observe a poisoned generation-state lock
+    /// as a typed error, even if the batch was fully consumed.
+    fn release_pending(&mut self) -> Result<(), GraphDbError> {
+        let mut state = self.database.wait_verified_generations_write()?;
+        for (locator, _) in self.pending.as_slice() {
+            if state
+                .retiring
+                .get(locator)
+                .is_some_and(|reservation| Arc::ptr_eq(reservation, &self.reservation))
+            {
+                state.retiring.remove(locator);
+            }
+        }
+        drop(state);
+        self.pending = Vec::new().into_iter();
+        Ok(())
+    }
+}
+
+impl Drop for SupersededRetirementBatchV1<'_> {
+    fn drop(&mut self) {
+        if self.is_empty() {
+            return;
+        }
+        // An early return or unwind still releases healthy reservations.
+        // A poisoned state must stay poisoned rather than being edited through
+        // an unchecked guard; subsequent graph operations fail closed.
+        if let Err(error) = self.release_pending() {
+            tracing::warn!(%error, "abandoned graph retirement fences could not be released");
+        }
+    }
+}
+
 impl GraphDbRegistry {
     /// Recovers a dependency-free verified code graph directly from its
     /// sealed derived store and the exact relational head/replay authority.
@@ -468,11 +523,11 @@ impl GraphDbRegistry {
             // Direct-sealed readers bypass this database's generation state
             // entirely; their liveness is tracked on the registry.
             retained.extend(self.live_direct_sealed_locators()?);
-            let selected = candidates
-                .into_iter()
-                .find(|(locator, _, _)| !retained.contains(locator));
+            let selected = candidates.into_iter().find(|(locator, _, _)| {
+                !retained.contains(locator) && !state.retiring.contains_key(locator)
+            });
             if let Some((locator, _, _)) = &selected {
-                state.retiring.insert(locator.clone());
+                state.retiring.insert(locator.clone(), Arc::new(()));
             }
             selected
         };
@@ -617,12 +672,12 @@ impl GraphDbRegistry {
         // in-flight publisher on this instance still holds its proof lease.
         {
             let mut state = database.wait_verified_generations_write()?;
-            if state.retains(&locator) || state.retiring.contains(&locator) {
+            if state.retains(&locator) || state.retiring.contains_key(&locator) {
                 return Err(GraphDbError::conflict(
                     "publication.discard_interrupted.generation_retained",
                 ));
             }
-            state.retiring.insert(locator.clone());
+            state.retiring.insert(locator.clone(), Arc::new(()));
         }
         let request = GraphPendingReplayDiscardV1 {
             key: pending.publication.key.clone(),
@@ -972,6 +1027,7 @@ impl GraphDbRegistry {
         }
 
         let mut receipt = SupersededReplayRetirement::default();
+        let reservation = Arc::new(());
         // Liveness is decided under the generation-state lock, and every
         // selected candidate is fenced there so a concurrent recover or open
         // cannot seat it while its rows disappear.
@@ -989,14 +1045,21 @@ impl GraphDbRegistry {
             candidates.sort_by_key(|(_, replay)| replay.sequence);
             let mut selected = Vec::with_capacity(candidates.len());
             for (locator, replay) in candidates {
-                if retained.contains(&locator) || state.retiring.contains(&locator) {
+                if retained.contains(&locator) || state.retiring.contains_key(&locator) {
                     receipt.retained += 1;
                     continue;
                 }
-                state.retiring.insert(locator.clone());
+                state
+                    .retiring
+                    .insert(locator.clone(), Arc::clone(&reservation));
                 selected.push((locator, replay));
             }
             selected
+        };
+        let mut selected = SupersededRetirementBatchV1 {
+            database: &database,
+            reservation,
+            pending: selected.into_iter(),
         };
         // Same policy as the staging-row release sweep: a hibernated engine
         // used to defer every native delete to "a later tick that already
@@ -1021,10 +1084,17 @@ impl GraphDbRegistry {
             projection,
             &head,
             &head_locator,
-            selected,
+            &mut selected,
             stale_tombstones,
             receipt,
         );
+        // Release unvisited fences before hibernation can retire the native
+        // generation state. The current item already settled its own fence.
+        // On the success path a poisoned lock must be returned as a typed
+        // failure, not silently recovered in the batch destructor. Preserve
+        // the original retirement error when both operations fail.
+        let cleanup = selected.release_pending();
+        drop(selected);
         if opened_for_retirement && let Err(error) = database.hibernate_if_lazy() {
             tracing::warn!(
                 %error,
@@ -1033,7 +1103,11 @@ impl GraphDbRegistry {
                 "staging engine opened for superseded retirement could not hibernate again"
             );
         }
-        receipt
+        match (receipt, cleanup) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(receipt), Ok(())) => Ok(receipt),
+        }
     }
 
     /// Runs the retirements the census selected, with the engine already in
@@ -1048,11 +1122,11 @@ impl GraphDbRegistry {
         projection: &GraphProjectionIdentityV1,
         head: &GraphVerifiedHeadV1,
         head_locator: &GenerationLocator,
-        selected: Vec<(GenerationLocator, GraphPublicationReplayRecordV1)>,
+        selected: &mut SupersededRetirementBatchV1<'_>,
         stale_tombstones: Vec<(GenerationLocator, GraphPublicationReplayTombstoneV1)>,
         mut receipt: SupersededReplayRetirement,
     ) -> Result<SupersededReplayRetirement, GraphDbError> {
-        for (locator, replay) in selected {
+        while let Some((locator, replay)) = selected.next() {
             let retirement = match GraphPublicationReplayRetirementV1::new(
                 replay.publication.key.clone(),
                 replay.publication.input_digest.clone(),
@@ -3074,6 +3148,115 @@ mod historical_publication_reuse_tests {
             generation,
             projection,
         }
+    }
+
+    /// A delayed batch destructor may run after hibernation reset the
+    /// generation state or another retirement path replaced a reservation.
+    /// Its old token must not withdraw the successor's reader fence.
+    #[test]
+    fn abandoned_retirement_batch_cannot_clear_a_successor_reservation() {
+        let fixture = published_fixture();
+        let database = fixture
+            .registry
+            .resolve(registration(fixture.binding.clone(), &fixture.root))
+            .unwrap();
+        let locator = GenerationLocator::new(fixture.projection.clone(), fixture.generation);
+        let replay = fixture.authority.records[&fixture.key].clone();
+        for reset in [false, true] {
+            let old_reservation = Arc::new(());
+            database
+                .wait_verified_generations_write()
+                .unwrap()
+                .retiring
+                .insert(locator.clone(), Arc::clone(&old_reservation));
+            let abandoned = super::SupersededRetirementBatchV1 {
+                database: &database,
+                reservation: old_reservation,
+                pending: vec![(locator.clone(), replay.clone())].into_iter(),
+            };
+            let successor = Arc::new(());
+            {
+                let mut state = database.wait_verified_generations_write().unwrap();
+                if reset {
+                    *state = crate::lease::VerifiedGenerationState::default();
+                }
+                state
+                    .retiring
+                    .insert(locator.clone(), Arc::clone(&successor));
+            }
+            drop(abandoned);
+            assert!(
+                database
+                    .wait_verified_generations_write()
+                    .unwrap()
+                    .retiring
+                    .get(&locator)
+                    .is_some_and(|reservation| Arc::ptr_eq(reservation, &successor)),
+                "an old batch cannot release a successor reservation (state reset: {reset})"
+            );
+            assert!(
+                matches!(
+                    database.verified_generation(&locator),
+                    Err(GraphDbError::Conflict { .. })
+                ),
+                "the successor's fence must still refuse a new reader"
+            );
+        }
+    }
+
+    /// A panic while holding the reader-fence state poisons the lock.
+    /// Explicit cleanup must report Unavailable; the destructor must not
+    /// silently recover the poisoned state or withdraw its reservation.
+    #[test]
+    fn abandoned_retirement_cleanup_reports_poison_without_mutating_fences() {
+        let fixture = published_fixture();
+        let database = fixture
+            .registry
+            .resolve(registration(fixture.binding.clone(), &fixture.root))
+            .unwrap();
+        let locator = GenerationLocator::new(fixture.projection.clone(), fixture.generation);
+        let reservation = Arc::new(());
+        database
+            .wait_verified_generations_write()
+            .unwrap()
+            .retiring
+            .insert(locator.clone(), Arc::clone(&reservation));
+        let mut abandoned = super::SupersededRetirementBatchV1 {
+            database: &database,
+            reservation: Arc::clone(&reservation),
+            pending: vec![(
+                locator.clone(),
+                fixture.authority.records[&fixture.key].clone(),
+            )]
+            .into_iter(),
+        };
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _state = database.inner.verified_generations.write().unwrap();
+            panic!("poison generation-state lock during retirement");
+        }));
+        assert!(panic.is_err());
+        assert!(matches!(
+            abandoned.release_pending(),
+            Err(GraphDbError::Unavailable { .. })
+        ));
+        drop(abandoned);
+        assert!(matches!(
+            database.wait_verified_generations_write(),
+            Err(GraphDbError::Unavailable { .. })
+        ));
+        let poisoned = database
+            .inner
+            .verified_generations
+            .read()
+            .err()
+            .expect("lock poisoned");
+        assert!(
+            poisoned
+                .into_inner()
+                .retiring
+                .get(&locator)
+                .is_some_and(|token| Arc::ptr_eq(token, &reservation))
+        );
     }
 
     #[test]

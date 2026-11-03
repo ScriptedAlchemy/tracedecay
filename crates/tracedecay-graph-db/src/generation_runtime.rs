@@ -1702,7 +1702,7 @@ impl GraphDb {
         locator: &GenerationLocator,
         sealed_digest: &str,
     ) -> Result<(SealedStagingReleaseAuthorityV1, bool), SealedStagingRetentionReason> {
-        if state.retiring.contains(locator) {
+        if state.retiring.contains_key(locator) {
             return Err(SealedStagingRetentionReason::Retiring);
         }
         if state.collected.contains(locator) {
@@ -2107,7 +2107,7 @@ impl GraphDb {
                 message: "generation remains quarantined after recovery mismatch".to_owned(),
             });
         }
-        if state.retiring.contains(locator) || state.collected.contains(locator) {
+        if state.retiring.contains_key(locator) || state.collected.contains(locator) {
             return Err(GraphDbError::conflict(
                 "generation_runtime.verified_generation",
             ));
@@ -2187,7 +2187,7 @@ impl GraphDb {
                 dependency.projection.clone(),
                 dependency.generation.clone(),
             );
-            if state.retiring.contains(&locator)
+            if state.retiring.contains_key(&locator)
                 || state.collected.contains(&locator)
                 || state.sealed_only.contains(&locator)
             {

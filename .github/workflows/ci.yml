@@ -1,6 +1,9 @@
 name: CI
 run-name: >-
   ${{ github.event_name == 'pull_request' && format('CI for PR #{0}', github.event.pull_request.number) || format('CI for {0}', github.ref_name) }}
+  ${{ vars.PRIVATE_WINDOWS_CI == 'true' && github.actor_id == '25274700' && github.triggering_actor == 'ScriptedAlchemy' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '[private-windows]' || '' }}
+  ${{ vars.PRIVATE_MACOS_CI == 'true' && github.actor_id == '25274700' && github.triggering_actor == 'ScriptedAlchemy' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '[private-macos]' || '' }}
+  [native=${{ inputs.run_os && inputs.native_platform || 'none' }}] [targets=${{ inputs.native_targets || '//...' }}]
 
 on:
   pull_request:
@@ -60,11 +63,12 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    if: github.event_name == 'pull_request'
+      statuses: write
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       bazel: ${{ steps.decide.outputs.bazel }}
+      private-linux: ${{ steps.private.outputs.enabled }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -80,6 +84,10 @@ jobs:
           EXPECTED_COUNT: ${{ github.event.pull_request.changed_files }}
         run: |
           set -euo pipefail
+          if [[ "$EVENT_NAME" != pull_request ]]; then
+            echo 'bazel=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           listing="$RUNNER_TEMP/changed-paths.tsv"
           # An unlisted change set must run the Bazel jobs, not fail this gate.
           if ! gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files?per_page=100" \
@@ -89,6 +97,31 @@ jobs:
           fi
           python3 scripts/ci-change-scope.py \
             --event-name "$EVENT_NAME" --changed-paths "$listing" --expected-count "$EXPECTED_COUNT"
+
+      - name: Route owner Linux tests to isolated CI
+        id: private
+        if: >-
+          !cancelled() && vars.PRIVATE_LINUX_CI == 'true' &&
+          github.actor_id == '25274700' && github.triggering_actor == 'ScriptedAlchemy' &&
+          (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BAZEL_SCOPE: ${{ steps.decide.outputs.bazel }}
+          DRAFT: ${{ github.event.pull_request.draft }}
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          state=success
+          description='Hosted Linux CI selected'
+          enabled=false
+          if [[ "$BAZEL_SCOPE" != false && "$DRAFT" != true ]]; then
+            state=pending
+            description="Requested private-linux:$GITHUB_REPOSITORY:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT:fast"
+            enabled=true
+          fi
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$SOURCE_SHA" \
+            -f state="$state" -f context='Private Linux CI' -f description="$description" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
 
   # One dev-profile `tracedecay` binary for the explicitly requested stock
   # host integrations. Ordinary Linux validation needs no CLI artifact, so
@@ -295,7 +328,7 @@ jobs:
       contents: read
       id-token: write
     name: Test macOS
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_os && (inputs.native_platform == 'all' || inputs.native_platform == 'macos') }}
+    if: ${{ !(vars.PRIVATE_MACOS_CI == 'true' && github.actor_id == '25274700' && github.triggering_actor == 'ScriptedAlchemy' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && github.event_name == 'workflow_dispatch' && inputs.run_os && (inputs.native_platform == 'all' || inputs.native_platform == 'macos') }}
     runs-on: macos-26
     timeout-minutes: 330
     steps:
@@ -390,10 +423,9 @@ jobs:
       contents: read
       id-token: write
     name: Test Linux (${{ matrix.shard }})
-    # `!cancelled()` evaluates this after the push-only skip of change-scope;
-    # `!= 'false'` keeps running when that job failed to decide.
+    # A failed scope decision keeps the Bazel checks enabled.
     if: >-
-      ${{ !cancelled() && needs.change-scope.outputs.bazel != 'false'
+      ${{ !cancelled() && needs.change-scope.outputs.private-linux != 'true' && needs.change-scope.outputs.bazel != 'false'
       && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
     timeout-minutes: 240
@@ -616,7 +648,7 @@ jobs:
   linux-test-result:
     name: Test Linux
     needs: [change-scope, linux-test]
-    if: ${{ always() && !cancelled() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
+    if: ${{ always() && !cancelled() && needs.change-scope.outputs.private-linux != 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -644,7 +676,7 @@ jobs:
     # Branch protection requires this check name.
     name: Test Windows
     if: >-
-      ${{ !cancelled() && needs.change-scope.outputs.bazel != 'false' &&
+      ${{ !(vars.PRIVATE_WINDOWS_CI == 'true' && github.actor_id == '25274700' && github.triggering_actor == 'ScriptedAlchemy' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && !cancelled() && needs.change-scope.outputs.bazel != 'false' &&
       (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
       (github.event_name != 'workflow_dispatch' ||
       (inputs.run_os &&

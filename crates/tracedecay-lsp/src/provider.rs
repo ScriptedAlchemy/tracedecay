@@ -483,6 +483,12 @@ pub trait DiagnosticSnapshotPort {
             failure_class: "workspace-diagnostics-unsupported".to_owned(),
         }
     }
+
+    /// Releases one workspace refresh's result ownership and requests cancellation.
+    /// The operation identity fences delayed retirement from a newer refresh.
+    fn retire_workspace_refresh(&self, _root: &AdmittedRoot, _operation_id: &str) -> bool {
+        false
+    }
 }
 
 impl<T> DiagnosticSnapshotPort for Arc<T>
@@ -547,6 +553,10 @@ where
         overlays: &[OverlaySnapshot],
     ) -> DiagnosticRefreshAdmission {
         (**self).request_workspace_refresh(workspace, root, overlays)
+    }
+
+    fn retire_workspace_refresh(&self, root: &AdmittedRoot, operation_id: &str) -> bool {
+        (**self).retire_workspace_refresh(root, operation_id)
     }
 }
 

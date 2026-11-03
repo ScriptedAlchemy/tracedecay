@@ -1,14 +1,14 @@
 use super::diagnostics_controller::{
-    parse_workspace_previous_results, refresh_pending_failure, validate_workspace_progress_tokens,
-    workspace_diagnostic_failure, workspace_result_identity, workspace_root_failure,
-    workspace_root_failure_value,
+    parse_workspace_previous_results, refresh_pending_failure, valid_refresh_identity,
+    validate_workspace_progress_tokens, workspace_diagnostic_failure, workspace_result_identity,
+    workspace_root_failure, workspace_root_failure_value,
 };
 use super::{
     AdmittedRoot, AuthorizedLspWorkspace, BTreeMap, BTreeSet, DaemonLspProtocolSession,
-    DiagnosticRefreshAdmission, DiagnosticSerializationCapabilities, DiagnosticSnapshotPort,
-    DocumentDiagnosticReport, FeedbackCyclePort, GatewayMethod, ManifestDigest,
-    MethodUnavailableReason, RpcFailure, SemanticProviderPort, Value, diagnostic_value,
-    document_diagnostic_report_value, json,
+    DiagnosticRefreshAdmission, DiagnosticRefreshIdentity, DiagnosticSerializationCapabilities,
+    DiagnosticSnapshotPort, DocumentDiagnosticReport, FeedbackCyclePort, GatewayMethod,
+    ManifestDigest, MethodUnavailableReason, RpcFailure, SemanticProviderPort, Value,
+    diagnostic_value, document_diagnostic_report_value, json,
 };
 use crate::workspace_diagnostics::{
     MAX_WORKSPACE_DIAGNOSTIC_FANOUT, MAX_WORKSPACE_DIAGNOSTIC_RESULTS,
@@ -25,6 +25,11 @@ pub(super) struct WorkspaceDiagnosticResultIdentity {
     pub(super) diagnostic_digest: ManifestDigest,
     pub(super) diagnostic_generation: u64,
     pub(super) version: Option<i64>,
+}
+
+pub(super) struct PendingWorkspaceDiagnosticRefresh {
+    pub(super) root: AdmittedRoot,
+    pub(super) identity: DiagnosticRefreshIdentity,
 }
 
 impl<P, S, D> DaemonLspProtocolSession<P, S, D>
@@ -78,6 +83,7 @@ where
                 .workspace_diagnostics(&workspace, root, &overlays)
             {
                 WorkspaceDiagnosticSnapshotOutcome::Ready { diagnostics, .. } => {
+                    self.retire_workspace_diagnostic_refresh(root.uri());
                     if valid_workspace_generation(&workspace, root, &diagnostics) {
                         self.diagnostics
                             .workspace_snapshots
@@ -92,11 +98,14 @@ where
                         );
                     }
                 }
-                WorkspaceDiagnosticSnapshotOutcome::Refreshing(_) => {
-                    started += 1;
-                    pending = true;
+                WorkspaceDiagnosticSnapshotOutcome::Refreshing(identity) => {
+                    if self.track_workspace_diagnostic_refresh(root, identity) {
+                        started += 1;
+                        pending = true;
+                    }
                 }
                 WorkspaceDiagnosticSnapshotOutcome::Partial { coverage, .. } => {
+                    self.retire_workspace_diagnostic_refresh(root.uri());
                     if started >= MAX_WORKSPACE_DIAGNOSTIC_FANOUT {
                         pending = true;
                         continue;
@@ -106,10 +115,12 @@ where
                         .provider
                         .request_workspace_refresh(&workspace, root, &overlays)
                     {
-                        DiagnosticRefreshAdmission::Started(_)
-                        | DiagnosticRefreshAdmission::AlreadyRunning(_) => {
-                            started += 1;
-                            pending = true;
+                        DiagnosticRefreshAdmission::Started(identity)
+                        | DiagnosticRefreshAdmission::AlreadyRunning(identity) => {
+                            if self.track_workspace_diagnostic_refresh(root, identity) {
+                                started += 1;
+                                pending = true;
+                            }
                         }
                         DiagnosticRefreshAdmission::Rejected { failure_class } => {
                             self.diagnostics.workspace_failures.insert(
@@ -120,6 +131,7 @@ where
                     }
                 }
                 WorkspaceDiagnosticSnapshotOutcome::Failed { failure_class, .. } => {
+                    self.retire_workspace_diagnostic_refresh(root.uri());
                     self.diagnostics.workspace_failures.insert(
                         root.uri().to_owned(),
                         workspace_root_failure(root, failure_class),
@@ -294,6 +306,65 @@ where
         self.diagnostics.workspace_failures.clear();
         self.diagnostics.workspace_results = next_results;
         Ok(value)
+    }
+
+    fn track_workspace_diagnostic_refresh(
+        &mut self,
+        root: &AdmittedRoot,
+        identity: DiagnosticRefreshIdentity,
+    ) -> bool {
+        if !valid_refresh_identity(&identity, identity.source_generation) {
+            let _ = self
+                .diagnostics
+                .provider
+                .retire_workspace_refresh(root, &identity.operation_id);
+            self.retire_workspace_diagnostic_refresh(root.uri());
+            self.diagnostics.workspace_failures.insert(
+                root.uri().to_owned(),
+                workspace_root_failure(root, "invalid-refresh-identity".to_owned()),
+            );
+            return false;
+        }
+        if self
+            .diagnostics
+            .workspace_refreshes
+            .get(root.uri())
+            .is_some_and(|pending| pending.root == *root && pending.identity == identity)
+        {
+            return true;
+        }
+        self.retire_workspace_diagnostic_refresh(root.uri());
+        self.diagnostics.workspace_refreshes.insert(
+            root.uri().to_owned(),
+            PendingWorkspaceDiagnosticRefresh {
+                root: root.clone(),
+                identity,
+            },
+        );
+        true
+    }
+
+    pub(super) fn retire_workspace_diagnostic_refresh(&mut self, root_uri: &str) {
+        if let Some(pending) = self.diagnostics.workspace_refreshes.remove(root_uri) {
+            // Result retirement cannot establish that accepted analyzer work
+            // has settled; its existing runtime owner still owns that work.
+            let _ = self
+                .diagnostics
+                .provider
+                .retire_workspace_refresh(&pending.root, &pending.identity.operation_id);
+        }
+    }
+
+    pub(super) fn clear_workspace_diagnostics(&mut self) {
+        let pending = std::mem::take(&mut self.diagnostics.workspace_refreshes);
+        for pending in pending.into_values() {
+            let _ = self
+                .diagnostics
+                .provider
+                .retire_workspace_refresh(&pending.root, &pending.identity.operation_id);
+        }
+        self.diagnostics.workspace_snapshots.clear();
+        self.diagnostics.workspace_failures.clear();
     }
 }
 
