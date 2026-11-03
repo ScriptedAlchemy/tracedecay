@@ -1,0 +1,12 @@
+load("@rules_python//python:defs.bzl", "py_test")
+
+py_test(
+    name = "http_runner_test",
+    size = "small",
+    srcs = [
+        "common.py",
+        "run_http.py",
+        "test_run_http.py",
+    ],
+    main = "test_run_http.py",
+)
