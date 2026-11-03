@@ -56,11 +56,18 @@ impl SourceKey {
 
 impl SourceLedger {
     pub(crate) fn holds(&self, key: &SourceKey, witness: Witness) -> bool {
+        self.observed_quarantine(key, witness).is_some()
+    }
+
+    /// An exact in-memory file witness can be settled or quarantined. Callers
+    /// that skip opening a quarantined header must retain partial coverage.
+    pub(crate) fn observed_quarantine(&self, key: &SourceKey, witness: Witness) -> Option<bool> {
         self.inner
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(key)
-            .is_some_and(|recorded| recorded.witness == witness)
+            .filter(|recorded| recorded.witness == witness)
+            .map(|recorded| recorded.quarantined)
     }
 
     fn recorded_converged(&self, key: &SourceKey) -> bool {
@@ -175,6 +182,14 @@ pub(crate) struct SourceClaim {
     settled: Option<(SourceLedger, Witness)>,
 }
 
+/// Discovery may avoid opening a known-bad file, but must never report that
+/// quarantined input as complete coverage.
+pub(crate) enum FileSourceObservation {
+    Read(SourceClaim),
+    Skipped,
+    Quarantined,
+}
+
 impl SourceClaim {
     fn unless_recorded(
         ledger: Option<&SourceLedger>,
@@ -212,17 +227,43 @@ impl SourceClaim {
         ledger: Option<&SourceLedger>,
         path: &Path,
     ) -> TranscriptIngestResult<Option<Self>> {
-        let key = SourceKey::file(path);
-        if ledger.is_none() {
-            return Ok(Some(Self { key, settled: None }));
+        match Self::observe_file_discovery_blocking(ledger, path)? {
+            FileSourceObservation::Read(claim) => Ok(Some(claim)),
+            FileSourceObservation::Skipped | FileSourceObservation::Quarantined => Ok(None),
         }
+    }
+
+    /// Preserve the reason a file was skipped for discovery sources that must
+    /// report quarantined evidence as partial, rather than complete, coverage.
+    pub(crate) fn observe_file_discovery_blocking(
+        ledger: Option<&SourceLedger>,
+        path: &Path,
+    ) -> TranscriptIngestResult<FileSourceObservation> {
+        let key = SourceKey::file(path);
+        let Some(ledger) = ledger else {
+            return Ok(FileSourceObservation::Read(Self { key, settled: None }));
+        };
         // Codex archives a session by moving its rollout away; failing on the
         // vanished path would replay the unacknowledged discovery pass forever.
         let Some(metadata) = stat_if_present(path, "stat transcript for convergence")? else {
-            return Ok(None);
+            return Ok(FileSourceObservation::Skipped);
         };
         let witness = Witness::settled_file(path, &metadata)?;
-        Ok(Self::unless_recorded(ledger, key, witness))
+        if let Some(witness) = witness {
+            if let Some(quarantined) = ledger.observed_quarantine(&key, witness) {
+                return Ok(if quarantined {
+                    FileSourceObservation::Quarantined
+                } else {
+                    FileSourceObservation::Skipped
+                });
+            }
+        } else if ledger.recorded_converged(&key) {
+            return Ok(FileSourceObservation::Skipped);
+        }
+        Ok(FileSourceObservation::Read(Self {
+            key,
+            settled: witness.map(|witness| (ledger.clone(), witness)),
+        }))
     }
 
     pub(crate) fn admitted(
@@ -240,6 +281,15 @@ impl SourceClaim {
     pub(crate) fn finished(self) -> TranscriptIngestResult<()> {
         match self.settled {
             Some((ledger, witness)) => ledger.record(&self.key, witness, false),
+            None => Ok(()),
+        }
+    }
+
+    /// Cache a durable invalid-source disposition only after the canonical
+    /// source memo has confirmed it; this ledger is never its authority.
+    pub(crate) fn quarantined(self) -> TranscriptIngestResult<()> {
+        match self.settled {
+            Some((ledger, witness)) => ledger.record(&self.key, witness, true),
             None => Ok(()),
         }
     }
