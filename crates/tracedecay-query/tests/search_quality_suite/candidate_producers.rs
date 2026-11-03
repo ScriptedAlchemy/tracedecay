@@ -6326,6 +6326,66 @@ fn prose_query_recovers_camel_case_symbol_from_real_sealed_subtoken_postings() {
 }
 
 #[test]
+fn prose_words_the_text_holds_whole_earn_no_second_subtoken_score() {
+    // The first row states the words; the second only hides them inside its
+    // name. Prose subtoken admission exists to reach the second row, and must
+    // not give the first row a second score for words it already matched.
+    let artifact = rust_artifact(&[
+        "/// Reports when the digest does not match its payload.\npub fn validate() {}\n",
+        "pub fn digestPayloadMismatch() {}\n",
+    ]);
+    let query = "digest payload";
+    let parts = tracedecay_query::retrieval::lexical::lexical_query_parts(query)
+        .expect("parse multiword query");
+    let mut request = artifact.request(query, &[], &[], &[], 0, 32);
+    request.whole_terms = Cow::Owned(parts.whole_terms);
+    request.subtokens = Cow::Owned(parts.subtokens);
+    request.phrases = Cow::Owned(parts.phrases);
+    let results = complete(
+        artifact
+            .lane()
+            .retrieve_lexical(&request)
+            .expect("sealed lexical search"),
+    );
+    let in_file = |ordinal: usize| {
+        results
+            .candidates
+            .iter()
+            .filter(move |candidate| {
+                candidate
+                    .file_occurrence_id
+                    .as_ref()
+                    .is_some_and(|file| file.as_str() == format!("file.fixture.{ordinal}"))
+            })
+            .map(|candidate| &results.evidence_by_occurrence[&candidate.source_occurrence_id])
+            .collect::<Vec<_>>()
+    };
+    let stated = in_file(0);
+    assert!(
+        !stated.is_empty()
+            && stated.iter().all(|evidence| {
+                evidence.matched_subtokens.is_empty()
+                    && evidence
+                        .field_scores_micros
+                        .iter()
+                        .all(|(field, _)| *field != LexicalFieldV1::Subtoken)
+            }),
+        "words the text holds whole must not score again as subtokens: {results:?}"
+    );
+    assert!(
+        in_file(1).iter().any(|evidence| {
+            ["digest", "payload"].iter().all(|term| {
+                evidence
+                    .matched_subtokens
+                    .iter()
+                    .any(|matched| matched == term)
+            })
+        }),
+        "the camelCase symbol must still match both words as subtokens: {results:?}"
+    );
+}
+
+#[test]
 fn lexical_artifact_reports_freshness_coverage_and_page_cutoff() {
     let sources = ["pub fn target() {}\n"; 3];
     let fixture = rust_source_fixture(&sources);
