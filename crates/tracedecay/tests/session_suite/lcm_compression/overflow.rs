@@ -633,6 +633,51 @@ async fn overflow_recovery_keeps_preserved_objective_scaffold_when_evicting_tail
     }));
 }
 
+#[tokio::test]
+async fn pinned_objective_is_not_reinjected_outside_the_replay_budget() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    let objective =
+        "[Current user objective preserved from compacted history]\nShip OAuth login now";
+    let messages = [
+        ("system", "policy anchor"),
+        ("system", objective),
+        ("assistant", "still working"),
+        ("assistant", "recent update"),
+    ];
+    insert_raw_messages_with_roles(&db, "cursor", "session-pinned-objective", &messages).await;
+    let cap = messages
+        .iter()
+        .map(|(_, content)| budget_tokens(content))
+        .sum::<i64>();
+    let mut request = limited_compress_request(
+        "cursor",
+        "session-pinned-objective",
+        provided_summary("unused"),
+        None,
+        None,
+        Some(cap),
+    );
+    request.current_tokens = None;
+    request.overrides.fresh_tail_count = Some(2);
+
+    let response = db.lcm_compress(request).await.unwrap();
+
+    assert_eq!(response.summary_nodes_created, 0);
+    assert_eq!(
+        response
+            .replay_messages
+            .iter()
+            .filter(|message| message["content"] == objective)
+            .count(),
+        1,
+        "the objective is already present among the pinned anchors"
+    );
+    assert_eq!(response.replay_messages.len(), messages.len());
+    assert_eq!(response.replay_token_estimate, cap);
+    assert!(!response.replay_over_budget);
+}
+
 // Mirrors hermes-lcm `_assemble_overflow_recovery_context`: with no backlog
 // to compact, forced overflow evicts droppable assistant/tool tail turns that
 // do not fit under the cap while keeping anchors and budgetable user intent.

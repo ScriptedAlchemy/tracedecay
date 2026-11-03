@@ -1420,7 +1420,7 @@ fn assemble_replay_messages(
                 .flat_map(|unit| unit.messages)
                 .collect(),
             summaries.iter().collect::<Vec<_>>(),
-            latest_user_context_anchor(anchor_source, raws),
+            latest_user_context_anchor(anchor_source, anchors, raws),
         ),
         Some(cap) => {
             let used = anchors
@@ -1430,7 +1430,7 @@ fn assemble_replay_messages(
             let (selected_raws, tail_tokens) = select_budget_tail(raws, used, cap);
             let mut summary_budget = (cap - used - tail_tokens).max(0);
             let preserved_objective_anchor =
-                latest_user_context_anchor(anchor_source, &selected_raws).and_then(
+                latest_user_context_anchor(anchor_source, anchors, &selected_raws).and_then(
                     |(store_id, part, already_preserved)| {
                         if already_preserved {
                             return Some((store_id, part, already_preserved));
@@ -1548,11 +1548,12 @@ fn is_budget_droppable_tail_message(message: &LcmRawMessage) -> bool {
 
 fn latest_user_context_anchor(
     raws: &[LcmRawMessage],
+    anchors: &[&LcmRawMessage],
     selected_tail: &[&LcmRawMessage],
 ) -> Option<(i64, String, bool)> {
     for message in raws.iter().rev() {
         if let Some(preserved) = preserved_objective_context_content(&message.content) {
-            if selected_tail.iter().any(|selected| {
+            if selected_tail.iter().chain(anchors).any(|selected| {
                 preserved_objective_context_content(&selected.content) == Some(preserved)
             }) {
                 return None;
