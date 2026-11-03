@@ -407,24 +407,42 @@ pub fn census_sqlite_temp_spill(
     bound_overrides: &BTreeMap<String, u64>,
 ) -> Option<ProfileFootprintEntryV1> {
     let mut bytes = 0u64;
-    for fd in std::fs::read_dir(fd_directory).ok()?.flatten() {
-        let Ok(target) = std::fs::read_link(fd.path()) else {
-            continue;
+    let mut unavailable_entry_count = 0usize;
+    for entry in std::fs::read_dir(fd_directory).ok()? {
+        let fd = match entry {
+            Ok(fd) => fd,
+            Err(_) => {
+                unavailable_entry_count = unavailable_entry_count.saturating_add(1);
+                continue;
+            }
+        };
+        let target = match std::fs::read_link(fd.path()) {
+            Ok(target) => target,
+            // Descriptors can close between enumeration and observation.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                unavailable_entry_count = unavailable_entry_count.saturating_add(1);
+                continue;
+            }
         };
         let unlinked_temp = target
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with("etilqs_") && name.ends_with(" (deleted)"));
-        // An fd closed since the listing no longer holds bytes.
-        if let (true, Ok(metadata)) = (unlinked_temp, std::fs::metadata(fd.path())) {
-            bytes = bytes.saturating_add(metadata.len());
+        if unlinked_temp {
+            match std::fs::metadata(fd.path()) {
+                Ok(metadata) => bytes = bytes.saturating_add(metadata.len()),
+                // A closed descriptor no longer consumes space.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => unavailable_entry_count = unavailable_entry_count.saturating_add(1),
+            }
         }
     }
     Some(ProfileFootprintEntryV1 {
         key: SQLITE_TEMP_SPILL_KEY.to_owned(),
         family: ProfileFamilyV1::SqliteTempSpill,
         bytes,
-        unavailable_entry_count: 0,
+        unavailable_entry_count,
         bound_bytes: bound_overrides
             .get(SQLITE_TEMP_SPILL_KEY)
             .copied()
@@ -720,6 +738,65 @@ mod tests {
         );
         assert!(
             census_sqlite_temp_spill(&temporary.path().join("absent"), &BTreeMap::new()).is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temp_spill_census_reports_unreadable_fd_entries_without_fabricating_health() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let fd_directory = temporary.path().join("fd");
+        std::fs::create_dir(&fd_directory).expect("fd directory");
+        let live_temp = temporary.path().join("etilqs_active (deleted)");
+        sized(&live_temp, 24 * MIB);
+        std::os::unix::fs::symlink(&live_temp, fd_directory.join("3")).expect("fd link");
+        // A real /proc/self/fd directory contains descriptor symlinks. A
+        // regular entry models an FD whose target cannot be inspected.
+        std::fs::write(fd_directory.join("4"), b"uninspectable").expect("unreadable fd");
+        // A descriptor closed after enumeration is not still consuming space.
+        std::os::unix::fs::symlink(
+            temporary.path().join("etilqs_closed (deleted)"),
+            fd_directory.join("5"),
+        )
+        .expect("closed fd link");
+
+        let entry = census_sqlite_temp_spill(&fd_directory, &BTreeMap::new())
+            .expect("readable fd directory");
+        assert_eq!(entry.bytes, 24 * MIB);
+        assert_eq!(entry.unavailable_entry_count, 1);
+        let footprint = ProfileFootprintV1 {
+            entries: vec![entry],
+            total_bytes: 0,
+            unavailable_entry_count: 0,
+            truncated: false,
+            total_bound_bytes: PROFILE_TOTAL_BOUND_BYTES,
+        };
+        let observed = findings(&footprint);
+        let finding = &observed[SQLITE_TEMP_SPILL_KEY];
+        assert_eq!(finding.finding().state(), DoctorEvidenceStateV1::Partial);
+        assert!(
+            finding
+                .finding()
+                .coverage()
+                .statement()
+                .contains("1 unreadable entries")
+        );
+
+        // A measured lower bound above the configured cap still proves overage.
+        let overrides = BTreeMap::from([(SQLITE_TEMP_SPILL_KEY.to_owned(), MIB)]);
+        let over = census_sqlite_temp_spill(&fd_directory, &overrides).expect("over-bound census");
+        assert_eq!(over.unavailable_entry_count, 1);
+        assert_eq!(
+            findings(&ProfileFootprintV1 {
+                entries: vec![over],
+                total_bytes: 0,
+                unavailable_entry_count: 0,
+                truncated: false,
+                total_bound_bytes: PROFILE_TOTAL_BOUND_BYTES,
+            })[SQLITE_TEMP_SPILL_KEY]
+                .finding()
+                .state(),
+            DoctorEvidenceStateV1::Degraded
         );
     }
 
