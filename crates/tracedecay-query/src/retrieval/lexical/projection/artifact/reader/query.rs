@@ -23,8 +23,7 @@ use super::{map_query_artifact_error, map_query_sql_error};
 use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest};
 use crate::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest,
-    MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1,
-    MAX_LEXICAL_QUERY_TERM_BYTES_V1, admit_candidate_sources,
+    MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1, admit_candidate_sources,
     candidate_admission_outcome, field_admitted,
 };
 use crate::retrieval::ports::{
