@@ -791,9 +791,21 @@ impl RepositoryRuntimePhysicalAttachment {
             return Err("repository physical attachment retained handles after drain".to_owned());
         }
         state.closed = true;
-        // Drain joined the writer and closed the reader pool. Keep an
-        // uncommitted initialization pin for abort_initialization's cleanup.
-        state.retained_file_pin.take();
+        // A lost-file notice moves workers into lost_* before their threads
+        // finish. Drain can succeed in that interval; only release the raw
+        // pin once those worker threads have actually exited.
+        let lost_workers_exited = state
+            .lost_readers
+            .as_ref()
+            .is_none_or(ReaderPool::workers_exited)
+            && state
+                .lost_writer
+                .as_ref()
+                .is_none_or(|writer| writer.worker_exited());
+        if !state.file_lost || lost_workers_exited {
+            // An uncommitted initialization retains its separate cleanup pin.
+            state.retained_file_pin.take();
+        }
         Ok(())
     }
 
@@ -1402,6 +1414,15 @@ mod tests {
             Ok(false),
             "the writer task is still running, so its connection is still open"
         );
+        // The lost-file writer no longer occupies the ordinary writer slot.
+        // Closing that slot must not drop the raw pin while the lost writer
+        // is still alive and holding a SQLite connection.
+        attachment.drain().unwrap();
+        attachment.close_and_join().unwrap();
+        assert!(
+            attachment.lock_state().retained_file_pin.is_some(),
+            "closing a lost-file attachment must retain its pin until the writer exits"
+        );
 
         hold.send(()).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -1412,8 +1433,10 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(5));
         }
-        attachment.drain().unwrap();
-        attachment.close_and_join().unwrap();
+        assert!(
+            attachment.lock_state().retained_file_pin.is_none(),
+            "the last lost worker exiting must release the original inode pin"
+        );
     }
 
     #[cfg(unix)]
