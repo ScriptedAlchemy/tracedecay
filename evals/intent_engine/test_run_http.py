@@ -209,6 +209,41 @@ class RunHttpTest(unittest.TestCase):
         self.assertEqual(result["rows"][0]["state_tokens"], 0)
         self.assertFalse(self.partial.exists())
 
+    def test_calibrated_resume_requires_verifiable_raw_probabilities(self):
+        extra = ["--noul-temperature", "2"]
+        self.interrupt(extra)
+        header, saved = self.partial.read_text().splitlines()
+        original = json.loads(saved)
+        for defect in ("missing", "wrong", "extra", "calibrated"):
+            with self.subTest(defect=defect):
+                row = copy.deepcopy(original)
+                if defect == "missing":
+                    del row["probs_raw"]
+                elif defect == "wrong":
+                    row["probs_raw"]["impact"] = 0.9
+                elif defect == "extra":
+                    row["probs_raw"]["unrequested"] = 0.5
+                else:
+                    row["probs"]["impact"] = 0.99
+                self.partial.write_text(header + "\n" + json.dumps(row) + "\n")
+                self.assert_refused_unchanged(extra)
+        # Unmodified calibrated evidence can still resume the missing case.
+        self.partial.write_text(header + "\n" + saved + "\n")
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main(extra)
+        self.assertEqual(post.call_count, 1)
+        result = json.loads(self.output.read_text())
+        self.assertEqual(len(result["rows"]), 2)
+        self.assertEqual(result["rows"][0]["probs_raw"], original["probs_raw"])
+
+    def test_uncalibrated_resume_rejects_fabricated_raw_probabilities(self):
+        self.interrupt()
+        header, saved = self.partial.read_text().splitlines()
+        row = json.loads(saved)
+        row["probs_raw"] = row["probs"]
+        self.partial.write_text(header + "\n" + json.dumps(row) + "\n")
+        self.assert_refused_unchanged()
+
     def test_invalid_settings_are_refused_without_inference(self):
         for value in ("0", "-1", "nan", "inf"):
             with self.subTest(temperature=value), patch.object(run_http, "post") as post:
