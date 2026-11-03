@@ -290,6 +290,25 @@ impl OpenedDatabaseFile {
     }
 }
 
+/// Check a live SQLite worker's physical file without opening and closing a
+/// second descriptor for the same inode on Unix. Closing that descriptor can
+/// release process-wide SQLite locks owned by other connections, even though
+/// SQLite's VFS did not perform the close.
+pub(crate) fn live_path_identity(path: &Path) -> Result<u64, OpenedDatabaseFileError> {
+    #[cfg(unix)]
+    {
+        let metadata = std::fs::metadata(path).map_err(|_| OpenedDatabaseFileError::Open)?;
+        if !metadata.is_file() {
+            return Err(OpenedDatabaseFileError::NotFile);
+        }
+        Ok(metadata_identity(&metadata))
+    }
+    #[cfg(not(unix))]
+    {
+        OpenedDatabaseFile::pin(path).map(|opened| opened.identity())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OpenedDatabaseFileError {
     Create,

@@ -3,7 +3,7 @@ use std::{env, fs, path::Path, process::Command, time::Duration};
 use rusqlite::{Connection, Error, ErrorCode, OpenFlags};
 use tempfile::TempDir;
 
-use super::{OpenedDatabaseFile, OpenedDatabaseFileError};
+use super::{OpenedDatabaseFile, OpenedDatabaseFileError, live_path_identity};
 
 const PROBE_PATH: &str = "TRACEDECAY_PATH_IDENTITY_PROBE_PATH";
 const PROBE_OPERATION: &str = "TRACEDECAY_PATH_IDENTITY_PROBE_OPERATION";
@@ -88,6 +88,41 @@ fn assert_committed_data(path: &Path) {
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
         .expect("integrity check");
     assert_eq!(integrity, "ok");
+}
+
+#[test]
+fn worker_identity_checks_keep_cross_process_writer_exclusion() {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("worker.db");
+    let connection = Connection::open(&path).expect("open database");
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode = DELETE;
+             CREATE TABLE sample(value INTEGER);
+             INSERT INTO sample VALUES (1);
+             BEGIN IMMEDIATE;
+             UPDATE sample SET value = 2;",
+        )
+        .expect("hold live SQLite writer lock");
+    // The old worker check opened another raw descriptor and dropped it
+    // immediately. On POSIX that released this transaction's advisory lock.
+    probe_external_connection(&path, "write", true);
+    let identity = live_path_identity(&path).expect("inspect live worker identity");
+    assert_ne!(identity, 0);
+    probe_external_connection(&path, "write", true);
+    assert_eq!(live_path_identity(&path).unwrap(), identity);
+    probe_external_connection(&path, "write", true);
+
+    connection.execute_batch("COMMIT").expect("commit");
+    probe_external_connection(&path, "write", false);
+    drop(connection);
+    assert_committed_data(&path);
+
+    let absent = temp.path().join("absent.db");
+    assert_eq!(live_path_identity(&absent), Err(OpenedDatabaseFileError::Open));
+    let directory = temp.path().join("not-a-database");
+    fs::create_dir(&directory).expect("directory");
+    assert_eq!(live_path_identity(&directory), Err(OpenedDatabaseFileError::NotFile));
 }
 
 #[test]

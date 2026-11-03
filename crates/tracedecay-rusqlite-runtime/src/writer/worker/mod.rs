@@ -434,8 +434,8 @@ impl Worker {
         }
         let opened_file_identity = match self.expected_file_identity {
             Some(expected) => {
-                let actual = match OpenedDatabaseFile::pin(&self.path) {
-                    Ok(opened) => opened.identity(),
+                let actual = match connection::live_path_identity(&self.path) {
+                    Ok(identity) => identity,
                     Err(error) => {
                         return self.fail_start(WriterStartError::OpenedDatabaseIdentity(error));
                     }
