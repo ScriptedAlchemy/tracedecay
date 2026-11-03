@@ -186,8 +186,7 @@ mod tests {
         let destination = root.join("destination");
         std::fs::create_dir_all(&original).expect("original project directory");
         std::fs::create_dir_all(&destination).expect("prospective destination");
-        std::fs::write(original.join("source.txt"), b"retained source")
-            .expect("original source");
+        std::fs::write(original.join("source.txt"), b"retained source").expect("original source");
         let project_id = "proj_named_adoption_alias";
         let runtime = RegisteredGlobalDbTestRuntime::project(
             &profile,
