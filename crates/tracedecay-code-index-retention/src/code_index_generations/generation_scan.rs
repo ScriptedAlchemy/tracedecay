@@ -241,9 +241,8 @@ mod tests {
 
     use super::{
         CodeGenerationRetentionErrorV1, GENERATION_METADATA_READ_CHUNK_BYTES,
-        GenerationDigestVerificationV1, MAX_GENERATION_METADATA_PREFIX_BYTES,
-        parse_json_u32_field, read_generation_format_revision, read_generation_metadata,
-        read_generation_metadata_prefix,
+        GenerationDigestVerificationV1, MAX_GENERATION_METADATA_PREFIX_BYTES, parse_json_u32_field,
+        read_generation_format_revision, read_generation_metadata, read_generation_metadata_prefix,
     };
 
     fn generation_bytes(manifest_padding: usize, payload_bytes: usize) -> Vec<u8> {
