@@ -2634,14 +2634,26 @@ mod tests {
                 "a healthy sibling's progress cannot reset a corrupt provider's backoff"
             );
             let pending = SessionHistoricalIngestOutcome::Pending { made_progress };
-            assert!(clears_blocked_history_backoff(Some(&pending), Some(&admitted)));
-            assert!(!clears_blocked_history_backoff(Some(&pending), Some(&refused)));
+            assert!(clears_blocked_history_backoff(
+                Some(&pending),
+                Some(&admitted)
+            ));
+            assert!(!clears_blocked_history_backoff(
+                Some(&pending),
+                Some(&refused)
+            ));
             let retryable = SessionHistoricalIngestOutcome::Retryable {
                 reason_code: "provider_temporarily_unavailable".to_owned(),
                 made_progress,
             };
-            assert!(clears_blocked_history_backoff(Some(&retryable), Some(&admitted)));
-            assert!(!clears_blocked_history_backoff(Some(&retryable), Some(&refused)));
+            assert!(clears_blocked_history_backoff(
+                Some(&retryable),
+                Some(&admitted)
+            ));
+            assert!(!clears_blocked_history_backoff(
+                Some(&retryable),
+                Some(&refused)
+            ));
         }
         let admission_saturated = SessionHistoricalIngestOutcome::Retryable {
             reason_code: HISTORY_ADMISSION_SATURATED_REASON.to_owned(),
