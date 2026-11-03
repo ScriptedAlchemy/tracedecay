@@ -463,11 +463,18 @@ mod tests {
         fs::create_dir_all(root.path().join("app/.git")).unwrap();
         fs::write(root.path().join("src/keep.rs"), "pub fn keep() {}\n").unwrap();
         fs::write(root.path().join("app/foreign.rs"), "pub fn foreign() {}\n").unwrap();
-        fs::write(root.path().join(".gitmodules"), "[invalid submodule metadata\n").unwrap();
+        fs::write(
+            root.path().join(".gitmodules"),
+            "[invalid submodule metadata\n",
+        )
+        .unwrap();
         let policy = IndexPathPolicyV1::new(vec![], vec!["src/**".into()]).unwrap();
         let files = walked_files(root.path(), &policy);
         assert!(files.contains(&PathBuf::from("src/keep.rs")));
-        assert!(files.iter().all(|path| !path.starts_with("app")), "{files:?}");
+        assert!(
+            files.iter().all(|path| !path.starts_with("app")),
+            "{files:?}"
+        );
     }
 
     #[test]
