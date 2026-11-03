@@ -569,10 +569,13 @@ impl std::error::Error for VerifiedReaderError {
 /// Foreign-database reader bound to the physical file actually
 /// opened by SQLite rather than a later pathname observation.
 pub struct VerifiedReader {
-    _opened_file: OpenedDatabaseFile,
+    // Keep the connection before the raw pin in declaration order: closing
+    // any raw descriptor on Unix can release another SQLite connection's
+    // process-wide record locks. SQLite must close its handle first.
     connection: Connection,
     canonical_path: PathBuf,
     file_identity: u64,
+    _opened_file: OpenedDatabaseFile,
 }
 
 pub fn default_vfs_max_pathname() -> Option<usize> {
@@ -592,8 +595,10 @@ impl VerifiedReader {
         self.file_identity
     }
 
-    pub fn into_parts(self) -> (Connection, PathBuf, u64) {
-        (self.connection, self.canonical_path, self.file_identity)
+    /// The verified canonical pathname. It remains bound to this reader's
+    /// retained physical file until the SQLite connection is closed.
+    pub fn canonical_path(&self) -> &Path {
+        &self.canonical_path
     }
 }
 
