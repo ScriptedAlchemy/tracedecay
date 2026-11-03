@@ -6071,6 +6071,59 @@ fn fielded_bm25_keeps_whole_identifiers_and_subtokens_distinct() {
 }
 
 #[test]
+fn prose_subtokens_add_identifier_matches_without_rescoring_whole_words() {
+    let artifact = rust_artifact(&[
+        "pub fn reserveStock() {}\n",
+        "pub fn reserve() { let stock = 1; }\n",
+    ]);
+    let lane = artifact.lane();
+    let whole = complete(
+        lane.retrieve_lexical(&artifact.request(
+            "reserve stock",
+            &["reserve", "stock"],
+            &[],
+            &[],
+            0,
+            8,
+        ))
+        .expect("whole-word retrieval"),
+    );
+    let expanded = complete(
+        lane.retrieve_lexical(&artifact.request(
+            "reserve stock",
+            &["reserve", "stock"],
+            &["reserve", "stock"],
+            &[],
+            0,
+            8,
+        ))
+        .expect("expanded retrieval"),
+    );
+    assert!(candidate_files(&whole.candidates).contains(&1));
+    assert_eq!(
+        candidate_files(&expanded.candidates),
+        BTreeSet::from([0, 1])
+    );
+    for candidate in &whole.candidates {
+        if candidate
+            .file_occurrence_id
+            .as_ref()
+            .map(|file| file.as_str())
+            != Some("file.fixture.1")
+        {
+            continue;
+        }
+        let occurrence = &candidate.source_occurrence_id;
+        let evidence = &whole.evidence_by_occurrence[occurrence];
+        assert_eq!(
+            expanded.evidence_by_occurrence[occurrence].field_scores_micros,
+            evidence.field_scores_micros,
+            "an ordinary word already scored in its source field is not new subtoken evidence"
+        );
+    }
+}
+
+#[test]
 fn lexical_phrase_and_bounded_fuzzy_recovery_are_deterministic() {
     let artifact = rust_artifact(&[
         "pub fn reserve() { // reserve stock inventory\n}\n",
@@ -6326,10 +6379,10 @@ fn prose_query_recovers_camel_case_symbol_from_real_sealed_subtoken_postings() {
 }
 
 #[test]
-fn prose_words_the_text_holds_whole_earn_no_second_subtoken_score() {
+fn prose_words_do_not_add_two_full_scores_for_the_same_evidence() {
     // The first row states the words; the second only hides them inside its
     // name. Prose subtoken admission exists to reach the second row, and must
-    // not give the first row a second score for words it already matched.
+    // not add two full scores for words the first row already matched.
     let artifact = rust_artifact(&[
         "/// Reports when the digest does not match its payload.\npub fn validate() {}\n",
         "pub fn digestPayloadMismatch() {}\n",
@@ -6347,6 +6400,18 @@ fn prose_words_the_text_holds_whole_earn_no_second_subtoken_score() {
             .retrieve_lexical(&request)
             .expect("sealed lexical search"),
     );
+    let whole = complete(
+        artifact
+            .lane()
+            .retrieve_lexical(&artifact.request(query, &["digest", "payload"], &[], &[], 0, 32))
+            .expect("whole-word control"),
+    );
+    let subtoken = complete(
+        artifact
+            .lane()
+            .retrieve_lexical(&artifact.request(query, &[], &["digest", "payload"], &[], 0, 32))
+            .expect("subtoken control"),
+    );
     let in_file = |ordinal: usize| {
         results
             .candidates
@@ -6361,17 +6426,25 @@ fn prose_words_the_text_holds_whole_earn_no_second_subtoken_score() {
             .collect::<Vec<_>>()
     };
     let stated = in_file(0);
-    assert!(
-        !stated.is_empty()
-            && stated.iter().all(|evidence| {
-                evidence.matched_subtokens.is_empty()
-                    && evidence
-                        .field_scores_micros
-                        .iter()
-                        .all(|(field, _)| *field != LexicalFieldV1::Subtoken)
-            }),
-        "words the text holds whole must not score again as subtokens: {results:?}"
-    );
+    assert!(!stated.is_empty());
+    let total = |evidence: &LexicalLaneEvidence| {
+        evidence
+            .field_scores_micros
+            .iter()
+            .map(|(_, score)| score)
+            .sum::<u64>()
+    };
+    for evidence in stated {
+        let occurrence = &evidence.binding.source_occurrence;
+        let whole_score = total(&whole.evidence_by_occurrence[occurrence]);
+        let subtoken_score = total(&subtoken.evidence_by_occurrence[occurrence]);
+        assert!(whole_score > 0 && subtoken_score > 0);
+        assert!(total(evidence) >= whole_score.max(subtoken_score));
+        assert!(
+            total(evidence) < whole_score + subtoken_score,
+            "overlapping representations must not add both full scores: {evidence:?}"
+        );
+    }
     assert!(
         in_file(1).iter().any(|evidence| {
             ["digest", "payload"].iter().all(|term| {

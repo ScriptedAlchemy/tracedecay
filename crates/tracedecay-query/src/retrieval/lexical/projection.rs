@@ -1025,6 +1025,7 @@ fn score_lexical_row(
     echo_penalty: bool,
 ) -> LexicalRowScoreV1 {
     let mut field_scores = BTreeMap::new();
+    let mut whole_term_scores = BTreeMap::<&str, u64>::new();
     let mut matched_whole_terms = BTreeSet::new();
     let mut matched_subtokens = BTreeSet::new();
     let mut matched_phrases = BTreeSet::new();
@@ -1058,11 +1059,18 @@ fn score_lexical_row(
         for (query_term, normalized) in &prepared.whole_terms {
             let exact_tf = term_frequency(field, normalized);
             if exact_tf > 0 {
-                add_score(
-                    &mut field_scores,
-                    field,
-                    bm25(field, exact_tf, document_frequency(field, normalized)),
-                );
+                let score = bm25(field, exact_tf, document_frequency(field, normalized));
+                add_score(&mut field_scores, field, score);
+                let weighted_score =
+                    if field == LexicalFieldV1::Documentation && prepared.whole_terms.len() != 1 {
+                        score.saturating_mul(DOCUMENTATION_NL_SCORE_MILLIS) / 1_000
+                    } else {
+                        score
+                    };
+                whole_term_scores
+                    .entry(normalized.as_str())
+                    .and_modify(|current| *current = (*current).max(weighted_score))
+                    .or_insert(weighted_score);
                 matched_whole_terms.insert((*query_term).to_owned());
                 collect_term_kinds(exact_terms, normalized, &mut matched_kinds);
             }
@@ -1088,49 +1096,28 @@ fn score_lexical_row(
         }
     }
     if field_lengths.contains_key(&LexicalFieldV1::Subtoken) {
-        // Multiword prose also searches each plain word as a subtoken so it
-        // can reach a camelCase identifier built from those words. Subtoken
-        // postings split every chunk token, so a word the text holds whole
-        // is there too; crediting it again double-counts ordinary prose.
-        // A single word inside an unrelated identifier (`is` in `is_empty`)
-        // is incidental, so prose words earn credit only when at least two
-        // of them occur in this row solely inside identifiers.
-        let mut scored = Vec::with_capacity(prepared.subtokens.len());
-        let mut embedded_prose_words = 0usize;
         for (subtoken, normalized) in &prepared.subtokens {
             let tf = term_frequency(LexicalFieldV1::Subtoken, normalized);
             if tf == 0 {
                 continue;
             }
-            let prose_word = prepared
-                .whole_terms
-                .iter()
-                .any(|(_, whole)| whole == normalized);
-            if prose_word {
-                let held_whole = [LexicalFieldV1::BodyText, LexicalFieldV1::PreambleText]
-                    .into_iter()
-                    .any(|text| term_frequency(text, normalized) > 0);
-                if held_whole {
-                    continue;
-                }
-                embedded_prose_words += 1;
-            }
-            scored.push((*subtoken, normalized.as_str(), tf, prose_word));
-        }
-        for (subtoken, normalized, tf, prose_word) in scored {
-            if prose_word && embedded_prose_words < 2 {
-                continue;
-            }
-            add_score(
-                &mut field_scores,
+            // Whole-word and subtoken postings can represent the same
+            // evidence. Add only the stronger representation's excess.
+            let score = bm25(
                 LexicalFieldV1::Subtoken,
-                bm25(
-                    LexicalFieldV1::Subtoken,
-                    tf,
-                    document_frequency(LexicalFieldV1::Subtoken, normalized),
-                ),
+                tf,
+                document_frequency(LexicalFieldV1::Subtoken, normalized),
+            )
+            .saturating_sub(
+                whole_term_scores
+                    .get(normalized.as_str())
+                    .copied()
+                    .unwrap_or_default(),
             );
-            matched_subtokens.insert(subtoken.to_owned());
+            if score > 0 {
+                add_score(&mut field_scores, LexicalFieldV1::Subtoken, score);
+                matched_subtokens.insert((*subtoken).to_owned());
+            }
         }
     }
     for (phrase, normalized) in &prepared.phrases {

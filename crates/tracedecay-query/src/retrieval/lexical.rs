@@ -166,10 +166,10 @@ pub(super) fn normalize_lexical(value: &str) -> String {
 /// Whole terms are the same maximal technical tokens the code index extracts
 /// (`tracedecay_domain::technical_tokens`), so a term the indexer keeps whole
 /// (`foo-bar`, `a::b`, `p/q.rs`) is queried whole, and subtokens decompose
-/// through the same shared grammar. For multiword prose, even an unsplit
-/// word is searched in the Subtoken field so a matching camelCase symbol can
-/// be admitted as a candidate. Single-token queries intentionally emit no
-/// subtokens so one technical term does not fan out to common subtokens.
+/// through the same shared grammar. For multiword prose, unsplit content
+/// words use the symbol route's policy before searching the Subtoken field,
+/// so camelCase symbols can be admitted without expanding stopwords.
+/// Single-token queries emit no subtokens, preserving their narrow admission.
 ///
 /// Multi-token sanitized input is also retained as a phrase. This gives exact
 /// diagnostic/error text and natural-language queries a bounded lexical phrase
@@ -191,10 +191,13 @@ pub fn lexical_query_parts(query: &str) -> Result<LexicalQueryPartsV1, Retrieval
     for (_, token) in technical_tokens(query) {
         whole_terms.push(token.to_owned());
         if split_identifiers {
-            // A plain prose word is also a possible component of a longer
-            // identifier. The index holds those components only in its
-            // Subtoken field, even when the word itself needs no splitting.
-            subtokens.extend(split_subtokens(token));
+            let lowercase = token.to_ascii_lowercase();
+            let expand_unsplit = !preferred_symbol_tokens(token).is_empty();
+            subtokens.extend(
+                split_subtokens(token)
+                    .into_iter()
+                    .filter(|part| part != &lowercase || expand_unsplit),
+            );
         }
     }
     whole_terms.sort();

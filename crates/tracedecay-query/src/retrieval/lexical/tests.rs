@@ -203,7 +203,7 @@ fn shared_query_parser_retains_phrase_and_identifier_subtokens() {
 /// query-side subtokens equal the extraction subtokens.
 #[test]
 fn query_tokenization_matches_index_tokenization_for_separator_terms() {
-    let text = "find foo-bar a::b p/q.rs --flag E0308 TS1234 ERR_X";
+    let text = "foo-bar a::b p/q.rs --flag E0308 TS1234 ERR_X";
     let parts = lexical_query_parts(text).expect("lexical query parts");
 
     let index_tokens: Vec<String> = technical_tokens(text)
@@ -266,6 +266,24 @@ fn prose_words_can_match_identifier_subtokens_without_broadening_single_term_que
             .is_empty(),
         "single-term queries must retain their narrow admission"
     );
+}
+
+#[test]
+fn prose_subtoken_expansion_uses_the_existing_content_word_policy() {
+    let query = "how do i find the widget auto tag";
+    let parts = lexical_query_parts(query).expect("prose search");
+    assert_eq!(
+        parts.subtokens,
+        ["auto", "tag", "widget"].map(str::to_owned)
+    );
+    for word in ["how", "do", "i", "find", "the"] {
+        assert!(parts.whole_terms.iter().any(|term| term == word));
+    }
+    assert_eq!(parts.phrases, [query]);
+
+    let technical = lexical_query_parts("TypeOf Widget").expect("technical query");
+    assert!(technical.subtokens.iter().any(|term| term == "type"));
+    assert!(technical.subtokens.iter().any(|term| term == "of"));
 }
 
 fn budget(max_candidates_per_lane: u32) -> RetrievalBudget {
