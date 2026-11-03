@@ -454,8 +454,9 @@ fn session_claim_digest(
 /// A receipt is canonical (answers and facts strictly ordered by intent),
 /// bounded, and names its selected intent through the source it claims: a
 /// `Model` selection was answered at or above its threshold, an `ActionFact`
-/// selection is an observed fact, and `Both` is both. Engine answers exist
-/// only from an identified engine that succeeded.
+/// selection is an observed fact, and `Both` is both. A `PromptFallback`
+/// selection names an inference with no usable answer for that intent. Engine
+/// answers exist only from an identified engine that succeeded.
 fn validate_intent_receipt(
     receipt: &ContextScoutIntentReceiptV1,
 ) -> Result<(), ContextScoutErrorV1> {
@@ -500,6 +501,13 @@ fn validate_intent_receipt(
         IntentDecisionSourceV1::Model => model_selected,
         IntentDecisionSourceV1::ActionFact => fact_selected,
         IntentDecisionSourceV1::Both => model_selected && fact_selected,
+        IntentDecisionSourceV1::PromptFallback => {
+            !fact_selected
+                && !receipt
+                    .answers
+                    .iter()
+                    .any(|answer| answer.intent == receipt.selected)
+        }
     };
     if !consistent {
         return Err(ContextScoutErrorV1::InvalidEvidence);
@@ -836,6 +844,40 @@ mod tests {
         fact_only.decision.selected = ContextScoutIntentKindV1::Search;
         fact_only.decision.source = IntentDecisionSourceV1::ActionFact;
         ContextScoutSessionEvidenceV1::claim(fact_only).unwrap();
+    }
+
+    #[test]
+    fn prompt_fallback_receipt_cannot_override_a_model_answer_or_claim_a_fact() {
+        rejected(|claim| {
+            claim.decision.selected = ContextScoutIntentKindV1::CallGraph;
+            claim.decision.source = IntentDecisionSourceV1::PromptFallback;
+        });
+        rejected(|claim| {
+            claim.decision.selected = ContextScoutIntentKindV1::Impact;
+            claim.decision.source = IntentDecisionSourceV1::ActionFact;
+        });
+        rejected(|claim| {
+            claim.decision.selected = ContextScoutIntentKindV1::Search;
+            claim.decision.source = IntentDecisionSourceV1::PromptFallback;
+        });
+        let mut unanswered = fixture_context_scout_session_claim();
+        unanswered.decision.selected = ContextScoutIntentKindV1::Impact;
+        unanswered.decision.source = IntentDecisionSourceV1::PromptFallback;
+        ContextScoutSessionEvidenceV1::claim(unanswered.clone()).unwrap();
+
+        unanswered.decision.engine = None;
+        unanswered.decision.outcome = ContextScoutModelOutcomeV1::Backpressured;
+        unanswered.decision.answers.clear();
+        let fallback = ContextScoutSessionEvidenceV1::claim(unanswered).unwrap();
+        let encoded = serde_json::to_value(&fallback).unwrap();
+        assert_eq!(encoded["decision"]["source"], "prompt_fallback");
+        assert!(
+            !fallback
+                .decision
+                .facts
+                .contains(&fallback.decision.selected)
+        );
+        fallback.validate().unwrap();
     }
 
     #[test]

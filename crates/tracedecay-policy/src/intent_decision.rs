@@ -18,8 +18,11 @@ pub struct IntentDecisionInputV1<'a> {
     /// An answer for an intent with no configured question is ignored: it has
     /// no threshold.
     pub answers: Option<&'a [(ContextScoutIntentKindV1, f64)]>,
-    /// Deterministic action facts, in classification priority order.
+    /// Observed tool actions, in classification priority order. These remain
+    /// evidence even when a semantic model answer is negative.
     pub facts: &'a [ContextScoutIntentKindV1],
+    /// Prompt interpretations used only when the intent has no usable answer.
+    pub prompt_inferences: &'a [ContextScoutIntentKindV1],
     pub questions: &'a [IntentQuestionSettingsV1],
     /// Score an action fact contributes for its intent.
     pub action_fact_score_permille: u16,
@@ -73,6 +76,26 @@ pub fn decide_intents(input: &IntentDecisionInputV1<'_>) -> IntentDecisionV1 {
             intent: *fact,
             relevance: fact_relevance,
             source: IntentDecisionSourceV1::ActionFact,
+        });
+    }
+
+    // Missing or unusable answers permit the explicit no-engine fallback.
+    // A usable negative answer is a decision, not an engine failure.
+    for intent in input.prompt_inferences {
+        if input.delivered.contains(intent)
+            || answered
+                .iter()
+                .any(|answer| answer.question.intent == *intent)
+            || candidates
+                .iter()
+                .any(|candidate| candidate.intent == *intent)
+        {
+            continue;
+        }
+        candidates.push(IntentCandidateV1 {
+            intent: *intent,
+            relevance: fact_relevance,
+            source: IntentDecisionSourceV1::PromptFallback,
         });
     }
 
@@ -212,6 +235,7 @@ mod tests {
         decide_intents(&IntentDecisionInputV1 {
             answers,
             facts,
+            prompt_inferences: &[],
             questions,
             action_fact_score_permille: 700,
             delivered,
@@ -460,6 +484,122 @@ mod tests {
         assert_eq!(
             decide(Some(&[]), &[], &open, &none),
             IntentDecisionV1::NoSignal
+        );
+    }
+
+    #[test]
+    fn negative_answer_rejects_prompt_inference_but_preserves_observed_search() {
+        use crate::intent_action_facts::{ActionFactInputV1, action_facts, observed_action_facts};
+
+        let inferred = action_facts(&ActionFactInputV1 {
+            prompt: Some("Do not analyze impact; just locate the file."),
+            ..ActionFactInputV1::default()
+        });
+        assert!(inferred.contains(&Kind::Impact));
+        let questions = vec![question(Kind::Impact, 600, None)];
+        let input = IntentDecisionInputV1 {
+            answers: Some(&[(Kind::Impact, 0.1)]),
+            facts: &[],
+            prompt_inferences: &inferred,
+            questions: &questions,
+            action_fact_score_permille: 700,
+            delivered: &BTreeSet::new(),
+        };
+        assert_eq!(
+            decide_intents(&input),
+            IntentDecisionV1::BelowThreshold {
+                best: IntentBestAnswerV1 {
+                    intent: Kind::Impact,
+                    probability_permille: 100,
+                },
+            }
+        );
+
+        let observed = observed_action_facts(&ActionFactInputV1 {
+            tool_name: Some("Bash"),
+            command: Some("rg impact src"),
+            ..ActionFactInputV1::default()
+        });
+        assert_eq!(observed, vec![Kind::Search]);
+        assert_eq!(
+            candidates(decide_intents(&IntentDecisionInputV1 {
+                facts: &observed,
+                ..input
+            })),
+            vec![IntentCandidateV1 {
+                intent: Kind::Search,
+                relevance: permille_relevance(700),
+                source: IntentDecisionSourceV1::ActionFact,
+            }]
+        );
+    }
+
+    #[test]
+    fn prompt_fallback_requires_an_unanswered_intent() {
+        let questions = questions();
+        let inferred = [Kind::Impact, Kind::CallGraph, Kind::TypeOrientation];
+        let input = IntentDecisionInputV1 {
+            answers: Some(&[(Kind::Impact, 0.1), (Kind::CallGraph, f64::NAN)]),
+            facts: &[],
+            prompt_inferences: &inferred,
+            questions: &questions,
+            action_fact_score_permille: 700,
+            delivered: &BTreeSet::new(),
+        };
+        assert_eq!(
+            candidates(decide_intents(&input))
+                .iter()
+                .map(|candidate| (candidate.intent, candidate.source))
+                .collect::<Vec<_>>(),
+            vec![
+                (Kind::CallGraph, IntentDecisionSourceV1::PromptFallback),
+                (
+                    Kind::TypeOrientation,
+                    IntentDecisionSourceV1::PromptFallback
+                ),
+            ]
+        );
+        let unavailable = candidates(decide_intents(&IntentDecisionInputV1 {
+            answers: None,
+            delivered: &BTreeSet::from([Kind::CallGraph]),
+            ..input
+        }));
+        assert_eq!(
+            unavailable
+                .iter()
+                .map(|candidate| candidate.intent)
+                .collect::<Vec<_>>(),
+            vec![Kind::Impact, Kind::TypeOrientation]
+        );
+        assert!(
+            unavailable
+                .iter()
+                .all(|candidate| { candidate.source == IntentDecisionSourceV1::PromptFallback })
+        );
+    }
+
+    #[test]
+    fn inference_cannot_bypass_a_model_margin_or_inflate_a_positive_answer() {
+        let questions = vec![
+            question(Kind::CallGraph, 600, Some(200)),
+            question(Kind::Impact, 600, None),
+        ];
+        let inferred = [Kind::CallGraph, Kind::Impact];
+        let selected = candidates(decide_intents(&IntentDecisionInputV1 {
+            answers: Some(&[(Kind::CallGraph, 0.75), (Kind::Impact, 0.65)]),
+            facts: &[],
+            prompt_inferences: &inferred,
+            questions: &questions,
+            action_fact_score_permille: 700,
+            delivered: &BTreeSet::new(),
+        }));
+        assert_eq!(
+            selected,
+            vec![IntentCandidateV1 {
+                intent: Kind::Impact,
+                relevance: probability_relevance(0.65),
+                source: IntentDecisionSourceV1::Model,
+            }]
         );
     }
 }
