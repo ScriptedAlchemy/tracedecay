@@ -5,6 +5,7 @@
 //! implements [`code_graph_seat::CodeGraphSeatRuntimePortV1`]; this crate must
 //! not depend on `tracedecay`.
 
+#![recursion_limit = "256"]
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
