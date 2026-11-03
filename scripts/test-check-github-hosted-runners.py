@@ -1,17 +1,28 @@
 #!/usr/bin/env python3
-"""Behavioral tests for the GitHub-hosted runner policy."""
+"""Behavioral tests for the GitHub-hosted runner and credential policy.
+
+The unit tests exercise one policy implementation. The repository self-checks
+read this repository's own workflows, so CI runs them against proposed trees
+too: `RUNNER_POLICY_ROOT` selects the tree to read (default: this checkout),
+which lets the pull request guard judge a proposed tree with the base
+revision's tests.
+"""
 
 from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parent.parent
 POLICY_PATH = ROOT / "scripts/check-github-hosted-runners.py"
+REPOSITORY_ROOT = Path(os.environ.get("RUNNER_POLICY_ROOT", ROOT)).resolve()
 
 
 def load_policy():
@@ -135,6 +146,113 @@ class GitHubHostedRunnerPolicyTests(unittest.TestCase):
             "jobs:\n  test:\n    runs-on: ${{ matrix.lane == 'product' "
             "&& 'ubuntu-24.04' || inputs.runner }}\n"
         )
+
+
+class RepositoryWorkflowPolicyTests(unittest.TestCase):
+    """Self-checks: this repository's workflows follow the same rules."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.policy = load_policy()
+        cls.workflows = REPOSITORY_ROOT / ".github/workflows"
+
+    def load_workflow(self, name: str) -> dict:
+        path = self.workflows / name
+        return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+    def test_workflows_resolve_to_standard_hosted_runners(self) -> None:
+        self.policy.validate_repository(REPOSITORY_ROOT)
+
+    def test_change_scope_decides_without_a_write_token(self) -> None:
+        job = self.load_workflow("ci.yml")["jobs"]["change-scope"]
+        permissions = job.get("permissions") or {}
+        self.assertNotIn(
+            "statuses",
+            permissions,
+            "the change-scope job must not hold the commit-status permission",
+        )
+        self.assertNotEqual(permissions.get("contents"), "write")
+
+    def test_change_scope_reads_the_decision_script_from_the_base_revision(self) -> None:
+        job = self.load_workflow("ci.yml")["jobs"]["change-scope"]
+        checkouts = [
+            step
+            for step in job.get("steps", [])
+            if "actions/checkout" in str(step.get("uses", ""))
+        ]
+        self.assertEqual(len(checkouts), 1)
+        ref = str(checkouts[0].get("with", {}).get("ref", ""))
+        self.assertIn("github.event.pull_request.base.sha", ref)
+        runs = "\n".join(str(step.get("run", "")) for step in job.get("steps", []))
+        self.assertIn("git show", runs)
+
+    def test_jobs_posting_commit_statuses_run_no_repository_code(self) -> None:
+        writers = []
+        for name in sorted(path.name for path in self.workflows.glob("*.y*ml")):
+            jobs = self.load_workflow(name).get("jobs") or {}
+            for job_name, job in jobs.items():
+                if not isinstance(job, dict):
+                    continue
+                if (job.get("permissions") or {}).get("statuses") == "write":
+                    writers.append((name, job_name, job))
+        self.assertTrue(
+            writers,
+            "no job holds the commit-status permission; removing the private "
+            "Linux status job has to change this test too",
+        )
+        for name, job_name, job in writers:
+            for step in job.get("steps", []):
+                uses = str(step.get("uses", ""))
+                self.assertNotIn(
+                    "actions/checkout",
+                    uses,
+                    f"{name} job {job_name!r} checks out code while holding statuses: write",
+                )
+                self.assertNotIn(
+                    "download-artifact",
+                    uses,
+                    f"{name} job {job_name!r} imports artifacts while holding statuses: write",
+                )
+
+    def test_fleet_enrollment_requires_a_github_hosted_runner(self) -> None:
+        action = yaml.safe_load(
+            (REPOSITORY_ROOT / ".github/actions/setup-bazel/action.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+        steps = action["runs"]["steps"]
+        enrollment = next(
+            index for index, step in enumerate(steps) if step.get("id") == "tailscale"
+        )
+        guards = [
+            step
+            for step in steps[:enrollment]
+            if step.get("if") == "inputs.tailscale-client-id != ''"
+        ]
+        self.assertTrue(guards, "enrollment has no separate guard step")
+        self.assertTrue(
+            any("runner.environment" in str(step.get("env", {})) for step in guards),
+            "no step before Tailscale enrollment inspects runner.environment",
+        )
+
+    def test_existing_tailnet_is_restricted_to_the_orchestrator(self) -> None:
+        action = yaml.safe_load(
+            (REPOSITORY_ROOT / ".github/actions/setup-bazel/action.yml").read_text(
+                encoding="utf-8"
+            )
+        )
+        steps = action["runs"]["steps"]
+        enrollment = next(
+            index for index, step in enumerate(steps) if step.get("id") == "tailscale"
+        )
+        guards = [
+            str(step.get("run", ""))
+            for step in steps[:enrollment]
+            if step.get("if") == "inputs.existing-tailnet == 'true'"
+        ]
+        self.assertTrue(guards, "existing-tailnet has no guard step")
+        self.assertIn("ScriptedAlchemy/ci-runner-orchestrator", guards[0])
+        self.assertIn("25274700", guards[0])
 
 
 if __name__ == "__main__":

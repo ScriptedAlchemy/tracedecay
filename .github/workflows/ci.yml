@@ -58,22 +58,31 @@ jobs:
   # reads skip those jobs; scripts/ci-change-scope.py holds the allowlist
   # and fails closed. Pushes and dispatches always run everything, and a
   # skipped required check still satisfies branch protection.
+  #
+  # This job decides whether required checks run, so it never executes code
+  # from the pull request head: the decision script is read out of the base
+  # revision's own tree, and a skip counts only for a same-repository pull
+  # request. Writes to GitHub belong to a separate job, so no write-scoped
+  # token sits next to code a pull request supplies.
   change-scope:
     name: Change scope
     permissions:
       contents: read
       pull-requests: read
-      statuses: write
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       bazel: ${{ steps.decide.outputs.bazel }}
       private-linux: ${{ steps.private.outputs.enabled }}
     steps:
+      # The base revision, never the head or merge commit: the script that
+      # decides the scope of this run comes from the branch being targeted.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
           sparse-checkout: scripts/ci-change-scope.py
           sparse-checkout-cone-mode: false
+          persist-credentials: false
 
       - name: Decide whether the Bazel jobs are needed
         id: decide
@@ -82,9 +91,28 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           EXPECTED_COUNT: ${{ github.event.pull_request.changed_files }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
           if [[ "$EVENT_NAME" != pull_request ]]; then
+            echo 'bazel=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A skip waives required checks, so it is honoured only when both
+          # facts hold: the checkout is the base revision, and the branch is
+          # in this repository. Otherwise run the jobs, exactly like an
+          # unreadable file listing.
+          trusted=true
+          if [[ -z "$BASE_SHA" || "$(git rev-parse HEAD)" != "$BASE_SHA" ]]; then
+            echo "::warning::The change-scope guard did not run from the base revision; running every Bazel job."
+            trusted=false
+          fi
+          if [[ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]]; then
+            echo "::notice::Fork pull requests run every Bazel job; the scope allowlist covers same-repository branches only."
+            trusted=false
+          fi
+          if [[ "$trusted" != true ]]; then
             echo 'bazel=true' >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -95,33 +123,65 @@ jobs:
             echo "::warning::Could not list the pull request files; running every Bazel job."
             : > "$listing"
           fi
-          python3 scripts/ci-change-scope.py \
+          # Run the blob the base commit records, not the worktree copy, so
+          # the executed decision is the reviewed one byte for byte.
+          script="$RUNNER_TEMP/ci-change-scope.py"
+          git show "HEAD:scripts/ci-change-scope.py" > "$script"
+          python3 "$script" \
             --event-name "$EVENT_NAME" --changed-paths "$listing" --expected-count "$EXPECTED_COUNT"
 
-      - name: Route owner Linux tests to isolated CI
+      # The routing decision is only a boolean; the commit status that wakes
+      # the private worker is posted by the job below.
+      - name: Select private Linux capacity
         id: private
         if: >-
           !cancelled() && vars.PRIVATE_LINUX_CI == 'true' &&
           github.actor_id == '25274700' && github.triggering_actor == 'ScriptedAlchemy' &&
           (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         env:
-          GH_TOKEN: ${{ github.token }}
           BAZEL_SCOPE: ${{ steps.decide.outputs.bazel }}
           DRAFT: ${{ github.event.pull_request.draft }}
-          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          state=success
-          description='Hosted Linux CI selected'
+          set -euo pipefail
           enabled=false
           if [[ "$BAZEL_SCOPE" != false && "$DRAFT" != true ]]; then
+            enabled=true
+          fi
+          echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
+
+  # The private Linux worker polls this commit status, which is why it needs
+  # `statuses: write`. It consumes one boolean output and event fields only: no
+  # checkout, no pull request code, no artifacts, so the write token cannot
+  # reach anything a contributor wrote.
+  private-linux-status:
+    name: Request private Linux capacity
+    needs: change-scope
+    permissions:
+      contents: read
+      statuses: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: >-
+      !cancelled() && vars.PRIVATE_LINUX_CI == 'true' &&
+      github.actor_id == '25274700' && github.triggering_actor == 'ScriptedAlchemy' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    steps:
+      - name: Record the private Linux request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENABLED: ${{ needs.change-scope.outputs.private-linux }}
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          state=success
+          description='Hosted Linux CI selected'
+          if [[ "$ENABLED" == true ]]; then
             state=pending
             description="Requested private-linux:$GITHUB_REPOSITORY:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT:fast"
-            enabled=true
           fi
           gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$SOURCE_SHA" \
             -f state="$state" -f context='Private Linux CI' -f description="$description" \
             -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
 
   # One dev-profile `tracedecay` binary for the explicitly requested stock
   # host integrations. Ordinary Linux validation needs no CLI artifact, so

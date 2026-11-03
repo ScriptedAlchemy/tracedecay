@@ -61,6 +61,64 @@ runs:
         git config --global core.longpaths true
         git config --system core.longpaths true
 
+    # Fleet credentials are for disposable GitHub-hosted runners. A persistent
+    # or self-hosted machine must never exchange this repository's OIDC token
+    # for a Tailscale node, because the node would outlive the job and the
+    # machine would keep the identity. `existing-tailnet` is the escape hatch
+    # for a VM the orchestrator already enrolled, and it is gated separately.
+    - name: Require a disposable runner for fleet enrollment
+      if: inputs.tailscale-client-id != ''
+      shell: bash
+      env:
+        RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        EXISTING_TAILNET: ${{ inputs.existing-tailnet }}
+      run: |
+        set -euo pipefail
+        if [[ "$RUNNER_ENVIRONMENT" != github-hosted ]]; then
+          echo "::error::Tailscale OIDC enrollment is restricted to GitHub-hosted runners; an already-enrolled private VM must pass existing-tailnet instead."
+          exit 1
+        fi
+        if [[ "$EXISTING_TAILNET" == true ]]; then
+          echo "::error::Pass either a Tailscale client id or existing-tailnet, never both."
+          exit 1
+        fi
+
+    # The existing-tailnet shortcut skips OIDC enrollment, so nothing above
+    # would stop a pull request in a repository that happens to reuse this
+    # action from claiming the runner's tailnet. Only the private orchestrator
+    # may ask for it, only for owner-initiated private-repository runs.
+    - name: Restrict the existing-tailnet shortcut
+      if: inputs.existing-tailnet == 'true'
+      shell: bash
+      env:
+        REPOSITORY: ${{ github.repository }}
+        VISIBILITY: ${{ github.event.repository.visibility }}
+        EVENT_NAME: ${{ github.event_name }}
+        ACTOR_ID: ${{ github.actor_id }}
+        RUNNER_ENVIRONMENT: ${{ runner.environment }}
+      run: |
+        set -euo pipefail
+        if [[ "$REPOSITORY" != 'ScriptedAlchemy/ci-runner-orchestrator' ]]; then
+          echo "::error::existing-tailnet is only available to ScriptedAlchemy/ci-runner-orchestrator."
+          exit 1
+        fi
+        if [[ "$VISIBILITY" != private ]]; then
+          echo "::error::existing-tailnet requires a private repository event payload; got '${VISIBILITY}'."
+          exit 1
+        fi
+        if [[ "$EVENT_NAME" == pull_request || "$EVENT_NAME" == pull_request_target ]]; then
+          echo "::error::existing-tailnet is not available to pull request workflows."
+          exit 1
+        fi
+        if [[ "$ACTOR_ID" != '25274700' ]]; then
+          echo "::error::existing-tailnet is restricted to the repository owner (actor_id 25274700)."
+          exit 1
+        fi
+        if [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]; then
+          echo "::error::existing-tailnet is for an already-enrolled private VM; GitHub-hosted runners enroll through OIDC."
+          exit 1
+        fi
+
     # Cache versions include the literal path. Keep setup-bazel's existing
     # directory and key prefix to restore previously compiled outputs.
     - name: Resolve action cache location

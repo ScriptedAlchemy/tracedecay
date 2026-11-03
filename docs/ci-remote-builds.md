@@ -93,19 +93,67 @@ identities and metrics.
 
 ## Trust configuration
 
-`TS_BAZEL_CLIENT_ID` is a repository variable, not a secret. Its Tailscale OIDC
-identity must have only Auth Keys write scope, restricted to `tag:bazel-ci`:
+The OIDC clients are repository variables, not secrets. Each one's Tailscale
+OIDC identity must have only Auth Keys write scope, restricted to
+`tag:bazel-ci`:
 
 - Issuer: `https://token.actions.githubusercontent.com`
 - Subject: `repo:ScriptedAlchemy/tracedecay:*`
 - Custom claim `repository_id`: `1261602522`
-- Custom claim `actor_id`: `25274700` (ScriptedAlchemy)
-- Custom claim `workflow_ref`: `ScriptedAlchemy/tracedecay/.github/workflows/ci.yml@*`
+- Custom claim `actor_id`: the actor listed for that client below
+- Custom claim `workflow_ref`: `ScriptedAlchemy/tracedecay/.github/workflows/<workflow>@*`
+  for every workflow that requests the client
 - Audience: `api.tailscale.com/<client-id>`
 
 Tailscale checks these signed claims independently of the workflow condition.
-Only the current repository owner is enrolled. Adding another maintainer
-requires an explicit trust change. The workflow also excludes fork PRs.
+Adding another maintainer requires an explicit trust change.
+
+### The subject claim does not separate forks from branches
+
+GitHub mints the OIDC token for the repository whose workflow runs, so a fork
+pull request presents the same `repo:ScriptedAlchemy/tracedecay:pull_request`
+subject as a same-repository one. A trust condition written on the `sub` claim
+alone therefore also accepts a fork's run. The `head.repo.full_name` test inside
+a workflow is not an authorization boundary either, because a pull request can
+edit the workflow that performs it. Every client's trust condition must
+therefore require the `actor_id` custom claim.
+
+### Clients
+
+Three clients can request fleet credentials, and each is a separate Tailscale
+OAuth client with its own audience and `actor_id` claim:
+
+| Variable | `actor_id` claim | Actor |
+| --- | --- | --- |
+| `TS_BAZEL_CLIENT_ID` | `25274700` | `ScriptedAlchemy` |
+| `TS_BAZEL_BOT_CLIENT_ID` | `158243242` | the repository automation bot |
+| `TS_BAZEL_RENOVATE_CLIENT_ID` | `29139614` | `renovate[bot]` |
+
+Every workflow that requests a client id, and the client it may receive:
+
+- `ci.yml`: `debug-cli`, `gates`, `macos-test`, `linux-test`, `clippy`,
+  `windows-test`, `shipped-cli` — any of the three.
+- `sdk-conformance.yml`: `packages`, `production-router` — owner or bot.
+- `release.yml`, `release-beta.yml`: `build` — owner or bot.
+- `release-please.yml`: `release-please` — owner or bot.
+- `upstream-compat.yml`: `bazel-10-readiness` — owner or bot.
+- `hermetic-evals.yml`: `test` — owner or bot.
+
+Each of those sites also pins the same repository and actor in a workflow
+expression. The expression is convenience: the signed `actor_id` claim in
+Tailscale is the control, and it is the only part that a pull request cannot
+edit. These conditions are configured in the Tailscale admin console and are
+not stored in this repository, so a change to a client, its audience, or its
+claims needs a matching console change; review both.
+
+`setup-bazel` refuses to exchange OIDC from any runner whose
+`runner.environment` is not `github-hosted`, because a persistent machine would
+keep the node identity after the job ends. Its `existing-tailnet` input skips
+enrollment only for a VM the orchestrator already enrolled: it is accepted only
+in `ScriptedAlchemy/ci-runner-orchestrator`, for owner-initiated
+(`actor_id` 25274700) non-pull-request events in a private repository, on a
+runner that is not GitHub-hosted.
+
 Keep GitHub's fork contributor approval policy at `all_external_contributors`;
 approved outside-contributor runs use GitHub-hosted execution without fleet
 credentials. Approving a fork run does not enroll its author in the fleet.
