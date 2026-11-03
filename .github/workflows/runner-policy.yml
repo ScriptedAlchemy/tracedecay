@@ -1,0 +1,69 @@
+# A pull request can target a self-hosted label and have its job run on a
+# machine the repository does not own. sdk-conformance already rejects that on
+# master; this workflow asks the same question about the pull request itself,
+# using the checker out of the base revision, so a pull request cannot widen
+# the allowlist it is judged by.
+#
+# It is its own workflow because the rest of SDK conformance builds and tests
+# the SDK, which a workflow edit does not change. Adopting a new standard
+# GitHub-hosted label therefore takes two changes: add it to
+# scripts/check-github-hosted-runners.py first, then use it, because the base
+# revision's allowlist decides what a pull request may select.
+name: Runner policy
+
+on:
+  pull_request:
+    paths:
+      - ".github/**"
+      - "scripts/check-github-hosted-runners.py"
+      - "scripts/test-check-github-hosted-runners.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  base-revision-policy:
+    name: GitHub-hosted runner policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the proposed workflows
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: head
+          persist-credentials: false
+
+      - name: Check out the base revision's checker
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: base
+          sparse-checkout: |
+            scripts/check-github-hosted-runners.py
+            scripts/test-check-github-hosted-runners.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.15.2"
+
+      - name: Install the YAML reader the checker requires
+        run: python3 -m pip install pyyaml==6.0.2
+
+      # The base revision's tests judge the proposed tree, so a pull request
+      # cannot relax a rule and satisfy its own weakened test in one step.
+      - name: Test the base-revision checker against the proposed tree
+        env:
+          RUNNER_POLICY_ROOT: ${{ github.workspace }}/head
+        run: python3 base/scripts/test-check-github-hosted-runners.py
+
+      # The tree is the pull request's; the rule is the base revision's.
+      - name: Check the proposed workflows against the base-revision policy
+        run: python3 base/scripts/check-github-hosted-runners.py --root head

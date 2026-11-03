@@ -73,6 +73,7 @@ jobs:
           .github/workflows/release-beta.yml
           .github/workflows/release-please.yml
           .github/workflows/release-pr-integrity.yml
+          .github/workflows/runner-policy.yml
   packages:
     permissions:
       contents: read
