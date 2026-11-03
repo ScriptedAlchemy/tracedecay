@@ -24,7 +24,10 @@ fn probe_external_connection(path: &Path, operation: &str, blocked: bool) {
         ])
         .env(PROBE_PATH, path)
         .env(PROBE_OPERATION, operation)
-        .env(PROBE_EXPECTATION, if blocked { "blocked" } else { "allowed" })
+        .env(
+            PROBE_EXPECTATION,
+            if blocked { "blocked" } else { "allowed" },
+        )
         .output()
         .expect("run external SQLite connection");
     let stdout = String::from_utf8_lossy(&output.stdout);
