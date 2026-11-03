@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.96](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.95...v1.0.0-beta.96) (2026-11-03)
+
+
+### Bug Fixes
+
+* **code-index:** retain panic input identity through quarantine ([#4686](https://github.com/ScriptedAlchemy/tracedecay/issues/4686)) ([105cdd4](https://github.com/ScriptedAlchemy/tracedecay/commit/105cdd4d2e2bead60bfbb56073351ec582c73845))
+* **graph:** release abandoned retirement reservations ([#4688](https://github.com/ScriptedAlchemy/tracedecay/issues/4688)) ([a151f6c](https://github.com/ScriptedAlchemy/tracedecay/commit/a151f6cb8d6e07eea8f9876a970cabe4d9e2e3ab))
+* **lsp:** retire abandoned workspace diagnostic operations ([#4685](https://github.com/ScriptedAlchemy/tracedecay/issues/4685)) ([bd7d3fc](https://github.com/ScriptedAlchemy/tracedecay/commit/bd7d3fc832a56f22eed19d7029dc5398f97964ed))
+
 ## [1.0.0-beta.95](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.94...v1.0.0-beta.95) (2026-11-01)
 
 
