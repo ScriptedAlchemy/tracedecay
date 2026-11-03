@@ -232,12 +232,13 @@ async fn run_registered_store_retention(
     match &report.session_lcm {
         Some(Ok(session_lcm)) => {
             let reclaimed = session_lcm.bytes_reclaimed();
-            if reclaimed > 0 || !session_lcm.errors.is_empty() {
+            if reclaimed > 0 || session_lcm.inlined.acted > 0 || !session_lcm.errors.is_empty() {
                 log_daemon_event(
                     "retention_session_lcm",
                     &[
                         ("store", "mounted_sessions".to_owned()),
                         ("bytes_reclaimed", reclaimed.to_string()),
+                        ("inlined_rows", session_lcm.inlined.acted.to_string()),
                         ("errors", session_lcm.errors.len().to_string()),
                     ],
                 );

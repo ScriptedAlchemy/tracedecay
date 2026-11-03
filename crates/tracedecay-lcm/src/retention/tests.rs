@@ -402,7 +402,8 @@ async fn dry_run_counts_without_mutating() -> Result<(), String> {
 #[asupersync::test]
 async fn backlog_read_reports_real_eligible_bytes_and_watermark() -> Result<(), String> {
     let store = test_store().await?;
-    let durable = insert_message(&store.conn, 1, 90, "retention backlog bytes").await?;
+    let content = "retention backlog café ☕";
+    let durable = insert_message(&store.conn, 1, 90, content).await?;
     make_projection_durable(&store.conn, durable).await?;
 
     let records = read_session_retention_backlog(
@@ -417,7 +418,7 @@ async fn backlog_read_reports_real_eligible_bytes_and_watermark() -> Result<(), 
 
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].table.as_str(), "lcm_raw_messages");
-    assert!(records[0].past_window_bytes.get() > 0);
+    assert_eq!(records[0].past_window_bytes.get(), content.len() as u64);
     assert_eq!(
         records[0].oldest_past_window_at,
         tracedecay_domain::UtcMicros((NOW - 90 * DAY) * 1_000_000)
@@ -530,6 +531,295 @@ async fn offload_externalizes_durable_content_after_durability() -> Result<(), S
     )
     .await?;
     assert_eq!(live_kind, 1, "live un-projected row stays inline");
+    Ok(())
+}
+
+#[asupersync::test]
+async fn offload_keeps_small_bodies_inline_and_uses_byte_threshold() -> Result<(), String> {
+    let store = test_store().await?;
+    let small = "é".repeat(INLINE_BODY_BYTES / 2 - 1);
+    let small_id = insert_message(&store.conn, 1, 90, &small).await?;
+    make_projection_durable(&store.conn, small_id).await?;
+    let config = LcmRetentionConfig {
+        drop_after_days: None,
+        ..LcmRetentionConfig::default()
+    };
+    let report = run_apply(&store.conn, &store.storage_root, &config).await?;
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.offloaded.eligible, 0);
+    assert_eq!(count(&store.conn, "lcm_external_payloads").await?, 0);
+    assert!(!payload::payload_dir(&store.storage_root).exists());
+    let backlog = read_session_retention_backlog(
+        &store.conn,
+        tracedecay_contracts::storage::StoreKeyV1::new("sessions.db")
+            .map_err(|error| error.to_string())?,
+        &config,
+        NOW,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    assert_eq!(backlog[0].past_window_bytes.get(), 0);
+
+    let boundary = "é".repeat(INLINE_BODY_BYTES / 2);
+    let boundary_id = insert_message(&store.conn, 2, 90, &boundary).await?;
+    make_projection_durable(&store.conn, boundary_id).await?;
+    let report = run_apply(&store.conn, &store.storage_root, &config).await?;
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.offloaded.acted, 1);
+    assert_eq!(report.offloaded.bytes_reclaimed, boundary.len() as u64);
+    let unchanged = raw::load_raw_message_by_store_id(&store.conn, small_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    assert_eq!(unchanged.content, small);
+    Ok(())
+}
+
+#[asupersync::test]
+async fn small_offload_restores_verified_text_and_releases_file_only_after_gc_grace()
+-> Result<(), String> {
+    let store = test_store().await?;
+    let content = "small tool output: café completed";
+    let target = seed_small_offload(&store, 1, content).await?;
+    let path = payload::payload_dir(&store.storage_root).join(&target.payload_ref);
+    let config = LcmRetentionConfig {
+        drop_after_days: None,
+        ..LcmRetentionConfig::default()
+    };
+    let preview = run_session_retention_authorized(
+        &store.conn,
+        &store.storage_root,
+        "all",
+        None,
+        &config,
+        RetentionMode::DryRun,
+        NOW,
+        &|_| Ok(()),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    assert_eq!(preview.inlined.eligible, 1);
+    assert_eq!(preview.inlined.acted, 0);
+    assert_eq!(preview.bytes_reclaimed(), 0);
+    assert_eq!(count(&store.conn, "lcm_external_payloads").await?, 1);
+    assert!(path.exists());
+
+    let report = run_apply(&store.conn, &store.storage_root, &config).await?;
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.inlined.acted, 1);
+    assert_eq!(report.offloaded.acted, 0);
+    assert_eq!(report.bytes_reclaimed(), 0);
+    assert_eq!(count(&store.conn, "session_canonical_bodies").await?, 0);
+    let restored = raw::load_raw_message_by_store_id(&store.conn, target.store_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    assert_eq!(restored.content, content);
+    assert_eq!(restored.content_hash, target.content_hash);
+    assert_eq!(restored.metadata_json, target.metadata_json);
+    assert!(restored.payload_ref.is_none());
+    assert!(path.exists(), "inlining never deletes the payload file");
+    assert_eq!(
+        fetch_i64(
+            &store.conn,
+            "SELECT COUNT(*) FROM lcm_raw_messages_fts
+             WHERE lcm_raw_messages_fts MATCH 'completed'",
+            (),
+        )
+        .await?,
+        1,
+        "restoration also makes the original tool text searchable again"
+    );
+
+    let marked_at = fetch_i64(
+        &store.conn,
+        "SELECT first_seen_at FROM lcm_gc_marks WHERE payload_ref = ?1",
+        params![target.payload_ref.as_str()],
+    )
+    .await?;
+    let gc_config = crate::LcmGcConfig::default();
+    for (now, retained) in [
+        (marked_at + gc_config.grace_seconds as i64 - 1, true),
+        (marked_at + gc_config.grace_seconds as i64 + 1, false),
+    ] {
+        let gc = crate::gc::run_payload_gc_with_apply(
+            &store.conn,
+            &store.storage_root,
+            PROVIDER,
+            Some(SESSION),
+            &gc_config,
+            true,
+            now,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        assert!(gc.errors.is_empty(), "{:?}", gc.errors);
+        assert_eq!(path.exists(), retained);
+        assert_eq!(
+            count(&store.conn, "lcm_external_payloads").await?,
+            i64::from(retained)
+        );
+    }
+    let restored = raw::load_raw_message_by_store_id(&store.conn, target.store_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    assert_eq!(restored.content, content, "full text survives payload GC");
+    Ok(())
+}
+
+#[asupersync::test]
+async fn small_offload_restoration_rejects_corruption_staleness_and_lost_authority()
+-> Result<(), String> {
+    for failure in ["payload", "receipt", "stale", "authority"] {
+        let store = test_store().await?;
+        let mut target = seed_small_offload(&store, 1, "original complete text").await?;
+        let path = payload::payload_dir(&store.storage_root).join(&target.payload_ref);
+        match failure {
+            "payload" => {
+                std::fs::write(&path, "tampered bytes").map_err(|error| error.to_string())?
+            }
+            "receipt" => {
+                store
+                    .conn
+                    .execute(
+                        "UPDATE lcm_raw_messages SET metadata_json = '{}' WHERE store_id = ?1",
+                        params![target.store_id],
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                target.metadata_json = Some("{}".to_owned());
+            }
+            "stale" => {
+                store
+                    .conn
+                    .execute(
+                        "UPDATE lcm_raw_messages SET timestamp = ?2 WHERE store_id = ?1",
+                        params![target.store_id, NOW],
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            _ => {}
+        }
+        let error = inline_offloaded_one(
+            RetentionStore::Connection(&store.conn),
+            &store.storage_root,
+            &target,
+            Some(&|intent| {
+                if failure == "authority" && intent == "commit session retention inline pass" {
+                    Err(LcmError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            }),
+        )
+        .await
+        .expect_err("unproven or changed payload must remain external");
+        match failure {
+            "payload" | "receipt" => assert_eq!(error, LcmError::PayloadIntegrityMismatch),
+            "stale" => assert!(error.to_string().contains("compare-and-swap rejected")),
+            "authority" => assert_eq!(error, LcmError::Cancelled),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            fetch_i64(
+                &store.conn,
+                "SELECT COUNT(*) FROM lcm_raw_messages
+                 WHERE store_id = ?1 AND storage_kind = 'external'
+                   AND content IS NULL AND payload_ref = ?2",
+                params![target.store_id, target.payload_ref.as_str()],
+            )
+            .await?,
+            1,
+            "{failure} must preserve the original row"
+        );
+        assert_eq!(count(&store.conn, "lcm_external_payloads").await?, 1);
+        assert!(path.exists(), "{failure} must preserve the payload file");
+    }
+    Ok(())
+}
+
+#[asupersync::test]
+async fn small_offload_restoration_is_bounded_scoped_and_leaves_protected_payloads()
+-> Result<(), String> {
+    let store = test_store().await?;
+    let first = seed_small_offload(&store, 1, "first old body").await?;
+    let second = seed_small_offload(&store, 2, "second old body").await?;
+    let protected = seed_small_offload(&store, 3, "protected body").await?;
+    store
+        .conn
+        .execute(
+            "UPDATE lcm_external_payloads SET kind = 'quarantined_assistant_output'
+             WHERE payload_ref = ?1",
+            params![protected.payload_ref.as_str()],
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let config = LcmRetentionConfig {
+        drop_after_days: None,
+        max_batch_size: 1,
+        ..LcmRetentionConfig::default()
+    };
+    for disabled in [
+        LcmRetentionConfig {
+            enabled: false,
+            ..config
+        },
+        LcmRetentionConfig {
+            offload_after_days: None,
+            ..config
+        },
+    ] {
+        let report = run_apply(&store.conn, &store.storage_root, &disabled).await?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.inlined.eligible, 0);
+        assert_eq!(report.inlined.acted, 0);
+    }
+    for (provider, session_id, expected) in [
+        ("other-provider", None, 0),
+        (PROVIDER, Some("other-session"), 0),
+        (PROVIDER, Some(SESSION), 1),
+        ("all", None, 1),
+        ("all", None, 0),
+    ] {
+        let report = run_session_retention_authorized(
+            &store.conn,
+            &store.storage_root,
+            provider,
+            session_id,
+            &config,
+            RetentionMode::Apply,
+            NOW,
+            &|_| Ok(()),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.inlined.acted, expected);
+        assert!(report.inlined.eligible <= 1);
+        assert_eq!(report.bytes_reclaimed(), 0);
+    }
+    for target in [&first, &second] {
+        assert!(
+            raw::load_raw_message_by_store_id(&store.conn, target.store_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .payload_ref
+                .is_none()
+        );
+    }
+    assert_eq!(
+        fetch_str(
+            &store.conn,
+            "SELECT payload_ref FROM lcm_raw_messages WHERE store_id = ?1",
+            params![protected.store_id],
+        )
+        .await?,
+        protected.payload_ref
+    );
+    assert!(
+        payload::payload_dir(&store.storage_root)
+            .join(&protected.payload_ref)
+            .exists()
+    );
     Ok(())
 }
 
@@ -708,4 +998,54 @@ async fn fetch_str(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "no row".to_string())?;
     row.get::<String>(0).map_err(|e| e.to_string())
+}
+
+/// Seeds the prior retention representation through its actual payload writer.
+async fn seed_small_offload(
+    store: &TestStore,
+    ordinal: i64,
+    content: &str,
+) -> Result<InlineOffloadedRow, String> {
+    let store_id = insert_message(&store.conn, ordinal, 90, content).await?;
+    make_projection_durable(&store.conn, store_id).await?;
+    offload_one(
+        RetentionStore::Connection(&store.conn),
+        &store.storage_root,
+        &OffloadRow {
+            store_id,
+            provider: PROVIDER.to_owned(),
+            session_id: SESSION.to_owned(),
+            message_id: format!("msg-{ordinal}"),
+            timestamp: NOW - 90 * DAY,
+            content: content.to_owned(),
+        },
+        None,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let mut rows = store
+        .conn
+        .query(
+            "SELECT payload_ref, content_hash, placeholder_text, metadata_json
+             FROM lcm_raw_messages WHERE store_id = ?1",
+            params![store_id],
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "missing offloaded row".to_string())?;
+    Ok(InlineOffloadedRow {
+        store_id,
+        timestamp: NOW - 90 * DAY,
+        provider: PROVIDER.to_owned(),
+        session_id: SESSION.to_owned(),
+        message_id: format!("msg-{ordinal}"),
+        payload_ref: row.get(0).map_err(|error| error.to_string())?,
+        content_hash: row.get(1).map_err(|error| error.to_string())?,
+        placeholder_text: row.get(2).map_err(|error| error.to_string())?,
+        metadata_json: row.get(3).map_err(|error| error.to_string())?,
+    })
 }
