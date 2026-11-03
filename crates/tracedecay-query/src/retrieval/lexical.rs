@@ -113,9 +113,8 @@ pub(crate) fn admit_candidate_sources<S>(
         let remaining = if admitted_sources == 0 {
             usize::MAX
         } else {
-            MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1.saturating_sub(
-                usize::try_from(admitted.len()).unwrap_or(usize::MAX),
-            )
+            MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1
+                .saturating_sub(usize::try_from(admitted.len()).unwrap_or(usize::MAX))
         };
         match new_documents(&source, &admitted, remaining)? {
             Some(delta) if delta.len() <= remaining as u64 => {

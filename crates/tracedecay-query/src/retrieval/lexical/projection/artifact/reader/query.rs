@@ -1783,7 +1783,6 @@ impl LexicalStatsCacheV1 {
         }
         sources
     }
-
 }
 
 struct LexicalDraftV1 {
@@ -2326,11 +2325,10 @@ mod candidate_source_tests {
             ("needle", LexicalFieldV1::Subtoken, 100..200),
             ("part", LexicalFieldV1::Subtoken, 200..210),
         ]);
-        let sources = stats
-            .candidate_sources(
-                vec!["needle".to_owned(), "needle".to_owned()],
-                vec!["part".to_owned(), "part".to_owned()],
-            );
+        let sources = stats.candidate_sources(
+            vec!["needle".to_owned(), "needle".to_owned()],
+            vec!["part".to_owned(), "part".to_owned()],
+        );
         assert_eq!(sources.len(), 2);
         assert_eq!(sources[0].0, 100);
         assert_eq!(sources[0].1.fields, CandidateSourceFieldsV1::Whole);

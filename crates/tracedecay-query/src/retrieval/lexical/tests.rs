@@ -154,12 +154,7 @@ fn candidate_sources_ignore_empty_sources_before_admitting_a_common_term() {
     );
     assert_eq!(documents.len(), (budget + 1) as u64);
     assert!(
-        synthetic_admission(
-            vec![(0, "missing"), (0, "absent")],
-            &[],
-            &mut Vec::new(),
-        )
-        .is_empty()
+        synthetic_admission(vec![(0, "missing"), (0, "absent")], &[], &mut Vec::new(),).is_empty()
     );
 }
 
