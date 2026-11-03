@@ -820,10 +820,15 @@ impl<'a> DoctorReportComposerV1<'a> {
             DoctorStorageFamilyReadV1::ObservedIncomplete { findings, reason }
                 if !findings.is_empty() =>
             {
-                Ok((
-                    storage_entries(findings)?,
-                    unavailable(storage_incomplete_reason(&reason)),
-                ))
+                let mut entries = storage_entries(findings)?;
+                let unavailable_reason = storage_incomplete_reason(&reason);
+                if let Some(detail) = storage_incomplete_detail(&reason) {
+                    // Resolved peers must not hide a named corruption, reset,
+                    // or unavailable-store verdict behind generic coverage.
+                    let (degraded, _) = storage_unavailable(unavailable_reason, Some(detail))?;
+                    entries.extend(degraded);
+                }
+                Ok((entries, unavailable(unavailable_reason)))
             }
             // An empty observed read means the runtime produced no storage
             // findings; that is an absent family, not a healthy claim.
