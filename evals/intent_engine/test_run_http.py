@@ -4,7 +4,9 @@ import copy
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
+import stat
 import sys
 import tempfile
 import unittest
@@ -236,6 +238,34 @@ class RunHttpTest(unittest.TestCase):
         with patch.object(run_http, "post", side_effect=self.response):
             self.run_main(["--sample-out", str(sample)])
         self.assertEqual(sample.read_text(), '{"previous": true}')
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+
+    @unittest.skipUnless(os.name == "posix", "dangling links require portable POSIX support")
+    def test_dangling_sample_link_refuses_without_inference_or_partial_output(self):
+        sample = self.root / "first-response.json"
+        sample.symlink_to("missing-capture.json")
+        with patch.object(run_http, "post") as post:
+            with self.assertRaisesRegex(ValueError, "not a regular file"):
+                self.run_main(["--sample-out", str(sample)])
+            post.assert_not_called()
+        self.assertTrue(sample.is_symlink())
+        self.assertFalse(sample.exists())
+        self.assertFalse(self.partial.exists())
+        # Also guard the atomic-publish race after the initial preflight.
+        with self.assertRaisesRegex(ValueError, "not a regular file"):
+            run_http.publish_sample(str(sample), '{"valid": true}')
+        self.assertEqual(list(self.root.glob(".noul-sample-*")), [])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX umask semantics")
+    def test_published_sample_matches_normal_exclusive_creation_mode(self):
+        sample = self.root / "first-response.json"
+        previous_umask = os.umask(0o022)
+        try:
+            with patch.object(run_http, "post", side_effect=self.response):
+                self.run_main(["--sample-out", str(sample)])
+        finally:
+            os.umask(previous_umask)
+        self.assertEqual(stat.S_IMODE(sample.stat().st_mode), 0o644)
         self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
 
     def test_calibration_remains_finite_at_extreme_positive_temperatures(self):

@@ -12,8 +12,8 @@ import json
 import math
 import os
 import re
+import secrets
 import sys
-import tempfile
 import time
 import urllib.request
 
@@ -46,14 +46,20 @@ def publish_sample(path, serialized):
     linking the completed file keeps the original exclusive-create behavior.
     """
     directory = os.path.dirname(os.path.abspath(path))
-    descriptor, staged = tempfile.mkstemp(prefix=".noul-sample-", dir=directory)
+    # mkstemp forces mode 0600. Match open(path, "x") by applying the
+    # process umask at creation without changing the process-wide umask.
+    staged = os.path.join(directory, f".noul-sample-{secrets.token_hex(16)}")
+    descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as output:
             output.write(serialized)
         try:
             os.link(staged, path)
         except FileExistsError:
-            pass
+            # A dangling symlink occupies the pathname but exists() says
+            # false. Do not treat that unusable capture as already published.
+            if not os.path.isfile(path):
+                raise ValueError(f"sample path exists but is not a regular file: {path}")
     finally:
         os.unlink(staged)
 
@@ -151,6 +157,8 @@ def main(argv=None):
             and (not math.isfinite(args.noul_temperature) or args.noul_temperature <= 0)):
         raise ValueError("--noul-temperature must be finite and greater than zero")
     server_config = load_server_config(args.server_config)
+    if args.sample_out and os.path.lexists(args.sample_out) and not os.path.isfile(args.sample_out):
+        raise ValueError(f"sample path exists but is not a regular file: {args.sample_out}")
     with open(os.path.join(HERE, "dataset.json"), "rb") as source:
         dataset_bytes = source.read()
     dataset = json.loads(dataset_bytes)
