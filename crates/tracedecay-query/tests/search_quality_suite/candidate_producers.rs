@@ -6124,6 +6124,58 @@ fn prose_subtokens_add_identifier_matches_without_rescoring_whole_words() {
 }
 
 #[test]
+fn filtered_subtoken_search_keeps_prose_evidence_when_whole_fields_are_excluded() {
+    let artifact = rust_artifact(&[
+        "pub fn process() { let digest = payload; }\n",
+        "pub fn digestPayloadMismatch() {}\n",
+    ]);
+    for filter in [
+        LexicalFieldFilterV1 {
+            field: LexicalFieldV1::Subtoken,
+            include: true,
+        },
+        LexicalFieldFilterV1 {
+            field: LexicalFieldV1::BodyText,
+            include: false,
+        },
+    ] {
+        let mut request = artifact.request(
+            "digest payload",
+            &["digest", "payload"],
+            &["digest", "payload"],
+            &[],
+            0,
+            8,
+        );
+        request.field_filters = Cow::Owned(vec![filter]);
+        let results = complete(
+            artifact
+                .lane()
+                .retrieve_lexical(&request)
+                .expect("filtered subtoken search"),
+        );
+        assert!(
+            results.candidates.iter().any(|candidate| {
+                candidate.file_occurrence_id.as_ref().is_some_and(|file| {
+                    file.as_str() == "file.fixture.0"
+                        && results
+                            .evidence_by_occurrence
+                            .get(&candidate.source_occurrence_id)
+                            .is_some_and(|evidence| {
+                                evidence.field_scores_micros.iter().any(|(field, score)| {
+                                    *field == LexicalFieldV1::Subtoken && *score > 0
+                                }) && ["digest", "payload"].iter().all(|word| {
+                                    evidence.matched_subtokens.iter().any(|term| term == word)
+                                })
+                            })
+                })
+            }),
+            "excluded whole fields must not zero out admitted subtokens: {results:?}"
+        );
+    }
+}
+
+#[test]
 fn lexical_phrase_and_bounded_fuzzy_recovery_are_deterministic() {
     let artifact = rust_artifact(&[
         "pub fn reserve() { // reserve stock inventory\n}\n",
