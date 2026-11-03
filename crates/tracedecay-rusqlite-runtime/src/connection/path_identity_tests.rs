@@ -119,10 +119,16 @@ fn worker_identity_checks_keep_cross_process_writer_exclusion() {
     assert_committed_data(&path);
 
     let absent = temp.path().join("absent.db");
-    assert_eq!(live_path_identity(&absent), Err(OpenedDatabaseFileError::Open));
+    assert_eq!(
+        live_path_identity(&absent),
+        Err(OpenedDatabaseFileError::Open)
+    );
     let directory = temp.path().join("not-a-database");
     fs::create_dir(&directory).expect("directory");
-    assert_eq!(live_path_identity(&directory), Err(OpenedDatabaseFileError::NotFile));
+    assert_eq!(
+        live_path_identity(&directory),
+        Err(OpenedDatabaseFileError::NotFile)
+    );
 }
 
 #[test]
