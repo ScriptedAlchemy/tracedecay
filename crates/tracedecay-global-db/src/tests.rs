@@ -1645,6 +1645,40 @@ async fn registered_runtime_does_not_recreate_a_missing_database() {
 }
 
 #[asupersync::test]
+async fn project_token_projection_rejects_unrepresentable_totals() {
+    let harness = RegisteredGlobalDbHarness::open("project-tokens-overflow").await;
+    let project = std::path::Path::new("/tmp/tracedecay-project-token-overflow");
+    harness
+        .registered
+        .try_upsert_project_tokens(project, 42)
+        .await
+        .unwrap();
+    assert!(
+        harness
+            .registered
+            .try_upsert_project_tokens(project, u64::MAX)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        harness.registered.try_get_project_tokens(project).await,
+        Ok(42)
+    );
+    let absent = std::path::Path::new("/tmp/tracedecay-unrepresentable-project-tokens");
+    assert!(
+        harness
+            .registered
+            .try_upsert_project_tokens(absent, u64::MAX)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        harness.registered.try_get_project_tokens(absent).await,
+        Ok(0)
+    );
+}
+
+#[asupersync::test]
 async fn project_tokens_separate_a_genuine_zero_from_a_failed_read() {
     let harness = RegisteredGlobalDbHarness::open("project-tokens-failed-read").await;
     let project = std::path::Path::new("/tmp/tracedecay-project-tokens");

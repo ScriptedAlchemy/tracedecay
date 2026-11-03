@@ -20,7 +20,7 @@ async fn direct_lifecycle_entry_points_retain_production_authority() {
         .await
         .expect("direct production init");
     initialized
-        .set_tokens_saved(41)
+        .record_token_savings(41)
         .await
         .expect("returned init runtime retains write authority");
     assert_eq!(

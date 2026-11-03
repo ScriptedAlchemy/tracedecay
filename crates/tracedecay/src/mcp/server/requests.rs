@@ -1054,7 +1054,7 @@ impl McpServer {
 
     async fn apply_token_accounting(
         self: &Arc<Self>,
-        cg: &TraceDecay,
+        cg: &Arc<TraceDecay>,
         tool_name: &str,
         result: &mut ToolResult,
     ) -> ToolTokenAccounting {
@@ -1065,6 +1065,7 @@ impl McpServer {
             None => self.account_unrendered_result(cg, result).await,
         };
         self.spawn_token_accounting_persist(
+            Arc::clone(cg),
             cg.project_root(),
             tool_name,
             accounting.net_saved_tokens(),
@@ -1184,7 +1185,7 @@ impl McpServer {
     )]
     async fn record_success_accounting(
         self: &Arc<Self>,
-        cg: &TraceDecay,
+        cg: &Arc<TraceDecay>,
         accounting_project_root: &Path,
         tool_name: &str,
         request_id: &Value,

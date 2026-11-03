@@ -14,7 +14,7 @@ use tracedecay_runtime_core::branch_meta;
 mod store_meta;
 
 pub use store_meta::{
-    add_local_counter, get_local_counter, get_tokens_saved, reset_local_counter, set_tokens_saved,
+    get_local_counter, get_tokens_saved, record_token_savings, reset_local_counter,
 };
 
 #[derive(Debug, Clone, Serialize)]

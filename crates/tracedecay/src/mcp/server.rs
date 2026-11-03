@@ -290,7 +290,9 @@ pub struct McpServer {
     tool_call_counts: std::sync::Mutex<HashMap<String, u64>>,
     identical_read_coalescer: IdenticalReadCoalescer,
     diagnostics_lsp: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
-    tokens_saved: Option<AtomicU64>,
+    /// Approximate display cache of committed project savings. It never writes
+    /// an absolute total back to the store.
+    tokens_saved: Option<Arc<AtomicU64>>,
     /// User-level database tracking all projects (best-effort). Wrapped in
     /// `Arc` so spawned savings-recording tasks can hold a cheap clone of
     /// the handle instead of opening a new connection per call.
@@ -965,7 +967,7 @@ impl McpServer {
             tool_call_counts: std::sync::Mutex::new(HashMap::new()),
             identical_read_coalescer: IdenticalReadCoalescer::default(),
             diagnostics_lsp,
-            tokens_saved: persisted_tokens_saved.map(AtomicU64::new),
+            tokens_saved: persisted_tokens_saved.map(|total| Arc::new(AtomicU64::new(total))),
             global_db,
             accounting_db,
             profile,

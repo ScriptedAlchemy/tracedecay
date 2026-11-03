@@ -382,7 +382,7 @@ mod runtime_configuration_cutover {
                 .initialize_project_graph_for_test(root.path(), options.clone())
                 .await
                 .expect("invalid automation grammar must not refuse project initialization");
-            initialized.set_tokens_saved(17).await.unwrap();
+            initialized.record_token_savings(17).await.unwrap();
             initialized.close();
             let graph = host_runtime
                 .open_project_graph_for_test(root.path(), options.clone())

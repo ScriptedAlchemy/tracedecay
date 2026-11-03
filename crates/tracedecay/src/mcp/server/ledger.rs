@@ -114,11 +114,11 @@ impl McpServer {
     /// crediting the full "before" would count a full-file read whose
     /// response contains the entire file as 100% saved.
     ///
-    /// The in-memory counter advances synchronously so concurrent calls
-    /// account exact totals; the `SQLite` and mmap writes ride the observed
-    /// ledger-write path so the response never waits on them and tests can
-    /// still await durability via [`Self::ledger_writes_settled`]. Shutdown
-    /// persists the final counter independently.
+    /// The project store atomically adds the delta to both counters. Only a
+    /// committed total can update the display cache or the profile projection;
+    /// an asynchronously scheduled write never carries an absolute local
+    /// snapshot back into the authority. Writes ride the observed ledger path
+    /// so the response never waits on storage and shutdown can drain them.
     #[tracing::instrument(
         name = "mcp.ledger.persist_token_accounting",
         level = "trace",
@@ -126,6 +126,7 @@ impl McpServer {
     )]
     pub(crate) fn spawn_token_accounting_persist(
         &self,
+        cg: Arc<TraceDecay>,
         monitor_project_root: &Path,
         tool_name: &str,
         net_saved_tokens: u64,
@@ -135,33 +136,38 @@ impl McpServer {
             .tokens_saved
             .as_ref()
             .filter(|_| net_saved_tokens != 0)
-            .map(|tokens_saved| {
-                let new_total =
-                    tokens_saved.fetch_add(net_saved_tokens, Ordering::Relaxed) + net_saved_tokens;
-                (
-                    std::sync::Arc::clone(&self.cg),
-                    self.ledger_sink(),
-                    new_total,
-                )
-            });
+            .map(|tokens_saved| (Arc::clone(tokens_saved), self.ledger_sink()));
         let monitor_project_root = monitor_project_root.to_path_buf();
         let monitor_dir = self
             .owner_profile()
             .map(|profile| profile.data_dir().to_path_buf());
         let tool_name = tool_name.to_owned();
         self.spawn_observed_ledger_write(async move {
-            if let Some((cg_lock, sink, new_total)) = persist {
-                let cg = cg_lock.read().await.clone();
-                let _ = cg.set_tokens_saved(new_total).await;
-                let _ = cg.add_local_counter(net_saved_tokens).await;
-                if let LedgerSink::Mounted(gdb) = sink
-                    && let Err(error) = gdb
-                        .try_upsert_project_tokens(cg.project_root(), new_total)
-                        .await
-                {
-                    // Background persist: the response already went out, so
-                    // the failed ledger write degrades to a named warning.
-                    tracing::warn!(error = %error, "background token-accounting persist failed");
+            if let Some((tokens_saved, sink)) = persist {
+                match cg.record_token_savings(net_saved_tokens).await {
+                    Ok(committed_total) => {
+                        // Two completions may resume in reverse order after
+                        // their commits. The cache is a monotonic projection.
+                        tokens_saved.fetch_max(committed_total, Ordering::Relaxed);
+                        if let LedgerSink::Mounted(gdb) = sink
+                            && let Err(error) = gdb
+                                .try_upsert_project_tokens(cg.project_root(), committed_total)
+                                .await
+                        {
+                            tracing::warn!(
+                                project_root = %cg.project_root().display(),
+                                %error,
+                                "background token-accounting projection failed"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            project_root = %cg.project_root().display(),
+                            %error,
+                            "background token-accounting commit failed"
+                        );
+                    }
                 }
             }
             // The monitor entry opens, locks, and mmaps a file; keep that
@@ -191,10 +197,9 @@ impl McpServer {
     /// completed (immediately when none are pending, including when global
     /// accounting is disabled and no writes are ever spawned).
     ///
-    /// Test-only observability for the fire-and-forget ledger recorder:
-    /// production code never calls this, so the request path stays
-    /// non-blocking, while tests can await durability deterministically
-    /// instead of polling the DB against a wall-clock deadline.
+    /// Tests use this default bound; production shutdown supplies its remaining
+    /// deadline to [`Self::ledger_writes_settled_within`]. The request path stays
+    /// non-blocking while observers can await durability deterministically.
     ///
     /// Bounded by `LEDGER_SETTLE_TIMEOUT` so a spawned write that wedges
     /// (a stuck DB handle, a task that never resolves) can never hang the
@@ -213,9 +218,13 @@ impl McpServer {
     pub async fn ledger_writes_settled_within(&self, timeout: std::time::Duration) -> bool {
         let wait = async {
             loop {
-                // Register interest *before* re-checking so a completion
-                // between the check and the await cannot be missed.
+                // Arm the waiter before reading counters and retain it across
+                // the check and await. Tokio already guarantees notify_waiters()
+                // delivery from future creation; explicit enabling also registers
+                // this waiter for a notify_one() completion signal.
                 let notified = self.ledger_write_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
                 let started = self.ledger_writes_started.load(Ordering::SeqCst);
                 let finished = self.ledger_writes_finished.load(Ordering::SeqCst);
                 if finished >= started {
@@ -486,11 +495,11 @@ mod tests {
         let (cg, _project, authority) =
             super::super::writer_test_support::init_indexed_repo().await;
         let project_root = cg.project_root().to_path_buf();
+        cg.record_token_savings(41).await.unwrap();
         let context = super::super::writer_test_support::registered_context(cg, &authority);
         let server = super::super::McpServer::new_with_context(context).await;
         let tokens_saved = server.tokens_saved.as_ref().expect("fixture token counter");
-        let baseline = tokens_saved.load(Ordering::Acquire);
-        tokens_saved.store(baseline + 41, Ordering::Release);
+        assert_eq!(tokens_saved.load(Ordering::Acquire), 41);
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -507,12 +516,126 @@ mod tests {
             .expect("tool call should produce a response");
         server.ledger_writes_settled().await;
         let accounted = tokens_saved.load(Ordering::Acquire);
-        server.spawn_token_accounting_persist(&project_root, "tracedecay_search", 41, 100);
+        server.spawn_token_accounting_persist(
+            server.cg_snapshot().await,
+            &project_root,
+            "tracedecay_search",
+            41,
+            100,
+        );
         server.ledger_writes_settled().await;
         assert_eq!(
             server.cg_snapshot().await.get_tokens_saved().await.unwrap(),
             accounted + 41,
             "local tokens-saved accounting must stay persisted"
+        );
+        assert_eq!(tokens_saved.load(Ordering::Acquire), accounted + 41);
+        server.shutdown_background_tasks().await;
+    }
+
+    #[tokio::test]
+    async fn independent_servers_credit_the_store_and_shutdown_cannot_restore_a_stale_total() {
+        let (cg, _project, authority) =
+            super::super::writer_test_support::init_indexed_repo().await;
+        let project_root = cg.project_root().to_path_buf();
+        cg.record_token_savings(17).await.unwrap();
+        let first = super::super::McpServer::new_with_context(
+            super::super::writer_test_support::registered_context(cg, &authority),
+        )
+        .await;
+        let second = super::super::McpServer::new_with_context(
+            super::super::writer_test_support::registered_context(
+                authority.reopen_project_graph(&project_root).await,
+                &authority,
+            ),
+        )
+        .await;
+
+        first.spawn_token_accounting_persist(
+            first.cg_snapshot().await,
+            &project_root,
+            "tracedecay_search",
+            7,
+            20,
+        );
+        first.ledger_writes_settled().await;
+        // The second server was created with the same baseline before the
+        // first credit. Its own completion must add to the committed total.
+        second.spawn_token_accounting_persist(
+            second.cg_snapshot().await,
+            &project_root,
+            "tracedecay_search",
+            11,
+            20,
+        );
+        // Shutdown itself must drain this accepted write.
+        second.shutdown().await;
+        assert_eq!(
+            second.cg_snapshot().await.get_tokens_saved().await.unwrap(),
+            35
+        );
+        assert_eq!(
+            second
+                .cg_snapshot()
+                .await
+                .get_local_counter()
+                .await
+                .unwrap(),
+            35
+        );
+
+        assert_eq!(
+            first.tokens_saved.as_ref().unwrap().load(Ordering::Acquire),
+            24
+        );
+        first.shutdown().await;
+        assert_eq!(
+            first.cg_snapshot().await.get_tokens_saved().await.unwrap(),
+            35
+        );
+        let reopened = authority.reopen_project_graph(&project_root).await;
+        assert_eq!(reopened.get_tokens_saved().await.unwrap(), 35);
+        assert_eq!(reopened.get_local_counter().await.unwrap(), 35);
+    }
+
+    #[tokio::test]
+    async fn a_failed_accounting_commit_does_not_advance_the_display_cache() {
+        let (cg, _project, authority) =
+            super::super::writer_test_support::init_indexed_repo().await;
+        let project_root = cg.project_root().to_path_buf();
+        cg.record_token_savings(u64::MAX).await.unwrap();
+        let server = super::super::McpServer::new_with_context(
+            super::super::writer_test_support::registered_context(cg, &authority),
+        )
+        .await;
+        server.spawn_token_accounting_persist(
+            server.cg_snapshot().await,
+            &project_root,
+            "tracedecay_search",
+            1,
+            2,
+        );
+        server.ledger_writes_settled().await;
+        assert_eq!(
+            server.cg_snapshot().await.get_tokens_saved().await.unwrap(),
+            u64::MAX
+        );
+        assert_eq!(
+            server
+                .cg_snapshot()
+                .await
+                .get_local_counter()
+                .await
+                .unwrap(),
+            u64::MAX
+        );
+        assert_eq!(
+            server
+                .tokens_saved
+                .as_ref()
+                .unwrap()
+                .load(Ordering::Acquire),
+            u64::MAX
         );
         server.shutdown_background_tasks().await;
     }
