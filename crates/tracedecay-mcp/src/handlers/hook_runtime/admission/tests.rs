@@ -260,6 +260,10 @@ async fn prompt_and_tool_admissions_settle_their_durable_intent_work() {
 #[test]
 fn redelivered_producer_event_with_pending_work_is_an_exact_duplicate() {
     let data_root = tempfile::tempdir().unwrap();
+    // Admission timestamps must be inside the real retention window: the
+    // daemon-owned ledger cache can evict and reopen this root during parallel
+    // test execution, and reopen uses the actual wall clock.
+    let admitted_at = hook_now();
     let envelope = admission_test_envelope(33, 7);
     let mut redelivered = envelope.clone();
     redelivered.observed_at = UtcMicros(envelope.observed_at.0 + 5_000);
@@ -269,7 +273,7 @@ fn redelivered_producer_event_with_pending_work_is_an_exact_duplicate() {
         Some(&envelope),
         None,
         Some(0),
-        UtcMicros(1_000),
+        admitted_at,
     )
     .unwrap();
     first.commit.wait().unwrap();
@@ -280,7 +284,7 @@ fn redelivered_producer_event_with_pending_work_is_an_exact_duplicate() {
         Some(&redelivered),
         None,
         Some(0),
-        UtcMicros(2_000),
+        hook_now(),
     )
     .expect("a redelivery is not backpressure");
     again.commit.wait().unwrap();
@@ -290,6 +294,13 @@ fn redelivered_producer_event_with_pending_work_is_an_exact_duplicate() {
         tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
     );
     assert_eq!(pending_work(data_root.path()), vec![envelope.clone()]);
+    // Exercise the eviction/reopen path explicitly instead of relying on
+    // parallel tests to displace this ledger by accident.
+    restart_ledger(data_root.path());
+    assert_eq!(
+        hook_v2_pending_work_envelopes(data_root.path(), envelope.producer, hook_now()).unwrap(),
+        vec![envelope.clone()],
+    );
     assert!(settle_hook_v2_pending_work(
         data_root.path(),
         &redelivered,
