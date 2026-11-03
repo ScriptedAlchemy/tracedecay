@@ -207,6 +207,7 @@ fn permille_relevance(permille: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::intent_action_facts::{ActionFactInputV1, action_facts, observed_action_facts};
     use ContextScoutIntentKindV1 as Kind;
 
     fn question(intent: Kind, threshold: u16, margin: Option<u16>) -> IntentQuestionSettingsV1 {
@@ -489,8 +490,6 @@ mod tests {
 
     #[test]
     fn negative_answer_rejects_prompt_inference_but_preserves_observed_search() {
-        use crate::intent_action_facts::{ActionFactInputV1, action_facts, observed_action_facts};
-
         let inferred = action_facts(&ActionFactInputV1 {
             prompt: Some("Do not analyze impact; just locate the file."),
             ..ActionFactInputV1::default()
