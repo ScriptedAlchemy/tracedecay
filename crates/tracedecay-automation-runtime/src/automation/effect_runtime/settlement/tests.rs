@@ -27,6 +27,10 @@ use crate::automation::effect_runtime::AutomationSettledTerminal;
 use crate::automation::effect_runtime::journal::*;
 use crate::automation::effect_runtime::recovery_index;
 
+/// Fails a wait that never completes. Passing runs finish far sooner, so a
+/// shared CI host under load does not turn slowness into a failure.
+const COMPLETION_CEILING: std::time::Duration = std::time::Duration::from_secs(120);
+
 struct NeverAutomationBackend;
 
 impl crate::automation::backend::AgentTaskBackend for NeverAutomationBackend {
@@ -2145,12 +2149,12 @@ async fn dropping_retained_waiter_does_not_abort_blocking_owner() {
     });
 
     started_rx
-        .recv_timeout(std::time::Duration::from_secs(5))
+        .recv_timeout(COMPLETION_CEILING)
         .expect("blocking owner started");
     drop(waiter);
     release_tx.send(()).expect("release detached owner");
     finished_rx
-        .recv_timeout(std::time::Duration::from_secs(5))
+        .recv_timeout(COMPLETION_CEILING)
         .expect("detached owner completed after waiter drop");
 }
 
@@ -2200,7 +2204,7 @@ async fn retained_projector_panic_finishes_recovery_before_releasing_task_lock()
     );
     drop(waiter);
     projected_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(COMPLETION_CEILING)
         .expect("detached owner executed projector");
 
     assert!(task_lock_is_denied(dashboard_root, job_id).await);
@@ -2208,7 +2212,7 @@ async fn retained_projector_panic_finishes_recovery_before_releasing_task_lock()
     journal_lock
         .unlock()
         .expect("release projector-panic recovery terminal");
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + COMPLETION_CEILING;
     loop {
         let terminal = read_indexed_record_blocking(&journal_path)
             .expect("projector-panic terminal journal read")
@@ -2232,7 +2236,7 @@ async fn retained_projector_panic_finishes_recovery_before_releasing_task_lock()
         "projector panic must not fabricate a successful ledger row"
     );
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + COMPLETION_CEILING;
     loop {
         if crate::automation::scheduler::AutomationTaskLock::try_acquire_keyed(
             dashboard_root,
@@ -2302,7 +2306,7 @@ async fn assert_request_waiting_pair_abandoned_cleanly(
     dashboard_root: &std::path::Path,
     fixture: &RequestWaitingPairFixture,
 ) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + COMPLETION_CEILING;
     loop {
         let journals_absent = fixture.journal_paths.iter().all(|path| !path.exists());
         let pending_absent = fixture.admissions.iter().all(|admission| {
@@ -2397,7 +2401,7 @@ async fn partial_pair_submit_abandons_the_closed_sibling_under_shared_guard_owne
             .expect("unreachable pair submission result");
     }));
     assert!(unwind.is_err(), "partial-submit fixture did not unwind");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + COMPLETION_CEILING;
     while fixture.journal_paths[0].exists() {
         assert!(
             std::time::Instant::now() < deadline,
@@ -2506,14 +2510,14 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
         .expect("submit both pair terminals");
 
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), phase_rx.recv())
+        tokio::time::timeout(COMPLETION_CEILING, phase_rx.recv())
             .await
             .expect("second pair leg attempted")
             .expect("second pair leg attempted: channel unexpectedly closed"),
         super::RetainedSettlementPhase::Prepared
     );
     let super::RetainedSettlementPairWaiter { first, second, .. } = waiter;
-    let first_result = tokio::time::timeout(Duration::from_secs(5), first.wait())
+    let first_result = tokio::time::timeout(COMPLETION_CEILING, first.wait())
         .await
         .expect("first pair owner must finish while second remains paused");
     assert!(
@@ -2537,7 +2541,7 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
     );
 
     release_tx.send(()).expect("release second pair leg");
-    let second_owned = tokio::time::timeout(Duration::from_secs(5), second.wait())
+    let second_owned = tokio::time::timeout(COMPLETION_CEILING, second.wait())
         .await
         .expect("second pair owner must finish")
         .expect("second pair settlement");
@@ -2554,7 +2558,7 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
         second_run_id
     );
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), second_observed_rx.recv())
+        tokio::time::timeout(COMPLETION_CEILING, second_observed_rx.recv())
             .await
             .expect("second pair exact observation")
             .expect("second pair exact observation: channel unexpectedly closed"),
@@ -2838,13 +2842,13 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
         Some(prepared_write_hook),
     );
     drop(waiter);
-    let expected_record = tokio::time::timeout(Duration::from_secs(5), projected_rx.recv())
+    let expected_record = tokio::time::timeout(COMPLETION_CEILING, projected_rx.recv())
         .await
         .expect("projector executed inside detached owner")
         .expect("projector executed inside detached owner: channel unexpectedly closed");
 
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), phase_rx.recv())
+        tokio::time::timeout(COMPLETION_CEILING, phase_rx.recv())
             .await
             .expect("unbound retry phase")
             .expect("unbound retry phase: channel unexpectedly closed"),
@@ -2869,7 +2873,7 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
 
     release_tx.send(()).expect("release failed Prepared phase");
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), phase_rx.recv())
+        tokio::time::timeout(COMPLETION_CEILING, phase_rx.recv())
             .await
             .expect("prepared phase")
             .expect("prepared phase: channel unexpectedly closed"),
@@ -2901,7 +2905,7 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
 
     release_tx.send(()).expect("release prepared phase");
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), phase_rx.recv())
+        tokio::time::timeout(COMPLETION_CEILING, phase_rx.recv())
             .await
             .expect("published phase")
             .expect("published phase: channel unexpectedly closed"),
@@ -2966,7 +2970,7 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
 
     release_tx.send(()).expect("release published phase");
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(5), observed_rx.recv())
+        tokio::time::timeout(COMPLETION_CEILING, observed_rx.recv())
             .await
             .expect("detached exact observation")
             .expect("detached exact observation: channel unexpectedly closed"),
