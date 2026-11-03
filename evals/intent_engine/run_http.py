@@ -13,6 +13,7 @@ import math
 import os
 import re
 import sys
+import tempfile
 import time
 import urllib.request
 
@@ -36,6 +37,25 @@ def digest(value):
 def request_bytes(body):
     # Preserve question and request-field order in both HTTP and resume evidence.
     return json.dumps(body, allow_nan=False).encode("utf-8")
+
+
+def publish_sample(path, serialized):
+    """Publish a completely rendered sample without clobbering an existing one.
+
+    Same-directory staging avoids exposing a partial sample after a write error;
+    linking the completed file keeps the original exclusive-create behavior.
+    """
+    directory = os.path.dirname(os.path.abspath(path))
+    descriptor, staged = tempfile.mkstemp(prefix=".noul-sample-", dir=directory)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            output.write(serialized)
+        try:
+            os.link(staged, path)
+        except FileExistsError:
+            pass
+    finally:
+        os.unlink(staged)
 
 
 def post(url, body, timeout=1800):
@@ -194,9 +214,6 @@ def main(argv=None):
                     continue
                 body, request_sha = requests[case["id"]]
                 response, ms = post(args.url, body)
-                if args.sample_out and not os.path.exists(args.sample_out):
-                    with open(args.sample_out, "x", encoding="utf-8") as sample:
-                        json.dump({"request": body, "response": response}, sample, indent=1, allow_nan=False)
                 answers = response["answers"]
                 probs = probabilities({key: value["noul"] for key, value in answers.items()}, questions)
                 server_ms = response.get("latency_ms")
@@ -212,7 +229,16 @@ def main(argv=None):
                 if args.noul_temperature is not None:
                     row["probs_raw"] = probs
                     row["probs"] = {key: calibrated(value, args.noul_temperature) for key, value in probs.items()}
-                partial.write(json.dumps(row, allow_nan=False) + "\n")
+                # Refuse malformed row and raw-sample data before publishing
+                # either. A non-finite response must not leave a sample file
+                # that a later valid retry mistakes for a completed capture.
+                serialized_row = json.dumps(row, allow_nan=False)
+                if args.sample_out and not os.path.exists(args.sample_out):
+                    serialized_sample = json.dumps(
+                        {"request": body, "response": response}, indent=1, allow_nan=False
+                    )
+                    publish_sample(args.sample_out, serialized_sample)
+                partial.write(serialized_row + "\n")
                 partial.flush()
                 done[case["id"]] = row
                 print(cfg, index, case["id"], "%.0f ms" % ms, flush=True)

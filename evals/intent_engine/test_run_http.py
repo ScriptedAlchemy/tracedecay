@@ -201,6 +201,43 @@ class RunHttpTest(unittest.TestCase):
                         self.run_main()
                 self.assertEqual(self.partial.read_bytes(), before)
 
+    def test_malformed_response_does_not_poison_first_sample_on_resume(self):
+        sample = self.root / "first-response.json"
+        response, elapsed = self.response("", {"questions": run_http.noul_questions()})
+        response["answers"]["impact"]["noul"] = float("nan")
+        with patch.object(run_http, "post", return_value=(response, elapsed)):
+            with self.assertRaises(ValueError):
+                self.run_main(["--sample-out", str(sample)])
+        self.assertFalse(sample.exists(), "an invalid response must not publish a sample")
+        self.assertEqual(len(self.partial.read_text().splitlines()), 1)
+
+        with patch.object(run_http, "post", side_effect=self.response):
+            self.run_main(["--sample-out", str(sample)])
+        captured = json.loads(sample.read_text())
+        self.assertEqual(captured["response"]["answers"]["impact"]["noul"], 0.25)
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+        self.assertFalse(self.partial.exists())
+
+    def test_nonfinite_raw_response_does_not_publish_sample_or_result(self):
+        sample = self.root / "first-response.json"
+        response, elapsed = self.response("", {"questions": run_http.noul_questions()})
+        # The accepted probability map alone is not proof the entire raw
+        # response can be written as strict JSON.
+        response["debug"] = {"nonfinite": float("nan")}
+        with patch.object(run_http, "post", return_value=(response, elapsed)):
+            with self.assertRaises(ValueError):
+                self.run_main(["--sample-out", str(sample)])
+        self.assertFalse(sample.exists())
+        self.assertEqual(len(self.partial.read_text().splitlines()), 1)
+
+    def test_existing_sample_is_never_replaced(self):
+        sample = self.root / "first-response.json"
+        sample.write_text('{"previous": true}')
+        with patch.object(run_http, "post", side_effect=self.response):
+            self.run_main(["--sample-out", str(sample)])
+        self.assertEqual(sample.read_text(), '{"previous": true}')
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+
     def test_calibration_remains_finite_at_extreme_positive_temperatures(self):
         for temperature in (1e-300, 1.0, 1e300):
             for probability in (0, 1e-300, 0.25, 0.5, 0.75, 1):
