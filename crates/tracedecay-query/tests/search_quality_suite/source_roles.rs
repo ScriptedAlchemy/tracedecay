@@ -270,7 +270,10 @@ fn json_object_keys_remain_searchable_but_do_not_outrank_code_definitions() {
         }
     }
     assert!(json_seen, "the JSON key must remain retrievable");
-    assert!(code_definition_seen, "the Rust function must remain a definition");
+    assert!(
+        code_definition_seen,
+        "the Rust function must remain a definition"
+    );
 
     let first = results.candidates.first().expect("named code candidate");
     assert_eq!(
