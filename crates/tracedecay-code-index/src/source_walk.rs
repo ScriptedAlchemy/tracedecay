@@ -9,7 +9,8 @@
 //! walk is therefore public rather than crate-private, the audit in the root
 //! crate reuses this policy instead of restating it.
 
-use std::path::{Path, PathBuf};
+use std::collections::BTreeSet;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use ignore::overrides::{Override, OverrideBuilder};
@@ -116,6 +117,7 @@ pub fn source_walk(
     let generated_dir_overrides = overrides.clone();
     let path_glob_scope = path_glob.and_then(PathGlobScope::from_path_glob);
     let filter_root = project_root.to_path_buf();
+    let included_submodules = included_git_submodules(project_root, path_policy)?;
     let path_policy = path_policy.clone();
 
     let mut builder = WalkBuilder::new(project_root);
@@ -165,13 +167,13 @@ pub fn source_walk(
             if !is_dir {
                 return !path_policy.excludes(&relative);
             }
-            // A directory with its own Git authority is another project, not
-            // source owned by this one. This covers linked worktrees (`.git`
-            // file), nested clones/submodules (`.git` directory), and keeps a
-            // primary checkout containing agent worktrees from indexing many
-            // copies of itself. The project root is deliberately exempt at
-            // depth zero above.
-            if std::fs::symlink_metadata(entry.path().join(".git")).is_ok() {
+            // Nested Git repositories are independent sources except for
+            // authenticated submodules selected by an explicit index include.
+            // Linked worktrees and unrelated clones remain pruned even when
+            // a broad source glob would otherwise include their contents.
+            if std::fs::symlink_metadata(entry.path().join(".git")).is_ok()
+                && !included_submodules.contains(Path::new(&relative))
+            {
                 return false;
             }
             !path_policy.excludes_directory(&relative)
@@ -191,6 +193,160 @@ pub fn source_walk(
 #[must_use]
 pub fn forward_slash_relative(relative: &Path) -> Arc<str> {
     tracedecay_domain::forward_slash_path(relative).into()
+}
+
+/// A nested repository is part of this source tree only when an explicit
+/// index.include.v1 path selects a registered, checked-out Git submodule.
+/// Linked worktrees and unrelated clones also carry .git files, so the
+/// marker alone never authorizes traversing their contents.
+fn included_git_submodules(
+    project_root: &Path,
+    policy: &IndexPathPolicyV1,
+) -> Result<BTreeSet<PathBuf>, SourceWalkError> {
+    if policy.include_patterns().is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let modules_file = project_root.join(".gitmodules");
+    match std::fs::symlink_metadata(&modules_file) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(BTreeSet::new());
+        }
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => return Err(git_walk_error(".gitmodules is not a regular file")),
+        Err(error) => return Err(git_walk_error(error)),
+    }
+
+    let mut command = source_git_command(project_root)?;
+    command.args([
+        "config",
+        "--null",
+        "--file",
+        ".gitmodules",
+        "--get-regexp",
+        r"^submodule\..*\.path$",
+    ]);
+    let modules = command.output().map_err(git_walk_error)?;
+    // Git config returns exit 1 when there are no matching keys.
+    if modules.status.code() == Some(1) {
+        return Ok(BTreeSet::new());
+    }
+    if !modules.status.success() {
+        return Err(git_walk_error(String::from_utf8_lossy(&modules.stderr)));
+    }
+    let registered = modules
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter_map(|record| {
+            let separator = record.iter().position(|byte| *byte == b'\n')?;
+            let key = std::str::from_utf8(&record[..separator]).ok()?;
+            if !key.starts_with("submodule.") || !key.ends_with(".path") {
+                return None;
+            }
+            let path = std::str::from_utf8(&record[separator + 1..]).ok()?;
+            let relative = Path::new(path);
+            if path.is_empty()
+                || relative.is_absolute()
+                || !relative.components().all(|part| matches!(part, Component::Normal(_)))
+            {
+                return None;
+            }
+            let explicitly_included = policy.include_patterns().iter().any(|rule| {
+                let rule = rule.trim_start_matches("./").trim_start_matches('/');
+                let rule = rule.trim_end_matches('/');
+                rule == path || rule.strip_suffix("/**") == Some(path)
+            });
+            explicitly_included.then(|| path.to_owned())
+        })
+        .collect::<BTreeSet<_>>();
+    if registered.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+
+    // The parent Git index, not HEAD or .gitmodules alone, must name a gitlink.
+    // New and staged submodules remain eligible before the parent's commit.
+    let mut command = source_git_command(project_root)?;
+    command.args(["--literal-pathspecs", "ls-files", "--stage", "-z", "--"]);
+    for path in &registered {
+        command.arg(path);
+    }
+    let index = checked_source_git_output(&mut command)?;
+    let gitlinks = index
+        .split(|byte| *byte == 0)
+        .filter_map(|record| {
+            let separator = record.iter().position(|byte| *byte == b'\t')?;
+            let fields = std::str::from_utf8(&record[..separator]).ok()?;
+            let mut parts = fields.split_whitespace();
+            if parts.next() != Some("160000")
+                || parts.next()?.len() != 40
+                || parts.next() != Some("0")
+                || parts.next().is_some()
+            {
+                return None;
+            }
+            let path = std::str::from_utf8(&record[separator + 1..]).ok()?;
+            registered.contains(path).then(|| path.to_owned())
+        })
+        .collect::<BTreeSet<_>>();
+    if gitlinks.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+
+    let canonical_root = project_root.canonicalize().map_err(git_walk_error)?;
+    let mut accepted = BTreeSet::new();
+    for path in gitlinks {
+        let checked_out = project_root.join(&path);
+        let marker = match std::fs::symlink_metadata(checked_out.join(".git")) {
+            Ok(metadata) => metadata.file_type().is_file() || metadata.file_type().is_dir(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(git_walk_error(error)),
+        };
+        if !marker {
+            continue;
+        }
+        let mut command = source_git_command(project_root)?;
+        command.arg("-C").arg(&path);
+        command.args(["rev-parse", "--show-superproject-working-tree"]);
+        let output = checked_source_git_output(&mut command)?;
+        let parent = std::str::from_utf8(&output)
+            .map_err(git_walk_error)?
+            .trim();
+        if !parent.is_empty()
+            && Path::new(parent).canonicalize().map_err(git_walk_error)? == canonical_root
+        {
+            accepted.insert(PathBuf::from(path));
+        }
+    }
+    Ok(accepted)
+}
+
+fn git_walk_error(error: impl std::fmt::Display) -> SourceWalkError {
+    SourceWalkError {
+        glob: ".gitmodules".to_owned(),
+        message: format!("registered submodule discovery failed: {error}"),
+    }
+}
+
+fn source_git_command(root: &Path) -> Result<std::process::Command, SourceWalkError> {
+    let program = tracedecay_runtime_core::git::try_git_program().map_err(git_walk_error)?;
+    let mut command = std::process::Command::new(program);
+    command.current_dir(root);
+    // Do not let ambient Git variables redirect the registered index or root.
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(key);
+        }
+    }
+    Ok(command)
+}
+
+fn checked_source_git_output(
+    command: &mut std::process::Command,
+) -> Result<Vec<u8>, SourceWalkError> {
+    let output = command.output().map_err(git_walk_error)?;
+    if !output.status.success() {
+        return Err(git_walk_error(String::from_utf8_lossy(&output.stderr)));
+    }
+    Ok(output.stdout)
 }
 
 fn build_overrides(
@@ -373,6 +529,72 @@ mod tests {
             !files.contains(&PathBuf::from("nested-clone/foreign.rs")),
             "a nested clone must not be indexed as parent source"
         );
+    }
+
+    fn run_git(root: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new(
+            tracedecay_runtime_core::git::try_git_program().expect("git executable"),
+        )
+        .current_dir(root)
+        .args(args)
+        .status()
+        .expect("run Git");
+        assert!(status.success(), "Git command failed: {args:?}");
+    }
+
+    #[test]
+    fn only_an_explicitly_included_registered_submodule_joins_the_parent_walk() {
+        let root = TempDir::new().expect("parent");
+        let child = TempDir::new().expect("submodule source");
+        run_git(root.path(), &["init", "-q"]);
+        run_git(child.path(), &["init", "-q"]);
+        fs::create_dir_all(child.path().join("src")).unwrap();
+        fs::write(child.path().join("src/feature.rs"), "pub fn feature() {}\n").unwrap();
+        run_git(child.path(), &["add", "."]);
+        run_git(
+            child.path(),
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "initial child",
+            ],
+        );
+        let git = tracedecay_runtime_core::git::try_git_program().expect("Git");
+        let status = std::process::Command::new(git)
+            .current_dir(root.path())
+            .args(["-c", "protocol.file.allow=always", "submodule", "add", "-q"])
+            .arg(child.path())
+            .arg("app")
+            .status()
+            .expect("add submodule");
+        assert!(status.success());
+        fs::create_dir_all(root.path().join("foreign/src")).unwrap();
+        fs::create_dir(root.path().join("foreign/.git")).unwrap();
+        fs::write(root.path().join("foreign/src/intruder.rs"), "foreign").unwrap();
+        // A .gitmodules declaration without a gitlink is not authority.
+        fs::write(
+            root.path().join(".gitmodules"),
+            "[submodule \"app\"]\n\tpath = app\n\turl = ../child\n[submodule \"foreign\"]\n\tpath = foreign\n\turl = ../child\n",
+        )
+        .unwrap();
+
+        let default = IndexPathPolicyV1::new(vec![], vec![]).unwrap();
+        assert!(
+            !walked_files(root.path(), &default).contains(&PathBuf::from("app/src/feature.rs")),
+            "the default must still prune all nested Git repositories"
+        );
+        let policy = IndexPathPolicyV1::new(
+            vec![],
+            vec!["app/**".into(), "foreign/**".into()],
+        )
+        .unwrap();
+        let files = walked_files(root.path(), &policy);
+        assert!(files.contains(&PathBuf::from("app/src/feature.rs")), "{files:?}");
+        assert!(!files.contains(&PathBuf::from("foreign/src/intruder.rs")));
     }
 
     #[test]
