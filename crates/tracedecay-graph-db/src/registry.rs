@@ -45,6 +45,7 @@ pub use code_graph_namespace::{
 pub use publication::{GraphPublicationPreparationV1, ProvenGraphPublicationV1};
 
 const OPEN_WAIT_POLL: Duration = Duration::from_millis(10);
+const CORRUPTION_PATH_SAMPLE_LIMIT: usize = 4;
 
 #[derive(Clone, Copy)]
 enum OwnerOpenMode {
@@ -135,6 +136,15 @@ pub struct GraphDbRegistryCapacity {
     pub max_open: usize,
     pub occupied: usize,
     pub evictable: usize,
+}
+
+/// A bounded view of the registry's retained terminal corruption verdicts.
+/// Faulted entries need not occupy an open slot, so `max_open` does not bound
+/// their count. The total includes every fault; paths are a stable sample.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GraphDbCorruptionCensusV1 {
+    pub total: usize,
+    pub sampled_paths: Vec<PathBuf>,
 }
 
 impl GraphDbRegistryCapacity {
@@ -1520,6 +1530,31 @@ impl GraphDbRegistry {
         Ok(Some(status(entry)))
     }
 
+    /// Containers whose registered owner retained a terminal corruption verdict.
+    ///
+    /// This observes the existing fault authority without opening a container,
+    /// renewing a lease, or repeating recovery. In particular, a persistent
+    /// corruption-decision lock file alone is not evidence of corruption.
+    pub fn corruption_census(&self) -> Result<GraphDbCorruptionCensusV1, GraphDbError> {
+        let state = self.state_lock()?;
+        let mut census = GraphDbCorruptionCensusV1::default();
+        for entry in state.entries.values() {
+            if let RegistryEntry::Faulted {
+                path,
+                error: GraphDbError::Corrupt { .. },
+                ..
+            } = entry
+            {
+                census.total += 1;
+                if census.sampled_paths.len() < CORRUPTION_PATH_SAMPLE_LIMIT {
+                    census.sampled_paths.push(path.clone());
+                }
+            }
+        }
+        census.sampled_paths.sort();
+        Ok(census)
+    }
+
     /// Canonical physical-open headroom, including ready owners the registry
     /// can close itself before admitting another shard.
     pub fn capacity(&self) -> Result<GraphDbRegistryCapacity, GraphDbError> {
@@ -2298,9 +2333,9 @@ mod tests {
     };
 
     use super::{
-        CloseReservation, GraphDbOwnerRegistrationV1, GraphDbRegistration, GraphDbRegistry,
-        GraphDbRegistryConfig, GraphDbRegistryStatus, GraphDbRetirementOutcome, RegistryEntry,
-        reserve_capacity_eviction,
+        CloseReservation, GraphDbCorruptionCensusV1, GraphDbOwnerRegistrationV1,
+        GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, GraphDbRegistryStatus,
+        GraphDbRetirementOutcome, RegistryEntry, reserve_capacity_eviction,
     };
     use crate::{
         GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbLocation, GraphDbOpenOptions,
@@ -2740,6 +2775,105 @@ mod tests {
             panic!("poison registry state before terminal close completion");
         });
         assert!(poisoned.join().is_err());
+    }
+
+    #[test]
+    fn corruption_census_preserves_the_retained_verdict_without_reopening() {
+        let corrupt_root = TempDir::new().unwrap();
+        let healthy_root = TempDir::new().unwrap();
+        let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 2 }).unwrap();
+        let corrupt_registration = registration_for(corrupt_root.path(), "project.corrupt");
+        let healthy_registration = registration_for(healthy_root.path(), "project.healthy");
+        let corrupt_attachment = registry
+            .resolve_owner_attachment(owner_registration(corrupt_registration.clone()))
+            .unwrap();
+        let _healthy_attachment = registry
+            .resolve_owner_attachment(owner_registration(healthy_registration.clone()))
+            .unwrap();
+        std::fs::write(
+            healthy_root.path().join("graph.grafeo.corruption-lock"),
+            b"",
+        )
+        .unwrap();
+        assert_eq!(registry.corruption_census().unwrap().total, 0);
+
+        let lease = corrupt_attachment.issue_lease().unwrap();
+        let fault = GraphDbError::Corrupt {
+            message: "graph container corruption is not deterministic; refusing deletion: \
+                      first fault `block 18 CRC mismatch`, second fault `block 7 CRC mismatch`"
+                .to_owned(),
+        };
+        registry
+            .retain_verification_fault_for_lease(&lease, &fault)
+            .unwrap();
+        let path = corrupt_registration.canonical_path().to_path_buf();
+        let bytes = std::fs::read(&path).unwrap();
+
+        for _ in 0..2 {
+            assert_eq!(
+                registry.corruption_census().unwrap(),
+                GraphDbCorruptionCensusV1 {
+                    total: 1,
+                    sampled_paths: vec![path.clone()],
+                }
+            );
+            assert_eq!(
+                registry.resolve(corrupt_registration.clone()).unwrap_err(),
+                fault,
+                "health reads cannot clear or retry a terminal corruption verdict"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert_eq!(
+                registry.status(&healthy_registration).unwrap(),
+                Some(GraphDbRegistryStatus::Ready),
+            );
+        }
+    }
+
+    #[test]
+    fn corruption_census_refuses_a_poisoned_registry() {
+        let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+        poison_registry_state_before_terminal_completion(&registry);
+        assert!(matches!(
+            registry.corruption_census(),
+            Err(GraphDbError::Unavailable { .. }),
+        ));
+    }
+
+    #[test]
+    fn corruption_census_bounds_paths_when_faults_outnumber_open_capacity() {
+        let temporary = TempDir::new().unwrap();
+        let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+        let total = super::CORRUPTION_PATH_SAMPLE_LIMIT + 3;
+        {
+            let mut state = registry.state_lock().unwrap();
+            for index in 0..total {
+                let root = temporary.path().join(format!("project-{index}"));
+                std::fs::create_dir(&root).unwrap();
+                let registration = registration_for(&root, &format!("project.corrupt-{index}"));
+                state.entries.insert(
+                    registration.binding().shard_id.clone(),
+                    RegistryEntry::Faulted {
+                        binding: registration.binding().clone(),
+                        verified_locator: registration.verified_locator().clone(),
+                        path: registration.canonical_path().to_path_buf(),
+                        expected_format: GraphFormatVersion::current(),
+                        owner: None,
+                        error: GraphDbError::Corrupt {
+                            message: "retained terminal open failure".to_owned(),
+                        },
+                    },
+                );
+            }
+        }
+        assert_eq!(registry.capacity().unwrap().occupied, 0);
+        let first = registry.corruption_census().unwrap();
+        assert_eq!(first.total, total);
+        assert_eq!(
+            first.sampled_paths.len(),
+            super::CORRUPTION_PATH_SAMPLE_LIMIT
+        );
+        assert_eq!(registry.corruption_census().unwrap(), first);
     }
 
     #[test]

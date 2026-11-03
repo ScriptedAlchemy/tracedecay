@@ -132,6 +132,40 @@ fn orphan_storage_read() -> DoctorStorageFamilyReadV1 {
     }
 }
 
+#[test]
+fn resolved_storage_findings_do_not_hide_a_named_corruption_verdict() {
+    let storage = StaticStorage(tracedecay_contracts::doctor::merge_storage_reads(
+        orphan_storage_read(),
+        DoctorStorageFamilyReadV1::Corrupt {
+            detail: "projects/proj_first/sessions.grafeo needs operator repair; \
+                     move the medium or rebuild from canonical replay authorities"
+                .to_owned(),
+        },
+    ));
+    let report = block_on(
+        DoctorReportComposerV1::new()
+            .with_storage(&storage)
+            .compose(&context()),
+    )
+    .expect("compose observed storage and terminal corruption");
+    let storage_findings = report
+        .findings()
+        .filter(|finding| finding.family() == DoctorFindingFamilyV1::Storage)
+        .collect::<Vec<_>>();
+    assert_eq!(storage_findings.len(), 2);
+    assert!(
+        storage_findings
+            .iter()
+            .all(|finding| { finding.state() == DoctorEvidenceStateV1::Degraded })
+    );
+    assert!(storage_findings.iter().any(|finding| {
+        let statement = finding.coverage().statement();
+        statement.contains("proj_first/sessions.grafeo")
+            && statement.contains("canonical replay authorities")
+    }));
+    assert!(!report.is_healthy_complete());
+}
+
 // --- Composition -------------------------------------------------------------
 
 #[test]

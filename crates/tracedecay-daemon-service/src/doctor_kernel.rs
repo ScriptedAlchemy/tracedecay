@@ -316,9 +316,64 @@ pub fn wal_checkpoint_pinned_read(
     storage_family_read(findings)
 }
 
-pub struct SchemaConvergenceDoctorReadV1 {
+/// Report terminal graph corruption already held by the registered owner.
+///
+/// A corruption-decision lock survives successful recovery, so scanning for
+/// that file would report healthy stores as corrupt. Only the registry's typed
+/// verdict is evidence; observing it must not re-drive the failed open.
+pub fn graph_corruption_read(
+    census: Result<
+        tracedecay_graph_db::GraphDbCorruptionCensusV1,
+        tracedecay_graph_db::GraphDbError,
+    >,
+    profile_root: &Path,
+) -> DoctorStorageFamilyReadV1 {
+    match census {
+        Ok(census) if census.total == 0 => DoctorStorageFamilyReadV1::Absent,
+        Ok(census) => {
+            // Doctor bounds source detail at 320 bytes. Keep both counts and
+            // the repair action intact; omit whole paths instead of silently
+            // truncating a container name or allocating an unbounded listing.
+            const DETAIL_MAX_BYTES: usize = 320;
+            let prefix = |omitted| {
+                format!(
+                    "{} graph containers remain corrupt; {omitted} paths omitted; move the \
+                     medium or rebuild from canonical replay authorities; paths: ",
+                    census.total,
+                )
+            };
+            let path_budget = DETAIL_MAX_BYTES.saturating_sub(prefix(census.total).len());
+            let mut names = String::new();
+            let mut shown = 0;
+            for path in &census.sampled_paths {
+                let name = path
+                    .strip_prefix(profile_root)
+                    .unwrap_or(path)
+                    .display()
+                    .to_string();
+                let separator = if names.is_empty() { "" } else { ", " };
+                if names.len() + separator.len() + name.len() <= path_budget {
+                    names.push_str(separator);
+                    names.push_str(&name);
+                    shown += 1;
+                }
+            }
+            if names.is_empty() {
+                names.push_str("(none within display budget)");
+            }
+            DoctorStorageFamilyReadV1::Corrupt {
+                detail: format!("{}{names}", prefix(census.total.saturating_sub(shown))),
+            }
+        }
+        Err(error) => DoctorStorageFamilyReadV1::Unavailable {
+            detail: format!("registered graph corruption verdicts are unavailable: {error}"),
+        },
+    }
+}
+
+pub struct RegisteredStorageDoctorReadV1 {
     pub storage: DoctorStorageFamilyReadV1,
-    pub findings: Vec<SchemaConvergenceFindingV1>,
+    pub schema_convergences: Vec<SchemaConvergenceFindingV1>,
 }
 
 // === Language server/analyzer (LanguageServer family) ========================
@@ -1059,7 +1114,7 @@ pub fn production_doctor_report_reader(
     profile_root: PathBuf,
     host_profile: tracedecay_runtime_core::config::ProfileRoot,
     remote_operational: Arc<dyn Fn() -> RemoteOperationalReadV1 + Send + Sync>,
-    schema_convergence: Arc<dyn Fn() -> SchemaConvergenceDoctorReadV1 + Send + Sync>,
+    registered_storage: Arc<dyn Fn() -> RegisteredStorageDoctorReadV1 + Send + Sync>,
     retention: tracedecay_configuration::RetentionConfig,
     schedulers: CodeIndexSchedulerRegistryV1,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
@@ -1077,7 +1132,7 @@ pub fn production_doctor_report_reader(
         let profile_root = profile_root.clone();
         let host_profile = host_profile.clone();
         let remote_operational = Arc::clone(&remote_operational);
-        let schema_convergence = Arc::clone(&schema_convergence);
+        let registered_storage = Arc::clone(&registered_storage);
         let retention = retention.clone();
         let schedulers = schedulers.clone();
         let diagnostic_broker = Arc::clone(&diagnostic_broker);
@@ -1262,7 +1317,7 @@ pub fn production_doctor_report_reader(
             )
             .await;
             let quick_check_ok = quick_check.ok().map(|problem| problem.is_none());
-            let schema_convergence = schema_convergence();
+            let registered_storage = registered_storage();
             let footprint_keys = profile_footprint
                 .iter()
                 .flat_map(|footprint| footprint.entries.iter().map(|entry| entry.key.as_str()))
@@ -1288,7 +1343,7 @@ pub fn production_doctor_report_reader(
                 profile_retention_backlog,
                 project_retention_backlog,
                 code_generation_retention,
-                schema_convergence.storage,
+                registered_storage.storage,
             ]
             .into_iter()
             .reduce(merge_storage_reads)
@@ -1344,7 +1399,7 @@ pub fn production_doctor_report_reader(
             Ok(
                 tracedecay_dashboard_api::AdmittedDoctorReportV1::new(report)
                     .with_table_growth_evidence(store_telemetry.table_growth_evidence)
-                    .with_schema_convergences(schema_convergence.findings)
+                    .with_schema_convergences(registered_storage.schema_convergences)
                     .with_language_servers(inputs.language_server),
             )
         })

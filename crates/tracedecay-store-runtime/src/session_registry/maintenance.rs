@@ -660,6 +660,17 @@ impl DaemonSessionRuntimeRegistryV1 {
         true
     }
 
+    /// Read retained graph corruption from this profile's canonical registry.
+    /// No store is opened, repaired, or re-probed by a health observation.
+    pub fn graph_corruption_census(
+        &self,
+    ) -> std::result::Result<
+        tracedecay_graph_db::GraphDbCorruptionCensusV1,
+        tracedecay_graph_db::GraphDbError,
+    > {
+        self.graph_registry.corruption_census()
+    }
+
     /// Stores in this profile currently held in their typed reset-required
     /// state, each with the exact command that resets it: registered stores
     /// refused at attach, store files lost while open, then Hook V2 admission

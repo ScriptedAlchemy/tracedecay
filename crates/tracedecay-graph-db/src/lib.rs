@@ -90,8 +90,8 @@ pub use registry::{
     CODE_GRAPH_SHARD_NAMESPACE_PREFIX, code_graph_shard_namespace, is_code_graph_shard_namespace,
 };
 pub use registry::{
-    GraphDbOwnerRegistrationV1, GraphDbRegistration, GraphDbRegistry, GraphDbRegistryCapacity,
-    GraphDbRegistryConfig, GraphDbRegistryStatus, GraphDbRetirementCommit,
+    GraphDbCorruptionCensusV1, GraphDbOwnerRegistrationV1, GraphDbRegistration, GraphDbRegistry,
+    GraphDbRegistryCapacity, GraphDbRegistryConfig, GraphDbRegistryStatus, GraphDbRetirementCommit,
     GraphDbRetirementOutcome, GraphDbRetirementRefusal, GraphDbRetirementReservation,
     GraphPublicationPreparationV1, ProvenGraphPublicationV1,
 };

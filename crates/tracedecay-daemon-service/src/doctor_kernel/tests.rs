@@ -14,6 +14,7 @@ use tracedecay_contracts::doctor::{
     IngestRefusalV1, LanguageServerAnalyzerStateV1, LanguageServerReadV1, LanguageServerStateV1,
     ObservabilityReadV1, ObservabilityStateV1, host_integration_finding,
 };
+use tracedecay_graph_db::GraphDbCorruptionCensusV1;
 
 use super::*;
 
@@ -25,6 +26,127 @@ fn configuration_read_from_pin_absent_on_cold_cache() {
         configuration_read_from_pin(&missing),
         ConfigurationAuthorityReadV1::Absent
     );
+}
+
+#[test]
+fn graph_corruption_names_the_retained_stores_and_operator_repair() {
+    let profile = Path::new("profile");
+    let read = graph_corruption_read(
+        Ok(GraphDbCorruptionCensusV1 {
+            total: 2,
+            sampled_paths: vec![
+                profile.join("projects/proj_first/tracedecay.grafeo"),
+                profile.join("projects/proj_second/sessions.grafeo"),
+            ],
+        }),
+        profile,
+    );
+    let DoctorStorageFamilyReadV1::Corrupt { detail } = read else {
+        panic!("retained corruption must be a typed corrupt storage read");
+    };
+    assert!(detail.contains("2 graph containers"));
+    assert!(detail.contains("0 paths omitted"));
+    assert!(detail.contains("proj_first"));
+    assert!(detail.contains("proj_second"));
+    assert!(detail.contains("move the medium"));
+    assert!(detail.contains("canonical replay authorities"));
+    assert!(!detail.contains("profile/"));
+}
+
+#[test]
+fn graph_corruption_absence_and_unavailable_authority_are_distinct() {
+    let profile = Path::new("profile");
+    assert_eq!(
+        graph_corruption_read(Ok(GraphDbCorruptionCensusV1::default()), profile),
+        DoctorStorageFamilyReadV1::Absent,
+    );
+    assert!(matches!(
+        graph_corruption_read(
+            Err(tracedecay_graph_db::GraphDbError::unavailable("registry lock is poisoned")),
+            profile,
+        ),
+        DoctorStorageFamilyReadV1::Unavailable { detail }
+            if detail.contains("registry lock is poisoned"),
+    ));
+}
+
+#[tokio::test]
+async fn graph_corruption_report_preserves_counts_and_repair_with_long_paths() {
+    use tracedecay_contracts::ResolvedScope;
+    use tracedecay_contracts::doctor::{DoctorEvidenceStateV1, DoctorFindingFamilyV1};
+    use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
+
+    struct StorageRead(DoctorStorageFamilyReadV1);
+    impl StorageDoctorPort for StorageRead {
+        fn storage_findings<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+        ) -> DoctorSourceFuture<'a, DoctorStorageFamilyReadV1> {
+            Box::pin(async move { self.0.clone() })
+        }
+    }
+
+    let context = doctor_report_request_context(
+        ResolvedScope::new(
+            ProjectId::new("project.corruption-report").unwrap(),
+            RepositoryId::new("repository.corruption-report").unwrap(),
+            WorktreeId::new("worktree.corruption-report").unwrap(),
+            None,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let profile = Path::new("profile");
+    let long_path = profile.join(format!("projects/proj_{}/graph.grafeo", "界".repeat(100)));
+    let short_paths = (0..3)
+        .map(|index| profile.join(format!("projects/proj_{index}/graph.grafeo")))
+        .collect::<Vec<_>>();
+    for (census, omitted) in [
+        (
+            GraphDbCorruptionCensusV1 {
+                total: 7,
+                sampled_paths: std::iter::once(long_path.clone())
+                    .chain(short_paths)
+                    .collect(),
+            },
+            4,
+        ),
+        (
+            GraphDbCorruptionCensusV1 {
+                total: 1,
+                sampled_paths: vec![long_path],
+            },
+            1,
+        ),
+    ] {
+        let total = census.total;
+        let read = graph_corruption_read(Ok(census), profile);
+        let DoctorStorageFamilyReadV1::Corrupt { detail } = &read else {
+            panic!("retained corruption must remain a corrupt read");
+        };
+        assert!(detail.len() <= 320);
+        assert!(detail.contains(&format!("{total} graph containers")));
+        assert!(detail.contains(&format!("{omitted} paths omitted")));
+        assert!(detail.contains("move the medium or rebuild from canonical replay authorities"));
+        if total == 7 {
+            for index in 0..3 {
+                assert!(detail.contains(&format!("projects/proj_{index}/graph.grafeo")));
+            }
+        }
+        let source = StorageRead(read.clone());
+        let report = DoctorReportComposerV1::new()
+            .with_storage(&source)
+            .compose(&context)
+            .await
+            .unwrap();
+        let finding = report
+            .findings()
+            .find(|finding| finding.family() == DoctorFindingFamilyV1::Storage)
+            .unwrap();
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Degraded);
+        assert!(finding.coverage().statement().ends_with(detail.as_str()));
+        assert!(!report.is_healthy_complete());
+    }
 }
 
 async fn audit_verdict(database: &tracedecay_runtime_core::db::Database) -> Option<bool> {

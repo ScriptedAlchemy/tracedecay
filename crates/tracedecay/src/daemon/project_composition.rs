@@ -1792,20 +1792,30 @@ impl ProjectOpenInputs<'_> {
         // large store can be mid-migration while the daemon serves. Doctor
         // re-reads that state on every report instead of a snapshot taken
         // before the migrations were scheduled.
-        let schema_convergence = {
+        let registered_storage = {
             let registry = self.store_administration.session_runtime_registry().await?;
+            let profile_root = core.profile_identity.profile_root().to_path_buf();
             Arc::new(move || {
                 let unconverged = registry.unconverged_registered_schemas();
-                tracedecay_daemon_service::doctor_kernel::SchemaConvergenceDoctorReadV1 {
-                    storage: tracedecay_contracts::doctor::merge_storage_reads(
+                tracedecay_daemon_service::doctor_kernel::RegisteredStorageDoctorReadV1 {
+                    storage: [
                         tracedecay_daemon_service::doctor_kernel::schema_convergence_incomplete_read(
                             &unconverged,
                         ),
                         tracedecay_daemon_service::doctor_kernel::wal_checkpoint_pinned_read(
                             &registry.runtime_telemetry(),
                         ),
+                        tracedecay_daemon_service::doctor_kernel::graph_corruption_read(
+                            registry.graph_corruption_census(),
+                            &profile_root,
+                        ),
+                    ]
+                    .into_iter()
+                    .fold(
+                        tracedecay_contracts::doctor::DoctorStorageFamilyReadV1::Absent,
+                        tracedecay_contracts::doctor::merge_storage_reads,
                     ),
-                    findings: registry.registered_schema_convergence_observations(),
+                    schema_convergences: registry.registered_schema_convergence_observations(),
                 }
             })
         };
@@ -1821,7 +1831,7 @@ impl ProjectOpenInputs<'_> {
                 core.profile_identity.profile_root().to_path_buf(),
                 core.transcript_source_profile.clone(),
                 remote_operational_read,
-                schema_convergence,
+                registered_storage,
                 cg.get_config().sync.retention.clone(),
                 self.invocation.code_index_schedulers.clone(),
                 Arc::clone(&core.ports.diagnostic_broker),
