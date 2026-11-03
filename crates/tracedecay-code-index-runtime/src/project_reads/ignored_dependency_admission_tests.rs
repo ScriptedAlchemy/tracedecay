@@ -21,7 +21,6 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::code_index_scheduler::{CodeIndexSchedulerRegistryV1, LatestCompleteCodeIndexV1};
 use crate::project_reads::project_code_index_ignored_dependency_admission_port;
-use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 const PROJECT_ID: &str = "project.project-open-ignored-dependency";
 
@@ -70,7 +69,6 @@ export function generationAnchor() { return 1; }
             .mount_worktree(project_id(), root.path(), store.path().to_path_buf())
             .await
             .expect("mount code-index scheduler");
-        wait_for_initial_generation(&registry, root.path()).await;
         let baseline = latest(&registry, root.path()).await;
         let generation = baseline.generation();
         let snapshot = generation.snapshot();
@@ -242,31 +240,11 @@ fn request_context(scope: ResolvedScope, suffix: &str) -> RequestContext {
     .expect("request context")
 }
 
-async fn wait_for_initial_generation(registry: &CodeIndexSchedulerRegistryV1, project_root: &Path) {
-    if registry.latest_generation_id(project_root).await.is_some() {
-        return;
-    }
-    let canonical_root = canonical_existing_identity(project_root).expect("canonical fixture root");
-    let mut publications = registry.subscribe_generation_publications();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let event = publications.recv().await.expect("generation publication");
-            if event.project_root == canonical_root {
-                break;
-            }
-        }
-    })
-    .await
-    .expect("initial generation publication");
-}
-
 /// Wait for the complete serving generation, not merely its publication.
 ///
-/// The generation-publication broadcast and `latest_generation_id` both fire
-/// on the reconcile pass, ahead of the bind and the serving swap that fill
-/// `serving_generation`. Reading the complete arm the instant
-/// `wait_for_initial_generation` returns therefore raced the seat and reported
-/// a missing generation for a store that had one.
+/// Publication and `latest_generation_id` precede the serving swap. Wait
+/// for the actual fresh serving state before using imports as admission
+/// evidence; no earlier broadcast establishes readiness.
 async fn latest(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
