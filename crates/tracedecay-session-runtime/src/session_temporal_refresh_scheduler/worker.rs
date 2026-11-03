@@ -109,15 +109,21 @@ fn history_continuation(outcome: Option<SessionHistoricalIngestOutcome>) -> Hist
 /// advanced healthy providers while the corrupt one remains blocked.
 /// Conversely, a completed, pending, or retryable pass may clear the terminal
 /// blocker without committing a source row.
-fn clears_blocked_history_backoff(outcome: Option<&SessionHistoricalIngestOutcome>) -> bool {
-    matches!(
-        outcome,
-        Some(
-            SessionHistoricalIngestOutcome::Complete
-                | SessionHistoricalIngestOutcome::Pending { .. }
-                | SessionHistoricalIngestOutcome::Retryable { .. }
+fn clears_blocked_history_backoff(
+    outcome: Option<&SessionHistoricalIngestOutcome>,
+    release: Option<&HistoryRelease>,
+) -> bool {
+    // Admission refusal returns Retryable without ever running the ingestor.
+    // Only a held history capacity subscription proves that a pass executed.
+    matches!(release, Some(HistoryRelease::Capacity(_)))
+        && matches!(
+            outcome,
+            Some(
+                SessionHistoricalIngestOutcome::Complete
+                    | SessionHistoricalIngestOutcome::Pending { .. }
+                    | SessionHistoricalIngestOutcome::Retryable { .. }
+            )
         )
-    )
 }
 
 /// What a history pass that committed nothing waits on before it runs again.
@@ -352,7 +358,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             // A nonblocked attempt clears old terminal backoff even when it
             // committed no new rows. A suppressed wake or progress by healthy
             // providers while another remains Blocked cannot clear it.
-            if clears_blocked_history_backoff(history_outcome.as_ref()) {
+            if clears_blocked_history_backoff(history_outcome.as_ref(), history_release.as_ref()) {
                 blocked_history_attempts = 0;
                 blocked_history_until = None;
             }
@@ -2614,31 +2620,45 @@ mod tests {
     }
 
     #[test]
-    fn terminal_history_backoff_clears_on_recovery_without_source_progress() {
-        assert!(!clears_blocked_history_backoff(None));
+    fn terminal_history_backoff_clears_only_after_an_admitted_unblocked_pass() {
+        let admitted = HistoryRelease::Capacity(SessionHistoricalCapacityRelease::new(Vec::new()));
+        let refused = HistoryRelease::Admission;
+        assert!(!clears_blocked_history_backoff(None, Some(&admitted)));
         for made_progress in [false, true] {
             let blocked = SessionHistoricalIngestOutcome::Blocked {
                 reason_code: "projection_store_corrupt".to_owned(),
                 made_progress,
             };
             assert!(
-                !clears_blocked_history_backoff(Some(&blocked)),
+                !clears_blocked_history_backoff(Some(&blocked), Some(&admitted)),
                 "a healthy sibling's progress cannot reset a corrupt provider's backoff"
             );
             let pending = SessionHistoricalIngestOutcome::Pending { made_progress };
-            assert!(clears_blocked_history_backoff(Some(&pending)));
+            assert!(clears_blocked_history_backoff(Some(&pending), Some(&admitted)));
+            assert!(!clears_blocked_history_backoff(Some(&pending), Some(&refused)));
             let retryable = SessionHistoricalIngestOutcome::Retryable {
                 reason_code: "provider_temporarily_unavailable".to_owned(),
                 made_progress,
             };
-            assert!(clears_blocked_history_backoff(Some(&retryable)));
+            assert!(clears_blocked_history_backoff(Some(&retryable), Some(&admitted)));
+            assert!(!clears_blocked_history_backoff(Some(&retryable), Some(&refused)));
         }
-        assert!(clears_blocked_history_backoff(Some(
-            &SessionHistoricalIngestOutcome::Complete
-        )));
-        assert!(!clears_blocked_history_backoff(Some(
-            &SessionHistoricalIngestOutcome::Cancelled
-        )));
+        let admission_saturated = SessionHistoricalIngestOutcome::Retryable {
+            reason_code: HISTORY_ADMISSION_SATURATED_REASON.to_owned(),
+            made_progress: false,
+        };
+        assert!(
+            !clears_blocked_history_backoff(Some(&admission_saturated), Some(&refused)),
+            "blocked, admission-refused, then blocked again must retain escalating backoff"
+        );
+        assert!(clears_blocked_history_backoff(
+            Some(&SessionHistoricalIngestOutcome::Complete),
+            Some(&admitted)
+        ));
+        assert!(!clears_blocked_history_backoff(
+            Some(&SessionHistoricalIngestOutcome::Cancelled),
+            Some(&admitted)
+        ));
     }
 
     #[test]
