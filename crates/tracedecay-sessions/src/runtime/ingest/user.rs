@@ -225,16 +225,24 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
         if cancellation.is_cancelled() {
             return Err(source::TranscriptIngestError::Cancelled { provider: "codex" });
         }
-        let Some(pending) = sweep.observe_file(path).await? else {
+        let Some(pending) = tracing::Instrument::instrument(
+            sweep.observe_file(path),
+            tracing::trace_span!("sessions.ingest.user.codex.convergence_check"),
+        )
+        .await?
+        else {
             continue;
         };
-        let progress = match codex::try_admit_codex_jsonl_observations_for_profile_with_admission_and_cancellation(
-            path,
-            session_id.as_deref(),
-            &registered_roots,
-            admission,
-            remaining,
-            cancellation,
+        let progress = match tracing::Instrument::instrument(
+            codex::try_admit_codex_jsonl_observations_for_profile_with_admission_and_cancellation(
+                path,
+                session_id.as_deref(),
+                &registered_roots,
+                admission,
+                remaining,
+                cancellation,
+            ),
+            tracing::trace_span!("sessions.ingest.user.codex.admit"),
         )
         .await
         {

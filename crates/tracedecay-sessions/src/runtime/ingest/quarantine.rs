@@ -201,6 +201,14 @@ impl SourceClaim {
         ledger: Option<SourceLedger>,
         path: &Path,
     ) -> TranscriptIngestResult<Option<Self>> {
+        // A detached sweep has no convergence witness to check. Do not
+        // dispatch a blocking task when there is no filesystem work.
+        if ledger.is_none() {
+            return Ok(Some(Self {
+                key: SourceKey::file(path),
+                settled: None,
+            }));
+        }
         let path = path.to_path_buf();
         run_blocking_transcript_section(provider, move || {
             Self::observe_file_blocking(ledger.as_ref(), &path)
@@ -672,6 +680,18 @@ mod tests {
                 "nothing is quarantined"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_detached_file_claim_does_not_require_filesystem_observation() {
+        let home = tempfile::tempdir().unwrap();
+        let missing = home.path().join("not-yet-created.jsonl");
+        let claim = SourceClaim::observe_file("codex", None, &missing)
+            .await
+            .unwrap()
+            .expect("detached source remains eligible without a convergence ledger");
+        assert!(claim.settled().is_none());
+        claim.finished().unwrap();
     }
 
     #[tokio::test]

@@ -293,7 +293,13 @@ impl<'a> ProjectProviderRun<'a> {
                 frontier_committable = false;
                 break;
             }
-            let Some(pending) = sweep.observe_file(path).await.transpose() else {
+            let Some(pending) = tracing::Instrument::instrument(
+                sweep.observe_file(path),
+                tracing::trace_span!("sessions.ingest.project.codex.convergence_check"),
+            )
+            .await
+            .transpose()
+            else {
                 continue;
             };
             if persisted_day.is_some_and(|day| path.parent() != Some(day)) {
@@ -351,13 +357,16 @@ impl<'a> ProjectProviderRun<'a> {
                     continue;
                 }
             };
-            match codex::try_admit_codex_jsonl_observations_for_project_window(
-                path,
-                self.project_root,
-                self.project_id.clone(),
-                self.facade,
-                remaining,
-                self.cancellation,
+            match tracing::Instrument::instrument(
+                codex::try_admit_codex_jsonl_observations_for_project_window(
+                    path,
+                    self.project_root,
+                    self.project_id.clone(),
+                    self.facade,
+                    remaining,
+                    self.cancellation,
+                ),
+                tracing::trace_span!("sessions.ingest.project.codex.admit"),
             )
             .await
             {
