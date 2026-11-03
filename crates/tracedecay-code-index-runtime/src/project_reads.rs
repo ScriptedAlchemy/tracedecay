@@ -62,10 +62,18 @@ fn refuse_projection_wait(request: &CodeGraphReadRequest<'_>) -> Result<(), Code
     }
 }
 
-/// A graph whose engine or catalog was released re-warms in the background;
-/// the read waits for it within what is left of its budget, so a re-warm
-/// that finishes in time serves the read instead of refusing it. Past the
-/// budget it answers the measured warm-up still needed.
+/// A released graph starts warming on the first read. A caller's deadline
+/// also covers response delivery, so spending all of it waiting on the warm
+/// would turn a retryable warming state into a generic transport timeout.
+/// Wait only while the measured warm is likely to fit with time to answer.
+fn rewarm_wait_budget(remaining: Duration, predicted: Duration) -> Option<Duration> {
+    let wait = remaining / 2;
+    (wait > Duration::ZERO && predicted < wait).then_some(wait)
+}
+
+/// A graph whose engine or catalog was released re-warms in the background.
+/// Serve a read if re-warming fits within its remaining request budget;
+/// otherwise return a typed warming result before the transport times out.
 #[tracing::instrument(
     name = "daemon.code_index.read.await_rewarm",
     level = "trace",
@@ -76,11 +84,13 @@ async fn await_rewarm(
     store: &Arc<CodeGraphProjectionStore>,
     request: &CodeGraphReadRequest<'_>,
 ) -> Result<Arc<InteractiveCatalogReaderLeaseV1>, CodeGraphReadError> {
-    // A zero budget never blocks: it starts the re-warm and reports it.
+    // The zero-budget probe starts the background re-warm and returns its
+    // measured remaining time without parking the request.
     let requirement = request.readiness;
-    if let Ok(retain) = store.await_rewarm_and_retain_for(Duration::ZERO, requirement) {
-        return Ok(retain);
-    }
+    let pending = match store.await_rewarm_and_retain_for(Duration::ZERO, requirement) {
+        Ok(retain) => return Ok(retain),
+        Err(pending) => pending,
+    };
     let now = now_micros();
     let expires_at =
         request
@@ -91,8 +101,13 @@ async fn await_rewarm(
                     .expires_at
                     .min(request.context.deadline().expires_at)
             });
-    let budget =
+    let remaining =
         Duration::from_micros(u64::try_from(expires_at.0.saturating_sub(now.0)).unwrap_or(0));
+    let Some(budget) = rewarm_wait_budget(remaining, pending.retry_after) else {
+        return Err(CodeGraphReadError::Rewarming {
+            retry_after_millis: u64::try_from(pending.retry_after.as_millis()).unwrap_or(u64::MAX),
+        });
+    };
     let waiting = Arc::clone(store);
     let wait = native_runtime::spawn_blocking(move || {
         waiting.await_rewarm_and_retain_for(budget, requirement)
@@ -113,6 +128,45 @@ async fn await_rewarm(
         Err(error) => Err(CodeGraphReadError::Unavailable {
             detail: format!("the code graph re-warm wait did not finish: {error}"),
         }),
+    }
+}
+
+#[cfg(test)]
+mod rewarm_budget_tests {
+    use std::time::Duration;
+
+    use super::rewarm_wait_budget;
+
+    #[test]
+    fn a_slow_graph_warm_does_not_consume_the_tool_dispatch_deadline() {
+        assert_eq!(
+            rewarm_wait_budget(Duration::from_secs(10), Duration::from_secs(17)),
+            None,
+        );
+        assert_eq!(
+            rewarm_wait_budget(Duration::from_secs(10), Duration::from_secs(5)),
+            None,
+        );
+        assert_eq!(
+            rewarm_wait_budget(Duration::from_secs(10), Duration::from_secs(3)),
+            Some(Duration::from_secs(5)),
+        );
+    }
+
+    #[test]
+    fn short_deadlines_refuse_waiting_without_extending_admission() {
+        assert_eq!(
+            rewarm_wait_budget(Duration::ZERO, Duration::from_millis(1)),
+            None,
+        );
+        assert_eq!(
+            rewarm_wait_budget(Duration::from_nanos(1), Duration::from_millis(1)),
+            None,
+        );
+        assert_eq!(
+            rewarm_wait_budget(Duration::from_secs(30), Duration::from_millis(1)),
+            Some(Duration::from_secs(15)),
+        );
     }
 }
 
