@@ -159,7 +159,8 @@ impl TypeScriptProjectConfigInputs {
     }
 
     /// Whether a change to `file` (absolute) can change what tsc reports for
-    /// this project beyond the program files it already read.
+    /// this project beyond the program files it already read. Missing or
+    /// partially resolved configuration cannot rule out a change.
     #[must_use]
     pub fn affected_by(&self, file: &Path) -> bool {
         let file = normalize(file);
@@ -182,9 +183,9 @@ impl TypeScriptProjectConfigInputs {
         {
             return true;
         }
-        self.config
-            .as_ref()
-            .is_some_and(|config| config.chain.contains(&file) || config.owns(&file))
+        self.config.as_ref().is_none_or(|config| {
+            config.inputs.incomplete || config.chain.contains(&file) || config.owns(&file)
+        })
     }
 }
 
@@ -303,6 +304,8 @@ struct Inputs {
     include: Option<Vec<String>>,
     exclude: Option<Vec<String>>,
     allow_js: Option<bool>,
+    /// A skipped base prevents this interpretation from proving safe reuse.
+    incomplete: bool,
 }
 
 impl Inputs {
@@ -314,8 +317,8 @@ impl Inputs {
             Some(RawExtends::One(base)) => vec![base],
             Some(RawExtends::Many(bases)) => bases,
         };
-        // A package base (`@tsconfig/node20`) is unreadable before install;
-        // such bases never carry inputs, so ownership does not depend on them.
+        // A skipped base leaves unknown inputs. Preserve the candidate for
+        // discovery, but never use partial inputs to rule out a recheck.
         let mut inputs = Self::default();
         for base in bases {
             if let Some(base) = resolve_extends(dir, &base)
@@ -323,6 +326,11 @@ impl Inputs {
                 && let Some(raw) = RawTsconfig::read(&base)
             {
                 inputs.overlay(Self::resolve(&base, raw, visited));
+            } else {
+                // Repeated bases include both cycles and shared ancestors in
+                // multiple extends. This interpreter cannot prove their full
+                // precedence, so reuse stays conservative in either case.
+                inputs.incomplete = true;
             }
         }
         inputs.overlay(Self {
@@ -345,6 +353,7 @@ impl Inputs {
                     .collect()
             }),
             allow_js: raw.compiler_options.allow_js,
+            incomplete: false,
         });
         inputs
     }
@@ -354,6 +363,7 @@ impl Inputs {
         self.include = nearer.include.or(self.include.take());
         self.exclude = nearer.exclude.or(self.exclude.take());
         self.allow_js = nearer.allow_js.or(self.allow_js);
+        self.incomplete |= nearer.incomplete;
     }
 }
 
@@ -755,6 +765,124 @@ mod tests {
         .filter(|path| app.affected_by(&root.join(path)))
         .collect::<Vec<_>>();
         assert_eq!(unaffected, Vec::<&str>::new());
+    }
+
+    #[test]
+    fn unreadable_config_inputs_cannot_exclude_a_change() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("tsconfig.json");
+        let changed = root.path().join("new/dependency.ts");
+        let missing = TypeScriptProjectConfigInputs::load(root.path(), &config);
+        assert!(missing.affected_by(&changed));
+
+        for unreadable in [b"{ invalid json".as_slice(), b"\xff".as_slice()] {
+            fs::write(&config, unreadable).unwrap();
+            let inputs = TypeScriptProjectConfigInputs::load(root.path(), &config);
+            assert!(inputs.affected_by(&changed));
+        }
+    }
+
+    #[test]
+    fn unresolved_bases_force_rechecks_without_hiding_the_project() {
+        for (extends, base) in [
+            ("./base", "base.json"),
+            ("@scope/config", "node_modules/@scope/config/tsconfig.json"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            write(
+                root.path(),
+                "tsconfig.json",
+                &format!(r#"{{"extends":"{extends}","include":["src"]}}"#),
+            );
+            let config = root.path().join("tsconfig.json");
+            let changed = root.path().join("new/dependency.js");
+            let incomplete = TypeScriptProjectConfigInputs::load(root.path(), &config);
+            assert!(incomplete.affected_by(&changed), "{extends}");
+            assert_eq!(
+                typescript_projects(root.path()),
+                vec![TypeScriptProject {
+                    tsconfig: config.clone(),
+                    compiler: None,
+                }],
+                "a missing base must not hide the compiler candidate"
+            );
+
+            write(root.path(), base, "{}");
+            let resolved = TypeScriptProjectConfigInputs::load(root.path(), &config);
+            assert!(!resolved.affected_by(&changed), "{extends}");
+            assert!(resolved.affected_by(&root.path().join("src/new.ts")));
+            assert!(resolved.affected_by(&root.path().join(base)));
+        }
+    }
+
+    #[test]
+    fn an_unreadable_transitive_base_keeps_reuse_incomplete() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), "tsconfig.json", r#"{"extends":"./middle"}"#);
+        write(
+            root.path(),
+            "middle.json",
+            r#"{"extends":"./base","include":["src"]}"#,
+        );
+        write(root.path(), "base.json", "{ invalid json");
+        let config = root.path().join("tsconfig.json");
+        let unrelated = root.path().join("sibling/new.ts");
+        let incomplete = TypeScriptProjectConfigInputs::load(root.path(), &config);
+        assert!(incomplete.affected_by(&unrelated));
+
+        write(root.path(), "base.json", "{}");
+        let resolved = TypeScriptProjectConfigInputs::load(root.path(), &config);
+        assert!(!resolved.affected_by(&unrelated));
+        assert!(resolved.affected_by(&root.path().join("src/new.ts")));
+        assert!(resolved.affected_by(&root.path().join("base.json")));
+    }
+
+    #[test]
+    fn cyclic_extends_cannot_authorize_reuse() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), "tsconfig.json", r#"{"extends":"./other"}"#);
+        write(
+            root.path(),
+            "other.json",
+            r#"{"extends":"./tsconfig","include":["src"]}"#,
+        );
+        let inputs =
+            TypeScriptProjectConfigInputs::load(root.path(), &root.path().join("tsconfig.json"));
+        assert!(inputs.affected_by(&root.path().join("sibling/new.ts")));
+    }
+
+    #[test]
+    fn skipped_shared_bases_do_not_claim_complete_precedence() {
+        let root = tempfile::tempdir().unwrap();
+        write(
+            root.path(),
+            "tsconfig.json",
+            r#"{"extends":["./left","./right"]}"#,
+        );
+        write(root.path(), "left.json", r#"{"extends":"./shared"}"#);
+        write(root.path(), "right.json", r#"{"extends":"./shared"}"#);
+        write(root.path(), "shared.json", r#"{"include":["src"]}"#);
+        let inputs =
+            TypeScriptProjectConfigInputs::load(root.path(), &root.path().join("tsconfig.json"));
+        assert!(inputs.affected_by(&root.path().join("sibling/new.ts")));
+    }
+
+    #[test]
+    fn fully_read_multiple_bases_keep_selective_invalidation() {
+        let root = tempfile::tempdir().unwrap();
+        write(
+            root.path(),
+            "tsconfig.json",
+            r#"{"extends":["./left","./right"]}"#,
+        );
+        write(root.path(), "left.json", r#"{"include":["left-src"]}"#);
+        write(root.path(), "right.json", r#"{"include":["right-src"]}"#);
+        let inputs =
+            TypeScriptProjectConfigInputs::load(root.path(), &root.path().join("tsconfig.json"));
+        assert!(inputs.affected_by(&root.path().join("right-src/new.ts")));
+        assert!(inputs.affected_by(&root.path().join("left.json")));
+        assert!(!inputs.affected_by(&root.path().join("left-src/new.ts")));
+        assert!(!inputs.affected_by(&root.path().join("sibling/new.ts")));
     }
 
     /// tsc records program files relative to the build-info file; a record
