@@ -23,7 +23,8 @@ use super::{map_query_artifact_error, map_query_sql_error};
 use crate::retrieval::exact::{ExactAdmissionAuthority, ExactLaneEvidence, ExactLaneRequest};
 use crate::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneEvidence, LexicalLaneRequest,
-    MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_QUERY_TERM_BYTES_V1, admit_candidate_sources,
+    MAX_FUZZY_TERM_EXPANSIONS_V1, MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1,
+    MAX_LEXICAL_QUERY_TERM_BYTES_V1, admit_candidate_sources,
     candidate_admission_outcome, field_admitted,
 };
 use crate::retrieval::ports::{
@@ -235,6 +236,41 @@ impl RequestTermPostingsV1 {
             }
         }
         Ok(documents)
+    }
+
+    /// Decode only the documents a source adds to the existing candidate set.
+    /// Stop as soon as it cannot fit; check cancellation during long postings
+    /// rather than waiting for the next row-hydration checkpoint.
+    fn new_documents_bounded(
+        &self,
+        term: &str,
+        admit: impl Fn(LexicalFieldV1) -> bool,
+        existing: &RoaringBitmap,
+        remaining: usize,
+        control: &dyn RetrievalExecutionControl,
+    ) -> Result<Option<RoaringBitmap>, RetrievalPortError> {
+        let mut added = RoaringBitmap::new();
+        let mut visited = 0usize;
+        for list in self.by_term.get(term).into_iter().flatten() {
+            if !admit(list.field) {
+                continue;
+            }
+            for posting in PostingListDecoderV1::new(&list.postings, true) {
+                if visited.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                    retrieval_checkpoint(control)?;
+                }
+                visited += 1;
+                let (document, _) = posting.map_err(map_query_artifact_error)?;
+                if !existing.contains(document) {
+                    added.insert(document);
+                    if added.len() > remaining as u64 {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+        retrieval_checkpoint(control)?;
+        Ok(Some(added))
     }
 }
 
@@ -1198,19 +1234,36 @@ impl<'a> ArtifactQueryV1<'a> {
             .iter()
             .map(|subtoken| normalize_lexical(subtoken))
             .collect::<Vec<_>>();
-        let sources = stats.candidate_sources(whole_terms, subtokens)?;
-        let mut documents = phrase_queries
+        let sources = stats.candidate_sources(whole_terms, subtokens);
+        let term_documents = admit_candidate_sources(
+            sources,
+            |source, existing, remaining| {
+                // A source with more independently guaranteed documents than
+                // the entire cap cannot fit after another source was admitted.
+                // This avoids decoding very common postings merely to prune.
+                if remaining != usize::MAX
+                    && source.minimum_documents > MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1
+                {
+                    return Ok(None);
+                }
+                stats.postings.new_documents_bounded(
+                    &source.term,
+                    |field| source.fields.admits(field),
+                    existing,
+                    remaining,
+                    request.control,
+                )
+            },
+            |frequency, source| {
+                if !pruned.iter().any(|(term, _)| term == &source.term) {
+                    pruned.push((source.term.clone(), frequency as u64));
+                }
+            },
+        )?;
+        let phrase_documents = phrase_queries
             .values()
             .fold(RoaringBitmap::new(), |union, documents| union | documents);
-        for source in admit_candidate_sources(sources, |frequency, source| {
-            pruned.push((source.term.clone(), frequency as u64));
-        }) {
-            documents |= stats
-                .postings
-                .documents(&source.term, |field| source.fields.admits(field))
-                .map_err(map_query_artifact_error)?;
-        }
-        Ok(documents)
+        Ok(phrase_documents | term_documents)
     }
 
     fn exact_documents(
@@ -1597,7 +1650,6 @@ struct LexicalStatsCacheV1 {
 enum CandidateSourceFieldsV1 {
     Whole,
     Subtoken,
-    All,
 }
 
 impl CandidateSourceFieldsV1 {
@@ -1605,7 +1657,6 @@ impl CandidateSourceFieldsV1 {
         match self {
             Self::Whole => field != LexicalFieldV1::Subtoken,
             Self::Subtoken => field == LexicalFieldV1::Subtoken,
-            Self::All => true,
         }
     }
 }
@@ -1613,6 +1664,7 @@ impl CandidateSourceFieldsV1 {
 struct LexicalCandidateSourceV1 {
     term: String,
     fields: CandidateSourceFieldsV1,
+    minimum_documents: usize,
 }
 
 fn lexical_terms(
@@ -1672,53 +1724,59 @@ impl LexicalStatsCacheV1 {
             .fold(0usize, usize::saturating_add)
     }
 
-    /// Charge a normalized term only once when both scoring channels name it.
-    /// Their actual document union, not the larger individual frequency, is
-    /// required: the channels may overlap completely or be disjoint. Scoring
-    /// retains the original field postings and frequencies. Only one transient
-    /// bitmap is needed here; admitted sources are decoded into the final set.
+    /// Keep whole-word and subtoken channels independently eligible. Their
+    /// stored field frequencies order sources without eager bitmap decoding;
+    /// admission later accounts for exact new document IDs across channels.
     fn candidate_sources(
         &self,
         whole_terms: Vec<String>,
         subtokens: Vec<String>,
-    ) -> Result<Vec<(usize, LexicalCandidateSourceV1)>, RetrievalPortError> {
-        let mut subtokens = subtokens.into_iter().collect::<BTreeSet<_>>();
+    ) -> Vec<(usize, LexicalCandidateSourceV1)> {
         let mut seen = BTreeSet::new();
         let mut sources = Vec::with_capacity(whole_terms.len() + subtokens.len());
         for term in whole_terms {
             if !seen.insert(term.clone()) || !self.postings.by_term.contains_key(&term) {
                 continue;
             }
-            let (frequency, fields) = if subtokens.remove(&term) {
-                let documents = self
-                    .postings
-                    .documents(&term, |_| true)
-                    .map_err(map_query_artifact_error)?;
-                (
-                    usize::try_from(documents.len()).map_err(contract_error)?,
-                    CandidateSourceFieldsV1::All,
-                )
-            } else {
-                (
-                    self.whole_term_documents(&term),
-                    CandidateSourceFieldsV1::Whole,
-                )
-            };
-            sources.push((frequency, LexicalCandidateSourceV1 { term, fields }));
+            let frequency = self.whole_term_documents(&term);
+            if frequency == 0 {
+                continue;
+            }
+            let minimum_documents = self
+                .document_frequencies
+                .iter()
+                .filter(|(field, _)| **field != LexicalFieldV1::Subtoken)
+                .map(|(_, terms)| terms.get(&term).copied().unwrap_or_default())
+                .max()
+                .unwrap_or_default();
+            sources.push((
+                frequency,
+                LexicalCandidateSourceV1 {
+                    term,
+                    fields: CandidateSourceFieldsV1::Whole,
+                    minimum_documents,
+                },
+            ));
         }
-        for term in subtokens {
-            if self.postings.by_term.contains_key(&term) {
+        for term in subtokens.into_iter().collect::<BTreeSet<_>>() {
+            if !self.postings.by_term.contains_key(&term) {
+                continue;
+            }
+            let frequency = self.document_frequency(LexicalFieldV1::Subtoken, &term);
+            if frequency > 0 {
                 sources.push((
-                    self.document_frequency(LexicalFieldV1::Subtoken, &term),
+                    frequency,
                     LexicalCandidateSourceV1 {
                         term,
                         fields: CandidateSourceFieldsV1::Subtoken,
+                        minimum_documents: frequency,
                     },
                 ));
             }
         }
-        Ok(sources)
+        sources
     }
+
 }
 
 struct LexicalDraftV1 {
@@ -2067,29 +2125,53 @@ mod candidate_source_tests {
         stats
     }
 
+    struct ActiveControl;
+
+    impl crate::retrieval::ports::RetrievalExecutionControl for ActiveControl {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn elapsed_micros(&self) -> u64 {
+            0
+        }
+    }
+
     fn candidates(
         stats: &LexicalStatsCacheV1,
         whole: &[&str],
         subtokens: &[&str],
     ) -> (RoaringBitmap, Vec<(String, usize)>) {
-        let sources = stats
-            .candidate_sources(
-                whole.iter().map(|term| (*term).to_owned()).collect(),
-                subtokens.iter().map(|term| (*term).to_owned()).collect(),
-            )
-            .expect("candidate sources");
+        let sources = stats.candidate_sources(
+            whole.iter().map(|term| (*term).to_owned()).collect(),
+            subtokens.iter().map(|term| (*term).to_owned()).collect(),
+        );
         let mut pruned = Vec::new();
-        let admitted = admit_candidate_sources(sources, |frequency, source| {
-            pruned.push((source.term.clone(), frequency));
-        });
-        let mut documents = RoaringBitmap::new();
-        for source in admitted {
-            documents |= stats
-                .postings
-                .documents(&source.term, |field| source.fields.admits(field))
-                .expect("decode admitted postings");
-        }
-        (documents, pruned)
+        let admitted = admit_candidate_sources(
+            sources,
+            |source, existing, remaining| {
+                if remaining != usize::MAX
+                    && source.minimum_documents
+                        > crate::retrieval::lexical::MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1
+                {
+                    return Ok(None);
+                }
+                stats.postings.new_documents_bounded(
+                    &source.term,
+                    |field| source.fields.admits(field),
+                    existing,
+                    remaining,
+                    &ActiveControl,
+                )
+            },
+            |frequency, source| {
+                if !pruned.iter().any(|(term, _)| term == &source.term) {
+                    pruned.push((source.term.clone(), frequency));
+                }
+            },
+        )
+        .expect("candidate admission");
+        (admitted, pruned)
     }
 
     #[test]
@@ -2138,6 +2220,75 @@ mod candidate_source_tests {
     }
 
     #[test]
+    fn rare_whole_word_is_not_lost_behind_a_common_subtoken() {
+        let stats = stats(&[
+            ("cache", LexicalFieldV1::BodyText, 0..1),
+            ("cache", LexicalFieldV1::Subtoken, 1..20_001),
+            ("token", LexicalFieldV1::BodyText, 20_001..20_101),
+            ("token", LexicalFieldV1::Subtoken, 20_001..20_101),
+        ]);
+        let (documents, pruned) = candidates(&stats, &["cache", "token"], &["cache", "token"]);
+        assert_eq!(documents.len(), 101);
+        assert!(documents.contains(0), "rare whole-word cache must survive");
+        assert!(documents.contains(20_100));
+        assert_eq!(pruned, vec![("cache".to_owned(), 20_000)]);
+    }
+
+    #[test]
+    fn rejected_common_source_is_not_decoded_before_admission() {
+        let mut stats = stats(&[
+            ("needle", LexicalFieldV1::BodyText, 0..1),
+            ("get", LexicalFieldV1::Subtoken, 1..30_001),
+        ]);
+        // The stored frequency alone proves this source cannot fit. If it
+        // were eagerly decoded, this intentionally invalid payload would fail.
+        stats.postings.by_term.get_mut("get").unwrap()[0].postings = vec![255];
+        let (documents, pruned) = candidates(&stats, &["needle"], &["get"]);
+        assert_eq!(documents.len(), 1);
+        assert!(documents.contains(0));
+        assert_eq!(pruned, vec![("get".to_owned(), 30_000)]);
+    }
+
+    #[test]
+    fn posting_admission_checks_cancellation_during_decode() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CancelAfterBatch(AtomicUsize);
+
+        impl crate::retrieval::ports::RetrievalExecutionControl for CancelAfterBatch {
+            fn is_cancelled(&self) -> bool {
+                self.0.fetch_add(1, Ordering::SeqCst) > 0
+            }
+
+            fn elapsed_micros(&self) -> u64 {
+                0
+            }
+        }
+
+        let stats = stats(&[("needle", LexicalFieldV1::BodyText, 0..1_024)]);
+        let control = CancelAfterBatch(AtomicUsize::new(0));
+        let error = stats
+            .postings
+            .new_documents_bounded(
+                "needle",
+                |_| true,
+                &RoaringBitmap::new(),
+                usize::MAX,
+                &control,
+            )
+            .expect_err("cancelled during the posting stream");
+        assert!(matches!(
+            error,
+            crate::retrieval::ports::RetrievalPortError::Cancelled
+        ));
+        assert_eq!(
+            control.0.load(Ordering::SeqCst),
+            2,
+            "the request was interrupted at the second 128-posting checkpoint"
+        );
+    }
+
+    #[test]
     fn repeated_sources_are_deduplicated_without_widening_requested_fields() {
         let stats = stats(&[
             ("needle", LexicalFieldV1::BodyText, 0..100),
@@ -2148,8 +2299,7 @@ mod candidate_source_tests {
             .candidate_sources(
                 vec!["needle".to_owned(), "needle".to_owned()],
                 vec!["part".to_owned(), "part".to_owned()],
-            )
-            .unwrap();
+            );
         assert_eq!(sources.len(), 2);
         assert_eq!(sources[0].0, 100);
         assert_eq!(sources[0].1.fields, CandidateSourceFieldsV1::Whole);
