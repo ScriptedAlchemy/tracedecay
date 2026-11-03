@@ -3983,10 +3983,8 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let (owner, database) = persistent_database(&temp);
         let generation = manifest("source:one", "watermark:one");
-        let locator = GenerationLocator::new(
-            generation.projection.clone(),
-            generation.generation.clone(),
-        );
+        let locator =
+            GenerationLocator::new(generation.projection.clone(), generation.generation.clone());
         let namespace = generation.identity().physical_namespace().unwrap();
         let directory = temp.path().join("commit-metadata.sealed").join(
             namespace
@@ -4002,7 +4000,11 @@ mod tests {
         let error = database
             .delete_generation_contents(&locator, &|| Ok(()))
             .expect_err("a failed sealed unlink must not complete retention");
-        assert!(error.to_string().contains("sealed directory removal failed"));
+        assert!(
+            error
+                .to_string()
+                .contains("sealed directory removal failed")
+        );
         assert_eq!(std::fs::read(&directory).unwrap(), b"not a directory");
 
         std::fs::remove_file(&directory).unwrap();
