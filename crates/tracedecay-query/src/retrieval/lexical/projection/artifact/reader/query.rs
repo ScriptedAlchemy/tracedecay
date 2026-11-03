@@ -1238,12 +1238,7 @@ impl<'a> ArtifactQueryV1<'a> {
         let term_documents = admit_candidate_sources(
             sources,
             |source, existing, remaining| {
-                // A source with more independently guaranteed documents than
-                // the entire cap cannot fit after another source was admitted.
-                // This avoids decoding very common postings merely to prune.
-                if remaining != usize::MAX
-                    && source.minimum_documents > MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1
-                {
+                if source.cannot_fit(existing, remaining) {
                     return Ok(None);
                 }
                 stats.postings.new_documents_bounded(
@@ -1667,6 +1662,19 @@ struct LexicalCandidateSourceV1 {
     minimum_documents: usize,
 }
 
+impl LexicalCandidateSourceV1 {
+    /// A source cannot fit even if every already-admitted document overlaps.
+    /// When the first source exceeds the cap, its existing documents may
+    /// entirely cover a second large channel, so its size alone cannot prune.
+    fn cannot_fit(&self, existing: &RoaringBitmap, remaining: usize) -> bool {
+        remaining != usize::MAX
+            && self.minimum_documents
+                > usize::try_from(existing.len())
+                    .unwrap_or(usize::MAX)
+                    .saturating_add(remaining)
+    }
+}
+
 fn lexical_terms(
     prepared: &PreparedLexicalQueryV1<'_>,
     fuzzy: &FuzzyExpansionsV1,
@@ -2087,6 +2095,7 @@ impl EditDistanceScratchV1 {
 mod candidate_source_tests {
     use std::collections::BTreeMap;
     use std::ops::Range;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use roaring::RoaringBitmap;
 
@@ -2150,10 +2159,7 @@ mod candidate_source_tests {
         let admitted = admit_candidate_sources(
             sources,
             |source, existing, remaining| {
-                if remaining != usize::MAX
-                    && source.minimum_documents
-                        > crate::retrieval::lexical::MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1
-                {
+                if source.cannot_fit(existing, remaining) {
                     return Ok(None);
                 }
                 stats.postings.new_documents_bounded(
@@ -2220,6 +2226,34 @@ mod candidate_source_tests {
     }
 
     #[test]
+    fn fully_overlapping_oversized_channels_do_not_claim_partial_evidence() {
+        let stats = stats(&[
+            ("cache", LexicalFieldV1::BodyText, 0..20_000),
+            ("cache", LexicalFieldV1::Subtoken, 0..20_000),
+        ]);
+        let (documents, pruned) = candidates(&stats, &["cache"], &["cache"]);
+        assert_eq!(documents.len(), 20_000);
+        assert!(documents.contains(19_999));
+        assert!(
+            pruned.is_empty(),
+            "the second channel adds no documents despite exceeding the cap: {pruned:?}"
+        );
+    }
+
+    #[test]
+    fn oversized_disjoint_channels_still_report_omitted_candidates() {
+        let stats = stats(&[
+            ("cache", LexicalFieldV1::BodyText, 0..20_000),
+            ("cache", LexicalFieldV1::Subtoken, 20_000..40_000),
+        ]);
+        let (documents, pruned) = candidates(&stats, &["cache"], &["cache"]);
+        assert_eq!(documents.len(), 20_000);
+        assert!(documents.contains(19_999));
+        assert!(!documents.contains(20_000));
+        assert_eq!(pruned, vec![("cache".to_owned(), 20_000)]);
+    }
+
+    #[test]
     fn rare_whole_word_is_not_lost_behind_a_common_subtoken() {
         let stats = stats(&[
             ("cache", LexicalFieldV1::BodyText, 0..1),
@@ -2251,8 +2285,6 @@ mod candidate_source_tests {
 
     #[test]
     fn posting_admission_checks_cancellation_during_decode() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
         struct CancelAfterBatch(AtomicUsize);
 
         impl crate::retrieval::ports::RetrievalExecutionControl for CancelAfterBatch {
