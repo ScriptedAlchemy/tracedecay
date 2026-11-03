@@ -2055,7 +2055,7 @@ mod auxiliary_scheduling_tests {
         connection
     }
 
-    fn vacuum_page_counts(connection: &rusqlite::Connection) -> (u64, u64) {
+    fn vacuum_page_counts(connection: &rusqlite::Connection) -> (i64, i64) {
         connection
             .query_row(
                 "SELECT page_count, freelist_count FROM pragma_page_count, pragma_freelist_count",
@@ -2083,7 +2083,7 @@ mod auxiliary_scheduling_tests {
 
             assert!(response.try_recv().unwrap().is_ok());
             let after = vacuum_page_counts(&connection);
-            assert_eq!(before.1 - after.1, u64::from(max_pages.max(1)));
+            assert_eq!(before.1 - after.1, i64::from(max_pages.max(1)));
             assert!(after.0 < before.0, "reclaimed pages leave the database");
             assert!(after.1 > 0, "one call must not drain the entire freelist");
             assert_eq!(
