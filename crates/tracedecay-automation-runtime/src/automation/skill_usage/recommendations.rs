@@ -307,7 +307,11 @@ mod tests {
             assert!(!recommendation.improvement, "{recommendation:?}");
             assert_eq!(recommendation.recommendation, "none");
             assert_eq!(recommendation.priority, "none");
-            assert!(recommendation.reason.contains("use evidence is unavailable"));
+            assert!(
+                recommendation
+                    .reason
+                    .contains("use evidence is unavailable")
+            );
         }
         let patched = by_id(&recommendations, "patched-twice-skill", id);
         for expected in ["patches=2", "uses=0", "use_telemetry=unobserved"] {
@@ -327,7 +331,11 @@ mod tests {
             let recommendation = &recommendations[0];
             assert!(!recommendation.improvement, "{recommendation:?}");
             assert_eq!(recommendation.recommendation, "none");
-            assert!(recommendation.reason.contains("use evidence is unavailable"));
+            assert!(
+                recommendation
+                    .reason
+                    .contains("use evidence is unavailable")
+            );
         }
     }
 
@@ -346,7 +354,10 @@ mod tests {
                 recommendation.recommendation,
                 if expected { "repair_candidate" } else { "none" }
             );
-            assert_eq!(recommendation.priority, if expected { "medium" } else { "none" });
+            assert_eq!(
+                recommendation.priority,
+                if expected { "medium" } else { "none" }
+            );
             assert!(
                 recommendation
                     .evidence
@@ -358,10 +369,30 @@ mod tests {
     #[test]
     fn observed_usage_does_not_override_protected_skill_exclusions() {
         for (pinned, source, state, reason) in [
-            (true, ManagedSkillSource::AutomationRun, ManagedSkillState::Active, "pinned"),
-            (false, ManagedSkillSource::User, ManagedSkillState::Active, "user-authored"),
-            (false, ManagedSkillSource::AutomationRun, ManagedSkillState::Disabled, "disabled"),
-            (false, ManagedSkillSource::AutomationRun, ManagedSkillState::Archived, "archived"),
+            (
+                true,
+                ManagedSkillSource::AutomationRun,
+                ManagedSkillState::Active,
+                "pinned",
+            ),
+            (
+                false,
+                ManagedSkillSource::User,
+                ManagedSkillState::Active,
+                "user-authored",
+            ),
+            (
+                false,
+                ManagedSkillSource::AutomationRun,
+                ManagedSkillState::Disabled,
+                "disabled",
+            ),
+            (
+                false,
+                ManagedSkillSource::AutomationRun,
+                ManagedSkillState::Archived,
+                "archived",
+            ),
         ] {
             let mut summary = automation_skill("protected-skill");
             summary.pinned = pinned;
