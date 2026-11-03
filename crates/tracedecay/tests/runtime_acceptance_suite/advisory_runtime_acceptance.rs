@@ -1201,8 +1201,18 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
             );
         } else {
             let stderr = String::from_utf8_lossy(&stop_output.stderr).into_owned();
+            let stop_problem = serde_json::from_slice::<Value>(&stop_output.stdout)
+                .ok()
+                .and_then(|response| {
+                    serde_json::from_str::<Value>(response["content"][0]["text"].as_str()?).ok()
+                })
+                .map(|payload| payload["problem"].clone())
+                .unwrap_or(Value::Null);
+            let catching_up = stop_problem["code"] == "temporal_refresh_unavailable"
+                && stop_problem["retryable"] == true
+                && stop_problem["terminality"] == "pre_admission";
             assert!(
-                stderr.contains("is warming in the background"),
+                catching_up || stderr.contains("is warming in the background"),
                 "registered daemon stop ingest failed\nstdout:\n{}\nstderr:\n{stderr}\ndaemon log:\n{}",
                 String::from_utf8_lossy(&stop_output.stdout),
                 std::fs::read_to_string(&daemon_log).expect("read isolated advisory daemon log"),

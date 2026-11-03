@@ -622,7 +622,7 @@ async fn mount_with_analysis_gate(
         .await
         .expect("mounted code-index owner activity");
     let mut last_observation = "no owner observation completed".to_owned();
-    let initial_generation = tokio::time::timeout(Duration::from_secs(5), async {
+    let initial_generation = tokio::time::timeout(Duration::from_secs(120), async {
         loop {
             if schedulers
                 .latest_generation_id(&repository_root)

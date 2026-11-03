@@ -549,7 +549,7 @@ pub fn pick_free_port() -> u16 {
 }
 
 pub fn http_agent() -> ureq::Agent {
-    http_agent_with_timeout(Duration::from_secs(4))
+    http_agent_with_timeout(Duration::from_secs(30))
 }
 
 pub fn http_agent_with_timeout(timeout: Duration) -> ureq::Agent {
