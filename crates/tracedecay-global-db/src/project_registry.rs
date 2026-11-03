@@ -894,12 +894,16 @@ impl RegisteredGlobalDb {
     ///   two or more project ids already claim this root or its git common
     ///   directory. Consolidating them would silently pick a winner, so the
     ///   profile is reported as needing a reset instead.
+    /// * [`TraceDecayError::Config`]: the registered root's metadata could not
+    ///   be inspected before remapping its authority. The previous directory
+    ///   is not assumed to have moved when inspection fails.
     /// * [`TraceDecayError::Database`]: the registry read, write, or
     ///   post-commit read-back failed. Uncommitted work is dropped with the
     ///   transaction.
     ///
     /// [`TraceDecayError::ProjectRoute`]: tracedecay_domain::errors::TraceDecayError::ProjectRoute
     /// [`TraceDecayError::ResetRequired`]: tracedecay_domain::errors::TraceDecayError::ResetRequired
+    /// [`TraceDecayError::Config`]: tracedecay_domain::errors::TraceDecayError::Config
     /// [`TraceDecayError::Database`]: tracedecay_domain::errors::TraceDecayError::Database
     pub fn upsert_code_project<'a>(
         &'a self,
@@ -1070,12 +1074,31 @@ impl RegisteredGlobalDb {
                     && match registered_root(&transaction, project_id).await? {
                         None => true,
                         // The first enrolled checkout stays the registered root
-                        // while it exists; a linked worktree of it may repair it.
+                        // while its directory exists; a linked worktree of it may
+                        // repair it. A replacement file does not own the root.
                         Some((registered_root, registered_common_dir)) => {
-                            registered_root == canonical_root
-                                || !Path::new(&registered_root).exists()
+                            if registered_root == canonical_root
                                 || (registered_common_dir.is_some()
                                     && registered_common_dir == git_common_dir_text)
+                            {
+                                true
+                            } else {
+                                match std::fs::metadata(&registered_root) {
+                                    Ok(metadata) => !metadata.is_dir(),
+                                    Err(error)
+                                        if error.kind() == std::io::ErrorKind::NotFound =>
+                                    {
+                                        true
+                                    }
+                                    Err(error) => {
+                                        return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                                            message: format!(
+                                                "cannot inspect registered root '{registered_root}' for project '{project_id}': {error}"
+                                            ),
+                                        });
+                                    }
+                                }
+                            }
                         }
                     };
                 if rewrite_registered_root {
@@ -2506,4 +2529,108 @@ pub async fn registered_enrollment_roots(
         Err(_) => {}
     }
     Ok(roots)
+}
+
+#[cfg(test)]
+mod root_remap_tests {
+    use crate::tests::harness::RegisteredGlobalDbHarness;
+
+    #[asupersync::test]
+    async fn replacement_file_at_former_root_allows_registry_remap() {
+        let harness = RegisteredGlobalDbHarness::open("registry-replacement-file-remap").await;
+        let db = &harness.registered;
+        let storage_root = db.db_path().parent().expect("registered storage root");
+        let original_root = storage_root.join("original-checkout");
+        let moved_root = storage_root.join("moved-checkout");
+        let project_id = "replacement-file-project";
+        std::fs::create_dir_all(&original_root).expect("create original checkout");
+        let original = db
+            .upsert_code_project(project_id, &original_root, None, None, Some("main"))
+            .await
+            .expect("register original checkout");
+
+        std::fs::rename(&original_root, &moved_root).expect("move registered checkout");
+        let replacement_contents = b"unrelated replacement file";
+        std::fs::write(&original_root, replacement_contents)
+            .expect("replace former root with file");
+
+        let remapped = db
+            .upsert_code_project(project_id, &moved_root, None, None, Some("main"))
+            .await
+            .expect("remap past replacement file");
+        let canonical_moved_root = moved_root.canonicalize().expect("canonical moved root");
+        assert_eq!(remapped.project_id, original.project_id);
+        assert_eq!(
+            remapped.canonical_root,
+            canonical_moved_root.to_string_lossy().into_owned()
+        );
+        assert_eq!(remapped.created_at, original.created_at);
+        assert_eq!(
+            db.get_code_project(project_id)
+                .await
+                .expect("read remapped authority"),
+            Some(remapped)
+        );
+        for alias in [&original_root, &moved_root] {
+            let context = db
+                .project_registry_context_by_alias(alias)
+                .await
+                .expect("resolve checkout alias")
+                .expect("checkout alias remains registered");
+            assert_eq!(context.project.project_id, project_id);
+        }
+        assert_eq!(
+            std::fs::read(&original_root).expect("read replacement file"),
+            replacement_contents
+        );
+    }
+
+    #[cfg(unix)]
+    #[asupersync::test]
+    async fn uninspectable_former_root_refuses_registry_remap_without_writes() {
+        let harness = RegisteredGlobalDbHarness::open("registry-uninspectable-root-remap").await;
+        let db = &harness.registered;
+        let storage_root = db.db_path().parent().expect("registered storage root");
+        let original_root = storage_root.join("original-checkout");
+        let moved_root = storage_root.join("moved-checkout");
+        let project_id = "uninspectable-root-project";
+        std::fs::create_dir_all(&original_root).expect("create original checkout");
+        let original = db
+            .upsert_code_project(project_id, &original_root, None, None, Some("main"))
+            .await
+            .expect("register original checkout");
+
+        std::fs::rename(&original_root, &moved_root).expect("move registered checkout");
+        // A self-referential symlink fails metadata inspection even when the
+        // test runs as root, unlike a directory with its read permissions removed.
+        std::os::unix::fs::symlink(&original_root, &original_root)
+            .expect("make former root uninspectable");
+        let inspection_error = std::fs::metadata(&original_root)
+            .expect_err("self-referential symlink must fail inspection");
+        assert_ne!(inspection_error.kind(), std::io::ErrorKind::NotFound);
+
+        let error = db
+            .upsert_code_project(project_id, &moved_root, None, None, Some("replacement"))
+            .await
+            .expect_err("inspection failure must refuse remapping");
+        let tracedecay_domain::errors::TraceDecayError::Config { message } = error else {
+            panic!("expected a configuration refusal, got {error:?}");
+        };
+        assert!(message.contains("cannot inspect registered root"));
+        assert!(message.contains(&original.canonical_root));
+        assert!(message.contains(project_id));
+        assert_eq!(
+            db.get_code_project(project_id)
+                .await
+                .expect("read unchanged authority"),
+            Some(original)
+        );
+        assert!(
+            db.project_registry_context_by_alias(&moved_root)
+                .await
+                .expect("check moved-root alias")
+                .is_none(),
+            "refused remapping must not publish the destination alias"
+        );
+    }
 }
