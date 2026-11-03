@@ -69,6 +69,10 @@ async fn moved_nongit_project_is_readopted_only_when_named() {
     let moved = root.join("nongit-moved");
     std::fs::rename(&original, &moved).expect("move nongit project");
     let moved_canonical = moved.canonicalize().expect("canonical moved root");
+    // A later ordinary file at the old pathname is not the moved directory
+    // and must neither block named adoption nor be modified by the remap.
+    std::fs::write(&original, b"unrelated replacement file")
+        .expect("seed a file at the former project root");
 
     // Ambient first-touch (`Never`) mints a fresh path-derived identity and
     // must not touch the moved project's registration.
@@ -126,6 +130,10 @@ async fn moved_nongit_project_is_readopted_only_when_named() {
         std::path::Path::new(&remapped.project.canonical_root),
         moved_canonical.as_path(),
         "registry canonical root must follow the move"
+    );
+    assert_eq!(
+        std::fs::read(&original).expect("replacement file survives adoption"),
+        b"unrelated replacement file",
     );
     let graph_bytes_after = std::fs::read(&layout.graph_db_path).expect("graph bytes after");
     assert_eq!(

@@ -76,15 +76,22 @@ pub async fn adopt_moved_nongit_project(
         });
     }
     let previous_root = PathBuf::from(&project.canonical_root);
-    let previous_exists = previous_root
-        .try_exists()
-        .map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "cannot inspect registered root '{}' for project '{requested}': {error}",
-                previous_root.display(),
-            ),
-        })?;
-    if previous_root == new_root || previous_exists {
+    // The registered root owns a directory, not any replacement file at
+    // the old pathname. Preserve inspection errors rather than assuming a
+    // directory was moved when its metadata cannot be checked.
+    let previous_directory_exists = match std::fs::metadata(&previous_root) {
+        Ok(metadata) => metadata.is_dir(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "cannot inspect registered root '{}' for project '{requested}': {error}",
+                    previous_root.display(),
+                ),
+            });
+        }
+    };
+    if previous_root == new_root || previous_directory_exists {
         return Err(TraceDecayError::Config {
             message: format!(
                 "project '{requested}' has not moved from its registered root '{}'",
