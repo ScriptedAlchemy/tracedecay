@@ -218,9 +218,13 @@ impl McpServer {
     pub async fn ledger_writes_settled_within(&self, timeout: std::time::Duration) -> bool {
         let wait = async {
             loop {
-                // Register interest *before* re-checking so a completion
-                // between the check and the await cannot be missed.
+                // A Notify::notified() future does not register with
+                // notify_waiters() until it is polled or enabled. Enable it
+                // before reading counters or a final write could finish in
+                // that gap and leave shutdown waiting until its deadline.
                 let notified = self.ledger_write_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
                 let started = self.ledger_writes_started.load(Ordering::SeqCst);
                 let finished = self.ledger_writes_finished.load(Ordering::SeqCst);
                 if finished >= started {
