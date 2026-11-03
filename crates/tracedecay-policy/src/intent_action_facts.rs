@@ -34,10 +34,24 @@ pub struct ActionFactInputV1<'a> {
 /// priority order and without repeats. The first element is the intent the
 /// hook hint surface shows.
 pub fn action_facts(input: &ActionFactInputV1<'_>) -> Vec<ContextScoutIntentKindV1> {
+    classify(input, |_| true)
+}
+
+/// Tool activity and authenticated output, excluding semantic interpretations
+/// of prompt or command text. The intent pass uses this evidence independently
+/// of its model answers; hook-local fallback classification remains separate.
+pub fn observed_action_facts(input: &ActionFactInputV1<'_>) -> Vec<ContextScoutIntentKindV1> {
+    classify(input, |rule| rule.observed)
+}
+
+fn classify(
+    input: &ActionFactInputV1<'_>,
+    include: impl Fn(&ClassificationRule) -> bool,
+) -> Vec<ContextScoutIntentKindV1> {
     let facts = ActionFactContext::new(input);
     let mut intents = Vec::new();
     for rule in CLASSIFICATION_RULES {
-        if !intents.contains(&rule.intent) && (rule.matches)(&facts) {
+        if include(rule) && !intents.contains(&rule.intent) && (rule.matches)(&facts) {
             intents.push(rule.intent);
         }
     }
@@ -96,20 +110,24 @@ type ClassificationPredicate = fn(&ActionFactContext<'_>) -> bool;
 
 struct ClassificationRule {
     intent: ContextScoutIntentKindV1,
+    observed: bool,
     matches: ClassificationPredicate,
 }
 
 const CLASSIFICATION_RULES: &[ClassificationRule] = &[
     ClassificationRule {
         intent: ContextScoutIntentKindV1::ExploreSubagent,
+        observed: true,
         matches: |facts| is_explore_subagent(facts.input),
     },
     ClassificationRule {
         intent: ContextScoutIntentKindV1::SubagentStartContext,
+        observed: true,
         matches: |facts| is_subagent_context_handoff(facts.input),
     },
     ClassificationRule {
         intent: ContextScoutIntentKindV1::SemanticSearch,
+        observed: true,
         matches: |facts| is_semantic_search_tool(facts.input),
     },
     // Tool-action rules precede the free-text rules: on a tool event the text
@@ -117,14 +135,17 @@ const CLASSIFICATION_RULES: &[ClassificationRule] = &[
     // pattern such as "impact" must not outrank the search the tool performed.
     ClassificationRule {
         intent: ContextScoutIntentKindV1::MemoryStore,
+        observed: true,
         matches: |facts| is_memory_store_edit(facts.input),
     },
     ClassificationRule {
         intent: ContextScoutIntentKindV1::EditRedundancy,
+        observed: true,
         matches: |facts| is_redundancy_candidate_edit(facts.input),
     },
     ClassificationRule {
         intent: ContextScoutIntentKindV1::FileLookup,
+        observed: true,
         matches: |facts| {
             facts
                 .tool_name
@@ -134,14 +155,17 @@ const CLASSIFICATION_RULES: &[ClassificationRule] = &[
     },
     ClassificationRule {
         intent: ContextScoutIntentKindV1::FileRead,
+        observed: true,
         matches: |facts| facts.command.is_some_and(is_shell_file_read_command),
     },
     ClassificationRule {
         intent: ContextScoutIntentKindV1::Search,
+        observed: true,
         matches: |facts| facts.command.is_some_and(is_shell_search_command),
     },
     ClassificationRule {
         intent: ContextScoutIntentKindV1::Search,
+        observed: true,
         matches: |facts| {
             facts
                 .tool_name
@@ -150,75 +174,99 @@ const CLASSIFICATION_RULES: &[ClassificationRule] = &[
     },
     ClassificationRule {
         intent: ContextScoutIntentKindV1::ToolDescriptorRead,
+        observed: true,
         matches: |facts| is_tracedecay_tool_descriptor_read(facts.input),
     },
     ClassificationRule {
         intent: ContextScoutIntentKindV1::FileRead,
+        observed: true,
         matches: |facts| is_single_file_read(facts.input),
     },
     ClassificationRule {
         intent: ContextScoutIntentKindV1::UnexpectedChanges,
+        observed: false,
         matches: |facts| signals_unexpected_change(&facts.text),
     },
     ClassificationRule {
         intent: ContextScoutIntentKindV1::SessionRecall,
+        observed: false,
         matches: |facts| asks_for_session_recall(&facts.text),
     },
     ClassificationRule {
         intent: ContextScoutIntentKindV1::ProjectContext,
-        matches: |facts| {
-            asks_for_project_context(&facts.text)
-                || facts.command.is_some_and(is_project_discovery_command)
-        },
+        observed: false,
+        matches: |facts| asks_for_project_context(&facts.text),
+    },
+    ClassificationRule {
+        intent: ContextScoutIntentKindV1::ProjectContext,
+        observed: true,
+        matches: |facts| facts.command.is_some_and(is_project_discovery_command),
     },
     ClassificationRule {
         intent: ContextScoutIntentKindV1::CallGraph,
+        observed: false,
         matches: |facts| asks_for_call_graph(&facts.text),
     },
     ClassificationRule {
         intent: ContextScoutIntentKindV1::Impact,
+        observed: false,
         matches: |facts| asks_for_impact(&facts.text),
     },
     ClassificationRule {
         intent: ContextScoutIntentKindV1::BuildDiagnostics,
+        observed: false,
         matches: |facts| {
             (!facts.command_is_shell_search && asks_for_build_diagnostics(&facts.prompt_text))
                 || facts.prompt_has_diagnostic
-                || facts.captured_output_has_diagnostic
-                || facts.trusted_build_failure
         },
     },
     ClassificationRule {
+        intent: ContextScoutIntentKindV1::BuildDiagnostics,
+        observed: true,
+        matches: |facts| facts.captured_output_has_diagnostic || facts.trusted_build_failure,
+    },
+    ClassificationRule {
         intent: ContextScoutIntentKindV1::AtomicEdit,
+        observed: false,
         matches: |facts| asks_for_atomic_edit(&facts.text),
     },
     ClassificationRule {
         intent: ContextScoutIntentKindV1::ReviewChanges,
+        observed: false,
+        matches: |facts| asks_for_review_changes(&facts.text),
+    },
+    ClassificationRule {
+        intent: ContextScoutIntentKindV1::ReviewChanges,
+        observed: true,
         matches: |facts| {
-            asks_for_review_changes(&facts.text)
-                || facts
-                    .command
-                    .is_some_and(|command| is_diff_review_command(command, &facts.text))
+            facts
+                .command
+                .is_some_and(|command| is_diff_review_command(command, &facts.text))
         },
     },
     ClassificationRule {
         intent: ContextScoutIntentKindV1::TypeOrientation,
+        observed: false,
         matches: |facts| asks_for_type_orientation(&facts.text),
     },
     ClassificationRule {
         intent: ContextScoutIntentKindV1::Search,
+        observed: false,
         matches: |facts| asks_for_text_search(&facts.text),
     },
     ClassificationRule {
         intent: ContextScoutIntentKindV1::BroadRead,
+        observed: false,
         matches: |facts| asks_for_broad_read(&facts.text),
     },
     ClassificationRule {
         intent: ContextScoutIntentKindV1::SymbolLookup,
+        observed: false,
         matches: |facts| asks_for_symbol_lookup(&facts.text),
     },
     ClassificationRule {
         intent: ContextScoutIntentKindV1::FileLookup,
+        observed: false,
         matches: |facts| asks_for_file_lookup(&facts.text),
     },
 ];
@@ -1185,6 +1233,36 @@ mod tests {
         assert_eq!(
             first_action_fact(&read),
             Some(ContextScoutIntentKindV1::FileRead)
+        );
+    }
+
+    #[test]
+    fn observed_actions_do_not_promote_prompt_or_shell_keywords_to_facts() {
+        let prompt = input(
+            None,
+            None,
+            Some("do not investigate impact or find callers"),
+        );
+        assert!(!action_facts(&prompt).is_empty());
+        assert!(observed_action_facts(&prompt).is_empty());
+        assert!(
+            observed_action_facts(&input(
+                Some("Bash"),
+                Some("echo 'impact error[E0425]: missing symbol'"),
+                None,
+            ))
+            .is_empty()
+        );
+        assert_eq!(
+            observed_action_facts(&input(Some("Bash"), Some("rg impact src"), None)),
+            vec![ContextScoutIntentKindV1::Search]
+        );
+
+        let mut failure = input(Some("Bash"), Some("cargo check"), None);
+        failure.trusted_failure = true;
+        assert_eq!(
+            observed_action_facts(&failure),
+            vec![ContextScoutIntentKindV1::BuildDiagnostics]
         );
     }
 }

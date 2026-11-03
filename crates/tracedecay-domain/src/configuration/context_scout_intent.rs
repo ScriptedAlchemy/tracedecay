@@ -103,7 +103,8 @@ impl ContextScoutIntentKindV1 {
 }
 
 /// What made an intent a candidate: the decision engine's answer, a
-/// deterministic action fact observed in the turn, or both.
+/// deterministic action fact observed in the turn, both, or prompt inference
+/// used because this intent had no usable engine answer.
 #[derive(
     Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
 )]
@@ -112,6 +113,7 @@ pub enum IntentDecisionSourceV1 {
     Model,
     ActionFact,
     Both,
+    PromptFallback,
 }
 
 /// Bounds on the decision-engine round trip. `timeout_ms` bounds one request;

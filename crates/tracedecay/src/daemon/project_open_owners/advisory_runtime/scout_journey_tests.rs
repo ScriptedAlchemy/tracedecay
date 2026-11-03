@@ -1302,10 +1302,10 @@ async fn intent_pass_enqueues_one_session_suggestion_claimed_at_stop_and_settled
         evidence.decision.selected,
         ContextScoutIntentKindV1::SessionRecall
     );
-    assert_ne!(
+    assert_eq!(
         evidence.decision.source,
-        tracedecay_domain::configuration::IntentDecisionSourceV1::ActionFact,
-        "the engine answer carried the selection"
+        tracedecay_domain::configuration::IntentDecisionSourceV1::Model,
+        "prompt agreement must not be recorded as an observed action"
     );
     assert!(evidence.decision.answers.contains(
         &tracedecay_contracts::context_scout::ContextScoutIntentAnswerV1 {
@@ -1485,6 +1485,40 @@ async fn intent_pass_enqueues_one_session_suggestion_claimed_at_stop_and_settled
             .len(),
         0
     );
+    unregister_intent_owner(&fixture);
+}
+
+#[tokio::test]
+async fn negative_intent_answer_does_not_enqueue_a_prompt_keyword_suggestion() {
+    let fixture = IntentJourneyFixture::open(Some(intent_settings())).await;
+    let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "intent-negative-prompt",
+    )
+    .await;
+    let sessions = harness.registered.as_ref();
+    let project_key = "/project/intent-negative-prompt";
+    seed_intent_session(sessions, project_key).await;
+    seed_transcript_message(
+        sessions,
+        3,
+        "user",
+        "Do not analyze impact or find callers; these are quoted words.",
+        None,
+        now_utc_micros().0 / 1_000_000,
+    )
+    .await;
+    let engine = RecordingDecisionEngine::new(0.05);
+    let boundary = fixture.hook(79, completed_tool());
+    assert_eq!(
+        fixture
+            .pass(&boundary, sessions, project_key, &engine)
+            .await,
+        ContextScoutIntentPassOutcomeV1::NoCandidate {
+            model_outcome:
+                tracedecay_contracts::context_scout::ContextScoutModelOutcomeV1::Succeeded,
+        }
+    );
+    assert_eq!(engine.requests(), 1);
     unregister_intent_owner(&fixture);
 }
 

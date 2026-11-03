@@ -464,7 +464,8 @@ pub struct ContextScoutIntentAnswerV1 {
 }
 
 /// Why the intent pass selected one intent: the engine outcome and answers,
-/// the deterministic action facts, and which of them carried the selection.
+/// the observed action facts, and the source carrying the selection. A
+/// PromptFallback source names a prompt interpretation without an answer.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ContextScoutIntentReceiptV1 {

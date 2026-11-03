@@ -33,7 +33,9 @@ use tracedecay_domain::{
     UtcMicros, canonical_sha256,
 };
 use tracedecay_global_db::{AnalyticsEventInsert, RegisteredGlobalDb};
-use tracedecay_policy::intent_action_facts::{ActionFactInputV1, action_facts};
+use tracedecay_policy::intent_action_facts::{
+    ActionFactInputV1, action_facts, observed_action_facts,
+};
 use tracedecay_policy::intent_catalog::suggestion_text;
 use tracedecay_policy::intent_decision::{
     IntentCandidateV1, IntentDecisionInputV1, IntentDecisionV1, decide_intents,
@@ -68,7 +70,7 @@ const INTENT_CANDIDATE_DEDUPE_DOMAIN: &str = "tracedecay.context-scout.intent-ca
 const INTENT_ENVELOPE_DOMAIN: &str = "tracedecay.context-scout.intent-envelope.v1";
 const INTENT_WATERMARK_DOMAIN: &str = "tracedecay.context-scout.intent-watermark.v1";
 const INTENT_POLICY_ID: &str = "policy.context-scout.intent-pass.v1";
-const INTENT_POLICY_VERSION: &str = "tracedecay.context-scout.intent-pass.v1";
+const INTENT_POLICY_VERSION: &str = "tracedecay.context-scout.intent-pass.v2";
 /// Interval between window reads while the pass waits for the boundary's
 /// turn to be ingested.
 const FRESHEN_POLL: Duration = Duration::from_millis(50);
@@ -418,9 +420,9 @@ pub async fn run_context_scout_intent_pass(
     }
 
     let engine_identity = pass.engine.as_ref().map(|engine| engine.identity());
-    // Facts are pure string inspection over the window, independent of the
-    // engine; the engine exchange is the only bounded wait of the pass.
-    let facts = window_action_facts(&window);
+    // Keep actual tool activity separate from prompt interpretation. Only an
+    // unanswered intent may use the latter as its deterministic fallback.
+    let (facts, prompt_inferences) = window_intent_signals(&window);
     let engine_outcome = match ask_engine(&pass, settings, &window).await {
         EngineCallV1::Cancelled => return ContextScoutIntentPassOutcomeV1::Cancelled,
         EngineCallV1::Finished(outcome) => outcome,
@@ -431,6 +433,7 @@ pub async fn run_context_scout_intent_pass(
     let decision = decide_intents(&IntentDecisionInputV1 {
         answers: answers.as_deref(),
         facts: &facts,
+        prompt_inferences: &prompt_inferences,
         questions: &settings.questions,
         action_fact_score_permille: settings.action_fact_score_permille,
         delivered: &session.delivered_intents,
@@ -440,7 +443,13 @@ pub async fn run_context_scout_intent_pass(
         IntentDecisionV1::Candidates(_)
         | IntentDecisionV1::BelowThreshold { .. }
         | IntentDecisionV1::NoSignal => {
-            let duplicate = delivered_duplicate(answers.as_deref(), &facts, settings, &session);
+            let duplicate = delivered_duplicate(
+                answers.as_deref(),
+                &facts,
+                &prompt_inferences,
+                settings,
+                &session,
+            );
             let suppression = duplicate.map(|_| ContextScoutSuppressionV1::Duplicate);
             pass.owner
                 .record_intent_outcome(
@@ -747,43 +756,37 @@ async fn ask_engine(
     }
 }
 
-/// Action facts of the boundary's turn: the newest user message and every
-/// tool call recorded after it. Earlier turns were judged by earlier passes.
-fn window_action_facts(window: &SessionWindowV1) -> Vec<ContextScoutIntentKindV1> {
+/// Signals of the boundary's turn. Prompt interpretation is kept apart from
+/// recorded tool activity so a negative model answer can suppress inference
+/// without discarding an observed action. Earlier turns were judged already.
+fn window_intent_signals(
+    window: &SessionWindowV1,
+) -> (Vec<ContextScoutIntentKindV1>, Vec<ContextScoutIntentKindV1>) {
     let turn_start = window
         .messages
         .iter()
         .rposition(|message| message.role == SessionWindowRoleV1::User);
+    let (turn, prompt_inferences) = match turn_start {
+        Some(index) => (
+            &window.messages[index + 1..],
+            action_facts(&ActionFactInputV1 {
+                prompt: Some(window.messages[index].text.as_str()),
+                ..ActionFactInputV1::default()
+            }),
+        ),
+        None => (window.messages.as_slice(), Vec::new()),
+    };
     let mut facts = Vec::new();
-    let mut push = |found: Vec<ContextScoutIntentKindV1>| {
-        for intent in found {
-            if !facts.contains(&intent) {
-                facts.push(intent);
-            }
-        }
-    };
-    let turn = match turn_start {
-        Some(index) => {
-            let prompt = window.messages[index].text.as_str();
-            if !prompt.is_empty() {
-                push(action_facts(&ActionFactInputV1 {
-                    prompt: Some(prompt),
-                    ..ActionFactInputV1::default()
-                }));
-            }
-            &window.messages[index + 1..]
-        }
-        None => window.messages.as_slice(),
-    };
     for message in turn {
         for call in &message.tool_calls {
-            push(tool_call_facts(
-                &call.name,
-                call.argument_excerpt.as_deref(),
-            ));
+            for intent in tool_call_facts(&call.name, call.argument_excerpt.as_deref()) {
+                if !facts.contains(&intent) {
+                    facts.push(intent);
+                }
+            }
         }
     }
-    facts
+    (facts, prompt_inferences)
 }
 
 fn tool_call_facts(
@@ -805,7 +808,7 @@ fn tool_call_facts(
     let command = text_argument(&["command", "cmd"]);
     let file_path = text_argument(&["file_path", "path", "filePath", "target_file"]);
     let subagent_type = text_argument(&["subagent_type"]);
-    action_facts(&ActionFactInputV1 {
+    observed_action_facts(&ActionFactInputV1 {
         tool_name: Some(tool_name),
         command: command.as_deref(),
         file_path: file_path.as_deref(),
@@ -819,6 +822,7 @@ fn tool_call_facts(
 fn delivered_duplicate(
     answers: Option<&[(ContextScoutIntentKindV1, f64)]>,
     facts: &[ContextScoutIntentKindV1],
+    prompt_inferences: &[ContextScoutIntentKindV1],
     settings: &ContextScoutIntentSettingsV1,
     session: &ContextScoutIntentSessionStateV1,
 ) -> Option<ContextScoutIntentKindV1> {
@@ -828,6 +832,7 @@ fn delivered_duplicate(
     match decide_intents(&IntentDecisionInputV1 {
         answers,
         facts,
+        prompt_inferences,
         questions: &settings.questions,
         action_fact_score_permille: settings.action_fact_score_permille,
         delivered: &BTreeSet::new(),
