@@ -9,6 +9,7 @@ py_test(
         "score.py",
         "test_run_http.py",
     ],
+    imports = ["."],
     main = "test_run_http.py",
 )
 
@@ -21,5 +22,6 @@ py_test(
         "score.py",
         "test_score.py",
     ],
+    imports = ["."],
     main = "test_score.py",
 )
