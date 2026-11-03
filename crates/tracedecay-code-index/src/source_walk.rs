@@ -164,6 +164,22 @@ pub fn source_walk(
             } else {
                 &path_policy
             };
+            // Explicitly admitted submodules are otherwise broader than their
+            // include rules: an include is normally just an exclude override.
+            // Keep traversal confined to reachable directories, and admit
+            // child files only through the same compiled include authority.
+            if included_submodules
+                .iter()
+                .any(|submodule| Path::new(&relative).starts_with(submodule))
+            {
+                if is_dir {
+                    if !path_policy.include_can_reach(&relative) {
+                        return false;
+                    }
+                } else if !path_policy.explicitly_includes(&relative) {
+                    return false;
+                }
+            }
             if !is_dir {
                 return !path_policy.excludes(&relative);
             }
@@ -250,11 +266,10 @@ fn included_git_submodules(
             {
                 return None;
             }
-            let explicitly_included = policy.include_patterns().iter().any(|rule| {
-                let rule = rule.trim_start_matches("./").trim_start_matches('/');
-                let rule = rule.trim_end_matches('/');
-                rule == path || rule.strip_suffix("/**") == Some(path)
-            });
+            // A selected file or glob below the gitlink also authorizes
+            // traversal to reach it; the per-entry matcher still filters
+            // unrelated child files. Reuse the compiled policy's reachability.
+            let explicitly_included = policy.include_can_reach(path);
             explicitly_included.then(|| path.to_owned())
         })
         .collect::<BTreeSet<_>>();
@@ -595,6 +610,24 @@ mod tests {
         let files = walked_files(root.path(), &policy);
         assert!(files.contains(&PathBuf::from("app/src/feature.rs")), "{files:?}");
         assert!(!files.contains(&PathBuf::from("foreign/src/intruder.rs")));
+
+        // A precise file include must both reach the registered submodule
+        // and refuse other child files. The unrestricted ordinary-file policy
+        // is not permission to index the whole submodule.
+        fs::write(root.path().join("app/src/unselected.rs"), "not selected\n").unwrap();
+        for rule in ["app/src/feature.rs", "app/src/fe*.rs"] {
+            let narrow = IndexPathPolicyV1::new(vec![], vec![rule.to_owned()]).unwrap();
+            let files = walked_files(root.path(), &narrow);
+            assert!(
+                files.contains(&PathBuf::from("app/src/feature.rs")),
+                "{rule}: the include must reach the child through its gitlink: {files:?}"
+            );
+            assert!(
+                !files.contains(&PathBuf::from("app/src/unselected.rs")),
+                "{rule}: a narrow include must not admit unrelated files: {files:?}"
+            );
+            assert!(!files.contains(&PathBuf::from("foreign/src/intruder.rs")));
+        }
     }
 
     #[test]
