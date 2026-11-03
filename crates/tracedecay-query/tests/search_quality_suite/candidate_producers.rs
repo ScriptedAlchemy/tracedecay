@@ -6283,7 +6283,6 @@ fn duplicate_whole_terms_do_not_consume_the_global_fuzzy_budget() {
     );
 }
 
-
 #[test]
 fn prose_query_recovers_camel_case_symbol_from_real_sealed_subtoken_postings() {
     let artifact = rust_artifact(&[
@@ -6318,7 +6317,7 @@ fn prose_query_recovers_camel_case_symbol_from_real_sealed_subtoken_postings() {
                             results.evidence_by_occurrence[&candidate.source_occurrence_id]
                                 .matched_subtokens
                                 .iter()
-                                .any(|matched| matched == term)
+                                .any(|matched| matched.as_str() == *term)
                         })
             })
         }),

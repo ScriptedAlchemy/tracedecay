@@ -194,7 +194,6 @@ fn query_tokenization_matches_index_tokenization_for_separator_terms() {
     }
 }
 
-
 #[test]
 fn prose_words_can_match_identifier_subtokens_without_broadening_single_term_queries() {
     let query = "widget auto tag items forward total";
