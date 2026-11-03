@@ -2100,8 +2100,7 @@ mod candidate_source_tests {
             ("target", LexicalFieldV1::BodyText, 100..16_350),
             ("target", LexicalFieldV1::Subtoken, 100..16_350),
         ]);
-        let (documents, pruned) =
-            candidates(&stats, &["needle", "target"], &["needle", "target"]);
+        let (documents, pruned) = candidates(&stats, &["needle", "target"], &["needle", "target"]);
         assert!(pruned.is_empty(), "{pruned:?}");
         assert_eq!(documents.len(), 16_350);
         assert!(
@@ -2132,8 +2131,7 @@ mod candidate_source_tests {
             ("target", LexicalFieldV1::BodyText, 200..16_400),
             ("target", LexicalFieldV1::Subtoken, 200..16_400),
         ]);
-        let (documents, pruned) =
-            candidates(&stats, &["needle", "target"], &["needle", "target"]);
+        let (documents, pruned) = candidates(&stats, &["needle", "target"], &["needle", "target"]);
         assert_eq!(documents.len(), 200);
         assert_eq!(pruned, vec![("target".to_owned(), 16_200)]);
         assert!(!documents.contains(16_399));

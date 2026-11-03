@@ -208,7 +208,9 @@ fn prose_words_can_match_identifier_subtokens_without_broadening_single_term_que
 
     let hyphenated =
         lexical_query_parts("widget-tool auto-tag query rows per item").expect("hyphenated prose");
-    for word in ["widget", "tool", "auto", "tag", "query", "rows", "per", "item"] {
+    for word in [
+        "widget", "tool", "auto", "tag", "query", "rows", "per", "item",
+    ] {
         assert!(
             hyphenated.subtokens.contains(&word.to_owned()),
             "{word} must reach a camelCase subtoken posting"
