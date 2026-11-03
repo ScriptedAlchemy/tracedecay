@@ -201,8 +201,22 @@ impl OpenedDatabaseFile {
     }
 
     pub(crate) fn verify_current_path(&self, path: &Path) -> Result<(), OpenedDatabaseFileError> {
-        let current = File::open(path).map_err(|_| OpenedDatabaseFileError::Open)?;
-        if opened_file_identity(&current)? != self.identity {
+        // POSIX record locks belong to the process: closing any descriptor
+        // for this inode releases SQLite's locks, even on another connection.
+        // Inspect the pathname without opening a temporary descriptor. Keep
+        // using the pinned descriptor's dev/inode identity, and retain both
+        // checks around SQLITE_FCNTL_HAS_MOVED in verify_connection.
+        #[cfg(unix)]
+        let current_identity = {
+            let current = std::fs::metadata(path).map_err(|_| OpenedDatabaseFileError::Open)?;
+            metadata_identity(&current)
+        };
+        #[cfg(not(unix))]
+        let current_identity = {
+            let current = File::open(path).map_err(|_| OpenedDatabaseFileError::Open)?;
+            opened_file_identity(&current)?
+        };
+        if current_identity != self.identity {
             return Err(OpenedDatabaseFileError::Replaced);
         }
         Ok(())
@@ -1268,6 +1282,9 @@ where
 fn policy(stage: &'static str, source: rusqlite::Error) -> ConnectionPolicyError {
     ConnectionPolicyError { stage, source }
 }
+
+#[cfg(all(test, unix))]
+mod path_identity_tests;
 
 #[cfg(test)]
 mod tests;
