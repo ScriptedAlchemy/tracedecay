@@ -46,7 +46,7 @@ compresses a session.
 2. Hermes exposes native aliases `lcm_grep`, `lcm_load_session`,
    `lcm_describe`, `lcm_expand`, `lcm_expand_query`, `lcm_status`, and
    `lcm_doctor`. They dispatch to their matching `tracedecay_lcm_*` commands;
-   use the Hermes alias and its schema when the context engine offers it, or the
+   use the Hermes alias and its schema when the plugin offers it, or the
    canonical command and its schema elsewhere. Do not invent fields by mixing
    the two surfaces.
 3. Narrow temporal evidence with `lcm_grep` / `tracedecay_lcm_grep` (default
@@ -87,9 +87,10 @@ and root identity stay inside the mounted daemon authority. Never redirect a
 profile refresh through whichever project happens to be active, and pass the
 same `scope`, `session`, `source`, and `target` selectors to `status` and
 `cancel` as to `begin`.
-Leave host context-window
-preflight, compression, and boundaries to the Hermes context engine rather
-than triggering them during recall.
+Hermes keeps its configured context engine, including its built-in compressor
+by default. That engine handles context-window preflight, compression, and
+boundaries. TraceDecay supplies retrieval tools and memory-provider transcript
+ingest without replacing it or triggering compression during recall.
 
 ## Storage and project identity
 

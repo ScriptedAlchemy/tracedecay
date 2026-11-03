@@ -38,12 +38,6 @@ except Exception:
     class MemoryProvider:
         pass
 
-try:
-    from agent.context_engine import ContextEngine
-except Exception:
-    class ContextEngine:
-        pass
-
 # Hermes' centralized auxiliary LLM facade is the MODULE-LEVEL
 # agent.auxiliary_client.call_llm(task=..., messages=..., ...). AIAgent
 # instances carry no ``auxiliary_client`` attribute and no host call site
@@ -320,20 +314,9 @@ LCM_NATIVE_SCHEMAS = [
 LCM_TOOL_ALIASES = {
     schema["name"]: "tracedecay_" + schema["name"] for schema in LCM_NATIVE_SCHEMAS
 }
-LCM_DIRECT_TOOL_NAMES = frozenset(LCM_TOOL_ALIASES.values())
 LCM_DIRECT_TO_NATIVE = {tracedecay_name: native_name for native_name, tracedecay_name in LCM_TOOL_ALIASES.items()}
 
-# Public LCM readers never depend on forwarding the host's live message list.
-MESSAGE_DEPENDENT_TOOLS = frozenset()
-
 STANDARD_HERMES_LCM_PROVIDER = "hermes"
-
-LCM_PROVIDER_LOCAL_TOOL_NAMES = frozenset((
-    "tracedecay_lcm_describe",
-    "tracedecay_lcm_doctor",
-    "tracedecay_lcm_expand",
-    "tracedecay_lcm_expand_query",
-))
 
 # Direct duplicates of the memory provider's own tool surface
 # (fact_store / fact_feedback / memory_status). Skipped at register() time
@@ -349,8 +332,6 @@ MEMORY_PROVIDER_TOOLS = frozenset((
 # first-turn guidance nudge so it never advertises tools that are not
 # actually registered.
 _REGISTERED_TOOL_NAMES = set()
-_CONTEXT_TOOL_NAMES = set()
-_HOST_FORWARDS_MESSAGES = None
 
 def _active_memory_provider(ctx=None):
     """The memory.provider configured for this profile, if any."""
@@ -371,19 +352,12 @@ def _active_memory_provider(ctx=None):
         pass
     return None
 
-def _make_wrapped_lcm_handler(tool_name: str, engine):
+def _make_wrapped_lcm_handler(tool_name: str, config=None, hermes_home=None):
     def _wrapped(args: dict, **kwargs) -> str:
-        return engine.handle_tool_call(tool_name, args, **kwargs)
-    return _wrapped
-
-def _host_forwards_registered_tool_messages(ctx) -> bool:
-    capability = getattr(ctx, "context_engine_tool_handlers_receive_messages", False)
-    if callable(capability):
-        try:
-            capability = capability()
-        except Exception:
-            return False
-    return bool(capability)
+        return _handle_lcm_tool_call(tool_name, args, config=config, **kwargs)
+    return _make_project_safe_handler(
+        LCM_TOOL_ALIASES[tool_name], _wrapped, hermes_home
+    )
 
 _NUDGE_CODE_REQUEST_RE = re.compile(
     r"\b("
@@ -1094,9 +1068,6 @@ PLUGIN_CONFIG_FIELDS = {
     "nudge": (True, "Inject a first-turn tracedecay guidance nudge only for codebase/navigation requests."),
     "sync_turn": (True, "Mirror each completed turn into the LCM raw store."),
     "prefetch": (True, "Background fact recall injected at turn start."),
-    "context_threshold": ("", "Compression trigger as a fraction of the context window (default: hermes compression.threshold)."),
-    "threshold_tokens": ("", "Absolute compression trigger in tokens (overrides context_threshold)."),
-    "context_length": ("", "Context window override when the host does not report one."),
     "expansion_model": ("", "Model used for lcm_expand_query synthesis."),
     "expansion_context_tokens": ("", "Expanded-context budget for lcm_expand_query (default 32000)."),
     "expansion_timeout_ms": ("", "lcm_expand_query synthesis timeout in milliseconds."),
@@ -1148,7 +1119,7 @@ def _with_plugin_block(config, hermes_home=None):
     """Layer the profile's plugins.tracedecay config block under a host config.
 
     Host-provided values always win; the block fills the gaps so profile
-    config.yaml settings reach the engine/provider without bespoke env vars.
+    config.yaml settings reach tools and the provider without bespoke env vars.
     """
     block = {
         key: value
@@ -1296,116 +1267,6 @@ def _lcm_int_setting(config, env_key, *names, default=None):
         except (TypeError, ValueError):
             pass
     return _configured_int(config, *names, default=default)
-
-def _config_bool_disabled(value):
-    if isinstance(value, bool):
-        return value is False
-    if isinstance(value, (int, float)):
-        return value == 0
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in ("0", "false", "no", "off"):
-            return True
-        try:
-            return float(normalized) == 0
-        except ValueError:
-            return False
-    return False
-
-def _hermes_yaml_compression_threshold(default, hermes_home=None):
-    # Port of hermes-lcm config._hermes_compression_threshold: read the main
-    # Hermes compression.threshold from the resolved host config when no LCM
-    # override exists. Disabled Hermes compression must not leak its threshold.
-    home = (
-        hermes_home
-        or os.path.join(os.path.expanduser("~"), ".hermes")
-    )
-    cfg_path = Path(home) / "config.yaml"
-    try:
-        text = cfg_path.read_text()
-    except Exception:
-        return default
-    try:
-        import yaml
-    except Exception:
-        yaml = None
-    try:
-        if yaml is not None:
-            cfg = yaml.safe_load(text) or {}
-            compression = cfg.get("compression") or {}
-            if _config_bool_disabled(compression.get("enabled")):
-                return default
-            value = compression.get("threshold")
-            if value is None:
-                return default
-            return float(value)
-
-        in_compression = False
-        direct_indent = None
-        compression_disabled = False
-        threshold_value = None
-        for raw_line in text.splitlines():
-            line = raw_line.split('#', 1)[0].rstrip()
-            if not line.strip():
-                continue
-            if not line.startswith((" ", "\t")):
-                in_compression = line.strip() == "compression:"
-                direct_indent = None
-                continue
-            if not in_compression:
-                continue
-            indent = len(line) - len(line.lstrip(" \t"))
-            if direct_indent is None:
-                direct_indent = indent
-            if indent != direct_indent or ":" not in line:
-                continue
-            key, raw_value = line.strip().split(":", 1)
-            value = raw_value.strip().strip("'\"")
-            if key == "enabled" and _config_bool_disabled(value):
-                compression_disabled = True
-            elif key == "threshold":
-                threshold_value = value
-        if compression_disabled or threshold_value is None:
-            return default
-        return float(threshold_value)
-    except Exception:
-        return default
-
-def _lcm_context_threshold(config, hermes_home=None):
-    raw = os.environ.get("LCM_CONTEXT_THRESHOLD")
-    if raw is not None:
-        try:
-            return float(raw)
-        except (TypeError, ValueError):
-            pass
-    configured = _configured_value(config, "context_threshold")
-    if configured is not None:
-        try:
-            return float(configured)
-        except (TypeError, ValueError):
-            pass
-    return _hermes_yaml_compression_threshold(0.75, hermes_home=hermes_home)
-
-def _configured_threshold_tokens(config, hermes_home=None, context_length_override=None):
-    explicit = _configured_int(config, "threshold_tokens")
-    if explicit is not None:
-        return explicit
-    context_length = context_length_override
-    if context_length is None:
-        context_length = _configured_int(
-            config,
-            "context_length",
-            "max_context_tokens",
-            "model_context_tokens",
-        )
-    if context_length is None:
-        return None
-    try:
-        return int(int(context_length) * float(_lcm_context_threshold(config, hermes_home=hermes_home)))
-    except (TypeError, ValueError):
-        return None
-
-
 
 def _lcm_expansion_model(config):
     value = _lcm_str_setting(config, "LCM_EXPANSION_MODEL", "expansion_model", default="")
@@ -1588,9 +1449,20 @@ def _synthesize_expand_query_payload(retrieval, agent=None, **kwargs):
 def _handle_lcm_expand_query(args, **kwargs) -> str:
     kwargs = dict(kwargs)
     agent = kwargs.pop("agent", None)
+    config = _with_plugin_block(kwargs.pop("config", None), kwargs.pop("hermes_home", None))
     args = dict(args or {})
     args.setdefault("provider", STANDARD_HERMES_LCM_PROVIDER)
-    retrieval = call_tracedecay_json("tracedecay_lcm_expand_query", args, **kwargs)
+    args.setdefault("context_max_tokens", _lcm_expansion_context_tokens(config))
+    retrieval = call_tracedecay_json(
+        "tracedecay_lcm_expand_query", args,
+        **_project_call_kwargs(kwargs.get("project_root")),
+    )
+    if kwargs.get("model") is None:
+        model = _lcm_expansion_model(config)
+        if model:
+            kwargs["model"] = model
+    if kwargs.get("timeout") is None and kwargs.get("expansion_timeout") is None:
+        kwargs["expansion_timeout"] = _lcm_expansion_timeout_ms(config) / 1000
     payload = _synthesize_expand_query_payload(retrieval, agent=agent, **kwargs)
     return json.dumps(payload)
 
@@ -1681,503 +1553,41 @@ def _translate_lcm_args(native_name: str, args: dict) -> dict:
         return translated
     return translated
 
-_ENGINE_DEFAULT_SESSION = "__default__"
+def _handle_lcm_tool_call(name, arguments=None, config=None, **kwargs) -> str:
+    """Dispatch retrieval using the calling Hermes session, without owning compaction."""
+    tool_name, tool_args = _normalize_memory_tool_call(name, arguments)
+    native_name = LCM_DIRECT_TO_NATIVE.get(tool_name, tool_name)
+    tracedecay_name = LCM_TOOL_ALIASES.get(native_name)
+    if tracedecay_name is None:
+        return tools.error_payload(f"unknown LCM tool: {tool_name}")
 
-class _EngineSessionState:
-    """Mutable per-conversation engine state.
-
-    The host registers ONE engine instance and shares it across every
-    AIAgent in the process (gateway sessions, parallel delegate_task
-    children), so conversation-scoped fields must never live directly on
-    the engine.
-    """
-
-    _FIELDS = (
-        "project_root",
-        "agent",
-        "model",
-        "last_prompt_tokens",
-        "last_real_prompt_tokens",
-        "last_completion_tokens",
-        "last_total_tokens",
-        "context_length",
-        "threshold_tokens",
-        "compression_count",
-        "last_compress_result",
-        "_last_compress_aborted",
-        "_last_summary_error",
-        "_runtime_context_length",
-        "_session_start_context_length",
+    tool_args = _translate_lcm_args(native_name, dict(tool_args))
+    if tool_args.get("error"):
+        return json.dumps({"error": tool_args["error"]})
+    tool_args.setdefault("provider", STANDARD_HERMES_LCM_PROVIDER)
+    if kwargs.get("session_id"):
+        tool_args.setdefault("session_id", kwargs["session_id"])
+    if (
+        native_name == "lcm_grep"
+        and tool_args.get("scope") == "current"
+        and not tool_args.get("session_id")
+    ):
+        return tools.error_payload("lcm_grep current scope requires a Hermes session_id")
+    project_root = kwargs.get("project_root")
+    tool_args = _lcm_store_args(tool_args, project_root)
+    if tracedecay_name == "tracedecay_lcm_expand_query":
+        return _handle_lcm_expand_query(
+            tool_args,
+            config=config,
+            hermes_home=kwargs.get("hermes_home"),
+            agent=kwargs.get("agent"),
+            **_project_call_kwargs(project_root),
+        )
+    # Retrieval never sends the host's live messages or other execution kwargs
+    # to the CLI. Completed turns still ingest through the memory provider.
+    return tools.call_tracedecay_tool(
+        tracedecay_name, tool_args, **_project_call_kwargs(project_root)
     )
-
-    def __init__(self):
-        self.project_root = None
-        self.agent = None
-        self.model = ""
-        self.last_prompt_tokens = 0
-        self.last_real_prompt_tokens = 0
-        self.last_completion_tokens = 0
-        self.last_total_tokens = 0
-        # Host-contract token state (run_agent.py reads these directly; the
-        # minimum-context guard in agent/agent_init.py checks context_length).
-        self.context_length = 0
-        self.threshold_tokens = 0
-        self.compression_count = 0
-        # Compression abort/diagnostic state read by
-        # agent/conversation_compression.py after each compress() call.
-        self.last_compress_result = None
-        self._last_compress_aborted = False
-        self._last_summary_error = None
-        self._runtime_context_length = None
-        self._session_start_context_length = None
-
-    def adopt(self, other):
-        """Carry conversation state across a compression-rotation rebind."""
-        for field in self._FIELDS:
-            setattr(self, field, getattr(other, field))
-
-def _engine_session_property(field):
-    """Engine attribute view onto the calling context's session state.
-
-    Keeps the host contract intact: run_agent.py reads (and
-    conversation_compression.py occasionally writes) these as plain
-    attributes on the shared engine instance, and each access resolves to
-    the session bound to the calling thread.
-    """
-
-    def _get(self):
-        return getattr(self._state(), field)
-
-    def _set(self, value):
-        setattr(self._state(), field, value)
-
-    return property(_get, _set)
-
-class TraceDecayContextEngine(ContextEngine):
-    def __init__(self, config=None, hermes_home=None):
-        # Per-session mutable state, guarded by an RLock. Calls that carry
-        # no session id (compress, update_from_response, should_compress,
-        # ...) resolve the session bound to the calling thread, falling
-        # back to the most recently bound session. That keeps concurrent
-        # gateway sessions / delegate_task children from clobbering each
-        # other whenever the host gives us a binding signal, and at minimum
-        # serializes state access when it does not.
-        self._state_lock = threading.RLock()
-        self._session_states = {}
-        self._thread_sessions = threading.local()
-        self.active_session_id = None
-        self._host_config = config
-        self.hermes_home = _resolve_hermes_home(config, hermes_home)
-        self.config = _with_plugin_block(config, self.hermes_home)
-        self.project_root = _resolved_project_scope(
-            _configured_project_root(self.config),
-            self.hermes_home,
-        )
-
-    def __deepcopy__(self, memo):
-        """Create an agent-local engine without copying locks or live agents."""
-        clone = type(self)(
-            config=copy.deepcopy(self._host_config, memo),
-            hermes_home=self.hermes_home,
-        )
-        memo[id(self)] = clone
-        clone.config = copy.deepcopy(self.config, memo)
-        clone.project_root = self.project_root
-        with self._state_lock:
-            clone.active_session_id = self.active_session_id
-            for key, state in self._session_states.items():
-                copied_state = _EngineSessionState()
-                for field in _EngineSessionState._FIELDS:
-                    if field == "agent":
-                        continue
-                    setattr(copied_state, field, copy.deepcopy(getattr(state, field), memo))
-                clone._session_states[key] = copied_state
-        return clone
-
-    project_root = _engine_session_property("project_root")
-    agent = _engine_session_property("agent")
-    model = _engine_session_property("model")
-    last_prompt_tokens = _engine_session_property("last_prompt_tokens")
-    last_real_prompt_tokens = _engine_session_property("last_real_prompt_tokens")
-    last_completion_tokens = _engine_session_property("last_completion_tokens")
-    last_total_tokens = _engine_session_property("last_total_tokens")
-    context_length = _engine_session_property("context_length")
-    threshold_tokens = _engine_session_property("threshold_tokens")
-    compression_count = _engine_session_property("compression_count")
-    last_compress_result = _engine_session_property("last_compress_result")
-    _last_compress_aborted = _engine_session_property("_last_compress_aborted")
-    _last_summary_error = _engine_session_property("_last_summary_error")
-    _runtime_context_length = _engine_session_property("_runtime_context_length")
-    _session_start_context_length = _engine_session_property("_session_start_context_length")
-
-    def _session_key(self, session_id=None):
-        if session_id:
-            return str(session_id)
-        bound = getattr(self._thread_sessions, "session_id", None)
-        if bound:
-            return bound
-        return self.active_session_id or _ENGINE_DEFAULT_SESSION
-
-    def _state(self, session_id=None):
-        key = self._session_key(session_id)
-        with self._state_lock:
-            state = self._session_states.get(key)
-            if state is None:
-                state = _EngineSessionState()
-                self._session_states[key] = state
-            return state
-
-    @property
-    def name(self) -> str:
-        return "tracedecay"
-
-    def _bind_session(self, session_id=None, hermes_home=None, project_root=None, **kwargs):
-        if session_id is not None:
-            session_key = str(session_id)
-            with self._state_lock:
-                if session_key not in self._session_states:
-                    state = _EngineSessionState()
-                    # Compression rotation continues the same conversation:
-                    # carry model/window/counters over from the predecessor
-                    # session's state (old_session_id on boundary starts,
-                    # else whatever this thread was bound to).
-                    source_key = str(kwargs.get("old_session_id") or "")
-                    source = self._session_states.get(source_key) if source_key else None
-                    if source is None and kwargs.get("boundary_reason") == "compression":
-                        source = self._session_states.get(self._session_key())
-                    if source is None:
-                        source = self._session_states.get(_ENGINE_DEFAULT_SESSION)
-                    if source is not None:
-                        state.adopt(source)
-                    self._session_states[session_key] = state
-            # Bind the calling thread so session-less calls (compress,
-            # update_from_response, should_compress) resolve this session.
-            self._thread_sessions.session_id = session_key
-            self.active_session_id = session_key
-        if kwargs.get("config") is not None:
-            self._host_config = kwargs.get("config")
-        if "context_length" in kwargs:
-            applied_context_length = self._apply_context_length(kwargs.get("context_length"))
-            if applied_context_length is not None:
-                self._session_start_context_length = applied_context_length
-        next_agent = kwargs.get("agent")
-        if next_agent is not None:
-            self.agent = next_agent
-        explicit_hermes_home = hermes_home or kwargs.get("hermes_home")
-        if explicit_hermes_home or kwargs.get("config") is not None or self.hermes_home is None:
-            next_hermes_home = _resolve_hermes_home(
-                kwargs.get("config", self._host_config),
-                explicit_hermes_home,
-            )
-            if next_hermes_home:
-                self.hermes_home = next_hermes_home
-        # Re-layer the profile's plugins.tracedecay block now that the host
-        # config and hermes_home are settled for this session.
-        self.config = _with_plugin_block(self._host_config, self.hermes_home)
-        explicit_project_root = project_root or kwargs.get("project_root")
-        runtime_cwd = kwargs.get("cwd")
-        configured_project_root = _configured_project_root(self.config)
-        routing_supplied = bool(explicit_project_root or runtime_cwd)
-        if explicit_project_root:
-            route_state, next_project_root = _project_scope_resolution(
-                explicit_project_root,
-                self.hermes_home,
-            )
-            if route_state == "unregistered":
-                next_project_root = _code_project_root(
-                    explicit=explicit_project_root,
-                    hermes_home=self.hermes_home,
-                )
-        elif runtime_cwd:
-            next_project_root = _resolved_project_scope(runtime_cwd, self.hermes_home)
-        elif self.project_root:
-            route_state, next_project_root = _project_scope_resolution(
-                self.project_root,
-                self.hermes_home,
-            )
-            if route_state == "unregistered":
-                next_project_root = _code_project_root(
-                    explicit=self.project_root,
-                    hermes_home=self.hermes_home,
-                )
-            routing_supplied = routing_supplied or next_project_root is None
-        elif configured_project_root:
-            next_project_root = _resolved_project_scope(
-                configured_project_root,
-                self.hermes_home,
-            )
-            routing_supplied = True
-        elif session_id is not None and not self.project_root:
-            next_project_root = _resolved_project_scope(
-                _runtime_working_directory(),
-                self.hermes_home,
-            )
-        else:
-            next_project_root = None
-        if next_project_root:
-            self.project_root = next_project_root
-        elif routing_supplied:
-            self.project_root = None
-
-    def initialize(self, session_id=None, hermes_home=None, project_root=None, **kwargs):
-        self._bind_session(session_id, hermes_home, project_root, **kwargs)
-
-    def on_session_start(self, session_id=None, hermes_home=None, project_root=None, **kwargs):
-        self._bind_session(session_id, hermes_home, project_root, **kwargs)
-
-    def on_session_end(self, session_id=None, messages=None, **kwargs):
-        _join_host_receipts()
-        # Real session boundary: drop the per-session record so long-lived
-        # gateway processes do not accumulate dead conversation state.
-        key = self._session_key(session_id)
-        with self._state_lock:
-            self._session_states.pop(key, None)
-        if getattr(self._thread_sessions, "session_id", None) == key:
-            self._thread_sessions.session_id = None
-        if self.active_session_id == key:
-            self.active_session_id = None
-
-    def _apply_context_length(self, context_length):
-        """Track a context length on the host-contract attrs.
-
-        run_agent.py logs ``context_length``/``threshold_tokens`` directly and
-        the minimum-context guard in agent/agent_init.py reads
-        ``context_length``, leaving them 0 logged a bogus 0-token window and
-        silently bypassed that guard.
-        """
-        try:
-            parsed = int(context_length)
-        except (TypeError, ValueError):
-            return None
-        if parsed <= 0:
-            return None
-        self.context_length = parsed
-        threshold_tokens = _configured_threshold_tokens(
-            self.config,
-            hermes_home=self.hermes_home,
-            context_length_override=parsed,
-        )
-        if threshold_tokens is None:
-            threshold_tokens = int(
-                parsed * _lcm_context_threshold(self.config, hermes_home=self.hermes_home)
-            )
-        self.threshold_tokens = threshold_tokens
-        return parsed
-
-    def update_model(self, model, context_length, base_url="", api_key="", provider="", api_mode=""):
-        self.model = str(model or "")
-        self._runtime_context_length = self._apply_context_length(context_length)
-
-    def update_from_response(self, usage):
-        # Required by newer Hermes ContextEngine ABCs (abstract method).
-        # Tracks normalized token usage; run_agent.py reads these attrs.
-        usage = usage or {}
-
-        def _as_int(value):
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                return 0
-
-        self.last_prompt_tokens = _as_int(
-            usage.get("prompt_tokens") or usage.get("input_tokens")
-        )
-        self.last_real_prompt_tokens = self.last_prompt_tokens
-        self.last_completion_tokens = _as_int(
-            usage.get("completion_tokens") or usage.get("output_tokens")
-        )
-        self.last_total_tokens = _as_int(usage.get("total_tokens")) or (
-            self.last_prompt_tokens + self.last_completion_tokens
-        )
-
-    def _effective_context_length(self):
-        if self._runtime_context_length is not None:
-            return self._runtime_context_length
-        if self._session_start_context_length is not None:
-            return self._session_start_context_length
-        return None
-
-    def _tool_args(self, session_id=None):
-        return {
-            "session_id": session_id if session_id is not None else self.active_session_id
-        }
-
-    def should_compress_preflight(self, messages, current_tokens=None, **kwargs):
-        del messages, current_tokens, kwargs
-        # Hermes does not expose an authentic raw-compression protocol. Its
-        # transcript still ingests through the daemon, but compaction is a
-        # typed unavailable capability.
-        return False
-
-    def _preflight_probe(self, messages, current_tokens=None, **kwargs):
-        del messages, current_tokens, kwargs
-        return {
-            "status": "unavailable",
-            "reason": "host_raw_compression_unavailable",
-            "should_compress": False,
-        }
-
-    def should_compress(self, prompt_tokens=None, **kwargs):
-        del prompt_tokens, kwargs
-        return False
-
-    def has_content_to_compress(self, messages, current_tokens=None, **kwargs):
-        del current_tokens, kwargs
-        non_empty = [
-            message
-            for message in (messages or [])
-            if str((message or {}).get("content") or "").strip()
-        ]
-        return len(non_empty) >= 2
-
-    def should_defer_preflight_to_real_usage(self, rough_tokens=None):
-        del rough_tokens
-        return False
-
-    def carry_over_new_session_context(self, old_session_id, new_session_id):
-        old_session_id = str(old_session_id or "")
-        new_session_id = str(new_session_id or "")
-        if not new_session_id:
-            return
-        self._bind_session(new_session_id, old_session_id=old_session_id)
-
-    def status(self, session_id=None, **kwargs):
-        args = self._tool_args(session_id)
-        args["provider"] = STANDARD_HERMES_LCM_PROVIDER
-        args = _lcm_store_args(args, kwargs.get("project_root") or self.project_root)
-        return call_tracedecay_json(
-            "tracedecay_lcm_status",
-            args,
-            **_project_call_kwargs(kwargs.get("project_root") or self.project_root),
-        )
-
-    def get_tool_schemas(self):
-        return list(LCM_NATIVE_SCHEMAS)
-
-    def get_status(self):
-        last_result = self.last_compress_result
-        if not isinstance(last_result, dict):
-            last_result = {"status": "never_ran"}
-        return {
-            "engine": self.name,
-            "session_id": self.active_session_id,
-            "active_session_id": self.active_session_id,
-            "project_root": self.project_root,
-            "tracedecay_binary_path": tools.TRACEDECAY_BIN,
-            "tracedecay_binary_available": _tracedecay_binary_available(),
-            "context_engine_tool_names": sorted(
-                schema["name"] for schema in self.get_tool_schemas()
-            ),
-            "last_compress_result": last_result,
-            "awaiting_real_usage_after_compression": False,
-            "live_ingest": {
-                "registered_tool_names": sorted(_REGISTERED_TOOL_NAMES),
-                "context_tool_names": sorted(_CONTEXT_TOOL_NAMES),
-                "host_forwards_messages": _HOST_FORWARDS_MESSAGES,
-                "message_dependent_tools_registered": bool(
-                    MESSAGE_DEPENDENT_TOOLS.intersection(_REGISTERED_TOOL_NAMES)
-                ),
-                "gate_reason": (
-                    "not_registered"
-                    if not _REGISTERED_TOOL_NAMES and not _CONTEXT_TOOL_NAMES
-                    else (
-                        "host_does_not_forward_messages"
-                        if _HOST_FORWARDS_MESSAGES is False
-                        else "registered"
-                    )
-                ),
-            },
-        }
-
-    def handle_tool_call(self, name, arguments=None, **kwargs) -> str:
-        tool_name, tool_args = _normalize_memory_tool_call(name, arguments)
-        native_name = tool_name
-        tracedecay_name = LCM_TOOL_ALIASES.get(native_name)
-        if tracedecay_name is None and native_name in LCM_DIRECT_TOOL_NAMES:
-            tracedecay_name = native_name
-            native_name = LCM_DIRECT_TO_NATIVE.get(native_name, native_name)
-        if tracedecay_name is None:
-            return tools.error_payload(f"unknown LCM tool: {tool_name}")
-
-        preflight_kwargs = dict(kwargs)
-        preflight_kwargs.pop("messages", None)
-
-        tool_args = _translate_lcm_args(native_name, dict(tool_args))
-        if tool_args.get("error"):
-            return json.dumps({"error": tool_args["error"]})
-        if tracedecay_name in LCM_PROVIDER_LOCAL_TOOL_NAMES:
-            tool_args.setdefault("provider", STANDARD_HERMES_LCM_PROVIDER)
-        if self.active_session_id:
-            tool_args.setdefault("session_id", self.active_session_id)
-        tool_args = _lcm_store_args(
-            tool_args,
-            preflight_kwargs.get("project_root") or self.project_root,
-        )
-
-        if tracedecay_name == "tracedecay_lcm_expand_query":
-            expand_kwargs = dict(preflight_kwargs)
-            agent = expand_kwargs.pop("agent", None) or self.agent
-            return _handle_lcm_expand_query(
-                tool_args,
-                agent=agent,
-                **_project_call_kwargs(
-                    expand_kwargs.get("project_root") or self.project_root
-                ),
-            )
-        return tools.call_tracedecay_tool(
-            tracedecay_name,
-            tool_args,
-            **_project_call_kwargs(
-                preflight_kwargs.get("project_root") or self.project_root
-            ),
-        )
-
-    def expand_query(self, prompt, query=None, node_ids=None, **kwargs):
-        kwargs = dict(kwargs)
-        args = self._tool_args(kwargs.pop("session_id", None))
-        args["provider"] = STANDARD_HERMES_LCM_PROVIDER
-        args["prompt"] = prompt
-        if query is not None:
-            args["query"] = query
-        if node_ids is not None:
-            args["node_ids"] = node_ids
-        for key in ("max_results", "max_tokens", "context_max_tokens"):
-            if key in kwargs and kwargs[key] is not None:
-                args[key] = kwargs[key]
-        if "context_max_tokens" not in args:
-            args["context_max_tokens"] = _lcm_expansion_context_tokens(self.config)
-        args = _lcm_store_args(args, kwargs.get("project_root") or self.project_root)
-        retrieval = call_tracedecay_json(
-            "tracedecay_lcm_expand_query",
-            args,
-            **_project_call_kwargs(kwargs.get("project_root") or self.project_root),
-        )
-        synthesis_kwargs = dict(kwargs)
-        synthesis_agent = synthesis_kwargs.pop("agent", None) or self.agent
-        if synthesis_kwargs.get("model") is None:
-            expansion_model = _lcm_expansion_model(self.config)
-            if expansion_model:
-                synthesis_kwargs["model"] = expansion_model
-        if (
-            synthesis_kwargs.get("timeout") is None
-            and synthesis_kwargs.get("expansion_timeout") is None
-        ):
-            synthesis_kwargs["expansion_timeout"] = _lcm_expansion_timeout_ms(self.config) / 1000
-        return _synthesize_expand_query_payload(retrieval, agent=synthesis_agent, **synthesis_kwargs)
-
-    def compress(self, messages, current_tokens=None, focus_topic=None, **kwargs):
-        """Return the unchanged transcript when host compaction is unavailable."""
-        del current_tokens, focus_topic, kwargs
-        original = list(messages or [])
-        reason = "host_raw_compression_unavailable"
-        self.last_compress_result = {
-            "status": "unavailable",
-            "reason": reason,
-            "semantic_error": True,
-        }
-        self._last_compress_aborted = True
-        self._last_summary_error = reason
-        return original
 
 class TracedecayMemoryProvider(MemoryProvider):
     provider_id = "tracedecay"
@@ -2585,7 +1995,6 @@ class TracedecayMemoryProvider(MemoryProvider):
         )
 
 def register(ctx):
-    global _HOST_FORWARDS_MESSAGES
     context_config = getattr(ctx, "config", None)
     explicit_context_home = (
         getattr(ctx, "hermes_home", None) or getattr(ctx, "_hermes_home", None)
@@ -2604,6 +2013,7 @@ def register(ctx):
         return bound
 
     ctx.register_hook("pre_llm_call", _pre_llm_call)
+    ctx.register_hook("on_session_end", lambda **_kwargs: _join_host_receipts())
     try:
         ctx.register_hook("post_tool_call", bind_hermes_home(_post_tool_call))
     except Exception as exc:
@@ -2635,32 +2045,14 @@ def register(ctx):
         memory_provider.hermes_home = context_hermes_home
         ctx.register_memory_provider(memory_provider)
 
-    context_engine = TraceDecayContextEngine(
-        config=context_config,
-        hermes_home=context_hermes_home,
-    )
-    ctx.register_context_engine(context_engine)
-
-    # Direct tool registration is split by capability:
-    #   - Code-graph / memory / transcript tools register UNCONDITIONALLY.
-    #     They work without host message forwarding, and hermes defers
-    #     registered non-core tools through its tool-search bridge
-    #     (tools/tool_search.py), so schema footprint is not a blocker.
-    #   - Only the live-ingest LCM verbs whose schemas take the in-memory
-    #     ``messages`` list (MESSAGE_DEPENDENT_TOOLS) and the context-engine
-    #     native tool mirrors stay gated behind the message-forwarding
-    #     capability flag, without forwarding their ingest piggyback can
-    #     never fire (the host still mounts the native LCM tools itself via
-    #     context_engine.get_tool_schemas()).
+    # TraceDecay supplies retrieval and memory. Hermes keeps its configured
+    # context engine (the built-in compressor by default), which owns native
+    # context-window pressure, compression, and conversation boundaries.
     register_tool = getattr(ctx, "register_tool", None)
-    host_forwards_messages = _host_forwards_registered_tool_messages(ctx)
-    _HOST_FORWARDS_MESSAGES = host_forwards_messages if callable(register_tool) else None
     tracedecay_is_memory_provider = _active_memory_provider(ctx) == "tracedecay"
     if callable(register_tool):
         for schema in schemas.TOOL_SCHEMAS:
             name = schema["name"]
-            if name in MESSAGE_DEPENDENT_TOOLS and not host_forwards_messages:
-                continue
             if name in MEMORY_PROVIDER_TOOLS and tracedecay_is_memory_provider:
                 # The active memory provider already exposes this store as
                 # fact_store/fact_feedback/memory_status, registering the
@@ -2692,34 +2084,30 @@ def register(ctx):
                 )
             else:
                 _REGISTERED_TOOL_NAMES.add(name)
-        if host_forwards_messages:
-            for schema in context_engine.get_tool_schemas():
-                name = schema["name"]
-                visible_schema = _agent_visible_schema(schema)
-                try:
-                    register_tool(
-                        name=name,
-                        toolset="context_engine",
-                        schema=visible_schema,
-                        handler=_make_wrapped_lcm_handler(name, context_engine),
-                        description=schema.get("description", ""),
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "tracedecay LCM tool registration failed for %s; continuing with context-engine schemas: %s",
-                        name,
-                        exc,
-                    )
-                else:
-                    _CONTEXT_TOOL_NAMES.add(name)
-        else:
-            logger.info(
-                "tracedecay LCM registered tools skipped: this Hermes host does not forward messages to registered tool handlers; transcript sync remains on the memory-provider hook"
-            )
+        # LCM readers use stored transcripts and forwarded session identity;
+        # they do not require access to the live in-memory message list.
+        for schema in LCM_NATIVE_SCHEMAS:
+            name = schema["name"]
+            try:
+                register_tool(
+                    name=name,
+                    toolset="tracedecay",
+                    schema=_agent_visible_schema(schema),
+                    handler=_make_wrapped_lcm_handler(
+                        name, config=context_config, hermes_home=context_hermes_home
+                    ),
+                    description=schema.get("description", ""),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "tracedecay LCM tool registration failed for %s; continuing: %s",
+                    name,
+                    exc,
+                )
+            else:
+                _REGISTERED_TOOL_NAMES.add(name)
     else:
-        logger.info(
-            "tracedecay direct tool registration unavailable on this Hermes host; continuing with context-engine schemas"
-        )
+        logger.info("tracedecay direct tool registration unavailable on this Hermes host")
 
     register_skill = getattr(ctx, "register_skill", None)
     skills_dir = Path(__file__).parent / "skills"

@@ -6,12 +6,12 @@ checkout), this harness imports the generated plugin package with a stubbed
 plugin context and a fake tracedecay binary, so it runs anywhere Python 3
 exists. It asserts the host contracts the 2026-06 review found broken:
 
-  1. compress() returns a MESSAGE LIST on success / no-op / error
-     (hermes ContextEngine ABC), never the raw result dict.
+  1. TraceDecay leaves the native context engine selected and registers
+     LCM retrieval tools independently, scoped to each calling session.
   2. Payloads >128 KiB round-trip through `--args @file` and the spill
      tempfile is cleaned up.
   3. Code-graph tools register WITHOUT the message-forwarding capability
-     flag; the messages-dependent LCM verbs stay gated.
+     flag; LCM readers use stored transcripts and forwarded session identity.
   4. The memory provider implements sync_turn / prefetch / on_memory_write
      and calls the right subprocess verbs.
   5. pre_llm_call returns None on non-first turns and on first-turn greetings
@@ -30,7 +30,6 @@ tracedecay binary named by $TRACEDECAY_BIN
 (default: bazel-bin/crates/tracedecay-cli/tracedecay).
 """
 
-import copy
 import json
 import os
 import shutil
@@ -330,9 +329,6 @@ def _check_hermes_home_scope(work: Path, plugin, host_home: Path) -> Path:
         ) is None
     finally:
         plugin.call_tracedecay_json = real_json
-    home_engine = plugin.TraceDecayContextEngine(hermes_home=str(host_home))
-    home_engine.on_session_start(session_id="home-scope", cwd=str(host_home))
-    assert home_engine.project_root is None
     home_provider = plugin.TracedecayMemoryProvider()
     home_provider.initialize(
         session_id="home-scope", hermes_home=str(host_home), cwd=str(host_home)
@@ -351,10 +347,8 @@ def _check_registration_split(
     # duplicates; transcript search has no provider twin and stays.
     ctx = StubCtx()
     plugin.register(ctx)
-    assert ctx.engine.hermes_home == str(host_home), (
-        ctx.engine.hermes_home,
-        str(host_home),
-    )
+    assert ctx.engine is None, "TraceDecay must not replace Hermes' native compressor"
+    assert ctx.provider.hermes_home == str(host_home)
     assert ctx.skills == {
         "managed-test": managed_skill,
         "tracedecay": plugin_dir / "skills" / "tracedecay" / "SKILL.md",
@@ -377,9 +371,7 @@ def _check_registration_split(
     custom_ctx = StubCtx()
     custom_ctx.hermes_home = str(custom_home)
     plugin.register(custom_ctx)
-    assert custom_ctx.engine.hermes_home == str(custom_home)
-    custom_ctx.engine.on_session_start(session_id="custom-home", cwd=str(custom_home))
-    assert custom_ctx.engine.project_root is None
+    assert custom_ctx.engine is None
     custom_ctx.provider.initialize(session_id="custom-home", cwd=str(custom_home))
     assert custom_ctx.provider.hermes_home == str(custom_home)
     assert custom_ctx.provider.project_root is None
@@ -433,8 +425,8 @@ def _check_registration_split(
     ok("registered tools and providers honor a custom Hermes home")
     assert "tracedecay_lcm_compress" not in ctx.tools, sorted(ctx.tools)
     assert "tracedecay_lcm_preflight" not in ctx.tools, sorted(ctx.tools)
-    # Context-engine native mirrors stay gated without the capability flag.
-    assert "lcm_grep" not in ctx.tools, sorted(ctx.tools)
+    # Readers work through the ordinary registry without taking over compaction.
+    assert set(plugin.LCM_TOOL_ALIASES).issubset(ctx.tools), sorted(ctx.tools)
     assert ctx.provider.get_config_schema() == [], ctx.provider.get_config_schema()
     schemas = json.dumps([entry["schema"] for entry in ctx.tools.values()])
     assert "storage_scope" not in schemas and "hermes_home" not in schemas, schemas
@@ -459,7 +451,7 @@ def _check_registration_split(
     plugin.register(fwd)
     assert "tracedecay_lcm_compress" not in fwd.tools, sorted(fwd.tools)
     assert "lcm_grep" in fwd.tools, sorted(fwd.tools)
-    ok("read-only LCM mirrors register when the host forwards messages")
+    ok("LCM readers register regardless of live-message forwarding")
     return ctx
 
 
@@ -701,151 +693,45 @@ def _check_response_envelope_table(plugin):
         plugin.tools.call_tracedecay_tool = real_tool
 
 
-def _check_engine_state_and_compress(
-    plugin, ctx, host_home: Path, runtime_project: Path
-) -> list:
-    # ── 1. compress() message-list contract ──────────────────────────────
-    engine = ctx.engine
-    assert engine is not None
-    engine.initialize(session_id="check-session", hermes_home=str(host_home))
-    engine.project_root = str(runtime_project)
-    engine.context_length = 200_000
-    engine.threshold_tokens = 150_000
-    engine.agent = object()
-    cloned_engine = copy.deepcopy(engine)
-    assert cloned_engine is not engine
-    assert cloned_engine._state_lock is not engine._state_lock
-    assert cloned_engine.project_root == str(runtime_project)
-    assert cloned_engine.context_length == 200_000
-    assert cloned_engine.threshold_tokens == 150_000
-    assert cloned_engine.agent is None
-    cloned_engine.context_length = 100_000
-    assert engine.context_length == 200_000
-    ok("context engine safely deep-copies per-agent budget state")
-
-    real_resolver = plugin._resolved_project_scope
+def _check_lcm_retrieval_scope(plugin, ctx, host_home: Path, runtime_project: Path):
+    assert ctx.engine is None, "TraceDecay must leave native compaction enabled"
+    calls = []
+    real_tool = plugin.tools.call_tracedecay_tool
+    real_resolution = plugin._project_scope_resolution
     try:
-        plugin._resolved_project_scope = lambda path, *_args: (
-            str(runtime_project)
-            if path
-            and os.path.realpath(str(path)) == os.path.realpath(str(runtime_project))
-            else None
+        plugin._project_scope_resolution = lambda path, *_args: (
+            ("rejected", None) if str(path) == str(host_home) else ("registered", str(path))
         )
-        engine.initialize(session_id="project-session", project_root=str(runtime_project))
-        assert engine.project_root == str(runtime_project)
-        engine.initialize(session_id="untethered-session", cwd=str(host_home))
-        assert engine.project_root is None
-        engine.initialize(session_id="project-session")
-        assert engine.project_root == str(runtime_project)
-        engine.initialize(session_id="untethered-session")
-        assert engine.project_root is None
-    finally:
-        plugin._resolved_project_scope = real_resolver
-    ok("context engine isolates project routing per Hermes session")
-
-    status_calls = []
-    real_json = plugin.call_tracedecay_json
-    try:
-        plugin.call_tracedecay_json = lambda name, args, **kwargs: (
-            status_calls.append((name, args, kwargs))
-            or {"status": "not_ingested"}
+        plugin.tools.call_tracedecay_tool = lambda name, args, **kwargs: (
+            calls.append((name, args, kwargs)) or "{}"
         )
-        engine.active_session_id = "status-session"
-        engine.project_root = str(runtime_project)
-        assert engine.status() == {"status": "not_ingested"}
-    finally:
-        plugin.call_tracedecay_json = real_json
-    assert status_calls == [
-        (
+        handler = ctx.tools["lcm_grep"]["handler"]
+        handler({"query": "orchard"}, session_id="project-session", cwd=str(runtime_project))
+        handler({"query": "orchard"}, session_id="chat-session", cwd=str(host_home))
+        handler({"query": "orchard"}, session_id="project-session", cwd=str(runtime_project))
+        assert [args["session_id"] for _, args, _ in calls] == [
+            "project-session", "chat-session", "project-session",
+        ]
+        assert calls[0][2] == calls[2][2] == {"project_root": str(runtime_project)}
+        assert calls[1][2] == {}
+        assert calls[1][1]["storage_scope"] == "user"
+        missing = json.loads(handler({"query": "orchard"}, cwd=str(runtime_project)))
+        assert "session_id" in missing["error"]
+        assert len(calls) == 3, "missing session identity must never reuse a previous session"
+        ctx.tools["lcm_status"]["handler"]({}, session_id="status-session", cwd=str(runtime_project))
+        assert calls[-1] == (
             "tracedecay_lcm_status",
             {"provider": "hermes", "session_id": "status-session"},
             {"project_root": str(runtime_project)},
         )
-    ], status_calls
-    ok("context-engine status binds its Hermes provider and session target")
-
-    messages = [
+    finally:
+        plugin.tools.call_tracedecay_tool = real_tool
+        plugin._project_scope_resolution = real_resolution
+    ok("retrieval tools retain per-call session/project scope without replacing compaction")
+    return [
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
     ]
-    out = engine.compress(list(messages), current_tokens=10)
-    assert out == messages, out
-    assert engine._last_compress_aborted is True
-    assert engine.last_compress_result == {
-        "status": "unavailable",
-        "reason": "host_raw_compression_unavailable",
-        "semantic_error": True,
-    }
-    ok("compress() returns the unchanged transcript with typed unavailability")
-
-    # Host-contract token attrs (minimum-context guard reads these).
-    engine.update_model("check-model", 128000)
-    assert engine.context_length == 128000
-    assert 0 < engine.threshold_tokens <= 128000
-    ok("update_model populates context_length/threshold_tokens")
-    return messages
-
-
-def _check_engine_thread_isolation(engine):
-    # Per-session isolation: the singleton engine must not leak one
-    # conversation's state into another (gateway sessions, delegate_task
-    # children all share this instance).
-    import threading as _threading
-
-    seen = {}
-
-    def _other_session():
-        engine.on_session_start(session_id="check-session-b")
-        engine.update_model("other-model", 64000)
-        engine.update_from_response({"prompt_tokens": 7, "completion_tokens": 3})
-        seen["b_context"] = engine.context_length
-        seen["b_total"] = engine.last_total_tokens
-
-    worker = _threading.Thread(target=_other_session)
-    worker.start()
-    worker.join(timeout=10)
-    assert seen == {"b_context": 64000, "b_total": 10}, seen
-    # The original thread stays bound to its own session.
-    assert engine.context_length == 128000, engine.context_length
-    assert engine.model == "check-model", engine.model
-    assert engine._last_compress_aborted is True  # from the exception check above
-    ok("per-session engine state stays isolated across threads")
-
-
-def _check_should_compress_gating(plugin, engine):
-    # Hermes exposes no authenticated raw-compaction payload, so no pressure
-    # probe can claim that compression is available.
-    probes = []
-    real_probe = plugin.TraceDecayContextEngine._preflight_probe
-    try:
-        def _spy_probe(self, *args, **kwargs):
-            probes.append(args)
-            return {"status": "ok", "should_compress": True}
-
-        plugin.TraceDecayContextEngine._preflight_probe = _spy_probe
-        assert engine.should_compress(prompt_tokens=10) is False
-        assert probes == [], probes
-        assert engine.should_compress(prompt_tokens=engine.threshold_tokens) is False
-        assert probes == [], probes
-    finally:
-        plugin.TraceDecayContextEngine._preflight_probe = real_probe
-    ok("should_compress stays false without an authentic host payload")
-
-    # ABC contract: should_compress_preflight returns a BOOL; an error dict
-    # from the probe must read as False, never truthy.
-    real_probe = plugin.TraceDecayContextEngine._preflight_probe
-    try:
-        plugin.TraceDecayContextEngine._preflight_probe = (
-            lambda self, *a, **k: {"error": "boom"}
-        )
-        assert engine.should_compress_preflight([{"role": "user", "content": "x"}]) is False
-        plugin.TraceDecayContextEngine._preflight_probe = (
-            lambda self, *a, **k: {"status": "ok", "should_compress": True}
-        )
-        assert engine.should_compress_preflight([]) is False
-    finally:
-        plugin.TraceDecayContextEngine._preflight_probe = real_probe
-    ok("should_compress_preflight reports typed capability absence")
 
 
 def _check_expand_query_degradation(plugin):
@@ -1173,7 +1059,7 @@ def _stop_daemon(proc: subprocess.Popen):
         proc.wait(timeout=5)
 
 
-def _check_hermes_lcm_session_census(plugin, ctx, work: Path):
+def _check_hermes_lcm_session_census(plugin, work: Path):
     """One ingested Hermes session shows its message; a session that was not
     ingested shows none. Status is asked only for the session id."""
     home = work / "home"
@@ -1196,9 +1082,6 @@ def _check_hermes_lcm_session_census(plugin, ctx, work: Path):
         stderr=subprocess.PIPE,
         text=True,
     )
-    engine = ctx.engine
-    saved_root = engine.project_root
-    saved_session = engine.active_session_id
     try:
         deadline = time.monotonic() + 10
         while not (profile / "daemon.sock").exists():
@@ -1207,8 +1090,6 @@ def _check_hermes_lcm_session_census(plugin, ctx, work: Path):
             if time.monotonic() >= deadline:
                 raise AssertionError("isolated daemon socket did not appear")
             time.sleep(0.05)
-        engine.project_root = None
-        engine.active_session_id = "not-the-queried-session"
         ingested = _call_until_tool_ready(
             lambda: plugin.call_tracedecay_json(
                 "tracedecay_hook_runtime",
@@ -1230,17 +1111,19 @@ def _check_hermes_lcm_session_census(plugin, ctx, work: Path):
         )
         assert ingested.get("status") in ("accepted", "committed"), ingested
         present = _call_until_tool_ready(
-            lambda: engine.status(session_id="gate-hermes-session")
+            lambda: plugin.call_tracedecay_json("tracedecay_lcm_status", {
+                "provider": "hermes", "session_id": "gate-hermes-session", "storage_scope": "user",
+            })
         )
         absent = _call_until_tool_ready(
-            lambda: engine.status(session_id="gate-empty-session")
+            lambda: plugin.call_tracedecay_json("tracedecay_lcm_status", {
+                "provider": "hermes", "session_id": "gate-empty-session", "storage_scope": "user",
+            })
         )
         assert _session_message_count(present, "gate-hermes-session") == 1, present
         assert _session_message_count(absent, "gate-empty-session") == 0, absent
-        ok("context-engine status counts the ingested session only")
+        ok("LCM status counts the ingested session only")
     finally:
-        engine.project_root = saved_root
-        engine.active_session_id = saved_session
         _stop_daemon(daemon)
         for key, value in saved_env.items():
             if value is None:
@@ -1262,16 +1145,14 @@ def run_checks(work: Path):
     _check_nudge_kill_switch(plugin, ctx)
     _check_canonical_metadata(plugin, plugin_dir, ctx)
     _check_response_envelope_table(plugin)
-    messages = _check_engine_state_and_compress(plugin, ctx, host_home, runtime_project)
-    _check_engine_thread_isolation(ctx.engine)
-    _check_should_compress_gating(plugin, ctx.engine)
+    messages = _check_lcm_retrieval_scope(plugin, ctx, host_home, runtime_project)
     _check_expand_query_degradation(plugin)
     _check_no_hermes_storage_routing(plugin)
     _check_provider_verbs(plugin, ctx, host_home, messages)
     _check_prefetch_cache(plugin, ctx)
     _check_system_prompt_block(ctx)
     _check_args_file_spill(plugin, work)
-    _check_hermes_lcm_session_census(plugin, ctx, work)
+    _check_hermes_lcm_session_census(plugin, work)
 
 
 if __name__ == "__main__":
