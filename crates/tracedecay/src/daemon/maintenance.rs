@@ -20,8 +20,8 @@ use tracedecay_maintenance::telemetry::{
     StoreFileIdentityStateV1, StoreTelemetrySamplingOutcome, StoreTelemetrySamplingRegistry,
 };
 use tracedecay_maintenance::tick::{
-    MaintenanceContinuation, MaintenanceTickOutcome, cursor_after_attempted_units,
-    select_store_window,
+    MaintenanceContinuation, MaintenanceTickOutcome, StoreMaintenanceContinuations,
+    cursor_after_attempted_units, select_store_window,
 };
 use tracedecay_runtime_core::storage::{RESPONSE_HANDLES_DIRECTORY, profile_sharded_data_root};
 
@@ -207,7 +207,7 @@ async fn join_cancelled_maintenance_task(
 async fn run_registered_store_retention(
     database: &tracedecay_global_db::RegisteredGlobalDb,
     config: &tracedecay_configuration::RetentionConfig,
-) -> bool {
+) -> MaintenanceTickOutcome {
     let now = match now_secs_i64() {
         Ok(now) => now,
         Err(failure) => {
@@ -218,7 +218,7 @@ async fn run_registered_store_retention(
                     ("failure", failure.to_owned()),
                 ],
             );
-            return false;
+            return MaintenanceTickOutcome::Retry;
         }
     };
     let report =
@@ -229,30 +229,7 @@ async fn run_registered_store_retention(
             now,
         )
         .await;
-    match &report.session_lcm {
-        Some(Ok(session_lcm)) => {
-            let reclaimed = session_lcm.bytes_reclaimed();
-            if reclaimed > 0 || session_lcm.inlined.acted > 0 || !session_lcm.errors.is_empty() {
-                log_daemon_event(
-                    "retention_session_lcm",
-                    &[
-                        ("store", "mounted_sessions".to_owned()),
-                        ("bytes_reclaimed", reclaimed.to_string()),
-                        ("inlined_rows", session_lcm.inlined.acted.to_string()),
-                        ("errors", session_lcm.errors.len().to_string()),
-                    ],
-                );
-            }
-        }
-        Some(Err(_)) => log_daemon_event(
-            "retention_degraded",
-            &[
-                ("pass", "session_lcm".to_owned()),
-                ("failure", "retention_pass_failed".to_owned()),
-            ],
-        ),
-        None => {}
-    }
+    let session_storage_outcome = record_session_lcm_outcome(&report.session_lcm);
     match &report.observations {
         Some(Ok(observations)) => {
             let reclaimed = observations.bytes_reclaimed();
@@ -290,15 +267,198 @@ async fn run_registered_store_retention(
         Ok(_) => {}
     }
     log_payload_gc_outcome(&report.payload_gc);
-    let mut succeeded = report.succeeded();
+    let canonical_body_outcome = record_canonical_body_gc_outcome(&report.canonical_body_gc);
+    let replay_metadata_outcome = record_replay_metadata_outcome(&report.replay_metadata);
+    let outcome = if report.succeeded() {
+        session_storage_outcome
+            .combine(canonical_body_outcome)
+            .combine(replay_metadata_outcome)
+    } else {
+        MaintenanceTickOutcome::Retry
+    };
     if let Some(compaction) = &config.compaction {
         let outcome = tracedecay_maintenance::retention::live_compaction::compact_registered_store(
             database, compaction,
         )
         .await;
-        succeeded &= record_live_compaction_outcome("mounted_sessions", outcome);
+        if !record_live_compaction_outcome("mounted_sessions", outcome) {
+            return MaintenanceTickOutcome::Retry;
+        }
     }
-    succeeded
+    outcome
+}
+
+fn record_session_lcm_outcome(
+    outcome: &Option<tracedecay_domain::errors::Result<tracedecay_lcm::LcmRetentionReport>>,
+) -> MaintenanceTickOutcome {
+    match outcome {
+        Some(Ok(session_lcm)) => {
+            let reclaimed = session_lcm.bytes_reclaimed();
+            if reclaimed > 0
+                || session_lcm.inlined.acted > 0
+                || session_lcm.canonicalized_rows > 0
+                || !session_lcm.errors.is_empty()
+            {
+                log_daemon_event(
+                    "retention_session_lcm",
+                    &[
+                        ("store", "mounted_sessions".to_owned()),
+                        ("bytes_reclaimed", reclaimed.to_string()),
+                        ("inlined_rows", session_lcm.inlined.acted.to_string()),
+                        (
+                            "canonicalized_rows",
+                            session_lcm.canonicalized_rows.to_string(),
+                        ),
+                        ("errors", session_lcm.errors.len().to_string()),
+                    ],
+                );
+            }
+        }
+        Some(Err(_)) => log_daemon_event(
+            "retention_degraded",
+            &[
+                ("pass", "session_lcm".to_owned()),
+                ("failure", "retention_pass_failed".to_owned()),
+            ],
+        ),
+        None => {}
+    }
+    match outcome {
+        Some(Ok(report)) if report.errors.is_empty() => {
+            if report.storage_has_more {
+                MaintenanceTickOutcome::Continue(MaintenanceContinuation::StoreRetention)
+            } else {
+                MaintenanceTickOutcome::Complete
+            }
+        }
+        None => MaintenanceTickOutcome::Complete,
+        _ => MaintenanceTickOutcome::Retry,
+    }
+}
+
+async fn run_registered_storage_continuation(
+    database: &tracedecay_global_db::RegisteredGlobalDb,
+    config: &tracedecay_configuration::RetentionConfig,
+) -> MaintenanceTickOutcome {
+    let now = match now_secs_i64() {
+        Ok(now) => now,
+        Err(failure) => {
+            log_daemon_event(
+                "retention_degraded",
+                &[
+                    ("pass", "session_storage".to_owned()),
+                    ("failure", failure.to_owned()),
+                ],
+            );
+            return MaintenanceTickOutcome::Retry;
+        }
+    };
+    let session_lcm =
+        tracedecay_maintenance::retention::registered_store::run_session_storage_compaction(
+            database,
+            &config.session_lcm,
+            now,
+        )
+        .await;
+    let canonical_body_gc =
+        tracedecay_maintenance::retention::registered_store::run_canonical_body_gc(database).await;
+    let replay_metadata =
+        tracedecay_maintenance::retention::registered_store::run_replay_metadata_compaction(
+            database,
+        )
+        .await;
+    record_session_lcm_outcome(&session_lcm)
+        .combine(record_canonical_body_gc_outcome(&canonical_body_gc))
+        .combine(record_replay_metadata_outcome(&replay_metadata))
+}
+
+fn record_canonical_body_gc_outcome(
+    outcome: &Result<
+        tracedecay_global_db::observation::CanonicalBodyGcReport,
+        tracedecay_maintenance::retention::registered_store::RegisteredStoreRetentionErrorV1,
+    >,
+) -> MaintenanceTickOutcome {
+    match outcome {
+        Ok(report) => {
+            if report.roots_scanned > 0 || report.bodies_scanned > 0 {
+                log_daemon_event(
+                    "retention_canonical_bodies",
+                    &[
+                        ("roots_scanned", report.roots_scanned.to_string()),
+                        ("bodies_scanned", report.bodies_scanned.to_string()),
+                        ("bodies_deleted", report.bodies_deleted.to_string()),
+                        (
+                            "stored_bytes_deleted",
+                            report.stored_bytes_deleted.to_string(),
+                        ),
+                        ("bootstrap_complete", report.bootstrap_complete.to_string()),
+                        ("has_more", report.has_more.to_string()),
+                    ],
+                );
+            }
+            if report.has_more {
+                MaintenanceTickOutcome::Continue(MaintenanceContinuation::StoreRetention)
+            } else {
+                MaintenanceTickOutcome::Complete
+            }
+        }
+        Err(error) => {
+            log_daemon_event(
+                "retention_degraded",
+                &[
+                    ("pass", "canonical_body_gc".to_owned()),
+                    ("failure", error.diagnostic().to_owned()),
+                ],
+            );
+            MaintenanceTickOutcome::Retry
+        }
+    }
+}
+
+fn record_replay_metadata_outcome(
+    outcome: &Result<
+        tracedecay_lcm::retention::ReplayMetadataCompactionReport,
+        tracedecay_maintenance::retention::registered_store::RegisteredStoreRetentionErrorV1,
+    >,
+) -> MaintenanceTickOutcome {
+    match outcome {
+        Ok(report) => {
+            if report.rows_scanned > 0 {
+                log_daemon_event(
+                    "retention_replay_metadata",
+                    &[
+                        ("rows_scanned", report.rows_scanned.to_string()),
+                        ("rows_compacted", report.rows_compacted.to_string()),
+                        ("rows_skipped", report.rows_skipped.to_string()),
+                        (
+                            "rows_skipped_oversized",
+                            report.rows_skipped_oversized.to_string(),
+                        ),
+                        (
+                            "metadata_bytes_removed",
+                            report.metadata_bytes_removed.to_string(),
+                        ),
+                        ("has_more", report.has_more.to_string()),
+                    ],
+                );
+            }
+            if report.has_more {
+                MaintenanceTickOutcome::Continue(MaintenanceContinuation::StoreRetention)
+            } else {
+                MaintenanceTickOutcome::Complete
+            }
+        }
+        Err(error) => {
+            log_daemon_event(
+                "retention_degraded",
+                &[
+                    ("pass", "replay_metadata_compaction".to_owned()),
+                    ("failure", error.diagnostic().to_owned()),
+                ],
+            );
+            MaintenanceTickOutcome::Retry
+        }
+    }
 }
 
 fn log_payload_gc_outcome(
@@ -457,6 +617,7 @@ pub(super) struct MaintenanceCoordinator {
     /// last store processed. The next tick resumes immediately after it so no
     /// store is starved when the mounted set exceeds `MAINTENANCE_STORE_PAGE_LIMIT`.
     store_cursor: Arc<Mutex<Option<String>>>,
+    store_continuations: Arc<Mutex<StoreMaintenanceContinuations>>,
     /// Instant of the last branch-store GC pass that succeeded for every
     /// mounted project. `None` keeps the daily cadence retry-eligible.
     last_branch_gc: Arc<Mutex<Option<Instant>>>,
@@ -477,6 +638,7 @@ impl Default for MaintenanceCoordinator {
             task: Arc::new(Mutex::new(None)),
             metrics: Arc::new(Mutex::new(MaintenanceMetricsV1::default())),
             store_cursor: Arc::new(Mutex::new(None)),
+            store_continuations: Arc::new(Mutex::new(StoreMaintenanceContinuations::default())),
             last_branch_gc: Arc::new(Mutex::new(None)),
             resident_memory_sampler: Arc::new(Mutex::new(None)),
             resident_memory_log: Arc::new(std::sync::Mutex::new(
@@ -802,16 +964,12 @@ impl MaintenanceCoordinator {
         administration
             .store_telemetry_sampling()
             .begin_retention_tick_log_window();
-        let session_databases = if continuation.is_none() {
-            administration
-                .mounted_registered_session_databases()
-                .await
-                .iter()
-                .map(|database| database.db_path().to_path_buf())
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let session_databases = administration
+            .mounted_registered_session_databases()
+            .await
+            .iter()
+            .map(|database| database.db_path().to_path_buf())
+            .collect::<Vec<_>>();
         let project_graphs = administration
             .mounted_project_graphs()
             .await
@@ -901,6 +1059,7 @@ impl MaintenanceCoordinator {
         }
         work.sort_by(|left, right| left.0.cmp(&right.0));
         let keys = work.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>();
+        self.store_continuations.lock().await.retain_stores(&keys);
         let after = self.store_cursor.lock().await.clone();
         let (window, _) =
             select_store_window(&keys, after.as_deref(), MAINTENANCE_STORE_PAGE_LIMIT);
@@ -941,8 +1100,8 @@ impl MaintenanceCoordinator {
         // Bounded, round-robin slice of mounted stores. Writer admission is
         // per unit so one busy store defers only itself, and the cursor
         // advances past attempted units even on cancellation. A continuation
-        // omits session stores, but remains phase-scoped over the same bounded
-        // graph window rather than pinning one project.
+        // advances bounded lossless storage work and code-generation retention
+        // over the same bounded store window rather than pinning one project.
         let mut attempted = 0usize;
         let mut deferred = 0u64;
         let mut outcome = MaintenanceTickOutcome::Complete;
@@ -967,10 +1126,10 @@ impl MaintenanceCoordinator {
                             else {
                                 return MaintenanceTickOutcome::Complete;
                             };
-                            if run_registered_store_retention(&database, retention).await {
-                                MaintenanceTickOutcome::Complete
+                            if continuation.is_some() {
+                                run_registered_storage_continuation(&database, retention).await
                             } else {
-                                MaintenanceTickOutcome::Retry
+                                run_registered_store_retention(&database, retention).await
                             }
                         }
                         MaintenanceStoreWork::Graph(_) => {
@@ -1008,7 +1167,13 @@ impl MaintenanceCoordinator {
                 .await;
             attempted = attempted.saturating_add(1);
             match admitted {
-                Some(unit_outcome) => outcome = outcome.combine(unit_outcome),
+                Some(unit_outcome) => {
+                    self.store_continuations
+                        .lock()
+                        .await
+                        .record(&keys[index], unit_outcome);
+                    outcome = outcome.combine(unit_outcome);
+                }
                 None => {
                     deferred = deferred.saturating_add(1);
                     outcome = MaintenanceTickOutcome::Retry;
@@ -1021,6 +1186,7 @@ impl MaintenanceCoordinator {
         }
         *self.store_cursor.lock().await =
             cursor_after_attempted_units(&keys, &window, attempted, after.as_deref());
+        outcome = self.store_continuations.lock().await.combine(outcome);
         if !registry_listed {
             outcome = MaintenanceTickOutcome::Retry;
         }
@@ -1647,7 +1813,7 @@ mod tests {
                 &schedulers,
                 &retention,
                 branch_gc,
-                Some(MaintenanceContinuation::CodeGenerationRetention),
+                Some(MaintenanceContinuation::StoreRetention),
             )
             .await;
         assert_eq!(continuation, MaintenanceTickOutcome::Complete);

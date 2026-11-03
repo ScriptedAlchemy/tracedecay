@@ -26,19 +26,22 @@
 //! 1. **Drop** (terminal, longest window): projection-durable raw rows past
 //!    `drop_after_days` are deleted. Any now unreferenced external payload is
 //!    reaped by the existing payload GC.
-//! 2. **Inline** (lossless): small bodies previously externalized by retention
-//!    return to their raw rows. The released files follow the existing GC grace
-//!    period; no disk reclamation is claimed before GC runs.
-//! 3. **Offload** (recoverable, shorter window): projection-durable *inline*
-//!    raw rows past `offload_after_days` have large `content` externalized and
-//!    replaced with a recoverable placeholder. Bodies below the normal inline
-//!    threshold stay inline, avoiding a separate uncompressed file and manifest
-//!    for each small message. Generated search text and its index follow the
-//!    retained body or placeholder; inlining restores the original search text.
+//! 2. **Inline** (lossless): bodies previously externalized by retention return
+//!    to their raw rows or the existing shared canonical-body store when its
+//!    packed body, retrieval snippet and record allowance are smaller. Released
+//!    files follow the existing GC grace period; this pass does not delete files.
+//! 3. **Offload** (lossless, shorter window): projection-durable direct-inline
+//!    bodies past `offload_after_days` move to shared canonical storage only
+//!    when the same storage comparison succeeds. Non-beneficial bodies stay
+//!    intact; no new uncompressed payload files are created. Generated search
+//!    text follows the retained body or canonical snippet, and verified reads
+//!    continue to return the complete original text.
 //!
-//! Every pass is bounded (`max_batch_size`) and incremental so the daemon can
-//! schedule it off the hot path without competing with foreground writes, and a
-//! dry run counts what would be reclaimed without mutating anything.
+//! Every pass is incremental. The lossless storage passes examine at most 500
+//! candidates and 8 MiB of body/metadata bytes per pass, with a 4 MiB cap on each
+//! body and row metadata envelope before body hydration. Larger records remain
+//! intact. Dry runs count candidates without hydrating, compressing or changing
+//! them, so their candidate count does not predict how many bodies will shrink.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -55,12 +58,25 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 use tracedecay_runtime_core::db::{
     Database, DatabaseEngineReadConnection, DatabaseMemoryTransaction,
 };
-use tracedecay_store::INLINE_BODY_BYTES;
+use tracedecay_store::{INLINE_BODY_BYTES, StoredCanonicalBody};
 
+#[cfg(test)]
 use super::payload::{ExternalPayloadWrite, PayloadFileRollback};
-use super::{LcmError, payload, raw, schema, util};
+use super::{LcmError, payload, raw, schema, summary_convergence, util};
+
+mod replay_metadata;
+pub use replay_metadata::{
+    MAX_REPLAY_METADATA_COMPACTION_ROWS, ReplayMetadataCompactionReport, compact_replay_metadata,
+};
 
 const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
+const MAX_REPACK_BODY_BYTES: usize = 4 * 1024 * 1024;
+const MAX_STORAGE_PASS_BYTES: usize = 8 * 1024 * 1024;
+const MAX_STORAGE_PASS_ROWS: i64 = 500;
+const RESTORE_CURSOR: &str = "restore_offloaded_v2";
+// Covers the canonical record, hash indexes and owner/candidate references.
+// This is a conservative logical storage allowance, not a filesystem estimate.
+const CANONICAL_RECORD_ALLOWANCE: usize = 1024;
 
 /// SQL predicate (over an aliased `lcm_raw_messages` row `r`) that is true when
 /// the raw row's `store_id` is covered by a durable summary node's lineage.
@@ -87,17 +103,18 @@ const OFFLOAD_KIND: &str = "retention_offload";
 
 /// Per-table/per-store retention windows for the session store. Defaults keep
 /// a six-month recovery horizon for projection-durable raw evidence and
-/// offload its bulky inline payload after 30 days. Rows without durable
-/// summary lineage remain untouched.
+/// compact its bulky inline payload after 30 days when canonical storage is
+/// smaller. Rows without durable summary lineage remain untouched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LcmRetentionConfig {
     /// Master switch. When `false`, [`run_session_retention`] is a
     /// no-op even in [`RetentionMode::Apply`].
     #[serde(default = "default_retention_enabled")]
     pub enabled: bool,
-    /// Window after which a projection-durable raw row with a large inline body
-    /// is offloaded. Small retention-offloaded bodies past this window return
-    /// inline instead. `None` disables both lossless storage passes.
+    /// Window after which projection-durable bodies may be compacted into the
+    /// existing canonical store. Retention-offloaded files past this window may
+    /// return inline or become canonical when smaller; non-beneficial and
+    /// oversized bodies remain intact. `None` disables both lossless passes.
     #[serde(default = "default_offload_after_days")]
     pub offload_after_days: Option<u32>,
     /// Window after which a projection-durable raw row is dropped. `None`
@@ -201,10 +218,19 @@ pub struct LcmRetentionReport {
     pub ended_at: i64,
     pub dropped: LcmRetentionPhaseReport,
     pub offloaded: LcmRetentionPhaseReport,
-    /// Small retention-offloaded bodies restored inline. Released files remain
-    /// available until the existing payload GC verifies them after its grace.
+    /// Retention-offloaded bodies restored to normal inline/canonical storage.
+    /// Released files remain available until existing payload GC verifies them
+    /// after its grace period.
     #[serde(default)]
     pub inlined: LcmRetentionPhaseReport,
+    /// Subset of restored/offloaded rows compacted into shared canonical bodies.
+    /// This counts representation changes, not filesystem bytes reclaimed.
+    #[serde(default)]
+    pub canonicalized_rows: u64,
+    /// A lossless pass reached its row/byte budget before draining its cursor.
+    /// The daemon may continue this work without rerunning age-based deletion.
+    #[serde(default)]
+    pub storage_has_more: bool,
     /// Database `PRAGMA freelist_count` before/after (freed pages are the
     /// measurable, VACUUM-free signal that space was reclaimed).
     pub freelist_before: u64,
@@ -394,6 +420,8 @@ async fn run_session_retention_inner(
         dropped: LcmRetentionPhaseReport::disabled(),
         offloaded: LcmRetentionPhaseReport::disabled(),
         inlined: LcmRetentionPhaseReport::disabled(),
+        canonicalized_rows: 0,
+        storage_has_more: false,
         freelist_before,
         freelist_after: freelist_before,
         page_count_before,
@@ -412,8 +440,8 @@ async fn run_session_retention_inner(
         provider,
         session_id,
     };
-    // Drop first (terminal, longest window) so offload never externalizes a row
-    // that is about to be deleted.
+    // Drop first (terminal, longest window) so the lossless passes never compact
+    // a row that is about to be deleted.
     let (dropped, drop_cursor) = run_drop_pass(
         store,
         scope,
@@ -425,7 +453,7 @@ async fn run_session_retention_inner(
     )
     .await?;
     report.dropped = dropped;
-    let (inlined, inline_cursor) = run_inline_offloaded_pass(
+    let (inlined, inline_cursor, inline_has_more) = run_inline_offloaded_pass(
         store,
         storage_root,
         scope,
@@ -433,22 +461,24 @@ async fn run_session_retention_inner(
         mode,
         now,
         &mut report.errors,
+        &mut report.canonicalized_rows,
         authorize,
     )
     .await?;
     report.inlined = inlined;
-    let (offloaded, offload_cursor) = run_offload_pass(
+    let (offloaded, offload_cursor, offload_has_more) = run_offload_pass(
         store,
-        storage_root,
         scope,
         config,
         mode,
         now,
         &mut report.errors,
+        &mut report.canonicalized_rows,
         authorize,
     )
     .await?;
     report.offloaded = offloaded;
+    report.storage_has_more = inline_has_more || offload_has_more;
     if mode.is_apply() {
         // Consume the staged GC/reporting meta cards: record the last run so a
         // scheduler and Doctor can report retention backlog without a rescan.
@@ -467,7 +497,7 @@ async fn run_session_retention_inner(
             for (pass, cursor) in [
                 ("drop", drop_cursor),
                 ("offload", offload_cursor),
-                ("inline_offloaded", inline_cursor),
+                (RESTORE_CURSOR, inline_cursor),
             ] {
                 if let Some(cursor) = cursor {
                     cursor.persist(&transaction, pass).await?;
@@ -964,18 +994,21 @@ struct InlineOffloadedRow {
     content_hash: String,
     placeholder_text: Option<String>,
     metadata_json: Option<String>,
+    byte_count: usize,
 }
 
-fn small_offload_predicate() -> String {
+fn restorable_offload_predicate() -> String {
     format!(
         "r.storage_kind = 'external' AND r.content IS NULL
+         AND COALESCE(LENGTH(CAST(r.metadata_json AS BLOB)), 0)
+             + COALESCE(LENGTH(CAST(r.placeholder_text AS BLOB)), 0) <= {MAX_REPACK_BODY_BYTES}
          AND EXISTS (
              SELECT 1 FROM lcm_external_payloads e
              WHERE e.payload_ref = r.payload_ref
                AND e.provider = r.provider AND e.session_id = r.session_id
                AND e.message_id = r.message_id AND e.content_hash = r.content_hash
                AND e.kind = '{OFFLOAD_KIND}'
-               AND e.byte_count > 0 AND e.byte_count < {INLINE_BODY_BYTES}
+               AND e.byte_count > 0 AND e.byte_count <= {MAX_REPACK_BODY_BYTES}
          )"
     )
 }
@@ -989,59 +1022,88 @@ async fn run_inline_offloaded_pass(
     mode: RetentionMode,
     now: i64,
     errors: &mut Vec<String>,
+    canonicalized: &mut u64,
     authorize: Option<&RetentionAuthorization<'_>>,
-) -> Result<(LcmRetentionPhaseReport, Option<RetentionCursor>), LcmError> {
+) -> Result<(LcmRetentionPhaseReport, Option<RetentionCursor>, bool), LcmError> {
     let mut report = LcmRetentionPhaseReport {
         window_days: config.offload_after_days,
         ..LcmRetentionPhaseReport::default()
     };
     let Some(window) = config.offload_after_days else {
-        return Ok((report, None));
+        return Ok((report, None, false));
     };
     let read = store.read_connection();
-    // A distinct cursor reaches small files created before the offload cursor
-    // advanced. It uses the same bounded age/summary-lineage traversal.
-    let cursor = RetentionCursor::read(&read, "inline_offloaded").await?;
-    let (targets, next) = select_retention_candidates(
-        &read,
-        scope,
-        cursor,
-        cutoff_secs(window, now),
-        config.batch_limit(),
-        "r.store_id, r.timestamp, r.provider, r.session_id, r.message_id,
-         r.payload_ref, r.content_hash, r.placeholder_text, r.metadata_json",
-        &small_offload_predicate(),
-        |row| {
-            Ok(InlineOffloadedRow {
-                store_id: row.get(0)?,
-                timestamp: row.get(1)?,
-                provider: row.get(2)?,
-                session_id: row.get(3)?,
-                message_id: row.get(4)?,
-                payload_ref: row.get(5)?,
-                content_hash: row.get(6)?,
-                placeholder_text: row.get(7)?,
-                metadata_json: row.get(8)?,
-            })
-        },
-    )
-    .await?;
-    report.eligible = targets.len() as u64;
-    report.oldest_eligible_at = targets.iter().map(|target| target.timestamp).min();
-    if !mode.is_apply() {
-        return Ok((report, None));
-    }
-
-    let errors_before = errors.len();
-    for target in targets {
-        match inline_offloaded_one(store, storage_root, &target, authorize).await {
-            Ok(()) => report.acted += 1,
-            Err(error) => errors.push(format!("inline raw row {}: {error}", target.store_id)),
+    // The v2 cursor revisits files skipped by the prior tiny-file-only pass.
+    let mut cursor = RetentionCursor::read(&read, RESTORE_CURSOR).await?;
+    let mut remaining = MAX_STORAGE_PASS_BYTES;
+    let mut has_more = true;
+    for _ in 0..config.batch_limit().min(MAX_STORAGE_PASS_ROWS) {
+        let (mut targets, next) = select_retention_candidates(
+            &read,
+            scope,
+            cursor,
+            cutoff_secs(window, now),
+            1,
+            "r.store_id, r.timestamp, r.provider, r.session_id, r.message_id,
+             r.payload_ref, r.content_hash, r.placeholder_text, r.metadata_json,
+             (SELECT byte_count FROM lcm_external_payloads WHERE payload_ref = r.payload_ref)",
+            &restorable_offload_predicate(),
+            |row| {
+                Ok(InlineOffloadedRow {
+                    store_id: row.get(0)?,
+                    timestamp: row.get(1)?,
+                    provider: row.get(2)?,
+                    session_id: row.get(3)?,
+                    message_id: row.get(4)?,
+                    payload_ref: row.get(5)?,
+                    content_hash: row.get(6)?,
+                    placeholder_text: row.get(7)?,
+                    metadata_json: row.get(8)?,
+                    byte_count: usize::try_from(row.get::<i64>(9)?)
+                        .map_err(|_| LcmError::PayloadIntegrityMismatch)?,
+                })
+            },
+        )
+        .await?;
+        if let Some(target) = targets.pop() {
+            let cost = target
+                .byte_count
+                .saturating_add(target.metadata_json.as_ref().map_or(0, String::len))
+                .saturating_add(target.placeholder_text.as_ref().map_or(0, String::len));
+            if cost > remaining {
+                break;
+            }
+            remaining -= cost;
+            report.eligible += 1;
+            report.oldest_eligible_at = Some(
+                report
+                    .oldest_eligible_at
+                    .map_or(target.timestamp, |old| old.min(target.timestamp)),
+            );
+            if mode.is_apply() {
+                match inline_offloaded_one(store, storage_root, &target, authorize).await {
+                    Ok(Some(compacted)) => {
+                        report.acted += 1;
+                        *canonicalized += u64::from(compacted);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        errors.push(format!("inline raw row {}: {error}", target.store_id));
+                        has_more = false;
+                        break;
+                    }
+                }
+            }
         }
+        if next == cursor {
+            has_more = false;
+            break;
+        }
+        cursor = next;
     }
     // Inlining releases a file reference, not physical bytes. Existing owner
     // GC proves it is unreferenced after grace and reports its own reclamation.
-    Ok((report, (errors.len() == errors_before).then_some(next)))
+    Ok((report, mode.is_apply().then_some(cursor), has_more))
 }
 
 async fn inline_offloaded_one(
@@ -1049,7 +1111,7 @@ async fn inline_offloaded_one(
     storage_root: &Path,
     target: &InlineOffloadedRow,
     authorize: Option<&RetentionAuthorization<'_>>,
-) -> Result<(), LcmError> {
+) -> Result<Option<bool>, LcmError> {
     let read = store.read_connection();
     let metadata = payload::load_payload_metadata(&read, &target.payload_ref).await?;
     if metadata.provider != target.provider
@@ -1065,7 +1127,8 @@ async fn inline_offloaded_one(
     if metadata.kind != OFFLOAD_KIND
         || metadata.content_hash != target.content_hash
         || bytes == 0
-        || bytes >= INLINE_BODY_BYTES
+        || bytes != target.byte_count
+        || bytes > MAX_REPACK_BODY_BYTES
         || chars > bytes
     {
         return Err(LcmError::PayloadIntegrityMismatch);
@@ -1083,27 +1146,43 @@ async fn inline_offloaded_one(
             Ok(())
         },
     )?;
+    let packed = (bytes >= INLINE_BODY_BYTES)
+        .then(|| pack_canonical(&content))
+        .transpose()?;
+    let placeholder = raw::derived_text_for_snippet(&content);
     let txn = store
         .begin_memory_write_transaction("begin session retention inline pass", authorize)
         .await?;
+    if let Some(body) = &packed {
+        if !canonical_storage_saves_bytes(&txn, body, &placeholder).await? {
+            txn.rollback().await?;
+            return Ok(None);
+        }
+        raw::persist_canonical_body(&txn, body).await?;
+    }
     if let Some(authorize) = authorize {
         authorize("compare and swap session retention inline row")?;
     }
+    summary_convergence::suspend_raw_update_guard(&txn).await?;
     let update_sql = format!(
         "UPDATE lcm_raw_messages AS r
-         SET content = ?2, storage_kind = 'inline', payload_ref = NULL, placeholder_text = NULL
+         SET content = ?2, storage_kind = 'inline', payload_ref = NULL, placeholder_text = ?11
          WHERE r.store_id = ?1 AND r.content_hash = ?3 AND r.payload_ref = ?4
            AND r.provider = ?5 AND r.session_id = ?6 AND r.message_id = ?7
            AND r.timestamp = ?8 AND r.placeholder_text IS ?9 AND r.metadata_json IS ?10
            AND {PROJECTION_DURABLE} AND {}",
-        small_offload_predicate()
+        restorable_offload_predicate()
     );
     let changed = txn
         .execute(
             &update_sql,
             params![
                 target.store_id,
-                content,
+                if packed.is_none() {
+                    Some(content.as_str())
+                } else {
+                    None
+                },
                 target.content_hash.as_str(),
                 target.payload_ref.as_str(),
                 target.provider.as_str(),
@@ -1111,7 +1190,8 @@ async fn inline_offloaded_one(
                 target.message_id.as_str(),
                 target.timestamp,
                 util::opt_text(target.placeholder_text.as_deref()),
-                util::opt_text(target.metadata_json.as_deref())
+                util::opt_text(target.metadata_json.as_deref()),
+                packed.as_ref().map(|_| placeholder.as_str())
             ],
         )
         .await?;
@@ -1129,7 +1209,47 @@ async fn inline_offloaded_one(
         txn.rollback().await?;
         return Err(error);
     }
-    commit_authorized(txn, authorize, "commit session retention inline pass").await
+    if let Err(error) = summary_convergence::restore_raw_update_guard(&txn).await {
+        txn.rollback().await?;
+        return Err(error);
+    }
+    commit_authorized(txn, authorize, "commit session retention inline pass").await?;
+    Ok(Some(packed.is_some()))
+}
+
+fn pack_canonical(content: &str) -> Result<StoredCanonicalBody, LcmError> {
+    StoredCanonicalBody::pack(content.as_bytes())
+        .map_err(|error| LcmError::Db(format!("retention canonical body pack failed: {error}")))
+}
+
+async fn canonical_storage_saves_bytes(
+    conn: &(impl QueryExecutor + ?Sized),
+    body: &StoredCanonicalBody,
+    snippet: &str,
+) -> Result<bool, LcmError> {
+    let original_bytes =
+        usize::try_from(body.uncompressed_bytes).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
+    let mut rows = conn.query(
+        "SELECT LENGTH(body), uncompressed_bytes FROM session_canonical_bodies WHERE content_hash = ?1",
+        params![body.content_hash.as_str()],
+    ).await?;
+    let marginal_body_bytes = if let Some(existing) = rows.next().await? {
+        // Validate sizes before the normal raw reader hydrates an existing body.
+        // It subsequently proves its decoded bytes, hash and sanitizer receipt
+        // under this same transaction, before releasing the original source.
+        let stored_bytes = usize::try_from(existing.get::<i64>(0)?)
+            .map_err(|_| LcmError::PayloadIntegrityMismatch)?;
+        if existing.get::<i64>(1)? != body.uncompressed_bytes || stored_bytes > original_bytes {
+            return Err(LcmError::PayloadIntegrityMismatch);
+        }
+        0
+    } else {
+        body.blob.len()
+    };
+    Ok(marginal_body_bytes
+        .saturating_add(snippet.len())
+        .saturating_add(CANONICAL_RECORD_ALLOWANCE)
+        < original_bytes)
 }
 
 struct OffloadRow {
@@ -1139,77 +1259,196 @@ struct OffloadRow {
     message_id: String,
     timestamp: i64,
     content: String,
+    metadata_json: Option<String>,
+}
+
+struct OffloadHeader {
+    store_id: i64,
+    timestamp: i64,
+    provider: String,
+    session_id: String,
+    message_id: String,
+    content_hash: String,
+    metadata_json: Option<String>,
+    byte_count: usize,
+}
+
+async fn load_offload_row(
+    read: &(impl QueryExecutor + ?Sized),
+    target: OffloadHeader,
+) -> Result<OffloadRow, LcmError> {
+    let mut rows = read
+        .query(
+            &format!(
+                "SELECT {} FROM lcm_raw_messages
+         WHERE store_id = ?1 AND timestamp = ?2 AND provider = ?3 AND session_id = ?4
+           AND message_id = ?5 AND content_hash = ?6 AND metadata_json IS ?7
+           AND storage_kind = 'inline' AND content IS NOT NULL
+           AND LENGTH(CAST(content AS BLOB)) = ?8",
+                raw::RAW_MESSAGE_SELECT_COLUMNS
+            ),
+            params![
+                target.store_id,
+                target.timestamp,
+                target.provider.as_str(),
+                target.session_id.as_str(),
+                target.message_id.as_str(),
+                target.content_hash.as_str(),
+                target.metadata_json.as_deref(),
+                target.byte_count as i64
+            ],
+        )
+        .await?;
+    let row = rows.next().await?.ok_or_else(|| {
+        LcmError::Db(format!(
+            "offload compare-and-swap rejected changed row {}",
+            target.store_id
+        ))
+    })?;
+    let message = raw::verified_raw_message_from_row(&row)?;
+    Ok(OffloadRow {
+        store_id: target.store_id,
+        timestamp: target.timestamp,
+        provider: target.provider,
+        session_id: target.session_id,
+        message_id: target.message_id,
+        content: message.content,
+        metadata_json: target.metadata_json,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn run_offload_pass(
     store: RetentionStore<'_>,
-    storage_root: &Path,
     scope: RetentionScope<'_>,
     config: &LcmRetentionConfig,
     mode: RetentionMode,
     now: i64,
     errors: &mut Vec<String>,
+    canonicalized: &mut u64,
     authorize: Option<&RetentionAuthorization<'_>>,
-) -> Result<(LcmRetentionPhaseReport, Option<RetentionCursor>), LcmError> {
+) -> Result<(LcmRetentionPhaseReport, Option<RetentionCursor>, bool), LcmError> {
     let mut report = LcmRetentionPhaseReport {
         window_days: config.offload_after_days,
         ..LcmRetentionPhaseReport::default()
     };
     let Some(window) = config.offload_after_days else {
-        return Ok((report, None));
+        return Ok((report, None, false));
     };
     let cutoff = cutoff_secs(window, now);
     let read = store.read_connection();
-    let cursor = RetentionCursor::read(&read, "offload").await?;
-    let (targets, next) = select_retention_candidates(
-        &read,
-        scope,
-        cursor,
-        cutoff,
-        config.batch_limit(),
-        "r.store_id, r.timestamp, r.provider, r.session_id, r.message_id, r.content",
-        &format!(
-            "r.storage_kind = 'inline' AND r.content IS NOT NULL
-             AND LENGTH(CAST(r.content AS BLOB)) >= {INLINE_BODY_BYTES}"
-        ),
-        |row| {
-            Ok(OffloadRow {
-                store_id: row.get(0)?,
-                timestamp: row.get(1)?,
-                provider: row.get(2)?,
-                session_id: row.get(3)?,
-                message_id: row.get(4)?,
-                content: row.get(5)?,
-            })
-        },
-    )
-    .await?;
-    report.eligible = targets.len() as u64;
-    report.oldest_eligible_at = targets.iter().map(|target| target.timestamp).min();
-    if !mode.is_apply() {
-        report.bytes_reclaimed = targets.iter().map(|t| t.content.len() as u64).sum();
-        return Ok((report, None));
-    }
-
-    // Each row is offloaded atomically: write the content-addressed file, then
-    // flip the row to external + placeholder in its own transaction. A crash
-    // between file write and commit is cleaned up by the rollback guard.
-    let errors_before = errors.len();
-    for target in targets {
-        match offload_one(store, storage_root, &target, authorize).await {
-            Ok(bytes) => {
-                report.acted += 1;
-                report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(bytes);
+    let mut cursor = RetentionCursor::read(&read, "offload").await?;
+    let mut remaining = MAX_STORAGE_PASS_BYTES;
+    let mut has_more = true;
+    for _ in 0..config.batch_limit().min(MAX_STORAGE_PASS_ROWS) {
+        let (mut targets, next) = select_retention_candidates(
+            &read, scope, cursor, cutoff, 1,
+            "r.store_id, r.timestamp, r.provider, r.session_id, r.message_id, r.content_hash,
+             r.metadata_json, LENGTH(CAST(r.content AS BLOB))",
+            &format!("r.storage_kind = 'inline' AND r.content IS NOT NULL
+                AND COALESCE(LENGTH(CAST(r.metadata_json AS BLOB)), 0) <= {MAX_REPACK_BODY_BYTES}
+                AND LENGTH(CAST(r.content AS BLOB)) BETWEEN {INLINE_BODY_BYTES} AND {MAX_REPACK_BODY_BYTES}"),
+            |row| Ok(OffloadHeader {
+                store_id: row.get(0)?, timestamp: row.get(1)?, provider: row.get(2)?,
+                session_id: row.get(3)?, message_id: row.get(4)?, content_hash: row.get(5)?,
+                metadata_json: row.get(6)?,
+                byte_count: usize::try_from(row.get::<i64>(7)?).map_err(|_| LcmError::PayloadIntegrityMismatch)?,
+            }),
+        ).await?;
+        if let Some(header) = targets.pop() {
+            let cost = header
+                .byte_count
+                .saturating_add(header.metadata_json.as_ref().map_or(0, String::len));
+            if cost > remaining {
+                break;
             }
-            Err(err) => errors.push(format!("offload raw row {}: {err}", target.store_id)),
+            remaining -= cost;
+            report.eligible += 1;
+            report.oldest_eligible_at = Some(
+                report
+                    .oldest_eligible_at
+                    .map_or(header.timestamp, |old| old.min(header.timestamp)),
+            );
+            if mode.is_apply() {
+                let store_id = header.store_id;
+                let result = async {
+                    let target = load_offload_row(&read, header).await?;
+                    offload_one(store, &target, authorize).await
+                }
+                .await;
+                match result {
+                    Ok(Some(bytes)) => {
+                        report.acted += 1;
+                        report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(bytes);
+                        *canonicalized += 1;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        errors.push(format!("offload raw row {store_id}: {error}"));
+                        has_more = false;
+                        break;
+                    }
+                }
+            }
         }
+        if next == cursor {
+            has_more = false;
+            break;
+        }
+        cursor = next;
     }
-    // A failed row stays behind the cursor so the next pass retries it.
-    Ok((report, (errors.len() == errors_before).then_some(next)))
+    Ok((report, mode.is_apply().then_some(cursor), has_more))
 }
 
 async fn offload_one(
+    store: RetentionStore<'_>,
+    target: &OffloadRow,
+    authorize: Option<&RetentionAuthorization<'_>>,
+) -> Result<Option<u64>, LcmError> {
+    if target.content.len() > MAX_REPACK_BODY_BYTES {
+        return Err(LcmError::Db(
+            "retention body exceeds the 4 MiB repack limit".to_owned(),
+        ));
+    }
+    if target.content.len() >= INLINE_BODY_BYTES {
+        let packed = pack_canonical(&target.content)?;
+        let placeholder = raw::derived_text_for_snippet(&target.content);
+        let txn = store
+            .begin_memory_write_transaction("begin session retention canonical pass", authorize)
+            .await?;
+        if canonical_storage_saves_bytes(&txn, &packed, &placeholder).await? {
+            raw::persist_canonical_body(&txn, &packed).await?;
+            let changed = txn.execute(&format!(
+                "UPDATE lcm_raw_messages AS r SET content = NULL, placeholder_text = ?2
+                 WHERE r.store_id = ?1 AND r.content_hash = ?3 AND r.provider = ?4
+                   AND r.session_id = ?5 AND r.message_id = ?6 AND r.timestamp = ?7
+                   AND r.content = ?8 AND r.metadata_json IS ?9
+                   AND r.storage_kind = 'inline' AND r.payload_ref IS NULL AND {PROJECTION_DURABLE}"),
+                params![target.store_id, placeholder.as_str(), packed.content_hash.as_str(),
+                    target.provider.as_str(), target.session_id.as_str(), target.message_id.as_str(),
+                    target.timestamp, target.content.as_str(), target.metadata_json.as_deref()]
+            ).await?;
+            if changed != 1 {
+                txn.rollback().await?;
+                return Err(LcmError::Db(format!(
+                    "offload compare-and-swap rejected changed row {}",
+                    target.store_id
+                )));
+            }
+            if let Err(error) = raw::load_raw_message_by_store_id(&txn, target.store_id).await {
+                txn.rollback().await?;
+                return Err(error);
+            }
+            commit_authorized(txn, authorize, "commit session retention canonical pass").await?;
+            return Ok(Some(target.content.len() as u64));
+        }
+        txn.rollback().await?;
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+async fn offload_external_one(
     store: RetentionStore<'_>,
     storage_root: &Path,
     target: &OffloadRow,
@@ -1264,6 +1503,7 @@ async fn offload_one(
            AND r.message_id = ?7
            AND r.timestamp = ?8
            AND r.content = ?9
+           AND r.metadata_json IS ?10
            AND r.storage_kind = 'inline'
            AND r.payload_ref IS NULL
            AND {PROJECTION_DURABLE}"
@@ -1280,7 +1520,8 @@ async fn offload_one(
                 target.session_id.as_str(),
                 target.message_id.as_str(),
                 target.timestamp,
-                target.content.as_str()
+                target.content.as_str(),
+                target.metadata_json.as_deref()
             ],
         )
         .await?;

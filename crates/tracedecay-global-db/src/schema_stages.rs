@@ -1140,6 +1140,7 @@ async fn install_registered_schema_stage_sequence(
                 },
                 error => global_db_operation_error("initialize LCM schema", error),
             })?;
+        observation::canonical_body_gc::schema::install(transaction).await?;
     }
     // `force_exhaustive` means admission observed damaged or missing guard
     // triggers (for example a dropped guarded table takes its triggers with

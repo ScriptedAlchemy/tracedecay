@@ -256,7 +256,7 @@ mod tests {
         drive_loop(
             MaintenanceCadence::with_retry_delay(DAILY, RETRY),
             vec![MaintenanceTickOutcome::Continue(
-                MaintenanceContinuation::CodeGenerationRetention,
+                MaintenanceContinuation::StoreRetention,
             )],
             |_wake, mut observed| async move {
                 let first = next_tick(&mut observed).await;
@@ -264,7 +264,7 @@ mod tests {
                 assert_eq!(first.continuation, None);
                 assert_eq!(
                     resumed.continuation,
-                    Some(MaintenanceContinuation::CodeGenerationRetention),
+                    Some(MaintenanceContinuation::StoreRetention),
                     "bounded progress must resume its code-generation phase instead of a full tick"
                 );
                 assert!(

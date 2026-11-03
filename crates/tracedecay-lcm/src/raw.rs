@@ -28,12 +28,15 @@ pub const RAW_MESSAGE_SELECT_COLUMNS: &str =
     "provider, message_id, session_id, store_id, role, ordinal,
                     timestamp, content, content_hash, storage_kind, payload_ref,
                     snippet_text, metadata_json,
-                    (SELECT encoding FROM session_canonical_bodies
-                      WHERE content_hash = lcm_raw_messages.content_hash),
-                    (SELECT body FROM session_canonical_bodies
-                      WHERE content_hash = lcm_raw_messages.content_hash),
-                    (SELECT uncompressed_bytes FROM session_canonical_bodies
-                      WHERE content_hash = lcm_raw_messages.content_hash)";
+                    CASE WHEN storage_kind = 'inline' AND content IS NULL THEN
+                      (SELECT encoding FROM session_canonical_bodies
+                       WHERE content_hash = lcm_raw_messages.content_hash) END,
+                    CASE WHEN storage_kind = 'inline' AND content IS NULL THEN
+                      (SELECT body FROM session_canonical_bodies
+                       WHERE content_hash = lcm_raw_messages.content_hash) END,
+                    CASE WHEN storage_kind = 'inline' AND content IS NULL THEN
+                      (SELECT uncompressed_bytes FROM session_canonical_bodies
+                       WHERE content_hash = lcm_raw_messages.content_hash) END";
 fn record_select_columns(alias: &str, text: &str, metadata: &str) -> String {
     format!(
         "{alias}.provider, {alias}.message_id, {alias}.session_id, {alias}.role,
@@ -231,6 +234,14 @@ async fn persist_canonical_text(
 ) -> Result<(), LcmError> {
     let body = StoredCanonicalBody::pack(text.as_bytes())
         .map_err(|error| LcmError::Db(format!("canonical body pack failed: {error}")))?;
+    persist_canonical_body(conn, &body).await
+}
+
+/// Persists an already packed body inside the caller's raw-owner transaction.
+pub(crate) async fn persist_canonical_body(
+    conn: &(impl Executor + ?Sized),
+    body: &StoredCanonicalBody,
+) -> Result<(), LcmError> {
     conn.execute(
         UPSERT_CANONICAL_BODY_SQL,
         params![

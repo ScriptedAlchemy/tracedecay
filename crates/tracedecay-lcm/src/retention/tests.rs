@@ -488,16 +488,15 @@ async fn drop_removes_the_single_content_copy_and_its_index() -> Result<(), Stri
     Ok(())
 }
 
-// (a) offload only externalizes projection-durable rows AFTER durability; the
-// bulky inline content leaves the raw column, replaced by a recoverable
-// content-addressed placeholder (§4 one content copy).
+// Compaction only changes projection-durable rows, and retains complete text
+// through the canonical verified reader without creating a plain payload file.
 #[asupersync::test]
-async fn offload_externalizes_durable_content_after_durability() -> Result<(), String> {
+async fn offload_compacts_durable_content_without_creating_payload_files() -> Result<(), String> {
     let store = test_store().await?;
     let conn = &store.conn;
-    let content = "x".repeat(4096);
+    let content = "x".repeat(8192);
     let durable = insert_message(conn, 1, 90, &content).await?;
-    let _live = insert_message(conn, 2, 90, &content).await?;
+    let live = insert_message(conn, 2, 90, &content).await?;
     make_projection_durable(conn, durable).await?;
 
     let config = LcmRetentionConfig {
@@ -512,25 +511,36 @@ async fn offload_externalizes_durable_content_after_durability() -> Result<(), S
         "only the durable row is offloaded"
     );
     assert!(report.offloaded.bytes_reclaimed >= 4096);
+    assert_eq!(report.canonicalized_rows, 1);
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
 
-    // Durable row: inline content cleared, now external with a payload_ref.
+    // The ordinary inline reader hydrates the shared canonical body.
     let kind: String = fetch_str(
         conn,
         "SELECT storage_kind FROM lcm_raw_messages WHERE store_id = ?1",
         params![durable],
     )
     .await?;
-    assert_eq!(kind, "external");
+    assert_eq!(kind, "inline");
     let payload_present = fetch_i64(conn, "SELECT COUNT(*) FROM lcm_external_payloads", ()).await?;
-    assert_eq!(payload_present, 1, "content stored once, addressed by hash");
-    // The un-projected live row is untouched (still inline).
-    let live_kind: i64 = fetch_i64(
+    assert_eq!(payload_present, 0);
+    assert_eq!(count(conn, "session_canonical_bodies").await?, 1);
+    assert!(!payload::payload_dir(&store.storage_root).exists());
+    let restored = raw::load_raw_message_by_store_id(conn, durable)
+        .await
+        .map_err(|error| error.to_string())?;
+    assert_eq!(restored.content, content);
+    assert!(restored.payload_ref.is_none());
+    let live_content = fetch_str(
         conn,
-        "SELECT COUNT(*) FROM lcm_raw_messages WHERE storage_kind = 'inline'",
-        (),
+        "SELECT content FROM lcm_raw_messages WHERE store_id = ?1",
+        params![live],
     )
     .await?;
-    assert_eq!(live_kind, 1, "live un-projected row stays inline");
+    assert_eq!(live_content, content, "live un-projected row stays intact");
+    let repeated = run_apply(conn, &store.storage_root, &config).await?;
+    assert_eq!(repeated.offloaded.acted, 0);
+    assert_eq!(repeated.canonicalized_rows, 0);
     Ok(())
 }
 
@@ -565,8 +575,13 @@ async fn offload_keeps_small_bodies_inline_and_uses_byte_threshold() -> Result<(
     make_projection_durable(&store.conn, boundary_id).await?;
     let report = run_apply(&store.conn, &store.storage_root, &config).await?;
     assert!(report.errors.is_empty(), "{:?}", report.errors);
-    assert_eq!(report.offloaded.acted, 1);
-    assert_eq!(report.offloaded.bytes_reclaimed, boundary.len() as u64);
+    assert_eq!(report.offloaded.eligible, 1);
+    assert_eq!(
+        report.offloaded.acted, 0,
+        "the full UTF-8 snippet would duplicate this body"
+    );
+    assert_eq!(report.offloaded.bytes_reclaimed, 0);
+    assert_eq!(count(&store.conn, "lcm_external_payloads").await?, 0);
     let unchanged = raw::load_raw_message_by_store_id(&store.conn, small_id)
         .await
         .map_err(|error| error.to_string())?;
@@ -579,7 +594,7 @@ async fn small_offload_restores_verified_text_and_releases_file_only_after_gc_gr
 -> Result<(), String> {
     let store = test_store().await?;
     let content = "small tool output: café completed";
-    let target = seed_small_offload(&store, 1, content).await?;
+    let target = seed_retention_offload(&store, 1, content).await?;
     let path = payload::payload_dir(&store.storage_root).join(&target.payload_ref);
     let config = LcmRetentionConfig {
         drop_after_days: None,
@@ -666,11 +681,16 @@ async fn small_offload_restores_verified_text_and_releases_file_only_after_gc_gr
 }
 
 #[asupersync::test]
-async fn small_offload_restoration_rejects_corruption_staleness_and_lost_authority()
--> Result<(), String> {
-    for failure in ["payload", "receipt", "stale", "authority"] {
+async fn offload_restoration_rejects_corruption_staleness_and_lost_authority() -> Result<(), String>
+{
+    for failure in ["payload", "receipt", "stale", "metadata", "authority"] {
         let store = test_store().await?;
-        let mut target = seed_small_offload(&store, 1, "original complete text").await?;
+        let content = if failure == "payload" {
+            "original complete text".to_owned()
+        } else {
+            "original complete text ".repeat(1024)
+        };
+        let mut target = seed_retention_offload(&store, 1, &content).await?;
         let path = payload::payload_dir(&store.storage_root).join(&target.payload_ref);
         match failure {
             "payload" => {
@@ -697,8 +717,21 @@ async fn small_offload_restoration_rejects_corruption_staleness_and_lost_authori
                     .await
                     .map_err(|error| error.to_string())?;
             }
+            "metadata" => {
+                store
+                    .conn
+                    .execute(
+                        "UPDATE lcm_raw_messages
+                     SET metadata_json = json_set(metadata_json, '$.changed', 1)
+                     WHERE store_id = ?1",
+                        params![target.store_id],
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
             _ => {}
         }
+        let convergence_before = mark_convergence_current(&store.conn).await?;
         let error = inline_offloaded_one(
             RetentionStore::Connection(&store.conn),
             &store.storage_root,
@@ -715,7 +748,9 @@ async fn small_offload_restoration_rejects_corruption_staleness_and_lost_authori
         .expect_err("unproven or changed payload must remain external");
         match failure {
             "payload" | "receipt" => assert_eq!(error, LcmError::PayloadIntegrityMismatch),
-            "stale" => assert!(error.to_string().contains("compare-and-swap rejected")),
+            "stale" | "metadata" => {
+                assert!(error.to_string().contains("compare-and-swap rejected"))
+            }
             "authority" => assert_eq!(error, LcmError::Cancelled),
             _ => unreachable!(),
         }
@@ -732,8 +767,456 @@ async fn small_offload_restoration_rejects_corruption_staleness_and_lost_authori
             "{failure} must preserve the original row"
         );
         assert_eq!(count(&store.conn, "lcm_external_payloads").await?, 1);
+        assert_eq!(count(&store.conn, "session_canonical_bodies").await?, 0);
         assert!(path.exists(), "{failure} must preserve the payload file");
+        assert_eq!(convergence_snapshot(&store.conn).await?, convergence_before);
+        summary_convergence::validate_raw_update_guard(&store.conn)
+            .await
+            .map_err(|error| error.to_string())?;
+        store
+            .conn
+            .execute(
+                "UPDATE lcm_raw_messages SET timestamp = timestamp + 1 WHERE store_id = ?1",
+                params![target.store_id],
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            count(&store.conn, "lcm_summary_convergence_dirty_raw").await?,
+            1,
+            "ordinary evidence changes still invalidate after {failure}"
+        );
     }
+    Ok(())
+}
+
+#[asupersync::test]
+async fn large_offloads_share_verified_canonical_text_and_release_files_after_grace()
+-> Result<(), String> {
+    let store = test_store().await?;
+    let content = "restored searchable café tool output\n".repeat(1024);
+    let first = seed_retention_offload(&store, 1, &content).await?;
+    let second = seed_retention_offload(&store, 2, &content).await?;
+    let convergence_before = mark_convergence_current(&store.conn).await?;
+    let config = LcmRetentionConfig {
+        drop_after_days: None,
+        ..LcmRetentionConfig::default()
+    };
+    let report = run_apply(&store.conn, &store.storage_root, &config).await?;
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.inlined.acted, 2);
+    assert_eq!(report.canonicalized_rows, 2);
+    assert_eq!(report.offloaded.acted, 0);
+    assert_eq!(
+        report.bytes_reclaimed(),
+        0,
+        "restoration does not report moved bytes as reclaimed"
+    );
+    assert_eq!(count(&store.conn, "session_canonical_bodies").await?, 1);
+    assert_eq!(convergence_snapshot(&store.conn).await?, convergence_before);
+    assert_eq!(fetch_i64(&store.conn,
+        "SELECT COUNT(*) FROM lcm_raw_messages_fts WHERE lcm_raw_messages_fts MATCH 'searchable'", ()
+    ).await?, 2);
+    for target in [&first, &second] {
+        let restored = raw::load_raw_message_by_store_id(&store.conn, target.store_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(restored.content, content);
+        assert_eq!(restored.content_hash, target.content_hash);
+        assert_eq!(restored.metadata_json, target.metadata_json);
+        assert!(restored.payload_ref.is_none());
+        assert!(
+            payload::payload_dir(&store.storage_root)
+                .join(&target.payload_ref)
+                .exists()
+        );
+    }
+    let marked_at = fetch_i64(
+        &store.conn,
+        "SELECT MAX(first_seen_at) FROM lcm_gc_marks",
+        (),
+    )
+    .await?;
+    let gc_config = crate::LcmGcConfig::default();
+    let gc = crate::gc::run_payload_gc_with_apply(
+        &store.conn,
+        &store.storage_root,
+        PROVIDER,
+        Some(SESSION),
+        &gc_config,
+        true,
+        marked_at + gc_config.grace_seconds as i64 + 1,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    assert!(gc.errors.is_empty(), "{:?}", gc.errors);
+    assert_eq!(count(&store.conn, "lcm_external_payloads").await?, 0);
+    for target in [&first, &second] {
+        assert!(
+            !payload::payload_dir(&store.storage_root)
+                .join(&target.payload_ref)
+                .exists()
+        );
+        assert_eq!(
+            raw::load_raw_message_by_store_id(&store.conn, target.store_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .content,
+            content
+        );
+    }
+    summary_convergence::validate_raw_update_guard(&store.conn)
+        .await
+        .map_err(|error| error.to_string())?;
+    store.conn.execute(
+        "UPDATE lcm_raw_messages SET metadata_json = json_set(metadata_json, '$.provider_note', 'changed')
+         WHERE store_id = ?1", params![first.store_id],
+    ).await.map_err(|error| error.to_string())?;
+    assert_eq!(
+        count(&store.conn, "lcm_summary_convergence_dirty_raw").await?,
+        1,
+        "ordinary metadata changes still invalidate after successful restoration"
+    );
+    Ok(())
+}
+
+#[asupersync::test]
+async fn canonical_compaction_counts_utf8_snippets_and_marginal_shared_body_cost()
+-> Result<(), String> {
+    let store = test_store().await?;
+    let mut state = 0x923a_405b_u64;
+    let ascii: String = (0..6000)
+        .map(|index| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            if index % 9 == 8 {
+                ' '
+            } else {
+                char::from(b'a' + ((state >> 32) % 26) as u8)
+            }
+        })
+        .collect();
+    let unicode = "é".repeat(3000);
+    let mut targets = Vec::new();
+    for (index, content) in [&ascii, &unicode].into_iter().enumerate() {
+        let packed = pack_canonical(content).map_err(|error| error.to_string())?;
+        let snippet = raw::derived_text_for_snippet(content);
+        assert!(
+            packed.blob.len() < content.len(),
+            "BLOB-only comparison would permit this body"
+        );
+        assert!(
+            packed.blob.len() + snippet.len() >= content.len(),
+            "the full representation grows"
+        );
+        targets.push(seed_retention_offload(&store, index as i64 + 1, content).await?);
+        let direct = insert_message(&store.conn, index as i64 + 3, 90, content).await?;
+        make_projection_durable(&store.conn, direct).await?;
+    }
+    assert!(
+        raw::derived_text_for_snippet(&unicode).len()
+            > raw::derived_text_for_snippet(&unicode).chars().count()
+    );
+    let config = LcmRetentionConfig {
+        drop_after_days: None,
+        ..LcmRetentionConfig::default()
+    };
+    let report = run_apply(&store.conn, &store.storage_root, &config).await?;
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.inlined.eligible, 2);
+    assert_eq!(report.offloaded.eligible, 2);
+    assert_eq!(report.inlined.acted + report.offloaded.acted, 0);
+    assert_eq!(count(&store.conn, "session_canonical_bodies").await?, 0);
+    assert_eq!(count(&store.conn, "lcm_external_payloads").await?, 2);
+
+    // Another ordinary canonical owner makes this BLOB a zero-marginal-cost
+    // reuse. Only its new snippet and record allowance need to fit.
+    let packed = pack_canonical(&ascii).map_err(|error| error.to_string())?;
+    let txn = store
+        .conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .map_err(|error| error.to_string())?;
+    raw::persist_canonical_body(&txn, &packed)
+        .await
+        .map_err(|error| error.to_string())?;
+    txn.execute(
+        "UPDATE lcm_raw_messages SET content = NULL, placeholder_text = ?1 WHERE message_id = 'msg-3'",
+        params![raw::derived_text_for_snippet(&ascii)],
+    ).await.map_err(|error| error.to_string())?;
+    txn.commit().await.map_err(|error| error.to_string())?;
+    assert_eq!(
+        inline_offloaded_one(
+            RetentionStore::Connection(&store.conn),
+            &store.storage_root,
+            &targets[0],
+            None
+        )
+        .await
+        .map_err(|error| error.to_string())?,
+        Some(true)
+    );
+    let restored = raw::load_raw_message_by_store_id(&store.conn, targets[0].store_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    assert_eq!(restored.content, ascii);
+    assert_eq!(restored.metadata_json, targets[0].metadata_json);
+    assert_eq!(count(&store.conn, "session_canonical_bodies").await?, 1);
+    assert_eq!(
+        fetch_str(
+            &store.conn,
+            "SELECT storage_kind FROM lcm_raw_messages WHERE store_id = ?1",
+            params![targets[1].store_id]
+        )
+        .await?,
+        "external"
+    );
+    Ok(())
+}
+
+#[asupersync::test]
+async fn restoration_revisits_old_cursor_and_stops_before_exceeding_byte_budget()
+-> Result<(), String> {
+    let store = test_store().await?;
+    let content = "bounded historical body\n".repeat(3 * 1024 * 1024 / 24);
+    let mut targets = Vec::new();
+    for ordinal in 1..=3 {
+        targets.push(seed_retention_offload(&store, ordinal, &content).await?);
+    }
+    let oversized =
+        seed_retention_offload(&store, 4, &"x".repeat(MAX_REPACK_BODY_BYTES + 1)).await?;
+    RetentionCursor {
+        aged_through: (NOW, i64::MAX),
+        durable_through: i64::MAX,
+    }
+    .persist(&store.conn, "inline_offloaded")
+    .await
+    .map_err(|error| error.to_string())?;
+    let config = LcmRetentionConfig {
+        drop_after_days: None,
+        ..LcmRetentionConfig::default()
+    };
+    let preview = run_session_retention_authorized(
+        &store.conn,
+        &store.storage_root,
+        "all",
+        None,
+        &config,
+        RetentionMode::DryRun,
+        NOW,
+        &|_| Ok(()),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    assert_eq!(preview.inlined.eligible, 2);
+    assert_eq!(preview.inlined.acted, 0);
+    assert_eq!(count(&store.conn, "session_canonical_bodies").await?, 0);
+    assert!(
+        schema::get_gc_meta(&store.conn, &RetentionCursor::keys(RESTORE_CURSOR).0)
+            .await
+            .map_err(|error| error.to_string())?
+            .is_none()
+    );
+    for (expected, has_more) in [(2, true), (1, false), (0, false)] {
+        let report = run_apply(&store.conn, &store.storage_root, &config).await?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.inlined.acted, expected);
+        assert_eq!(report.canonicalized_rows, expected);
+        assert_eq!(report.storage_has_more, has_more);
+    }
+    for target in &targets {
+        assert_eq!(
+            raw::load_raw_message_by_store_id(&store.conn, target.store_id)
+                .await
+                .map_err(|error| error.to_string())?
+                .content,
+            content
+        );
+    }
+    assert_eq!(
+        fetch_str(
+            &store.conn,
+            "SELECT payload_ref FROM lcm_raw_messages WHERE store_id = ?1",
+            params![oversized.store_id]
+        )
+        .await?,
+        oversized.payload_ref
+    );
+    assert!(
+        payload::payload_dir(&store.storage_root)
+            .join(&oversized.payload_ref)
+            .exists()
+    );
+    // A short continuation also drains newly durable inline rows across its
+    // row cap without repeating already-compacted work or skipping a source.
+    let direct_content = "short continuation text\n".repeat(1024);
+    for ordinal in 5..=7 {
+        let store_id = insert_message(&store.conn, ordinal, 90, &direct_content).await?;
+        make_projection_durable(&store.conn, store_id).await?;
+    }
+    let config = LcmRetentionConfig {
+        max_batch_size: 1,
+        ..config
+    };
+    let mut total = 0;
+    let mut drained = false;
+    for _ in 0..6 {
+        let report = run_apply(&store.conn, &store.storage_root, &config).await?;
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(report.offloaded.acted <= 1);
+        total += report.offloaded.acted;
+        if !report.storage_has_more {
+            drained = true;
+            break;
+        }
+    }
+    assert!(drained, "bounded short continuations must reach the end");
+    assert_eq!(total, 3);
+    Ok(())
+}
+
+#[asupersync::test]
+async fn canonical_compaction_commit_denial_preserves_original_inline_body() -> Result<(), String> {
+    let store = test_store().await?;
+    let content = "complete retained body\n".repeat(1024);
+    let store_id = insert_message(&store.conn, 1, 90, &content).await?;
+    make_projection_durable(&store.conn, store_id).await?;
+    let original = raw::load_raw_message_by_store_id(&store.conn, store_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let config = LcmRetentionConfig {
+        drop_after_days: None,
+        ..LcmRetentionConfig::default()
+    };
+    let report = run_session_retention_authorized(
+        &store.conn,
+        &store.storage_root,
+        "all",
+        None,
+        &config,
+        RetentionMode::Apply,
+        NOW,
+        &|intent| {
+            if intent == "commit session retention canonical pass" {
+                Err(LcmError::Cancelled)
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    assert_eq!(report.errors.len(), 1);
+    assert_eq!(report.offloaded.acted, 0);
+    assert!(
+        !report.storage_has_more,
+        "authority loss must not request a hot-loop retry"
+    );
+    let retained = raw::load_raw_message_by_store_id(&store.conn, store_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    assert_eq!(retained.content, original.content);
+    assert_eq!(retained.metadata_json, original.metadata_json);
+    assert_eq!(count(&store.conn, "session_canonical_bodies").await?, 0);
+    assert_eq!(count(&store.conn, "lcm_external_payloads").await?, 0);
+    assert_eq!(
+        RetentionCursor::read(&store.conn, "offload")
+            .await
+            .map_err(|error| error.to_string())?
+            .aged_through,
+        (i64::MIN, i64::MIN)
+    );
+    Ok(())
+}
+
+#[asupersync::test]
+async fn corrupt_shared_body_cannot_replace_plaintext_or_external_source() -> Result<(), String> {
+    let store = test_store().await?;
+    let content = "verified source text\n".repeat(1024);
+    let external = seed_retention_offload(&store, 1, &content).await?;
+    let direct = insert_message(&store.conn, 2, 90, &content).await?;
+    make_projection_durable(&store.conn, direct).await?;
+    let mut packed = pack_canonical(&content).map_err(|error| error.to_string())?;
+    packed.blob = vec![0xff];
+    raw::persist_canonical_body(&store.conn, &packed)
+        .await
+        .map_err(|error| error.to_string())?;
+    // Both kinds have independent authoritative content and must not fetch an
+    // unrelated canonical BLOB. The normal canonical path still rejects it.
+    for store_id in [external.store_id, direct] {
+        let mut rows = store
+            .conn
+            .query(
+                &format!(
+                    "SELECT {} FROM lcm_raw_messages WHERE store_id = ?1",
+                    raw::RAW_MESSAGE_SELECT_COLUMNS
+                ),
+                params![store_id],
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| error.to_string())?
+            .ok_or("missing fixture row")?;
+        assert!(
+            row.get::<Option<Vec<u8>>>(14)
+                .map_err(|error| error.to_string())?
+                .is_none()
+        );
+        raw::verified_raw_message_from_row(&row).map_err(|error| error.to_string())?;
+    }
+    let config = LcmRetentionConfig {
+        drop_after_days: None,
+        ..LcmRetentionConfig::default()
+    };
+    let report = run_apply(&store.conn, &store.storage_root, &config).await?;
+    assert_eq!(report.errors.len(), 2);
+    assert_eq!(report.inlined.acted + report.offloaded.acted, 0);
+    assert_eq!(
+        fetch_str(
+            &store.conn,
+            "SELECT content FROM lcm_raw_messages WHERE store_id = ?1",
+            params![direct]
+        )
+        .await?,
+        content
+    );
+    assert_eq!(
+        fetch_str(
+            &store.conn,
+            "SELECT payload_ref FROM lcm_raw_messages WHERE store_id = ?1",
+            params![external.store_id]
+        )
+        .await?,
+        external.payload_ref
+    );
+    assert!(
+        payload::payload_dir(&store.storage_root)
+            .join(&external.payload_ref)
+            .exists()
+    );
+    assert_eq!(
+        RetentionCursor::read(&store.conn, RESTORE_CURSOR)
+            .await
+            .map_err(|error| error.to_string())?
+            .aged_through,
+        (i64::MIN, i64::MIN)
+    );
+    store
+        .conn
+        .execute(
+            "UPDATE lcm_raw_messages SET content = NULL, placeholder_text = ?1 WHERE store_id = ?2",
+            params![raw::derived_text_for_snippet(&content), direct],
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    assert_eq!(
+        raw::load_raw_message_by_store_id(&store.conn, direct)
+            .await
+            .expect_err("actual canonical content must be verified"),
+        LcmError::PayloadIntegrityMismatch
+    );
     Ok(())
 }
 
@@ -741,9 +1224,9 @@ async fn small_offload_restoration_rejects_corruption_staleness_and_lost_authori
 async fn small_offload_restoration_is_bounded_scoped_and_leaves_protected_payloads()
 -> Result<(), String> {
     let store = test_store().await?;
-    let first = seed_small_offload(&store, 1, "first old body").await?;
-    let second = seed_small_offload(&store, 2, "second old body").await?;
-    let protected = seed_small_offload(&store, 3, "protected body").await?;
+    let first = seed_retention_offload(&store, 1, "first old body").await?;
+    let second = seed_retention_offload(&store, 2, "second old body").await?;
+    let protected = seed_retention_offload(&store, 3, "protected body").await?;
     store
         .conn
         .execute(
@@ -824,11 +1307,15 @@ async fn small_offload_restoration_is_bounded_scoped_and_leaves_protected_payloa
 }
 
 #[asupersync::test]
-async fn offload_cas_preserves_revived_row_and_rolls_back_payload() -> Result<(), String> {
+async fn offload_cas_preserves_revived_row_and_rolls_back_canonical_body() -> Result<(), String> {
     let store = test_store().await?;
-    let original = "stale content".repeat(128);
+    let original = "stale content".repeat(1024);
     let store_id = insert_message(&store.conn, 1, 90, &original).await?;
     make_projection_durable(&store.conn, store_id).await?;
+    let metadata_json = raw::load_raw_message_by_store_id(&store.conn, store_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .metadata_json;
     let target = OffloadRow {
         store_id,
         provider: PROVIDER.to_string(),
@@ -836,6 +1323,7 @@ async fn offload_cas_preserves_revived_row_and_rolls_back_payload() -> Result<()
         message_id: "msg-1".to_string(),
         timestamp: NOW - 90 * DAY,
         content: original,
+        metadata_json,
     };
     let revived = "revived content";
     let revived_hash = sha256_hex(revived.as_bytes());
@@ -855,7 +1343,6 @@ async fn offload_cas_preserves_revived_row_and_rolls_back_payload() -> Result<()
     }
     let error = offload_one(
         RetentionStore::Connection(&store.conn),
-        &store.storage_root,
         &target,
         Some(&authorize),
     )
@@ -882,13 +1369,8 @@ async fn offload_cas_preserves_revived_row_and_rolls_back_payload() -> Result<()
         "inline"
     );
     assert_eq!(count(&store.conn, "lcm_external_payloads").await?, 0);
-    assert_eq!(
-        std::fs::read_dir(crate::payload::payload_dir(&store.storage_root))
-            .map_err(|error| error.to_string())?
-            .count(),
-        0,
-        "failed CAS removes the newly-created payload file"
-    );
+    assert_eq!(count(&store.conn, "session_canonical_bodies").await?, 0);
+    assert!(!payload::payload_dir(&store.storage_root).exists());
     Ok(())
 }
 
@@ -1000,15 +1482,50 @@ async fn fetch_str(
     row.get::<String>(0).map_err(|e| e.to_string())
 }
 
+async fn convergence_snapshot(conn: &(impl QueryExecutor + ?Sized)) -> Result<String, String> {
+    fetch_str(
+        conn,
+        "SELECT json_array(state, protection_frontier_store_id, attempted_raw_store_id,
+                           raw_revision_generation, stale_from_store_id,
+                           (SELECT COUNT(*) FROM lcm_summary_convergence_dirty_raw),
+                           (SELECT COUNT(*) FROM lcm_summary_convergence_invalidation_work),
+                           (SELECT COUNT(*) FROM session_summary_sources))
+         FROM lcm_summary_convergence_queue",
+        (),
+    )
+    .await
+}
+
+async fn mark_convergence_current(conn: &(impl Executor + ?Sized)) -> Result<String, String> {
+    conn.execute_batch(
+        "DELETE FROM lcm_summary_convergence_invalidation_work;
+         DELETE FROM lcm_summary_convergence_dirty_raw;
+         UPDATE lcm_summary_convergence_queue SET state = 'current',
+            attempted_raw_store_id = newest_raw_store_id,
+            protection_frontier_store_id = newest_raw_store_id,
+            stale_from_store_id = NULL;",
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    convergence_snapshot(conn).await
+}
+
 /// Seeds the prior retention representation through its actual payload writer.
-async fn seed_small_offload(
+async fn seed_retention_offload(
     store: &TestStore,
     ordinal: i64,
     content: &str,
 ) -> Result<InlineOffloadedRow, String> {
     let store_id = insert_message(&store.conn, ordinal, 90, content).await?;
     make_projection_durable(&store.conn, store_id).await?;
-    offload_one(
+    let original = raw::load_raw_message_by_store_id(&store.conn, store_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    assert_eq!(
+        original.content, content,
+        "fixture content must survive normal sanitization"
+    );
+    offload_external_one(
         RetentionStore::Connection(&store.conn),
         &store.storage_root,
         &OffloadRow {
@@ -1018,6 +1535,7 @@ async fn seed_small_offload(
             message_id: format!("msg-{ordinal}"),
             timestamp: NOW - 90 * DAY,
             content: content.to_owned(),
+            metadata_json: original.metadata_json,
         },
         None,
     )
@@ -1047,5 +1565,6 @@ async fn seed_small_offload(
         content_hash: row.get(1).map_err(|error| error.to_string())?,
         placeholder_text: row.get(2).map_err(|error| error.to_string())?,
         metadata_json: row.get(3).map_err(|error| error.to_string())?,
+        byte_count: content.len(),
     })
 }

@@ -55,11 +55,11 @@ pub async fn run_project_generation_maintenance(
     let mut outcome = match code_generation {
         CodeGenerationRetentionOutcomeV1::Complete => MaintenanceTickOutcome::Complete,
         CodeGenerationRetentionOutcomeV1::MoreWork => {
-            MaintenanceTickOutcome::Continue(MaintenanceContinuation::CodeGenerationRetention)
+            MaintenanceTickOutcome::Continue(MaintenanceContinuation::StoreRetention)
         }
         CodeGenerationRetentionOutcomeV1::Failed => MaintenanceTickOutcome::Retry,
     };
-    if continuation == Some(MaintenanceContinuation::CodeGenerationRetention) {
+    if continuation == Some(MaintenanceContinuation::StoreRetention) {
         return finalize_generation_outcome(outcome, cancellation);
     }
     if !cancellation.is_cancelled() {
@@ -124,7 +124,7 @@ pub async fn run_registered_project_generation_maintenance(
     {
         CodeGenerationRetentionOutcomeV1::Complete => MaintenanceTickOutcome::Complete,
         CodeGenerationRetentionOutcomeV1::MoreWork => {
-            MaintenanceTickOutcome::Continue(MaintenanceContinuation::CodeGenerationRetention)
+            MaintenanceTickOutcome::Continue(MaintenanceContinuation::StoreRetention)
         }
         CodeGenerationRetentionOutcomeV1::Failed => MaintenanceTickOutcome::Retry,
     };
