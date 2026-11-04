@@ -1979,21 +1979,29 @@ async fn await_callable_rewarm(
     requirement: CodeGraphReadinessRequirement,
     remaining: Duration,
 ) -> Result<Arc<InteractiveCatalogReaderLeaseV1>, CallableCodeCursorError> {
-    let pending = match store.await_rewarm_and_retain_for(Duration::ZERO, requirement) {
-        Ok(retain) => return Ok(retain),
-        Err(pending) => pending,
-    };
-    let budget = crate::project_reads::rewarm_wait_budget(remaining, pending.retry_after)
-        .ok_or(CallableCodeCursorError::Unavailable)?;
+    // Even a zero-budget probe can wait for the synchronous serving-engine
+    // mutex while a background engine open holds it. Keep both the probe and
+    // the measured wait off Tokio workers, and bound the entire admission.
     let waiting = Arc::clone(store);
-    match native_runtime::spawn_blocking(move || {
-        waiting.await_rewarm_and_retain_for(budget, requirement)
-    })
-    .await
-    {
-        Ok(Ok(retain)) => Ok(retain),
-        Ok(Err(_pending)) => Err(CallableCodeCursorError::Unavailable),
-        Err(error) => {
+    let admission = native_runtime::timeout(
+        remaining,
+        native_runtime::spawn_blocking(move || {
+            let pending =
+                match waiting.await_rewarm_and_retain_for(Duration::ZERO, requirement) {
+                    Ok(retain) => return Ok(retain),
+                    Err(pending) => pending,
+                };
+            let budget = crate::project_reads::rewarm_wait_budget(remaining, pending.retry_after)
+                .ok_or(CallableCodeCursorError::Unavailable)?;
+            waiting
+                .await_rewarm_and_retain_for(budget, requirement)
+                .map_err(|_| CallableCodeCursorError::Unavailable)
+        }),
+    )
+    .await;
+    match admission {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
             tracing::warn!(
                 event = "code_graph_rewarm_wait_failed",
                 %error,
@@ -2001,6 +2009,7 @@ async fn await_callable_rewarm(
             );
             Err(CallableCodeCursorError::Unavailable)
         }
+        Err(_) => Err(CallableCodeCursorError::Unavailable),
     }
 }
 

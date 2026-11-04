@@ -87,9 +87,19 @@ async fn await_rewarm(
     // The zero-budget probe starts the background re-warm and returns its
     // measured remaining time without parking the request.
     let requirement = request.readiness;
-    let pending = match store.await_rewarm_and_retain_for(Duration::ZERO, requirement) {
-        Ok(retain) => return Ok(retain),
-        Err(pending) => pending,
+    let probing = Arc::clone(store);
+    let pending = match native_runtime::spawn_blocking(move || {
+        probing.await_rewarm_and_retain_for(Duration::ZERO, requirement)
+    })
+    .await
+    {
+        Ok(Ok(retain)) => return Ok(retain),
+        Ok(Err(pending)) => pending,
+        Err(error) => {
+            return Err(CodeGraphReadError::Unavailable {
+                detail: format!("the code graph re-warm probe did not finish: {error}"),
+            });
+        }
     };
     let now = now_micros();
     let expires_at =

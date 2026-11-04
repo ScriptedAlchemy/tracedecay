@@ -37,7 +37,6 @@ use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use tracedecay_lcm::LcmRetentionConfig;
 use tracedecay_lcm::types::LcmImmutableSummaryPublication;
 use tracedecay_lcm::{LcmSourceRef, LcmSummaryNodeDraft};
-use tracedecay_temporal_query::execution::ExecutionControl;
 use tracedecay_maintenance::retention::registered_store::run_registered_store_retention;
 use tracedecay_privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
@@ -56,6 +55,7 @@ use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionCon
 use tracedecay_sessions::runtime::{
     TranscriptIngestOutcome, ingest_project_sources_for_provider, with_transcript_source_profile,
 };
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 pub const PROVIDER: &str = "codex";
 pub const MESSAGES_PER_SESSION: u64 = 5;
