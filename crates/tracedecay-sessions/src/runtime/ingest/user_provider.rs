@@ -83,6 +83,23 @@ fn claude_provider_run_outcome(
     outcome
 }
 
+fn codex_profile_coverage_update(
+    discovery_waiting: bool,
+    deferred_by_byte_cap: bool,
+    frontier_persisted: bool,
+) -> Option<HostProviderCoverage> {
+    if discovery_waiting {
+        // A concurrent scan produced no evidence about this profile. Do not
+        // replace its last durable complete/partial coverage claim.
+        return None;
+    }
+    Some(if deferred_by_byte_cap || !frontier_persisted {
+        HostProviderCoverage::Partial
+    } else {
+        HostProviderCoverage::Complete
+    })
+}
+
 pub(super) struct UserProviderRunResult {
     pub(super) outcome: ProviderRunOutcome,
     pub(super) claude_projected_session_ids: BTreeSet<String>,
@@ -228,6 +245,7 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
         );
         let mut run = match ingested.await {
             Ok(result) => {
+                let discovery_waiting = result.discovery_waiting;
                 let outcome = result.outcome;
                 let mut run = ProviderRunOutcome::bounded(
                     outcome.stats,
@@ -256,29 +274,30 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
                         "user Codex discovery frontier persistence failed",
                     ));
                 }
-                let coverage = if outcome.deferred_by_byte_cap || !frontier_persisted {
-                    HostProviderCoverage::Partial
-                } else {
-                    HostProviderCoverage::Complete
-                };
-                let persisted_coverage = erase_send!(
-                    persist_host_provider_coverage(
-                        self.facade,
-                        &ObservationScopeV1::Profile,
-                        "codex",
-                        coverage,
-                        u64::from(coverage != HostProviderCoverage::Complete),
-                        None,
-                    ),
-                    crate::runtime::source::TranscriptIngestResult<()>
-                );
-                if let Err(coverage_error) = persisted_coverage.await {
-                    run.add_failure(warn_transcript_catch_up_failure(
-                        "codex",
-                        "coverage",
-                        &coverage_error,
-                        "user Codex coverage persistence failed",
-                    ));
+                if let Some(coverage) = codex_profile_coverage_update(
+                    discovery_waiting,
+                    outcome.deferred_by_byte_cap,
+                    frontier_persisted,
+                ) {
+                    let persisted_coverage = erase_send!(
+                        persist_host_provider_coverage(
+                            self.facade,
+                            &ObservationScopeV1::Profile,
+                            "codex",
+                            coverage,
+                            u64::from(coverage != HostProviderCoverage::Complete),
+                            None,
+                        ),
+                        crate::runtime::source::TranscriptIngestResult<()>
+                    );
+                    if let Err(coverage_error) = persisted_coverage.await {
+                        run.add_failure(warn_transcript_catch_up_failure(
+                            "codex",
+                            "coverage",
+                            &coverage_error,
+                            "user Codex coverage persistence failed",
+                        ));
+                    }
                 }
                 if frontier_persisted && let Some((hub, consumer)) = self.codex_discovery {
                     hub.acknowledge(consumer);
@@ -708,7 +727,10 @@ mod tests {
     use crate::runtime::source::TranscriptIngestError;
 
     use super::super::user::{BoundedProviderFailure, BoundedProviderOutcome};
-    use super::{claude_provider_run_outcome, cursor_provider_run_outcome};
+    use super::{
+        claude_provider_run_outcome, codex_profile_coverage_update, cursor_provider_run_outcome,
+    };
+    use crate::runtime::source::HostProviderCoverage;
 
     fn committed_outcome() -> BoundedProviderOutcome {
         BoundedProviderOutcome {
@@ -719,6 +741,32 @@ mod tests {
             bytes_consumed: 42,
             deferred_by_byte_cap: true,
         }
+    }
+
+    #[test]
+    fn waiting_for_shared_codex_discovery_preserves_last_profile_coverage() {
+        // Another consumer's shared scan is not evidence that a previously
+        // complete profile became partial. In particular, it must not force
+        // a full historical re-offer after a daemon restart.
+        let durable = HostProviderCoverage::Complete;
+        let update = codex_profile_coverage_update(true, true, false);
+        assert_eq!(update, None);
+        assert_eq!(update.unwrap_or(durable), HostProviderCoverage::Complete);
+
+        // A real incomplete page, or a failed frontier commit, still revokes
+        // completion. A successfully settled page may publish completion.
+        assert_eq!(
+            codex_profile_coverage_update(false, true, true),
+            Some(HostProviderCoverage::Partial)
+        );
+        assert_eq!(
+            codex_profile_coverage_update(false, false, false),
+            Some(HostProviderCoverage::Partial)
+        );
+        assert_eq!(
+            codex_profile_coverage_update(false, false, true),
+            Some(HostProviderCoverage::Complete)
+        );
     }
 
     #[test]

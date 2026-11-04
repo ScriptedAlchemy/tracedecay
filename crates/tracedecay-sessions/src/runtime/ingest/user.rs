@@ -170,6 +170,7 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
                 deferred_by_byte_cap: false,
             },
             committable_frontier: None,
+            discovery_waiting: false,
             failures: Vec::new(),
         });
     };
@@ -192,6 +193,7 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
                         deferred_by_byte_cap: true,
                     },
                     committable_frontier: None,
+                    discovery_waiting: true,
                     failures: Vec::new(),
                 });
             }
@@ -288,6 +290,7 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
             deferred_by_byte_cap,
         },
         committable_frontier: frontier_committable.then_some(next_frontier),
+        discovery_waiting: false,
         failures,
     })
 }
@@ -295,6 +298,8 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
 pub(super) struct CodexUserIngestOutcome {
     pub(super) outcome: BoundedProviderOutcome,
     pub(super) committable_frontier: Option<codex::CodexDiscoveryFrontier>,
+    /// Shared discovery has not produced a page; preserve durable coverage.
+    pub(super) discovery_waiting: bool,
     pub(super) failures: Vec<TranscriptCatchUpFailure>,
 }
 
