@@ -66,7 +66,7 @@ fn refuse_projection_wait(request: &CodeGraphReadRequest<'_>) -> Result<(), Code
 /// also covers response delivery, so spending all of it waiting on the warm
 /// would turn a retryable warming state into a generic transport timeout.
 /// Wait only while the measured warm is likely to fit with time to answer.
-fn rewarm_wait_budget(remaining: Duration, predicted: Duration) -> Option<Duration> {
+pub(crate) fn rewarm_wait_budget(remaining: Duration, predicted: Duration) -> Option<Duration> {
     let wait = remaining / 2;
     (wait > Duration::ZERO && predicted < wait).then_some(wait)
 }
