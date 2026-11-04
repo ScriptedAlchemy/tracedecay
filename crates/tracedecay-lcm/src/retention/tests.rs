@@ -977,13 +977,23 @@ async fn canonical_compaction_counts_utf8_snippets_and_marginal_shared_body_cost
 async fn restoration_revisits_old_cursor_and_stops_before_exceeding_byte_budget()
 -> Result<(), String> {
     let store = test_store().await?;
-    let content = "bounded historical body\n".repeat(3 * 1024 * 1024 / 24);
+    // The sanitizer accepts large structured documents through its bounded
+    // structured path; unstructured text over 1 MiB is refused at ingestion.
+    // Keep each valid body around 3 MiB so two fit the 8 MiB storage pass and
+    // the third must wait. The fourth exceeds the 4 MiB repack limit.
+    let content = serde_json::json!({
+        "body": "bounded historical body ".repeat(3 * 1024 * 1024 / 24)
+    })
+    .to_string();
     let mut targets = Vec::new();
     for ordinal in 1..=3 {
         targets.push(seed_retention_offload(&store, ordinal, &content).await?);
     }
-    let oversized =
-        seed_retention_offload(&store, 4, &"x".repeat(MAX_REPACK_BODY_BYTES + 1)).await?;
+    let too_large = serde_json::json!({
+        "body": "x".repeat(MAX_REPACK_BODY_BYTES)
+    })
+    .to_string();
+    let oversized = seed_retention_offload(&store, 4, &too_large).await?;
     RetentionCursor {
         aged_through: (NOW, i64::MAX),
         durable_through: i64::MAX,
