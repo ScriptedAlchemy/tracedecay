@@ -394,7 +394,9 @@ pub(crate) async fn validate_existing_observation_table(
     let contract = TABLES
         .iter()
         .find(|table| table.name == "observations")
-        .ok_or_else(|| global_db_operation_message(OPERATION, "observation table contract is missing"))?;
+        .ok_or_else(|| {
+            global_db_operation_message(OPERATION, "observation table contract is missing")
+        })?;
     validate_table(contract, actual)
 }
 
