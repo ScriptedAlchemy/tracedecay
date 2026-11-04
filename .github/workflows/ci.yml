@@ -161,6 +161,13 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      - name: Report final build disk usage
+        if: ${{ always() && hashFiles('.github/actions/setup-bazel/report_disk.sh') != '' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: bash
+        run: bash .github/actions/setup-bazel/report_disk.sh
+
   benchmark-harness:
     name: Benchmark harness self-tests
     runs-on: ubuntu-latest
@@ -324,6 +331,13 @@ jobs:
       - name: Check rusqlite stays inside storage owners
         run: python3 scripts/check-rusqlite-storage-boundary.py
 
+      - name: Report final build disk usage
+        if: ${{ always() && hashFiles('.github/actions/setup-bazel/report_disk.sh') != '' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: bash
+        run: bash .github/actions/setup-bazel/report_disk.sh
+
   # The macOS and Windows lanes run the same Bazel workspace the Linux
   # authority does, on demand: they exercise target-specific behavior the
   # Linux lane cannot prove.
@@ -342,31 +356,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-
-      - name: Remove inactive Xcode installations
-        shell: bash
-        run: |
-          df -h /
-          python3 - <<'PYTHON'
-          import pathlib
-          import subprocess
-
-          applications = pathlib.Path("/Applications")
-          selected = pathlib.Path(subprocess.check_output(["xcode-select", "-p"], text=True).strip()).resolve(strict=True)
-          active = next((path for path in selected.parents if path.suffix == ".app"), None)
-          if active is None:
-              raise SystemExit(f"Selected developer directory is not an Xcode application: {selected}")
-          print(f"Selected Xcode before cleanup: {active}", flush=True)
-          inactive = [path for path in applications.glob("Xcode*.app") if path.resolve() != active]
-          for path in inactive:
-              print(f"Removing inactive Xcode: {path}", flush=True)
-              subprocess.run(["sudo", "rm", "-rf", "--", str(path)], check=True)
-          after = pathlib.Path(subprocess.check_output(["xcode-select", "-p"], text=True).strip()).resolve(strict=True)
-          if after != selected:
-              raise SystemExit(f"Selected developer directory changed: {selected} -> {after}")
-          print(f"Selected Xcode after cleanup: {active}", flush=True)
-          PYTHON
-          df -h /
 
       - uses: ./.github/actions/setup-bazel
         id: bazel
@@ -418,6 +407,13 @@ jobs:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
           key: ${{ steps.bazel.outputs.disk-cache-key }}
 
+      - name: Report final build disk usage
+        if: ${{ always() && hashFiles('.github/actions/setup-bazel/report_disk.sh') != '' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: bash
+        run: bash .github/actions/setup-bazel/report_disk.sh
+
   # A trusted fleet run submits the whole workspace from one hosted runner.
   # Hosted-only runs retain their shards so local CPU and disk limits do not
   # serialize the entire workspace. Both routes feed the Test Linux check.
@@ -460,29 +456,6 @@ jobs:
                 && ((github.actor_id == '25274700' && vars.TS_BAZEL_CLIENT_ID)
                     || (github.actor_id == '158243242' && vars.TS_BAZEL_BOT_CLIENT_ID)
                     || (github.actor_id == '29139614' && vars.TS_BAZEL_RENOVATE_CLIENT_ID)) || '' }}
-
-      # Fleet measurements leave about 46 GiB free without deleting SDKs.
-      # Keep cleanup for unmeasured hosted shards and fleet fallback, where
-      # local builds have previously exhausted the runner disk.
-      - name: Free runner disk space
-        if: matrix.shard != 'fleet' || steps.bazel.outputs.fleet-enabled != 'true'
-        run: |
-          set -euo pipefail
-          df -h /
-          status=0
-          sudo rm -rf /usr/local/lib/android &
-          p1=$!
-          sudo rm -rf /usr/share/dotnet &
-          p2=$!
-          sudo rm -rf /opt/ghc &
-          p3=$!
-          sudo rm -rf /opt/hostedtoolcache/CodeQL &
-          p4=$!
-          for pid in "$p1" "$p2" "$p3" "$p4"; do
-            wait "$pid" || status=1
-          done
-          df -h /
-          exit "$status"
 
       - name: Select Linux test targets
         id: targets
@@ -605,11 +578,6 @@ jobs:
               prebuild=false
             fi
           fi
-          if [[ $SHARD == fleet ]]; then
-            # Keep test binaries and intermediate outputs in the remote CAS.
-            # Bazel still downloads test logs and XML for failure diagnostics.
-            echo 'build --remote_download_outputs=minimal' >> .bazelrc.local
-          fi
           {
             echo "patterns=${targets[*]}"
             echo "prebuild=$prebuild"
@@ -646,6 +614,13 @@ jobs:
         with:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
           key: ${{ steps.bazel.outputs.disk-cache-key }}
+
+      - name: Report final build disk usage
+        if: ${{ always() && hashFiles('.github/actions/setup-bazel/report_disk.sh') != '' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: bash
+        run: bash .github/actions/setup-bazel/report_disk.sh
 
   # Preserves the "Test Linux" check name for branch protection.
   linux-test-result:
@@ -795,6 +770,13 @@ jobs:
             exit 1
           fi
 
+      - name: Report final build disk usage
+        if: ${{ always() && hashFiles('.github/actions/setup-bazel/report_disk.sh') != '' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: bash
+        run: bash .github/actions/setup-bazel/report_disk.sh
+
   # Blocking Clippy policy over every Bazel Rust target, the
   # `cargo clippy --workspace --all-targets -D warnings` equivalent.
   clippy:
@@ -837,6 +819,13 @@ jobs:
         with:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
           key: ${{ steps.bazel.outputs.disk-cache-key }}
+
+      - name: Report final build disk usage
+        if: ${{ always() && hashFiles('.github/actions/setup-bazel/report_disk.sh') != '' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: bash
+        run: bash .github/actions/setup-bazel/report_disk.sh
 
   # Branch protection requires this check name. The generator feature policy
   # test (`//scripts:gen_builds_test`) runs inside Repository gates, whose
@@ -914,6 +903,13 @@ jobs:
           TRACEDECAY_BIN="$binary" bazel run //scripts:mcp-conformance-smoke.sh
           bazel run //scripts:packaged_lsp_bridge -- "$binary" "$smoke_work/lsp"
 
+      - name: Report final build disk usage
+        if: ${{ always() && hashFiles('.github/actions/setup-bazel/report_disk.sh') != '' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: bash
+        run: bash .github/actions/setup-bazel/report_disk.sh
+
   # Frontend checks require no Rust compilation and must also validate drafts.
   # Do not serialize them behind repository-wide Rust formatting and gates.
   dashboard:
@@ -984,6 +980,13 @@ jobs:
         with:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
           key: ${{ steps.bazel.outputs.disk-cache-key }}
+
+      - name: Report final build disk usage
+        if: ${{ always() && hashFiles('.github/actions/setup-bazel/report_disk.sh') != '' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: bash
+        run: bash .github/actions/setup-bazel/report_disk.sh
 
   hermes-integration:
     name: Hermes integration (stock)
@@ -1081,4 +1084,3 @@ jobs:
         env:
           TRACEDECAY_BIN: ${{ github.workspace }}/target/debug/tracedecay
         run: scripts/opencode_stock_integration.sh
-

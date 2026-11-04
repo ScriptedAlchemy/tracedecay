@@ -130,6 +130,13 @@ fn hash_admitted_schema(omit: Option<(&str, &str)>) -> (String, bool) {
             ));
         }
     }
+    for (name, sql) in crate::observation::canonical_body_gc::schema::OBJECTS {
+        parts.push(format!("canonical_body_gc:{name}:{sql}"));
+    }
+    parts.push(format!(
+        "lcm_fts_update:{}",
+        tracedecay_lcm::schema::RAW_FTS_UPDATE_TRIGGER_SQL
+    ));
     for (table, columns) in TEMPORAL_TABLE_COLUMNS {
         parts.push(format!("temporal:{table}"));
         for column in *columns {
@@ -172,6 +179,7 @@ pub use invariants::{
 pub(crate) use invariants::{ensure_authority_invariants, ensure_fresh_authority_invariants};
 pub use validation::validate_registry_schema_contract;
 pub(crate) use validation::{
-    validate_authority_schema_contract, validate_remote_deletion_schema_contract,
-    validate_session_graph_publication_schema_contract, validate_session_temporal_schema_contract,
+    validate_authority_schema_contract, validate_existing_observation_table,
+    validate_remote_deletion_schema_contract, validate_session_graph_publication_schema_contract,
+    validate_session_temporal_schema_contract,
 };

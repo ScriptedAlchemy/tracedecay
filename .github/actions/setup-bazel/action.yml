@@ -1,7 +1,8 @@
 name: Set up Bazel
 description: >
   Installs Bazel through the pinned bazelisk with its repository cache, and a
-  disk cache named by `cache-key` that only master saves automatically: PRs
+  disk cache for hosted-only execution named by `cache-key`. Only master saves
+  automatically: PRs
   restore master's entry; explicit native Windows dispatches may also prime
   their branch's cache. Jobs with the same configuration and
   runner image share a restore prefix; master callers save fresh
@@ -18,6 +19,9 @@ inputs:
       prefix misses. Use when two jobs share rustc flags and runner image so
       Clippy can reuse Test Linux action outputs.
     default: ""
+  remote-download-outputs:
+    description: Remote outputs to materialize; packaging jobs require toplevel.
+    default: "minimal"
   cache-save:
     description: Whether this setup may save Bazelisk and repository caches.
     default: "true"
@@ -42,6 +46,53 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Free runner disk space
+      if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+      shell: bash
+      run: |
+        set -euo pipefail
+        df -h /
+        status=0
+        sudo rm -rf /usr/local/lib/android &
+        p1=$!
+        sudo rm -rf /usr/share/dotnet &
+        p2=$!
+        sudo rm -rf /opt/ghc &
+        p3=$!
+        sudo rm -rf /opt/hostedtoolcache/CodeQL &
+        p4=$!
+        for pid in "$p1" "$p2" "$p3" "$p4"; do
+          wait "$pid" || status=1
+        done
+        df -h /
+        exit "$status"
+
+    - name: Remove inactive Xcode installations
+      if: runner.os == 'macOS' && runner.environment == 'github-hosted'
+      shell: bash
+      run: |
+        df -h /
+        python3 - <<'PYTHON'
+        import pathlib
+        import subprocess
+
+        applications = pathlib.Path("/Applications")
+        selected = pathlib.Path(subprocess.check_output(["xcode-select", "-p"], text=True).strip()).resolve(strict=True)
+        active = next((path for path in selected.parents if path.suffix == ".app"), None)
+        if active is None:
+            raise SystemExit(f"Selected developer directory is not an Xcode application: {selected}")
+        print(f"Selected Xcode before cleanup: {active}", flush=True)
+        inactive = [path for path in applications.glob("Xcode*.app") if path.resolve() != active]
+        for path in inactive:
+            print(f"Removing inactive Xcode: {path}", flush=True)
+            subprocess.run(["sudo", "rm", "-rf", "--", str(path)], check=True)
+        after = pathlib.Path(subprocess.check_output(["xcode-select", "-p"], text=True).strip()).resolve(strict=True)
+        if after != selected:
+            raise SystemExit(f"Selected developer directory changed: {selected} -> {after}")
+        print(f"Selected Xcode after cleanup: {active}", flush=True)
+        PYTHON
+        df -h /
+
     - name: Verify Windows build runner configuration
       if: runner.os == 'Windows' && runner.environment == 'github-hosted'
       shell: pwsh
@@ -104,18 +155,6 @@ runs:
         );
         JS
 
-    - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
-      with:
-        bazelisk-cache: true
-        repository-cache: true
-        disk-cache: false
-        bazelrc: >-
-          build --disk_cache=${{ steps.disk-cache-config.outputs.path }}
-        cache-save: ${{ github.ref == 'refs/heads/master' && inputs.cache-save == 'true' }}
-        # Windows build-script runfiles nest each vendored crate's sources
-        # under its repository name twice; keep the output base short.
-        output-base: ${{ steps.disk-cache-config.outputs.output-base }}
-
     - name: Preserve the runner network environment for Tailscale
       if: runner.os == 'Linux' && inputs.tailscale-client-id != ''
       shell: bash
@@ -153,6 +192,7 @@ runs:
       shell: bash
       env:
         TAILSCALE_OUTCOME: ${{ steps.tailscale.outcome }}
+        REMOTE_DOWNLOAD_OUTPUTS: ${{ inputs.remote-download-outputs }}
       run: |
         if [[ "$TAILSCALE_OUTCOME" == success ]]; then
           # Resolve the peer through the local API without changing runner DNS.
@@ -167,6 +207,18 @@ runs:
           fi
         fi
         python3 "$GITHUB_ACTION_PATH/configure_fleet.py"
+
+    - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+      with:
+        bazelisk-cache: true
+        repository-cache: true
+        disk-cache: false
+        bazelrc: >-
+          build --disk_cache=${{ steps.fleet.outputs.enabled != 'true' && steps.disk-cache-config.outputs.path || '' }}
+        cache-save: ${{ github.ref == 'refs/heads/master' && inputs.cache-save == 'true' }}
+        # Windows build-script runfiles nest each vendored crate's sources
+        # under its repository name twice; keep the output base short.
+        output-base: ${{ steps.disk-cache-config.outputs.output-base }}
 
     - name: Map the shared Windows compiler path
       if: steps.fleet.outputs.enabled == 'true' && runner.os == 'Windows'
@@ -207,3 +259,8 @@ runs:
         path: ${{ steps.disk-cache-config.outputs.path }}
         key: ${{ steps.disk-cache-config.outputs.prefix }}run-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
         restore-keys: ${{ steps.disk-cache-config.outputs.restore-keys }}
+
+    - name: Report available build storage
+      continue-on-error: true
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/report_disk.sh"

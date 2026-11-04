@@ -965,7 +965,7 @@ mod retention_tick_log_tests {
 
         assert!(
             registry.admit_retention_tick_log(MaintenanceTickOutcome::Continue(
-                MaintenanceContinuation::CodeGenerationRetention,
+                MaintenanceContinuation::StoreRetention,
             ))
         );
         assert!(registry.admit_retention_tick_log(MaintenanceTickOutcome::Retry));

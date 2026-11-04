@@ -47,3 +47,10 @@ jobs:
             --incompatible_no_implicit_file_export \
             --rewind_lost_inputs \
             //crates/...
+
+      - name: Report final build disk usage
+        if: ${{ always() && hashFiles('.github/actions/setup-bazel/report_disk.sh') != '' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: bash
+        run: bash .github/actions/setup-bazel/report_disk.sh

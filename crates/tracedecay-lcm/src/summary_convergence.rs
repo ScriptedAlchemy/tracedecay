@@ -110,6 +110,11 @@ CREATE TRIGGER IF NOT EXISTS lcm_summary_convergence_raw_insert
             raw_revision_generation =
                 lcm_summary_convergence_queue.raw_revision_generation + 1;
     END;
+"#;
+
+/// Canonical guard restored by transaction-scoped storage maintenance after it
+/// proves that effective content and its sanitizer receipt remain unchanged.
+pub(crate) const RAW_UPDATE_TRIGGER_SQL: &str = r#"
 CREATE TRIGGER IF NOT EXISTS lcm_summary_convergence_raw_unprotected_update
     AFTER UPDATE OF provider, session_id, role, ordinal, timestamp,
                     content_hash, storage_kind, payload_ref, metadata_json
@@ -193,6 +198,53 @@ CREATE TRIGGER IF NOT EXISTS lcm_summary_convergence_raw_unprotected_update
                 lcm_summary_convergence_queue.raw_revision_generation + 1;
     END;
 "#;
+
+pub(crate) async fn validate_raw_update_guard(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Result<(), LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+            params!["lcm_summary_convergence_raw_unprotected_update"],
+        )
+        .await?;
+    let actual = rows
+        .next()
+        .await?
+        .ok_or_else(|| LcmError::Db("summary convergence guard is missing".to_owned()))?
+        .get::<String>(0)?;
+    let expected = RAW_UPDATE_TRIGGER_SQL.trim().replacen(
+        "CREATE TRIGGER IF NOT EXISTS ",
+        "CREATE TRIGGER ",
+        1,
+    );
+    if actual.trim().trim_end_matches(';') != expected.trim_end_matches(';') {
+        return Err(LcmError::Db(
+            "summary convergence guard does not match its contract".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Only lossless storage maintenance may call this inside its authorized writer
+/// transaction. It must verify the unchanged body/receipt and restore this
+/// exact guard before committing. Rollback restores it on any failure. Body
+/// ownership, privacy, FTS and payload-reference triggers remain installed.
+pub(crate) async fn suspend_raw_update_guard(
+    conn: &(impl Executor + ?Sized),
+) -> Result<(), LcmError> {
+    validate_raw_update_guard(conn).await?;
+    conn.execute_batch("DROP TRIGGER lcm_summary_convergence_raw_unprotected_update")
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn restore_raw_update_guard(
+    conn: &(impl Executor + ?Sized),
+) -> Result<(), LcmError> {
+    conn.execute_batch(RAW_UPDATE_TRIGGER_SQL).await?;
+    validate_raw_update_guard(conn).await
+}
 
 pub const NEXT_CANDIDATE_SQL: &str = "SELECT provider, session_id, newest_raw_store_id,
             protection_frontier_store_id, attempted_raw_store_id,
@@ -278,6 +330,7 @@ impl LcmSummaryConvergenceQueueState {
 pub async fn ensure_schema(conn: &(impl Executor + ?Sized)) -> Result<(), LcmError> {
     conn.execute_batch(SUMMARY_CONVERGENCE_TABLE_SQL).await?;
     conn.execute_batch(SUMMARY_CONVERGENCE_WORK_SQL).await?;
+    conn.execute_batch(RAW_UPDATE_TRIGGER_SQL).await?;
     Ok(())
 }
 

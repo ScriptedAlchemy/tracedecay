@@ -393,9 +393,9 @@ fn classify_transcript_ingest_outcome(
     SessionHistoricalIngestOutcome::Complete
 }
 
-/// Names the pass blocker(s) per provider. A single-provider pass keeps the
-/// raw reason code so existing status strings stay stable. Multi-provider
-/// passes use `provider:reason` so rotation order cannot hide the real stall.
+/// Names every distinct pass blocker in stable provider/reason order. A
+/// single-provider pass keeps raw reason codes; multi-provider passes qualify
+/// each reason so neither provider rotation nor source order hides a fault.
 fn pass_reason_code(
     failures: &[tracedecay_sessions::runtime::TranscriptCatchUpFailure],
     retryable: bool,
@@ -405,28 +405,19 @@ fn pass_reason_code(
         .map(|failure| failure.provider)
         .collect::<BTreeSet<_>>()
         .len();
-    let mut blockers = BTreeMap::new();
-    for failure in failures {
-        if failure.retryable != retryable {
-            continue;
-        }
-        blockers
-            .entry(failure.provider)
-            .or_insert(failure.reason_code);
-    }
-    if blockers.is_empty() {
-        return String::new();
-    }
-    if provider_count <= 1 {
-        let mut reasons = blockers.into_values();
-        return match reasons.next() {
-            Some(reason) => reason.to_owned(),
-            None => String::new(),
-        };
-    }
-    blockers
+    failures
+        .iter()
+        .filter(|failure| failure.retryable == retryable)
+        .map(|failure| (failure.provider, failure.reason_code))
+        .collect::<BTreeSet<_>>()
         .into_iter()
-        .map(|(provider, reason)| format!("{provider}:{reason}"))
+        .map(|(provider, reason)| {
+            if provider_count <= 1 {
+                reason.to_owned()
+            } else {
+                format!("{provider}:{reason}")
+            }
+        })
         .collect::<Vec<_>>()
         .join(",")
 }
@@ -443,7 +434,10 @@ mod tests {
     use tracedecay_sessions::runtime::{
         IngestPassCoverage, TranscriptCatchUpFailure, TranscriptIngestOutcome,
     };
-    use tracedecay_sessions::serving::SessionProjectionServingStatusPort;
+    use tracedecay_sessions::serving::{
+        SessionProjectionServingState, SessionProjectionServingStatusPort,
+        SessionProjectionStaleReason,
+    };
 
     #[test]
     fn completed_history_records_committed_progress_but_idle_passes_do_not() {
@@ -674,5 +668,114 @@ mod tests {
             "a retryable sibling must not become the blocked label, got {reason_code}"
         );
         assert!(!outcome.needs_another_pass());
+    }
+
+    fn failure(
+        provider: &'static str,
+        reason_code: &'static str,
+        retryable: bool,
+    ) -> TranscriptCatchUpFailure {
+        TranscriptCatchUpFailure {
+            provider,
+            source: "observation",
+            reason_code,
+            retryable,
+            source_locator: None,
+        }
+    }
+
+    #[test]
+    fn same_provider_corruption_survives_source_order_and_reaches_status() {
+        let expected = "invalid_observation_contract,projection_store_corrupt";
+        for reverse in [false, true] {
+            let mut failures = vec![
+                failure("claude", "invalid_observation_contract", false),
+                failure("claude", "projection_store_corrupt", false),
+                failure("claude", "projection_store_corrupt", false),
+            ];
+            if reverse {
+                failures.reverse();
+            }
+            let outcome = classify_transcript_ingest_outcome(
+                ingest_outcome_with_failures(failures),
+                &ObservationCancellation::default(),
+            );
+            assert_eq!(
+                outcome,
+                SessionHistoricalIngestOutcome::Blocked {
+                    reason_code: expected.to_owned(),
+                    made_progress: false,
+                }
+            );
+            assert!(!outcome.needs_another_pass());
+
+            let state = Arc::new(SessionTemporalRefreshWakeState::default());
+            state.mark_running();
+            state.record_history_outcome(outcome);
+            assert_eq!(
+                state.handle().serving_status().state,
+                SessionProjectionServingState::Stale {
+                    reason: SessionProjectionStaleReason::HistoricalBlocked {
+                        reason_code: expected.to_owned(),
+                    },
+                }
+            );
+            state.record_history_outcome(SessionHistoricalIngestOutcome::Complete);
+            assert_eq!(
+                state.handle().serving_status().state,
+                SessionProjectionServingState::Current
+            );
+        }
+    }
+
+    #[test]
+    fn same_provider_retry_reasons_are_sorted_and_deduplicated() {
+        for reverse in [false, true] {
+            let mut failures = vec![
+                failure("codex", "projection_storage_retry_scheduled", true),
+                failure("codex", "cursor_conflict", true),
+                failure("codex", "cursor_conflict", true),
+            ];
+            if reverse {
+                failures.reverse();
+            }
+            let outcome = classify_transcript_ingest_outcome(
+                ingest_outcome_with_failures(failures),
+                &ObservationCancellation::default(),
+            );
+            assert_eq!(
+                outcome,
+                SessionHistoricalIngestOutcome::Retryable {
+                    reason_code: "cursor_conflict,projection_storage_retry_scheduled".to_owned(),
+                    made_progress: false,
+                }
+            );
+            assert!(outcome.needs_another_pass());
+        }
+    }
+
+    #[test]
+    fn all_terminal_reasons_keep_provider_identity_and_progress() {
+        let mut ingested = ingest_outcome_with_failures(vec![
+            failure("cursor", "projection_store_corrupt", false),
+            failure("claude", "invalid_observation_contract", false),
+            failure("claude", "projection_store_corrupt", false),
+            failure("claude", "cursor_conflict", true),
+        ]);
+        ingested.stats.messages_upserted = 2;
+        let pass = historical_pass(ingested, &ObservationCancellation::default());
+        assert!(pass.made_progress);
+        assert_eq!(
+            pass.outcome,
+            SessionHistoricalIngestOutcome::Blocked {
+                reason_code: concat!(
+                    "claude:invalid_observation_contract,",
+                    "claude:projection_store_corrupt,cursor:projection_store_corrupt"
+                )
+                .to_owned(),
+                made_progress: true,
+            }
+        );
+        assert!(!pass.outcome.needs_another_pass());
     }
 }

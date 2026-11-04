@@ -164,6 +164,7 @@ jobs:
         id: bazel
         uses: ./.release-automation/.github/actions/setup-bazel
         with:
+          remote-download-outputs: toplevel
           cache-key: release-${{ matrix.target }}
           tailscale-client-id: >-
             ${{ (matrix.name == 'x86_64-linux' || matrix.name == 'aarch64-macos' || matrix.name == 'x86_64-windows')
@@ -260,6 +261,13 @@ jobs:
         with:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
           key: ${{ steps.bazel.outputs.disk-cache-key }}
+
+      - name: Report final build disk usage
+        if: ${{ always() && hashFiles('.release-automation/.github/actions/setup-bazel/report_disk.sh') != '' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: bash
+        run: bash .release-automation/.github/actions/setup-bazel/report_disk.sh
 
   verify-release:
     name: Verify immutable GitHub release
@@ -764,6 +772,13 @@ jobs:
             sdks/typescript/npm-12.2.0.tgz.sha256
           if-no-files-found: error
           retention-days: 7
+
+      - name: Report final build disk usage
+        if: ${{ always() && hashFiles('.github/actions/setup-bazel/report_disk.sh') != '' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: bash
+        run: bash .github/actions/setup-bazel/report_disk.sh
 
   publish-typescript:
     name: Publish @tracedecay/sdk to npm

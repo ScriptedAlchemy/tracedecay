@@ -302,14 +302,17 @@ impl<'a> ProjectProviderRun<'a> {
                 continue;
             };
             if persisted_day.is_some_and(|day| path.parent() != Some(day)) {
-                let membership = run_blocking_transcript_section("codex", {
-                    let path = path.clone();
-                    let project_root = self.project_root.to_path_buf();
-                    move || {
-                        codex::codex_rollout_project_membership(&path, &project_root)
-                            == Some(ProjectMembership::NoMatch)
-                    }
-                })
+                let membership = tracing::Instrument::instrument(
+                    run_blocking_transcript_section("codex", {
+                        let path = path.clone();
+                        let project_root = self.project_root.to_path_buf();
+                        move || {
+                            codex::codex_rollout_project_membership(&path, &project_root)
+                                == Some(ProjectMembership::NoMatch)
+                        }
+                    }),
+                    tracing::trace_span!("sessions.ingest.project.codex.membership_check"),
+                )
                 .await;
                 match membership {
                     Ok(false) => {}
@@ -371,7 +374,10 @@ impl<'a> ProjectProviderRun<'a> {
             {
                 Ok(progress) => {
                     if let Err(error) =
-                        pending.admitted(progress.source_deferred, progress.covered_through)
+                        tracing::trace_span!("sessions.ingest.project.codex.convergence_settle")
+                            .in_scope(|| {
+                                pending.admitted(progress.source_deferred, progress.covered_through)
+                            })
                     {
                         outcome.add_failure(warn_transcript_catch_up_failure(
                             "codex",

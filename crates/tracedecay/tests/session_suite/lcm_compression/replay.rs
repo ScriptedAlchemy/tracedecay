@@ -215,6 +215,75 @@ async fn threshold_pressure_summarizes_short_huge_active_context() {
 }
 
 #[tokio::test]
+async fn active_tool_result_body_is_stored_once_with_lossless_replay() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "session-tool-body").await;
+
+    let body = format!(
+        "tool-output-start\n{}tool-output-tail",
+        "test result: module completed successfully\n".repeat(2_048)
+    );
+    assert!(!tracedecay_lcm::security::should_externalize(
+        "tool",
+        Some("tool_result"),
+        &body,
+    ));
+    let mut messages = active_multi_tool_transaction();
+    messages[1]["content"] = json!(body);
+    let initial =
+        ingest_active_messages(&db, "cursor", "session-tool-body", messages.clone()).await;
+    let raw = db
+        .lcm_load_raw_message("cursor", "tool-a")
+        .await
+        .expect("tool result should be stored");
+    assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
+    assert_eq!(raw.content, body);
+    let stored_metadata = raw
+        .metadata_json
+        .as_deref()
+        .expect("active replay metadata");
+    let metadata: Value = serde_json::from_str(stored_metadata).unwrap();
+    assert!(
+        metadata["active_replay"].get("content").is_none(),
+        "the canonical body must not also be stored in SQL metadata"
+    );
+    assert!(stored_metadata.len() < tracedecay_store::INLINE_BODY_BYTES);
+    assert_eq!(metadata["active_replay"]["tool_call_id"], "call-a");
+    assert_eq!(initial.replay_messages[1]["content"], body);
+    assert_eq!(initial.replay_messages[1]["tool_call_id"], "call-a");
+
+    let preflight = db
+        .lcm_preflight(preflight_request(
+            "cursor",
+            "session-tool-body",
+            Vec::new(),
+            Some(100),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(preflight.replay_messages, initial.replay_messages);
+
+    for input in [messages, initial.replay_messages.clone()] {
+        let replay = ingest_active_messages(&db, "cursor", "session-tool-body", input).await;
+        assert_eq!(replay.replay_messages, initial.replay_messages);
+        assert_eq!(replay.replay_token_estimate, initial.replay_token_estimate);
+        assert_eq!(
+            db.lcm_load_raw_message("cursor", "tool-a").await.unwrap(),
+            raw,
+            "original input and replay must preserve body, identity, and metadata"
+        );
+        assert_eq!(
+            db.lcm_status("cursor", Some("session-tool-body"))
+                .await
+                .unwrap()
+                .raw_message_count,
+            3
+        );
+    }
+}
+
+#[tokio::test]
 async fn active_structured_content_survives_compress_ingest_and_preflight_replay() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;

@@ -1025,6 +1025,7 @@ fn score_lexical_row(
     echo_penalty: bool,
 ) -> LexicalRowScoreV1 {
     let mut field_scores = BTreeMap::new();
+    let mut whole_term_scores = BTreeMap::<&str, u64>::new();
     let mut matched_whole_terms = BTreeSet::new();
     let mut matched_subtokens = BTreeSet::new();
     let mut matched_phrases = BTreeSet::new();
@@ -1052,49 +1053,72 @@ fn score_lexical_row(
         if !score_name_fields && is_identifier_name_field(field) {
             continue;
         }
-        if field != LexicalFieldV1::Subtoken {
-            for (query_term, normalized) in &prepared.whole_terms {
-                let exact_tf = term_frequency(field, normalized);
-                if exact_tf > 0 {
-                    add_score(
-                        &mut field_scores,
-                        field,
-                        bm25(field, exact_tf, document_frequency(field, normalized)),
-                    );
-                    matched_whole_terms.insert((*query_term).to_owned());
-                    collect_term_kinds(exact_terms, normalized, &mut matched_kinds);
-                }
-                if let Some(expansions) = fuzzy.by_query.get(*query_term) {
-                    for expansion in expansions {
-                        let fuzzy_tf = term_frequency(field, expansion);
-                        if fuzzy_tf == 0 {
-                            continue;
-                        }
-                        let score = bm25(field, fuzzy_tf, document_frequency(field, expansion))
-                            .saturating_mul(FUZZY_SCORE_MILLIS)
-                            / 1_000;
-                        add_score(&mut field_scores, field, score);
-                        matched_whole_terms.insert((*query_term).to_owned());
-                        spelling_variants.insert(LexicalSpellingVariantV1 {
-                            query: (*query_term).to_owned(),
-                            alternative: expansion.clone(),
-                        });
-                        typo_recovery_applied = true;
-                        collect_term_kinds(exact_terms, expansion, &mut matched_kinds);
+        // Only an admitted whole-word field can cover subtoken evidence.
+        // Otherwise a Subtoken-only request loses rows before lane filtering.
+        if field == LexicalFieldV1::Subtoken || !super::field_admitted(field_filters, field) {
+            continue;
+        }
+        for (query_term, normalized) in &prepared.whole_terms {
+            let exact_tf = term_frequency(field, normalized);
+            if exact_tf > 0 {
+                let score = bm25(field, exact_tf, document_frequency(field, normalized));
+                add_score(&mut field_scores, field, score);
+                let weighted_score =
+                    if field == LexicalFieldV1::Documentation && prepared.whole_terms.len() != 1 {
+                        score.saturating_mul(DOCUMENTATION_NL_SCORE_MILLIS) / 1_000
+                    } else {
+                        score
+                    };
+                whole_term_scores
+                    .entry(normalized.as_str())
+                    .and_modify(|current| *current = (*current).max(weighted_score))
+                    .or_insert(weighted_score);
+                matched_whole_terms.insert((*query_term).to_owned());
+                collect_term_kinds(exact_terms, normalized, &mut matched_kinds);
+            }
+            if let Some(expansions) = fuzzy.by_query.get(*query_term) {
+                for expansion in expansions {
+                    let fuzzy_tf = term_frequency(field, expansion);
+                    if fuzzy_tf == 0 {
+                        continue;
                     }
+                    let score = bm25(field, fuzzy_tf, document_frequency(field, expansion))
+                        .saturating_mul(FUZZY_SCORE_MILLIS)
+                        / 1_000;
+                    add_score(&mut field_scores, field, score);
+                    matched_whole_terms.insert((*query_term).to_owned());
+                    spelling_variants.insert(LexicalSpellingVariantV1 {
+                        query: (*query_term).to_owned(),
+                        alternative: expansion.clone(),
+                    });
+                    typo_recovery_applied = true;
+                    collect_term_kinds(exact_terms, expansion, &mut matched_kinds);
                 }
             }
-        } else {
-            for (subtoken, normalized) in &prepared.subtokens {
-                let tf = term_frequency(field, normalized);
-                if tf > 0 {
-                    add_score(
-                        &mut field_scores,
-                        field,
-                        bm25(field, tf, document_frequency(field, normalized)),
-                    );
-                    matched_subtokens.insert((*subtoken).to_owned());
-                }
+        }
+    }
+    if field_lengths.contains_key(&LexicalFieldV1::Subtoken) {
+        for (subtoken, normalized) in &prepared.subtokens {
+            let tf = term_frequency(LexicalFieldV1::Subtoken, normalized);
+            if tf == 0 {
+                continue;
+            }
+            // Whole-word and subtoken postings can represent the same
+            // evidence. Add only the stronger representation's excess.
+            let score = bm25(
+                LexicalFieldV1::Subtoken,
+                tf,
+                document_frequency(LexicalFieldV1::Subtoken, normalized),
+            )
+            .saturating_sub(
+                whole_term_scores
+                    .get(normalized.as_str())
+                    .copied()
+                    .unwrap_or_default(),
+            );
+            if score > 0 {
+                add_score(&mut field_scores, LexicalFieldV1::Subtoken, score);
+                matched_subtokens.insert((*subtoken).to_owned());
             }
         }
     }

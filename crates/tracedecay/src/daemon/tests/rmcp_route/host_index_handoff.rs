@@ -222,8 +222,10 @@ async fn readiness_budget_bounds_canonical_broker_runtime_contention() {
         let broker = Arc::clone(&broker);
         move || {
             let mut entered = Some(entered);
+            // Establish the held runtime deterministically: a try-lock probe
+            // can legitimately refuse unrelated concurrent spool activity.
             broker
-                .pending_replay_matches(|_| {
+                .pending_replay_matches_blocking(|_| {
                     entered.take().unwrap().send(()).unwrap();
                     let _ = released.recv();
                     Ok(false)

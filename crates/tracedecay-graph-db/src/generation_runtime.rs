@@ -1837,7 +1837,7 @@ impl GraphDb {
             // and nothing serves it, so its directory leaves the disk now
             // instead of waiting, possibly forever, on a project that never
             // publishes again, behind the deferred row delete.
-            self.retire_sealed_generation_store(locator);
+            self.retire_sealed_generation_store(locator)?;
             return Ok(GenerationContentsDeletion::RetentionPending);
         }
         let mut state = self.wait_verified_generations_write()?;
@@ -1858,7 +1858,7 @@ impl GraphDb {
             state.heads.remove(&locator.projection);
         }
         drop(state);
-        self.retire_sealed_generation_store(locator);
+        self.retire_sealed_generation_store(locator)?;
         Ok(GenerationContentsDeletion::Deleted)
     }
 
@@ -2270,7 +2270,7 @@ impl GraphDb {
         drop(state);
         // A quarantined generation's rows are in doubt; its derived sealed
         // artifact must not outlive that doubt.
-        self.retire_sealed_generation_store(&locator);
+        self.retire_sealed_generation_store(&locator)?;
         Ok(())
     }
 }
@@ -2799,8 +2799,8 @@ mod tests {
     };
 
     use super::{
-        GenerationLocator, GenerationStageOutcome, StagedGenerationRowsDeletion,
-        generation_stage_pages,
+        GenerationContentsDeletion, GenerationLocator, GenerationStageOutcome,
+        StagedGenerationRowsDeletion, generation_stage_pages,
     };
 
     fn manifest(source: &str, watermark: &str) -> GraphGenerationManifest {
@@ -3975,6 +3975,51 @@ mod tests {
             2,
             "an exact cleanup retry after every row is gone must be a no-op"
         );
+        owner.close().unwrap();
+    }
+
+    #[test]
+    fn sealed_generation_retirement_keeps_unlink_errors_retryable() {
+        let temp = TempDir::new().unwrap();
+        let (owner, database) = persistent_database(&temp);
+        let generation = manifest("source:one", "watermark:one");
+        let locator =
+            GenerationLocator::new(generation.projection.clone(), generation.generation.clone());
+        let namespace = generation.identity().physical_namespace().unwrap();
+        let directory = temp.path().join("commit-metadata.sealed").join(
+            namespace
+                .as_str()
+                .strip_prefix("generation:")
+                .unwrap_or(namespace.as_str()),
+        );
+        std::fs::create_dir_all(directory.parent().unwrap()).unwrap();
+        // A regular file in the exact artifact slot deterministically refuses
+        // remove_dir_all even on hosts that run the test with full privileges.
+        std::fs::write(&directory, b"not a directory").unwrap();
+
+        let error = database
+            .delete_generation_contents(&locator, &|| Ok(()))
+            .expect_err("a failed sealed unlink must not complete retention");
+        assert!(
+            error
+                .to_string()
+                .contains("sealed directory removal failed")
+        );
+        assert_eq!(std::fs::read(&directory).unwrap(), b"not a directory");
+
+        std::fs::remove_file(&directory).unwrap();
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("derived-rows"), b"retired").unwrap();
+        assert!(matches!(
+            database.delete_generation_contents(&locator, &|| Ok(())),
+            Ok(GenerationContentsDeletion::Deleted)
+        ));
+        assert!(!directory.exists());
+        // Idempotent replay after the directory is gone still succeeds.
+        assert!(matches!(
+            database.delete_generation_contents(&locator, &|| Ok(())),
+            Ok(GenerationContentsDeletion::Deleted)
+        ));
         owner.close().unwrap();
     }
 }

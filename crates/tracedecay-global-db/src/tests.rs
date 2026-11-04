@@ -1645,6 +1645,45 @@ async fn registered_runtime_does_not_recreate_a_missing_database() {
 }
 
 #[asupersync::test]
+async fn savings_ledger_refuses_unrepresentable_token_counts() {
+    let harness = RegisteredGlobalDbHarness::open("savings-ledger-token-encoding").await;
+    let database = &harness.registered;
+    let out_of_range = i64::MAX as u64 + 1;
+
+    for (before, after) in [
+        (out_of_range, 0),
+        (0, out_of_range),
+        (u64::MAX, 3),
+        (3, u64::MAX),
+    ] {
+        let error = database
+            .try_record_savings("/project", "tool", before, after, 1)
+            .await
+            .expect_err("unrepresentable token count must be refused");
+        assert!(
+            error.to_string().contains("encode savings ledger"),
+            "unexpected refusal: {error}"
+        );
+    }
+    assert_eq!(
+        row_count(database, "savings_ledger").await,
+        0,
+        "a rejected count must not append a corrupted or partial row"
+    );
+
+    database
+        .try_record_savings("/project", "tool", i64::MAX as u64, 0, 1)
+        .await
+        .expect("the largest representable count must be accepted");
+    let total = database
+        .sum_savings(Some("/project"), 0)
+        .await
+        .expect("read the committed savings row");
+    assert_eq!(total.saved_tokens, i64::MAX as u64);
+    assert_eq!(total.calls, 1);
+}
+
+#[asupersync::test]
 async fn project_token_projection_rejects_unrepresentable_totals() {
     let harness = RegisteredGlobalDbHarness::open("project-tokens-overflow").await;
     let project = std::path::Path::new("/tmp/tracedecay-project-token-overflow");

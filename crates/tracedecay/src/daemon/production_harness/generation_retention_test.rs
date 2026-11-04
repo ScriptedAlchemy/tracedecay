@@ -262,7 +262,7 @@ async fn mounted_code_generation_retention_continues_capped_segment_reclamation(
     };
     assert_eq!(
         outcome,
-        MaintenanceTickOutcome::Continue(MaintenanceContinuation::CodeGenerationRetention),
+        MaintenanceTickOutcome::Continue(MaintenanceContinuation::StoreRetention),
         "a capped segment-only pass must keep the production maintenance cadence short"
     );
     assert_eq!(

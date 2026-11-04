@@ -37,6 +37,7 @@ runs:
       id: bazel
       if: inputs.prepared-build != 'true'
       with:
+        remote-download-outputs: toplevel
         cache-key: ${{ inputs.cache-key }}
         tailscale-client-id: ${{ inputs.tailscale-client-id }}
 

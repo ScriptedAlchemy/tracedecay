@@ -35,6 +35,8 @@ use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority;
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use tracedecay_lcm::LcmRetentionConfig;
+use tracedecay_lcm::types::LcmImmutableSummaryPublication;
+use tracedecay_lcm::{LcmSourceRef, LcmSummaryNodeDraft};
 use tracedecay_maintenance::retention::registered_store::run_registered_store_retention;
 use tracedecay_privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
@@ -53,6 +55,7 @@ use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionCon
 use tracedecay_sessions::runtime::{
     TranscriptIngestOutcome, ingest_project_sources_for_provider, with_transcript_source_profile,
 };
+use tracedecay_temporal_query::execution::ExecutionControl;
 
 pub const PROVIDER: &str = "codex";
 pub const MESSAGES_PER_SESSION: u64 = 5;
@@ -750,15 +753,111 @@ pub async fn retention_tick_read_bytes(database: &RegisteredGlobalDb) -> u64 {
     process_read_bytes() - before
 }
 
-/// Measures retention after aligning the WAL and settling the seeded backlog.
-/// Warm-up ticks may checkpoint; neither measured tick may include that copy.
-pub async fn probe_retention_tick_read_bytes(database: &RegisteredGlobalDb) -> u64 {
+/// Discharge an older seeded backlog before comparing equal-size streamed
+/// batches. One retention pass is bounded (500 rows by default), so a single
+/// warm-up would leave a grown store with many more eligible deletes than the
+/// base store, measuring backlog volume instead of per-tick read amplification.
+pub async fn settle_retention_backlog(database: &RegisteredGlobalDb) {
+    let seeded_rows = GROWN_SESSIONS * MESSAGES_PER_SESSION + DRAIN_WINDOW as u64;
+    let batch = LcmRetentionConfig::default().max_batch_size as u64;
+    let max_ticks = seeded_rows.div_ceil(batch) + 2;
+    for _ in 0..max_ticks {
+        let report = run_registered_store_retention(
+            database,
+            &LcmRetentionConfig::default(),
+            &ObservationRetentionConfig::default(),
+            RETENTION_NOW,
+        )
+        .await;
+        assert!(report.succeeded(), "retention warm-up must succeed");
+        let lcm = report.session_lcm.as_ref().unwrap().as_ref().unwrap();
+        if lcm.dropped.eligible == 0 {
+            return;
+        }
+    }
+    panic!("prior retained rows must drain within the derived bounded tick count");
+}
+
+/// Measures one tick with only the expected newly streamed messages eligible
+/// for the destructive age policy, and excludes unrelated WAL checkpoints.
+pub async fn probe_retention_tick_read_bytes(
+    database: &RegisteredGlobalDb,
+    expected_dropped: u64,
+) -> u64 {
     let checkpointed = writer_telemetry(database).wal.checkpointed_frames;
-    let read = retention_tick_read_bytes(database).await;
+    let before = process_read_bytes();
+    let report = run_registered_store_retention(
+        database,
+        &LcmRetentionConfig::default(),
+        &ObservationRetentionConfig::default(),
+        RETENTION_NOW,
+    )
+    .await;
+    assert!(report.succeeded(), "retention must succeed");
+    let actual_dropped = report
+        .session_lcm
+        .as_ref()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .dropped
+        .acted;
+    assert_eq!(
+        actual_dropped, expected_dropped,
+        "the compared ticks must perform identical bounded raw-row deletion work"
+    );
+    let read = process_read_bytes() - before;
     assert_eq!(
         writer_telemetry(database).wal.checkpointed_frames,
         checkpointed,
         "the retention query comparison must not include a periodic checkpoint"
     );
     read
+}
+
+/// Make the streamed batch genuinely eligible for destructive retention:
+/// only raw sources backed by a published, durable summary may be deleted.
+/// Build the lineage through the registered production publication journey.
+pub async fn publish_retention_probe_summary(
+    database: &RegisteredGlobalDb,
+    cursor: &SessionCursor,
+    from_ordinal: u64,
+    count: u64,
+    summary_id: &str,
+) {
+    let mut source_refs = Vec::with_capacity(usize::try_from(count).unwrap());
+    for ordinal in from_ordinal..from_ordinal + count {
+        let message_id = format!("{}.message.{ordinal:05}", cursor.session_id.as_str());
+        let store_id = database
+            .lcm_raw_message_store_id(PROVIDER, &message_id)
+            .await
+            .unwrap()
+            .expect("streamed raw message must exist before summary publication");
+        source_refs.push(LcmSourceRef::RawMessage { store_id });
+    }
+    database
+        .lcm_publish_immutable_summary_guarded(
+            LcmImmutableSummaryPublication {
+                summary_id: summary_id.to_owned(),
+                predecessor_summary_id: None,
+                draft: LcmSummaryNodeDraft {
+                    provider: PROVIDER.to_owned(),
+                    conversation_id: cursor.session_id.as_str().to_owned(),
+                    session_id: cursor.session_id.as_str().to_owned(),
+                    depth: 0,
+                    summary_text: "Summary of the newly streamed retention probe".to_owned(),
+                    source_refs,
+                    source_token_count: i64::try_from(count).unwrap(),
+                    summary_token_count: 8,
+                    source_time_start: Some(SEED_TIMESTAMP),
+                    source_time_end: Some(RETENTION_NOW),
+                    expand_hint: None,
+                    metadata_json: None,
+                },
+            },
+            &ExecutionControl::default(),
+            || Ok(()),
+        )
+        .await
+        .expect("publish durable retention lineage through registered authority");
 }

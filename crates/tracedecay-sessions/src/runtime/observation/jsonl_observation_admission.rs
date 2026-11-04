@@ -2238,7 +2238,12 @@ impl ActiveAdmission<'_> {
             requests.push(self.capture_request(batch_expected, frame, retention_class)?);
             batch_expected = next_expected;
         }
-        match self.admission.capture_observations(requests).await {
+        match tracing::Instrument::instrument(
+            self.admission.capture_observations(requests),
+            tracing::trace_span!("sessions.observation.admit_jsonl.capture_batch"),
+        )
+        .await
+        {
             Ok(outcomes) => {
                 if outcomes.len() != checkpoints.len() {
                     return Err(CaptureWindowError::Ingest(
@@ -2344,17 +2349,18 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
     if cancellation.is_cancelled() {
         return Err(TranscriptIngestError::Cancelled { provider });
     }
-    let mut expected_cursor =
-        admission
-            .get_source_cursor(&source, &scope)
-            .await
-            .map_err(|outcome| {
-                if is_admission_cancellation(&outcome, &cancellation) {
-                    TranscriptIngestError::Cancelled { provider }
-                } else {
-                    host_admission_error(provider, outcome)
-                }
-            })?;
+    let mut expected_cursor = tracing::Instrument::instrument(
+        admission.get_source_cursor(&source, &scope),
+        tracing::trace_span!("sessions.observation.admit_jsonl.cursor_lookup"),
+    )
+    .await
+    .map_err(|outcome| {
+        if is_admission_cancellation(&outcome, &cancellation) {
+            TranscriptIngestError::Cancelled { provider }
+        } else {
+            host_admission_error(provider, outcome)
+        }
+    })?;
     if cancellation.is_cancelled() {
         return Err(TranscriptIngestError::Cancelled { provider });
     }

@@ -56,3 +56,10 @@ jobs:
           --test_output=errors
       - name: Execute stock-edit oracle regressions
         run: python3 evals/agent_adoption/stock_check_selftest.py
+
+      - name: Report final build disk usage
+        if: ${{ always() && hashFiles('.github/actions/setup-bazel/report_disk.sh') != '' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: bash
+        run: bash .github/actions/setup-bazel/report_disk.sh

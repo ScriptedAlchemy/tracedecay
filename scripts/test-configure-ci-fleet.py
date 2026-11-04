@@ -33,11 +33,22 @@ class ConfigureCiFleetTest(unittest.TestCase):
         self.endpoint.bind(("127.0.0.1", 0))
 
     def configure(
-        self, outcome: str = "success", runner_os: str = "Linux", arch: str = "X64"
+        self,
+        outcome: str = "success",
+        runner_os: str = "Linux",
+        arch: str = "X64",
+        remote_download_outputs: str = "minimal",
     ) -> bool:
         host, port = self.endpoint.getsockname()
         return FLEET.configure_fleet(
-            self.workspace, self.output, outcome, runner_os, arch, host, port
+            self.workspace,
+            self.output,
+            outcome,
+            runner_os,
+            arch,
+            host,
+            port,
+            remote_download_outputs,
         )
 
     def options(self) -> dict[str, str]:
@@ -60,6 +71,7 @@ class ConfigureCiFleetTest(unittest.TestCase):
         self.assertTrue(self.configure())
         options = self.options()
         self.assertEqual(options["--config"], "rbe-linux")
+        self.assertEqual(options["--remote_download_outputs"], "minimal")
         self.assertIn("--remote_cache_compression", options)
         self.assertIn("--remote_upload_local_results", options)
         self.assertIn("--noremote_cache_async", options)
@@ -84,6 +96,7 @@ class ConfigureCiFleetTest(unittest.TestCase):
         self.assertTrue(self.configure(runner_os="Windows"))
         options = self.options()
         self.assertEqual(options["--config"], "rbe-windows")
+        self.assertEqual(options["--remote_download_outputs"], "minimal")
         self.assertIn("--remote_cache_compression", options)
         self.assertIn("--remote_upload_local_results", options)
         self.assertIn("--noremote_cache_async", options)
@@ -111,6 +124,7 @@ class ConfigureCiFleetTest(unittest.TestCase):
         self.assertTrue(self.configure(runner_os="macOS", arch="ARM64"))
         options = self.options()
         self.assertEqual(options["--config"], "rbe-macos")
+        self.assertEqual(options["--remote_download_outputs"], "minimal")
         self.assertIn("--remote_cache_compression", options)
         self.assertIn("--remote_upload_local_results", options)
         self.assertIn("--noremote_cache_async", options)
@@ -121,6 +135,18 @@ class ConfigureCiFleetTest(unittest.TestCase):
         self.assertEqual(options["--dynamic_remote_strategy"], "remote")
         self.assertNotIn("--experimental_local_lockfree_output", options)
         self.assertIn("build --strategy=Rustc=dynamic", self.rc.read_text())
+
+    def test_packaging_materializes_top_level_outputs(self) -> None:
+        self.endpoint.listen()
+        self.assertTrue(self.configure(remote_download_outputs="toplevel"))
+        self.assertEqual(self.options()["--remote_download_outputs"], "toplevel")
+
+    def test_invalid_download_mode_preserves_existing_configuration(self) -> None:
+        self.rc.write_text("# Existing configuration\n")
+        with self.assertRaises(ValueError):
+            self.configure(remote_download_outputs="minimal\nbuild --jobs=1000")
+        self.assertEqual(self.rc.read_text(), "# Existing configuration\n")
+        self.assertFalse(self.output.exists())
 
     def test_unsupported_windows_architecture_does_not_contact_executor(self) -> None:
         self.endpoint.listen()

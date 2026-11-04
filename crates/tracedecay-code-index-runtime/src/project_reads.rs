@@ -66,7 +66,7 @@ fn refuse_projection_wait(request: &CodeGraphReadRequest<'_>) -> Result<(), Code
 /// also covers response delivery, so spending all of it waiting on the warm
 /// would turn a retryable warming state into a generic transport timeout.
 /// Wait only while the measured warm is likely to fit with time to answer.
-fn rewarm_wait_budget(remaining: Duration, predicted: Duration) -> Option<Duration> {
+pub(crate) fn rewarm_wait_budget(remaining: Duration, predicted: Duration) -> Option<Duration> {
     let wait = remaining / 2;
     (wait > Duration::ZERO && predicted < wait).then_some(wait)
 }
@@ -87,9 +87,19 @@ async fn await_rewarm(
     // The zero-budget probe starts the background re-warm and returns its
     // measured remaining time without parking the request.
     let requirement = request.readiness;
-    let pending = match store.await_rewarm_and_retain_for(Duration::ZERO, requirement) {
-        Ok(retain) => return Ok(retain),
-        Err(pending) => pending,
+    let probing = Arc::clone(store);
+    let pending = match native_runtime::spawn_blocking(move || {
+        probing.await_rewarm_and_retain_for(Duration::ZERO, requirement)
+    })
+    .await
+    {
+        Ok(Ok(retain)) => return Ok(retain),
+        Ok(Err(pending)) => pending,
+        Err(error) => {
+            return Err(CodeGraphReadError::Unavailable {
+                detail: format!("the code graph re-warm probe did not finish: {error}"),
+            });
+        }
     };
     let now = now_micros();
     let expires_at =

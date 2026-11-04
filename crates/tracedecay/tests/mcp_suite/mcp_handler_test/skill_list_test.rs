@@ -241,7 +241,7 @@ fn active_listing() -> Value {
         "improvement": false,
         "improvement_skill_id": "skill-active",
         "improvement_recommendation": "none",
-        "improvement_reason": "no repeated correction or failed-use signal is present",
+        "improvement_reason": "skill use evidence is unavailable; patch counts alone do not establish a repair need",
         "improvement_priority": "none",
     })
 }

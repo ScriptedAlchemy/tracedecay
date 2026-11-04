@@ -781,6 +781,27 @@ impl RegisteredGlobalDb {
         .map_err(|error| registered_error("run registered session retention", error))
     }
 
+    /// Advances one bounded ownership-bootstrap or orphan-collection page.
+    /// All body and reference mutations share the guarded database writer.
+    pub async fn run_canonical_body_gc(
+        &self,
+        max_rows: usize,
+    ) -> tracedecay_domain::errors::Result<crate::observation::CanonicalBodyGcReport> {
+        crate::observation::canonical_body_gc::run(&self.database, max_rows).await
+    }
+
+    /// Removes old exact replay-string duplicates using verified raw bodies,
+    /// without changing summary evidence or the effective replay message.
+    pub async fn compact_replay_metadata(
+        &self,
+        max_rows: usize,
+    ) -> tracedecay_domain::errors::Result<tracedecay_lcm::retention::ReplayMetadataCompactionReport>
+    {
+        tracedecay_lcm::retention::compact_replay_metadata(&self.database, max_rows)
+            .await
+            .map_err(|error| registered_error("compact duplicate LCM replay metadata", error))
+    }
+
     #[tracing::instrument(
         name = "global_db.registered.retention.observations",
         level = "trace",

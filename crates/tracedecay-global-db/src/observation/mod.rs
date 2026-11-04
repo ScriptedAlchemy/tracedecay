@@ -1,4 +1,5 @@
 mod canonical_bodies;
+pub(crate) mod canonical_body_gc;
 mod codec;
 mod persist;
 mod refusal_census;
@@ -7,6 +8,7 @@ mod schema;
 
 pub(crate) use canonical_bodies::compact_lcm_bodies;
 pub use canonical_bodies::decode_observation_json;
+pub use canonical_body_gc::{CanonicalBodyGcReport, MAX_CANONICAL_BODY_GC_ROWS};
 pub use refusal_census::ingest_refusal_read_from_censuses;
 pub(super) use schema::{OBSERVATION_ADMISSION_MARKERS, ensure_observation_schema};
 

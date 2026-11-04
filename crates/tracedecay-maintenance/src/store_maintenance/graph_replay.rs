@@ -7,6 +7,7 @@ use tracedecay_code_index_retention::code_index_generations::{
 };
 use tracedecay_runtime_core::logging::log_daemon_event;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReconcileOutcome {
     /// The page from the cursor held no queued release event.
     Complete,
@@ -24,6 +25,20 @@ pub enum ReconcileOutcome {
     /// keeps the work safe for a later attempt.
     Deferred,
     Failed,
+}
+
+/// Keep a failed staging release visible even if an independent replay-release
+/// page succeeds. Otherwise the maintenance owner treats the tick as complete
+/// and can park staging cleanup behind the full maintenance interval.
+fn with_staging_release_failure(
+    page_outcome: ReconcileOutcome,
+    staging_failed: bool,
+) -> ReconcileOutcome {
+    if staging_failed {
+        ReconcileOutcome::Failed
+    } else {
+        page_outcome
+    }
 }
 
 /// Every code-generation degradation is a genuine anomaly: it keeps the tick
@@ -166,9 +181,10 @@ pub async fn reconcile_graph_replay_releases(
             staging_cursor,
         )
         .await;
-    match staging_release {
+    let staging_failed = match staging_release {
         Ok(continuation) => {
             observations.record_graph_staging_release_cursor(project_root, continuation);
+            false
         }
         Err(error) => {
             log_code_generation_retention_degraded_with_error(
@@ -176,8 +192,9 @@ pub async fn reconcile_graph_replay_releases(
                 "graph_staging_release_failed",
                 &error,
             );
+            true
         }
-    }
+    };
     // One bounded page per pass, resumed from the durable-queue cursor of the
     // previous attempt. Retained releases fall behind the cursor instead of
     // blocking every later page, and a backlog drains across short-cadence
@@ -197,7 +214,7 @@ pub async fn reconcile_graph_replay_releases(
     };
     if page.releases.is_empty() {
         observations.record_graph_replay_release_served(project_root, page.continuation);
-        return ReconcileOutcome::Complete;
+        return with_staging_release_failure(ReconcileOutcome::Complete, staging_failed);
     }
     let mut retained = false;
     let mut released = false;
@@ -242,11 +259,39 @@ pub async fn reconcile_graph_replay_releases(
     }
     let more_work = page.continuation.is_some();
     observations.record_graph_replay_release_served(project_root, page.continuation);
-    if more_work || released {
+    let page_outcome = if more_work || released {
         ReconcileOutcome::MoreWork
     } else if retained {
         ReconcileOutcome::Retained
     } else {
         ReconcileOutcome::Complete
+    };
+    with_staging_release_failure(page_outcome, staging_failed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ReconcileOutcome, with_staging_release_failure};
+
+    #[test]
+    fn staging_release_failure_cannot_be_hidden_by_release_page_result() {
+        for page_outcome in [
+            ReconcileOutcome::Complete,
+            ReconcileOutcome::MoreWork,
+            ReconcileOutcome::Retained,
+            ReconcileOutcome::Deferred,
+            ReconcileOutcome::Failed,
+        ] {
+            assert_eq!(
+                with_staging_release_failure(page_outcome, true),
+                ReconcileOutcome::Failed,
+                "failed staging release must keep the maintenance retry cadence",
+            );
+            assert_eq!(
+                with_staging_release_failure(page_outcome, false),
+                page_outcome,
+                "successful staging release must preserve the independent page result",
+            );
+        }
     }
 }

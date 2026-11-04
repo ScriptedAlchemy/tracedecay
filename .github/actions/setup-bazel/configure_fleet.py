@@ -16,7 +16,10 @@ def configure_fleet(
     runner_arch: str,
     host: str = "ubuntu-main",
     port: int = 50051,
+    remote_download_outputs: str = "minimal",
 ) -> bool:
+    if remote_download_outputs not in {"minimal", "toplevel", "all"}:
+        raise ValueError(f"Invalid remote output mode: {remote_download_outputs}")
     profile = {
         ("Linux", "X64"): "rbe-linux",
         ("macOS", "ARM64"): "rbe-macos",
@@ -77,7 +80,7 @@ build --noremote_cache_async
 build --remote_timeout=600
 # Survive brief coordinator restarts; five retries expire in about 3s.
 build --remote_retries=10
-build --remote_download_outputs=toplevel
+build --remote_download_outputs={remote_download_outputs}
 build --jobs={16 if windows else 40}
 # Leave room for Bazel analysis and downloads while large Rust actions compile.
 build --local_resources=cpu=2
@@ -108,4 +111,5 @@ if __name__ == "__main__":
         os.environ["RUNNER_OS"],
         os.environ["RUNNER_ARCH"],
         host=os.environ.get("BAZEL_FLEET_HOST", "ubuntu-main"),
+        remote_download_outputs=os.environ.get("REMOTE_DOWNLOAD_OUTPUTS", "minimal"),
     )

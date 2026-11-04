@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
@@ -779,9 +779,14 @@ struct PinnedPartitionedSegmentV1 {
     file: File,
 }
 
+/// Keep a bounded set of pinned files during interleaved graph page reads.
+/// A single last-used handle still reopens segments when pages alternate.
+const MAX_GRAPH_SEGMENT_OPEN_HANDLES: usize = 8;
+
 struct GraphSegmentReadPassV1<'a> {
     roots: &'a [PathBuf],
-    pinned: Option<PinnedPartitionedSegmentV1>,
+    /// Least-recently used first; the most recent handle is at the back.
+    pinned: VecDeque<PinnedPartitionedSegmentV1>,
     open_attempts: usize,
     reads: usize,
 }
@@ -790,7 +795,7 @@ impl<'a> GraphSegmentReadPassV1<'a> {
     fn new(roots: &'a [PathBuf]) -> Self {
         Self {
             roots,
-            pinned: None,
+            pinned: VecDeque::new(),
             open_attempts: 0,
             reads: 0,
         }
@@ -802,17 +807,27 @@ impl<'a> GraphSegmentReadPassV1<'a> {
         buffer: &mut Vec<u8>,
     ) -> Result<(), CodeIndexProductionErrorV1> {
         let (digest, _, _, _) = partitioned_segment_request(request)?;
-        if !self
+        if let Some(position) = self
             .pinned
-            .as_ref()
-            .is_some_and(|pinned| pinned.digest == digest)
+            .iter()
+            .position(|pinned| pinned.digest == digest)
         {
-            self.pinned = None;
+            let pinned = self.pinned.remove(position).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed graph segment cache lost its retained handle".to_owned(),
+                )
+            })?;
+            self.pinned.push_back(pinned);
+        } else {
             let root = select_partitioned_segment_root(self.roots, request)?;
             self.open_attempts += 1;
-            self.pinned = Some(open_partitioned_segment(root, request)?);
+            let pinned = open_partitioned_segment(root, request)?;
+            if self.pinned.len() == MAX_GRAPH_SEGMENT_OPEN_HANDLES {
+                self.pinned.pop_front();
+            }
+            self.pinned.push_back(pinned);
         }
-        let pinned = self.pinned.as_mut().ok_or_else(|| {
+        let pinned = self.pinned.back_mut().ok_or_else(|| {
             CodeIndexProductionErrorV1::Contract(
                 "sealed graph segment handle was not pinned".to_owned(),
             )
@@ -2326,6 +2341,117 @@ mod tests {
             .unwrap_err(),
             GraphDbError::SealSuperseded
         );
+    }
+
+    #[test]
+    fn graph_segment_pass_reuses_interleaved_sealed_handles() {
+        let temporary = TempDir::new().unwrap();
+        let first: &[u8] = b"first authenticated graph segment";
+        let second: &[u8] = b"second authenticated graph segment";
+        let digests = [first, second].map(|bytes| {
+            let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).unwrap();
+            let path = temporary.path().join(format!(
+                "segment-{}.json",
+                sha256_hex_suffix(digest.as_str()).unwrap()
+            ));
+            std::fs::write(path, bytes).unwrap();
+            digest
+        });
+        let seal_path = temporary.path().join("seal");
+        std::fs::write(&seal_path, b"live").unwrap();
+        let routes = SealRoutes {
+            seal_paths: vec![seal_path],
+            segment_roots: vec![temporary.path().to_path_buf()],
+        };
+        SEGMENT_OPENS.with(|opens| opens.set(0));
+        with_verified_segments(&digests[0], &routes, &|| Ok(()), |read| {
+            let mut buffer = Vec::new();
+            for index in [0, 1, 0, 1, 0, 1] {
+                let expected = [first, second][index];
+                read(
+                    SealedGenerationSegmentReadV1::Whole {
+                        digest: &digests[index],
+                        size_bytes: expected.len() as u64,
+                    },
+                    &mut buffer,
+                )?;
+                assert_eq!(buffer.as_slice(), expected);
+                assert_eq!(
+                    ManifestDigest::from_sha256_bytes(&Sha256::digest(&buffer)).unwrap(),
+                    digests[index]
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            SEGMENT_OPENS.with(|opens| opens.get()),
+            2,
+            "interleaved pages must not re-open previously pinned segments"
+        );
+    }
+
+    #[test]
+    fn graph_segment_pass_bounds_handles_and_reopens_evicted_segments() {
+        let temporary = TempDir::new().unwrap();
+        let roots = vec![temporary.path().to_path_buf()];
+        let segments = (0..super::MAX_GRAPH_SEGMENT_OPEN_HANDLES + 1)
+            .map(|index| {
+                let bytes = format!("sealed graph segment {index}").into_bytes();
+                let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&bytes)).unwrap();
+                let path = temporary.path().join(format!(
+                    "segment-{}.json",
+                    sha256_hex_suffix(digest.as_str()).unwrap()
+                ));
+                std::fs::write(path, &bytes).unwrap();
+                (digest, bytes)
+            })
+            .collect::<Vec<_>>();
+        let mut pass = super::GraphSegmentReadPassV1::new(&roots);
+        SEGMENT_OPENS.with(|opens| opens.set(0));
+        for (digest, expected) in &segments {
+            let mut bytes = Vec::new();
+            pass.read(
+                SealedGenerationSegmentReadV1::Whole {
+                    digest,
+                    size_bytes: expected.len() as u64,
+                },
+                &mut bytes,
+            )
+            .unwrap();
+            assert_eq!(bytes.as_slice(), expected.as_slice());
+            assert!(pass.pinned.len() <= super::MAX_GRAPH_SEGMENT_OPEN_HANDLES);
+        }
+        assert_eq!(pass.open_attempts, segments.len());
+        assert_eq!(pass.pinned.len(), super::MAX_GRAPH_SEGMENT_OPEN_HANDLES);
+        let (newest_digest, newest) = segments.last().unwrap();
+        assert!(
+            pass.read(
+                SealedGenerationSegmentReadV1::Range {
+                    digest: newest_digest,
+                    size_bytes: newest.len() as u64,
+                    offset: 1,
+                    length: newest.len() as u64,
+                },
+                &mut Vec::new(),
+            )
+            .is_err(),
+            "a cached handle must still reject an over-bound read"
+        );
+        let (oldest_digest, oldest) = &segments[0];
+        let mut bytes = Vec::new();
+        pass.read(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: oldest_digest,
+                size_bytes: oldest.len() as u64,
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        assert_eq!(bytes.as_slice(), oldest.as_slice());
+        assert_eq!(pass.open_attempts, segments.len() + 1);
+        assert_eq!(pass.pinned.len(), super::MAX_GRAPH_SEGMENT_OPEN_HANDLES);
+        assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), segments.len() + 1);
     }
 
     #[test]

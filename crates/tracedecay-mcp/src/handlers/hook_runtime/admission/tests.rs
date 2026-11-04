@@ -80,7 +80,9 @@ fn restart_ledger(data_root: &std::path::Path) {
 #[test]
 fn producer_work_commits_with_its_admission_and_redrives_until_completed() {
     let data_root = tempfile::tempdir().unwrap();
-    let now = UtcMicros(1_000);
+    // Settlement reopens an evicted ledger at the wall clock, and parallel
+    // tests can evict this root, so admit inside the real retention window.
+    let now = hook_now();
     let envelope = admission_test_envelope(31, 7);
     let staged = stage_hook_v2_admission(
         data_root.path(),

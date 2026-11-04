@@ -165,12 +165,11 @@ pub fn source_walk(
             if !is_dir {
                 return !path_policy.excludes(&relative);
             }
-            // A directory with its own Git authority is another project, not
-            // source owned by this one. This covers linked worktrees (`.git`
-            // file), nested clones/submodules (`.git` directory), and keeps a
-            // primary checkout containing agent worktrees from indexing many
-            // copies of itself. The project root is deliberately exempt at
-            // depth zero above.
+            // Includes select paths, not repository authority. A parent
+            // gitlink does not capture the child's files or prove their
+            // freshness, so even registered submodules remain separate
+            // sources. Linked worktrees and nested clones share this boundary.
+            // The project root is deliberately exempt at depth zero above.
             if std::fs::symlink_metadata(entry.path().join(".git")).is_ok() {
                 return false;
             }
@@ -226,7 +225,7 @@ mod tests {
     fn walked_files(root: &std::path::Path, path_policy: &IndexPathPolicyV1) -> Vec<PathBuf> {
         let mut files = source_walk(root, None, path_policy)
             .expect("source walk")
-            .filter_map(Result::ok)
+            .map(|entry| entry.expect("source entry"))
             .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
             .map(|entry| {
                 entry
@@ -372,6 +371,109 @@ mod tests {
         assert!(
             !files.contains(&PathBuf::from("nested-clone/foreign.rs")),
             "a nested clone must not be indexed as parent source"
+        );
+    }
+
+    fn fixture_git(root: &std::path::Path, args: &[&str]) -> std::process::Output {
+        let program = tracedecay_runtime_core::git::try_git_program().expect("Git program");
+        let mut command = std::process::Command::new(program);
+        command.current_dir(root);
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("GIT_") {
+                command.env_remove(key);
+            }
+        }
+        let output = command
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", root.join(".fixture-gitconfig"))
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .expect("run fixture Git");
+        assert!(
+            output.status.success(),
+            "Git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    }
+
+    #[test]
+    fn includes_cannot_admit_registered_submodule_files_as_parent_source() {
+        let fixture = TempDir::new().expect("repository fixture");
+        let root = fixture.path().join("parent");
+        let child = fixture.path().join("child");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(child.join("src")).unwrap();
+        fixture_git(&root, &["init", "-q"]);
+        fixture_git(&child, &["init", "-q"]);
+        fs::write(root.join("src/parent.rs"), "pub fn parent() {}\n").unwrap();
+        fs::write(child.join("src/feature.rs"), "pub fn feature() {}\n").unwrap();
+        fixture_git(&child, &["add", "."]);
+        fixture_git(&child, &["commit", "-qm", "child source"]);
+        fixture_git(
+            &root,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                "../child",
+                "app",
+            ],
+        );
+        let index = fixture_git(&root, &["ls-files", "--stage", "-z", "--", "app"]);
+        assert!(index.stdout.starts_with(b"160000 "));
+        assert!(index.stdout.ends_with(b" 0\tapp\0"));
+        assert!(root.join("app/src/feature.rs").is_file());
+
+        for rule in ["app/**", "app/src/feature.rs", "app/src/fe*.rs"] {
+            let policy = IndexPathPolicyV1::new(vec![], vec![rule.into()]).unwrap();
+            let files = walked_files(&root, &policy);
+            assert!(files.contains(&PathBuf::from("src/parent.rs")), "{files:?}");
+            assert!(
+                files.iter().all(|path| !path.starts_with("app")),
+                "{rule}: a parent gitlink is not child source authority: {files:?}"
+            );
+            let scoped = source_walk(&root, Some(rule), &policy)
+                .expect("explicit submodule scope")
+                .map(|entry| entry.expect("source entry"))
+                .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+                .collect::<Vec<_>>();
+            assert!(
+                scoped.is_empty(),
+                "{rule}: an explicit scope cannot cross repositories"
+            );
+        }
+    }
+
+    #[test]
+    fn submodule_metadata_cannot_break_an_unrelated_source_include() {
+        let root = TempDir::new().expect("project root");
+        fs::create_dir_all(root.path().join(".git")).unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::create_dir_all(root.path().join("app/.git")).unwrap();
+        fs::write(root.path().join("src/keep.rs"), "pub fn keep() {}\n").unwrap();
+        fs::write(root.path().join("app/foreign.rs"), "pub fn foreign() {}\n").unwrap();
+        fs::write(
+            root.path().join(".gitmodules"),
+            "[invalid submodule metadata\n",
+        )
+        .unwrap();
+        let policy = IndexPathPolicyV1::new(vec![], vec!["src/**".into()]).unwrap();
+        let files = walked_files(root.path(), &policy);
+        assert!(files.contains(&PathBuf::from("src/keep.rs")));
+        assert!(
+            files.iter().all(|path| !path.starts_with("app")),
+            "{files:?}"
         );
     }
 

@@ -142,6 +142,32 @@ pub(crate) fn lcm_message_budget_tokens(message: &Value) -> i64 {
     }
 }
 
+/// Tokens replayed by a message, including tool calls and other fields
+/// outside `content`. Replay selection and reporting must use the same
+/// tokenizer for this envelope as for visible text. Role framing belongs to
+/// the host's prompt overhead; store and summary IDs are local provenance.
+pub(crate) fn lcm_replay_message_budget_tokens(message: &Value) -> i64 {
+    let content_tokens = lcm_message_budget_tokens(message);
+    let Some(object) = message.as_object() else {
+        return content_tokens;
+    };
+    let envelope = object
+        .iter()
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                "content" | "role" | "store_id" | "lcm_summary_node_id"
+            )
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<serde_json::Map<String, Value>>();
+    if envelope.is_empty() {
+        content_tokens
+    } else {
+        content_tokens.saturating_add(lcm_budget_tokens(&Value::Object(envelope).to_string()))
+    }
+}
+
 enum VisibleContent<'a> {
     Empty,
     Text(&'a str),
@@ -278,7 +304,10 @@ impl GitScopeFilter {
 
 #[cfg(test)]
 mod budget_tests {
-    use super::{lcm_budget_tokens, lcm_message_budget_tokens, lcm_message_visible_text};
+    use super::{
+        lcm_budget_tokens, lcm_message_budget_tokens, lcm_message_visible_text,
+        lcm_replay_message_budget_tokens,
+    };
     use serde_json::json;
 
     /// The borrowed counter must agree with counting the materialized visible
@@ -340,6 +369,49 @@ mod budget_tests {
         assert_eq!(
             lcm_message_budget_tokens(&json!({ "content": code })),
             lcm_budget_tokens(&code)
+        );
+    }
+
+    #[test]
+    fn replay_budget_ignores_local_provenance_and_role_framing() {
+        let message = json!({
+            "role": "system",
+            "content": "compact summary",
+            "store_id": 123,
+            "lcm_summary_node_id": "summary-local-id",
+        });
+        assert_eq!(
+            lcm_replay_message_budget_tokens(&message),
+            lcm_budget_tokens("compact summary")
+        );
+    }
+
+    #[test]
+    fn overflow_recovery_does_not_charge_tool_arguments_as_fixed_overhead() {
+        use crate::compression_policy::{OverflowRecoveryCapInput, overflow_recovery_assembly_cap};
+
+        let message = json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "call-a",
+                "type": "function",
+                "function": {
+                    "name": "execute",
+                    "arguments": json!({"source": "f(x:u32)->u32{x+1};".repeat(32)}).to_string(),
+                },
+            }],
+        });
+        let message_tokens = lcm_replay_message_budget_tokens(&message);
+        let prompt_overhead = 128;
+        assert_eq!(
+            overflow_recovery_assembly_cap(OverflowRecoveryCapInput {
+                current_tokens: Some(message_tokens + prompt_overhead),
+                max_assembly_tokens: Some(message_tokens + prompt_overhead),
+                messages: &[message],
+            }),
+            Some(message_tokens),
+            "the replay budget must reserve fixed prompt overhead exactly once"
         );
     }
 

@@ -163,6 +163,7 @@ jobs:
         id: bazel
         uses: ./.release-automation/.github/actions/setup-bazel
         with:
+          remote-download-outputs: toplevel
           cache-key: release-${{ matrix.target }}
           tailscale-client-id: >-
             ${{ (matrix.name == 'x86_64-linux' || matrix.name == 'aarch64-macos' || matrix.name == 'x86_64-windows')
@@ -239,6 +240,13 @@ jobs:
         with:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
           key: ${{ steps.bazel.outputs.disk-cache-key }}
+
+      - name: Report final build disk usage
+        if: ${{ always() && hashFiles('.release-automation/.github/actions/setup-bazel/report_disk.sh') != '' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: bash
+        run: bash .release-automation/.github/actions/setup-bazel/report_disk.sh
 
   publish:
     needs: [validate, build]

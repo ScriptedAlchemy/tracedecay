@@ -68,11 +68,41 @@ where
     T::try_from(format!("sha256:{}", byte.to_string().repeat(64))).expect("valid fixture digest")
 }
 
+fn synthetic_admission(
+    sources: Vec<(usize, &'static str)>,
+    ranges: &[(&str, std::ops::Range<u32>)],
+    pruned: &mut Vec<(String, u64)>,
+) -> roaring::RoaringBitmap {
+    admit_candidate_sources(
+        sources,
+        |term, existing, remaining| {
+            let range = ranges
+                .iter()
+                .find(|(name, _)| name == term)
+                .expect("source")
+                .1
+                .clone();
+            let mut delta = roaring::RoaringBitmap::new();
+            for document in range {
+                if !existing.contains(document) {
+                    delta.insert(document);
+                }
+                if delta.len() > remaining as u64 {
+                    return Ok(None);
+                }
+            }
+            Ok(Some(delta))
+        },
+        |frequency, term| pruned.push(((*term).to_owned(), frequency as u64)),
+    )
+    .expect("admission")
+}
+
 #[test]
 fn candidate_sources_admit_rarest_first_within_the_document_budget() {
     let budget = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1;
     let mut pruned = Vec::new();
-    let admitted = admit_candidate_sources(
+    let documents = synthetic_admission(
         vec![
             (budget * 3, "the"),
             (10, "pendingtoolkind"),
@@ -80,20 +110,24 @@ fn candidate_sources_admit_rarest_first_within_the_document_budget() {
             (budget * 2, "tool"),
             (200, "kind"),
         ],
-        |frequency, term| pruned.push((term.to_string(), frequency as u64)),
+        &[
+            ("pendingtoolkind", 0..10),
+            ("kind", 10..210),
+            ("pending", 210..(210 + (budget - 100) as u32)),
+            ("tool", 30_000..(30_000 + (budget * 2) as u32)),
+            ("the", 70_000..(70_000 + (budget * 3) as u32)),
+        ],
+        &mut pruned,
     );
-    assert_eq!(
-        admitted,
-        ["pendingtoolkind", "kind"],
-        "`pending` would push the admitted total past the budget, and every later \
-         (more common) source is pruned with it"
-    );
+    assert_eq!(documents.len(), 210);
+    assert!(documents.contains(209));
+    assert!(!documents.contains(210));
     assert_eq!(
         pruned,
         [
             ("pending".to_owned(), (budget - 100) as u64),
             ("tool".to_owned(), (budget * 2) as u64),
-            ("the".to_owned(), (budget * 3) as u64)
+            ("the".to_owned(), (budget * 3) as u64),
         ]
     );
     let outcome = super::candidate_admission_outcome(
@@ -113,24 +147,33 @@ fn candidate_sources_admit_rarest_first_within_the_document_budget() {
 #[test]
 fn candidate_sources_ignore_empty_sources_before_admitting_a_common_term() {
     let budget = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1;
-    assert_eq!(
-        admit_candidate_sources(
-            vec![(0, "missing"), (budget + 1, "common"), (0, "absent")],
-            |_, _| {}
-        ),
-        ["common"],
-        "empty sources must not consume the first nonempty source exception"
+    let documents = synthetic_admission(
+        vec![(0, "missing"), (budget + 1, "common"), (0, "absent")],
+        &[("common", 0..(budget + 1) as u32)],
+        &mut Vec::new(),
     );
-    assert!(admit_candidate_sources(vec![(0, "missing"), (0, "absent")], |_, _| {}).is_empty());
+    assert_eq!(documents.len(), (budget + 1) as u64);
+    assert!(
+        synthetic_admission(vec![(0, "missing"), (0, "absent")], &[], &mut Vec::new(),).is_empty()
+    );
 }
 
 #[test]
 fn candidate_sources_keep_request_order_across_equal_frequencies() {
     let half = MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 / 2;
-    assert_eq!(
-        admit_candidate_sources(vec![(half, "b"), (half, "a"), (half, "c")], |_, _| {}),
-        ["b", "a"]
+    let mut pruned = Vec::new();
+    let documents = synthetic_admission(
+        vec![(half, "b"), (half, "a"), (half, "c")],
+        &[
+            ("b", 0..half as u32),
+            ("a", half as u32..(half * 2) as u32),
+            ("c", (half * 2) as u32..(half * 3) as u32),
+        ],
+        &mut pruned,
     );
+    assert_eq!(documents.len(), (half * 2) as u64);
+    assert!(!documents.contains((half * 2) as u32));
+    assert_eq!(pruned, vec![("c".to_owned(), half as u64)]);
 }
 
 #[test]
@@ -160,7 +203,7 @@ fn shared_query_parser_retains_phrase_and_identifier_subtokens() {
 /// query-side subtokens equal the extraction subtokens.
 #[test]
 fn query_tokenization_matches_index_tokenization_for_separator_terms() {
-    let text = "find foo-bar a::b p/q.rs --flag E0308 TS1234 ERR_X";
+    let text = "foo-bar a::b p/q.rs --flag E0308 TS1234 ERR_X";
     let parts = lexical_query_parts(text).expect("lexical query parts");
 
     let index_tokens: Vec<String> = technical_tokens(text)
@@ -181,12 +224,7 @@ fn query_tokenization_matches_index_tokenization_for_separator_terms() {
 
     let mut expected_subtokens: Vec<String> = index_tokens
         .iter()
-        .flat_map(|token| {
-            let lowercase = token.to_ascii_lowercase();
-            split_subtokens(token)
-                .into_iter()
-                .filter(move |part| part != &lowercase)
-        })
+        .flat_map(|token| split_subtokens(token))
         .collect();
     expected_subtokens.sort();
     expected_subtokens.dedup();
@@ -197,6 +235,55 @@ fn query_tokenization_matches_index_tokenization_for_separator_terms() {
             "{subtoken} must be reachable as a subtoken"
         );
     }
+}
+
+#[test]
+fn prose_words_can_match_identifier_subtokens_without_broadening_single_term_queries() {
+    let query = "widget auto tag items forward total";
+    let parts = lexical_query_parts(query).expect("prose search");
+    assert_eq!(
+        parts.subtokens,
+        ["auto", "forward", "items", "tag", "total", "widget"]
+            .map(str::to_owned)
+            .to_vec()
+    );
+    assert_eq!(parts.whole_terms.len(), 6);
+
+    let hyphenated =
+        lexical_query_parts("widget-tool auto-tag query rows per item").expect("hyphenated prose");
+    for word in [
+        "widget", "tool", "auto", "tag", "query", "rows", "per", "item",
+    ] {
+        assert!(
+            hyphenated.subtokens.contains(&word.to_owned()),
+            "{word} must reach a camelCase subtoken posting"
+        );
+    }
+    assert!(
+        lexical_query_parts("fetchWidgetAutoTagItemsForwardTotal")
+            .expect("single identifier")
+            .subtokens
+            .is_empty(),
+        "single-term queries must retain their narrow admission"
+    );
+}
+
+#[test]
+fn prose_subtoken_expansion_uses_the_existing_content_word_policy() {
+    let query = "how do i find the widget auto tag";
+    let parts = lexical_query_parts(query).expect("prose search");
+    assert_eq!(
+        parts.subtokens,
+        ["auto", "tag", "widget"].map(str::to_owned)
+    );
+    for word in ["how", "do", "i", "find", "the"] {
+        assert!(parts.whole_terms.iter().any(|term| term == word));
+    }
+    assert_eq!(parts.phrases, [query]);
+
+    let technical = lexical_query_parts("TypeOf Widget").expect("technical query");
+    assert!(technical.subtokens.iter().any(|term| term == "type"));
+    assert!(technical.subtokens.iter().any(|term| term == "of"));
 }
 
 fn budget(max_candidates_per_lane: u32) -> RetrievalBudget {

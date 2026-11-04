@@ -85,12 +85,12 @@ pub(super) fn registration_state(
         .and_then(|memory| string_value(&memory, "provider"))
         .as_deref()
         == Some("tracedecay");
-    let context = root
+    let replaces_compressor = root
         .get_mapping("context")
         .and_then(|context| string_value(&context, "engine"))
         .as_deref()
         == Some("tracedecay");
-    if enabled && memory && context {
+    if enabled && memory && !replaces_compressor {
         State::Current
     } else {
         State::Repairable
@@ -145,7 +145,6 @@ pub(super) fn disable_plugin(config_path: &Path) -> Result<()> {
 // install/update surfaces stay stable.
 const PLUGINS_ERR: &str = "unsupported Hermes plugins config";
 const MEMORY_ERR: &str = "unsupported Hermes memory config";
-const CONTEXT_ERR: &str = "unsupported Hermes context config";
 
 // The mutation path is deliberately text/span oriented rather than CST oriented.
 // `yaml-edit` (as of 0.2.3) cannot reliably synthesize nested block or flow
@@ -159,7 +158,7 @@ const CONTEXT_ERR: &str = "unsupported Hermes context config";
 
 /// The containers enabling TraceDecay may add to a profile, as JSON pointers
 /// into the YAML document.
-const OWNED_CONTAINERS: [&str; 4] = ["/plugins", "/plugins/enabled", "/memory", "/context"];
+const OWNED_CONTAINERS: [&str; 3] = ["/plugins", "/plugins/enabled", "/memory"];
 
 /// The enabled config and the [`OWNED_CONTAINERS`] enabling added to it.
 fn enable_plugin_config(
@@ -216,20 +215,13 @@ fn enable_normalized(existing: &str) -> std::result::Result<String, String> {
         "memory",
         "provider",
         "tracedecay",
-        &[],
         MEMORY_ERR,
         "Hermes memory provider already configured; refusing to overwrite it",
     )?;
-    let text = ensure_scalar(
-        &text,
-        "context",
-        "engine",
-        "tracedecay",
-        &["compressor"],
-        CONTEXT_ERR,
-        "Hermes context engine already configured; refusing to overwrite it",
-    )?;
-    Ok(text)
+    // TraceDecay owns retrieval and memory, not Hermes' native compressor.
+    // Repair profiles activated by the former no-op engine while preserving
+    // every user-selected engine and the rest of the context configuration.
+    disable_scalar(&text, "context", "engine", false)
 }
 
 fn disable_normalized(
@@ -394,7 +386,6 @@ fn ensure_scalar(
     container: &str,
     key: &str,
     value: &str,
-    allow_overwrite: &[&str],
     unsupported: &str,
     conflict: &str,
 ) -> std::result::Result<String, String> {
@@ -424,21 +415,6 @@ fn ensure_scalar(
     }
     match string_value(mapping, key).as_deref() {
         Some(current) if current == value => Ok(text.to_string()),
-        Some(current) if allow_overwrite.contains(&current) => {
-            let entry = mapping
-                .find_entry_by_key(key)
-                .ok_or_else(|| unsupported.to_string())?;
-            let range = entry
-                .value_node()
-                .and_then(|node| node.as_scalar().map(yaml_edit::Scalar::byte_range))
-                .ok_or_else(|| unsupported.to_string())?;
-            Ok(format!(
-                "{}{}{}",
-                &text[..range.start as usize],
-                value,
-                &text[range.end as usize..]
-            ))
-        }
         Some(_) => Err(conflict.to_string()),
         None => Err(unsupported.to_string()),
     }
@@ -833,7 +809,7 @@ mod tests {
                 .as_deref(),
             Some("tracedecay")
         );
-        assert_eq!(
+        assert_ne!(
             root.get_mapping("context")
                 .and_then(|context| string_value(&context, "engine"))
                 .as_deref(),
@@ -1004,11 +980,11 @@ mod tests {
         for (original, appended) in [
             (
                 "theme: dark\nplugins:\n  enabled:\n    - foreign\n",
-                &["/memory", "/context"][..],
+                &["/memory"][..],
             ),
             (
                 "model: x\nmemory: {}\n",
-                &["/plugins", "/plugins/enabled", "/context"][..],
+                &["/plugins", "/plugins/enabled"][..],
             ),
         ] {
             let (enabled, created) = enable_plugin_config(original).unwrap();
@@ -1018,6 +994,48 @@ mod tests {
             let created = |pointer: &str| created.contains(&pointer);
             assert_eq!(disable_plugin_config(&enabled, &created).unwrap(), original);
         }
+    }
+
+    #[test]
+    fn activation_preserves_native_and_user_selected_context_engines() {
+        for context in [
+            "",
+            "context: {engine: compressor, budget: 42}\n",
+            "context: {engine: custom-engine, budget: 42}\n",
+        ] {
+            let original = format!(
+                "plugins: {{enabled: [tracedecay]}}\nmemory: {{provider: tracedecay}}\n\
+                 {context}compression: {{enabled: false, threshold: 0.6}}\n"
+            );
+            let (updated, created) = enable_plugin_config(&original).unwrap();
+            assert_eq!(updated, original);
+            assert!(created.is_empty());
+        }
+    }
+
+    #[test]
+    fn activation_repairs_the_unavailable_context_engine_without_losing_settings() {
+        use crate::agents::host_bundle::HostBundleRegistrationStateV1 as State;
+
+        let dir = TempDir::new().unwrap();
+        let config = dir.path().join("config.yaml");
+        let original = concat!(
+            "plugins: {enabled: [tracedecay]}\n",
+            "memory: {provider: tracedecay}\n",
+            "context: {engine: tracedecay, budget: 42}\n",
+            "compression: {enabled: true, threshold: 0.6}\n",
+        );
+        std::fs::write(&config, original).unwrap();
+        assert_eq!(registration_state(&config), State::Repairable);
+
+        enable_plugin(&config).unwrap();
+
+        assert_eq!(registration_state(&config), State::Current);
+        let updated = read(&config);
+        assert_enabled(&updated);
+        assert!(updated.contains("budget: 42"));
+        assert!(updated.contains("compression: {enabled: true, threshold: 0.6}"));
+        assert_eq!(enable_plugin_config(&updated).unwrap().0, updated);
     }
 
     #[test]

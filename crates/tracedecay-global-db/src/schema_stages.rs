@@ -9,7 +9,8 @@ use super::schema_contract::{
     ensure_authority_invariant_schema, ensure_authority_invariants,
     ensure_fresh_authority_invariants, require_foreign_key_audit,
     validate_authority_rows_exhaustive, validate_authority_schema_contract,
-    validate_registry_schema_contract, validate_remote_deletion_schema_contract,
+    validate_existing_observation_table, validate_registry_schema_contract,
+    validate_remote_deletion_schema_contract,
 };
 use super::{
     configuration, git_index_transactions, global_db_operation_error, global_db_operation_message,
@@ -702,6 +703,26 @@ async fn git_correlation_schema_refusal(
 /// storage classification.
 const AUTHORITY_SCHEMA_AUTHORITY: &str = "authority schema";
 
+/// Refuse a drifted observation table before maintenance installs triggers.
+/// Both initial admission and subsequent attachments use the same read-only
+/// check so a missing table's triggers never mask its typed reset.
+async fn validate_existing_observation_for_admission(
+    conn: &impl QueryExecutor,
+    is_fresh: bool,
+) -> tracedecay_domain::errors::Result<()> {
+    if is_fresh {
+        return Ok(());
+    }
+    validate_existing_observation_table(conn)
+        .await
+        .map_err(|error| {
+            tracedecay_domain::errors::TraceDecayError::reset_required(
+                AUTHORITY_SCHEMA_AUTHORITY,
+                error.to_string(),
+            )
+        })
+}
+
 async fn validate_admitted_authority_schema(
     conn: &RegisteredSchemaInstallationV1,
     is_fresh: bool,
@@ -744,6 +765,7 @@ pub async fn ensure_registered_schema_for_admission(
         }
     };
     let is_fresh = configuration_fresh.is_some();
+    validate_existing_observation_for_admission(installation, is_fresh).await?;
     let triggers_intact: Pin<
         Box<dyn Future<Output = tracedecay_domain::errors::Result<bool>> + Send + '_>,
     > = Box::pin(authority_invariant_triggers_intact(installation));
@@ -1140,6 +1162,7 @@ async fn install_registered_schema_stage_sequence(
                 },
                 error => global_db_operation_error("initialize LCM schema", error),
             })?;
+        observation::canonical_body_gc::schema::install(transaction).await?;
     }
     // `force_exhaustive` means admission observed damaged or missing guard
     // triggers (for example a dropped guarded table takes its triggers with
@@ -1313,6 +1336,8 @@ pub(crate) async fn ensure_attached_registered_schema(
             return Ok(RegisteredSchemaAttachmentV1::SessionsRefused(refused));
         }
     };
+    validate_existing_observation_for_admission(&read_connection, configuration_fresh.is_some())
+        .await?;
     let triggers_intact: Pin<
         Box<dyn Future<Output = tracedecay_domain::errors::Result<bool>> + Send + '_>,
     > = Box::pin(authority_invariant_triggers_intact(&read_connection));
@@ -1409,6 +1434,12 @@ pub(crate) async fn attached_registered_schema_reset_refusal(
         }
         Err(error) => return reset_or_error(error),
     };
+    if let Err(error) =
+        validate_existing_observation_for_admission(&read_connection, configuration_fresh.is_some())
+            .await
+    {
+        return reset_or_error(error);
+    }
     let triggers_intact: Pin<
         Box<dyn Future<Output = tracedecay_domain::errors::Result<bool>> + Send + '_>,
     > = Box::pin(authority_invariant_triggers_intact(&read_connection));
