@@ -228,6 +228,13 @@ fn compacted_metadata(message: &LcmRawMessage) -> Result<Option<String>, LcmErro
         || gc::is_known_payload_placeholder_prefix(content.trim_start())
         || !payload::extract_payload_refs_from_text(content).is_empty()
         || security::contains_media_payload(content)
+        // Ingest's large-media detector intentionally requires substantial
+        // base64 data. Compaction is stricter: even a tiny data: URI carries
+        // a provider media representation that must remain in replay metadata.
+        || content
+            .as_bytes()
+            .windows(5)
+            .any(|bytes| bytes.eq_ignore_ascii_case(b"data:"))
     {
         return Ok(None);
     }
