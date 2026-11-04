@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracedecay_domain::{SessionId, UtcMicros};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -27,13 +27,37 @@ use super::wake::{
     SessionTemporalRefreshRetryClass, SessionTemporalRefreshWakeState, enabled_idle_notification,
 };
 use super::worker::{
-    apply_refresh_effect, run_session_temporal_refresh_pass, run_session_temporal_refresh_scheduler,
+    apply_refresh_effect, history_idle_recheck_at, run_session_temporal_refresh_pass,
+    run_session_temporal_refresh_scheduler,
 };
 use crate::lcm_effects::DaemonLcmEffectService;
 use tracedecay_sessions::ProviderPassUnits;
 use tracedecay_sessions::serving::{
     SessionHistoryProgressState, SessionProjectionServingStatusPort,
 };
+
+#[test]
+fn blocked_history_idle_recheck_waits_for_terminal_backoff() {
+    let now = Instant::now();
+    let discovery = Duration::from_mins(1);
+
+    assert_eq!(history_idle_recheck_at(now, None), now + discovery);
+    assert_eq!(
+        history_idle_recheck_at(now, Some(now + Duration::from_secs(20))),
+        now + discovery,
+        "a shorter terminal delay cannot turn the idle loop into a spin"
+    );
+    assert_eq!(
+        history_idle_recheck_at(now, Some(now + Duration::from_mins(8))),
+        now + Duration::from_mins(8),
+        "a blocked worker must not wake every minute before retry admission"
+    );
+    assert_eq!(
+        history_idle_recheck_at(now, Some(now - Duration::from_secs(1))),
+        now + discovery,
+        "expired backoff resumes the normal discovery cadence"
+    );
+}
 
 async fn begin_empty_refreshes(
     store: &SessionTemporalStore<'_, tracedecay_global_db::RegisteredGlobalDb>,
