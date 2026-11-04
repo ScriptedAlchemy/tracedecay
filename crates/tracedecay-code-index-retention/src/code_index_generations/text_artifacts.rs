@@ -423,14 +423,29 @@ pub(super) fn plan_collectable_text_artifacts_budgeted_cancellable(
                         } else {
                             verification
                         };
-                        if !verify_unreferenced_completed_text_artifact(
+                        // Durable references are verified above and remain
+                        // fail-closed. A broken unreferenced candidate has no
+                        // unlink authority: preserve and report it without
+                        // starving independent collection.
+                        match verify_unreferenced_completed_text_artifact(
                             &path,
                             digest,
                             metadata.len(),
                             candidate_verification,
                             is_cancelled,
-                        )? {
-                            continue;
+                        ) {
+                            Ok(true) => {}
+                            Ok(false) => continue,
+                            Err(CodeGenerationRetentionErrorV1::UnsafeState(reason)) => {
+                                tracing::warn!(
+                                    event = "code_text_artifact_retention_candidate_preserved",
+                                    artifact = %path.display(),
+                                    %reason,
+                                    "unreferenced artifact failed identity proof; preserving it"
+                                );
+                                continue;
+                            }
+                            Err(error) => return Err(error),
                         }
                         Some(CodeTextArtifactRetentionCandidateV1 {
                             artifact_file: file_name,
@@ -451,10 +466,15 @@ pub(super) fn plan_collectable_text_artifacts_budgeted_cancellable(
                     size_bytes: metadata.len(),
                 }),
                 _ => {
-                    return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                        "code text artifact inventory contains unrecognized regular file '{}'",
-                        path.display()
-                    )));
+                    // Unknown regular files cannot be deleted, but neither
+                    // can they veto retirement of unrelated verified data.
+                    tracing::warn!(
+                        event = "code_text_artifact_retention_candidate_preserved",
+                        artifact = %path.display(),
+                        reason = "unrecognized_artifact_name",
+                        "unrecognized regular file preserved during retention"
+                    );
+                    continue;
                 }
             };
             if let Some(candidate) = candidate {
