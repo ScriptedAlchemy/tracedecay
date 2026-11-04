@@ -1971,6 +1971,13 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 }
 
+/// A callable must reserve dispatch time for the response even when the
+/// zero-duration probe blocks on the synchronous graph-engine mutex.
+fn callable_rewarm_admission_budget(remaining: Duration) -> Option<Duration> {
+    let budget = remaining / 2;
+    (budget > Duration::ZERO).then_some(budget)
+}
+
 /// A callable's deadline includes route settlement and response delivery.
 /// Probe without waiting to start a released graph's background re-warm, then
 /// wait only if measured remaining work fits inside the reserved budget.
@@ -1981,10 +1988,13 @@ async fn await_callable_rewarm(
 ) -> Result<Arc<InteractiveCatalogReaderLeaseV1>, CallableCodeCursorError> {
     // Even a zero-budget probe can wait for the synchronous serving-engine
     // mutex while a background engine open holds it. Keep both the probe and
-    // the measured wait off Tokio workers, and bound the entire admission.
+    // the measured wait off Tokio workers. Bound the *whole* admission to
+    // half the remaining deadline, not merely the wait after the probe.
+    let admission_budget =
+        callable_rewarm_admission_budget(remaining).ok_or(CallableCodeCursorError::Unavailable)?;
     let waiting = Arc::clone(store);
     let admission = native_runtime::timeout(
-        remaining,
+        admission_budget,
         native_runtime::spawn_blocking(move || {
             let pending = match waiting.await_rewarm_and_retain_for(Duration::ZERO, requirement) {
                 Ok(retain) => return Ok(retain),
@@ -4525,6 +4535,20 @@ mod tests {
         assert_eq!(
             generation_resolution_wait_from_remaining(Duration::from_secs(90)),
             MAX_GENERATION_RESOLUTION_WAIT
+        );
+    }
+
+    #[test]
+    fn callable_rewarm_admission_bounds_blocked_zero_budget_probes() {
+        assert_eq!(
+            callable_rewarm_admission_budget(Duration::from_secs(9)),
+            Some(Duration::from_millis(4_500)),
+            "a blocked zero-budget probe cannot occupy all of dispatch time"
+        );
+        assert_eq!(
+            callable_rewarm_admission_budget(Duration::from_nanos(1)),
+            None,
+            "a sub-nanosecond wait cannot admit a background probe"
         );
     }
 
