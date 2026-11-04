@@ -412,10 +412,14 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             // The bounded predecessor rewrite retains its history fairness
             // turn; it performs no model call.
             if matches!(convergence_admission, LcmConvergenceAdmission::Admitted)
-                && projection_still_unpublished(&report)
-                && (projection_published_work(&report)
-                    || (!projection_joins.is_empty() && report.discovery_advanced))
+                && (report.retry_class.is_some()
+                    || (projection_still_unpublished(&report)
+                        && (projection_published_work(&report)
+                            || (!projection_joins.is_empty() && report.discovery_advanced))))
             {
+                // A retryable projection has not settled its generation. Retry
+                // publication before competing for summary admission, even
+                // when this attempt committed no progress.
                 convergence_admission = LcmConvergenceAdmission::Deferred;
             }
             let (
