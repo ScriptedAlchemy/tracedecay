@@ -352,135 +352,155 @@ pub(super) fn plan_collectable_text_artifacts_budgeted_cancellable(
         }
     }
 
+    // The shared completed-artifact directory may contain permanently
+    // untrusted files. Alternate bounded entry observations with the
+    // independent staging namespace so those files cannot consume every
+    // scan slot and suppress otherwise verified staging cleanup.
+    let mut completed_entries = if root_present {
+        Some(std::fs::read_dir(&root).map_err(storage)?)
+    } else {
+        None
+    };
+    let mut staging_entries = if private_directory_exists(&staging_root)? {
+        Some(std::fs::read_dir(&staging_root).map_err(storage)?)
+    } else {
+        None
+    };
     let mut candidates = BTreeMap::new();
     let mut remaining = MAX_CODE_TEXT_ARTIFACT_INVENTORY_ENTRIES_V1;
-    for (directory, shared) in [(&root, true), (&staging_root, false)] {
-        if !private_directory_exists(directory)? {
-            continue;
+    let mut scan_completed = true;
+    while remaining > 0 && candidates.len() < MAX_CODE_TEXT_ARTIFACT_RETENTION_BATCH_V1 {
+        if is_cancelled() {
+            return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
-        let mut entries = std::fs::read_dir(directory).map_err(storage)?;
-        while remaining > 0 && candidates.len() < MAX_CODE_TEXT_ARTIFACT_RETENTION_BATCH_V1 {
-            if is_cancelled() {
-                return Err(CodeGenerationRetentionErrorV1::Cancelled);
-            }
-            let Some(entry) = entries.next() else {
-                break;
-            };
-            if *remaining_entries == 0 {
-                return Err(CodeGenerationRetentionErrorV1::EntryBudgetExceeded);
-            }
-            *remaining_entries -= 1;
-            remaining -= 1;
-            let entry = entry.map_err(storage)?;
-            let file_name = entry.file_name().into_string().map_err(|_| {
-                CodeGenerationRetentionErrorV1::UnsafeState(
-                    "code text artifact inventory filename is not UTF-8".to_owned(),
-                )
-            })?;
-            let path = entry.path();
-            // This inventory reads the artifact directories without the
-            // generation-store lock, so an entry the listing just named can
-            // already be gone: the text-artifact builder retires a `.staging`
-            // family (the staging database and its `-journal`/`-wal`/`-shm`
-            // sidecars) under that lock while this scan runs. A vanished entry
-            // is reclaimed, which is what this inventory would have planned
-            // anyway, so it is not a candidate and not a failure. Failing the
-            // plan here turned every publish that raced a maintenance tick
-            // into a loud `retention_plan_failed` pass (master run
-            // 35422072661, `Storage("No such file or directory")`). A
-            // completed artifact this scope's index *references* is verified
-            // above, before this scan, and stays fail-closed if it disappears.
-            let metadata = match std::fs::symlink_metadata(&path) {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(storage(error)),
-            };
-            if !metadata.file_type().is_file() {
-                return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                    "code text artifact inventory path '{}' is not a regular file",
-                    path.display()
-                )));
-            }
-            let staging_source = staging_text_artifact_source_digest(&file_name)
-                .or_else(|| staging_sidecar_text_artifact_source_digest(&file_name));
-            let completed = completed_text_artifact_digest(&file_name);
-            let candidate = match (shared, staging_source, completed) {
-                (true, None, Some(digest)) => {
-                    if marked.contains(file_name.as_str()) {
-                        None
-                    } else {
-                        // A completed SQLite artifact can never be empty. A
-                        // zero-byte file at its final content-addressed path
-                        // is the only state left when publication created the
-                        // destination but failed before writing any bytes. It
-                        // contains no recoverable data, so retain the
-                        // regular-file/inode/size checks while allowing
-                        // retention to collect that publish-crash placeholder.
-                        // Every non-empty candidate still requires its full
-                        // content proof.
-                        let candidate_verification = if metadata.len() == 0 {
-                            GenerationDigestVerificationV1::MetadataOnly
-                        } else {
-                            verification
-                        };
-                        // Durable references are verified above and remain
-                        // fail-closed. A broken unreferenced candidate has no
-                        // unlink authority: preserve and report it without
-                        // starving independent collection.
-                        match verify_unreferenced_completed_text_artifact(
-                            &path,
-                            digest,
-                            metadata.len(),
-                            candidate_verification,
-                            is_cancelled,
-                        ) {
-                            Ok(true) => {}
-                            Ok(false) => continue,
-                            Err(CodeGenerationRetentionErrorV1::UnsafeState(reason)) => {
-                                tracing::warn!(
-                                    event = "code_text_artifact_retention_candidate_preserved",
-                                    artifact = %path.display(),
-                                    %reason,
-                                    "unreferenced artifact failed identity proof; preserving it"
-                                );
-                                continue;
-                            }
-                            Err(error) => return Err(error),
-                        }
-                        Some(CodeTextArtifactRetentionCandidateV1 {
-                            artifact_file: file_name,
-                            kind: CodeTextArtifactRetentionKindV1::Completed,
-                            size_bytes: metadata.len(),
-                        })
-                    }
-                }
-                // The active build's staging family is the builder's
-                // property; any other staging database or sidecar is crash
-                // debris.
-                (false, Some(source_digest), _) if Some(source_digest) == active_staging_source => {
+        if completed_entries.is_none() && staging_entries.is_none() {
+            break;
+        }
+        let shared = scan_completed;
+        scan_completed = !scan_completed;
+        let listing = if shared {
+            &mut completed_entries
+        } else {
+            &mut staging_entries
+        };
+        let Some(entry) = listing.as_mut().and_then(|entries| entries.next()) else {
+            *listing = None;
+            continue;
+        };
+        if *remaining_entries == 0 {
+            return Err(CodeGenerationRetentionErrorV1::EntryBudgetExceeded);
+        }
+        *remaining_entries -= 1;
+        remaining -= 1;
+        let entry = entry.map_err(storage)?;
+        let file_name = entry.file_name().into_string().map_err(|_| {
+            CodeGenerationRetentionErrorV1::UnsafeState(
+                "code text artifact inventory filename is not UTF-8".to_owned(),
+            )
+        })?;
+        let path = entry.path();
+        // This inventory reads the artifact directories without the
+        // generation-store lock, so an entry the listing just named can
+        // already be gone: the text-artifact builder retires a `.staging`
+        // family (the staging database and its `-journal`/`-wal`/`-shm`
+        // sidecars) under that lock while this scan runs. A vanished entry
+        // is reclaimed, which is what this inventory would have planned
+        // anyway, so it is not a candidate and not a failure. Failing the
+        // plan here turned every publish that raced a maintenance tick
+        // into a loud `retention_plan_failed` pass (master run
+        // 35422072661, `Storage("No such file or directory")`). A
+        // completed artifact this scope's index *references* is verified
+        // above, before this scan, and stays fail-closed if it disappears.
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(storage(error)),
+        };
+        if !metadata.file_type().is_file() {
+            return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                "code text artifact inventory path '{}' is not a regular file",
+                path.display()
+            )));
+        }
+        let staging_source = staging_text_artifact_source_digest(&file_name)
+            .or_else(|| staging_sidecar_text_artifact_source_digest(&file_name));
+        let completed = completed_text_artifact_digest(&file_name);
+        let candidate = match (shared, staging_source, completed) {
+            (true, None, Some(digest)) => {
+                if marked.contains(file_name.as_str()) {
                     None
+                } else {
+                    // A completed SQLite artifact can never be empty. A
+                    // zero-byte file at its final content-addressed path
+                    // is the only state left when publication created the
+                    // destination but failed before writing any bytes. It
+                    // contains no recoverable data, so retain the
+                    // regular-file/inode/size checks while allowing
+                    // retention to collect that publish-crash placeholder.
+                    // Every non-empty candidate still requires its full
+                    // content proof.
+                    let candidate_verification = if metadata.len() == 0 {
+                        GenerationDigestVerificationV1::MetadataOnly
+                    } else {
+                        verification
+                    };
+                    // Durable references are verified above and remain
+                    // fail-closed. A broken unreferenced candidate has no
+                    // unlink authority: preserve and report it without
+                    // starving independent collection.
+                    match verify_unreferenced_completed_text_artifact(
+                        &path,
+                        digest,
+                        metadata.len(),
+                        candidate_verification,
+                        is_cancelled,
+                    ) {
+                        Ok(true) => {}
+                        Ok(false) => continue,
+                        Err(CodeGenerationRetentionErrorV1::UnsafeState(reason)) => {
+                            tracing::warn!(
+                                event = "code_text_artifact_retention_candidate_preserved",
+                                artifact = %path.display(),
+                                %reason,
+                                "unreferenced artifact failed identity proof; preserving it"
+                            );
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                    Some(CodeTextArtifactRetentionCandidateV1 {
+                        artifact_file: file_name,
+                        kind: CodeTextArtifactRetentionKindV1::Completed,
+                        size_bytes: metadata.len(),
+                    })
                 }
-                (false, Some(_), _) => Some(CodeTextArtifactRetentionCandidateV1 {
-                    artifact_file: file_name,
-                    kind: CodeTextArtifactRetentionKindV1::Staging,
-                    size_bytes: metadata.len(),
-                }),
-                _ => {
-                    // Unknown regular files cannot be deleted, but neither
-                    // can they veto retirement of unrelated verified data.
-                    tracing::warn!(
-                        event = "code_text_artifact_retention_candidate_preserved",
-                        artifact = %path.display(),
-                        reason = "unrecognized_artifact_name",
-                        "unrecognized regular file preserved during retention"
-                    );
-                    continue;
-                }
-            };
-            if let Some(candidate) = candidate {
-                inventory.insert(candidate.artifact_file.clone(), candidate.size_bytes);
-                candidates.insert(candidate.artifact_file.clone(), candidate);
             }
+            // The active build's staging family is the builder's
+            // property; any other staging database or sidecar is crash
+            // debris.
+            (false, Some(source_digest), _) if Some(source_digest) == active_staging_source => {
+                None
+            }
+            (false, Some(_), _) => Some(CodeTextArtifactRetentionCandidateV1 {
+                artifact_file: file_name,
+                kind: CodeTextArtifactRetentionKindV1::Staging,
+                size_bytes: metadata.len(),
+            }),
+            _ => {
+                // Unknown regular files cannot be deleted, but neither
+                // can they veto retirement of unrelated verified data.
+                tracing::warn!(
+                    event = "code_text_artifact_retention_candidate_preserved",
+                    artifact = %path.display(),
+                    reason = "unrecognized_artifact_name",
+                    "unrecognized regular file preserved during retention"
+                );
+                continue;
+            }
+        };
+        if let Some(candidate) = candidate {
+            inventory.insert(candidate.artifact_file.clone(), candidate.size_bytes);
+            candidates.insert(candidate.artifact_file.clone(), candidate);
         }
     }
     Ok(CodeTextArtifactRetentionInventoryV1 {

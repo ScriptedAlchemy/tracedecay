@@ -1664,6 +1664,55 @@ fn unverified_unreferenced_artifacts_do_not_block_other_retention() {
     );
 }
 
+/// Permanently untrusted shared files must not consume the whole bounded scan
+/// before independent staging debris can be observed and safely reclaimed.
+#[test]
+fn unsafe_shared_artifacts_do_not_starve_staging_debris() {
+    let (store, _) = fixture_store(1);
+    let shared_root = code_text_artifacts_root(store.path());
+    std::fs::create_dir_all(&shared_root).expect("create shared artifact root");
+    for index in 0..MAX_CODE_TEXT_ARTIFACT_INVENTORY_ENTRIES_V1 {
+        std::fs::write(shared_root.join(format!("unknown-{index:03}")), b"preserve")
+            .expect("write unknown artifact");
+    }
+    let staging_root = code_text_artifact_staging_root(store.path());
+    std::fs::create_dir_all(&staging_root).expect("create staging root");
+    let staging_name = format!(".text-artifact-{}.staging", "e".repeat(64));
+    let staging_path = staging_root.join(&staging_name);
+    std::fs::write(&staging_path, b"abandoned").expect("write abandoned staging file");
+
+    let plan = prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("preserved shared entries must not block staging cleanup");
+    assert!(
+        plan.collectable_text_artifacts
+            .iter()
+            .any(|candidate| candidate.artifact_file == staging_name),
+        "staging debris must retain bounded collection opportunity"
+    );
+    let report = execute_code_generation_retention(
+        store.path(),
+        plan,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(52),
+        None,
+    )
+    .expect("reclaim independently verified staging debris");
+    assert_eq!(report.deleted_text_artifacts.len(), 1);
+    assert!(!staging_path.exists(), "abandoned staging file is reclaimed");
+    assert_eq!(
+        std::fs::read_dir(&shared_root)
+            .expect("read preserved artifacts")
+            .count(),
+        MAX_CODE_TEXT_ARTIFACT_INVENTORY_ENTRIES_V1,
+        "all unknown shared files are preserved"
+    );
+}
+
 /// A text-artifact receipt is read only by recovery of its own journal, so a
 /// committed sweep's receipt is removed by the next pass.
 #[test]
