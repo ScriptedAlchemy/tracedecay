@@ -291,7 +291,7 @@ async fn skill_view_returns_the_requested_package_and_withholds_support_bytes() 
     assert_eq!(summary["improvement_recommendation"]["priority"], "none");
     assert_eq!(
         summary["improvement_recommendation"]["reason"],
-        "no repeated correction or failed-use signal is present"
+        "skill use evidence is unavailable; patch counts alone do not establish a repair need"
     );
 
     let included = call_skill_view(
