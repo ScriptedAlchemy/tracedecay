@@ -262,6 +262,5 @@ runs:
 
     - name: Report available build storage
       continue-on-error: true
-      timeout-minutes: 2
       shell: bash
       run: bash "$GITHUB_ACTION_PATH/report_disk.sh"
