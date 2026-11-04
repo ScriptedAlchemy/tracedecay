@@ -519,6 +519,12 @@ impl RepositoryRuntimePhysicalAttachment {
     }
 
     pub fn snapshot(&self) -> RepositoryRuntimePhysicalSnapshot {
+        // Health observations also complete lost-file cleanup after the last
+        // SQLite worker exits. Registry lookup is not required to release the
+        // identity pin for a runtime retained by another owner.
+        if self.file_lost() {
+            let _ = self.lost_file_closed();
+        }
         let state = self.lock_state();
         let writer = state.writer.as_ref();
         let writer_telemetry = writer.map(|writer| writer.telemetry_snapshot());
@@ -1426,16 +1432,20 @@ mod tests {
 
         hold.send(()).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while !attachment.lost_file_closed() {
+        // Do not poll lost_file_closed: health observation itself must release
+        // the pin after worker exit, even without another registry lookup.
+        while attachment.lock_state().retained_file_pin.is_some() {
+            let _ = attachment.snapshot();
             assert!(
                 std::time::Instant::now() < deadline,
-                "the file stayed unclosed after the writer task returned"
+                "health observation did not release the pin after worker exit"
             );
             thread::sleep(Duration::from_millis(5));
         }
+        assert!(attachment.lost_file_closed());
         assert!(
-            attachment.lock_state().retained_file_pin.is_none(),
-            "the last lost worker exiting must release the original inode pin"
+            deleted_descriptors(directory.path()).is_empty(),
+            "the last lost worker exiting must release every deleted-file descriptor"
         );
     }
 
