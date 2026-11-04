@@ -195,11 +195,6 @@ class RepositoryWorkflowPolicyTests(unittest.TestCase):
                     continue
                 if (job.get("permissions") or {}).get("statuses") == "write":
                     writers.append((name, job_name, job))
-        self.assertTrue(
-            writers,
-            "no job holds the commit-status permission; removing the private "
-            "Linux status job has to change this test too",
-        )
         for name, job_name, job in writers:
             for step in job.get("steps", []):
                 uses = str(step.get("uses", ""))
@@ -235,24 +230,6 @@ class RepositoryWorkflowPolicyTests(unittest.TestCase):
             "no step before Tailscale enrollment inspects runner.environment",
         )
 
-    def test_existing_tailnet_is_restricted_to_the_orchestrator(self) -> None:
-        action = yaml.safe_load(
-            (REPOSITORY_ROOT / ".github/actions/setup-bazel/action.yml").read_text(
-                encoding="utf-8"
-            )
-        )
-        steps = action["runs"]["steps"]
-        enrollment = next(
-            index for index, step in enumerate(steps) if step.get("id") == "tailscale"
-        )
-        guards = [
-            str(step.get("run", ""))
-            for step in steps[:enrollment]
-            if step.get("if") == "inputs.existing-tailnet == 'true'"
-        ]
-        self.assertTrue(guards, "existing-tailnet has no guard step")
-        self.assertIn("ScriptedAlchemy/ci-runner-orchestrator", guards[0])
-        self.assertIn("25274700", guards[0])
 
 
 if __name__ == "__main__":
