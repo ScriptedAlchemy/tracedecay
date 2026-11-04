@@ -7,9 +7,6 @@ license = "MIT"
 description = "Daemon code-index scheduler, git watch, and git transactions runtime"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
-[package.metadata.bazel.test_sizes]
-unit_test = "large"
-
 [lib]
 doctest = false
 

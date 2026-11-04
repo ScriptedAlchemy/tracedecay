@@ -14,7 +14,6 @@ categories = ["development-tools", "command-line-utilities"]
 
 # Measured aggregate suites exceed the native five-minute medium limit.
 [package.metadata.bazel.test_sizes]
-dashboard_api_test = "large"
 mcp_suite = "large"
 unit_test = "large"
 

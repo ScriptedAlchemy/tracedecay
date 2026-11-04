@@ -74,7 +74,6 @@ rust_library(
 
 rust_test(
     name = "unit_test",
-    size = "large",
     crate = ":tracedecay-code-index-runtime__+full_+lite_+test-helpers_+test-transport__dev",
     crate_features = ["full", "lite", "test-helpers", "test-transport"],
     edition = crate_edition(),

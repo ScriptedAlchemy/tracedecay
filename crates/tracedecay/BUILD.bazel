@@ -107,7 +107,6 @@ rust_test(
 
 rust_test(
     name = "dashboard_api_test",
-    size = "large",
     srcs = glob(["tests/dashboard_api_test/**/*.rs"]) + glob(["tests/common/**/*.rs"]) + ["//tests:support_sources"],
     crate_root = "tests/dashboard_api_test/main.rs",
     edition = crate_edition(),

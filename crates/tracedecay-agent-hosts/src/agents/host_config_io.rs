@@ -407,7 +407,7 @@ pub(super) struct TestHostConfigWritePauseController(std::sync::Arc<TestHostConf
 #[cfg(test)]
 impl TestHostConfigWritePauseController {
     pub(super) fn wait_until_reached(&self) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut state = self.0.state.lock().expect("host write pause state");
         while !state.0 {
             let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
