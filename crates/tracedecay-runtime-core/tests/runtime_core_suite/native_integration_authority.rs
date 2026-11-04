@@ -75,7 +75,9 @@ impl RepositoryFixture {
                 if path.is_dir() {
                     collect(root, &path, objects);
                 } else {
-                    let relative = path.strip_prefix(root).expect("object path within repository");
+                    let relative = path
+                        .strip_prefix(root)
+                        .expect("object path within repository");
                     objects.insert(
                         relative.to_path_buf(),
                         std::fs::read(&path).expect("read object bytes"),

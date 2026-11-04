@@ -1096,7 +1096,10 @@ async fn scoped_single_row_retention_finishes_when_no_lineage_remains() -> Resul
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     assert_eq!(report.inlined.eligible, 0);
     assert_eq!(report.offloaded.eligible, 0);
-    assert!(!report.storage_has_more, "an empty scoped pass must not hot-loop");
+    assert!(
+        !report.storage_has_more,
+        "an empty scoped pass must not hot-loop"
+    );
     Ok(())
 }
 
