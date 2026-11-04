@@ -683,6 +683,8 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             if state.has_pending_work() {
                 break;
             }
+            let history_idle_deadline =
+                history_idle_recheck_at(Instant::now(), blocked_history_until);
             tokio::select! {
                 () = tracing::Instrument::instrument(state.wait_for_cancellation(), tracing::trace_span!("daemon.scheduler.session_temporal.idle_cancel")) => return,
                 // Every wake sets its work flag first, so a wake without work
@@ -699,10 +701,10 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     state.wake_history();
                     break;
                 }
-                // Discovery of new sources, and the retry of a refusal nothing
-                // signals (a still-mounting authority, an undecidable source),
-                // share this cadence. Unchanged sources cost it no reads.
-                fired = tracing::Instrument::instrument(native_runtime::sleep_until(history_idle_recheck_at(Instant::now(), blocked_history_until)), tracing::trace_span!("daemon.scheduler.session_temporal.history_idle_wait")) => {
+                // Ordinary source discovery keeps its one-minute cadence.
+                // After a terminal history blocker, park through its backoff
+                // instead of firing pointless minute-by-minute scheduler passes.
+                fired = tracing::Instrument::instrument(native_runtime::sleep_until(history_idle_deadline), tracing::trace_span!("daemon.scheduler.session_temporal.history_idle_wait")) => {
                     if stop_without_timer(fired) {
                         return;
                     }
