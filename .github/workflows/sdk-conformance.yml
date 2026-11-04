@@ -110,6 +110,13 @@ jobs:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
           key: ${{ steps.bazel.outputs.disk-cache-key }}
 
+      - name: Report final build disk usage
+        if: ${{ always() && hashFiles('.github/actions/setup-bazel/report_disk.sh') != '' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: bash
+        run: bash .github/actions/setup-bazel/report_disk.sh
+
   production-router:
     permissions:
       contents: read
@@ -143,3 +150,10 @@ jobs:
           --test_arg=--include-ignored
       - run: pnpm run test:installed
         working-directory: sdks/typescript
+
+      - name: Report final build disk usage
+        if: ${{ always() && hashFiles('.github/actions/setup-bazel/report_disk.sh') != '' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: bash
+        run: bash .github/actions/setup-bazel/report_disk.sh

@@ -63,6 +63,13 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      - name: Report final build disk usage
+        if: ${{ always() && hashFiles('.github/actions/setup-bazel/report_disk.sh') != '' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: bash
+        run: bash .github/actions/setup-bazel/report_disk.sh
+
   push:
     name: Push regenerated bundles
     needs: build
