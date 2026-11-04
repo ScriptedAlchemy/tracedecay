@@ -84,13 +84,7 @@ async fn savings_without_a_display_baseline_still_commit_to_the_project_store() 
     let (cg, _dir, _authority) = init_indexed_repo().await;
     assert_eq!(cg.get_tokens_saved().await.unwrap(), 0);
 
-    super::ledger::commit_token_savings(
-        &cg,
-        None,
-        super::ledger::LedgerSink::NotMounted,
-        13,
-    )
-    .await;
+    super::ledger::commit_token_savings(&cg, None, super::ledger::LedgerSink::NotMounted, 13).await;
     assert_eq!(cg.get_tokens_saved().await.unwrap(), 13);
     assert_eq!(cg.get_local_counter().await.unwrap(), 13);
 

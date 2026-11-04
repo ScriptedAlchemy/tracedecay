@@ -171,8 +171,12 @@ impl McpServer {
     ) {
         // An unreadable baseline suppresses only the approximate display cache.
         // It must not disable future durable deltas if that read failure clears.
-        let persist = (net_saved_tokens != 0)
-            .then(|| (self.tokens_saved.as_ref().map(Arc::clone), self.ledger_sink()));
+        let persist = (net_saved_tokens != 0).then(|| {
+            (
+                self.tokens_saved.as_ref().map(Arc::clone),
+                self.ledger_sink(),
+            )
+        });
         let monitor_project_root = monitor_project_root.to_path_buf();
         let monitor_dir = self
             .owner_profile()

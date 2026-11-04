@@ -1986,11 +1986,10 @@ async fn await_callable_rewarm(
     let admission = native_runtime::timeout(
         remaining,
         native_runtime::spawn_blocking(move || {
-            let pending =
-                match waiting.await_rewarm_and_retain_for(Duration::ZERO, requirement) {
-                    Ok(retain) => return Ok(retain),
-                    Err(pending) => pending,
-                };
+            let pending = match waiting.await_rewarm_and_retain_for(Duration::ZERO, requirement) {
+                Ok(retain) => return Ok(retain),
+                Err(pending) => pending,
+            };
             let budget = crate::project_reads::rewarm_wait_budget(remaining, pending.retry_after)
                 .ok_or(CallableCodeCursorError::Unavailable)?;
             waiting
