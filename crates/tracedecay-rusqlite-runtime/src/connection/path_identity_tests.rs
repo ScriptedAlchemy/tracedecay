@@ -15,6 +15,14 @@ const PROBE_COMPLETE: &str = "tracedecay-path-identity-probe-complete";
 // Execute only the child test in a fresh process, with a marker to reject a
 // successful test harness invocation that accidentally selected zero tests.
 fn probe_external_connection(path: &Path, operation: &str, blocked: bool) {
+    probe_external_connection_expectation(
+        path,
+        operation,
+        if blocked { "blocked" } else { "allowed" },
+    );
+}
+
+fn probe_external_connection_expectation(path: &Path, operation: &str, expectation: &str) {
     let (_, module) = module_path!().split_once("::").expect("test module path");
     let output = Command::new(env::current_exe().expect("test executable"))
         .args([
@@ -24,10 +32,7 @@ fn probe_external_connection(path: &Path, operation: &str, blocked: bool) {
         ])
         .env(PROBE_PATH, path)
         .env(PROBE_OPERATION, operation)
-        .env(
-            PROBE_EXPECTATION,
-            if blocked { "blocked" } else { "allowed" },
-        )
+        .env(PROBE_EXPECTATION, expectation)
         .output()
         .expect("run external SQLite connection");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -46,11 +51,13 @@ fn external_connection_probe() {
     };
     let operation = env::var(PROBE_OPERATION).expect("probe operation");
     let expectation = env::var(PROBE_EXPECTATION).expect("probe expectation");
-    let connection = Connection::open_with_flags(
-        Path::new(&path),
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .expect("open existing database in another process");
+    let flags = if operation == "read" {
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX
+    } else {
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX
+    };
+    let connection = Connection::open_with_flags(Path::new(&path), flags)
+        .expect("open existing database in another process");
     connection
         .busy_timeout(Duration::ZERO)
         .expect("no lock wait");
@@ -61,6 +68,22 @@ fn external_connection_probe() {
                 row.get::<_, String>(0)
             })
             .map(|mode| assert_eq!(mode, "delete")),
+        "read" => connection
+            .query_row("SELECT value FROM sample", [], |row| row.get::<_, i64>(0))
+            .and_then(|value| {
+                let expected = expectation
+                    .strip_prefix("read:")
+                    .expect("read expectation")
+                    .parse::<i64>()
+                    .expect("numeric read expectation");
+                assert_eq!(
+                    value, expected,
+                    "external reader must see committed WAL data"
+                );
+                connection
+                    .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+                    .map(|integrity| assert_eq!(integrity, "ok"))
+            }),
         _ => panic!("unknown probe operation: {operation}"),
     };
     match expectation.as_str() {
@@ -72,6 +95,9 @@ fn external_connection_probe() {
             "expected SQLITE_BUSY from external {operation}, got {result:?}",
         ),
         "allowed" => result.expect("external operation after lock release"),
+        value if operation == "read" && value.starts_with("read:") => {
+            result.expect("external read-only SQLite query")
+        }
         _ => panic!("unknown probe expectation: {expectation}"),
     }
     println!("{PROBE_COMPLETE}");
@@ -194,6 +220,44 @@ fn path_checks_preserve_live_wal_journal_mode_guard() {
     probe_external_connection(&path, "journal", true);
     drop(connection);
     probe_external_connection(&path, "journal", false);
+    drop(pinned);
+    assert_committed_data(&path);
+}
+
+#[test]
+fn external_read_only_wal_reader_survives_live_writer_identity_checks() {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("sessions.db");
+    let pinned = OpenedDatabaseFile::create_new(&path).expect("pin database");
+    let connection = Connection::open(&path).expect("open database");
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode = WAL;
+             CREATE TABLE sample(value INTEGER);
+             INSERT INTO sample VALUES (1);",
+        )
+        .expect("initialize committed WAL snapshot");
+
+    // A separate read-only process must see the last committed snapshot,
+    // even when the daemon writer holds an uncommitted WAL transaction.
+    probe_external_connection_expectation(&path, "read", "read:1");
+    connection
+        .execute_batch("BEGIN IMMEDIATE; UPDATE sample SET value = 2;")
+        .expect("hold live WAL write transaction");
+    probe_external_connection_expectation(&path, "read", "read:1");
+
+    // Path and SQLite-connection identity checks must not break either the
+    // writer's lock or another process's read-only WAL access.
+    pinned.verify_current_path(&path).expect("same inode");
+    probe_external_connection_expectation(&path, "read", "read:1");
+    pinned
+        .verify_connection(&connection, &path)
+        .expect("same SQLite connection");
+    probe_external_connection_expectation(&path, "read", "read:1");
+
+    connection.execute_batch("COMMIT").expect("commit");
+    probe_external_connection_expectation(&path, "read", "read:2");
+    drop(connection);
     drop(pinned);
     assert_committed_data(&path);
 }
