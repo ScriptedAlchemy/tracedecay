@@ -210,6 +210,15 @@ impl CodeIndexBuildProgressSlotStateV1 {
         if self.generation_id.as_ref() != Some(generation_id) || self.owner_epoch != owner_epoch {
             return false;
         }
+        // A progress producer can timestamp its snapshot before another
+        // producer publishes. Preserve the most recent observed timestamp
+        // even when the later lock acquisition delivers an older sample.
+        // Replacing the generation clears the snapshot and starts a new owner.
+        if let Some(current) = self.snapshot.as_ref() {
+            snapshot.last_progress_micros = snapshot
+                .last_progress_micros
+                .max(current.last_progress_micros);
+        }
         self.progress_epoch = self.progress_epoch.saturating_add(1).max(1);
         snapshot.progress_epoch = self.progress_epoch;
 
