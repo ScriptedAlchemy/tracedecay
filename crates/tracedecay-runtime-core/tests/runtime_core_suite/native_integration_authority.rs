@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tempfile::TempDir;
@@ -65,6 +66,30 @@ impl RepositoryFixture {
         self.git(&["rev-parse", &format!("{reference}^{{tree}}")])
     }
 
+    /// Snapshot actual Git objects, not filesystem block allocation. Git's
+    /// loose-object size statistic can vary without changing object bytes.
+    fn object_database_snapshot(&self) -> BTreeMap<PathBuf, Vec<u8>> {
+        fn collect(root: &Path, directory: &Path, objects: &mut BTreeMap<PathBuf, Vec<u8>>) {
+            for entry in std::fs::read_dir(directory).expect("read object directory") {
+                let path = entry.expect("object directory entry").path();
+                if path.is_dir() {
+                    collect(root, &path, objects);
+                } else {
+                    let relative = path.strip_prefix(root).expect("object path within repository");
+                    objects.insert(
+                        relative.to_path_buf(),
+                        std::fs::read(&path).expect("read object bytes"),
+                    );
+                }
+            }
+        }
+
+        let root = self.path().join(".git/objects");
+        let mut objects = BTreeMap::new();
+        collect(&root, &root, &mut objects);
+        objects
+    }
+
     fn setup_fast_forward(&self) -> (GitOidV1, GitOidV1) {
         self.write("base.txt", "base\n");
         let destination = self.commit("base");
@@ -125,7 +150,7 @@ fn preflight_is_read_only_and_fast_forward_apply_and_rollback_use_exact_ref_cas(
     let (source, destination) = fixture.setup_fast_forward();
     let refs_before = fixture.git(&["show-ref"]);
     let status_before = fixture.git(&["status", "--porcelain=v1"]);
-    let objects_before = fixture.git(&["count-objects", "-v"]);
+    let objects_before = fixture.object_database_snapshot();
 
     let preview = preflight(
         &fixture,
@@ -136,7 +161,11 @@ fn preflight_is_read_only_and_fast_forward_apply_and_rollback_use_exact_ref_cas(
     assert_eq!(preview.disposition, GitNativePreflightDisposition::Eligible);
     assert_eq!(fixture.git(&["show-ref"]), refs_before);
     assert_eq!(fixture.git(&["status", "--porcelain=v1"]), status_before);
-    assert_eq!(fixture.git(&["count-objects", "-v"]), objects_before);
+    assert_eq!(
+        fixture.object_database_snapshot(),
+        objects_before,
+        "preflight must not add, remove, or rewrite any Git object",
+    );
 
     let authority = GitRepositoryAuthority::discover(fixture.path()).unwrap();
     let candidate = preview.candidate_tree.as_ref().unwrap();
