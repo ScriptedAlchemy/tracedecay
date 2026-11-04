@@ -1589,9 +1589,16 @@ mod tests {
             let writer = database
                 .writer_connection()
                 .expect("registered profile writer");
-            Executor::execute_batch(&writer, "DROP TRIGGER observations_immutable_update;")
-                .await
-                .expect("drop observation immutability for corruption fixture");
+            // Corruption is outside normal writer admission: bypass both
+            // immutability and canonical-body ownership validation in this
+            // isolated fixture, without weakening either production guard.
+            Executor::execute_batch(
+                &writer,
+                "DROP TRIGGER observations_immutable_update;
+                 DROP TRIGGER canonical_body_gc_observation_update;",
+            )
+            .await
+            .expect("drop observation immutability for corruption fixture");
             Executor::execute(
                 &writer,
                 "UPDATE observations
