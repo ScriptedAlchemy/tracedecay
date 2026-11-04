@@ -76,7 +76,10 @@ fn external_connection_probe() {
                     .expect("read expectation")
                     .parse::<i64>()
                     .expect("numeric read expectation");
-                assert_eq!(value, expected, "external reader must see committed WAL data");
+                assert_eq!(
+                    value, expected,
+                    "external reader must see committed WAL data"
+                );
                 connection
                     .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
                     .map(|integrity| assert_eq!(integrity, "ok"))
