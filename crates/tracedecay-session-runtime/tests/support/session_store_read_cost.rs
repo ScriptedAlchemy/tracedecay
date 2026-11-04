@@ -750,11 +750,60 @@ pub async fn retention_tick_read_bytes(database: &RegisteredGlobalDb) -> u64 {
     process_read_bytes() - before
 }
 
-/// Measures retention after aligning the WAL and settling the seeded backlog.
-/// Warm-up ticks may checkpoint; neither measured tick may include that copy.
-pub async fn probe_retention_tick_read_bytes(database: &RegisteredGlobalDb) -> u64 {
+/// Discharge an older seeded backlog before comparing equal-size streamed
+/// batches. One retention pass is bounded (500 rows by default), so a single
+/// warm-up would leave a grown store with many more eligible deletes than the
+/// base store, measuring backlog volume instead of per-tick read amplification.
+pub async fn settle_retention_backlog(database: &RegisteredGlobalDb) {
+    let seeded_rows = GROWN_SESSIONS * MESSAGES_PER_SESSION + DRAIN_WINDOW as u64;
+    let batch = LcmRetentionConfig::default().max_batch_size as u64;
+    let max_ticks = seeded_rows.div_ceil(batch) + 2;
+    for _ in 0..max_ticks {
+        let report = run_registered_store_retention(
+            database,
+            &LcmRetentionConfig::default(),
+            &ObservationRetentionConfig::default(),
+            RETENTION_NOW,
+        )
+        .await;
+        assert!(report.succeeded(), "retention warm-up must succeed");
+        let lcm = report.session_lcm.as_ref().unwrap().as_ref().unwrap();
+        if lcm.dropped.eligible == 0 {
+            return;
+        }
+    }
+    panic!("prior retained rows must drain within the derived bounded tick count");
+}
+
+/// Measures one tick with only the expected newly streamed messages eligible
+/// for the destructive age policy, and excludes unrelated WAL checkpoints.
+pub async fn probe_retention_tick_read_bytes(
+    database: &RegisteredGlobalDb,
+    expected_dropped: u64,
+) -> u64 {
     let checkpointed = writer_telemetry(database).wal.checkpointed_frames;
-    let read = retention_tick_read_bytes(database).await;
+    let before = process_read_bytes();
+    let report = run_registered_store_retention(
+        database,
+        &LcmRetentionConfig::default(),
+        &ObservationRetentionConfig::default(),
+        RETENTION_NOW,
+    )
+    .await;
+    assert!(report.succeeded(), "retention must succeed");
+    let actual_dropped = report
+        .session_lcm
+        .as_ref()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .dropped
+        .acted;
+    assert_eq!(
+        actual_dropped, expected_dropped,
+        "the compared ticks must perform identical bounded raw-row deletion work"
+    );
+    let read = process_read_bytes() - before;
     assert_eq!(
         writer_telemetry(database).wal.checkpointed_frames,
         checkpointed,
