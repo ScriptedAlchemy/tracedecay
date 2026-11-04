@@ -1,6 +1,6 @@
 use super::{DatabaseOwnerReconciler, McpServer, McpServerConstructionContext};
 use crate::test_support::git::git;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -75,6 +75,38 @@ async fn init_indexed_repo() -> (TraceDecay, TempDir, FreshnessFixtureAuthority)
             _runtime: runtime,
         },
     )
+}
+
+/// A failed startup baseline read must not permanently turn off durable
+/// accounting. The missing cache is not an authorization or write failure.
+#[tokio::test]
+async fn savings_without_a_display_baseline_still_commit_to_the_project_store() {
+    let (cg, _dir, _authority) = init_indexed_repo().await;
+    assert_eq!(cg.get_tokens_saved().await.unwrap(), 0);
+
+    super::ledger::commit_token_savings(
+        &cg,
+        None,
+        super::ledger::LedgerSink::NotMounted,
+        13,
+    )
+    .await;
+    assert_eq!(cg.get_tokens_saved().await.unwrap(), 13);
+    assert_eq!(cg.get_local_counter().await.unwrap(), 13);
+
+    // A later projected completion must observe the committed lifetime total,
+    // not restart its accounting from the absent startup display baseline.
+    let display = AtomicU64::new(0);
+    super::ledger::commit_token_savings(
+        &cg,
+        Some(&display),
+        super::ledger::LedgerSink::NotMounted,
+        7,
+    )
+    .await;
+    assert_eq!(display.load(Ordering::Relaxed), 20);
+    assert_eq!(cg.get_tokens_saved().await.unwrap(), 20);
+    assert_eq!(cg.get_local_counter().await.unwrap(), 20);
 }
 
 /// Serve-old/await-new: the request that notices the drift answers on the

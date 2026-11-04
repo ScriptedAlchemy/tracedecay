@@ -810,7 +810,7 @@ impl McpServer {
                 tracing::warn!(
                     project_root = %cg.project_root().display(),
                     %error,
-                    "MCP token accounting is unavailable because its durable baseline could not be read"
+                    "MCP token accounting display baseline is unavailable; durable writes will still be attempted"
                 );
                 None
             }

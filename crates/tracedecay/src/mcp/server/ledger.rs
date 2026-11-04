@@ -86,6 +86,43 @@ pub(crate) struct McpToolErrorAnalyticsRequest<'a> {
     pub(crate) connection_instance_id: Option<&'a str>,
 }
 
+/// Commits a response delta even when startup could not read the display
+/// baseline. The optional cache and global projection consume committed data;
+/// neither can suppress the authoritative project-store write.
+pub(super) async fn commit_token_savings(
+    cg: &TraceDecay,
+    tokens_saved: Option<&AtomicU64>,
+    sink: LedgerSink,
+    delta: u64,
+) {
+    match cg.record_token_savings(delta).await {
+        Ok(committed_total) => {
+            // Two completions may resume in reverse order after their commits.
+            if let Some(tokens_saved) = tokens_saved {
+                tokens_saved.fetch_max(committed_total, Ordering::Relaxed);
+            }
+            if let LedgerSink::Mounted(gdb) = sink
+                && let Err(error) = gdb
+                    .try_upsert_project_tokens(cg.project_root(), committed_total)
+                    .await
+            {
+                tracing::warn!(
+                    project_root = %cg.project_root().display(),
+                    %error,
+                    "background token-accounting projection failed"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                project_root = %cg.project_root().display(),
+                %error,
+                "background token-accounting commit failed"
+            );
+        }
+    }
+}
+
 impl McpServer {
     /// Resolves the ledger sink: the dedicated accounting database when the
     /// daemon mounted one, otherwise the registry handle it shares with, and
@@ -132,11 +169,10 @@ impl McpServer {
         net_saved_tokens: u64,
         raw_file_tokens: u64,
     ) {
-        let persist = self
-            .tokens_saved
-            .as_ref()
-            .filter(|_| net_saved_tokens != 0)
-            .map(|tokens_saved| (Arc::clone(tokens_saved), self.ledger_sink()));
+        // An unreadable baseline suppresses only the approximate display cache.
+        // It must not disable future durable deltas if that read failure clears.
+        let persist = (net_saved_tokens != 0)
+            .then(|| (self.tokens_saved.as_ref().map(Arc::clone), self.ledger_sink()));
         let monitor_project_root = monitor_project_root.to_path_buf();
         let monitor_dir = self
             .owner_profile()
@@ -144,31 +180,7 @@ impl McpServer {
         let tool_name = tool_name.to_owned();
         self.spawn_observed_ledger_write(async move {
             if let Some((tokens_saved, sink)) = persist {
-                match cg.record_token_savings(net_saved_tokens).await {
-                    Ok(committed_total) => {
-                        // Two completions may resume in reverse order after
-                        // their commits. The cache is a monotonic projection.
-                        tokens_saved.fetch_max(committed_total, Ordering::Relaxed);
-                        if let LedgerSink::Mounted(gdb) = sink
-                            && let Err(error) = gdb
-                                .try_upsert_project_tokens(cg.project_root(), committed_total)
-                                .await
-                        {
-                            tracing::warn!(
-                                project_root = %cg.project_root().display(),
-                                %error,
-                                "background token-accounting projection failed"
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            project_root = %cg.project_root().display(),
-                            %error,
-                            "background token-accounting commit failed"
-                        );
-                    }
-                }
+                commit_token_savings(&cg, tokens_saved.as_deref(), sink, net_saved_tokens).await;
             }
             // The monitor entry opens, locks, and mmaps a file; keep that
             // off the async workers.
