@@ -17,7 +17,6 @@ on:
       - ".github/**"
       - "scripts/check-github-hosted-runners.py"
       - "scripts/test-check-github-hosted-runners.py"
-      - "scripts/test-private-linux-routing.py"
   workflow_dispatch:
 
 permissions:
@@ -72,8 +71,3 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "26"
-
-      # Proposed behavioral tests run without write/OIDC permissions and do
-      # not replace the preceding base-revision policy decision.
-      - name: Exercise Linux request failure and hosted fallback
-        run: python3 head/scripts/test-private-linux-routing.py

@@ -148,11 +148,8 @@ claims needs a matching console change; review both.
 
 `setup-bazel` refuses to exchange OIDC from any runner whose
 `runner.environment` is not `github-hosted`, because a persistent machine would
-keep the node identity after the job ends. Its `existing-tailnet` input skips
-enrollment only for a VM the orchestrator already enrolled: it is accepted only
-in `ScriptedAlchemy/ci-runner-orchestrator`, for owner-initiated
-(`actor_id` 25274700) non-pull-request events in a private repository, on a
-runner that is not GitHub-hosted.
+keep the node identity after the job ends. All Actions jobs use GitHub-hosted
+runners; NativeLink remains a separate Bazel execution service.
 
 Keep GitHub's fork contributor approval policy at `all_external_contributors`;
 approved outside-contributor runs use GitHub-hosted execution without fleet
