@@ -723,7 +723,6 @@ async fn validate_existing_observation_for_admission(
         })
 }
 
-
 async fn validate_admitted_authority_schema(
     conn: &RegisteredSchemaInstallationV1,
     is_fresh: bool,
@@ -1337,11 +1336,8 @@ pub(crate) async fn ensure_attached_registered_schema(
             return Ok(RegisteredSchemaAttachmentV1::SessionsRefused(refused));
         }
     };
-    validate_existing_observation_for_admission(
-        &read_connection,
-        configuration_fresh.is_some(),
-    )
-    .await?;
+    validate_existing_observation_for_admission(&read_connection, configuration_fresh.is_some())
+        .await?;
     let triggers_intact: Pin<
         Box<dyn Future<Output = tracedecay_domain::errors::Result<bool>> + Send + '_>,
     > = Box::pin(authority_invariant_triggers_intact(&read_connection));
@@ -1438,11 +1434,9 @@ pub(crate) async fn attached_registered_schema_reset_refusal(
         }
         Err(error) => return reset_or_error(error),
     };
-    if let Err(error) = validate_existing_observation_for_admission(
-        &read_connection,
-        configuration_fresh.is_some(),
-    )
-    .await
+    if let Err(error) =
+        validate_existing_observation_for_admission(&read_connection, configuration_fresh.is_some())
+            .await
     {
         return reset_or_error(error);
     }

@@ -8,8 +8,8 @@ pub mod support;
 
 use support::{
     BASE_SESSIONS, DrainFixture, GROWN_SESSIONS, SEED_TIMESTAMP, advance_to_wal_restart,
-    probe_one_message, probe_retention_tick_read_bytes, seed_sessions, settle_retention_backlog,
-    session_cursor,
+    probe_one_message, probe_retention_tick_read_bytes, publish_retention_probe_summary,
+    seed_sessions, session_cursor, settle_retention_backlog,
 };
 use tracedecay_sessions::admission::HostAdmissionScope;
 
@@ -35,6 +35,7 @@ async fn retention_tick_reads_do_not_scale_with_the_session_store() {
     // exactly STREAMED new messages at a comparable checkpoint phase.
     advance_to_wal_restart(&facade, &fixture, &mut padding, probe_timestamp).await;
     settle_retention_backlog(database).await;
+    let base_start = streamed.next_ordinal;
     for offset in 0..STREAMED {
         probe_one_message(
             &facade,
@@ -45,11 +46,20 @@ async fn retention_tick_reads_do_not_scale_with_the_session_store() {
         )
         .await;
     }
+    publish_retention_probe_summary(
+        database,
+        &streamed,
+        base_start,
+        STREAMED,
+        "summary.retention-cost.base",
+    )
+    .await;
     let base_read = probe_retention_tick_read_bytes(database, STREAMED).await;
 
     seed_sessions(&facade, project, &scope, BASE_SESSIONS..GROWN_SESSIONS).await;
     advance_to_wal_restart(&facade, &fixture, &mut padding, probe_timestamp).await;
     settle_retention_backlog(database).await;
+    let grown_start = streamed.next_ordinal;
     for offset in STREAMED..2 * STREAMED {
         probe_one_message(
             &facade,
@@ -60,6 +70,14 @@ async fn retention_tick_reads_do_not_scale_with_the_session_store() {
         )
         .await;
     }
+    publish_retention_probe_summary(
+        database,
+        &streamed,
+        grown_start,
+        STREAMED,
+        "summary.retention-cost.grown",
+    )
+    .await;
     let grown_read = probe_retention_tick_read_bytes(database, STREAMED).await;
 
     eprintln!("retention tick read bytes: base={base_read} grown={grown_read}");

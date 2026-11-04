@@ -35,6 +35,9 @@ use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority;
 use tracedecay_host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
 use tracedecay_lcm::LcmRetentionConfig;
+use tracedecay_lcm::types::LcmImmutableSummaryPublication;
+use tracedecay_lcm::{LcmSourceRef, LcmSummaryNodeDraft};
+use tracedecay_temporal_query::execution::ExecutionControl;
 use tracedecay_maintenance::retention::registered_store::run_registered_store_retention;
 use tracedecay_privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
@@ -810,4 +813,51 @@ pub async fn probe_retention_tick_read_bytes(
         "the retention query comparison must not include a periodic checkpoint"
     );
     read
+}
+
+/// Make the streamed batch genuinely eligible for destructive retention:
+/// only raw sources backed by a published, durable summary may be deleted.
+/// Build the lineage through the registered production publication journey.
+pub async fn publish_retention_probe_summary(
+    database: &RegisteredGlobalDb,
+    cursor: &SessionCursor,
+    from_ordinal: u64,
+    count: u64,
+    summary_id: &str,
+) {
+    let mut source_refs = Vec::with_capacity(usize::try_from(count).unwrap());
+    for ordinal in from_ordinal..from_ordinal + count {
+        let message_id = format!("{}.message.{ordinal:05}", cursor.session_id.as_str());
+        let store_id = database
+            .lcm_raw_message_store_id(PROVIDER, &message_id)
+            .await
+            .unwrap()
+            .expect("streamed raw message must exist before summary publication");
+        source_refs.push(LcmSourceRef::RawMessage { store_id });
+    }
+    database
+        .lcm_publish_immutable_summary_guarded(
+            LcmImmutableSummaryPublication {
+                summary_id: summary_id.to_owned(),
+                predecessor_summary_id: None,
+                draft: LcmSummaryNodeDraft {
+                    provider: PROVIDER.to_owned(),
+                    conversation_id: cursor.session_id.as_str().to_owned(),
+                    session_id: cursor.session_id.as_str().to_owned(),
+                    depth: 0,
+                    summary_text: "Summary of the newly streamed retention probe".to_owned(),
+                    source_refs,
+                    source_token_count: i64::try_from(count).unwrap(),
+                    summary_token_count: 8,
+                    source_time_start: Some(SEED_TIMESTAMP),
+                    source_time_end: Some(RETENTION_NOW),
+                    expand_hint: None,
+                    metadata_json: None,
+                },
+            },
+            &ExecutionControl::default(),
+            || Ok(()),
+        )
+        .await
+        .expect("publish durable retention lineage through registered authority");
 }

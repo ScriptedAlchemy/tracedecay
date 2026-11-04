@@ -1936,35 +1936,19 @@ impl CodeIndexSchedulerRegistryV1 {
         // request that spent its budget mid-warm, was cancelled, or lost
         // the wait task answers the typed unavailable rather than opening
         // a reader on a store it never waited out.
-        let mut catalog_retain = None;
-        if let Some(budget) = remaining_generation_resolution_wait(context.request) {
-            let requirement = match seed {
-                Some(seed) if !seed_is_served(&store, &latest, seed, budget).await? => {
-                    CodeGraphReadinessRequirement::Engine
-                }
-                _ => CodeGraphReadinessRequirement::Catalog,
-            };
-            // The seed read spent part of the request; the wait gets the rest.
-            let budget =
-                remaining_generation_resolution_wait(context.request).unwrap_or(Duration::ZERO);
-            let waiting = Arc::clone(&store);
-            match native_runtime::spawn_blocking(move || {
-                waiting.await_rewarm_and_retain_for(budget, requirement)
-            })
-            .await
-            {
-                Ok(Ok(retain)) => catalog_retain = Some(retain),
-                Ok(Err(_pending)) => return Err(CallableCodeCursorError::Unavailable),
-                Err(join_error) => {
-                    tracing::warn!(
-                        event = "code_graph_rewarm_wait_failed",
-                        error = %join_error,
-                        "a callable's graph re-warm wait did not finish"
-                    );
-                    return Err(CallableCodeCursorError::Unavailable);
-                }
+        let seed_budget = remaining_generation_resolution_wait(context.request)
+            .ok_or(CallableCodeCursorError::Unavailable)?;
+        let requirement = match seed {
+            Some(seed) if !seed_is_served(&store, &latest, seed, seed_budget).await? => {
+                CodeGraphReadinessRequirement::Engine
             }
-        }
+            _ => CodeGraphReadinessRequirement::Catalog,
+        };
+        // The seed point read may have spent part of the budget. A released
+        // catalog must not consume the rest of the enclosing MCP deadline.
+        let budget = remaining_generation_resolution_wait(context.request)
+            .ok_or(CallableCodeCursorError::Unavailable)?;
+        let catalog_retain = Some(await_callable_rewarm(&store, requirement, budget).await?);
         let cost = CodeGraphReadCostMeter::start();
         let reader = store
             .interactive_reader_with_cancellation(
@@ -1987,6 +1971,39 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 }
 
+/// A callable's deadline includes route settlement and response delivery.
+/// Probe without waiting to start a released graph's background re-warm, then
+/// wait only if measured remaining work fits inside the reserved budget.
+async fn await_callable_rewarm(
+    store: &Arc<CodeGraphProjectionStore>,
+    requirement: CodeGraphReadinessRequirement,
+    remaining: Duration,
+) -> Result<Arc<InteractiveCatalogReaderLeaseV1>, CallableCodeCursorError> {
+    let pending = match store.await_rewarm_and_retain_for(Duration::ZERO, requirement) {
+        Ok(retain) => return Ok(retain),
+        Err(pending) => pending,
+    };
+    let budget = crate::project_reads::rewarm_wait_budget(remaining, pending.retry_after)
+        .ok_or(CallableCodeCursorError::Unavailable)?;
+    let waiting = Arc::clone(store);
+    match native_runtime::spawn_blocking(move || {
+        waiting.await_rewarm_and_retain_for(budget, requirement)
+    })
+    .await
+    {
+        Ok(Ok(retain)) => Ok(retain),
+        Ok(Err(_pending)) => Err(CallableCodeCursorError::Unavailable),
+        Err(error) => {
+            tracing::warn!(
+                event = "code_graph_rewarm_wait_failed",
+                %error,
+                "a callable's graph re-warm wait did not finish"
+            );
+            Err(CallableCodeCursorError::Unavailable)
+        }
+    }
+}
+
 /// Whether `seed` names a symbol `latest` serves, read once the engine is
 /// resident. A malformed seed is not served; the query refuses it as invalid.
 async fn seed_is_served(
@@ -1998,12 +2015,12 @@ async fn seed_is_served(
     let Ok(seed) = typed::<SymbolOccurrenceId>(seed) else {
         return Ok(false);
     };
+    let engine_retain =
+        await_callable_rewarm(store, CodeGraphReadinessRequirement::Engine, budget).await?;
     let probing = Arc::clone(store);
     let generation = latest.metadata().manifest().generation_id.clone();
     native_runtime::spawn_blocking(move || {
-        let _engine = probing
-            .await_rewarm_and_retain_for(budget, CodeGraphReadinessRequirement::Engine)
-            .map_err(|_| CallableCodeCursorError::Unavailable)?;
+        let _engine_retain = engine_retain;
         let cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation> =
             Arc::new(tracedecay_graph_db::NeverCancelled);
         probing
@@ -4500,6 +4517,22 @@ mod tests {
         assert_eq!(
             generation_resolution_wait_from_remaining(Duration::from_secs(90)),
             MAX_GENERATION_RESOLUTION_WAIT
+        );
+    }
+
+    #[test]
+    fn slow_callable_rewarm_reserves_time_for_seed_and_catalog_reads() {
+        let available = generation_resolution_wait_from_remaining(Duration::from_secs(10));
+        assert_eq!(available, Duration::from_secs(9));
+        assert_eq!(
+            crate::project_reads::rewarm_wait_budget(available, Duration::from_secs(17)),
+            None,
+            "a measured 17-second warm must not occupy a 10-second MCP dispatch"
+        );
+        assert_eq!(
+            crate::project_reads::rewarm_wait_budget(available, Duration::from_secs(2)),
+            Some(Duration::from_millis(4_500)),
+            "a short warm retains a bounded wait and leaves response time"
         );
     }
 
