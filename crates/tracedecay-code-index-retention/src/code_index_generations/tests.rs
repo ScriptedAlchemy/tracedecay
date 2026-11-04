@@ -1658,7 +1658,10 @@ fn unverified_unreferenced_artifacts_do_not_block_other_retention() {
     assert!(!valid_path.exists(), "verified orphan is reclaimed");
     assert!(damaged_path.is_file(), "damaged orphan is preserved");
     assert!(unknown_path.is_file(), "unrecognized data is preserved");
-    assert!(referenced_path.is_file(), "referenced artifact remains live");
+    assert!(
+        referenced_path.is_file(),
+        "referenced artifact remains live"
+    );
 }
 
 /// A text-artifact receipt is read only by recovery of its own journal, so a
@@ -2943,10 +2946,25 @@ fn metadata_only_artifact_census_does_not_hash_unlink_evidence() {
     )
     .expect("metadata census uses bounded filename/type/size identity");
     assert_eq!(metadata_only.collectable_text_artifacts.len(), 1);
-    let full = plan_code_generation_retention(store.path(), &BTreeSet::new());
+    let full = plan_code_generation_retention(store.path(), &BTreeSet::new())
+        .expect("a damaged orphan must not veto unrelated verified retention");
     assert!(
-        matches!(full, Err(CodeGenerationRetentionErrorV1::UnsafeState(_))),
-        "only full verification may trust the content address for unlinking"
+        full.collectable_text_artifacts.is_empty(),
+        "full verification must exclude a tampered content address from unlinking"
+    );
+    let report = execute_code_generation_retention(
+        store.path(),
+        full,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(14),
+        None,
+    )
+    .expect("apply verified retention without deleting the damaged orphan");
+    assert!(report.deleted_text_artifacts.is_empty());
+    assert_eq!(
+        std::fs::read(&orphan_path).expect("damaged orphan remains"),
+        b"evil",
+        "preservation must leave the original damaged bytes untouched"
     );
 }
 
