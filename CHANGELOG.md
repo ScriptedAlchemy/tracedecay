@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.98](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.97...v1.0.0-beta.98) (2026-11-04)
+
+
+### Bug Fixes
+
+* **code-index:** reserve settlement time across callable rewarm probes ([#4750](https://github.com/ScriptedAlchemy/tracedecay/issues/4750)) ([2c408f7](https://github.com/ScriptedAlchemy/tracedecay/commit/2c408f7ca5e4734a44d164878b1eb1d895abdd3a))
+
 ## [1.0.0-beta.97](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.96...v1.0.0-beta.97) (2026-11-04)
 
 
