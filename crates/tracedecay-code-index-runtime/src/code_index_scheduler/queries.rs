@@ -4539,7 +4539,7 @@ mod tests {
     }
 
     #[test]
-    fn callable_rewarm_admission_bounds_blocked_zero_budget_probes() {
+    fn callable_rewarm_admission_reserves_response_settlement() {
         assert_eq!(
             callable_rewarm_admission_budget(Duration::from_secs(9)),
             Some(Duration::from_millis(4_500)),
@@ -4548,7 +4548,7 @@ mod tests {
         assert_eq!(
             callable_rewarm_admission_budget(Duration::from_nanos(1)),
             None,
-            "a sub-nanosecond wait cannot admit a background probe"
+            "a one-nanosecond deadline cannot admit a background probe"
         );
     }
 
