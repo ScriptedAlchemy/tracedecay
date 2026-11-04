@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.97](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.96...v1.0.0-beta.97) (2026-11-04)
+
+
+### Features
+
+* consolidate pending storage, search, and session changes ([d2279cf](https://github.com/ScriptedAlchemy/tracedecay/commit/d2279cf27a2933a22e2211a0dc311e7353c2ed95))
+* consolidate pending TraceDecay changes ([cbe2de3](https://github.com/ScriptedAlchemy/tracedecay/commit/cbe2de35f9b7a9ed3b184db9253fdd44c540a101))
+
+
+### Bug Fixes
+
+* **accounting:** commit token savings through the project store ([#4698](https://github.com/ScriptedAlchemy/tracedecay/issues/4698)) ([16f4368](https://github.com/ScriptedAlchemy/tracedecay/commit/16f436862d9d5cda5c8faf9e532b6f4cc15c4842))
+* **accounting:** distinguish display read failure from write admission ([0a9801f](https://github.com/ScriptedAlchemy/tracedecay/commit/0a9801f5395663504f74127fd44649e35bfae92b))
+* **accounting:** integrate durable baseline recovery ([0d28b76](https://github.com/ScriptedAlchemy/tracedecay/commit/0d28b76d32e49910a4785b91e7fa1e3d9f7a8b41))
+* **accounting:** persist savings after baseline read failure ([590208a](https://github.com/ScriptedAlchemy/tracedecay/commit/590208a7bb470f719e2b7f55213bb2433bcb8def))
+* **build:** preserve code-index runtime recursion budget ([#4703](https://github.com/ScriptedAlchemy/tracedecay/issues/4703)) ([9f2e64b](https://github.com/ScriptedAlchemy/tracedecay/commit/9f2e64b42b19d8f8756eda1b641caf606383d91c))
+* **ci:** reduce Bazel runner disk usage across workflows ([10fbc92](https://github.com/ScriptedAlchemy/tracedecay/commit/10fbc92af953c1e157e48811c5b313eef9a75b1a))
+* **ci:** repair composite action metadata after runner changes ([468b03c](https://github.com/ScriptedAlchemy/tracedecay/commit/468b03c8044d2d324de6f54705f3f121d2acf509))
+* **cli:** clarify readiness and configuration refusals ([#4702](https://github.com/ScriptedAlchemy/tracedecay/issues/4702)) ([32afec6](https://github.com/ScriptedAlchemy/tracedecay/commit/32afec6f67644f4c9a9e777f757709557367b23a))
+* **code-index:** bound callable graph rewarm waits ([b484bc8](https://github.com/ScriptedAlchemy/tracedecay/commit/b484bc84182efadc20c98c96bd105a64efdf7a7b))
+* **doctor:** surface retained graph corruption verdicts ([#4700](https://github.com/ScriptedAlchemy/tracedecay/issues/4700)) ([adbf0e3](https://github.com/ScriptedAlchemy/tracedecay/commit/adbf0e391bd7d2e378916f98636a8d787dfb6dd4))
+* **evals:** bind HTTP resumes to experiment identity ([#4707](https://github.com/ScriptedAlchemy/tracedecay/issues/4707)) ([ea6fffa](https://github.com/ScriptedAlchemy/tracedecay/commit/ea6fffa848add0dc1dc7b4bbc36582f524686efb))
+* **global-db:** classify drifted observation attachments before GC ([3fa508f](https://github.com/ScriptedAlchemy/tracedecay/commit/3fa508f2468366b67d5cf00b12f17f6a8c167ec5))
+* **graph:** keep rewarm probes off async workers ([76e784c](https://github.com/ScriptedAlchemy/tracedecay/commit/76e784c49a0eea687aa8155c3b85964ee09bc8a6))
+* **graph:** return warming before rewarm dispatch deadline ([#4709](https://github.com/ScriptedAlchemy/tracedecay/issues/4709)) ([ba5f8dc](https://github.com/ScriptedAlchemy/tracedecay/commit/ba5f8dc0856270453d82fec68e888c6775a5a887))
+* **lcm:** retain short data URI replay representations ([f2f111f](https://github.com/ScriptedAlchemy/tracedecay/commit/f2f111f3f7fb436d2ba739d9382414fc033e284e))
+* **lcm:** stop idle scoped retention from requeuing itself ([0343b7c](https://github.com/ScriptedAlchemy/tracedecay/commit/0343b7ccc5fa2ecf9cce5379e776e6c40e2cdfdd))
+* **project:** adopt moved stores by explicit identity ([#4701](https://github.com/ScriptedAlchemy/tracedecay/issues/4701)) ([ba90ba5](https://github.com/ScriptedAlchemy/tracedecay/commit/ba90ba57eb65530cb70acb1d9541b9ac3373e08d))
+* **release:** exclude unapproved beta.97 from consolidation ([0b93806](https://github.com/ScriptedAlchemy/tracedecay/commit/0b93806e1521eebcb81274515ee40cbe4f9f47bb))
+* **retention:** publish durable sources for comparable read probes ([e28de39](https://github.com/ScriptedAlchemy/tracedecay/commit/e28de3985e248a252f53d9913056e5ecb81f7c42))
+* **scout:** separate prompt inference from observed actions ([#4699](https://github.com/ScriptedAlchemy/tracedecay/issues/4699)) ([2388749](https://github.com/ScriptedAlchemy/tracedecay/commit/23887493a2bd75b03117339cad12b21438dcba6b))
+* **scout:** validate complete choice probability contracts ([#4690](https://github.com/ScriptedAlchemy/tracedecay/issues/4690)) ([65ddc06](https://github.com/ScriptedAlchemy/tracedecay/commit/65ddc060db753dfcb13362f3ec3ed5c4c3a006dd))
+* **sessions:** retry temporal publication before summary admission ([50fbef3](https://github.com/ScriptedAlchemy/tracedecay/commit/50fbef3ef38b3cc114a2be39fb2f3d5edeaeea67))
+* **sqlite:** release lost-file pins during health observation ([317f03c](https://github.com/ScriptedAlchemy/tracedecay/commit/317f03c882b00555fb4d1402b7fc63add8ecb738))
+* **storage:** refuse drifted observations before GC trigger repair ([e71ed2d](https://github.com/ScriptedAlchemy/tracedecay/commit/e71ed2dcbc2a30ab0fc6346c27faafdfeaee175b))
+* **typescript:** recheck incomplete configuration inputs ([#4708](https://github.com/ScriptedAlchemy/tracedecay/issues/4708)) ([402628a](https://github.com/ScriptedAlchemy/tracedecay/commit/402628a33e6c56d1355827a29443b1f6ec24e401))
+
+
+### Performance Improvements
+
+* **sessions:** avoid detached Codex dispatch and trace per-rollout phases ([#4706](https://github.com/ScriptedAlchemy/tracedecay/issues/4706)) ([68c1dd5](https://github.com/ScriptedAlchemy/tracedecay/commit/68c1dd55eae6f505a05a0b094559aff2c9f7fb44))
+
 ## [1.0.0-beta.96](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.95...v1.0.0-beta.96) (2026-11-03)
 
 
