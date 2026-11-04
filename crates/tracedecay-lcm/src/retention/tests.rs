@@ -1085,6 +1085,22 @@ async fn restoration_revisits_old_cursor_and_stops_before_exceeding_byte_budget(
 }
 
 #[asupersync::test]
+async fn scoped_single_row_retention_finishes_when_no_lineage_remains() -> Result<(), String> {
+    let store = test_store().await?;
+    let config = LcmRetentionConfig {
+        drop_after_days: None,
+        max_batch_size: 1,
+        ..LcmRetentionConfig::default()
+    };
+    let report = run_apply(&store.conn, &store.storage_root, &config).await?;
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.inlined.eligible, 0);
+    assert_eq!(report.offloaded.eligible, 0);
+    assert!(!report.storage_has_more, "an empty scoped pass must not hot-loop");
+    Ok(())
+}
+
+#[asupersync::test]
 async fn canonical_compaction_commit_denial_preserves_original_inline_body() -> Result<(), String> {
     let store = test_store().await?;
     let content = "complete retained body\n".repeat(1024);

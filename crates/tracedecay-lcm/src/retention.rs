@@ -1094,6 +1094,12 @@ async fn run_inline_offloaded_pass(
                     }
                 }
             }
+        } else if next.durable_through == cursor.durable_through {
+            // No eligible aged row and no later summary lineage to examine.
+            // Reaching the cutoff itself is not pending work, even when a
+            // scoped pass cannot persist the shared cursor.
+            has_more = false;
+            break;
         }
         if next == cursor {
             has_more = false;
@@ -1390,6 +1396,12 @@ async fn run_offload_pass(
                     }
                 }
             }
+        } else if next.durable_through == cursor.durable_through {
+            // No eligible aged row and no later summary lineage to examine.
+            // Reaching the cutoff itself is not pending work, even when a
+            // scoped pass cannot persist the shared cursor.
+            has_more = false;
+            break;
         }
         if next == cursor {
             has_more = false;
