@@ -179,6 +179,7 @@ pub use invariants::{
 pub(crate) use invariants::{ensure_authority_invariants, ensure_fresh_authority_invariants};
 pub use validation::validate_registry_schema_contract;
 pub(crate) use validation::{
-    validate_authority_schema_contract, validate_remote_deletion_schema_contract,
-    validate_session_graph_publication_schema_contract, validate_session_temporal_schema_contract,
+    validate_authority_schema_contract, validate_existing_observation_table,
+    validate_remote_deletion_schema_contract, validate_session_graph_publication_schema_contract,
+    validate_session_temporal_schema_contract,
 };

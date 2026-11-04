@@ -9,7 +9,8 @@ use super::schema_contract::{
     ensure_authority_invariant_schema, ensure_authority_invariants,
     ensure_fresh_authority_invariants, require_foreign_key_audit,
     validate_authority_rows_exhaustive, validate_authority_schema_contract,
-    validate_registry_schema_contract, validate_remote_deletion_schema_contract,
+    validate_existing_observation_table, validate_registry_schema_contract,
+    validate_remote_deletion_schema_contract,
 };
 use super::{
     configuration, git_index_transactions, global_db_operation_error, global_db_operation_message,
@@ -744,6 +745,19 @@ pub async fn ensure_registered_schema_for_admission(
         }
     };
     let is_fresh = configuration_fresh.is_some();
+    // Refuse incompatible existing observation tables before installing
+    // canonical-body GC triggers. Dropping a table also drops its triggers;
+    // a partial trigger inventory must not mask the typed authority reset.
+    if !is_fresh {
+        validate_existing_observation_table(installation)
+            .await
+            .map_err(|error| {
+                tracedecay_domain::errors::TraceDecayError::reset_required(
+                    AUTHORITY_SCHEMA_AUTHORITY,
+                    error.to_string(),
+                )
+            })?;
+    }
     let triggers_intact: Pin<
         Box<dyn Future<Output = tracedecay_domain::errors::Result<bool>> + Send + '_>,
     > = Box::pin(authority_invariant_triggers_intact(installation));

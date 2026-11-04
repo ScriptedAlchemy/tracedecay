@@ -378,6 +378,26 @@ async fn validate_named_tables_and_indexes(
     validate_contracts(conn, &contracts).await
 }
 
+/// Reuse the final authority table contract before recovery work can install
+/// maintenance triggers on an existing incompatible observation table. A
+/// missing table remains installable; its schema has no rows to protect.
+pub(crate) async fn validate_existing_observation_table(
+    conn: &impl QueryExecutor,
+) -> tracedecay_domain::errors::Result<()> {
+    let metadata = read_table_metadata(conn, &["observations"]).await?;
+    let actual = metadata.get("observations").ok_or_else(|| {
+        global_db_operation_message(OPERATION, "observation table inventory is unavailable")
+    })?;
+    if actual.columns.is_empty() {
+        return Ok(());
+    }
+    let contract = TABLES
+        .iter()
+        .find(|table| table.name == "observations")
+        .ok_or_else(|| global_db_operation_message(OPERATION, "observation table contract is missing"))?;
+    validate_table(contract, actual)
+}
+
 async fn validate_contracts(
     conn: &impl QueryExecutor,
     contracts: &[&Table],
