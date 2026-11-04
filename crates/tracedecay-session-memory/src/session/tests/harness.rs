@@ -230,6 +230,11 @@ impl RegisteredTemporalHarness {
     }
 
     pub(super) async fn seed_quarantined_legacy_fixture(&self) {
+        // The unavailable legacy source is not a canonical inline body. An
+        // inline row with NULL content must reference a verified canonical
+        // body, and the canonical ownership trigger correctly rejects one
+        // without that owner. Keep the untrusted metadata and missing bytes
+        // outside the admitted inline representation.
         self.registered
             .writer_connection()
             .expect("registered writer")
@@ -246,13 +251,25 @@ impl RegisteredTemporalHarness {
                  ) VALUES (
                     'claude', 'message.temporal.legacy', 'session.temporal.legacy',
                     'user', 1, 1, NULL,
-                    'sha256:quarantined', 'inline', NULL,
+                    'sha256:quarantined', 'external', 'legacy-quarantined-unavailable',
                     'quarantined legacy record',
                     '{\"payload_access\":\"quarantined\",\"migration\":\"legacy-unsanitized\",\"legacy_preview\":\"sk-proj-private-canary\"}'
                  );",
             )
             .await
             .expect("seed quarantined legacy source");
+        assert_eq!(
+            self.count(
+                "SELECT COUNT(*) FROM lcm_raw_messages
+                 WHERE provider = 'claude' AND message_id = 'message.temporal.legacy'
+                   AND storage_kind = 'external' AND content IS NULL
+                   AND payload_ref = 'legacy-quarantined-unavailable'
+                   AND instr(metadata_json, 'sk-proj-private-canary') > 0",
+            )
+            .await,
+            1,
+            "the legacy canary must remain stored but unavailable to full-text readers"
+        );
     }
 
     /// Reopens the profile sessions store through the registry, so a test can
