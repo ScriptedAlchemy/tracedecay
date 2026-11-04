@@ -1,65 +1,297 @@
-"""Run noul configs against a decision server over HTTP; writes results/<tag>_<config>.json.
+"""Run noul configurations against an HTTP decision server.
 
-usage: run_http.py --url http://127.0.0.1:8009/v1/systemone --tag kev4b [--subset subset.json] [--send-model kev-latest] CONFIG ...
-CONFIG in A_noul_prompt, B_noul_text, B2_noul_text_promptfirst (same states and questions as run.py)."""
-import argparse, hashlib, json, os, sys, time, urllib.request
+Pass --server-config with a JSON object declaring checkpoint, server_revision,
+backend, dtype, and temperature. These are operator-supplied provenance, not
+remote attestation. Change the declaration whenever the serving setup changes.
+Only an exact experiment identity may resume an interrupted .partial output.
+See HTTP_RUNNER.md for invocation and provenance limits.
+"""
+import argparse
+import hashlib
+import json
+import math
+import os
+import re
+import secrets
+import sys
+import time
+import urllib.request
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from common import *
+from common import noul_questions, prompt_only, text_window
 
-STATES = {"A_noul_prompt": prompt_only, "B_noul_text": text_window,
-          "B2_noul_text_promptfirst": lambda c: text_window(c, prompt_first=True)}
+STATES = {
+    "A_noul_prompt": prompt_only,
+    "B_noul_text": text_window,
+    "B2_noul_text_promptfirst": lambda c: text_window(c, prompt_first=True),
+}
+
+
+def digest(value):
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, allow_nan=False).encode("utf-8")
+    ).hexdigest()
+
+
+def request_bytes(body):
+    # Preserve question and request-field order in both HTTP and resume evidence.
+    return json.dumps(body, allow_nan=False).encode("utf-8")
+
+
+def publish_sample(path, serialized):
+    """Publish a completely rendered sample without clobbering an existing one.
+
+    Same-directory staging avoids exposing a partial sample after a write error;
+    linking the completed file keeps the original exclusive-create behavior.
+    """
+    directory = os.path.dirname(os.path.abspath(path))
+    # mkstemp forces mode 0600. Match open(path, "x") by applying the
+    # process umask at creation without changing the process-wide umask.
+    staged = os.path.join(directory, f".noul-sample-{secrets.token_hex(16)}")
+    descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            output.write(serialized)
+        try:
+            os.link(staged, path)
+        except FileExistsError:
+            # A dangling symlink occupies the pathname but exists() says
+            # false. Do not treat that unusable capture as already published.
+            if not os.path.isfile(path):
+                raise ValueError(f"sample path exists but is not a regular file: {path}")
+    finally:
+        os.unlink(staged)
+
 
 def post(url, body, timeout=1800):
-    req = urllib.request.Request(url, json.dumps(body).encode(), {"content-type": "application/json"})
-    t = time.perf_counter()
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        out = json.loads(r.read())
-    return out, (time.perf_counter() - t) * 1000
+    req = urllib.request.Request(
+        url, request_bytes(body), {"content-type": "application/json"}
+    )
+    started = time.perf_counter()
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        out = json.loads(response.read())
+    return out, (time.perf_counter() - started) * 1000
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--url", required=True); ap.add_argument("--tag", required=True)
-    ap.add_argument("--subset"); ap.add_argument("--send-model")
+
+def load_server_config(path):
+    with open(path, encoding="utf-8") as source:
+        config = json.load(source)
+    if not isinstance(config, dict):
+        raise ValueError("--server-config must contain a JSON object")
+    for field in ("checkpoint", "server_revision", "backend", "dtype"):
+        value = config.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"--server-config requires a nonempty {field}")
+    temperature = config.get("temperature")
+    if (isinstance(temperature, bool)
+            or not isinstance(temperature, (int, float))
+            or not math.isfinite(temperature) or temperature < 0):
+        raise ValueError("--server-config requires a finite nonnegative temperature")
+    # Reject non-JSON numerical values in additional serving settings as well.
+    digest(config)
+    return config
+
+
+def probabilities(values, questions):
+    if not isinstance(values, dict) or set(values) != set(questions):
+        raise ValueError("noul probabilities must cover exactly the requested questions")
+    for value in values.values():
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or not 0 <= value <= 1):
+            raise ValueError("noul probabilities must be finite numbers in [0, 1]")
+    return values
+
+
+def calibrated(probability, temperature):
+    if probability in (0, 1):
+        return probability
+    log_odds = (math.log(probability) - math.log1p(-probability)) / temperature
+    if log_odds >= 0:
+        return 1 / (1 + math.exp(-log_odds))
+    exp_odds = math.exp(log_odds)
+    return exp_odds / (1 + exp_odds)
+
+
+def serialize_result(row, questions, temperature):
+    """Admit fresh and resumed rows before any durable output is changed."""
+    probabilities(row.get("probs"), questions)
+    for field in ("ms", "server_ms", "input_tokens", "state_tokens", "dropped"):
+        if field not in row:
+            raise ValueError(f"result row is missing {field} for {row.get('id')}")
+        value = row[field]
+        if field != "ms" and value is None:
+            continue  # Omitted server telemetry is unknown, not a measured zero.
+        if field in ("input_tokens", "state_tokens", "dropped"):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{field} must be a nonnegative integer")
+        elif (isinstance(value, bool) or not isinstance(value, (int, float))
+              or value < 0 or (isinstance(value, float) and not math.isfinite(value))):
+            raise ValueError(f"{field} must be a finite nonnegative number")
+    if temperature is None:
+        if "probs_raw" in row:
+            raise ValueError("uncalibrated result must not contain raw probabilities")
+    else:
+        raw = probabilities(row.get("probs_raw"), questions)
+        if row["probs"] != {key: calibrated(value, temperature) for key, value in raw.items()}:
+            raise ValueError("calibrated probabilities disagree with raw probabilities")
+    # json.loads accepts NaN/Infinity, including in extra nested fields. Reject
+    # them while validating the partial log, not after opening the final file.
+    return json.dumps(row, allow_nan=False)
+
+
+def resume_rows(partial, header, cases, requests, questions, temperature):
+    """Validate the whole existing log before appending or issuing HTTP work."""
+    first = partial.readline()
+    if not first.endswith("\n") or json.loads(first) != header:
+        raise ValueError("partial output belongs to another or unrecorded experiment; use a new tag")
+    done = {}
+    for line_number, line in enumerate(partial, 2):
+        if not line.endswith("\n"):
+            raise ValueError(f"partial output has an incomplete row at line {line_number}")
+        row = json.loads(line)
+        case_id = row.get("id") if isinstance(row, dict) else None
+        if not isinstance(case_id, str) or case_id not in cases or case_id in done:
+            raise ValueError(f"partial output has an unknown or duplicate case at line {line_number}")
+        case = cases[case_id]
+        if (row.get("request_sha256") != requests[case_id][1]
+                or row.get("labels") != case["labels"]
+                or row.get("context_needed") != case["context_needed"]):
+            raise ValueError(f"partial output has mismatched case evidence for {case_id}")
+        serialize_result(row, questions, temperature)
+        done[case_id] = row
+    return done
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--url", required=True)
+    ap.add_argument("--tag", required=True)
+    ap.add_argument("--server-config", required=True, help="JSON file with immutable serving identity; omit credentials")
+    ap.add_argument("--subset")
+    ap.add_argument("--send-model")
     ap.add_argument("--sample-out", help="write the first raw response here")
-    ap.add_argument("--noul-temperature", type=float, help="apply softmax(log p / T) to each noul (released preset T when the server runs uncalibrated); raw kept as probs_raw")
-    ap.add_argument("configs", nargs="+")
-    a = ap.parse_args()
-    ds = load(os.path.join(HERE, "dataset.json"))
-    sha = hashlib.sha256(open(os.path.join(HERE, "dataset.json"), "rb").read()).hexdigest()
-    if a.subset:
-        keep = set(json.load(open(a.subset))["ids"]); ds = [c for c in ds if c["id"] in keep]
-    qs = noul_questions()
+    ap.add_argument("--noul-temperature", type=float, help="client calibration temperature; raw probabilities are retained")
+    ap.add_argument("configs", nargs="+", choices=tuple(STATES))
+    args = ap.parse_args(argv)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.tag):
+        raise ValueError("--tag must be a filename component starting with a letter or digit")
+    if (args.noul_temperature is not None
+            and (not math.isfinite(args.noul_temperature) or args.noul_temperature <= 0)):
+        raise ValueError("--noul-temperature must be finite and greater than zero")
+    server_config = load_server_config(args.server_config)
+    if args.sample_out and os.path.lexists(args.sample_out) and not os.path.isfile(args.sample_out):
+        raise ValueError(f"sample path exists but is not a regular file: {args.sample_out}")
+    with open(os.path.join(HERE, "dataset.json"), "rb") as source:
+        dataset_bytes = source.read()
+    dataset = json.loads(dataset_bytes)
+    dataset_sha = hashlib.sha256(dataset_bytes).hexdigest()
+    case_ids = [case["id"] for case in dataset]
+    if any(not isinstance(case_id, str) for case_id in case_ids) or len(set(case_ids)) != len(case_ids):
+        raise ValueError("dataset must have unique string case IDs")
+    if args.subset:
+        with open(args.subset, encoding="utf-8") as source:
+            ids = json.load(source)["ids"]
+        if (not isinstance(ids, list) or not ids
+                or any(not isinstance(case_id, str) for case_id in ids)
+                or len(set(ids)) != len(ids) or not set(ids).issubset(case_ids)):
+            raise ValueError("subset must name unique, known case IDs")
+        keep = set(ids)
+        dataset = [case for case in dataset if case["id"] in keep]
+    if not dataset:
+        raise ValueError("the experiment must contain at least one case")
+    questions = noul_questions()
+    cases = {case["id"]: case for case in dataset}
     os.makedirs(os.path.join(HERE, "results"), exist_ok=True)
-    for cfg in a.configs:
-        name = "%s_%s" % (a.tag, cfg); path = os.path.join(HERE, "results", name + ".json")
-        done = {}
-        if os.path.exists(path + ".partial"):
-            for line in open(path + ".partial"):
-                r = json.loads(line); done[r["id"]] = r
-        part = open(path + ".partial", "a")
-        for i, c in enumerate(ds):
-            if c["id"] in done: continue
-            body = {"state": STATES[cfg](c), "questions": qs}
-            if a.send_model: body["model"] = a.send_model
-            resp, ms = post(a.url, body)
-            if a.sample_out and not os.path.exists(a.sample_out):
-                json.dump({"request": body, "response": resp}, open(a.sample_out, "w"), indent=1)
-            ans = resp["answers"]
-            srv_ms = resp.get("latency_ms") or (resp.get("timing") or {}).get("inference_ms")
-            rec = {"id": c["id"], "labels": c["labels"], "context_needed": c["context_needed"], "ms": ms, "server_ms": srv_ms,
-                   "state_tokens": resp.get("usage", {}).get("input_tokens", 0), "dropped": 0,
-                   "probs": {k: float(v["noul"]) for k, v in ans.items()}}
-            if a.noul_temperature:
-                T = a.noul_temperature; rec["probs_raw"] = rec["probs"]
-                rec["probs"] = {k: (p ** (1 / T)) / (p ** (1 / T) + (1 - p) ** (1 / T)) if 0 < p < 1 else p for k, p in rec["probs_raw"].items()}
-            part.write(json.dumps(rec) + "\n"); part.flush(); done[c["id"]] = rec
-            print(cfg, i, c["id"], "%.0f ms" % ms, flush=True)
-        rows = [done[c["id"]] for c in ds]
-        json.dump({"config": name, "dataset_sha256": sha, "noul_temperature": a.noul_temperature, "subset": a.subset and os.path.basename(a.subset), "rows": rows},
-                  open(path, "w"), indent=1)
-        os.remove(path + ".partial")
+    for cfg in args.configs:
+        name = f"{args.tag}_{cfg}"
+        path = os.path.join(HERE, "results", name + ".json")
+        if os.path.exists(path):
+            raise ValueError(f"completed output already exists: {path}; use a new tag")
+        requests = {}
+        for case in dataset:
+            body = {"state": STATES[cfg](case), "questions": questions}
+            if args.send_model:
+                body["model"] = args.send_model
+            requests[case["id"]] = (body, hashlib.sha256(request_bytes(body)).hexdigest())
+        identity = {
+            "version": 2,
+            "config": cfg,
+            "dataset_sha256": dataset_sha,
+            "case_ids": list(cases),
+            "requests_sha256": digest([[key, value[1]] for key, value in requests.items()]),
+            "endpoint_sha256": hashlib.sha256(args.url.encode("utf-8")).hexdigest(),
+            "requested_model": args.send_model,
+            "noul_temperature": args.noul_temperature,
+            "server_config": server_config,
+        }
+        header = {"experiment": identity, "experiment_sha256": digest(identity)}
+        partial_path = path + ".partial"
+        try:
+            partial = open(partial_path, "x+", encoding="utf-8")
+            created = True
+        except FileExistsError:
+            partial = open(partial_path, "r+", encoding="utf-8")
+            created = False
+        with partial:
+            if created:
+                partial.write(json.dumps(header, allow_nan=False) + "\n")
+                partial.flush()
+                done = {}
+            else:
+                done = resume_rows(partial, header, cases, requests, questions, args.noul_temperature)
+            for index, case in enumerate(dataset):
+                if case["id"] in done:
+                    continue
+                body, request_sha = requests[case["id"]]
+                response, ms = post(args.url, body)
+                answers = response["answers"]
+                probs = probabilities({key: value["noul"] for key, value in answers.items()}, questions)
+                server_ms = response.get("latency_ms")
+                if server_ms is None:
+                    server_ms = (response.get("timing") or {}).get("inference_ms")
+                usage = response.get("usage")
+                if usage is None:
+                    usage = {}
+                if not isinstance(usage, dict):
+                    raise ValueError("response usage must be an object or null")
+                row = {
+                    "id": case["id"], "request_sha256": request_sha,
+                    "labels": case["labels"], "context_needed": case["context_needed"],
+                    "ms": ms, "server_ms": server_ms,
+                    "input_tokens": usage.get("input_tokens"),
+                    "state_tokens": usage.get("state_tokens"),
+                    "dropped": usage.get("state_tokens_dropped"), "probs": probs,
+                }
+                if args.noul_temperature is not None:
+                    row["probs_raw"] = probs
+                    row["probs"] = {key: calibrated(value, args.noul_temperature) for key, value in probs.items()}
+                # Refuse malformed row and raw-sample data before publishing
+                # either. A non-finite response must not leave a sample file
+                # that a later valid retry mistakes for a completed capture.
+                serialized_row = serialize_result(row, questions, args.noul_temperature)
+                if args.sample_out and not os.path.exists(args.sample_out):
+                    serialized_sample = json.dumps(
+                        {"request": body, "response": response}, indent=1, allow_nan=False
+                    )
+                    publish_sample(args.sample_out, serialized_sample)
+                partial.write(serialized_row + "\n")
+                partial.flush()
+                done[case["id"]] = row
+                print(cfg, index, case["id"], "%.0f ms" % ms, flush=True)
+        # Never overwrite another completed experiment, even with the same tag.
+        with open(path, "x", encoding="utf-8") as output:
+            json.dump({"config": name, "dataset_sha256": dataset_sha,
+                       "noul_temperature": args.noul_temperature,
+                       "subset": args.subset and os.path.basename(args.subset),
+                       **header, "rows": [done[case_id] for case_id in cases]},
+                      output, indent=1, allow_nan=False)
+        os.remove(partial_path)
         print(cfg, "done", flush=True)
 
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (OSError, ValueError, KeyError) as error:
+        raise SystemExit(str(error)) from error
