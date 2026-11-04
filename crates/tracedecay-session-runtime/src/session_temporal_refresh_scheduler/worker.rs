@@ -43,7 +43,7 @@ const HISTORY_IDLE_RECHECK_INTERVAL: Duration = Duration::from_mins(1);
 // During terminal backoff a minute-by-minute timer would schedule suppressed
 // history passes, which can still wake unrelated summary convergence. External
 // projection/cancellation wakes remain independently selectable.
-fn history_idle_recheck_at(now: Instant, blocked_until: Option<Instant>) -> Instant {
+pub(super) fn history_idle_recheck_at(now: Instant, blocked_until: Option<Instant>) -> Instant {
     let discovery_at = now + HISTORY_IDLE_RECHECK_INTERVAL;
     blocked_until.map_or(discovery_at, |until| until.max(discovery_at))
 }
