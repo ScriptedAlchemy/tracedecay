@@ -472,12 +472,12 @@ impl SealedGenerationStore {
         )
     }
 
-    /// Best-effort teardown used only when the generation is quarantined or
-    /// retired, or before staging rows become releasable. A sealed-only head
-    /// is never discarded through this path while it remains serveable.
-    fn discard(&self) {
+    /// Retirement tears down the reader and requires a successful artifact
+    /// unlink. A failed unlink remains a typed error for the durable cleanup
+    /// owner to retry; a sealed-only live head never enters this path.
+    fn discard(&self) -> Result<(), GraphDbError> {
         let _ = self.close();
-        remove_sealed_directory(&self.directory);
+        remove_sealed_directory_checked(&self.directory)
     }
 }
 
@@ -751,15 +751,28 @@ pub(crate) fn sweep_abandoned_row_spills(database_path: &Path) {
     }
 }
 
-fn remove_sealed_directory(directory: &Path) {
+fn remove_sealed_directory_checked(directory: &Path) -> Result<(), GraphDbError> {
     match std::fs::remove_dir_all(directory) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => {
-            // Retirement re-runs are idempotent; a leaked directory is
-            // re-collected on the next retirement or rebuild of this
-            // generation and never serves reads without a matching receipt.
-        }
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(sealed_store_io_failure(
+            "sealed directory removal failed",
+            error,
+        )),
+    }
+}
+
+/// Staging and invalid-artifact cleanup are best effort. Retiring an accepted
+/// replay instead uses the checked path, so a failed unlink cannot be reported
+/// as a completed retirement and lose its durable retry ownership.
+fn remove_sealed_directory(directory: &Path) {
+    if let Err(error) = remove_sealed_directory_checked(directory) {
+        tracing::warn!(
+            event = "sealed_artifact_cleanup_deferred",
+            path = %directory.display(),
+            %error,
+            "sealed artifact cleanup did not complete"
+        );
     }
 }
 
@@ -1657,30 +1670,31 @@ impl GraphDb {
     /// Retires the sealed artifact for `locator`: uninstalls the reader and
     /// deletes its directory. Idempotent, and never touches staging rows.
     #[tracing::instrument(name = "graph_db.sealed_store.retire", level = "trace", skip_all)]
-    pub(crate) fn retire_sealed_generation_store(&self, locator: &GenerationLocator) {
+    pub(crate) fn retire_sealed_generation_store(
+        &self,
+        locator: &GenerationLocator,
+    ) -> Result<(), GraphDbError> {
         let removed = self
             .inner
             .sealed_generations
             .write()
-            .ok()
-            .and_then(|mut sealed| sealed.remove(locator));
+            .map_err(|_| GraphDbError::unavailable("sealed generation registry lock poisoned"))?
+            .remove(locator);
         if let Some(store) = removed {
-            store.discard();
-            return;
+            return store.discard();
         }
-        // No installed reader: still delete any on-disk artifact so a
-        // retired generation leaves nothing behind.
+        // A removed in-memory reader is not necessary for the artifact to
+        // exist on disk. Unlink by exact locator even after a prior failed
+        // retirement; a durable tombstone can then retry without the reader.
         let Some(reopen) = self.inner.reopen.as_ref() else {
-            return;
+            return Ok(());
         };
         let Some(database_path) = reopen.config.path.as_ref() else {
-            return;
+            return Ok(());
         };
-        let Ok(physical_namespace) = locator.physical_namespace() else {
-            return;
-        };
+        let physical_namespace = locator.physical_namespace()?;
         let root = sealed_store_root(database_path);
-        remove_sealed_directory(&sealed_generation_directory(&root, &physical_namespace));
+        remove_sealed_directory_checked(&sealed_generation_directory(&root, &physical_namespace))
     }
 }
 

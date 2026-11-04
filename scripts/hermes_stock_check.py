@@ -10,16 +10,15 @@ wrote the plugin into a throwaway profile:
 
 Asserts the surfaces stock Hermes actually exposes:
   1. the general PluginManager loads + enables the plugin (hook, command),
-  2. the context engine registers and is selected via `context.engine`,
+  2. Hermes keeps its native compressor while LCM readers register as tools,
   3. the memory provider is discovered via `memory.provider` config
      (stock routes providers through plugins/memory, not PluginContext),
   4. real tool dispatch round-trips through the tracedecay binary
-     (memory facts, LCM status/preflight/compress, graph status).
+     (memory facts, LCM status/retrieval, graph status).
 
-Everything runs offline: no model calls (compress stays below threshold).
+Everything runs offline: compression pressure checks do not call a model.
 """
 
-import copy
 import json
 import os
 import subprocess
@@ -88,7 +87,7 @@ def assert_tool_dispatch_success_when_ready(dispatch, *, timeout_seconds=15):
 
 
 def assert_lcm_status_argv(argv, project_root):
-    """Validate the canonical CLI route used by the stock context engine."""
+    """Validate the canonical CLI route used by LCM retrieval."""
     assert len(argv) >= 6, argv
     assert argv[1] == "tool", argv
     name_index = 2
@@ -162,16 +161,15 @@ def main():
     assert managed_view.get("success") is True, managed_view
     assert "Hermes can load this exported managed skill" in managed_view.get("content", "")
     ok("plugin-native managed skills resolve through qualified skill_view")
-    # Code-graph / memory / transcript tools register unconditionally; only
-    # the live-ingest LCM verbs (whose schemas take the in-memory messages
-    # list) depend on the context_engine_tool_handlers_receive_messages
-    # capability, which stock does not advertise.
+    # Retrieval uses stored transcripts, so all LCM readers register through
+    # stock Hermes without live-message forwarding or context-engine takeover.
     registered = set(loaded.tools_registered)
     assert "tracedecay_search" in registered, sorted(registered)
     assert "tracedecay_context" in registered, sorted(registered)
     assert "tracedecay_message_search" in registered, sorted(registered)
     assert "tracedecay_lcm_compress" not in registered, sorted(registered)
     assert "tracedecay_lcm_preflight" not in registered, sorted(registered)
+    assert set(plugin.LCM_TOOL_ALIASES).issubset(registered), sorted(registered)
     # memory.provider is tracedecay here, so the provider-owned fact trio
     # must not register as direct duplicates.
     assert "tracedecay_fact_store" not in registered, sorted(registered)
@@ -179,7 +177,7 @@ def main():
     assert "tracedecay_fact_feedback" not in registered, sorted(registered)
     assert "tracedecay_memory_status" not in registered, sorted(registered)
     ok(
-        "code-graph tools register on stock; LCM + provider-owned tools stay gated",
+        "code-graph and LCM readers register on stock; provider-owned tools deduplicate",
         f"{len(registered)} tools",
     )
     from model_tools import get_tool_definitions
@@ -239,50 +237,37 @@ def main():
     )
     ok("TraceDecay tools participate in stock progressive tool discovery")
 
-    # 2. Context engine: registered through the plugin and selected the way
-    #    stock agent/agent_init.py selects it (config-driven, plugin fallback).
+    # 2. Exercise the real host selector and compressor. Registering a no-op
+    # plugin engine here would silently disable native automatic compaction.
     from hermes_cli.config import load_config
+    from agent.agent_init import _select_context_engine
+    from agent.context_compressor import ContextCompressor
 
     config = load_config()
-    engine_name = (config.get("context") or {}).get("engine")
-    assert engine_name == "tracedecay", f"context.engine = {engine_name!r}"
-    ok("config.yaml selects context.engine: tracedecay")
+    engine_name = (config.get("context") or {}).get("engine") or "compressor"
+    assert engine_name == "compressor", f"context.engine = {engine_name!r}"
+    assert get_plugin_context_engine() is None
+    assert _select_context_engine(config) is None
+    compressor = ContextCompressor(
+        model="stock-check-model", config_context_length=128000,
+        threshold_percent=0.75, quiet_mode=True,
+    )
+    assert compressor.should_compress(1000) is False
+    assert compressor.should_compress(compressor.threshold_tokens) is True
+    ok("stock Hermes retains native compaction and responds to context pressure")
 
-    from plugins.context_engine import load_context_engine
+    from tools.registry import registry
 
-    assert load_context_engine(engine_name) is None
-    engine = get_plugin_context_engine()
-    assert engine is not None and engine.name == engine_name
-    from agent.context_engine import ContextEngine
-
-    assert isinstance(engine, ContextEngine)
-    ok("context engine activates via stock plugin fallback")
-
-    engine.initialize(session_id="stock-check-session", project_root=project_root)
-    assert engine.project_root is not None
-    assert os.path.realpath(engine.project_root) == os.path.realpath(project_root)
-    engine.update_model("stock-check-model", 128000)
-    engine.update_from_response({"prompt_tokens": 120, "completion_tokens": 30})
-    assert engine.last_total_tokens == 150
-    ok("stock ContextEngine ABC surface works", "update_from_response")
-
-    # Stock Hermes deep-copies the registered plugin singleton for every
-    # AIAgent. The copy must retain routing/budget state without sharing locks
-    # or live agent references, otherwise Hermes falls back to its compressor.
-    engine.agent = object()
-    cloned_engine = copy.deepcopy(engine)
-    assert cloned_engine is not engine
-    assert cloned_engine._state_lock is not engine._state_lock
-    assert cloned_engine.project_root == engine.project_root
-    assert cloned_engine.context_length == 128000
-    assert cloned_engine.last_total_tokens == 150
-    assert cloned_engine.agent is None
-    ok("context engine deep-copies through the stock Hermes agent contract")
-
-    assert engine.should_compress(1000) is False
-    ok("should_compress gates locally below the tracked threshold")
-    assert engine.should_compress_preflight([], current_tokens=1000) is False
-    ok("should_compress_preflight honors the bool ABC contract")
+    def lcm_status():
+        raw = registry.dispatch(
+            "lcm_status", {}, session_id="stock-check-session", project_root=project_root,
+        )
+        outer = assert_tool_dispatch_success(raw)
+        payloads = plugin._content_json_payloads(outer["content"])
+        assert len(payloads) == 1, outer
+        payload, error = plugin._application_envelope_payload(payloads[0])
+        assert error is None, error
+        return payload
 
     lcm_status_argv = []
     real_subprocess_run = plugin.tools.subprocess.run
@@ -292,10 +277,10 @@ def main():
             return real_subprocess_run(argv, *args, **kwargs)
 
         plugin.tools.subprocess.run = capture_lcm_status_argv
-        status = engine.status()
+        status = lcm_status()
     finally:
         plugin.tools.subprocess.run = real_subprocess_run
-    assert lcm_status_argv, "context engine did not invoke tracedecay_lcm_status"
+    assert lcm_status_argv, "registered reader did not invoke tracedecay_lcm_status"
     status_payload = json.loads(assert_lcm_status_argv(lcm_status_argv[-1], project_root))
     assert status_payload == {
         "provider": "hermes",
@@ -305,7 +290,7 @@ def main():
     assert_decoded_result(status, "status")
     if status.get("status") == "not_ingested":
         assert status.get("store_exists") is False, status
-        ok("lcm_status dispatch round-trips", "not_ingested before compress")
+        ok("lcm_status dispatch round-trips", "not_ingested before transcript sync")
     else:
         assert status.get("session_id") == "stock-check-session", status
         ok("lcm_status dispatch round-trips")
@@ -314,25 +299,6 @@ def main():
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi there"},
     ]
-    compressed = engine.compress(list(messages), current_tokens=50)
-    # Host ABC contract: compress() returns a MESSAGE LIST the host adopts as
-    # the live transcript. Hermes exposes no authentic raw-compression
-    # protocol, so the daemon-owned LCM authority reports host raw compaction
-    # as a typed unavailable capability and the transcript passes through
-    # unchanged (the transcript itself still ingests through the daemon).
-    assert isinstance(compressed, list), type(compressed)
-    assert compressed == messages, compressed
-    result = engine.last_compress_result
-    assert isinstance(result, dict) and result == {
-        "status": "unavailable",
-        "reason": "host_raw_compression_unavailable",
-        "semantic_error": True,
-    }, result
-    ok(
-        "compress returns the unchanged transcript with typed unavailability",
-        f"reason={result.get('reason')}",
-    )
-
     # 3. Memory provider: stock discovers providers via plugins/memory and the
     #    memory.provider config key (the general PluginContext has no
     #    register_memory_provider, so this is the only stock activation path).
@@ -510,14 +476,14 @@ def main():
         "hello", "hi there", session_id="stock-check-session", messages=messages
     )
     ingest_deadline = time.time() + 30
-    ingest_status = engine.status()
+    ingest_status = lcm_status()
     while time.time() < ingest_deadline and (
         not isinstance(ingest_status, dict)
         or ingest_status.get("status") in (None, "not_ingested")
         or _retryable_retained_pressure(ingest_status)
     ):
         time.sleep(0.25)
-        ingest_status = engine.status()
+        ingest_status = lcm_status()
     assert isinstance(ingest_status, dict), ingest_status
     assert ingest_status.get("status") not in (None, "not_ingested"), ingest_status
     grep = call_when_ready(

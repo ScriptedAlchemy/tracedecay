@@ -10,6 +10,10 @@ use super::{LcmError, LcmRawMessage, raw};
 #[cfg(test)]
 use super::util;
 
+#[cfg(test)]
+#[path = "schema/fts_tests.rs"]
+mod fts_tests;
+
 /// Message and raw rows carry no copy of their observation envelope; readers
 /// join it from the `observations` row. Raw rows store their body once.
 /// `snippet_text` and `index_text` are virtual columns computing
@@ -27,9 +31,9 @@ use super::util;
 /// `session_summary_sources` authority (session temporal schema) through
 /// [`SUMMARY_VISIBLE_SQL`]. Session rows LCM creates carry their store's
 /// scope as project fields (version 14). A message whose host content is a
-/// block array is stored as its text (version 15). Version 16 creates every
-/// table, index and trigger in its final shape; no in-place upgrade runs on
-/// an existing store. Older stores require a profile reset.
+/// block array is stored as its text (version 15). Version 16 defines the
+/// current durable schema. Derived index maintenance is refreshed on admission;
+/// older durable schemas require a profile reset.
 pub const LCM_SCHEMA_VERSION: i64 = 16;
 
 /// Visibility rule for every LCM summary read, over a `session_summary_nodes`
@@ -121,9 +125,20 @@ const RAW_FTS_DDL: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS lcm_raw_messages_f
                 'delete', OLD.store_id, OLD.index_text, OLD.role, OLD.kind, OLD.model,
                 OLD.tool_names
             );
-        END;
-    CREATE TRIGGER IF NOT EXISTS lcm_raw_messages_fts_update
-        AFTER UPDATE ON lcm_raw_messages BEGIN
+        END;";
+
+/// Derived index maintenance only runs when an indexed value actually changes.
+/// `index_text` is generated, so comparing its values also covers body and
+/// placeholder updates without treating metadata-only writes as new documents.
+pub const RAW_FTS_UPDATE_TRIGGER_SQL: &str = "CREATE TRIGGER lcm_raw_messages_fts_update
+        AFTER UPDATE ON lcm_raw_messages
+        WHEN OLD.store_id IS NOT NEW.store_id
+          OR OLD.index_text IS NOT NEW.index_text
+          OR OLD.role IS NOT NEW.role
+          OR OLD.kind IS NOT NEW.kind
+          OR OLD.model IS NOT NEW.model
+          OR OLD.tool_names IS NOT NEW.tool_names
+        BEGIN
             INSERT INTO lcm_raw_messages_fts(
                 lcm_raw_messages_fts, rowid, index_text, role, kind, model, tool_names
             )
@@ -134,6 +149,30 @@ const RAW_FTS_DDL: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS lcm_raw_messages_f
             INSERT INTO lcm_raw_messages_fts(rowid, index_text, role, kind, model, tool_names)
             VALUES (NEW.store_id, NEW.index_text, NEW.role, NEW.kind, NEW.model, NEW.tool_names);
         END;";
+
+async fn ensure_raw_fts_update_trigger(conn: &(impl Executor + ?Sized)) -> Result<(), LcmError> {
+    let mut rows = conn
+        .query(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'trigger' AND name = 'lcm_raw_messages_fts_update'",
+            (),
+        )
+        .await?;
+    let existing = match rows.next().await? {
+        Some(row) => Some(row.get::<String>(0)?),
+        None => None,
+    };
+    drop(rows);
+    if existing.as_deref().map(|sql| sql.trim_end_matches(';'))
+        == Some(RAW_FTS_UPDATE_TRIGGER_SQL.trim_end_matches(';'))
+    {
+        return Ok(());
+    }
+    conn.execute_batch("DROP TRIGGER IF EXISTS lcm_raw_messages_fts_update;")
+        .await?;
+    conn.execute_batch(RAW_FTS_UPDATE_TRIGGER_SQL).await?;
+    Ok(())
+}
 
 /// A payload is referenced only by its owner raw row, the
 /// `(provider, message_id)` its metadata names. Payload GC therefore never
@@ -257,7 +296,7 @@ pub async fn ensure_lcm_schema_in_transaction(
     conn: &(impl Executor + ?Sized),
 ) -> Result<(), LcmError> {
     match require_admissible_lcm_schema(conn).await? {
-        LcmSchemaAdmission::Current => return Ok(()),
+        LcmSchemaAdmission::Current => return ensure_raw_fts_update_trigger(conn).await,
         LcmSchemaAdmission::Fresh => {}
     }
 
@@ -379,6 +418,7 @@ pub async fn ensure_lcm_schema_in_transaction(
     ensure_raw_identity_schema(conn).await?;
     ensure_payload_gc_candidates(conn).await?;
     conn.execute_batch(RAW_FTS_DDL).await?;
+    ensure_raw_fts_update_trigger(conn).await?;
     super::summary_convergence::ensure_schema(conn).await?;
     for sql in LCM_STATUS_PERFORMANCE_INDEX_SQL {
         conn.execute_batch(sql).await?;

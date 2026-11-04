@@ -90,6 +90,8 @@ pub(crate) fn recover_deterministically_corrupt_container_with<T>(
         tracing::error!(
             event = "store_corrupt_not_deterministic",
             container = %container.display(),
+            first_fault_fingerprint = %format!("sha256:{}", sha256_hex(first_fault.as_bytes())),
+            second_fault_fingerprint = %format!("sha256:{}", sha256_hex(second_fault.as_bytes())),
             first_fault = %first_fault,
             second_fault = %second_fault,
             "graph container corruption is not deterministic; deletion refused. \
@@ -376,6 +378,14 @@ mod tests {
         );
         for field in [
             format!("container={}", container.display()),
+            format!(
+                "first_fault_fingerprint=sha256:{}",
+                sha256_hex(b"block 18 CRC mismatch")
+            ),
+            format!(
+                "second_fault_fingerprint=sha256:{}",
+                sha256_hex(b"block 7 CRC mismatch")
+            ),
             "first_fault=block 18 CRC mismatch".to_owned(),
             "second_fault=block 7 CRC mismatch".to_owned(),
         ] {

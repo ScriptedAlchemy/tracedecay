@@ -3004,6 +3004,44 @@ fn text_progress_rate_and_eta_require_two_monotonic_committed_samples() {
 }
 
 #[test]
+fn progress_timestamp_never_regresses_within_one_owner() {
+    let generation = CodeGenerationId::new("generation.progress-clock").unwrap();
+    let mut slot = super::super::CodeIndexBuildProgressSlotStateV1::default();
+    let owner = slot.replace_generation(generation.clone());
+
+    let mut first = progress_snapshot_for_generation(&generation, 1);
+    first.last_progress_micros = 500;
+    assert!(slot.publish(&generation, owner, first));
+    let first_epoch = slot.snapshot().unwrap().progress_epoch;
+
+    // This later producer committed more pages but assembled its snapshot
+    // before the earlier publisher took the slot lock.
+    let mut delayed = progress_snapshot_for_generation(&generation, 2);
+    delayed.last_progress_micros = 400;
+    assert!(slot.publish(&generation, owner, delayed));
+    let current = slot.snapshot().unwrap();
+    assert_eq!(current.committed_pages, 2);
+    assert!(current.progress_epoch > first_epoch);
+    assert_eq!(
+        current.last_progress_micros, 500,
+        "last observed progress cannot move backwards within one owner"
+    );
+
+    let mut later = progress_snapshot_for_generation(&generation, 3);
+    later.last_progress_micros = 600;
+    assert!(slot.publish(&generation, owner, later));
+    assert_eq!(slot.snapshot().unwrap().last_progress_micros, 600);
+
+    // Ownership replacement is a new observation sequence, even when the
+    // generation identity is reused. It must not inherit the old timestamp.
+    let replacement_owner = slot.replace_generation(generation.clone());
+    let mut replacement = progress_snapshot_for_generation(&generation, 1);
+    replacement.last_progress_micros = 42;
+    assert!(slot.publish(&generation, replacement_owner, replacement));
+    assert_eq!(slot.snapshot().unwrap().last_progress_micros, 42);
+}
+
+#[test]
 fn progress_owner_epoch_rejects_original_a_after_a_b_a_replacement() {
     let generation_a = CodeGenerationId::new("generation.progress-a").expect("generation A");
     let generation_b = CodeGenerationId::new("generation.progress-b").expect("generation B");

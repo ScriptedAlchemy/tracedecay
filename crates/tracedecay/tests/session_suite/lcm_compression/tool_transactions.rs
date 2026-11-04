@@ -22,7 +22,12 @@ async fn fresh_tail_boundary_keeps_multi_tool_transaction_atomic_and_shrinking()
         Some(400),
     );
     request.messages = with_authoritative_timestamps(messages);
-    request.current_tokens = Some(107);
+    let original_tokens = request
+        .messages
+        .iter()
+        .map(|message| budget_tokens(&message.to_string()))
+        .sum::<i64>();
+    request.current_tokens = Some(original_tokens);
     request.overrides.threshold_tokens = Some(80);
     request.overrides.fresh_tail_count = Some(3);
 
@@ -47,7 +52,81 @@ async fn fresh_tail_boundary_keeps_multi_tool_transaction_atomic_and_shrinking()
             .collect::<Vec<_>>(),
         vec!["call-a", "call-b"]
     );
-    assert!(response.replay_token_estimate < 107);
+    assert!(response.replay_token_estimate < original_tokens);
+}
+
+#[tokio::test]
+async fn tool_arguments_use_token_budget_when_selecting_atomic_replay() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "session-tool-token-budget").await;
+
+    let arguments = json!({"source": "f(x:u32)->u32{x+1};".repeat(256)}).to_string();
+    let cap = budget_tokens(&arguments) / 2;
+    let mut messages = active_multi_tool_transaction();
+    messages[0]["tool_calls"][0]["function"]["arguments"] = json!(arguments);
+    let mut request = limited_compress_request(
+        "cursor",
+        "session-tool-token-budget",
+        provided_summary("unused"),
+        None,
+        None,
+        Some(cap),
+    );
+    request.messages = with_authoritative_timestamps(messages);
+    request.current_tokens = None;
+    request.overrides.fresh_tail_count = Some(3);
+
+    let response = db.lcm_compress(request).await.unwrap();
+
+    assert_eq!(response.reason, "no_backlog_to_compress");
+    assert_eq!(response.summary_nodes_created, 0);
+    assert!(
+        response.replay_messages.is_empty(),
+        "tool arguments exceed the cap, so the whole transaction must be evicted"
+    );
+    assert!(!response.replay_over_budget);
+}
+
+#[tokio::test]
+async fn overflow_recovery_reports_oversized_tool_arguments() {
+    let tmp = TempDir::new().unwrap();
+    let db = open_lcm_db(&tmp).await;
+    insert_session(&db, "cursor", "session-tool-overflow").await;
+
+    let arguments = json!({"source": "f(x:u32)->u32{x+1};".repeat(256)}).to_string();
+    let argument_tokens = budget_tokens(&arguments);
+    let mut messages = active_multi_tool_transaction();
+    messages[0]["tool_calls"][0]["function"]["arguments"] = json!(arguments);
+    ingest_active_messages(&db, "cursor", "session-tool-overflow", messages).await;
+
+    // Recover from the canonical raw history, with no backlog to summarize.
+    // The newest tool transaction must remain intact even when it cannot fit.
+    let mut request = limited_compress_request(
+        "cursor",
+        "session-tool-overflow",
+        provided_summary("unused"),
+        None,
+        None,
+        Some(64),
+    );
+    request.current_tokens = Some(argument_tokens);
+    request.overrides.fresh_tail_count = Some(3);
+
+    let response = db.lcm_compress(request).await.unwrap();
+
+    assert_eq!(response.status, "best_effort");
+    assert_eq!(response.reason, "irreducible_overflow_no_backlog");
+    assert_eq!(response.summary_nodes_created, 0);
+    assert!(response.replay_over_budget);
+    assert!(response.replay_token_estimate >= argument_tokens);
+    assert_eq!(response.replay_messages.len(), 3);
+    assert_eq!(
+        response.replay_messages[0]["tool_calls"][0]["function"]["arguments"],
+        arguments
+    );
+    assert_eq!(response.replay_messages[1]["tool_call_id"], "call-a");
+    assert_eq!(response.replay_messages[2]["tool_call_id"], "call-b");
 }
 
 #[tokio::test]

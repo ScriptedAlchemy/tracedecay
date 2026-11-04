@@ -240,7 +240,8 @@ pub struct ObservationRetentionPhaseReport {
     pub eligible: u64,
     /// Rows actually released (`0` in a dry run).
     pub acted: u64,
-    /// Bytes of payload reclaimed from the database by this pass.
+    /// Logical UTF-8 payload bytes removed, excluding replacement markers.
+    /// Page and file reclamation are measured separately.
     pub bytes_reclaimed: u64,
     /// Oldest governing disposition timestamp among the bounded eligible rows.
     #[serde(default)]
@@ -606,11 +607,9 @@ async fn execute_required(executor: &(impl Executor + ?Sized), sql: &str) -> Res
         .map_err(db_error)
 }
 
-/// Reclaimed bytes for one released column: the original length minus the
-/// compact marker that replaces it (saturating so a payload already smaller
-/// than the marker never underflows).
-fn reclaimed_bytes(original_len: u64, marker: &str) -> u64 {
-    original_len.saturating_sub(marker.len() as u64)
+/// Logical payload reduction across the columns replaced with a marker.
+fn reclaimed_bytes(original_len: u64, marker: &str, marker_columns: u64) -> u64 {
+    original_len.saturating_sub((marker.len() as u64).saturating_mul(marker_columns))
 }
 
 /// One row whose payload a pass selected for release.
@@ -626,6 +625,7 @@ struct PayloadRelease {
     drop_trigger: &'static str,
     create_trigger: &'static str,
     marker: &'static str,
+    marker_columns: u64,
     /// `UPDATE … RETURNING id` over `{ids}` that re-checks each row's
     /// eligibility (`?1` is the marker, `?2` the disposition cutoff).
     update: String,
@@ -673,7 +673,9 @@ async fn run_release_pass(
     if !mode.is_apply() {
         report.bytes_reclaimed = targets
             .iter()
-            .map(|target| reclaimed_bytes(target.original_len, release.marker))
+            .map(|target| {
+                reclaimed_bytes(target.original_len, release.marker, release.marker_columns)
+            })
             .sum();
         return Ok(report);
     }
@@ -733,7 +735,9 @@ async fn release_payload_batch(
             chunk
                 .iter()
                 .filter(|target| released.contains(&target.id))
-                .map(|target| reclaimed_bytes(target.original_len, release.marker))
+                .map(|target| {
+                    reclaimed_bytes(target.original_len, release.marker, release.marker_columns)
+                })
                 .sum(),
         );
     }
@@ -819,7 +823,7 @@ async fn run_anchor_pass(
     };
     let cutoff = release_cutoff(window, now);
     let sql = format!(
-        "SELECT a.anchor_id, LENGTH(a.anchor_json) AS len,
+        "SELECT a.anchor_id, LENGTH(CAST(a.anchor_json AS BLOB)) AS len,
                 (
                     SELECT d.effective_at
                     FROM retrieval_anchor_dispositions d
@@ -840,6 +844,7 @@ async fn run_anchor_pass(
         drop_trigger: DROP_ANCHOR_UPDATE_TRIGGER,
         create_trigger: CREATE_ANCHOR_UPDATE_TRIGGER,
         marker: ANCHOR_RELEASED_MARKER,
+        marker_columns: 1,
         update: format!(
             "UPDATE retrieval_anchors AS a SET anchor_json = ?1
              WHERE a.anchor_id IN ({{ids}})
@@ -900,7 +905,7 @@ async fn run_observation_pass(
     // rewrites the payload, and restores the exact canonical trigger before
     // commit.
     let sql = format!(
-        "SELECT o.observation_id, LENGTH(o.observation_json) AS len,
+        "SELECT o.observation_id, LENGTH(CAST(o.observation_json AS BLOB)) AS len,
                 released.effective_at
          FROM observations o
          JOIN (
@@ -932,6 +937,7 @@ async fn run_observation_pass(
         drop_trigger: DROP_OBSERVATION_UPDATE_TRIGGER,
         create_trigger: CREATE_OBSERVATION_UPDATE_TRIGGER,
         marker: OBSERVATION_RELEASED_MARKER,
+        marker_columns: 1,
         update: format!(
             "UPDATE observations AS o SET observation_json = ?1
              WHERE o.observation_id IN ({{ids}})
@@ -967,7 +973,8 @@ async fn run_provenance_pass(
     // IS NULL)` satisfied.
     let sql = format!(
         "SELECT p.observation_id,
-                LENGTH(p.availability_json) + LENGTH(COALESCE(p.capture_json, '')) AS len,
+                LENGTH(CAST(p.availability_json AS BLOB))
+                  + LENGTH(CAST(COALESCE(p.capture_json, '') AS BLOB)) AS len,
                 (
                     SELECT d.effective_at
                     FROM retrieval_anchor_dispositions d
@@ -990,6 +997,7 @@ async fn run_provenance_pass(
         drop_trigger: DROP_PROVENANCE_UPDATE_TRIGGER,
         create_trigger: CREATE_PROVENANCE_UPDATE_TRIGGER,
         marker: PROVENANCE_RELEASED_MARKER,
+        marker_columns: 2,
         update: format!(
             "UPDATE observation_repository_provenance AS p
              SET availability_json = ?1, capture_json = ?1

@@ -4,7 +4,11 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_global_db::observation::retention::{
     ObservationRetentionConfig, ObservationRetentionReport, RetentionMode,
 };
+use tracedecay_global_db::observation::{CanonicalBodyGcReport, MAX_CANONICAL_BODY_GC_ROWS};
 use tracedecay_global_db::{ObservabilityRetentionReceiptV1, RegisteredGlobalDb};
+use tracedecay_lcm::retention::{
+    MAX_REPLAY_METADATA_COMPACTION_ROWS, ReplayMetadataCompactionReport,
+};
 use tracedecay_lcm::{
     LcmGcConfig, LcmGcReport, LcmRetentionConfig, LcmRetentionReport,
     RetentionMode as LcmRetentionMode,
@@ -14,13 +18,18 @@ use tracedecay_lcm::{
 pub enum RegisteredStoreRetentionErrorV1 {
     Observability { diagnostic: String },
     PayloadGc { diagnostic: String },
+    CanonicalBodyGc { diagnostic: String },
+    ReplayMetadataCompaction { diagnostic: String },
 }
 
 impl RegisteredStoreRetentionErrorV1 {
     #[must_use]
     pub fn diagnostic(&self) -> &str {
         match self {
-            Self::Observability { diagnostic } | Self::PayloadGc { diagnostic } => diagnostic,
+            Self::Observability { diagnostic }
+            | Self::PayloadGc { diagnostic }
+            | Self::CanonicalBodyGc { diagnostic }
+            | Self::ReplayMetadataCompaction { diagnostic } => diagnostic,
         }
     }
 }
@@ -34,6 +43,11 @@ pub struct RegisteredStoreRetentionReportV1 {
     /// Applied external-payload GC. It runs after session retention so the
     /// payloads of rows that pass just dropped are reconciled by the same tick.
     pub payload_gc: Result<LcmGcReport, RegisteredStoreRetentionErrorV1>,
+    /// Shared canonical bodies are collected only after both owner indexes
+    /// and the initial candidate seed are complete.
+    pub canonical_body_gc: Result<CanonicalBodyGcReport, RegisteredStoreRetentionErrorV1>,
+    /// Lossless repair of old provider replay strings duplicated by raw bodies.
+    pub replay_metadata: Result<ReplayMetadataCompactionReport, RegisteredStoreRetentionErrorV1>,
 }
 
 impl RegisteredStoreRetentionReportV1 {
@@ -55,6 +69,8 @@ impl RegisteredStoreRetentionReportV1 {
             && observations_succeeded
             && self.observability.is_ok()
             && payload_gc_succeeded
+            && self.canonical_body_gc.is_ok()
+            && self.replay_metadata.is_ok()
     }
 }
 
@@ -99,12 +115,63 @@ pub async fn run_registered_store_retention(
         .await
         .map_err(|diagnostic| RegisteredStoreRetentionErrorV1::Observability { diagnostic });
     let payload_gc = run_payload_gc(database, now).await;
+    let canonical_body_gc = run_canonical_body_gc(database).await;
+    let replay_metadata = run_replay_metadata_compaction(database).await;
     RegisteredStoreRetentionReportV1 {
         session_lcm,
         observations,
         observability,
         payload_gc,
+        canonical_body_gc,
+        replay_metadata,
     }
+}
+
+/// Resume bounded, lossless storage work without repeating the raw-drop policy.
+pub async fn run_session_storage_compaction(
+    database: &RegisteredGlobalDb,
+    config: &LcmRetentionConfig,
+    now: i64,
+) -> Option<tracedecay_domain::errors::Result<LcmRetentionReport>> {
+    if !config.enabled || config.offload_after_days.is_none() {
+        return None;
+    }
+    let config = LcmRetentionConfig {
+        drop_after_days: None,
+        ..*config
+    };
+    Some(
+        database
+            .run_session_lcm_retention("all", None, &config, LcmRetentionMode::Apply, now)
+            .await,
+    )
+}
+
+/// Continuation ticks advance the bounded body lifecycle, leaving destructive
+/// age policies and profile-wide maintenance on their normal cadence.
+pub async fn run_canonical_body_gc(
+    database: &RegisteredGlobalDb,
+) -> Result<CanonicalBodyGcReport, RegisteredStoreRetentionErrorV1> {
+    database
+        .run_canonical_body_gc(MAX_CANONICAL_BODY_GC_ROWS)
+        .await
+        .map_err(|error| RegisteredStoreRetentionErrorV1::CanonicalBodyGc {
+            diagnostic: error.to_string(),
+        })
+}
+
+/// Runs a bounded replay-metadata repair page without repeating age policies.
+pub async fn run_replay_metadata_compaction(
+    database: &RegisteredGlobalDb,
+) -> Result<ReplayMetadataCompactionReport, RegisteredStoreRetentionErrorV1> {
+    database
+        .compact_replay_metadata(MAX_REPLAY_METADATA_COMPACTION_ROWS)
+        .await
+        .map_err(
+            |error| RegisteredStoreRetentionErrorV1::ReplayMetadataCompaction {
+                diagnostic: error.to_string(),
+            },
+        )
 }
 
 async fn run_payload_gc(
@@ -170,6 +237,41 @@ mod tests {
             enabled: false,
             ..ObservationRetentionConfig::default()
         };
+
+        let storage = run_session_storage_compaction(
+            &harness.registered,
+            &LcmRetentionConfig {
+                drop_after_days: Some(0),
+                ..LcmRetentionConfig::default()
+            },
+            31 * 86_400,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(storage.dropped.window_days, None);
+        assert_eq!(storage.dropped.acted, 0);
+        assert!(
+            run_session_storage_compaction(&harness.registered, &session_lcm, 31 * 86_400)
+                .await
+                .is_none(),
+            "disabling session retention also stops its storage continuation"
+        );
+        assert_eq!(
+            harness
+                .registered
+                .query_analytics_events(&AnalyticsEventQuery {
+                    provider: Some("tracedecay-observability".to_owned()),
+                    project_id: Some("scope:retention".to_owned()),
+                    limit: 10,
+                    ..AnalyticsEventQuery::default()
+                })
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "storage continuation must not run profile-wide age policies"
+        );
 
         let report = run_registered_store_retention(
             &harness.registered,

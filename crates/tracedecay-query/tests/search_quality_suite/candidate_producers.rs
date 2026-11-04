@@ -6071,6 +6071,111 @@ fn fielded_bm25_keeps_whole_identifiers_and_subtokens_distinct() {
 }
 
 #[test]
+fn prose_subtokens_add_identifier_matches_without_rescoring_whole_words() {
+    let artifact = rust_artifact(&[
+        "pub fn reserveStock() {}\n",
+        "pub fn reserve() { let stock = 1; }\n",
+    ]);
+    let lane = artifact.lane();
+    let whole = complete(
+        lane.retrieve_lexical(&artifact.request(
+            "reserve stock",
+            &["reserve", "stock"],
+            &[],
+            &[],
+            0,
+            8,
+        ))
+        .expect("whole-word retrieval"),
+    );
+    let expanded = complete(
+        lane.retrieve_lexical(&artifact.request(
+            "reserve stock",
+            &["reserve", "stock"],
+            &["reserve", "stock"],
+            &[],
+            0,
+            8,
+        ))
+        .expect("expanded retrieval"),
+    );
+    assert!(candidate_files(&whole.candidates).contains(&1));
+    assert_eq!(
+        candidate_files(&expanded.candidates),
+        BTreeSet::from([0, 1])
+    );
+    for candidate in &whole.candidates {
+        if candidate
+            .file_occurrence_id
+            .as_ref()
+            .map(|file| file.as_str())
+            != Some("file.fixture.1")
+        {
+            continue;
+        }
+        let occurrence = &candidate.source_occurrence_id;
+        let evidence = &whole.evidence_by_occurrence[occurrence];
+        assert_eq!(
+            expanded.evidence_by_occurrence[occurrence].field_scores_micros,
+            evidence.field_scores_micros,
+            "an ordinary word already scored in its source field is not new subtoken evidence"
+        );
+    }
+}
+
+#[test]
+fn filtered_subtoken_search_keeps_prose_evidence_when_whole_fields_are_excluded() {
+    let artifact = rust_artifact(&[
+        "pub fn process() { let digest = payload; }\n",
+        "pub fn digestPayloadMismatch() {}\n",
+    ]);
+    for filter in [
+        LexicalFieldFilterV1 {
+            field: LexicalFieldV1::Subtoken,
+            include: true,
+        },
+        LexicalFieldFilterV1 {
+            field: LexicalFieldV1::BodyText,
+            include: false,
+        },
+    ] {
+        let mut request = artifact.request(
+            "digest payload",
+            &["digest", "payload"],
+            &["digest", "payload"],
+            &[],
+            0,
+            8,
+        );
+        request.field_filters = Cow::Owned(vec![filter]);
+        let results = complete(
+            artifact
+                .lane()
+                .retrieve_lexical(&request)
+                .expect("filtered subtoken search"),
+        );
+        assert!(
+            results.candidates.iter().any(|candidate| {
+                candidate.file_occurrence_id.as_ref().is_some_and(|file| {
+                    file.as_str() == "file.fixture.0"
+                        && results
+                            .evidence_by_occurrence
+                            .get(&candidate.source_occurrence_id)
+                            .is_some_and(|evidence| {
+                                evidence.field_scores_micros.iter().any(|(field, score)| {
+                                    *field == LexicalFieldV1::Subtoken && *score > 0
+                                }) && ["digest", "payload"].iter().all(|word| {
+                                    evidence.matched_subtokens.iter().any(|term| term == word)
+                                })
+                            })
+                })
+            }),
+            "excluded whole fields must not zero out admitted subtokens: {results:?}"
+        );
+    }
+}
+
+#[test]
 fn lexical_phrase_and_bounded_fuzzy_recovery_are_deterministic() {
     let artifact = rust_artifact(&[
         "pub fn reserve() { // reserve stock inventory\n}\n",
@@ -6280,6 +6385,128 @@ fn duplicate_whole_terms_do_not_consume_the_global_fuzzy_budget() {
             .evidence_by_occurrence
             .values()
             .any(|evidence| evidence.matched_whole_terms.contains(&"otherr".to_owned()))
+    );
+}
+
+#[test]
+fn prose_query_recovers_camel_case_symbol_from_real_sealed_subtoken_postings() {
+    let artifact = rust_artifact(&[
+        "pub fn fetchWidgetAutoTagItemsForwardTotal() {}\n",
+        "pub fn widget() {}\n",
+        "pub fn tag() {}\n",
+    ]);
+    let query = "widget auto tag items forward total";
+    let parts = tracedecay_query::retrieval::lexical::lexical_query_parts(query)
+        .expect("parse multiword query");
+    let mut request = artifact.request(query, &[], &[], &[], 0, 32);
+    request.whole_terms = Cow::Owned(parts.whole_terms);
+    request.subtokens = Cow::Owned(parts.subtokens);
+    request.phrases = Cow::Owned(parts.phrases);
+    let results = complete(
+        artifact
+            .lane()
+            .retrieve_lexical(&request)
+            .expect("sealed lexical search"),
+    );
+    assert!(
+        candidate_files(&results.candidates).contains(&0),
+        "the camelCase symbol must not be absent from the bounded page: {results:?}"
+    );
+    assert!(
+        results.candidates.iter().any(|candidate| {
+            candidate.file_occurrence_id.as_ref().is_some_and(|file| {
+                file.as_str() == "file.fixture.0"
+                    && ["widget", "auto", "tag", "items", "forward", "total"]
+                        .iter()
+                        .all(|term| {
+                            results.evidence_by_occurrence[&candidate.source_occurrence_id]
+                                .matched_subtokens
+                                .iter()
+                                .any(|matched| matched.as_str() == *term)
+                        })
+            })
+        }),
+        "the long symbol must match every query word in the subtoken field"
+    );
+}
+
+#[test]
+fn prose_words_do_not_add_two_full_scores_for_the_same_evidence() {
+    // The first row states the words; the second only hides them inside its
+    // name. Prose subtoken admission exists to reach the second row, and must
+    // not add two full scores for words the first row already matched.
+    let artifact = rust_artifact(&[
+        "/// Reports when the digest does not match its payload.\npub fn validate() {}\n",
+        "pub fn digestPayloadMismatch() {}\n",
+    ]);
+    let query = "digest payload";
+    let parts = tracedecay_query::retrieval::lexical::lexical_query_parts(query)
+        .expect("parse multiword query");
+    let mut request = artifact.request(query, &[], &[], &[], 0, 32);
+    request.whole_terms = Cow::Owned(parts.whole_terms);
+    request.subtokens = Cow::Owned(parts.subtokens);
+    request.phrases = Cow::Owned(parts.phrases);
+    let results = complete(
+        artifact
+            .lane()
+            .retrieve_lexical(&request)
+            .expect("sealed lexical search"),
+    );
+    let whole = complete(
+        artifact
+            .lane()
+            .retrieve_lexical(&artifact.request(query, &["digest", "payload"], &[], &[], 0, 32))
+            .expect("whole-word control"),
+    );
+    let subtoken = complete(
+        artifact
+            .lane()
+            .retrieve_lexical(&artifact.request(query, &[], &["digest", "payload"], &[], 0, 32))
+            .expect("subtoken control"),
+    );
+    let in_file = |ordinal: usize| {
+        results
+            .candidates
+            .iter()
+            .filter(move |candidate| {
+                candidate
+                    .file_occurrence_id
+                    .as_ref()
+                    .is_some_and(|file| file.as_str() == format!("file.fixture.{ordinal}"))
+            })
+            .map(|candidate| &results.evidence_by_occurrence[&candidate.source_occurrence_id])
+            .collect::<Vec<_>>()
+    };
+    let stated = in_file(0);
+    assert!(!stated.is_empty());
+    let total = |evidence: &LexicalLaneEvidence| {
+        evidence
+            .field_scores_micros
+            .iter()
+            .map(|(_, score)| score)
+            .sum::<u64>()
+    };
+    for evidence in stated {
+        let occurrence = &evidence.binding.source_occurrence;
+        let whole_score = total(&whole.evidence_by_occurrence[occurrence]);
+        let subtoken_score = total(&subtoken.evidence_by_occurrence[occurrence]);
+        assert!(whole_score > 0 && subtoken_score > 0);
+        assert!(total(evidence) >= whole_score.max(subtoken_score));
+        assert!(
+            total(evidence) < whole_score + subtoken_score,
+            "overlapping representations must not add both full scores: {evidence:?}"
+        );
+    }
+    assert!(
+        in_file(1).iter().any(|evidence| {
+            ["digest", "payload"].iter().all(|term| {
+                evidence
+                    .matched_subtokens
+                    .iter()
+                    .any(|matched| matched == term)
+            })
+        }),
+        "the camelCase symbol must still match both words as subtokens: {results:?}"
     );
 }
 

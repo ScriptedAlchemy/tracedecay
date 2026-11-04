@@ -97,6 +97,7 @@ impl RepositoryPhysicalAttachmentFactory {
                 #[cfg(test)]
                 after_lost_notice: None,
                 close_failure: None,
+                retained_file_pin: Some(opened_database),
             })),
             drain_serial: Mutex::new(()),
         })
@@ -295,7 +296,11 @@ impl RepositoryPhysicalAttachmentFactory {
             ));
         }
         let opened_file_identity = opened_database.identity();
-        let initialization_file = created.then_some(opened_database);
+        let (initialization_file, retained_file_pin) = if created {
+            (Some(opened_database), None)
+        } else {
+            (None, Some(opened_database))
+        };
         let state = Arc::new(Mutex::new(RepositoryRuntimePhysicalState {
             binding,
             database_path: path,
@@ -312,6 +317,7 @@ impl RepositoryPhysicalAttachmentFactory {
             #[cfg(test)]
             after_lost_notice: None,
             close_failure: None,
+            retained_file_pin,
         }));
         let _ = lost_state.set(Arc::downgrade(&state));
         Ok(RepositoryRuntimePhysicalAttachment {
@@ -398,6 +404,10 @@ struct RepositoryRuntimePhysicalState {
     #[cfg(test)]
     after_lost_notice: Option<Box<dyn FnOnce() + Send>>,
     close_failure: Option<String>,
+    /// Kept until all SQLite workers exit: closing any raw fd for the inode
+    /// while SQLite holds POSIX locks can release those locks process-wide.
+    /// Keep this last so normal state destruction drops worker owners first.
+    retained_file_pin: Option<OpenedDatabaseFile>,
 }
 
 /// Runs on the writer's pool task once its probe finds the file unlinked or
@@ -451,6 +461,11 @@ impl RepositoryRuntimePhysicalAttachment {
         }
         state.lost_readers = None;
         state.lost_writer = None;
+        if state.file_lost {
+            // Both worker groups have exited; no live SQLite lock can be
+            // released by closing the retained identity descriptor.
+            state.retained_file_pin.take();
+        }
         true
     }
 
@@ -471,7 +486,9 @@ impl RepositoryRuntimePhysicalAttachment {
         opened
             .verify_current_path(&state.database_path)
             .map_err(|error| error.to_string())?;
-        state.initialization_file.take();
+        // Successful initialization does not end the SQLite worker lifetime.
+        // Transfer the original pin rather than closing it on commit.
+        state.retained_file_pin = state.initialization_file.take();
         Ok(())
     }
 
@@ -774,6 +791,21 @@ impl RepositoryRuntimePhysicalAttachment {
             return Err("repository physical attachment retained handles after drain".to_owned());
         }
         state.closed = true;
+        // A lost-file notice moves workers into lost_* before their threads
+        // finish. Drain can succeed in that interval; only release the raw
+        // pin once those worker threads have actually exited.
+        let lost_workers_exited = state
+            .lost_readers
+            .as_ref()
+            .is_none_or(ReaderPool::workers_exited)
+            && state
+                .lost_writer
+                .as_ref()
+                .is_none_or(|writer| writer.worker_exited());
+        if !state.file_lost || lost_workers_exited {
+            // An uncommitted initialization retains its separate cleanup pin.
+            state.retained_file_pin.take();
+        }
         Ok(())
     }
 
@@ -1080,6 +1112,109 @@ mod tests {
             .unwrap()
     }
 
+    /// The attachment's original identity descriptor must not be dropped
+    /// during startup or initialization commit while SQLite workers are live.
+    /// On Unix, closing it can release the process's unrelated SQLite locks.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn attachment_retains_identity_pins_until_workers_close() {
+        let directory = TempDir::new().unwrap();
+        let binding = binding();
+
+        let writable_path = directory.path().join("store-0.sqlite3");
+        let writable = attach_seeded_store(directory.path(), &binding, 0);
+        assert!(
+            writable
+                .lock_state()
+                .retained_file_pin
+                .as_ref()
+                .is_some_and(|pin| !pin.is_lost(&writable_path)),
+            "existing writable stores must keep their original inode pin"
+        );
+        let rows = writable
+            .exact_sql_handle()
+            .unwrap()
+            .query(
+                statement("SELECT value FROM identity_probe", vec![]),
+                Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(rows.rows.len(), 1);
+        writable.drain().unwrap();
+        writable.close_and_join().unwrap();
+        assert!(writable.lock_state().retained_file_pin.is_none());
+
+        let read_only_path = directory.path().join("read-only.sqlite3");
+        create_identity_database(&read_only_path, "read-only");
+        let read_only = RepositoryPhysicalAttachmentFactory
+            .attach_read_only(
+                binding.clone(),
+                locator(&binding),
+                read_only_path.canonicalize().unwrap(),
+                AdmissionConfigV1::default(),
+            )
+            .unwrap();
+        assert!(
+            read_only
+                .lock_state()
+                .retained_file_pin
+                .as_ref()
+                .is_some_and(|pin| !pin.is_lost(&read_only_path)),
+            "read-only attachments must retain the pin while readers are live"
+        );
+        let rows = read_only
+            .exact_sql_handle()
+            .unwrap()
+            .query(
+                statement("SELECT value FROM identity_probe", vec![]),
+                Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(rows.rows.len(), 1);
+        read_only.drain().unwrap();
+        read_only.close_and_join().unwrap();
+        assert!(read_only.lock_state().retained_file_pin.is_none());
+
+        let created_path = directory.path().join("created.sqlite3");
+        let created = RepositoryPhysicalAttachmentFactory
+            .initialize(
+                &native_runtime(),
+                binding.clone(),
+                locator(&binding),
+                created_path.clone(),
+                AdmissionConfigV1::default(),
+            )
+            .unwrap();
+        assert!(
+            created
+                .lock_state()
+                .initialization_file
+                .as_ref()
+                .is_some_and(|pin| !pin.is_lost(&created_path)),
+            "an uncommitted new store must retain its cleanup pin"
+        );
+        created.commit_initialization().unwrap();
+        {
+            let state = created.lock_state();
+            assert!(state.initialization_file.is_none());
+            assert!(
+                state
+                    .retained_file_pin
+                    .as_ref()
+                    .is_some_and(|pin| !pin.is_lost(&created_path)),
+                "committing an initialized store must transfer, not drop, its pin"
+            );
+        }
+        created
+            .exact_sql_handle()
+            .unwrap()
+            .execute_batch("CREATE TABLE pinned_identity_probe (value TEXT)".to_owned())
+            .unwrap();
+        created.drain().unwrap();
+        created.close_and_join().unwrap();
+        assert!(created.lock_state().retained_file_pin.is_none());
+    }
+
     #[cfg(target_os = "linux")]
     fn alone_in_child_process(test: &str) -> bool {
         const CHILD: &str = "TRACEDECAY_ATTACHMENT_TEST_CHILD";
@@ -1279,6 +1414,15 @@ mod tests {
             Ok(false),
             "the writer task is still running, so its connection is still open"
         );
+        // The lost-file writer no longer occupies the ordinary writer slot.
+        // Closing that slot must not drop the raw pin while the lost writer
+        // is still alive and holding a SQLite connection.
+        attachment.drain().unwrap();
+        attachment.close_and_join().unwrap();
+        assert!(
+            attachment.lock_state().retained_file_pin.is_some(),
+            "closing a lost-file attachment must retain its pin until the writer exits"
+        );
 
         hold.send(()).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -1289,8 +1433,10 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(5));
         }
-        attachment.drain().unwrap();
-        attachment.close_and_join().unwrap();
+        assert!(
+            attachment.lock_state().retained_file_pin.is_none(),
+            "the last lost worker exiting must release the original inode pin"
+        );
     }
 
     #[cfg(unix)]

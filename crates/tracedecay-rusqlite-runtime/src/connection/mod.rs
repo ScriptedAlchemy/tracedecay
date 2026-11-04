@@ -201,8 +201,22 @@ impl OpenedDatabaseFile {
     }
 
     pub(crate) fn verify_current_path(&self, path: &Path) -> Result<(), OpenedDatabaseFileError> {
-        let current = File::open(path).map_err(|_| OpenedDatabaseFileError::Open)?;
-        if opened_file_identity(&current)? != self.identity {
+        // POSIX record locks belong to the process: closing any descriptor
+        // for this inode releases SQLite's locks, even on another connection.
+        // Inspect the pathname without opening a temporary descriptor. Keep
+        // using the pinned descriptor's dev/inode identity, and retain both
+        // checks around SQLITE_FCNTL_HAS_MOVED in verify_connection.
+        #[cfg(unix)]
+        let current_identity = {
+            let current = std::fs::metadata(path).map_err(|_| OpenedDatabaseFileError::Open)?;
+            metadata_identity(&current)
+        };
+        #[cfg(not(unix))]
+        let current_identity = {
+            let current = File::open(path).map_err(|_| OpenedDatabaseFileError::Open)?;
+            opened_file_identity(&current)?
+        };
+        if current_identity != self.identity {
             return Err(OpenedDatabaseFileError::Replaced);
         }
         Ok(())
@@ -273,6 +287,25 @@ impl OpenedDatabaseFile {
             }
         }
         Ok(())
+    }
+}
+
+/// Check a live SQLite worker's physical file without opening and closing a
+/// second descriptor for the same inode on Unix. Closing that descriptor can
+/// release process-wide SQLite locks owned by other connections, even though
+/// SQLite's VFS did not perform the close.
+pub(crate) fn live_path_identity(path: &Path) -> Result<u64, OpenedDatabaseFileError> {
+    #[cfg(unix)]
+    {
+        let metadata = std::fs::metadata(path).map_err(|_| OpenedDatabaseFileError::Open)?;
+        if !metadata.is_file() {
+            return Err(OpenedDatabaseFileError::NotFile);
+        }
+        Ok(metadata_identity(&metadata))
+    }
+    #[cfg(not(unix))]
+    {
+        OpenedDatabaseFile::pin(path).map(|opened| opened.identity())
     }
 }
 
@@ -569,10 +602,13 @@ impl std::error::Error for VerifiedReaderError {
 /// Foreign-database reader bound to the physical file actually
 /// opened by SQLite rather than a later pathname observation.
 pub struct VerifiedReader {
-    _opened_file: OpenedDatabaseFile,
+    // Keep the connection before the raw pin in declaration order: closing
+    // any raw descriptor on Unix can release another SQLite connection's
+    // process-wide record locks. SQLite must close its handle first.
     connection: Connection,
     canonical_path: PathBuf,
     file_identity: u64,
+    _opened_file: OpenedDatabaseFile,
 }
 
 pub fn default_vfs_max_pathname() -> Option<usize> {
@@ -592,8 +628,10 @@ impl VerifiedReader {
         self.file_identity
     }
 
-    pub fn into_parts(self) -> (Connection, PathBuf, u64) {
-        (self.connection, self.canonical_path, self.file_identity)
+    /// The verified canonical pathname. It remains bound to this reader's
+    /// retained physical file until the SQLite connection is closed.
+    pub fn canonical_path(&self) -> &Path {
+        &self.canonical_path
     }
 }
 
@@ -1268,6 +1306,9 @@ where
 fn policy(stage: &'static str, source: rusqlite::Error) -> ConnectionPolicyError {
     ConnectionPolicyError { stage, source }
 }
+
+#[cfg(all(test, unix))]
+mod path_identity_tests;
 
 #[cfg(test)]
 mod tests;

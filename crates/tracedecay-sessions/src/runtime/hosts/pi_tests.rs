@@ -10,12 +10,17 @@ use tracedecay_domain::{
 use super::{
     MAX_DISCOVERY_CANDIDATES, MAX_DISCOVERY_FAILURE_EVIDENCE, MAX_DISCOVERY_INPUT_BYTES,
     MAX_DISCOVERY_UNITS, PI_AGENT_RELATIVE, PiDiscoveryReport, PiSource, capture_pi_observations,
-    capture_pi_session, pi_agent_dir_for, session_dir_name, warn_discovery_failures,
+    capture_pi_session, capture_pi_sweep, pi_agent_dir_for, session_dir_name,
+    warn_discovery_failures,
 };
 use crate::admission::{HostAdmission, test_support::MemoryHostAdmission};
 use crate::observation::ObservationCancellation;
 use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget};
-use crate::runtime::source::{FileDiscoveryReport, TranscriptDiscoveryBounds};
+use crate::runtime::hosts::codex::CodexDiscoveryHub;
+use crate::runtime::ingest::quarantine::SourceSweep;
+use crate::runtime::source::{
+    FileDiscoveryReport, TranscriptDiscoveryBounds, spin_until_jsonl_change_settled,
+};
 
 const FIXTURE_NAME: &str = "2026-09-25T16-00-00-000Z_5f0c2a8e-3b1d-4c7e-9a2f-6d8e1b4c7a90.jsonl";
 const FIXTURE: &str = include_str!(
@@ -278,6 +283,85 @@ async fn repeated_discovery_summary_keeps_malformed_sources_and_coverage_refused
         2,
         "quarantined malformed sources must not become complete coverage"
     );
+}
+
+#[tokio::test]
+async fn a_quarantined_pi_header_skips_unchanged_discovery_without_masking_coverage() {
+    let layout = Layout::new();
+    let path = layout.session_dir().join(FIXTURE_NAME);
+    std::fs::write(&path, b"{\"not\":\"a Pi session header\"}\n").unwrap();
+    assert!(
+        spin_until_jsonl_change_settled(&path),
+        "the initial file must have a settled witness"
+    );
+
+    let hub = CodexDiscoveryHub::default();
+    hub.register("pi-headers", Some(&layout.agent_dir));
+    let admission = MemoryHostAdmission::default();
+    let scope = ObservationScopeV1::Profile;
+    let run = || async {
+        let mut sweep = SourceSweep::new("pi", Some((&hub, "pi-headers")));
+        capture_pi_sweep(
+            &admission,
+            &layout.source(),
+            &layout.project,
+            scope.clone(),
+            None,
+            &ObservationCancellation::default(),
+            &mut sweep,
+        )
+        .await
+        .unwrap()
+    };
+
+    let first = run().await;
+    assert_eq!(first.discovery_failures, 1);
+    assert!(first.deferred);
+    assert!(admission.observations().is_empty());
+
+    // A second discovery with the same source ledger must not open/parse the
+    // quarantined header again, but its evidence still denies complete coverage.
+    let sweep = SourceSweep::new("pi", Some((&hub, "pi-headers")));
+    let (discovery, _) = layout
+        .source()
+        .discover(
+            &layout.project,
+            TranscriptDiscoveryBounds::from_discovered_units(MAX_DISCOVERY_CANDIDATES),
+            None,
+            HostScanBudget::new(
+                MAX_DISCOVERY_INPUT_BYTES,
+                MAX_DISCOVERY_UNITS,
+                std::time::Instant::now() + HOST_SCAN_WINDOW,
+                ObservationCancellation::default(),
+            ),
+            sweep.ledger().as_ref(),
+        )
+        .unwrap();
+    assert!(discovery.invalid_headers.is_empty());
+    assert_eq!(discovery.quarantined_headers, 1);
+    assert_eq!(discovery.failure_count, 0);
+
+    let second = run().await;
+    assert_eq!(second.discovery_failures, 0);
+    assert!(second.deferred);
+    let coverage = admission
+        .get_parse_offset(&scope, "host-coverage://pi/v1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(coverage.file_id, 2, "quarantine must remain partial");
+
+    // Changed source evidence releases the in-memory quarantine; the durable
+    // path memo then re-evaluates the repaired header and admits the session.
+    layout.write_fixture();
+    assert!(
+        spin_until_jsonl_change_settled(&path),
+        "the repaired file must have a settled witness"
+    );
+    let recovered = run().await;
+    assert!(!recovered.deferred, "{recovered:?}");
+    assert_eq!(recovered.discovery_failures, 0);
+    assert_eq!(admission.observations().len(), 9);
 }
 
 #[tokio::test]

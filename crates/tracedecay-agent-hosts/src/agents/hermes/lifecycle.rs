@@ -110,8 +110,8 @@ mod tests {
             "config should select tracedecay memory provider:\n{config}"
         );
         assert!(
-            config.contains("engine: tracedecay"),
-            "config should select tracedecay context engine:\n{config}"
+            !config.contains("engine: tracedecay"),
+            "config must leave Hermes' native context engine selected:\n{config}"
         );
     }
 
@@ -144,7 +144,7 @@ mod tests {
         let named_config = text(&home.path().join(".hermes/profiles/work/config.yaml"));
         assert!(named_config.contains("- tracedecay"));
         assert!(named_config.contains("provider: tracedecay"));
-        assert!(named_config.contains("engine: tracedecay"));
+        assert!(!named_config.contains("engine: tracedecay"));
         assert_eq!(
             super::super::hermes_registration_state(
                 home.path(),

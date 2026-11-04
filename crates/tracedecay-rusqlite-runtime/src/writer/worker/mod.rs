@@ -434,8 +434,8 @@ impl Worker {
         }
         let opened_file_identity = match self.expected_file_identity {
             Some(expected) => {
-                let actual = match OpenedDatabaseFile::pin(&self.path) {
-                    Ok(opened) => opened.identity(),
+                let actual = match connection::live_path_identity(&self.path) {
+                    Ok(identity) => identity,
                     Err(error) => {
                         return self.fail_start(WriterStartError::OpenedDatabaseIdentity(error));
                     }
@@ -1178,9 +1178,19 @@ fn run_incremental_vacuum(
             return;
         }
     };
-    if let Err(error) =
-        transaction.pragma_update(None, "incremental_vacuum", command.max_pages.max(1))
-    {
+    // Each result row releases one page. pragma_update only steps once, so
+    // drain this bounded pragma before deciding whether its transaction commits.
+    let reclaimed = transaction
+        .prepare(&format!(
+            "PRAGMA incremental_vacuum({})",
+            command.max_pages.max(1)
+        ))
+        .and_then(|mut statement| {
+            let mut rows = statement.query([])?;
+            while rows.next()?.is_some() {}
+            Ok(())
+        });
+    if let Err(error) = reclaimed {
         command.settle(Err(WriterActorError::IncrementalVacuumFailed(
             error.to_string(),
         )));
@@ -2025,12 +2035,71 @@ mod auxiliary_scheduling_tests {
         );
     }
 
-    #[test]
-    fn incremental_vacuum_rolls_back_when_authority_is_revoked() {
-        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    fn vacuum_connection_with_free_pages() -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
         connection
             .pragma_update(None, "auto_vacuum", "INCREMENTAL")
             .unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE retained(value TEXT NOT NULL);
+                 INSERT INTO retained VALUES ('keep the live evidence');
+                 CREATE TABLE released(value BLOB NOT NULL);
+                 WITH RECURSIVE copies(n) AS (
+                     VALUES(1) UNION ALL SELECT n + 1 FROM copies WHERE n < 64
+                 ) INSERT INTO released SELECT zeroblob(16384) FROM copies;
+                 DELETE FROM released;",
+            )
+            .unwrap();
+        assert!(vacuum_page_counts(&connection).1 > 32);
+        connection
+    }
+
+    fn vacuum_page_counts(connection: &rusqlite::Connection) -> (i64, i64) {
+        connection
+            .query_row(
+                "SELECT page_count, freelist_count FROM pragma_page_count, pragma_freelist_count",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn incremental_vacuum_reclaims_the_requested_page_budget() {
+        let mut connection = vacuum_connection_with_free_pages();
+        for max_pages in [0, 8, 3] {
+            let before = vacuum_page_counts(&connection);
+            let authority = Arc::new(RecordingAuthority {
+                stages: Arc::new(Mutex::new(Vec::new())),
+                deny_before_commit: false,
+            });
+            let (reply, mut response) = oneshot::channel();
+
+            run_incremental_vacuum(
+                &mut connection,
+                IncrementalVacuumCommand::new(max_pages, authority, reply),
+            );
+
+            assert!(response.try_recv().unwrap().is_ok());
+            let after = vacuum_page_counts(&connection);
+            assert_eq!(before.1 - after.1, i64::from(max_pages.max(1)));
+            assert!(after.0 < before.0, "reclaimed pages leave the database");
+            assert!(after.1 > 0, "one call must not drain the entire freelist");
+            assert_eq!(
+                connection
+                    .query_row("SELECT value FROM retained", [], |row| row
+                        .get::<_, String>(0))
+                    .unwrap(),
+                "keep the live evidence"
+            );
+        }
+    }
+
+    #[test]
+    fn incremental_vacuum_rolls_back_when_authority_is_revoked() {
+        let mut connection = vacuum_connection_with_free_pages();
+        let before = vacuum_page_counts(&connection);
         let authority = Arc::new(RecordingAuthority {
             stages: Arc::new(Mutex::new(Vec::new())),
             deny_before_commit: true,
@@ -2049,5 +2118,6 @@ mod auxiliary_scheduling_tests {
             })
         ));
         assert!(connection.is_autocommit());
+        assert_eq!(vacuum_page_counts(&connection), before);
     }
 }

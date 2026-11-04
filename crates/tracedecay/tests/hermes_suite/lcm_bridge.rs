@@ -292,10 +292,9 @@ class NoToolCtx:
 ctx = NoToolCtx()
 plugin.register(ctx)
 
-assert [name for name, _ in ctx.hooks] == ["pre_llm_call", "post_tool_call"]
+assert [name for name, _ in ctx.hooks] == ["pre_llm_call", "on_session_end", "post_tool_call"]
 assert len(ctx.memory_providers) == 1
-assert len(ctx.context_engines) == 1
-assert isinstance(ctx.context_engines[0], plugin.TraceDecayContextEngine)
+assert ctx.context_engines == [], "TraceDecay must leave Hermes' compressor selected"
 "#,
         "generated plugin registration should continue when host lacks register_tool",
     );
@@ -332,9 +331,9 @@ ctx = RaisingToolCtx()
 plugin.register(ctx)
 
 assert ctx.tool_calls
-assert [name for name, _ in ctx.hooks] == ["pre_llm_call", "post_tool_call"]
+assert [name for name, _ in ctx.hooks] == ["pre_llm_call", "on_session_end", "post_tool_call"]
 assert len(ctx.memory_providers) == 1
-assert len(ctx.context_engines) == 1
+assert ctx.context_engines == []
 "#,
         "generated plugin registration should continue when register_tool raises",
     );
@@ -399,15 +398,6 @@ assert receipt_event == {
 assert "secret.txt" not in repr(captured)
 assert "cat " not in repr(captured)
 
-# The engine's session-end boundary drops per-session state without emitting
-# a host receipt; the daemon owns any stop-side transcript work.
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-hermes-native", project_root="/workspace/project")
-assert engine.active_session_id == "session-hermes-native"
-engine.on_session_end(session_id="session-hermes-native")
-assert engine.active_session_id is None
-assert len(captured) == 1
-
 class Ctx:
     def __init__(self):
         self.hooks = []
@@ -418,7 +408,10 @@ class Ctx:
 
 ctx = Ctx()
 plugin.register(ctx)
-assert [name for name, _ in ctx.hooks] == ["pre_llm_call", "post_tool_call"]
+assert [name for name, _ in ctx.hooks] == ["pre_llm_call", "on_session_end", "post_tool_call"]
+# Ending a session flushes queued receipts without taking over compaction.
+dict(ctx.hooks)["on_session_end"](session_id="session-hermes-native")
+assert len(captured) == 1
 "#,
         "generated Hermes callbacks must forward terminal receipt identity without content",
     );
@@ -499,67 +492,48 @@ finally:
 }
 
 #[test]
-fn generated_registration_skips_tools_without_message_forwarding_capability() {
+fn generated_registration_keeps_lcm_readers_without_message_forwarding() {
     run_generated_plugin_script(
-        "check_registration_capability_gate.py",
+        "check_generated_registration_keeps_lcm_readers_without_message_forwarding.py",
         r#"
-class UnsafeRegisteredToolCtx:
+class Ctx:
     context_engine_tool_handlers_receive_messages = False
-
     def __init__(self):
-        self.tools = []
+        self.registered = []
         self.context_engines = []
-
+    def register_hook(self, *args, **kwargs):
+        pass
     def register_tool(self, **kwargs):
-        self.tools.append(kwargs["name"])
-
-    def register_hook(self, name, handler):
-        pass
-
-    def register_memory_provider(self, provider):
-        pass
-
+        self.registered.append(kwargs)
     def register_context_engine(self, engine):
         self.context_engines.append(engine)
 
-ctx = UnsafeRegisteredToolCtx()
+ctx = Ctx()
 plugin.register(ctx)
-
-# Code-graph / memory / transcript tools register even without message
-# forwarding; only the live-ingest LCM verbs whose schemas carry the
-# in-memory messages list (and the context-engine tool mirrors) are gated.
-expected_without_messages = {
-    schema["name"]
-    for schema in plugin.schemas.TOOL_SCHEMAS
-    if schema["name"] not in plugin.MESSAGE_DEPENDENT_TOOLS
-}
-assert expected_without_messages.issubset(ctx.tools)
-assert "tracedecay_lcm_compress" not in ctx.tools
-assert "tracedecay_lcm_preflight" not in ctx.tools
-assert "lcm_grep" not in ctx.tools
-assert len(ctx.context_engines) == 1
-engine = ctx.context_engines[0]
-assert engine.name == "tracedecay"
-assert "lcm_grep" in {schema["name"] for schema in engine.get_tool_schemas()}
+expected = {schema["name"] for schema in plugin.schemas.TOOL_SCHEMAS}
+expected.update(schema["name"] for schema in plugin.LCM_NATIVE_SCHEMAS)
+registered = {entry["name"] for entry in ctx.registered}
+assert expected == registered
+assert "tracedecay_lcm_compress" not in registered
+assert "tracedecay_lcm_preflight" not in registered
+assert ctx.context_engines == []
+assert all(entry["toolset"] == "tracedecay" for entry in ctx.registered)
 "#,
-        "generated plugin should gate only message-dependent tools when host does not forward messages",
+        "LCM readers must register independently of live-message forwarding and compaction",
     );
 }
 
 #[test]
-fn generated_context_engine_exposes_native_lcm_surface_and_dispatch() {
+fn generated_lcm_tools_expose_native_surface_and_dispatch() {
     run_generated_plugin_script(
         "check_context_engine_native_surface.py",
         r#"
 import json
 
 plugin._resolved_project_scope = lambda path, *_args: path
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-1", project_root="/tmp/project")
-
-assert engine.name == "tracedecay"
-
-schemas = engine.get_tool_schemas()
+from functools import partial
+call_tool = partial(plugin._handle_lcm_tool_call, session_id="session-1", project_root="/tmp/project")
+schemas = plugin.LCM_NATIVE_SCHEMAS
 schemas_by_name = {schema["name"]: schema for schema in schemas}
 schema_names = {schema["name"] for schema in schemas}
 expected_native = {
@@ -615,24 +589,6 @@ doctor_params = schemas_by_name["lcm_doctor"]["parameters"]
 assert status_params["properties"] == {}
 assert doctor_params["properties"] == {}
 
-status = engine.get_status()
-assert status["engine"] == "tracedecay"
-assert status["session_id"] == "session-1"
-assert status["active_session_id"] == "session-1"
-assert "storage_scope" not in status
-assert "hermes_home" not in status
-assert "lcm_project_root" not in status
-assert status["project_root"] == "/tmp/project"
-assert status["tracedecay_binary_path"] == plugin.tools.TRACEDECAY_BIN
-assert isinstance(status["tracedecay_binary_available"], bool)
-assert status["context_engine_tool_names"] == sorted(schema_names)
-assert status["last_compress_result"] == {"status": "never_ran"}
-assert status["live_ingest"]["registered_tool_names"] == []
-assert status["live_ingest"]["context_tool_names"] == []
-assert status["live_ingest"]["host_forwards_messages"] is None
-assert status["live_ingest"]["message_dependent_tools_registered"] is False
-assert status["live_ingest"]["gate_reason"] == "not_registered"
-
 calls = []
 
 def fake_call_tracedecay_tool(name, args, **kwargs):
@@ -640,7 +596,7 @@ def fake_call_tracedecay_tool(name, args, **kwargs):
     return json.dumps({"ok": True, "tool": name})
 
 plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
-native_result = engine.handle_tool_call(
+native_result = call_tool(
     "lcm_grep",
     {
         "query": "orchard",
@@ -653,19 +609,19 @@ native_result = engine.handle_tool_call(
     },
     messages=[{"role": "user", "content": "current turn"}],
 )
-load_result = engine.handle_tool_call(
+load_result = call_tool(
     "lcm_load_session",
     {"session_id": "session-1", "max_content_chars": 123, "roles": ["user", "tool"], "time_from": 1, "time_to": 2},
     messages=[{"role": "assistant", "content": "load turn"}],
 )
-describe_node_result = engine.handle_tool_call("lcm_describe", {"node_id": 7})
-describe_payload_result = engine.handle_tool_call("lcm_describe", {"externalized_ref": "payload_123.payload"})
-expand_result = engine.handle_tool_call(
+describe_node_result = call_tool("lcm_describe", {"node_id": 7})
+describe_payload_result = call_tool("lcm_describe", {"externalized_ref": "payload_123.payload"})
+expand_result = call_tool(
     "lcm_expand",
     {"store_id": 42, "session_id": "session-foreign", "max_tokens": 77, "source_offset": 3, "source_limit": 2},
 )
-direct_result = engine.handle_tool_call("tracedecay_lcm_grep", {"query": "direct", "session_scope": "all"})
-implicit_current_result = engine.handle_tool_call("lcm_grep", {"query": "implicit"})
+direct_result = call_tool("tracedecay_lcm_grep", {"query": "direct", "session_scope": "all"})
+implicit_current_result = call_tool("lcm_grep", {"query": "implicit"})
 
 assert json.loads(native_result) == {"ok": True, "tool": "tracedecay_lcm_grep"}
 assert json.loads(load_result) == {"ok": True, "tool": "tracedecay_lcm_load_session"}
@@ -731,84 +687,40 @@ assert "project_root" not in calls[6][1]
 assert calls[6][2] == {"project_root": "/tmp/project"}
 assert calls[6][1]["session_id"] == "session-1"
 "#,
-        "generated context engine should expose Hermes-style native LCM surface",
+        "generated tools should expose Hermes-style native LCM retrieval",
     );
 }
 
 #[test]
-fn generated_context_engine_never_uses_hermes_home_as_storage_identity() {
+fn generated_lcm_tools_never_use_hermes_home_as_storage_identity() {
     run_generated_plugin_script(
-        "check_context_engine_env_home.py",
+        "check_generated_lcm_tools_never_use_hermes_home_as_storage_identity.py",
         r#"
-import importlib.machinery
-import importlib.util
 import json
 import os
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_env_home"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
 
 os.environ["HERMES_HOME"] = "/tmp/hermes-from-env"
-
 calls = []
-
-def fake_call_tracedecay_tool(name, args, **kwargs):
+def fake_call(name, args, **kwargs):
     calls.append((name, args, kwargs))
-    return json.dumps({"content": [{"type": "text", "text": json.dumps({"status": "ok"})}]})
-
-plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
-plugin._resolved_project_scope = lambda path, *_args: (
-    str(path) if path and str(path) == "/tmp/project" else None
-)
-
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-1")
-assert os.path.normcase(os.path.realpath(engine.hermes_home)) == os.path.normcase(
-    os.path.realpath(str(plugin_dir.parent.parent))
-)
-status = engine.get_status()
-assert "storage_scope" not in status
-assert "hermes_home" not in status
-assert "lcm_project_root" not in status
-assert status["project_root"] is None
-
-engine.handle_tool_call(
-    "lcm_grep",
-    {"query": "orchard"},
-    messages=[{"role": "user", "content": "profile current turn"}],
-)
-
-assert len(calls) == 1
-assert calls[0][0] == "tracedecay_lcm_grep"
-assert "project_root" not in calls[0][1]
-assert calls[0][1]["storage_scope"] == "user"
-assert calls[0][2] == {}
-assert "messages" not in calls[0][1]
-
+    return "{}"
+plugin.tools.call_tracedecay_tool = fake_call
+plugin._project_scope_resolution = lambda *_args: ("rejected", None)
+handler = plugin._make_wrapped_lcm_handler("lcm_grep", hermes_home="/tmp/hermes-from-config")
+handler({"query": "orchard"}, session_id="session-1", cwd="/tmp/hermes-from-config",
+        messages=[{"role": "user", "content": "profile current turn"}])
+assert calls == [("tracedecay_lcm_grep", {
+    "query": "orchard", "scope": "current", "provider": "hermes",
+    "sort": "relevance", "include_summaries": False, "temporal_mode": {"kind": "current"},
+    "session_id": "session-1", "storage_scope": "user",
+}, {})], calls
 os.environ["HERMES_HOME"] = "/tmp/another-hermes-home"
-other = plugin.TraceDecayContextEngine()
-other.initialize(session_id="session-2")
-other.status()
+handler({"query": "orchard"}, session_id="session-2")
+assert calls[-1][1]["session_id"] == "session-2"
 assert calls[-1][1]["storage_scope"] == "user"
 assert calls[-1][2] == {}
 "#,
-        "generated context engine must not use HERMES_HOME as a TraceDecay storage identity",
+        "LCM readers must not use Hermes home as a TraceDecay storage identity",
     );
 }
 
@@ -861,173 +773,67 @@ assert args == {"format": "json"}
 }
 
 #[test]
-fn generated_context_engine_resolves_configured_hermes_home_on_registration() {
+fn generated_registration_resolves_configured_hermes_home() {
     run_generated_plugin_script(
-        "check_context_engine_config_home.py",
+        "check_generated_registration_resolves_configured_hermes_home.py",
         r#"
-import importlib.machinery
-import importlib.util
-import pathlib
-import sys
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_config_home"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
 class Ctx:
-    def __init__(self):
-        self.config = {"hermes_home": "/tmp/hermes-from-config"}
-        self.context_engines = []
+    config = {"hermes_home": "/tmp/hermes-from-config"}
     def register_hook(self, name, handler):
         pass
-    def register_context_engine(self, engine):
-        self.context_engines.append(engine)
+    def register_memory_provider(self, provider):
+        self.provider = provider
 
 ctx = Ctx()
 plugin.register(ctx)
-
-assert len(ctx.context_engines) == 1
-engine = ctx.context_engines[0]
-assert engine.name == "tracedecay"
-assert engine.hermes_home == "/tmp/hermes-from-config"
+ctx.provider.initialize(session_id="session-1")
+assert ctx.provider.hermes_home == "/tmp/hermes-from-config"
 "#,
-        "generated registration should resolve configured hermes_home",
+        "generated registration should resolve configured hermes_home without a context engine",
     );
 }
 
 #[test]
-fn generated_context_engine_registers() {
-    run_python_check(
-        "check_context_engine.py",
+fn generated_registration_preserves_native_compaction_and_lcm_tools() {
+    run_generated_plugin_script(
+        "check_generated_registration_preserves_native_compaction_and_lcm_tools.py",
         r#"
-import importlib.machinery
-import importlib.util
-import os
-import pathlib
-import sys
-import types
-
-plugin_dir = pathlib.Path(sys.argv[1])
-
-parent_name = "_hermes_user_context"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-class ContextEngine:
-    pass
-
-agent_module = types.ModuleType("agent")
-agent_module.__path__ = []
-context_engine_module = types.ModuleType("agent.context_engine")
-context_engine_module.ContextEngine = ContextEngine
-agent_module.context_engine = context_engine_module
-sys.modules["agent"] = agent_module
-sys.modules["agent.context_engine"] = context_engine_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-class FullCtx:
+import json
+class Ctx:
+    # A retrieval plugin must load on a host that exposes no context-engine API.
+    config = {"context": {"engine": "compressor"}, "memory": {"provider": "tracedecay"}}
     def __init__(self):
-        self.tools = []
-        self.hooks = []
-        self.context_engines = []
-
-    def register_tool(self, **kwargs):
-        self.tools.append(kwargs)
-
+        self.tools = {}
     def register_hook(self, name, handler):
-        self.hooks.append((name, handler))
+        pass
+    def register_tool(self, **kwargs):
+        self.tools[kwargs["name"]] = kwargs["handler"]
+    def register_memory_provider(self, provider):
+        self.provider = provider
 
-    def register_context_engine(self, engine):
-        self.context_engines.append(engine)
-
-ctx = FullCtx()
+ctx = Ctx()
 plugin.register(ctx)
-assert len(ctx.context_engines) == 1
-engine = ctx.context_engines[0]
-assert isinstance(engine, plugin.TraceDecayContextEngine)
-assert isinstance(engine, ContextEngine)
-
-plugin._resolved_project_scope = lambda path, *_args: path
-engine.initialize(
-    session_id="session-123",
-    hermes_home="/tmp/hermes-profile",
-    project_root="/tmp/project",
-)
-assert engine.active_session_id == "session-123"
-assert engine.hermes_home == "/tmp/hermes-profile"
-assert engine.project_root == "/tmp/project"
-
-# Project routing is transport-only and never derived from Hermes home.
-assert not hasattr(plugin, "_storage_args")
-assert plugin._project_call_kwargs("/tmp/project") == {
-    "project_root": "/tmp/project",
-}
-
+assert ctx.config["context"]["engine"] == "compressor"
+assert ctx.provider.name == "tracedecay"
+assert set(plugin.LCM_TOOL_ALIASES).issubset(ctx.tools)
 calls = []
-
-def fake_call_tracedecay_tool(name, args, **kwargs):
-    calls.append((name, args, kwargs))
-    return "{}"
-
-plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
-plugin._resolved_project_scope = lambda path, *_args: (
-    str(path) if path and str(path) == "/tmp/project" else None
+plugin._project_scope_resolution = lambda path, *_: ("registered", path)
+plugin.tools.call_tracedecay_tool = lambda name, args, **kwargs: (
+    calls.append((name, dict(args), kwargs)) or "{}"
 )
-
-profile_engine = plugin.TraceDecayContextEngine()
-profile_engine.on_session_start(session_id="session-1", hermes_home="/tmp/hermes")
-assert profile_engine.should_compress_preflight(messages=[], current_tokens=123) is False
-
-project_engine = plugin.TraceDecayContextEngine()
-project_engine.on_session_start(
-    session_id="session-2",
-    hermes_home="/tmp/hermes",
-    project_root="/tmp/project",
-)
-assert project_engine.should_compress_preflight(messages=[], current_tokens=456) is False
-
-project_engine = plugin.TraceDecayContextEngine()
-project_engine.initialize(session_id="initial", project_root="/tmp/project")
-project_engine.on_session_start(session_id="next", project_root="/tmp/project")
-assert project_engine.should_compress_preflight(messages=[], current_tokens=789) is False
-
-profile_engine = plugin.TraceDecayContextEngine()
-profile_engine.initialize(session_id="initial", hermes_home="/tmp/hermes")
-profile_engine.on_session_start(session_id="next")
-assert profile_engine.should_compress_preflight(messages=[], current_tokens=321) is False
-assert calls == []
-
+ctx.tools["lcm_grep"]({"query": "orchard"}, session_id="session-123", project_root="/tmp/project")
+assert calls == [("tracedecay_lcm_grep", {
+    "query": "orchard", "scope": "current", "provider": "hermes", "session_id": "session-123",
+    "sort": "relevance", "include_summaries": False, "temporal_mode": {"kind": "current"},
+}, {"project_root": "/tmp/project"})], calls
+assert not hasattr(plugin, "_storage_args")
 "#,
-        "generated plugin should register a Hermes context engine",
+        "generated registration must preserve native compaction while exposing LCM retrieval",
     );
 }
 
 #[test]
-fn context_engine_expand_query_synthesizes_and_degrades() {
+fn lcm_expand_query_synthesizes_and_degrades() {
     run_python_check(
         "check_expand_query_synthesis.py",
         r#"
@@ -1108,11 +914,12 @@ class Aux:
         return "<reasoning>hidden</reasoning>Final answer from context"
 
 agent = type("Agent", (), {"auxiliary_client": Aux()})()
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
+def expand_query(**args):
+    args["session_id"] = "session-1"
+    return json.loads(plugin._handle_lcm_expand_query(args, project_root="/tmp/project", agent=agent))
 
 responses.append(needs_synthesis())
-answer = engine.expand_query(prompt="What changed?", query="orchard")
+answer = expand_query(prompt="What changed?", query="orchard")
 assert answer["status"] == "ok"
 assert answer["needs_synthesis"] is False
 assert answer["answer"] == "Final answer from context"
@@ -1127,7 +934,7 @@ assert "EXPANDED CONTEXT" in agent.auxiliary_client.calls[0]["messages"][1]["con
 
 agent.auxiliary_client.mode = "timeout"
 responses.append(needs_synthesis())
-timeout_payload = engine.expand_query(prompt="What changed?", query="orchard")
+timeout_payload = expand_query(prompt="What changed?", query="orchard")
 assert timeout_payload["degraded"] is True
 assert "timed out" in timeout_payload["error"]
 assert timeout_payload["timeout_seconds"] > 0
@@ -1135,7 +942,7 @@ assert timeout_payload["needs_synthesis"] is False
 
 agent.auxiliary_client.mode = "empty"
 responses.append(needs_synthesis())
-empty_payload = engine.expand_query(prompt="What changed?", query="orchard")
+empty_payload = expand_query(prompt="What changed?", query="orchard")
 assert empty_payload["degraded"] is True
 assert "empty answer" in empty_payload["error"]
 assert empty_payload["needs_synthesis"] is False
@@ -1145,13 +952,13 @@ assert empty_payload["needs_synthesis"] is False
 # exception that loses the retrieval behind a generic registry error.
 agent.auxiliary_client.mode = "unexpected"
 responses.append(needs_synthesis())
-failed_payload = engine.expand_query(prompt="What changed?", query="orchard")
+failed_payload = expand_query(prompt="What changed?", query="orchard")
 assert failed_payload["degraded"] is True
 assert "schema bug" in failed_payload["error"]
 assert failed_payload["needs_synthesis"] is False
 assert failed_payload["matches"], "retrieval must survive synthesis failures"
 "#,
-        "generated context engine should synthesize and degrade expand-query answers",
+        "generated retrieval should synthesize and degrade expand-query answers",
     );
 }
 
@@ -1295,7 +1102,7 @@ assert provider.project_root is None
 }
 
 #[test]
-fn context_engine_records_all_forwarded_native_lcm_tools() {
+fn registration_records_all_native_lcm_tools() {
     run_generated_plugin_script(
         "check_context_tool_names_bookkeeping.py",
         r#"
@@ -1324,10 +1131,10 @@ ctx = Ctx()
 plugin.register(ctx)
 
 expected = sorted(schema["name"] for schema in plugin.LCM_NATIVE_SCHEMAS)
-assert sorted(plugin._CONTEXT_TOOL_NAMES) == expected
+assert set(expected).issubset(plugin._REGISTERED_TOOL_NAMES)
 assert set(expected).issubset(set(ctx.registered))
 "#,
-        "generated plugin should record every forwarded native LCM context tool",
+        "generated plugin should record every native LCM retrieval tool",
     );
 }
 
@@ -1397,7 +1204,7 @@ assert "cursor" not in raw
 }
 
 #[test]
-fn context_engine_lcm_expand_query_tolerates_forwarded_agent_kwarg() {
+fn lcm_expand_query_tolerates_forwarded_agent_kwarg() {
     run_generated_plugin_script(
         "check_expand_query_forwarded_agent.py",
         r#"
@@ -1419,24 +1226,23 @@ class Aux:
         raise AssertionError("synthesis should not run")
 
 forwarded_agent = type("ForwardedAgent", (), {"auxiliary_client": Aux()})()
-engine = plugin.TraceDecayContextEngine()
-engine.initialize(session_id="session-1", project_root="/tmp/project", agent=forwarded_agent)
-
-raw = engine.handle_tool_call(
+raw = plugin._handle_lcm_tool_call(
     "lcm_expand_query",
     {"prompt": "What changed?"},
+    session_id="session-1",
+    project_root="/tmp/project",
     agent=forwarded_agent,
 )
 payload = json.loads(raw)
 assert payload["status"] == "ok"
 assert payload["answer"] == "retrieval-only answer"
 "#,
-        "generated context engine should not pass duplicate agent kwargs through lcm_expand_query",
+        "generated retrieval must not pass duplicate agent kwargs through lcm_expand_query",
     );
 }
 
 #[test]
-fn context_engine_expand_query_uses_expansion_model_context_and_timeout_knobs() {
+fn lcm_expand_query_uses_expansion_model_context_and_timeout_knobs() {
     run_generated_plugin_script(
         "check_expand_query_expansion_knobs.py",
         r#"
@@ -1501,16 +1307,15 @@ os.environ["LCM_EXPANSION_CONTEXT_TOKENS"] = "4321"
 os.environ["LCM_EXPANSION_TIMEOUT_MS"] = "9000"
 
 agent = FakeAgent()
-engine = plugin.TraceDecayContextEngine(
+result = json.loads(plugin._handle_lcm_expand_query(
+    {"prompt": "What changed?", "query": "orchard", "session_id": "session-1"},
+    project_root="/tmp/project", agent=agent,
     config={
         "expansion_model": "cfg-expansion-model",
         "expansion_context_tokens": 32000,
         "expansion_timeout_ms": 120000,
-    }
-)
-engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
-
-result = engine.expand_query(prompt="What changed?", query="orchard")
+    },
+))
 assert result["status"] == "ok"
 assert result["needs_synthesis"] is False
 assert result["answer"] == "synthetic answer"
@@ -1702,89 +1507,6 @@ assert tools.call_tracedecay_tool("tracedecay_lcm_status", {}) == "{}"
     );
 }
 
-/// Newer Hermes declares `ContextEngine.update_from_response(usage)` as an
-/// abstract method; the generated engine must implement it or the plugin
-/// fails to load with "Can't instantiate abstract class".
-#[test]
-fn generated_context_engine_satisfies_abstract_update_from_response() {
-    run_python_check(
-        "check_update_from_response.py",
-        r#"
-import abc
-import importlib.machinery
-import importlib.util
-import pathlib
-import sys
-import types
-
-plugin_dir = pathlib.Path(sys.argv[1])
-
-# Mimic the newer Hermes ABC *before* the plugin module is executed.
-class ContextEngine(abc.ABC):
-    @abc.abstractmethod
-    def update_from_response(self, usage):
-        raise NotImplementedError
-
-agent_module = types.ModuleType("agent")
-agent_module.__path__ = []
-context_engine_module = types.ModuleType("agent.context_engine")
-context_engine_module.ContextEngine = ContextEngine
-agent_module.context_engine = context_engine_module
-sys.modules["agent"] = agent_module
-sys.modules["agent.context_engine"] = context_engine_module
-
-parent_name = "_hermes_user_abc"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-class Ctx:
-    def __init__(self):
-        self.context_engines = []
-    def register_hook(self, name, handler):
-        pass
-    def register_context_engine(self, engine):
-        self.context_engines.append(engine)
-
-ctx = Ctx()
-# This instantiates TraceDecayContextEngine; an unimplemented abstract method
-# raises TypeError here.
-plugin.register(ctx)
-assert len(ctx.context_engines) == 1
-engine = ctx.context_engines[0]
-
-engine.update_from_response({"prompt_tokens": 11, "completion_tokens": 7})
-assert engine.last_prompt_tokens == 11
-assert engine.last_completion_tokens == 7
-assert engine.last_total_tokens == 18
-
-engine.update_from_response(
-    {"input_tokens": "3", "output_tokens": "4", "total_tokens": 9}
-)
-assert engine.last_prompt_tokens == 3
-assert engine.last_completion_tokens == 4
-assert engine.last_total_tokens == 9
-
-engine.update_from_response(None)
-assert engine.last_prompt_tokens == 0
-assert engine.last_completion_tokens == 0
-assert engine.last_total_tokens == 0
-"#,
-        "generated engine must satisfy the abstract update_from_response contract",
-    );
-}
-
 /// Newer Hermes derives the skill namespace from the plugin name and rejects
 /// ':' inside skill names, so registration must use the bare "tracedecay".
 #[test]
@@ -1926,46 +1648,45 @@ assert "tracedecay:tracedecay" in text, text
 /// Host runtime config may identify a project, but a real session cwd or
 /// explicit call wins. The plugin-owned config block is filtered separately.
 #[test]
-fn generated_context_engine_prefers_runtime_project_context() {
+fn generated_lcm_tools_scope_each_call_to_its_runtime_session() {
     run_generated_plugin_script(
-        "check_context_engine_project_root.py",
+        "check_generated_lcm_tools_scope_each_call_to_its_runtime_session.py",
         r#"
+import json
+from concurrent.futures import ThreadPoolExecutor
 class Ctx:
+    config = {"project_root": "/tmp/stale-pinned-project"}
     def __init__(self):
-        self.config = {"project_root": "/tmp/pinned-project"}
-        self.context_engines = []
+        self.tools = {}
     def register_hook(self, name, handler):
         pass
-    def register_context_engine(self, engine):
-        self.context_engines.append(engine)
+    def register_tool(self, **kwargs):
+        self.tools[kwargs["name"]] = kwargs["handler"]
 
 ctx = Ctx()
-plugin._resolved_project_scope = lambda path, *_args: path
 plugin.register(ctx)
-engine = ctx.context_engines[0]
-
-# Host runtime config applies at registration time.
-assert engine.project_root == "/tmp/pinned-project", engine.project_root
-
-# A real session cwd overrides stale host config.
-engine.on_session_start(session_id="s1", cwd="/somewhere/else")
-assert engine.project_root == "/somewhere/else", engine.project_root
-
-# An explicit project_root remains highest priority.
-engine.on_session_start(session_id="s2", project_root="/explicit/root")
-assert engine.project_root == "/explicit/root", engine.project_root
-
-# Returning to a prior session restores its route instead of inheriting the
-# most recently active session or the host default.
-engine.on_session_start(session_id="s1")
-assert engine.project_root == "/somewhere/else", engine.project_root
-
-# Without explicit runtime context, cwd is the fallback.
-unpinned = plugin.TraceDecayContextEngine(config={})
-assert unpinned.project_root is None
-unpinned.on_session_start(session_id="s3", cwd="/cwd/fallback")
-assert unpinned.project_root == "/cwd/fallback", unpinned.project_root
+plugin._project_scope_resolution = lambda path, *_: ("registered", path)
+plugin.tools.call_tracedecay_tool = lambda name, args, **kwargs: json.dumps({
+    "tool": name, "args": args, "route": kwargs,
+})
+handler = ctx.tools["lcm_grep"]
+def recall(index):
+    sid = "session-" + str(index)
+    root = "/tmp/project-" + str(index)
+    result = json.loads(handler({"query": "q"}, session_id=sid, cwd=root))
+    assert result["args"]["session_id"] == sid
+    assert result["route"] == {"project_root": root}
+with ThreadPoolExecutor(max_workers=4) as pool:
+    list(pool.map(recall, range(16)))
+# Explicit selectors and runtime identity are resolved for every call; no
+# preceding conversation's session or project can become a fallback.
+result = json.loads(handler({"query": "q", "session_id": "explicit"},
+                            session_id="runtime", cwd="/tmp/cwd", project_root="/tmp/explicit"))
+assert result["args"]["session_id"] == "explicit"
+assert result["route"] == {"project_root": "/tmp/explicit"}
+missing = json.loads(handler({"query": "q"}, cwd="/tmp/other"))
+assert "session_id" in missing["error"]
 "#,
-        "generated engine must prefer explicit project and real cwd over host config",
+        "LCM retrieval must preserve runtime project and session scope across concurrent calls",
     );
 }

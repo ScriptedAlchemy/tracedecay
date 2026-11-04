@@ -6,11 +6,14 @@ use tracedecay_domain::{CodeSearchChunkGrainV1, RetrievalSourceRoleV1};
 use super::lexical::LexicalFieldV1;
 
 /// Classify a hit from the existing test-path authority plus whether the
-/// matched evidence is a name or signature definition.
+/// matched evidence is a name or signature definition. JSON object keys are
+/// searchable configuration data, not executable code definitions: treating
+/// each key as a production definition fills capped symbol pages ahead of
+/// real declarations. Keep the key eligible and its raw score unchanged.
 pub(crate) fn classify_source_role(path: &str, definition_match: bool) -> RetrievalSourceRoleV1 {
     if is_test_file(path) {
         RetrievalSourceRoleV1::TestReference
-    } else if definition_match {
+    } else if definition_match && !path.ends_with(".json") {
         RetrievalSourceRoleV1::ProductionDefinition
     } else {
         RetrievalSourceRoleV1::ProductionOther
@@ -84,6 +87,20 @@ mod tests {
         assert_eq!(
             classify_source_role("src/internal/client/ensure-daemon.test.ts", true),
             RetrievalSourceRoleV1::TestReference
+        );
+        assert_eq!(
+            classify_source_role("config/render.json", true),
+            RetrievalSourceRoleV1::ProductionOther,
+            "a JSON key remains searchable but cannot preempt a code definition"
+        );
+        assert_eq!(
+            classify_source_role("config/render.json", false),
+            RetrievalSourceRoleV1::ProductionOther
+        );
+        assert_eq!(
+            classify_source_role("tests/render.json", true),
+            RetrievalSourceRoleV1::TestReference,
+            "test source retains its own lower-priority role"
         );
         assert_eq!(
             RetrievalSourceRoleV1::ProductionDefinition.admission_rank(),

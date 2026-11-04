@@ -1,0 +1,508 @@
+use tracedecay_runtime_core::db::engine::{
+    Connection, Executor, QueryExecutor, TestConnection, TransactionBehavior, params,
+};
+use tracedecay_store::{
+    BODY_REF_KEY, CANONICAL_BODIES_TABLE_SQL, StoredCanonicalBody, UPSERT_CANONICAL_BODY_SQL,
+};
+
+use super::{CanonicalBodyGcReport, has_candidates, read_progress, schema, step};
+
+struct Store {
+    runtime: TestConnection,
+    _directory: tempfile::TempDir,
+}
+
+impl Store {
+    async fn open() -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = TestConnection::open(&directory.path().join("canonical-bodies.db"));
+        runtime
+            .execute_batch(CANONICAL_BODIES_TABLE_SQL)
+            .await
+            .unwrap();
+        runtime
+            .execute_batch(
+                "CREATE TABLE lcm_raw_messages (
+                    store_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    storage_kind TEXT NOT NULL, content TEXT, content_hash TEXT NOT NULL
+                 );
+                 CREATE TABLE observations (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    observation_json TEXT NOT NULL
+                 );",
+            )
+            .await
+            .unwrap();
+        Self {
+            runtime,
+            _directory: directory,
+        }
+    }
+
+    fn conn(&self) -> &Connection {
+        &self.runtime
+    }
+
+    async fn install(&self) {
+        let transaction = self
+            .conn()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .unwrap();
+        schema::install(&transaction).await.unwrap();
+        transaction.commit().await.unwrap();
+    }
+
+    async fn tick(&self, limit: usize) -> CanonicalBodyGcReport {
+        let transaction = self
+            .conn()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .unwrap();
+        let report = step(&transaction, limit).await.unwrap();
+        transaction.commit().await.unwrap();
+        report
+    }
+}
+
+async fn insert_body(conn: &(impl Executor + ?Sized), body: &StoredCanonicalBody) {
+    conn.execute(
+        UPSERT_CANONICAL_BODY_SQL,
+        params![
+            body.content_hash.as_str(),
+            body.encoding,
+            body.blob.as_slice(),
+            body.uncompressed_bytes
+        ],
+    )
+    .await
+    .unwrap();
+}
+
+async fn body_exists(conn: &(impl QueryExecutor + ?Sized), hash: &str) -> bool {
+    conn.query(
+        "SELECT 1 FROM session_canonical_bodies WHERE content_hash = ?1",
+        params![hash],
+    )
+    .await
+    .unwrap()
+    .next()
+    .await
+    .unwrap()
+    .is_some()
+}
+
+fn observation(hash: &str) -> String {
+    serde_json::json!({
+        "payload": {"text": null},
+        (BODY_REF_KEY): {"/payload/text": hash}
+    })
+    .to_string()
+}
+
+async fn drain(store: &Store, limit: usize) -> (u64, u64) {
+    let mut deleted = 0;
+    let mut bytes = 0;
+    for _ in 0..32 {
+        let report = store.tick(limit).await;
+        assert!(report.roots_scanned <= limit as u64);
+        assert!(report.bodies_scanned <= limit as u64);
+        if !report.bootstrap_complete {
+            assert_eq!(report.bodies_deleted, 0, "bootstrap never collects");
+        }
+        deleted += report.bodies_deleted;
+        bytes += report.stored_bytes_deleted;
+        if !report.has_more {
+            return (deleted, bytes);
+        }
+    }
+    panic!("bounded fixture must converge");
+}
+
+#[asupersync::test]
+async fn bootstrap_and_owner_release_preserve_shared_bodies_until_the_final_reference() {
+    let store = Store::open().await;
+    let shared =
+        StoredCanonicalBody::pack("shared complete text ".repeat(1024).as_bytes()).unwrap();
+    let orphan =
+        StoredCanonicalBody::pack("unreferenced old text ".repeat(1024).as_bytes()).unwrap();
+    insert_body(store.conn(), &shared).await;
+    insert_body(store.conn(), &orphan).await;
+    store.conn().execute(
+        "INSERT INTO lcm_raw_messages(storage_kind, content, content_hash) VALUES ('inline', NULL, ?1)",
+        params![shared.content_hash.as_str()],
+    ).await.unwrap();
+    store
+        .conn()
+        .execute(
+            "INSERT INTO observations(observation_json) VALUES (?1)",
+            params![observation(&shared.content_hash)],
+        )
+        .await
+        .unwrap();
+    store.install().await;
+
+    let first = store.tick(1).await;
+    assert_eq!(first.roots_scanned, 1);
+    assert!(
+        !first.bootstrap_complete,
+        "observation and body seed are still pending"
+    );
+    assert_eq!(first.bodies_deleted, 0);
+    assert!(body_exists(store.conn(), &orphan.content_hash).await);
+    let (deleted, bytes) = drain(&store, 1).await;
+    assert_eq!(deleted, 1);
+    assert_eq!(bytes, orphan.blob.len() as u64);
+    assert!(body_exists(store.conn(), &shared.content_hash).await);
+    assert!(
+        store
+            .conn()
+            .execute(
+                "DELETE FROM session_canonical_bodies WHERE content_hash = ?1",
+                params![shared.content_hash.as_str()]
+            )
+            .await
+            .is_err(),
+        "the reference index also enforces its body foreign key"
+    );
+
+    store
+        .conn()
+        .execute("DELETE FROM lcm_raw_messages", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        store.tick(1).await.bodies_deleted,
+        0,
+        "observation still owns the body"
+    );
+    store.conn().execute("UPDATE observations SET observation_json = '{\"__retention_released\":\"observation\"}'", ()).await.unwrap();
+    let released = store.tick(1).await;
+    assert_eq!(released.bodies_deleted, 1);
+    assert_eq!(released.stored_bytes_deleted, shared.blob.len() as u64);
+    assert!(released.stored_bytes_deleted < shared.uncompressed_bytes as u64);
+    assert!(!released.has_more);
+}
+
+#[asupersync::test]
+async fn bootstrap_survives_interruption_and_tracks_owners_changed_between_pages() {
+    let store = Store::open().await;
+    let old = StoredCanonicalBody::pack("old complete body ".repeat(1024).as_bytes()).unwrap();
+    let new = StoredCanonicalBody::pack("new complete body ".repeat(1024).as_bytes()).unwrap();
+    insert_body(store.conn(), &old).await;
+    store
+        .conn()
+        .execute(
+            "INSERT INTO lcm_raw_messages(storage_kind, content_hash) VALUES ('inline', ?1)",
+            params![old.content_hash.as_str()],
+        )
+        .await
+        .unwrap();
+    store
+        .conn()
+        .execute(
+            "INSERT INTO observations(observation_json) VALUES (?1)",
+            params![observation(&old.content_hash)],
+        )
+        .await
+        .unwrap();
+    store.install().await;
+
+    let transaction = store
+        .conn()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .unwrap();
+    assert_eq!(step(&transaction, 1).await.unwrap().roots_scanned, 1);
+    transaction.rollback().await.unwrap();
+    assert_eq!(
+        read_progress(store.conn()).await.unwrap().raw_through,
+        0,
+        "interruption rolls back the ownership page and frontier together"
+    );
+    assert!(body_exists(store.conn(), &old.content_hash).await);
+    assert_eq!(store.tick(1).await.roots_scanned, 1);
+
+    let transaction = store
+        .conn()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .unwrap();
+    insert_body(&transaction, &new).await;
+    transaction
+        .execute(
+            "INSERT INTO lcm_raw_messages(storage_kind, content_hash) VALUES ('inline', ?1)",
+            params![new.content_hash.as_str()],
+        )
+        .await
+        .unwrap();
+    transaction
+        .execute("DELETE FROM lcm_raw_messages WHERE store_id = 1", ())
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "UPDATE observations SET observation_json = ?1",
+            params![observation(&new.content_hash)],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let (deleted, _) = drain(&store, 1).await;
+    assert_eq!(deleted, 1);
+    assert!(!body_exists(store.conn(), &old.content_hash).await);
+    assert!(
+        body_exists(store.conn(), &new.content_hash).await,
+        "owners above the initial frontier are tracked by writer triggers"
+    );
+    store
+        .conn()
+        .execute("DELETE FROM observations", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        store.tick(1).await.bodies_deleted,
+        0,
+        "the raw owner added during bootstrap survives"
+    );
+}
+
+#[asupersync::test]
+async fn damaged_guards_and_unresolvable_old_references_block_collection() {
+    let store = Store::open().await;
+    let orphan = StoredCanonicalBody::pack(b"unreferenced body").unwrap();
+    insert_body(store.conn(), &orphan).await;
+    store
+        .conn()
+        .execute(
+            "INSERT INTO observations(observation_json) VALUES (?1)",
+            params![observation("missing-body")],
+        )
+        .await
+        .unwrap();
+    store.install().await;
+    let transaction = store
+        .conn()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .unwrap();
+    assert!(
+        step(&transaction, 1).await.is_err(),
+        "missing referenced body must not earn bootstrap completeness"
+    );
+    transaction.rollback().await.unwrap();
+    assert_eq!(
+        read_progress(store.conn())
+            .await
+            .unwrap()
+            .observations_through,
+        0
+    );
+    assert!(body_exists(store.conn(), &orphan.content_hash).await);
+    store
+        .conn()
+        .execute_batch("DROP TRIGGER canonical_body_gc_observation_insert")
+        .await
+        .unwrap();
+    let transaction = store
+        .conn()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .unwrap();
+    let error = step(&transaction, 1).await.unwrap_err();
+    assert!(error.to_string().contains("schema is incomplete"));
+    transaction.rollback().await.unwrap();
+    assert!(body_exists(store.conn(), &orphan.content_hash).await);
+}
+
+#[asupersync::test]
+async fn registered_collection_commits_and_lost_authority_rolls_back_deleted_bodies() {
+    let mut harness =
+        crate::tests::harness::RegisteredGlobalDbHarness::open("canonical-body-gc").await;
+    let database = harness.registered.clone();
+    let first = StoredCanonicalBody::pack(b"first unowned canonical body").unwrap();
+    let retained = StoredCanonicalBody::pack(b"body whose collection is revoked").unwrap();
+    let transaction = database.begin_write_transaction().await.unwrap();
+    insert_body(&transaction, &first).await;
+    transaction.commit().await.unwrap();
+    let report = database.run_canonical_body_gc(1).await.unwrap();
+    assert!(report.bootstrap_complete);
+    assert_eq!(report.bodies_deleted, 1);
+    assert_eq!(report.stored_bytes_deleted, first.blob.len() as u64);
+
+    let transaction = database.begin_write_transaction().await.unwrap();
+    insert_body(&transaction, &retained).await;
+    transaction.commit().await.unwrap();
+    let transaction = database.begin_write_transaction().await.unwrap();
+    assert_eq!(step(&transaction, 1).await.unwrap().bodies_deleted, 1);
+    harness.revoke();
+    assert!(
+        transaction.commit().await.is_err(),
+        "revoked writer cannot publish collection"
+    );
+    assert!(body_exists(&database.read_connection(), &retained.content_hash).await);
+    assert!(database.run_canonical_body_gc(1).await.is_err());
+}
+
+#[asupersync::test]
+async fn registered_legacy_bootstrap_and_live_references_survive_restarts() {
+    let mut harness =
+        crate::tests::harness::RegisteredGlobalDbHarness::open("canonical-body-gc-restart").await;
+    let live = StoredCanonicalBody::pack(b"retained by the registered raw owner").unwrap();
+    let orphan = StoredCanonicalBody::pack(b"unowned before additive installation").unwrap();
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    insert_body(&transaction, &live).await;
+    insert_body(&transaction, &orphan).await;
+    transaction
+        .execute_batch(
+            "INSERT INTO sessions(provider, session_id, project_key, project_path)
+         VALUES ('codex', 'gc-session', '/gc-project', '/gc-project');",
+        )
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "INSERT INTO lcm_raw_messages(provider, message_id, session_id, role, ordinal,
+            content, content_hash, storage_kind)
+         VALUES ('codex', 'gc-message', 'gc-session', 'assistant', 1, NULL, ?1, 'inline')",
+            params![live.content_hash.as_str()],
+        )
+        .await
+        .unwrap();
+    // Model an older admitted store: remove only derived GC objects while
+    // retaining canonical bodies and both source-root tables.
+    for &(name, sql) in schema::OBJECTS.iter().rev() {
+        let kind = if sql.starts_with("CREATE TRIGGER") {
+            "TRIGGER"
+        } else if sql.starts_with("CREATE INDEX") {
+            "INDEX"
+        } else {
+            "TABLE"
+        };
+        transaction
+            .execute_batch(&format!("DROP {kind} {name}"))
+            .await
+            .unwrap();
+    }
+    transaction.commit().await.unwrap();
+    harness = harness.restart().await;
+    let report = harness.registered.run_canonical_body_gc(1).await.unwrap();
+    assert_eq!(report.roots_scanned, 1);
+    assert!(!report.bootstrap_complete);
+    assert_eq!(report.bodies_deleted, 0);
+    let before = read_progress(&harness.registered.read_connection())
+        .await
+        .unwrap();
+    harness = harness.restart().await;
+    let after = read_progress(&harness.registered.read_connection())
+        .await
+        .unwrap();
+    assert_eq!(after.raw_through, before.raw_through);
+    assert_eq!(after.bodies_after, before.bodies_after);
+    schema::validate(&harness.registered.read_connection())
+        .await
+        .unwrap();
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    assert!(
+        transaction
+            .execute(
+                "DELETE FROM session_canonical_bodies WHERE content_hash = ?1",
+                params![live.content_hash.as_str()],
+            )
+            .await
+            .is_err(),
+        "the registered production writer enforces the owner foreign key"
+    );
+    transaction.rollback().await.unwrap();
+    let seed = harness.registered.run_canonical_body_gc(1).await.unwrap();
+    assert_eq!(seed.bodies_scanned, 1);
+    harness = harness.restart().await;
+    assert!(
+        has_candidates(&harness.registered.read_connection())
+            .await
+            .unwrap(),
+        "candidate seed persists across reopen"
+    );
+    let mut deleted = 0;
+    for _ in 0..8 {
+        let report = harness.registered.run_canonical_body_gc(1).await.unwrap();
+        deleted += report.bodies_deleted;
+        if !report.has_more {
+            break;
+        }
+    }
+    assert_eq!(deleted, 1);
+    assert!(body_exists(&harness.registered.read_connection(), &live.content_hash).await);
+    assert!(!body_exists(&harness.registered.read_connection(), &orphan.content_hash).await);
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "DELETE FROM lcm_raw_messages WHERE provider = 'codex' AND message_id = 'gc-message'",
+            (),
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!(
+        harness
+            .registered
+            .run_canonical_body_gc(1)
+            .await
+            .unwrap()
+            .bodies_deleted,
+        1
+    );
+}
+
+#[asupersync::test]
+async fn nonpositive_legacy_owner_ids_cannot_be_skipped_by_bootstrap() {
+    for raw_owner in [true, false] {
+        let store = Store::open().await;
+        let body = StoredCanonicalBody::pack(b"retained legacy body").unwrap();
+        insert_body(store.conn(), &body).await;
+        if raw_owner {
+            store
+                .conn()
+                .execute(
+                    "INSERT INTO lcm_raw_messages(store_id, storage_kind, content, content_hash)
+                 VALUES (0, 'inline', NULL, ?1)",
+                    params![body.content_hash.as_str()],
+                )
+                .await
+                .unwrap();
+        } else {
+            store
+                .conn()
+                .execute(
+                    "INSERT INTO observations(sequence, observation_json) VALUES (-1, ?1)",
+                    params![observation(&body.content_hash)],
+                )
+                .await
+                .unwrap();
+        }
+        let transaction = store
+            .conn()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .unwrap();
+        let error = schema::install(&transaction).await.unwrap_err();
+        assert!(error.to_string().contains("positive source identities"));
+        transaction.rollback().await.unwrap();
+        assert!(body_exists(store.conn(), &body.content_hash).await);
+        assert!(
+            store
+                .conn()
+                .query(
+                    "SELECT 1 FROM sqlite_master WHERE name GLOB 'canonical_body_gc_*' LIMIT 1",
+                    ()
+                )
+                .await
+                .unwrap()
+                .next()
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}

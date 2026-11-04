@@ -1,12 +1,14 @@
 //! Maintenance tick policy: continuation, cadence, and store-window selection.
 
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-/// Resume a bounded maintenance phase over the normal graph window.
+/// Resume bounded store maintenance over the normal store window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaintenanceContinuation {
-    /// Resume bounded code-generation retention over the normal graph window.
-    CodeGenerationRetention,
+    /// Resume code-generation retention and canonical-body collection, without
+    /// repeating age policies or profile-wide maintenance on the short cadence.
+    StoreRetention,
 }
 
 /// Outcome of one maintenance tick or per-store unit.
@@ -40,9 +42,7 @@ impl MaintenanceTickOutcome {
     pub fn label(self) -> &'static str {
         match self {
             Self::Complete => "complete",
-            Self::Continue(MaintenanceContinuation::CodeGenerationRetention) => {
-                "code_generation_progress"
-            }
+            Self::Continue(MaintenanceContinuation::StoreRetention) => "store_retention_progress",
             Self::Retry => "retry",
         }
     }
@@ -56,6 +56,44 @@ impl MaintenanceTickOutcome {
             (Self::Continue(continuation), Self::Continue(_) | Self::Complete)
             | (Self::Complete, Self::Continue(continuation)) => Self::Continue(continuation),
             (Self::Complete, Self::Complete) => Self::Complete,
+        }
+    }
+}
+
+/// Retains unfinished store work across round-robin windows. An idle window
+/// must not cancel a continuation another mounted store still needs.
+#[derive(Debug, Default)]
+pub struct StoreMaintenanceContinuations {
+    pending: BTreeSet<String>,
+}
+
+impl StoreMaintenanceContinuations {
+    /// The coordinator's work keys are sorted and represent current mounts.
+    pub fn retain_stores(&mut self, sorted_keys: &[String]) {
+        self.pending
+            .retain(|key| sorted_keys.binary_search(key).is_ok());
+    }
+
+    pub fn record(&mut self, key: &str, outcome: MaintenanceTickOutcome) {
+        match outcome {
+            MaintenanceTickOutcome::Continue(_) => {
+                self.pending.insert(key.to_owned());
+            }
+            MaintenanceTickOutcome::Complete => {
+                self.pending.remove(key);
+            }
+            MaintenanceTickOutcome::Retry => {}
+        }
+    }
+
+    #[must_use]
+    pub fn combine(&self, current: MaintenanceTickOutcome) -> MaintenanceTickOutcome {
+        if self.pending.is_empty() {
+            current
+        } else {
+            current.combine(MaintenanceTickOutcome::Continue(
+                MaintenanceContinuation::StoreRetention,
+            ))
         }
     }
 }
@@ -170,7 +208,7 @@ pub fn cursor_after_attempted_units(
 mod tests {
     use super::{
         MaintenanceCadence, MaintenanceContinuation, MaintenanceTickOutcome,
-        cursor_after_attempted_units, select_store_window,
+        StoreMaintenanceContinuations, cursor_after_attempted_units, select_store_window,
     };
     use std::time::Duration;
 
@@ -198,8 +236,7 @@ mod tests {
 
     #[test]
     fn retry_outcome_takes_precedence_over_bounded_progress() {
-        let progress =
-            MaintenanceTickOutcome::Continue(MaintenanceContinuation::CodeGenerationRetention);
+        let progress = MaintenanceTickOutcome::Continue(MaintenanceContinuation::StoreRetention);
 
         assert_eq!(
             progress.combine(MaintenanceTickOutcome::Retry),
@@ -214,7 +251,7 @@ mod tests {
     #[test]
     fn code_generation_continuation_dominates_a_complete_tick() {
         let code_generation =
-            MaintenanceTickOutcome::Continue(MaintenanceContinuation::CodeGenerationRetention);
+            MaintenanceTickOutcome::Continue(MaintenanceContinuation::StoreRetention);
 
         assert_eq!(
             code_generation.combine(MaintenanceTickOutcome::Complete),
@@ -232,6 +269,32 @@ mod tests {
 
     fn store_keys(count: usize) -> Vec<String> {
         (0..count).map(|index| format!("s:{index:03}")).collect()
+    }
+
+    #[test]
+    fn idle_windows_do_not_forget_another_stores_pending_work() {
+        let progress = MaintenanceTickOutcome::Continue(MaintenanceContinuation::StoreRetention);
+        let mut pending = StoreMaintenanceContinuations::default();
+        pending.retain_stores(&["a".to_owned(), "b".to_owned()]);
+        pending.record("a", progress);
+        pending.record("b", MaintenanceTickOutcome::Complete);
+        assert_eq!(pending.combine(MaintenanceTickOutcome::Complete), progress);
+        pending.record("a", MaintenanceTickOutcome::Retry);
+        assert_eq!(
+            pending.combine(MaintenanceTickOutcome::Retry),
+            MaintenanceTickOutcome::Retry
+        );
+        pending.record("a", MaintenanceTickOutcome::Complete);
+        assert_eq!(
+            pending.combine(MaintenanceTickOutcome::Complete),
+            MaintenanceTickOutcome::Complete
+        );
+        pending.record("a", progress);
+        pending.retain_stores(&["b".to_owned()]);
+        assert_eq!(
+            pending.combine(MaintenanceTickOutcome::Complete),
+            MaintenanceTickOutcome::Complete
+        );
     }
 
     #[test]

@@ -82,6 +82,17 @@ fn skill_improvement_recommendation(summary: &SkillUsageRecord) -> SkillImprovem
         );
     }
 
+    // A missing use observation is not a measured low-use rate. Keep patch
+    // counts available as evidence without turning absent telemetry into a
+    // repair diagnosis. This does not establish that the skill needs no work.
+    if summary.use_count == 0 || summary.last_used_at.is_none() {
+        return no_improvement_recommendation(
+            summary,
+            "skill use evidence is unavailable; patch counts alone do not establish a repair need",
+            evidence,
+        );
+    }
+
     if summary.patch_count >= 2 && summary.use_count <= summary.patch_count {
         return SkillImprovementRecommendation {
             skill_id: summary.skill_id.clone(),
@@ -264,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn only_repeated_patches_recommend_skill_repair() {
+    fn repeated_patches_without_use_evidence_do_not_recommend_repair() {
         let now = tracedecay_runtime_core::tracedecay::current_timestamp();
         let mut viewed_unused = activated_long_ago("viewed-unused-skill", now);
         viewed_unused.view_count = 3;
@@ -286,14 +297,116 @@ mod tests {
         let id: fn(&SkillImprovementRecommendation) -> &str =
             |recommendation| &recommendation.skill_id;
 
-        for skill_id in ["viewed-unused-skill", "patched-once-skill", "unused-skill"] {
+        for skill_id in [
+            "viewed-unused-skill",
+            "patched-once-skill",
+            "unused-skill",
+            "patched-twice-skill",
+        ] {
             let recommendation = by_id(&recommendations, skill_id, id);
             assert!(!recommendation.improvement, "{recommendation:?}");
             assert_eq!(recommendation.recommendation, "none");
+            assert_eq!(recommendation.priority, "none");
+            assert!(
+                recommendation
+                    .reason
+                    .contains("use evidence is unavailable")
+            );
         }
-        let repair = by_id(&recommendations, "patched-twice-skill", id);
-        assert!(repair.improvement);
-        assert_eq!(repair.recommendation, "repair_candidate");
-        assert_eq!(repair.priority, "medium");
+        let patched = by_id(&recommendations, "patched-twice-skill", id);
+        for expected in ["patches=2", "uses=0", "use_telemetry=unobserved"] {
+            assert!(patched.evidence.iter().any(|entry| entry == expected));
+        }
+    }
+
+    #[test]
+    fn incomplete_use_evidence_cannot_authorize_a_patch_review() {
+        for (use_count, last_used_at) in [(1, None), (0, Some(100))] {
+            let mut summary = automation_skill("incomplete-use");
+            summary.patch_count = 2;
+            summary.use_count = use_count;
+            summary.last_used_at = last_used_at;
+            let recommendations = skill_improvement_recommendations(&[summary]);
+            assert_eq!(recommendations.len(), 1);
+            let recommendation = &recommendations[0];
+            assert!(!recommendation.improvement, "{recommendation:?}");
+            assert_eq!(recommendation.recommendation, "none");
+            assert!(
+                recommendation
+                    .reason
+                    .contains("use evidence is unavailable")
+            );
+        }
+    }
+
+    #[test]
+    fn observed_use_preserves_the_existing_patch_review_policy() {
+        for (use_count, patch_count, expected) in [(1, 2, true), (3, 2, false), (1, 1, false)] {
+            let mut summary = automation_skill("observed-use");
+            summary.use_count = use_count;
+            summary.patch_count = patch_count;
+            summary.last_used_at = Some(100);
+            let recommendations = skill_improvement_recommendations(&[summary]);
+            assert_eq!(recommendations.len(), 1);
+            let recommendation = &recommendations[0];
+            assert_eq!(recommendation.improvement, expected, "{recommendation:?}");
+            assert_eq!(
+                recommendation.recommendation,
+                if expected { "repair_candidate" } else { "none" }
+            );
+            assert_eq!(
+                recommendation.priority,
+                if expected { "medium" } else { "none" }
+            );
+            assert!(
+                recommendation
+                    .evidence
+                    .contains(&"use_telemetry=observed".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn observed_usage_does_not_override_protected_skill_exclusions() {
+        for (pinned, source, state, reason) in [
+            (
+                true,
+                ManagedSkillSource::AutomationRun,
+                ManagedSkillState::Active,
+                "pinned",
+            ),
+            (
+                false,
+                ManagedSkillSource::User,
+                ManagedSkillState::Active,
+                "user-authored",
+            ),
+            (
+                false,
+                ManagedSkillSource::AutomationRun,
+                ManagedSkillState::Disabled,
+                "disabled",
+            ),
+            (
+                false,
+                ManagedSkillSource::AutomationRun,
+                ManagedSkillState::Archived,
+                "archived",
+            ),
+        ] {
+            let mut summary = automation_skill("protected-skill");
+            summary.pinned = pinned;
+            summary.provenance_source = Some(source);
+            summary.state = Some(state);
+            summary.use_count = 1;
+            summary.last_used_at = Some(100);
+            summary.patch_count = 2;
+            let recommendations = skill_improvement_recommendations(&[summary]);
+            assert_eq!(recommendations.len(), 1);
+            let recommendation = &recommendations[0];
+            assert!(!recommendation.improvement, "{recommendation:?}");
+            assert_eq!(recommendation.recommendation, "none");
+            assert!(recommendation.reason.contains(reason), "{recommendation:?}");
+        }
     }
 }

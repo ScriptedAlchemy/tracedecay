@@ -130,6 +130,13 @@ fn hash_admitted_schema(omit: Option<(&str, &str)>) -> (String, bool) {
             ));
         }
     }
+    for (name, sql) in crate::observation::canonical_body_gc::schema::OBJECTS {
+        parts.push(format!("canonical_body_gc:{name}:{sql}"));
+    }
+    parts.push(format!(
+        "lcm_fts_update:{}",
+        tracedecay_lcm::schema::RAW_FTS_UPDATE_TRIGGER_SQL
+    ));
     for (table, columns) in TEMPORAL_TABLE_COLUMNS {
         parts.push(format!("temporal:{table}"));
         for column in *columns {

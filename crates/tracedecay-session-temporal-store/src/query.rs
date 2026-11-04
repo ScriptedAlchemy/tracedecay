@@ -9,9 +9,10 @@ use tracedecay_domain::{
     UtcMicros,
 };
 use tracedecay_runtime_core::db::engine::{Row, params, params_from_iter};
+use tracedecay_store::canonical_body::LOAD_CANONICAL_BODIES_SQL;
 use tracedecay_store::{
-    CanonicalBodyError, LOAD_CANONICAL_BODY_SQL, SessionFrozenWatermarksV1, SessionStoreError,
-    SessionStoreResult, collect_body_refs, parse_stored_observation, unpack_body,
+    CanonicalBodyError, SessionFrozenWatermarksV1, SessionStoreError, SessionStoreResult,
+    collect_body_refs, parse_stored_observation, unpack_body,
 };
 
 use crate::sql::{
@@ -262,38 +263,82 @@ pub(super) async fn read_observation(
     Ok((sequence, observation))
 }
 
+/// Hydrate one observation's distinct canonical bodies in bounded SQL pages.
+/// The shared ordered query preserves missing/corrupt verdict order; pages
+/// split only when their combined bodies exceed SQL materialization capacity.
 pub(super) async fn decode_stored_observation(
     conn: &impl crate::handle::SessionTemporalQuery,
     encoded: &str,
     operation: &'static str,
 ) -> SessionStoreResult<DurableObservationV1> {
+    const BODY_READ_BATCH: usize = 16;
     let hashes = collect_body_refs(encoded).map_err(|error| storage(operation, error))?;
-    let mut bodies = HashMap::new();
-    for hash in hashes {
-        let mut rows = conn
-            .query(LOAD_CANONICAL_BODY_SQL, params![hash.as_str()])
-            .await
-            .map_err(|error| storage(operation, error))?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|error| storage(operation, error))?
-            .ok_or_else(|| {
-                storage(
-                    operation,
-                    CanonicalBodyError::Missing {
-                        content_hash: hash.clone(),
-                    },
-                )
-            })?;
-        let encoding: String = row.get(0).map_err(|error| storage(operation, error))?;
-        let blob: Vec<u8> = row.get(1).map_err(|error| storage(operation, error))?;
-        let uncompressed: i64 = row.get(2).map_err(|error| storage(operation, error))?;
-        bodies.insert(
-            hash.clone(),
-            unpack_body(&hash, &encoding, &blob, uncompressed)
-                .map_err(|error| storage(operation, error))?,
-        );
+    let mut bodies = HashMap::with_capacity(hashes.len());
+    for page in hashes.chunks(BODY_READ_BATCH) {
+        let mut pending = vec![(0, page.len())];
+        while let Some((start, end)) = pending.pop() {
+            let chunk = &page[start..end];
+            let references =
+                serde_json::to_string(chunk).map_err(|error| storage(operation, error))?;
+            let mut rows = match conn
+                .query(LOAD_CANONICAL_BODIES_SQL, params![references])
+                .await
+            {
+                Ok(rows) => rows,
+                Err(error) => {
+                    let error = storage(operation, error);
+                    // The original single-hash path can read oversized
+                    // combinations. Split only on the exact-SQL materialization
+                    // ceiling, preserving typed errors for every other failure.
+                    if chunk.len() > 1
+                        && observation_prefetch_exceeded_materialization_limit(&error)
+                    {
+                        let mid = start + chunk.len() / 2;
+                        pending.push((mid, end));
+                        pending.push((start, mid));
+                        continue;
+                    }
+                    return Err(error);
+                }
+            };
+            let mut stored = HashMap::with_capacity(chunk.len());
+            while let Some(row) = rows
+                .next()
+                .await
+                .map_err(|error| storage(operation, error))?
+            {
+                let hash: String = row.get(0).map_err(|error| storage(operation, error))?;
+                stored.insert(hash, row);
+            }
+            // Decode and verify in requested-hash order, independently of
+            // SQLite's IN row ordering and any later row's invalid encoding.
+            for hash in chunk {
+                let row = stored.remove(hash).ok_or_else(|| {
+                    storage(
+                        operation,
+                        CanonicalBodyError::Missing {
+                            content_hash: hash.clone(),
+                        },
+                    )
+                })?;
+                let encoding = row
+                    .get::<Option<String>>(1)
+                    .map_err(|error| storage(operation, error))?
+                    .ok_or_else(|| {
+                        storage(
+                            operation,
+                            CanonicalBodyError::Missing {
+                                content_hash: hash.clone(),
+                            },
+                        )
+                    })?;
+                let blob: Vec<u8> = row.get(2).map_err(|error| storage(operation, error))?;
+                let uncompressed: i64 = row.get(3).map_err(|error| storage(operation, error))?;
+                let unpacked = unpack_body(hash, &encoding, &blob, uncompressed)
+                    .map_err(|error| storage(operation, error))?;
+                bodies.insert(hash.clone(), unpacked);
+            }
+        }
     }
     parse_stored_observation(encoded, |hash| {
         bodies
@@ -420,6 +465,191 @@ pub(super) fn missing_observation(observation_id: &CanonicalObservationIdV1) -> 
 #[cfg(test)]
 mod tests {
     use super::{PERSIST_OPERATION, observation_prefetch_exceeded_materialization_limit, storage};
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tracedecay_runtime_core::db::engine;
+
+    struct CountedRead<'a> {
+        inner: crate::sql::TemporalSqlRead<'a>,
+        queries: AtomicUsize,
+    }
+
+    impl crate::handle::SessionTemporalQuery for CountedRead<'_> {
+        fn query<P>(
+            &self,
+            sql: &str,
+            params: P,
+        ) -> impl Future<Output = engine::Result<engine::Rows>> + Send
+        where
+            P: engine::IntoParams + Send,
+        {
+            self.queries.fetch_add(1, Ordering::Relaxed);
+            self.inner.query(sql, params)
+        }
+    }
+
+    #[asupersync::test]
+    async fn observation_hydration_batches_distinct_bodies_and_preserves_integrity() {
+        use tracedecay_domain::{
+            ComponentVersion, DurableObservationV1, ObservationId, ObservationIdentityMaterialV1,
+            ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
+            ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1,
+            RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+            SanitizerDispositionV1, SensitivityV1, SessionId,
+        };
+        use tracedecay_runtime_core::db::engine::{TestConnection, params};
+        use tracedecay_store::{
+            CANONICAL_BODIES_TABLE_SQL, CanonicalBodyError, UPSERT_CANONICAL_BODY_SQL,
+            collect_body_refs, slim_stored_json,
+        };
+
+        let mut payload = serde_json::Map::new();
+        for index in 0..18 {
+            payload.insert(
+                format!("part-{index:02}"),
+                serde_json::json!(format!("body-{index:02}-{}", "z".repeat(4096))),
+            );
+        }
+        let repeated = payload["part-00"].clone();
+        payload.insert("repeat".to_owned(), repeated);
+        let payload = serde_json::Value::Object(payload);
+        let identity = ObservationIdentityMaterialV1::for_native_record(
+            ObservationSourceIdentityV1::new(SessionId::new("session.batch").unwrap()).unwrap(),
+            ObservationScopeV1::Profile,
+            ObservationSourceGenerationV1::new(7).unwrap(),
+            ObservationSourceRangeV1::new(12, 34).unwrap(),
+            ObservationOrderingDomainV1::FileBytes,
+            ObservationId::new("record.batch").unwrap(),
+        )
+        .unwrap();
+        let receipt = SanitizationReceiptV1::new(
+            SanitizationReceiptRefV1::new(
+                SanitizationReceiptId::new("receipt.batch").unwrap(),
+                ComponentVersion::new("sanitizer.batch-test.v1").unwrap(),
+            )
+            .unwrap(),
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::NonSensitive,
+            Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
+        )
+        .unwrap();
+        let original = DurableObservationV1::new(
+            identity,
+            receipt,
+            RetentionClass::new("transcript.batch-test").unwrap(),
+            payload,
+        )
+        .unwrap();
+        let (stored, packed) =
+            slim_stored_json(&serde_json::to_string(&original).unwrap()).unwrap();
+        let hashes = collect_body_refs(&stored).unwrap();
+        assert_eq!(packed.len(), 19, "repeat reference shares a content hash");
+        assert_eq!(hashes.len(), 18);
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let connection = TestConnection::open(&directory.path().join("canonical-read.db"));
+        connection
+            .execute_batch(CANONICAL_BODIES_TABLE_SQL)
+            .await
+            .unwrap();
+        for body in &packed {
+            connection
+                .execute(
+                    UPSERT_CANONICAL_BODY_SQL,
+                    params![
+                        body.content_hash.as_str(),
+                        body.encoding,
+                        body.blob.as_slice(),
+                        body.uncompressed_bytes
+                    ],
+                )
+                .await
+                .unwrap();
+        }
+        let counted = CountedRead {
+            inner: crate::sql::TemporalSqlRead::engine_connection(&connection),
+            queries: AtomicUsize::new(0),
+        };
+        let decoded = super::decode_stored_observation(&counted, &stored, super::PERSIST_OPERATION)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+        assert_eq!(
+            counted.queries.load(Ordering::Relaxed),
+            2,
+            "18 distinct references need two bounded SQL reads, not 18"
+        );
+
+        let inline = serde_json::to_string(&original).unwrap();
+        let decoded = super::decode_stored_observation(&counted, &inline, super::PERSIST_OPERATION)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+        assert_eq!(
+            counted.queries.load(Ordering::Relaxed),
+            2,
+            "inline observations need no canonical-body read"
+        );
+
+        let first = &hashes[0];
+        connection
+            .execute(
+                "DELETE FROM session_canonical_bodies WHERE content_hash = ?1",
+                params![first.as_str()],
+            )
+            .await
+            .unwrap();
+        let error = super::decode_stored_observation(&counted, &stored, super::PERSIST_OPERATION)
+            .await
+            .unwrap_err();
+        let tracedecay_store::SessionStoreError::Storage { source, .. } = error else {
+            panic!("expected missing canonical-body storage error");
+        };
+        assert!(matches!(
+            source.downcast_ref::<CanonicalBodyError>(),
+            Some(CanonicalBodyError::Missing { content_hash }) if content_hash == first
+        ));
+
+        let original_body = packed
+            .iter()
+            .find(|body| &body.content_hash == first)
+            .unwrap();
+        connection
+            .execute(
+                UPSERT_CANONICAL_BODY_SQL,
+                params![
+                    original_body.content_hash.as_str(),
+                    original_body.encoding,
+                    original_body.blob.as_slice(),
+                    original_body.uncompressed_bytes
+                ],
+            )
+            .await
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE session_canonical_bodies SET encoding = 'identity', body = ?1 WHERE content_hash = ?2",
+                params![b"corrupt".as_slice(), first.as_str()],
+            )
+            .await
+            .unwrap();
+        let error = super::decode_stored_observation(&counted, &stored, super::PERSIST_OPERATION)
+            .await
+            .unwrap_err();
+        let tracedecay_store::SessionStoreError::Storage { source, .. } = error else {
+            panic!("expected corrupted canonical-body storage error");
+        };
+        assert!(matches!(
+            source.downcast_ref::<CanonicalBodyError>(),
+            Some(CanonicalBodyError::Corrupt { content_hash, .. }) if content_hash == first
+        ));
+    }
 
     #[test]
     fn materialization_limit_is_the_prefetch_split_signal() {

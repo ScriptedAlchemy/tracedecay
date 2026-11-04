@@ -137,7 +137,7 @@ pub async fn run_code_index_scope_reconciliation(
                     ),
                 ],
             );
-            MaintenanceTickOutcome::Continue(MaintenanceContinuation::CodeGenerationRetention)
+            MaintenanceTickOutcome::Continue(MaintenanceContinuation::StoreRetention)
         }
         Ok(Err((failure, error))) => scope_reconciliation_failed(failure, error),
         Err(_) => scope_reconciliation_failed("scope_task_panicked", None),

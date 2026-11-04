@@ -10,6 +10,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
+use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     CodeGenerationId, CompactCandidate, ComponentRevision, CursorPayloadDigest,
@@ -78,45 +79,52 @@ pub const MAX_LEXICAL_FIELD_FILTERS_V1: usize = 9;
 /// proximity term.
 pub const MAX_LEXICAL_QUERY_TERM_BYTES_V1: usize = 512;
 
-/// Summed document-frequency budget for lexical term-source admission. Every
-/// candidate is decoded from its row and scored, so the union of the request's
-/// term sources, not the winner cap, decides the lane's transient allocation
-/// and wall time: unbounded, a natural-language task whose terms include
-/// common words hydrated ~74k rows of a 472k-chunk corpus per read (~0.95 GB
-/// decoded, 5.7 s) and missed the context deadline. Term sources are admitted
-/// in ascending document-frequency order until their summed frequencies would
-/// exceed this bound; the most selective source is always admitted so a
-/// single common-term query still answers. Phrase sources are admitted separately.
+/// Unique-document budget for lexical term-source admission. Every candidate
+/// is decoded and scored, so source selection determines transient allocation
+/// and wall time. Previously a natural-language query hydrated ~74k rows of
+/// a 472k-chunk corpus (~0.95 GB decoded, 5.7 s), missing the deadline.
+/// Sources are considered in ascending stored field-frequency order. Only
+/// new document IDs charge the budget; the first nonempty source is always
+/// admitted so a single common-term query still answers. Phrase sources
+/// are admitted separately.
 /// This is a recall/latency policy, not a hard document or allocation ceiling:
-/// documents matching only pruned terms cannot rank. The initial 16,384 value
+/// documents matching only pruned sources cannot rank. The 16,384 value
 /// retains the measured policy (~100 MiB decode churn at ~6.6 KiB per row);
 /// changing the reader cache must not change candidate eligibility.
 pub const MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1: usize = 16_384;
 
-/// Admit `(document_frequency, source)` pairs rarest-first while the summed
-/// frequency stays within [`MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1`]; the rarest
-/// nonempty source is always admitted. Ties keep request order so admission
-/// is deterministic. Sources past the bound still weigh admitted candidates
-/// through scoring; a document matching only those sources is never hydrated.
+/// Visit posting sources rarest-first, counting unique documents rather than
+/// charging overlapping whole/subtoken postings twice. The reader supplies a
+/// bounded delta; only the rarest nonempty source may exceed the cap.
 pub(crate) fn admit_candidate_sources<S>(
     mut sources: Vec<(usize, S)>,
+    mut new_documents: impl FnMut(
+        &S,
+        &RoaringBitmap,
+        usize,
+    ) -> Result<Option<RoaringBitmap>, RetrievalPortError>,
     mut on_pruned: impl FnMut(usize, &S),
-) -> Vec<S> {
+) -> Result<RoaringBitmap, RetrievalPortError> {
     sources.retain(|(frequency, _)| *frequency > 0);
     sources.sort_by_key(|(frequency, _)| *frequency);
-    let total = sources.len();
-    let mut admitted_documents = 0usize;
-    let mut admitted = Vec::with_capacity(total);
-    for (ordinal, (frequency, source)) in sources.into_iter().enumerate() {
-        let next = admitted_documents.saturating_add(frequency);
-        if ordinal > 0 && next > MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1 {
-            on_pruned(frequency, &source);
-            continue;
+    let mut admitted = RoaringBitmap::new();
+    let mut admitted_sources = 0usize;
+    for (frequency, source) in sources {
+        let remaining = if admitted_sources == 0 {
+            usize::MAX
+        } else {
+            MAX_LEXICAL_CANDIDATE_DOCUMENTS_V1
+                .saturating_sub(usize::try_from(admitted.len()).unwrap_or(usize::MAX))
+        };
+        match new_documents(&source, &admitted, remaining)? {
+            Some(delta) if delta.len() <= remaining as u64 => {
+                admitted |= delta;
+                admitted_sources += 1;
+            }
+            _ => on_pruned(frequency, &source),
         }
-        admitted_documents = next;
-        admitted.push(source);
     }
-    admitted
+    Ok(admitted)
 }
 
 fn candidate_admission_outcome<E>(
@@ -158,8 +166,10 @@ pub(super) fn normalize_lexical(value: &str) -> String {
 /// Whole terms are the same maximal technical tokens the code index extracts
 /// (`tracedecay_domain::technical_tokens`), so a term the indexer keeps whole
 /// (`foo-bar`, `a::b`, `p/q.rs`) is queried whole, and subtokens decompose
-/// through the same shared grammar. Single-token queries intentionally emit
-/// no subtokens so one technical term does not fan out to common subtokens.
+/// through the same shared grammar. For multiword prose, unsplit content
+/// words use the symbol route's policy before searching the Subtoken field,
+/// so camelCase symbols can be admitted without expanding stopwords.
+/// Single-token queries emit no subtokens, preserving their narrow admission.
 ///
 /// Multi-token sanitized input is also retained as a phrase. This gives exact
 /// diagnostic/error text and natural-language queries a bounded lexical phrase
@@ -182,10 +192,11 @@ pub fn lexical_query_parts(query: &str) -> Result<LexicalQueryPartsV1, Retrieval
         whole_terms.push(token.to_owned());
         if split_identifiers {
             let lowercase = token.to_ascii_lowercase();
+            let expand_unsplit = !preferred_symbol_tokens(token).is_empty();
             subtokens.extend(
                 split_subtokens(token)
                     .into_iter()
-                    .filter(|part| part != &lowercase),
+                    .filter(|part| part != &lowercase || expand_unsplit),
             );
         }
     }

@@ -1,0 +1,27 @@
+load("@rules_python//python:defs.bzl", "py_test")
+
+py_test(
+    name = "http_runner_test",
+    size = "small",
+    srcs = [
+        "common.py",
+        "run_http.py",
+        "score.py",
+        "test_run_http.py",
+    ],
+    imports = ["."],
+    main = "test_run_http.py",
+)
+
+py_test(
+    name = "scoring_test",
+    size = "small",
+    srcs = [
+        "common.py",
+        "compare.py",
+        "score.py",
+        "test_score.py",
+    ],
+    imports = ["."],
+    main = "test_score.py",
+)

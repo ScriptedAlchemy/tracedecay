@@ -101,6 +101,16 @@ async fn seed_evidence(
     generation: &str,
     size: usize,
 ) -> Result<(), String> {
+    seed_evidence_with_text(conn, anchor_id, generation, &"x".repeat(size)).await
+}
+
+async fn seed_evidence_with_text(
+    conn: &RetentionTestStore,
+    anchor_id: &str,
+    generation: &str,
+    text: &str,
+) -> Result<(), String> {
+    let payload = |field: &str| serde_json::json!({ (field): text }).to_string();
     let observation_id = format!("obs-{anchor_id}");
     let receipt_id = format!("receipt-{anchor_id}");
     conn.execute(
@@ -117,12 +127,18 @@ async fn seed_evidence(
         params![
             observation_id.as_str(),
             receipt_id.as_str(),
-            payload("body", size)
+            payload("body")
         ],
     )
     .await
     .map_err(|err| format!("insert observation: {err}"))?;
-    insert_anchor(conn, anchor_id, generation, size).await?;
+    conn.execute(
+        "INSERT INTO retrieval_anchors(anchor_id, anchor_json, owner_json, projection_generation)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![anchor_id, payload("target"), OWNER, generation],
+    )
+    .await
+    .map_err(|err| format!("insert anchor: {err}"))?;
     conn.execute(
         "INSERT INTO observation_retrieval_anchors(observation_id, anchor_id)
          VALUES (?1, ?2)",
@@ -136,8 +152,8 @@ async fn seed_evidence(
          VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
             observation_id.as_str(),
-            payload("avail", size),
-            payload("capture", size),
+            payload("avail"),
+            payload("capture"),
             anchor_id,
             OWNER
         ],
@@ -699,6 +715,90 @@ async fn reports_measurable_reclaim_metrics() -> Result<(), String> {
         "released payloads freed pages"
     );
     assert!(report.bytes_reclaimed() >= 8 * 2048);
+    Ok(())
+}
+
+async fn evidence_payloads(conn: &RetentionTestStore) -> Result<[String; 4], String> {
+    let mut rows = conn
+        .query(
+            "SELECT a.anchor_json, o.observation_json, p.availability_json, p.capture_json
+             FROM retrieval_anchors a
+             JOIN observation_retrieval_anchors b ON b.anchor_id = a.anchor_id
+             JOIN observations o ON o.observation_id = b.observation_id
+             JOIN observation_repository_provenance p ON p.observation_id = o.observation_id
+             WHERE a.anchor_id = 'measured'",
+            (),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or("evidence payload row")?;
+    Ok([
+        row.get(0).map_err(|error| error.to_string())?,
+        row.get(1).map_err(|error| error.to_string())?,
+        row.get(2).map_err(|error| error.to_string())?,
+        row.get(3).map_err(|error| error.to_string())?,
+    ])
+}
+
+#[asupersync::test]
+async fn reports_utf8_payload_reduction_after_every_replacement_marker() -> Result<(), String> {
+    for text in ["evidence".repeat(64), "é漢🙂".repeat(64), String::new()] {
+        let conn = test_store().await;
+        seed_evidence_with_text(&conn, "measured", GEN, &text).await?;
+        set_disposition(&conn, "measured", "deleted", NOW - 90 * DAY, None).await?;
+        let before = evidence_payloads(&conn).await?;
+        let dry = conn
+            .database()
+            .run_observation_retention(
+                None,
+                &released_config(),
+                RetentionMode::DryRun,
+                UtcMicros(NOW),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        assert_eq!(evidence_payloads(&conn).await?, before);
+
+        let applied = run_apply(&conn, None, &released_config()).await?;
+        let after = evidence_payloads(&conn).await?;
+        assert_eq!(after[0], ANCHOR_RELEASED_MARKER);
+        assert_eq!(after[1], OBSERVATION_RELEASED_MARKER);
+        assert_eq!(after[2], PROVENANCE_RELEASED_MARKER);
+        assert_eq!(after[3], PROVENANCE_RELEASED_MARKER);
+        let lengths = |payloads: &[String; 4]| {
+            [
+                payloads[0].len(),
+                payloads[1].len(),
+                payloads[2].len() + payloads[3].len(),
+            ]
+        };
+        let expected = lengths(&before)
+            .into_iter()
+            .zip(lengths(&after))
+            .map(|(before, after)| before.saturating_sub(after) as u64)
+            .collect::<Vec<_>>();
+        for report in [&dry, &applied] {
+            assert_eq!(
+                [
+                    report.anchors_released.bytes_reclaimed,
+                    report.observations_released.bytes_reclaimed,
+                    report.provenance_released.bytes_reclaimed,
+                ],
+                expected.as_slice(),
+            );
+            assert_eq!(report.bytes_reclaimed(), expected.iter().sum::<u64>());
+        }
+        assert_eq!(dry.anchors_released.acted, 0);
+        assert_eq!(dry.observations_released.acted, 0);
+        assert_eq!(dry.provenance_released.acted, 0);
+        assert_eq!(applied.anchors_released.acted, 1);
+        assert_eq!(applied.observations_released.acted, 1);
+        assert_eq!(applied.provenance_released.acted, 1);
+    }
     Ok(())
 }
 

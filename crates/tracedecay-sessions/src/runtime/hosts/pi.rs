@@ -28,7 +28,9 @@ use tracedecay_store::{ParseOffset, observation::ObservationCoverageReason};
 use crate::admission::{HostAdmission, HostDiscoveryQueueEntry};
 use crate::observation::ObservationCancellation;
 use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget, isolatable_source_error};
-use crate::runtime::ingest::quarantine::{SourceClaim, SourceLedger, SourceSweep, Witness};
+use crate::runtime::ingest::quarantine::{
+    FileSourceObservation, SourceClaim, SourceLedger, SourceSweep, Witness,
+};
 use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionProgress, JsonlObservationAdmissionRequest,
     admit_jsonl_observations,
@@ -140,6 +142,7 @@ struct InvalidHeader {
     path: PathBuf,
     witness: Witness,
     error_kind: io::ErrorKind,
+    pending: SourceClaim,
 }
 
 impl PiDiscoveryReport {
@@ -276,9 +279,16 @@ impl PiSource {
                         {
                             continue;
                         }
-                        let pending = match SourceClaim::observe_file_blocking(ledger, &candidate) {
-                            Ok(Some(pending)) => pending,
-                            Ok(None) => continue,
+                        let pending = match SourceClaim::observe_file_discovery_blocking(
+                            ledger, &candidate,
+                        ) {
+                            Ok(FileSourceObservation::Read(pending)) => pending,
+                            Ok(FileSourceObservation::Skipped) => continue,
+                            Ok(FileSourceObservation::Quarantined) => {
+                                discovery.quarantined_headers =
+                                    discovery.quarantined_headers.saturating_add(1);
+                                continue;
+                            }
                             Err(TranscriptIngestError::ScanIo { source, .. }) => {
                                 discovery.record_failure(
                                     PiDiscoveryFailureKind::SessionHeaderUnavailable,
@@ -306,6 +316,7 @@ impl PiSource {
                                     path: candidate,
                                     witness,
                                     error_kind: error.kind(),
+                                    pending,
                                 });
                                 continue;
                             }
@@ -888,6 +899,7 @@ async fn reconcile_invalid_headers(
         discovery.quarantined_headers = discovery.quarantined_headers.saturating_add(1);
         let memo = PathMemo::read(facade, scope, &invalid.path).await?;
         if memo.disposition(Some(invalid.witness)) == Some(Disposition::InvalidHeader) {
+            invalid.pending.quarantined()?;
             continue;
         }
         if !budget.try_charge_input(invalid.witness.len()) {
@@ -902,9 +914,11 @@ async fn reconcile_invalid_headers(
             break;
         }
         if matches!(current, Ok(HeaderRead::Invalid { witness, .. }) if witness == invalid.witness)
+            && memo
+                .record(facade, scope, invalid.witness, Disposition::InvalidHeader)
+                .await?
         {
-            memo.record(facade, scope, invalid.witness, Disposition::InvalidHeader)
-                .await?;
+            invalid.pending.quarantined()?;
         }
         discovery.failure_count = discovery.failure_count.saturating_add(1);
         if discovery.failures.len() < MAX_DISCOVERY_FAILURE_EVIDENCE {

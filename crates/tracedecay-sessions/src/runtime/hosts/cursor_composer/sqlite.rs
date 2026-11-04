@@ -114,11 +114,11 @@ pub(super) async fn open_readonly_immutable(db_path: &Path) -> Result<ReadOnlyDb
     tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         let opened = tracedecay_rusqlite_runtime::open_verified_immutable_reader(&path)
             .map_err(|error| format!("could not open '{}' read-only: {error}", path.display()))?;
-        let (conn, canonical_path, file_identity) = opened.into_parts();
-        let generation = ObservationSourceGenerationV1::new(file_identity)
+        let canonical_path = opened.canonical_path().to_path_buf();
+        let generation = ObservationSourceGenerationV1::new(opened.file_identity())
             .map_err(|error| format!("invalid SQLite generation identity: {error}"))?;
         Ok(ReadOnlyDb {
-            conn: CursorConn::new(conn),
+            conn: CursorConn::new_verified(opened),
             generation,
             canonical_path,
         })

@@ -1420,17 +1420,17 @@ fn assemble_replay_messages(
                 .flat_map(|unit| unit.messages)
                 .collect(),
             summaries.iter().collect::<Vec<_>>(),
-            latest_user_context_anchor(anchor_source, raws),
+            latest_user_context_anchor(anchor_source, anchors, raws),
         ),
         Some(cap) => {
             let used = anchors
                 .iter()
-                .map(|message| crate::lcm_budget_tokens(&message.content))
+                .map(|message| replay_transactions::replay_message_tokens(message))
                 .sum::<i64>();
             let (selected_raws, tail_tokens) = select_budget_tail(raws, used, cap);
             let mut summary_budget = (cap - used - tail_tokens).max(0);
             let preserved_objective_anchor =
-                latest_user_context_anchor(anchor_source, &selected_raws).and_then(
+                latest_user_context_anchor(anchor_source, anchors, &selected_raws).and_then(
                     |(store_id, part, already_preserved)| {
                         if already_preserved {
                             return Some((store_id, part, already_preserved));
@@ -1548,11 +1548,12 @@ fn is_budget_droppable_tail_message(message: &LcmRawMessage) -> bool {
 
 fn latest_user_context_anchor(
     raws: &[LcmRawMessage],
+    anchors: &[&LcmRawMessage],
     selected_tail: &[&LcmRawMessage],
 ) -> Option<(i64, String, bool)> {
     for message in raws.iter().rev() {
         if let Some(preserved) = preserved_objective_context_content(&message.content) {
-            if selected_tail.iter().any(|selected| {
+            if selected_tail.iter().chain(anchors).any(|selected| {
                 preserved_objective_context_content(&selected.content) == Some(preserved)
             }) {
                 return None;
@@ -1714,7 +1715,10 @@ fn context_recovery_hint(summary_nodes: &[LcmSummaryNode]) -> Option<String> {
 }
 
 fn replay_token_estimate(messages: &[Value]) -> i64 {
-    messages.iter().map(crate::lcm_message_budget_tokens).sum()
+    messages
+        .iter()
+        .map(crate::lcm_replay_message_budget_tokens)
+        .sum()
 }
 
 fn replay_exceeds_budget(replay_token_estimate: i64, max_assembly_tokens: Option<i64>) -> bool {
@@ -2098,7 +2102,8 @@ async fn ingest_active_messages(
                 let mut replay = message.clone();
                 replay["role"] = Value::String(role.clone());
                 replay["content"] = original_content.clone();
-                let initial_metadata_json = active_message_metadata(message, &replay);
+                let initial_metadata_json =
+                    active_message_metadata(message, &replay, &storage_text);
                 let expected_content_hash = projected_content_hash(&storage_text);
                 if let Some(existing) = existing_state {
                     let matches_stored_row = existing.ordinal == ordinal
@@ -2167,6 +2172,7 @@ async fn ingest_active_messages(
                 let metadata_json = active_replay_metadata_json(
                     upsert.projection_metadata_json.as_deref(),
                     &replay,
+                    &raw,
                 );
                 if metadata_json != initial_metadata_json {
                     update_active_replay_metadata(conn, provider, &message_id, &metadata_json)
@@ -2354,7 +2360,7 @@ fn default_message_kind(role: &str) -> String {
     }
 }
 
-fn active_message_metadata(message: &Value, replay: &Value) -> String {
+fn active_message_metadata(message: &Value, replay: &Value, storage_text: &str) -> String {
     let mut metadata = Map::new();
     metadata.insert(
         replay_transactions::ACTIVE_REPLAY_METADATA_KEY.to_string(),
@@ -2362,7 +2368,7 @@ fn active_message_metadata(message: &Value, replay: &Value) -> String {
     );
     metadata.insert(
         replay_transactions::ACTIVE_REPLAY_MESSAGE_KEY.to_string(),
-        active_replay_for_metadata(replay),
+        active_replay_for_metadata(replay, Some(storage_text)),
     );
     if let Some(lcm_ingest) = message.get("lcm_ingest") {
         metadata.insert("lcm_ingest".to_string(), lcm_ingest.clone());
@@ -2384,7 +2390,11 @@ fn replay_content_value(
     serde_json::from_str(&raw.content).unwrap_or_else(|_| Value::String(raw.content.clone()))
 }
 
-fn active_replay_metadata_json(existing_metadata_json: Option<&str>, replay: &Value) -> String {
+fn active_replay_metadata_json(
+    existing_metadata_json: Option<&str>,
+    replay: &Value,
+    raw: &LcmRawMessage,
+) -> String {
     let mut metadata = existing_metadata_json
         .and_then(|text| serde_json::from_str::<Value>(text).ok())
         .and_then(|value| value.as_object().cloned())
@@ -2395,18 +2405,29 @@ fn active_replay_metadata_json(existing_metadata_json: Option<&str>, replay: &Va
     );
     metadata.insert(
         replay_transactions::ACTIVE_REPLAY_MESSAGE_KEY.to_string(),
-        active_replay_for_metadata(replay),
+        active_replay_for_metadata(
+            replay,
+            (raw.storage_kind == LcmStorageKind::Inline).then_some(raw.content.as_str()),
+        ),
     );
     Value::Object(metadata).to_string()
 }
 
-fn active_replay_for_metadata(replay: &Value) -> Value {
+fn active_replay_for_metadata(replay: &Value, canonical_content: Option<&str>) -> Value {
     let mut replay = replay.clone();
     if let Some(object) = replay.as_object_mut() {
         // This locator is regenerated from the canonical raw row at replay.
         // Persisting it makes our own replay look like a source metadata edit
         // and invalidates otherwise unchanged summary lineage on re-ingest.
         object.remove("store_id");
+        // The canonical raw body already owns this exact string. The replay
+        // reader restores omitted content from it; structured content and
+        // external payload placeholders retain their separate representation.
+        if canonical_content
+            .is_some_and(|content| object.get("content").and_then(Value::as_str) == Some(content))
+        {
+            object.remove("content");
+        }
         replay_transactions::strip_disposable_assistant_replay_sidecars(object, "");
     }
     replay

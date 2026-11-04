@@ -75,16 +75,27 @@ fn assert_baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples(
         [
             "train-016",
             "train-019",
-            "train-020",
             "train-026",
             "validation-015",
-            "validation-017",
             "validation-023",
             "validation-024",
             "validation-025",
             "validation-027",
         ]
     );
+    for query_id in ["train-020", "validation-018", "validation-019"] {
+        let query = report
+            .profiles
+            .iter()
+            .flat_map(|profile| &profile.queries)
+            .find(|query| query.query_id == query_id)
+            .expect("ranking regression query is present");
+        assert_eq!(
+            query.status,
+            crate::DirectEvaluationStatusV1::Pass,
+            "{query_id} must retain useful top-ten retrieval"
+        );
+    }
     assert!(report.profiles.iter().all(|profile| {
         profile.quality.protected_recall_at_10.denominator > 0
             && profile.quality.protected_recall_at_10.numerator
