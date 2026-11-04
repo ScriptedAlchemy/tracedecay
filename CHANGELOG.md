@@ -5,27 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0-beta.97](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.96...v1.0.0-beta.97) (2026-11-04)
-
-
-### Bug Fixes
-
-* **accounting:** commit token savings through the project store ([#4698](https://github.com/ScriptedAlchemy/tracedecay/issues/4698)) ([16f4368](https://github.com/ScriptedAlchemy/tracedecay/commit/16f436862d9d5cda5c8faf9e532b6f4cc15c4842))
-* **build:** preserve code-index runtime recursion budget ([#4703](https://github.com/ScriptedAlchemy/tracedecay/issues/4703)) ([9f2e64b](https://github.com/ScriptedAlchemy/tracedecay/commit/9f2e64b42b19d8f8756eda1b641caf606383d91c))
-* **cli:** clarify readiness and configuration refusals ([#4702](https://github.com/ScriptedAlchemy/tracedecay/issues/4702)) ([32afec6](https://github.com/ScriptedAlchemy/tracedecay/commit/32afec6f67644f4c9a9e777f757709557367b23a))
-* **doctor:** surface retained graph corruption verdicts ([#4700](https://github.com/ScriptedAlchemy/tracedecay/issues/4700)) ([adbf0e3](https://github.com/ScriptedAlchemy/tracedecay/commit/adbf0e391bd7d2e378916f98636a8d787dfb6dd4))
-* **evals:** bind HTTP resumes to experiment identity ([#4707](https://github.com/ScriptedAlchemy/tracedecay/issues/4707)) ([ea6fffa](https://github.com/ScriptedAlchemy/tracedecay/commit/ea6fffa848add0dc1dc7b4bbc36582f524686efb))
-* **graph:** return warming before rewarm dispatch deadline ([#4709](https://github.com/ScriptedAlchemy/tracedecay/issues/4709)) ([ba5f8dc](https://github.com/ScriptedAlchemy/tracedecay/commit/ba5f8dc0856270453d82fec68e888c6775a5a887))
-* **project:** adopt moved stores by explicit identity ([#4701](https://github.com/ScriptedAlchemy/tracedecay/issues/4701)) ([ba90ba5](https://github.com/ScriptedAlchemy/tracedecay/commit/ba90ba57eb65530cb70acb1d9541b9ac3373e08d))
-* **scout:** separate prompt inference from observed actions ([#4699](https://github.com/ScriptedAlchemy/tracedecay/issues/4699)) ([2388749](https://github.com/ScriptedAlchemy/tracedecay/commit/23887493a2bd75b03117339cad12b21438dcba6b))
-* **scout:** validate complete choice probability contracts ([#4690](https://github.com/ScriptedAlchemy/tracedecay/issues/4690)) ([65ddc06](https://github.com/ScriptedAlchemy/tracedecay/commit/65ddc060db753dfcb13362f3ec3ed5c4c3a006dd))
-* **typescript:** recheck incomplete configuration inputs ([#4708](https://github.com/ScriptedAlchemy/tracedecay/issues/4708)) ([402628a](https://github.com/ScriptedAlchemy/tracedecay/commit/402628a33e6c56d1355827a29443b1f6ec24e401))
-
-
-### Performance Improvements
-
-* **sessions:** avoid detached Codex dispatch and trace per-rollout phases ([#4706](https://github.com/ScriptedAlchemy/tracedecay/issues/4706)) ([68c1dd5](https://github.com/ScriptedAlchemy/tracedecay/commit/68c1dd55eae6f505a05a0b094559aff2c9f7fb44))
-
 ## [1.0.0-beta.96](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.95...v1.0.0-beta.96) (2026-11-03)
 
 
