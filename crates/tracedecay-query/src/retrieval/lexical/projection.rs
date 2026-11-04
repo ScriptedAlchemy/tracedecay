@@ -1055,9 +1055,7 @@ fn score_lexical_row(
         }
         // Only an admitted whole-word field can cover subtoken evidence.
         // Otherwise a Subtoken-only request loses rows before lane filtering.
-        if field == LexicalFieldV1::Subtoken
-            || !super::field_admitted(field_filters, field)
-        {
+        if field == LexicalFieldV1::Subtoken || !super::field_admitted(field_filters, field) {
             continue;
         }
         for (query_term, normalized) in &prepared.whole_terms {
