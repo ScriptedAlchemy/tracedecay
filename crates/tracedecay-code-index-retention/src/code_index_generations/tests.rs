@@ -1703,7 +1703,10 @@ fn unsafe_shared_artifacts_do_not_starve_staging_debris() {
     )
     .expect("reclaim independently verified staging debris");
     assert_eq!(report.deleted_text_artifacts.len(), 1);
-    assert!(!staging_path.exists(), "abandoned staging file is reclaimed");
+    assert!(
+        !staging_path.exists(),
+        "abandoned staging file is reclaimed"
+    );
     assert_eq!(
         std::fs::read_dir(&shared_root)
             .expect("read preserved artifacts")

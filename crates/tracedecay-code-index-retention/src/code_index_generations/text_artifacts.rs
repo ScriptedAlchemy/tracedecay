@@ -478,9 +478,7 @@ pub(super) fn plan_collectable_text_artifacts_budgeted_cancellable(
             // The active build's staging family is the builder's
             // property; any other staging database or sidecar is crash
             // debris.
-            (false, Some(source_digest), _) if Some(source_digest) == active_staging_source => {
-                None
-            }
+            (false, Some(source_digest), _) if Some(source_digest) == active_staging_source => None,
             (false, Some(_), _) => Some(CodeTextArtifactRetentionCandidateV1 {
                 artifact_file: file_name,
                 kind: CodeTextArtifactRetentionKindV1::Staging,
