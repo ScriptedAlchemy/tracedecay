@@ -227,11 +227,11 @@ def noul_probabilities(response, questions):
         raise ValueError("noul answers must cover exactly the requested questions")
     values = {}
     for key, answer in answers.items():
-        # Older decision servers omit the kind, but a present tag must agree
-        # with the requested question. A Score response with an incidental
-        # noul field is not evidence of a successful Noul prediction.
+        # The current decision contract tags every answer. An untyped
+        # response could be an unrelated decision with an incidental noul
+        # value, so it cannot qualify as Noul model evidence.
         if (not isinstance(answer, dict)
-                or ("type" in answer and answer["type"] != "noul")
+                or answer.get("type") != "noul"
                 or "noul" not in answer):
             raise ValueError(f"invalid noul answer for {key}")
         values[key] = answer["noul"]

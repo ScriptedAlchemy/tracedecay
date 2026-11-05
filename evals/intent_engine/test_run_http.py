@@ -48,7 +48,7 @@ class RunHttpTest(unittest.TestCase):
         (self.root / name).write_text(json.dumps(value), encoding="utf-8")
 
     def response(self, url, body):
-        return {"answers": {key: {"noul": 0.25} for key in body["questions"]},
+        return {"answers": {key: {"type": "noul", "noul": 0.25} for key in body["questions"]},
                 "usage": {"input_tokens": 12}, "latency_ms": 0}, 5.0
 
     def run_main(self, extra=()):
@@ -762,6 +762,9 @@ class RunHttpTest(unittest.TestCase):
         sample = self.root / "rejected-response.json"
         response, elapsed = self.response("", {"questions": run_http.noul_questions()})
         invalid = []
+        untyped = copy.deepcopy(response)
+        del untyped["answers"]["impact"]["type"]
+        invalid.append(untyped)
         for declared_type in ("score", None, False, [], {"kind": "noul"}):
             malformed = copy.deepcopy(response)
             malformed["answers"]["impact"]["type"] = declared_type
