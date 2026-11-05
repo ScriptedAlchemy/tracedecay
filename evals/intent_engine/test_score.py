@@ -207,6 +207,81 @@ class ScoringTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, field):
                         score.lat([{**row("invalid"), field: value}])
 
+    def test_cli_does_not_invent_an_unmeasured_hybrid_arm(self):
+        for same_cases in (True, False):
+            with self.subTest(same_cases=same_cases), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.stage_scripts(root)
+                results = root / "results"
+                results.mkdir()
+                configurations = {
+                    "B_noul_text": {"config": "B_noul_text", "rows": [row("a")]},
+                    "C_choice_text": {
+                        "config": "C_choice_text",
+                        "rows": [row("a" if same_cases else "b", choice="none")],
+                    },
+                }
+                for name, result in configurations.items():
+                    (results / f"{name}.json").write_text(json.dumps(result), encoding="utf-8")
+                scored = self.run_script(root, "score.py")
+                self.assertEqual(scored.returncode, 0, scored.stderr)
+                summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
+                self.assertEqual(set(summary), set(configurations))
+                for name, result in configurations.items():
+                    self.assertEqual(summary[name], score.score_config(result))
+                self.assertNotIn("H_hybrid_text", scored.stdout)
+
+    def test_cli_preserves_a_recorded_hybrid_instead_of_replacing_its_measurements(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.stage_scripts(root)
+            results = root / "results"
+            results.mkdir()
+            hybrid = {
+                "config": "H_hybrid_text",
+                "experiment": {"version": 2},
+                "rows": [{
+                    **row("a", [score.CATS[0]], True), "ms": 17,
+                    "input_tokens": 151, "state_tokens": 93, "dropped": 4,
+                }],
+            }
+            configurations = [
+                {"config": "B_noul_text", "rows": [row("a")]},
+                {"config": "C_choice_text", "rows": [row("a", choice="none")]},
+                hybrid,
+            ]
+            for result in configurations:
+                (results / f"{result['config']}.json").write_text(
+                    json.dumps(result), encoding="utf-8",
+                )
+            original_inputs = {path: path.read_bytes() for path in results.iterdir()}
+            scored = self.run_script(root, "score.py")
+            self.assertEqual(scored.returncode, 0, scored.stderr)
+            summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["H_hybrid_text"], score.score_config(hybrid))
+            self.assertEqual({path: path.read_bytes() for path in results.iterdir()}, original_inputs)
+            compared = self.run_script(root, "compare.py", "H_hybrid_text")
+            self.assertEqual(compared.returncode, 0, compared.stderr)
+            self.assertIn("| median ms / call | 17 |", compared.stdout)
+
+    def test_duplicate_configuration_files_are_refused_before_summary_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.stage_scripts(root)
+            results = root / "results"
+            results.mkdir()
+            for name, ms in [("first", 10), ("second", 900)]:
+                (results / f"{name}.json").write_text(json.dumps({
+                    "config": "same", "rows": [{**row(name), "ms": ms}],
+                }), encoding="utf-8")
+            summary = root / "summary.json"
+            summary.write_bytes(b"existing summary\n")
+            scored = self.run_script(root, "score.py")
+            self.assertNotEqual(scored.returncode, 0)
+            self.assertIn("duplicate configuration", scored.stderr)
+            self.assertIn("same", scored.stderr)
+            self.assertEqual(summary.read_bytes(), b"existing summary\n")
+
     @staticmethod
     def stage_scripts(root):
         for name in ("score.py", "compare.py", "common.py"):

@@ -153,16 +153,12 @@ if __name__ == "__main__":
     fixed = json.load(open(os.path.join(here, "fixed_thresholds.json"))) if os.path.exists(os.path.join(here, "fixed_thresholds.json")) else None
     summary = {}; allres = {}
     for f in sorted(glob.glob(os.path.join(here, "results", "*.json"))):
-        res = json.load(open(f)); allres[res["config"]] = res
-    if "B_noul_text" in allres and "C_choice_text" in allres:
-        # derived: noul probs for session_recall/memory_store, choice probs for the rest (two calls: 2 noul rows + 1 choice row)
-        b = {r["id"]: r for r in allres["B_noul_text"]["rows"]}
-        rows = []
-        for r in allres["C_choice_text"]["rows"]:
-            p = dict(r["probs"]); p["session_recall"] = b[r["id"]]["probs"]["session_recall"]; p["memory_store"] = b[r["id"]]["probs"]["memory_store"]
-            rows.append({**r, "probs": p, "ms": r["ms"] + 2 * 340})
-            rows[-1].pop("choice")
-        allres["H_hybrid_text"] = {"config": "H_hybrid_text", "rows": rows}
+        res = json.load(open(f))
+        if res["config"] in allres:
+            raise ValueError("duplicate configuration %r in result files" % res["config"])
+        allres[res["config"]] = res
+    # Score recorded runs only. Combining independently measured arms cannot
+    # establish hybrid latency or usage, and must never replace an actual run.
     for k, res in allres.items():
         summary[k] = score_config(res, fixed)
     json.dump(summary, open(os.path.join(here, "summary.json"), "w"), indent=1)
