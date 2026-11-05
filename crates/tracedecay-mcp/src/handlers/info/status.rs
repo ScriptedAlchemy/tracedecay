@@ -1181,12 +1181,11 @@ mod tests {
 
     use super::{
         CodeIndexReadinessWaitReadV1, CorrelationIndexHealth, FreshnessLabelV1,
-        SessionHistoryCatchUpProgress, code_index_freshness_projection,
-        code_index_freshness_status, git_staleness, graph_statistics_value,
-        apply_historical_worker_blocker, historical_session_catch_up_progress,
-        historical_session_catch_up_state,
-        readiness_wait_outcome, render_status_md, schema_convergence_status,
-        session_git_evidence_state,
+        SessionHistoryCatchUpProgress, apply_historical_worker_blocker,
+        code_index_freshness_projection, code_index_freshness_status, git_staleness,
+        graph_statistics_value, historical_session_catch_up_progress,
+        historical_session_catch_up_state, readiness_wait_outcome, render_status_md,
+        schema_convergence_status, session_git_evidence_state,
     };
     use tracedecay_contracts::code_index_freshness::{
         CodeGraphServingReadinessV1, CodeIndexFreshnessCoverageV1, CodeIndexFreshnessPayloadV1,
