@@ -1075,6 +1075,20 @@ impl MaintenanceCoordinator {
             .iter()
             .map(|graph| graph.project_root.clone())
             .collect::<BTreeSet<_>>();
+        // Text-artifact progress belongs to registered project data roots,
+        // not only mounted graphs. Mounted-only pruning replays a preserved
+        // directory prefix forever for an unmounted registered scope.
+        if registry_listed {
+            let mut scan_data_roots = project_graphs
+                .iter()
+                .map(|graph| graph.data_root.clone())
+                .collect::<BTreeSet<_>>();
+            scan_data_roots.extend(work.iter().filter_map(|(_, unit)| match unit {
+                MaintenanceStoreWork::Registered(store) => Some(store.data_root.clone()),
+                MaintenanceStoreWork::Session(_) | MaintenanceStoreWork::Graph(_) => None,
+            }));
+            maintenance_observations.retain_text_artifact_scan_projects(&scan_data_roots);
+        }
         maintenance_observations.retain_project_maintenance_state(&active_maintenance_projects);
         // A capacity retirement releasing stores skips this pass: sampling
         // leases every sampled store until it ends.
