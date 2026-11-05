@@ -46,6 +46,35 @@ describe("AutomationsPage scheduler bay", () => {
     expect(within(bay).getByText(/no scheduler-triggered run is recorded for any task/)).toBeTruthy();
   });
 
+  it("prints a reset-blocked scheduler with its census and remedy, never configured", async () => {
+    stubAutomation({
+      status: scheduler({
+        status: "blocked_reset_required",
+        reset_required_stores: [
+          {
+            store: "profile sessions",
+            authority: "git correlation",
+            found_version: 5,
+            required_version: 6,
+            reason: "git correlation profile schema 5 is incompatible with required schema 6",
+            remedy: "tracedecay wipe --stale --yes",
+          },
+        ],
+        tasks: [],
+      }),
+    });
+    renderAutomations();
+    const bay = await settledRegion("Scheduler status");
+    expect(within(bay).getByText("reset required")).toBeTruthy();
+    expect(within(bay).queryByText("configured")).toBeNull();
+    expect(
+      within(bay).getByText(
+        /profile sessions \(git correlation\) requires reset: git correlation profile schema 5 is incompatible with required schema 6/,
+      ),
+    ).toBeTruthy();
+    expect(within(bay).getByText(/tracedecay wipe --stale --yes/)).toBeTruthy();
+  });
+
   it("prints each scheduler task with its due flag, skip reason and last run", async () => {
     stubAutomation();
     renderAutomations();
@@ -392,13 +421,20 @@ function renderAutomations() {
 
 const NOW = 1_754_000_000;
 
-function scheduler(overrides: { paused?: boolean; status?: string; tasks?: unknown[] } = {}) {
+function scheduler(
+  overrides: {
+    paused?: boolean;
+    status?: string;
+    tasks?: unknown[];
+    reset_required_stores?: unknown[];
+  } = {},
+) {
   return {
     status: overrides.status ?? "configured",
     paused: overrides.paused ?? false,
     enabled: true,
     scheduler_tick_secs: 900,
-    reset_required_stores: [],
+    reset_required_stores: overrides.reset_required_stores ?? [],
     now: NOW,
     last_session_activity: NOW - 1200,
     configuration_revision_id: "configuration.revision.automation.test",
