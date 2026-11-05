@@ -262,6 +262,78 @@ fn external_read_only_wal_reader_survives_live_writer_identity_checks() {
     assert_committed_data(&path);
 }
 
+
+#[test]
+fn dropping_secondary_identity_pins_never_releases_rollback_writer_locks() {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("shared-pin-rollback.db");
+    let pinned = OpenedDatabaseFile::create_new(&path).expect("pin database");
+    let reader_pin = pinned.try_clone().expect("share reader identity");
+    let writer_pin = pinned.try_clone().expect("share writer identity");
+    let connection = Connection::open(&path).expect("open SQLite connection");
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode = DELETE;
+             CREATE TABLE sample(value INTEGER);
+             INSERT INTO sample VALUES (1);
+             BEGIN IMMEDIATE;
+             UPDATE sample SET value = 2;",
+        )
+        .expect("hold writer transaction");
+    probe_external_connection(&path, "write", true);
+
+    // In the old implementation these were independent dup(2) descriptors.
+    // Dropping either one discarded SQLite's unrelated process-wide lock.
+    drop(reader_pin);
+    probe_external_connection(&path, "write", true);
+    drop(writer_pin);
+    probe_external_connection(&path, "write", true);
+    pinned
+        .verify_connection(&connection, &path)
+        .expect("shared pin still identifies the live file");
+    probe_external_connection(&path, "write", true);
+
+    connection.execute_batch("COMMIT").expect("commit");
+    probe_external_connection(&path, "write", false);
+    drop(connection);
+    drop(pinned);
+    assert_committed_data(&path);
+}
+
+#[test]
+fn dropping_secondary_identity_pins_never_unlocks_live_wal_journal() {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("shared-pin-wal.db");
+    let pinned = OpenedDatabaseFile::create_new(&path).expect("pin database");
+    let reader_pin = pinned.try_clone().expect("share reader identity");
+    let writer_pin = pinned.try_clone().expect("share writer identity");
+    let connection = Connection::open(&path).expect("open SQLite connection");
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode = WAL;
+             CREATE TABLE sample(value INTEGER);
+             INSERT INTO sample VALUES (1);
+             BEGIN IMMEDIATE;
+             UPDATE sample SET value = 2;",
+        )
+        .expect("hold WAL write transaction");
+    probe_external_connection(&path, "journal", true);
+
+    drop(reader_pin);
+    probe_external_connection(&path, "journal", true);
+    drop(writer_pin);
+    probe_external_connection(&path, "journal", true);
+    pinned.verify_current_path(&path).expect("original file identity");
+    probe_external_connection(&path, "journal", true);
+
+    connection.execute_batch("COMMIT").expect("commit");
+    probe_external_connection(&path, "journal", true);
+    drop(connection);
+    drop(pinned);
+    probe_external_connection(&path, "journal", false);
+    assert_committed_data(&path);
+}
+
 #[test]
 fn path_checks_keep_pinned_identity_and_reject_missing_or_replaced_files() {
     let temp = TempDir::new().expect("tempdir");

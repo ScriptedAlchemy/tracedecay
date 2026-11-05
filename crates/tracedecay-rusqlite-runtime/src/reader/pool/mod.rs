@@ -812,10 +812,10 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         self.inner.capacity_changed.notify_all();
     }
 
-    /// Fences admission, closes the pinned descriptor, and tells every worker
-    /// to interrupt its statement and exit, which closes its connection. The
-    /// pool object may outlive this call inside a lease, but no longer holds
-    /// the unlinked file open. Never waits, so a pool task may call it.
+    /// Fences admission and tells every worker to interrupt its statement
+    /// and exit. The shared inode pin must outlive every SQLite connection:
+    /// closing it here could release process-wide POSIX locks while another
+    /// worker is still shutting down. Never waits, so a pool task may call it.
     pub(crate) fn close_for_lost_file(&self) {
         // Draining and `lost` flip under one lock, so a waiter the wake below
         // releases never sees the pool draining without the file being lost.
@@ -835,7 +835,6 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                 .collect()
         };
         self.inner.capacity_changed.notify_all();
-        self.inner.locator.release_opened_database();
         for client in clients {
             client.shutdown();
         }

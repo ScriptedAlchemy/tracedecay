@@ -6,7 +6,7 @@ use std::{
     io,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -65,8 +65,10 @@ const RETAINED_WAL_BYTES: i64 = WAL_SOFT_LIMIT_BYTES as i64;
 /// pathname stat.
 #[derive(Debug)]
 pub(crate) struct OpenedDatabaseFile {
-    /// `None` once [`Self::release`] closed the descriptor of a lost file.
-    file: Mutex<Option<File>>,
+    /// One descriptor shared by every attachment worker. Duplicating this
+    /// descriptor and closing a clone while SQLite holds POSIX locks would
+    /// release locks belonging to other live connections to the same inode.
+    file: Arc<Mutex<Option<File>>>,
     identity: u64,
 }
 
@@ -91,19 +93,9 @@ impl OpenedDatabaseFile {
         }
         let identity = opened_file_identity(&file)?;
         Ok(Self {
-            file: Mutex::new(Some(file)),
+            file: Arc::new(Mutex::new(Some(file))),
             identity,
         })
-    }
-
-    /// Closes the pinned descriptor of a file that was unlinked or replaced,
-    /// for every holder of this handle at once. The identity stays readable;
-    /// anything that needs the descriptor afterwards reports `Replaced`.
-    pub(crate) fn release(&self) {
-        self.file
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
     }
 
     pub(crate) const fn identity(&self) -> u64 {
@@ -123,9 +115,12 @@ impl OpenedDatabaseFile {
     }
 
     pub(crate) fn try_clone(&self) -> Result<Self, OpenedDatabaseFileError> {
-        let file = self.with_file(|file| file.try_clone())?;
+        // Share the *same* raw descriptor instead of dup(2): closing any
+        // duplicate descriptor after a SQLite connection acquires POSIX locks
+        // can silently release that connection's locks process-wide.
+        self.with_file(|_| ())?;
         Ok(Self {
-            file: Mutex::new(Some(file.map_err(|_| OpenedDatabaseFileError::Open)?)),
+            file: Arc::clone(&self.file),
             identity: self.identity,
         })
     }
