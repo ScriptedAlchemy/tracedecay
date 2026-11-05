@@ -585,6 +585,16 @@ pub async fn run_registered_code_generation_retention(
             return CodeGenerationRetentionOutcomeV1::Failed;
         }
     };
+    // A project may remain registered long after individual scope directories
+    // are retired. Only a successful canonical scope census can release their
+    // retained directory streams; an inventory failure above preserves them.
+    observations.retain_text_artifact_scan_scopes(
+        &store.data_root,
+        &scopes
+            .iter()
+            .map(|scope| scope.store_root.clone())
+            .collect::<BTreeSet<_>>(),
+    );
     let graph_replay_pool_root = store
         .data_root
         .join(tracedecay_runtime_core::config::DB_FILENAME)

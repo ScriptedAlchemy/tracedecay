@@ -1,6 +1,6 @@
 //! Text-artifact scan positions owned by the existing maintenance registry.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -36,6 +36,23 @@ impl StoreTelemetrySamplingRegistry {
         });
         Arc::clone(&entry.scan)
     }
+
+    /// Release directory streams for scopes absent from a successfully read
+    /// project scope inventory. A registered project can outlive many retired
+    /// worktrees; pruning by project alone would retain their open ReadDir
+    /// handles indefinitely.
+    pub(crate) fn retain_text_artifact_scan_scopes(
+        &self,
+        data_root: &Path,
+        live_store_roots: &BTreeSet<PathBuf>,
+    ) {
+        self.text_artifact_scans
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|store_root, entry| {
+                entry.data_root != data_root || live_store_roots.contains(store_root)
+            });
+    }
 }
 
 #[cfg(test)]
@@ -45,6 +62,46 @@ mod tests {
     use std::sync::Arc;
 
     use super::StoreTelemetrySamplingRegistry;
+
+    #[test]
+    fn retired_scope_releases_scan_while_registered_project_stays_live() {
+        let registry = StoreTelemetrySamplingRegistry::default();
+        let project = Path::new("registered-project");
+        let survivor = Path::new("registered-project/code-index-v1/survivor");
+        let retired = Path::new("registered-project/code-index-v1/retired");
+        let other = Path::new("other-project/code-index-v1/scope");
+
+        let live = registry.text_artifact_scan(project, survivor);
+        let removed = registry.text_artifact_scan(project, retired);
+        let removed_weak = Arc::downgrade(&removed);
+        drop(removed);
+
+        let other_data_root = Path::new("other-project");
+        let elsewhere = registry.text_artifact_scan(other_data_root, other);
+        let elsewhere_weak = Arc::downgrade(&elsewhere);
+        drop(elsewhere);
+
+        // The registered project is still present. Only its *scope* inventory
+        // changed, so the retired scan must not keep its ReadDir handles.
+        registry.retain_text_artifact_scan_scopes(
+            project,
+            &BTreeSet::from([survivor.to_path_buf()]),
+        );
+        assert!(removed_weak.upgrade().is_none());
+        assert!(Arc::ptr_eq(
+            &live,
+            &registry.text_artifact_scan(project, survivor)
+        ));
+        assert!(elsewhere_weak.upgrade().is_some());
+
+        // A failed/incomplete project inventory does not invoke pruning.
+        // After a later successful empty inventory, all its old streams close.
+        let live_weak = Arc::downgrade(&live);
+        drop(live);
+        registry.retain_text_artifact_scan_scopes(project, &BTreeSet::new());
+        assert!(live_weak.upgrade().is_none());
+        assert!(elsewhere_weak.upgrade().is_some());
+    }
 
     #[test]
     fn scope_scans_share_the_owner_and_retire_with_project_state() {
