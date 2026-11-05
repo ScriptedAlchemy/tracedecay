@@ -201,6 +201,51 @@ class ScoringTests(unittest.TestCase):
             compared = self.run_script(root, "compare.py", "unknown")
             self.assertEqual(compared.returncode, 0, compared.stderr)
 
+    def test_result_rows_require_valid_predictions_and_verifiable_case_labels(self):
+        original = row("a", [score.CATS[0]])
+        cases = [
+            ({"probs": {**original["probs"], score.CATS[0]: True}}, "probs value"),
+            ({"probs": {**original["probs"], score.CATS[0]: float("nan")}}, "probs value"),
+            ({"probs": {**original["probs"], score.CATS[0]: float("inf")}}, "probs value"),
+            ({"probs": {**original["probs"], score.CATS[0]: -0.1}}, "probs value"),
+            ({"probs": {**original["probs"], score.CATS[0]: 1.1}}, "probs value"),
+            ({"probs": {k: v for k, v in original["probs"].items() if k != score.CATS[0]}}, "probs coverage"),
+            ({"probs": {**original["probs"], "unexpected": 0.2}}, "probs coverage"),
+            ({"probs_raw": {**original["probs"], score.CATS[0]: False}}, "probs_raw value"),
+            ({"labels": ["not_an_intent"]}, "invalid labels"),
+            ({"labels": [score.CATS[0], score.CATS[0]]}, "invalid labels"),
+            ({"context_needed": "true"}, "context_needed"),
+            ({"choice": "not_an_option"}, "invalid choice"),
+            ({"ms": True}, "elapsed ms"),
+            ({"ms": float("nan")}, "elapsed ms"),
+        ]
+        for changed, message in cases:
+            with self.subTest(changed=changed):
+                with self.assertRaisesRegex(ValueError, message):
+                    score.score_config({"config": "invalid", "rows": [{**original, **changed}]})
+        with self.assertRaisesRegex(ValueError, "duplicate case ID"):
+            score.score_config({"config": "duplicate", "rows": [original, dict(original)]})
+        choice = {**original, "choice": "none",
+                  "probs": {**original["probs"], "none": 0.2}}
+        self.assertEqual(score.score_config({"config": "choice", "rows": [choice]})["latency"]["total_cases"], 1)
+
+    def test_invalid_probability_cannot_replace_previous_cli_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.stage_scripts(root)
+            (root / "results").mkdir()
+            invalid = row("a", [score.CATS[0]])
+            invalid["probs"][score.CATS[0]] = True
+            (root / "results" / "bad.json").write_text(
+                json.dumps({"config": "bad", "rows": [invalid]}), encoding="utf-8",
+            )
+            summary = root / "summary.json"
+            summary.write_bytes(b"previous valid summary\n")
+            result = self.run_script(root, "score.py")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("invalid probs value", result.stderr)
+            self.assertEqual(summary.read_bytes(), b"previous valid summary\n")
+
     def test_invalid_usage_is_not_silently_discarded_as_missing(self):
         for field in ("state_tokens", "input_tokens", "dropped"):
             for value in (True, -1, 1.5, "12", float("nan")):

@@ -4,7 +4,7 @@ Empty slices have unknown rates, not zero accuracy. Macro AUC averages only
 categories with both label classes and reports its category coverage. Nonempty
 macro F1 retains the historical fixed-CATS, zero-for-undefined convention.
 """
-import json, glob, os, statistics, sys, tempfile
+import json, glob, math, os, statistics, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import CATS
 
@@ -24,6 +24,47 @@ def publish_summary(path, summary):
     finally:
         if os.path.lexists(staged):
             os.unlink(staged)
+
+
+def validate_rows(rows, config):
+    """Refuse invalid measured evidence before any threshold or AUC arithmetic."""
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("configuration %r has no rows to score" % config)
+    categories = set(CATS)
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("configuration %r has a non-object result row" % config)
+        case_id = row.get("id")
+        if not isinstance(case_id, str) or not case_id or case_id in seen:
+            raise ValueError("configuration %r has a missing or duplicate case ID" % config)
+        seen.add(case_id)
+        labels = row.get("labels")
+        if (not isinstance(labels, list) or
+                any(not isinstance(label, str) or label not in categories for label in labels) or
+                len(set(labels)) != len(labels)):
+            raise ValueError(f"configuration {config!r} case {case_id} has invalid labels")
+        if not isinstance(row.get("context_needed"), bool):
+            raise ValueError(f"configuration {config!r} case {case_id} has invalid context_needed")
+        for field in ("probs", "probs_raw"):
+            if field == "probs_raw" and field not in row:
+                continue
+            probs = row.get(field)
+            if (not isinstance(probs, dict) or not categories.issubset(probs) or
+                    set(probs) - categories - {"none"}):
+                raise ValueError(f"configuration {config!r} case {case_id} has invalid {field} coverage")
+            for label, value in probs.items():
+                if (isinstance(value, bool) or not isinstance(value, (int, float)) or
+                        not math.isfinite(value) or not 0 <= value <= 1):
+                    raise ValueError(f"configuration {config!r} case {case_id} has invalid {field} value for {label}")
+        if "choice" in row:
+            choice = row["choice"]
+            if choice is not None and (not isinstance(choice, str) or choice not in categories | {"none"}):
+                raise ValueError(f"configuration {config!r} case {case_id} has invalid choice")
+        elapsed = row.get("ms")
+        if (isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)) or
+                not math.isfinite(elapsed) or elapsed < 0):
+            raise ValueError(f"configuration {config!r} case {case_id} has invalid elapsed ms")
 
 
 def auc(pos, neg):
@@ -107,8 +148,7 @@ def score_config(res, fixed_t=None):
         if not isinstance(experiment, dict) or experiment.get("version") != 2:
             raise ValueError("HTTP result telemetry version is unsupported; rerun with a new tag")
     rows = res["rows"]
-    if not rows:
-        raise ValueError("configuration %r has no rows to score" % res.get("config"))
+    validate_rows(rows, res.get("config"))
     choices = ["choice" in row for row in rows]
     if any(choices) and not all(choices):
         raise ValueError("configuration %r has incomplete choice coverage" % res.get("config"))
