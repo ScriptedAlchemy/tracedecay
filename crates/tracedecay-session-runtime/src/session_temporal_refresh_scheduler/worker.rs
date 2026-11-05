@@ -39,6 +39,15 @@ use tracedecay_session_temporal_store::{
 
 const HISTORY_IDLE_RECHECK_INTERVAL: Duration = Duration::from_mins(1);
 
+// Only use the one-minute discovery cadence when historical ingest can run.
+// During terminal backoff a minute-by-minute timer would schedule suppressed
+// history passes, which can still wake unrelated summary convergence. External
+// projection/cancellation wakes remain independently selectable.
+pub(super) fn history_idle_recheck_at(now: Instant, blocked_until: Option<Instant>) -> Instant {
+    let discovery_at = now + HISTORY_IDLE_RECHECK_INTERVAL;
+    blocked_until.map_or(discovery_at, |until| until.max(discovery_at))
+}
+
 /// A history refresh's outcome and the release its next pass waits on.
 type HistoryPassReport = (SessionHistoricalIngestOutcome, Option<HistoryRelease>);
 
@@ -674,6 +683,8 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             if state.has_pending_work() {
                 break;
             }
+            let history_idle_deadline =
+                history_idle_recheck_at(Instant::now(), blocked_history_until);
             tokio::select! {
                 () = tracing::Instrument::instrument(state.wait_for_cancellation(), tracing::trace_span!("daemon.scheduler.session_temporal.idle_cancel")) => return,
                 // Every wake sets its work flag first, so a wake without work
@@ -690,10 +701,10 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     state.wake_history();
                     break;
                 }
-                // Discovery of new sources, and the retry of a refusal nothing
-                // signals (a still-mounting authority, an undecidable source),
-                // share this cadence. Unchanged sources cost it no reads.
-                fired = tracing::Instrument::instrument(native_runtime::sleep_until(Instant::now() + HISTORY_IDLE_RECHECK_INTERVAL), tracing::trace_span!("daemon.scheduler.session_temporal.history_idle_wait")) => {
+                // Ordinary source discovery keeps its one-minute cadence.
+                // After a terminal history blocker, park through its backoff
+                // instead of firing pointless minute-by-minute scheduler passes.
+                fired = tracing::Instrument::instrument(native_runtime::sleep_until(history_idle_deadline), tracing::trace_span!("daemon.scheduler.session_temporal.history_idle_wait")) => {
                     if stop_without_timer(fired) {
                         return;
                     }
