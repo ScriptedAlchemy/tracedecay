@@ -64,6 +64,31 @@ def publish_sample(path, serialized):
         os.unlink(staged)
 
 
+def require_exclusive_publication(directory):
+    """Refuse unsupported result volumes before spending inference tokens.
+
+    Both completed output and first-response samples use no-clobber hard links.
+    A writable directory alone does not prove that publication will work:
+    FAT/exFAT volumes can accept the partial log but never complete the run.
+    """
+    staged = os.path.join(directory, f".noul-link-probe-{secrets.token_hex(16)}")
+    linked = staged + ".linked"
+    descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.close(descriptor)
+    try:
+        try:
+            os.link(staged, linked)
+        except OSError as error:
+            raise OSError(
+                f"exclusive publication requires hard links in {directory}; "
+                "choose a hard-link-capable output directory"
+            ) from error
+    finally:
+        if os.path.lexists(linked):
+            os.unlink(linked)
+        os.unlink(staged)
+
+
 def publish_final_result(path, document):
     """Expose a completed JSON result only after its bytes are fully written.
 
@@ -227,8 +252,11 @@ def main(argv=None):
     for cfg in args.configs:
         name = f"{args.tag}_{cfg}"
         path = os.path.join(HERE, "results", name + ".json")
-        if os.path.exists(path):
+        if os.path.lexists(path):
             raise ValueError(f"completed output already exists: {path}; use a new tag")
+        require_exclusive_publication(os.path.dirname(os.path.abspath(path)))
+        if args.sample_out and not os.path.isfile(args.sample_out):
+            require_exclusive_publication(os.path.dirname(os.path.abspath(args.sample_out)))
         requests = {}
         for case in dataset:
             body = {"state": STATES[cfg](case), "questions": questions}

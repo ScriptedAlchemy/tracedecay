@@ -355,6 +355,57 @@ class RunHttpTest(unittest.TestCase):
                     self.run_main(["--subset", str(self.root / "subset.json")])
                 post.assert_not_called()
 
+    def test_unsupported_results_volume_refuses_before_any_http_work(self):
+        with patch.object(run_http, "post") as post:
+            with patch.object(run_http.os, "link", side_effect=OSError("unsupported links")):
+                with self.assertRaisesRegex(OSError, "requires hard links"):
+                    self.run_main()
+            post.assert_not_called()
+        self.assertFalse(self.partial.exists())
+        self.assertFalse(self.output.exists())
+        self.assertEqual(list(self.output.parent.glob(".noul-link-probe-*")), [])
+
+        # A real partial on a newly unavailable volume stays intact, and a
+        # retry refuses without duplicating already recorded inference.
+        self.interrupt()
+        preserved = self.partial.read_bytes()
+        with patch.object(run_http, "post") as post:
+            with patch.object(run_http.os, "link", side_effect=OSError("unsupported links")):
+                with self.assertRaisesRegex(OSError, "requires hard links"):
+                    self.run_main()
+            post.assert_not_called()
+        self.assertEqual(self.partial.read_bytes(), preserved)
+
+    def test_unsupported_sample_volume_refuses_before_any_http_work(self):
+        sample = self.root / "first-response.json"
+        actual_link = os.link
+
+        def refuse_sample_volume(source, destination):
+            if os.path.dirname(source) == str(self.root):
+                raise OSError("sample volume lacks hard links")
+            return actual_link(source, destination)
+
+        with patch.object(run_http, "post") as post:
+            with patch.object(run_http.os, "link", side_effect=refuse_sample_volume):
+                with self.assertRaisesRegex(OSError, "requires hard links"):
+                    self.run_main(["--sample-out", str(sample)])
+            post.assert_not_called()
+        self.assertFalse(self.partial.exists())
+        self.assertFalse(sample.exists())
+        self.assertEqual(list(self.root.glob(".noul-link-probe-*")), [])
+        self.assertEqual(list(self.output.parent.glob(".noul-link-probe-*")), [])
+
+    @unittest.skipUnless(os.name == "posix", "dangling symlinks require POSIX")
+    def test_dangling_completed_output_refuses_before_inference(self):
+        self.output.parent.mkdir()
+        self.output.symlink_to("missing-result.json")
+        with patch.object(run_http, "post") as post:
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                self.run_main()
+            post.assert_not_called()
+        self.assertTrue(self.output.is_symlink())
+        self.assertFalse(self.partial.exists())
+
     def test_completed_output_is_fully_valid_before_its_name_is_published(self):
         actual_link = os.link
         inspected = []
@@ -379,8 +430,15 @@ class RunHttpTest(unittest.TestCase):
                          ["first", "second"])
 
     def test_final_link_failure_preserves_a_complete_resumable_partial(self):
+        actual_link = os.link
+
+        def fail_final_only(source, destination):
+            if destination == str(self.output):
+                raise OSError("link refused")
+            return actual_link(source, destination)
+
         with patch.object(run_http, "post", side_effect=self.response):
-            with patch.object(run_http.os, "link", side_effect=OSError("link refused")):
+            with patch.object(run_http.os, "link", side_effect=fail_final_only):
                 with self.assertRaisesRegex(OSError, "link refused"):
                     self.run_main()
         self.assertFalse(self.output.exists())
@@ -407,8 +465,11 @@ class RunHttpTest(unittest.TestCase):
         self.assertFalse(self.partial.exists())
 
     def test_competing_final_publication_cannot_be_overwritten(self):
+        actual_link = os.link
+
         def race_at_publication(source, destination):
-            self.assertEqual(destination, str(self.output))
+            if destination != str(self.output):
+                return actual_link(source, destination)
             self.output.write_text('{"other_writer": true}', encoding="utf-8")
             raise FileExistsError("another result won publication")
 
