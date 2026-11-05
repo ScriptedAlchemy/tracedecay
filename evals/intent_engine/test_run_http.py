@@ -199,6 +199,35 @@ class RunHttpTest(unittest.TestCase):
         self.assertEqual(unrelated.read_text(encoding="utf-8"), "unchanged")
         self.assertFalse(self.output.exists())
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "named pipes require POSIX")
+    def test_named_pipe_partial_is_refused_without_waiting_for_a_writer(self):
+        self.partial.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(self.partial)
+        outcome = {}
+        finished = Event()
+
+        def resume():
+            try:
+                self.run_main()
+            except Exception as error:
+                outcome["error"] = error
+            finally:
+                finished.set()
+
+        with patch.object(run_http, "post") as post:
+            worker = Thread(target=resume, daemon=True)
+            worker.start()
+            self.assertTrue(
+                finished.wait(5),
+                "resume blocked on a FIFO before it could refuse non-file evidence",
+            )
+            worker.join()
+            self.assertIsInstance(outcome.get("error"), ValueError)
+            self.assertIn("regular file", str(outcome["error"]))
+            post.assert_not_called()
+        self.assertTrue(stat.S_ISFIFO(self.partial.lstat().st_mode))
+        self.assertFalse(self.output.exists())
+
     def test_input_tokens_do_not_fabricate_state_or_truncation_measurements(self):
         self.interrupt()
         with patch.object(run_http, "post", side_effect=self.response):

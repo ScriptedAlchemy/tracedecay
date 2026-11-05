@@ -14,6 +14,7 @@ import math
 import os
 import re
 import secrets
+import stat
 import sys
 import time
 import urllib.request
@@ -278,6 +279,30 @@ def lock_partial_writer(partial, path):
     partial.seek(0)
 
 
+def open_partial_for_resume(path):
+    """Open only regular resumable evidence, without blocking on a FIFO.
+
+    A pre-existing .partial path is untrusted filesystem state. Opening it
+    as r+ before inspecting its type can hang forever on a named pipe, so
+    request nonblocking/no-follow admission and check the opened descriptor.
+    The later lock still checks inode identity against the pathname.
+    """
+    flags = os.O_RDWR | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise ValueError(f"partial output was replaced or redirected: {path}") from error
+        raise
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError(f"partial output must be a regular file: {path}")
+        return os.fdopen(descriptor, "r+", encoding="utf-8")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def resume_rows(partial, header, cases, requests, questions, temperature):
     """Validate the whole existing log before appending or issuing HTTP work."""
     first = partial.readline()
@@ -377,7 +402,7 @@ def main(argv=None):
             partial = open(partial_path, "x+", encoding="utf-8")
             created = True
         except FileExistsError:
-            partial = open(partial_path, "r+", encoding="utf-8")
+            partial = open_partial_for_resume(partial_path)
             created = False
         with partial:
             lock_partial_writer(partial, partial_path)
