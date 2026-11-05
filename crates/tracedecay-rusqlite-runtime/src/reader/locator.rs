@@ -55,12 +55,6 @@ impl ExistingReaderLocator {
         self.opened_database = Some(Arc::new(opened_database));
         self
     }
-    /// Closes the pinned descriptor for this locator and every clone of it.
-    pub(crate) fn release_opened_database(&self) {
-        if let Some(opened) = &self.opened_database {
-            opened.release();
-        }
-    }
     pub(crate) fn expected_file_identity(&self) -> Option<u64> {
         self.opened_database
             .as_deref()
@@ -71,8 +65,11 @@ impl ExistingReaderLocator {
         connection: &rusqlite::Connection,
     ) -> Result<(), ReaderStartError> {
         self.opened_database.as_deref().map_or(Ok(()), |opened| {
+            // A released pin cannot be replaced by a pathname-only proof,
+            // even when that pathname still names the original inode.
             opened
-                .verify_connection(connection, &self.path)
+                .try_clone()
+                .and_then(|opened| opened.verify_connection(connection, &self.path))
                 .map_err(ReaderStartError::OpenedDatabaseIdentity)
         })
     }
@@ -80,8 +77,12 @@ impl ExistingReaderLocator {
         self.opened_database.as_deref().map_or_else(
             || Ok(self.path.clone()),
             |opened| {
+                // Canonical-path platforms do not otherwise touch the pin
+                // while choosing the worker path. Refuse a released owner
+                // before opening another SQLite connection.
                 opened
-                    .reader_open_path(&self.path)
+                    .try_clone()
+                    .and_then(|opened| opened.reader_open_path(&self.path))
                     .map_err(ReaderStartError::OpenedDatabaseIdentity)
             },
         )
@@ -154,6 +155,55 @@ impl Error for ReaderStartError {
             Self::SchemaProbeFailed(error) => Some(error),
             Self::OpenedDatabaseIdentity(error) => Some(error),
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ExistingReaderLocator, OpenedDatabaseFile, OpenedDatabaseFileError, ReaderStartError,
+    };
+    use crate::reader::tests::TestStore;
+
+    #[test]
+    fn released_pin_refuses_retained_reader_locators() {
+        let store = TestStore::new();
+        let locator = store.locator();
+        let path = locator.path().to_path_buf();
+        let pinned = OpenedDatabaseFile::pin(&path).expect("pin reader database");
+        let attachment_pin = pinned.try_clone().expect("share attachment pin");
+        let locator: ExistingReaderLocator = locator.with_opened_database(pinned);
+        let retained = locator.clone();
+        let identity = locator.expected_file_identity();
+        assert!(identity.is_some());
+
+        let connection = rusqlite::Connection::open(&path).expect("open original database");
+        locator
+            .verify_connection(&connection)
+            .expect("live pin verifies the original database");
+        assert!(retained.worker_open_path().is_ok());
+        // Release only after the SQLite worker has exited. A retained
+        // locator must not become reusable merely because the file remains.
+        drop(connection);
+        attachment_pin.release_after_workers_exit();
+        assert!(path.is_file());
+
+        let connection = rusqlite::Connection::open(&path).expect("reopen same inode for probe");
+        for closed in [&locator, &retained] {
+            assert_eq!(closed.expected_file_identity(), identity);
+            assert!(matches!(
+                closed.worker_open_path(),
+                Err(ReaderStartError::OpenedDatabaseIdentity(
+                    OpenedDatabaseFileError::Replaced
+                ))
+            ));
+            assert!(matches!(
+                closed.verify_connection(&connection),
+                Err(ReaderStartError::OpenedDatabaseIdentity(
+                    OpenedDatabaseFileError::Replaced
+                ))
+            ));
         }
     }
 }

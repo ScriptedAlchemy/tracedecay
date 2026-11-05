@@ -461,10 +461,12 @@ impl RepositoryRuntimePhysicalAttachment {
         }
         state.lost_readers = None;
         state.lost_writer = None;
-        if state.file_lost {
-            // Both worker groups have exited; no live SQLite lock can be
-            // released by closing the retained identity descriptor.
-            state.retained_file_pin.take();
+        if state.file_lost
+            && let Some(pin) = state.retained_file_pin.take()
+        {
+            // Both worker groups have exited. Clear the shared descriptor,
+            // not just this handle: a caller may still retain a closed pool.
+            pin.release_after_workers_exit();
         }
         true
     }
@@ -808,9 +810,11 @@ impl RepositoryRuntimePhysicalAttachment {
                 .lost_writer
                 .as_ref()
                 .is_none_or(|writer| writer.worker_exited());
-        if !state.file_lost || lost_workers_exited {
+        if (!state.file_lost || lost_workers_exited)
+            && let Some(pin) = state.retained_file_pin.take()
+        {
             // An uncommitted initialization retains its separate cleanup pin.
-            state.retained_file_pin.take();
+            pin.release_after_workers_exit();
         }
         Ok(())
     }
@@ -1389,6 +1393,13 @@ mod tests {
     fn a_lost_file_is_not_closed_while_the_lost_writer_still_holds_its_connection() {
         let directory = TempDir::new().unwrap();
         let attachment = Arc::new(attach_seeded_store(directory.path(), &binding(), 0));
+        let held_pin = attachment
+            .lock_state()
+            .retained_file_pin
+            .as_ref()
+            .unwrap()
+            .try_clone()
+            .unwrap();
         let (hold, held) = mpsc::channel::<()>();
         attachment.lock_state().after_lost_notice = Some(Box::new(move || {
             let _ = held.recv();
@@ -1429,6 +1440,10 @@ mod tests {
             attachment.lock_state().retained_file_pin.is_some(),
             "closing a lost-file attachment must retain its pin until the writer exits"
         );
+        assert!(
+            held_pin.try_clone().is_ok(),
+            "the shared descriptor must remain open while the writer is held"
+        );
 
         hold.send(()).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -1443,6 +1458,10 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         assert!(attachment.lost_file_closed());
+        assert!(
+            held_pin.try_clone().is_err(),
+            "retaining a pin handle must not retain the descriptor after worker exit"
+        );
         assert!(
             deleted_descriptors(directory.path()).is_empty(),
             "the last lost worker exiting must release every deleted-file descriptor"
