@@ -125,6 +125,21 @@ class RefuseDecisionRedirects(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def require_http_endpoint(url):
+    """Require a real HTTP transport before writing evaluation evidence."""
+    try:
+        endpoint = urlsplit(url)
+        # Accessing port also refuses malformed explicit port declarations.
+        _ = endpoint.port
+    except ValueError as error:
+        raise ValueError("--url must be a valid HTTP(S) endpoint") from error
+    if endpoint.scheme not in ("http", "https") or not endpoint.hostname:
+        raise ValueError("--url must use HTTP or HTTPS with a hostname")
+    if endpoint.username is not None or endpoint.password is not None:
+        raise ValueError("--url must not include credentials; use --bearer-token-env")
+    return endpoint
+
+
 def load_bearer_token(name, url):
     """Read an optional bearer credential without persisting it in evidence."""
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
@@ -132,7 +147,7 @@ def load_bearer_token(name, url):
     token = os.environ.get(name)
     if not token or not re.fullmatch(r"[A-Za-z0-9._~+/-]+=*", token):
         raise ValueError(f"--bearer-token-env {name} must contain a valid bearer token")
-    endpoint = urlsplit(url)
+    endpoint = require_http_endpoint(url)
     if endpoint.scheme != "https" and not (
         endpoint.scheme == "http"
         and endpoint.hostname in ("localhost", "127.0.0.1", "::1")
@@ -142,6 +157,7 @@ def load_bearer_token(name, url):
 
 
 def post(url, body, timeout=1800, bearer_token=None):
+    require_http_endpoint(url)
     headers = {"content-type": "application/json"}
     if bearer_token is not None:
         headers["Authorization"] = f"Bearer {bearer_token}"
@@ -303,6 +319,7 @@ def main(argv=None):
     if (args.noul_temperature is not None
             and (not math.isfinite(args.noul_temperature) or args.noul_temperature <= 0)):
         raise ValueError("--noul-temperature must be finite and greater than zero")
+    require_http_endpoint(args.url)
     server_config = load_server_config(args.server_config)
     bearer_token = (load_bearer_token(args.bearer_token_env, args.url)
                     if args.bearer_token_env is not None else None)

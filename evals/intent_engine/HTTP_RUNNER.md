@@ -11,6 +11,11 @@ python evals/intent_engine/run_http.py \
   B_noul_text
 ```
 
+The endpoint must use HTTP or HTTPS with a hostname. File URLs, data URLs,
+other non-HTTP schemes, malformed ports and URL-embedded credentials are
+refused before any evaluation output is opened. Otherwise urllib can read
+static local JSON instead of performing a network inference.
+
 For an authenticated server, set a bearer-token environment variable and pass
 `--bearer-token-env NAME` (for example, `SYSTEMONE_TOKEN`). The runner
 reads it before creating partial output or issuing requests, sends it only in

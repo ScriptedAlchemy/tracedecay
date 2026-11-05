@@ -750,6 +750,31 @@ class RunHttpTest(unittest.TestCase):
         self.assertEqual(hashlib.sha256(sent).hexdigest(), hashlib.sha256(run_http.request_bytes(body)).hexdigest())
 
 
+    def test_non_http_and_url_embedded_credentials_refused_before_any_evidence(self):
+        # urllib.request normally accepts POST-style Request bodies for file:
+        # and data: handlers, which could fabricate evaluated model answers.
+        static = self.root / "fake-server-answer.json"
+        static.write_text('{"answers":{}}', encoding="utf-8")
+        for url in (
+            static.as_uri(),
+            "data:application/json,%7B%22answers%22%3A%7B%7D%7D",
+            "ftp://localhost/answer.json",
+            "https:///missing-host",
+            "http://name:password@127.0.0.1:8009/v1/systemone",
+            "http://model.example:invalid/v1/systemone",
+        ):
+            with self.subTest(url=url):
+                with patch.object(run_http, "post") as post:
+                    with self.assertRaisesRegex(ValueError, "HTTP|credentials"):
+                        self.run_main(["--url", url])
+                    post.assert_not_called()
+                self.assertFalse(self.partial.exists())
+                self.assertFalse(self.output.exists())
+                with patch("urllib.request.build_opener") as opener:
+                    with self.assertRaisesRegex(ValueError, "HTTP|credentials"):
+                        run_http.post(url, {"state": "private transcript", "questions": {}})
+                    opener.assert_not_called()
+
     def test_authentication_reads_env_without_persisting_credentials(self):
         token = "opaque.Test~7+/-=="
         response, elapsed = self.response("", {"questions": run_http.noul_questions()})
