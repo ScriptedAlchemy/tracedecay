@@ -362,6 +362,45 @@ class ScoringTests(unittest.TestCase):
             self.assertIn("calibrated probabilities disagree", attempt.stderr)
             self.assertEqual(summary.read_bytes(), b"last verified summary\n")
 
+    def test_http_provenance_cannot_be_downgraded_to_local_scoring(self):
+        original = signed_http_result("B_noul_text", [row("first"), row("second")])
+        self.assertEqual(score.score_config(original)["latency"]["total_cases"], 2)
+        for missing in (
+            ("experiment",),
+            ("experiment", "experiment_sha256"),
+        ):
+            with self.subTest(missing=missing):
+                damaged = json.loads(json.dumps(original))
+                for field in missing:
+                    del damaged[field]
+                with self.assertRaisesRegex(ValueError, "missing its experiment identity"):
+                    score.score_config(damaged)
+
+        # Local evaluations record dataset_sha256 too; preserve their format.
+        local = {
+            "config": "local", "dataset_sha256": "a" * 64,
+            "rows": [row("local")],
+        }
+        self.assertEqual(score.score_config(local)["latency"]["total_cases"], 1)
+
+        # Failed HTTP provenance checks cannot overwrite a scored snapshot.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.stage_scripts(root)
+            (root / "results").mkdir()
+            damaged = json.loads(json.dumps(original))
+            del damaged["experiment"]
+            del damaged["experiment_sha256"]
+            (root / "results" / "damaged.json").write_text(
+                json.dumps(damaged), encoding="utf-8",
+            )
+            summary = root / "summary.json"
+            summary.write_bytes(b"last verified summary\n")
+            attempt = self.run_script(root, "score.py")
+            self.assertNotEqual(attempt.returncode, 0)
+            self.assertIn("missing its experiment identity", attempt.stderr)
+            self.assertEqual(summary.read_bytes(), b"last verified summary\n")
+
     def test_http_result_fingerprints_bind_case_order_and_experiment(self):
         original = signed_http_result("B_noul_text", [row("first"), row("second")])
         self.assertEqual(score.score_config(original)["latency"]["total_cases"], 2)

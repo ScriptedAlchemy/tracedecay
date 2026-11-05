@@ -76,7 +76,14 @@ def evidence_digest(value):
 def validate_http_provenance(result, rows):
     """Bind scored HTTP rows to the recorded experiment and request order."""
     if "experiment" not in result:
-        return  # Local-only scoring inputs do not claim HTTP provenance.
+        # Historical local runs can carry a dataset digest, but HTTP request
+        # fingerprints and experiment digests require a matching identity.
+        # Losing the identity cannot silently downgrade HTTP evidence to local.
+        if "experiment_sha256" in result or any(
+            "request_sha256" in row for row in rows
+        ):
+            raise ValueError("HTTP result is missing its experiment identity")
+        return
     experiment = result["experiment"]
     if result.get("experiment_sha256") != evidence_digest(experiment):
         raise ValueError("HTTP experiment identity digest disagrees with recorded settings")
