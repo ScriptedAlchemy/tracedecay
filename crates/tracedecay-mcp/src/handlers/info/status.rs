@@ -620,7 +620,11 @@ pub async fn compute_status(
                         // daemon authority drains its bounded backlog.
                         status.session_history_catch_up = Some(
                             tracing::Instrument::instrument(
-                                historical_session_catch_up(db, history_progress.as_ref()),
+                                historical_session_catch_up(
+                                    db,
+                                    history_progress.as_ref(),
+                                    status.session_projection.reason.as_deref(),
+                                ),
                                 tracing::trace_span!("mcp.info.status.session_history"),
                             )
                             .await,
@@ -809,6 +813,7 @@ fn session_git_evidence_state(health: CorrelationIndexHealth) -> StatusSessionGi
 async fn historical_session_catch_up(
     db: &RegisteredGlobalDb,
     progress: Option<&SessionHistoryCatchUpProgress>,
+    projection_reason: Option<&str>,
 ) -> Value {
     let mut state = match db.session_ingest_health_for_provider(None).await {
         Ok(ingest) => historical_session_catch_up_state(&ingest),
@@ -820,8 +825,29 @@ async fn historical_session_catch_up(
             "message": error,
         }),
     };
+    apply_historical_worker_blocker(&mut state, projection_reason);
     state["progress"] = historical_session_catch_up_progress(progress);
     state
+}
+
+/// A complete database sweep cannot establish current history when the
+/// independently mounted refresh worker has a terminal provider blocker.
+/// Preserve an unavailable measurement instead of disguising its failure.
+fn apply_historical_worker_blocker(state: &mut Value, projection_reason: Option<&str>) {
+    let Some(reason) = projection_reason.filter(|reason| {
+        reason
+            .strip_prefix("historical_blocked:")
+            .is_some_and(|code| !code.is_empty())
+    }) else {
+        return;
+    };
+    if state["status"] == "unavailable" {
+        state["worker_blocker"] = json!(reason);
+    } else {
+        state["status"] = json!("blocked");
+        state["coverage"] = json!("partial");
+        state["reason"] = json!(reason);
+    }
 }
 
 fn historical_session_catch_up_progress(progress: Option<&SessionHistoryCatchUpProgress>) -> Value {
@@ -1157,7 +1183,8 @@ mod tests {
         CodeIndexReadinessWaitReadV1, CorrelationIndexHealth, FreshnessLabelV1,
         SessionHistoryCatchUpProgress, code_index_freshness_projection,
         code_index_freshness_status, git_staleness, graph_statistics_value,
-        historical_session_catch_up_progress, historical_session_catch_up_state,
+        apply_historical_worker_blocker, historical_session_catch_up_progress,
+        historical_session_catch_up_state,
         readiness_wait_outcome, render_status_md, schema_convergence_status,
         session_git_evidence_state,
     };
@@ -2165,6 +2192,55 @@ mod tests {
         assert_eq!(state["coverage"], "partial");
         assert_eq!(state["authority"], "daemon");
         assert!(!state.to_string().contains("sessions ingest"));
+    }
+
+    #[test]
+    fn historical_worker_blocker_prevents_false_current_catch_up() {
+        let mut state = historical_session_catch_up_state(&SessionIngestHealth {
+            observed_providers: vec!["cursor".into()],
+            ..SessionIngestHealth::default()
+        });
+        assert_eq!(state["status"], "current");
+
+        apply_historical_worker_blocker(
+            &mut state,
+            Some("historical_blocked:projection_store_corrupt"),
+        );
+        assert_eq!(state["status"], "blocked");
+        assert_eq!(state["coverage"], "partial");
+        assert_eq!(state["reason"], "historical_blocked:projection_store_corrupt");
+        assert_eq!(state["authority"], "daemon");
+
+        let mut no_blocker = historical_session_catch_up_state(&SessionIngestHealth {
+            observed_providers: vec!["cursor".into()],
+            ..SessionIngestHealth::default()
+        });
+        apply_historical_worker_blocker(&mut no_blocker, None);
+        assert_eq!(no_blocker["status"], "current");
+        assert_eq!(no_blocker["coverage"], "complete");
+    }
+
+    #[test]
+    fn historical_worker_blocker_keeps_unavailable_measurements_truthful() {
+        let mut state = json!({
+            "status": "unavailable",
+            "coverage": "unknown",
+            "authority": "daemon",
+            "reason": "historical_backlog_measurement_failed",
+            "message": "database unavailable",
+        });
+        apply_historical_worker_blocker(
+            &mut state,
+            Some("historical_blocked:projection_store_corrupt"),
+        );
+        assert_eq!(state["status"], "unavailable");
+        assert_eq!(state["coverage"], "unknown");
+        assert_eq!(state["reason"], "historical_backlog_measurement_failed");
+        assert_eq!(state["message"], "database unavailable");
+        assert_eq!(
+            state["worker_blocker"],
+            "historical_blocked:projection_store_corrupt"
+        );
     }
 
     #[test]
