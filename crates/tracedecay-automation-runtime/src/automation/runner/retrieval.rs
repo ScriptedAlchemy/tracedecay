@@ -988,19 +988,16 @@ mod authority_tests {
                     "the empty evidence is still hashed so the skip is attributable"
                 );
             }
-            other => match other {
-                crate::automation::runner::evidence::SessionReflectorEvidenceOutcome::Ready(
-                    bundle,
-                ) => panic!(
+            crate::automation::runner::evidence::SessionReflectorEvidenceOutcome::Ready(bundle) => {
+                panic!(
                     "an empty store must not produce evidence; got {} hits",
                     bundle
                         .evidence
                         .get("hits")
                         .and_then(Value::as_array)
                         .map_or(0, Vec::len)
-                ),
-                _ => panic!("expected an empty-evidence skip"),
-            },
+                )
+            }
         }
     }
 

@@ -1766,14 +1766,18 @@ pub fn service_status(
     let resets = if process.reset_required_stores().is_empty() {
         String::new()
     } else {
-        let mut section = String::from("reset required:\n");
-        for refusal in process.reset_required_stores() {
-            section.push_str(&format!(
-                "  {} ({}) - {}\n    remedy: {}\n",
-                refusal.store, refusal.authority, refusal.reason, refusal.remedy
-            ));
-        }
-        section
+        let refusals = process
+            .reset_required_stores()
+            .iter()
+            .map(|refusal| {
+                format!(
+                    "  {} ({}) - {}\n    remedy: {}\n",
+                    refusal.store, refusal.authority, refusal.reason, refusal.remedy
+                )
+            })
+            .collect::<Vec<_>>()
+            .concat();
+        format!("reset required:\n{refusals}")
     };
     let display = format!(
         "state: {state}\nservice: {service}\nservice manager: {service_manager}\n{transport_kind}: {transport} ({socket_state})\nprotocol: {process}\n{resets}{detail}logs: {logs}\n",

@@ -384,11 +384,11 @@ async fn unconfigured_backend_jobs_are_blocked_without_failure_cooldown_and_reco
         "a failure under the current backend must keep its cooldown"
     );
     let isolated = tempfile::TempDir::new().unwrap();
-    assert!(
+    assert_eq!(
         load_run_records_for_task_key(isolated.path(), &super::job_task_key(&job.id), 100)
             .await
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        Vec::new()
     );
 }
 

@@ -1443,6 +1443,7 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         assert!(attachment.lost_file_closed());
+        #[cfg(target_os = "linux")]
         assert!(
             deleted_descriptors(directory.path()).is_empty(),
             "the last lost worker exiting must release every deleted-file descriptor"
