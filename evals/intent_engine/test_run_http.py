@@ -1053,6 +1053,61 @@ class RunHttpTest(unittest.TestCase):
             server.server_close()
 
 
+    def test_duplicate_json_response_fields_cannot_publish_evaluation_evidence(self):
+        response, _ = self.response("", {"questions": run_http.noul_questions()})
+        valid = json.dumps(response).encode("utf-8")
+        duplicate_answers = (
+            b'{"answers":{},"answers":'
+            + json.dumps(response["answers"]).encode("utf-8") + b'}'
+        )
+        duplicate_noul = valid.replace(
+            b'"noul": 0.25', b'"noul": 0.1, "noul": 0.25', 1
+        )
+        self.assertNotEqual(duplicate_noul, valid)
+
+        class Answer(BaseHTTPRequestHandler):
+            payload = valid
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                payload = type(self).payload
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *_):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Answer)
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        sample = self.root / "first-response.json"
+        extra = [
+            "--url", f"http://127.0.0.1:{server.server_port}/v1/systemone",
+            "--sample-out", str(sample),
+        ]
+        try:
+            for ambiguous in (duplicate_answers, duplicate_noul):
+                Answer.payload = ambiguous
+                with self.subTest(payload=ambiguous[:100]):
+                    with self.assertRaisesRegex(ValueError, "duplicate JSON field"):
+                        self.run_main(extra)
+                    self.assertEqual(len(self.partial.read_text().splitlines()), 1)
+                    self.assertFalse(sample.exists())
+                    self.assertFalse(self.output.exists())
+            Answer.payload = valid
+            self.run_main(extra)
+            result = json.loads(self.output.read_text(encoding="utf-8"))
+            self.assertEqual([row["id"] for row in result["rows"]], ["first", "second"])
+            self.assertTrue(sample.exists())
+            self.assertFalse(self.partial.exists())
+        finally:
+            server.shutdown()
+            worker.join(timeout=2)
+            server.server_close()
+
+
     def test_decision_response_rejects_oversized_or_invalid_http_bodies(self):
         class Answer(BaseHTTPRequestHandler):
             def do_POST(self):

@@ -161,6 +161,16 @@ def load_bearer_token(name, url):
     return token
 
 
+def reject_duplicate_json_fields(pairs):
+    """Reject ambiguous nested JSON objects before recording model evidence."""
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError(f"decision response contains duplicate JSON field: {key}")
+        obj[key] = value
+    return obj
+
+
 def post(url, body, timeout=1800, bearer_token=None):
     require_http_endpoint(url)
     headers = {"content-type": "application/json"}
@@ -185,7 +195,7 @@ def post(url, body, timeout=1800, bearer_token=None):
         payload = response.read(MAX_DECISION_RESPONSE_BYTES + 1)
         if len(payload) > MAX_DECISION_RESPONSE_BYTES:
             raise ValueError("decision response exceeds the 1 MiB size limit")
-        out = json.loads(payload)
+        out = json.loads(payload, object_pairs_hook=reject_duplicate_json_fields)
     return out, (time.perf_counter() - started) * 1000
 
 
