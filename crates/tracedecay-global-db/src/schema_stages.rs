@@ -5,6 +5,12 @@ use std::time::{Duration, Instant};
 
 use tracedecay_domain::errors::ProjectOpenFailureKind;
 
+mod workflow_artifact_ceiling_upgrade;
+use workflow_artifact_ceiling_upgrade::{
+    PublishedArtifactCeilingShape, classify_published_artifact_ceiling,
+    upgrade_published_artifact_ceiling,
+};
+
 use super::schema_contract::{
     authority_invariant_triggers_intact, ensure_authority_audit_checkpoint_schema,
     ensure_authority_invariant_schema, ensure_authority_invariants,
@@ -848,7 +854,8 @@ pub async fn ensure_registered_schema_for_admission(
 
 /// Installs (or idempotently re-ensures) every registered schema stage inside
 /// the caller's admission transaction. Callers classify admission first, so
-/// this stage runs only for stores classified fresh or exactly current.
+/// this stage runs only for stores classified fresh, exactly current, or
+/// exactly the one published workflow shape it upgrades.
 ///
 /// Heap boundary: see [`RegisteredSchemaAdmissionClassify`].
 #[tracing::instrument(name = "global_db.schema.persist.install", level = "trace", skip_all)]
@@ -902,6 +909,15 @@ where
             transaction.commit().await.map_err(|error| {
                 global_db_operation_error(commit_operation, std::io::Error::other(error))
             })?;
+            if session_features
+                == (SessionFeatureSchema::Hosted {
+                    workflow: WorkflowSchemaAdmission::UpgradePublishedArtifactCeiling,
+                })
+            {
+                tracing::info!(
+                    "upgraded the published workflow artifact table to the final contract"
+                );
+            }
             Ok(refused_authority)
         }
         Err(error) => match transaction.rollback().await {
@@ -1095,6 +1111,13 @@ async fn install_registered_schema_stage_sequence(
             .execute_batch(WORKFLOW_SCHEMA_IDENTITY_V1)
             .await
             .map_err(|error| global_db_operation_error("initialize workflow schema", error))?;
+    }
+    if session_features
+        == (SessionFeatureSchema::Hosted {
+            workflow: WorkflowSchemaAdmission::UpgradePublishedArtifactCeiling,
+        })
+    {
+        upgrade_published_artifact_ceiling(transaction).await?;
     }
     transaction
         .execute_batch(WORK_SCHEMA_V1)
@@ -1487,6 +1510,9 @@ pub(crate) enum RegisteredSchemaAttachmentV1 {
 enum WorkflowSchemaAdmission {
     Create,
     Complete,
+    /// The one published shape admission steps forward, inside its own
+    /// transaction. See [`workflow_artifact_ceiling_upgrade`].
+    UpgradePublishedArtifactCeiling,
 }
 
 async fn inspect_workflow_schema_for_admission(
@@ -1539,11 +1565,20 @@ async fn inspect_workflow_schema_for_admission(
         .map(|contract| (contract.name, Some(contract.sql)))
         .collect::<Vec<_>>();
     if actual_workflow_tables != expected_workflow_tables {
+        match classify_published_artifact_ceiling(conn, &actual_workflow_tables).await? {
+            PublishedArtifactCeilingShape::Upgradable => {
+                return Ok(Ok(WorkflowSchemaAdmission::UpgradePublishedArtifactCeiling));
+            }
+            PublishedArtifactCeilingShape::Refused(reason) => {
+                return Ok(Err(workflow_schema_refusal(reason)));
+            }
+            PublishedArtifactCeilingShape::Other => {}
+        }
         let identity = if actual_workflow_tables
             .iter()
             .any(|(name, _)| *name == "workflow_schema")
         {
-            Some(recorded_workflow_identity(conn).await)
+            Some(recorded_workflow_identity(conn).await?)
         } else {
             None
         };
@@ -1693,33 +1728,48 @@ fn required_workflow_identity() -> String {
 /// The identity a store with drifted workflow tables records, read only to
 /// make the refusal actionable: comparing it with the required digest tells
 /// a store written by another release from a damaged one.
-async fn recorded_workflow_identity(conn: &impl QueryExecutor) -> String {
-    let read = async {
-        let mut rows = conn
-            .query(
-                "SELECT schema_version, definition_digest FROM workflow_schema
-                 ORDER BY singleton LIMIT 2",
-                (),
-            )
-            .await
-            .ok()?;
-        let first = rows.next().await.ok()??;
-        let version = first.get::<i64>(0).ok()?;
-        let digest = first.get::<String>(1).ok()?;
-        let extra = rows.next().await.ok()?.is_some();
-        Some((version, digest, extra))
-    };
-    match read.await {
-        Some((version, digest, false)) => format!(
+///
+/// A drifted `workflow_schema` may not even answer this query, which is more
+/// drift to report. A database that cannot be read right now says nothing about
+/// the store, so that stays a typed failure rather than a reset reason.
+async fn recorded_workflow_identity(
+    conn: &impl QueryExecutor,
+) -> tracedecay_domain::errors::Result<String> {
+    match read_recorded_workflow_identity(conn).await {
+        Ok(Some((version, digest, false))) => Ok(format!(
             "the store records version {version} with {}",
             workflow_digest_label(&digest)
-        ),
-        Some((version, digest, true)) => format!(
+        )),
+        Ok(Some((version, digest, true))) => Ok(format!(
             "the store records several identity rows, the first version {version} with {}",
             workflow_digest_label(&digest)
-        ),
-        None => "the store's recorded workflow identity is unreadable".to_owned(),
+        )),
+        Ok(None) => Ok("the store records no workflow identity".to_owned()),
+        Err(error) if error.is_transient_read_failure() => Err(global_db_operation_error(
+            "read recorded workflow identity",
+            error,
+        )),
+        Err(_) => Ok("the store's recorded workflow identity is unreadable".to_owned()),
     }
+}
+
+async fn read_recorded_workflow_identity(
+    conn: &impl QueryExecutor,
+) -> engine::Result<Option<(i64, String, bool)>> {
+    let mut rows = conn
+        .query(
+            "SELECT schema_version, definition_digest FROM workflow_schema
+             ORDER BY singleton LIMIT 2",
+            (),
+        )
+        .await?;
+    let Some(first) = rows.next().await? else {
+        return Ok(None);
+    };
+    let version = first.get::<i64>(0)?;
+    let digest = first.get::<String>(1)?;
+    let extra = rows.next().await?.is_some();
+    Ok(Some((version, digest, extra)))
 }
 
 fn workflow_table_drift_reason(
@@ -1961,7 +2011,9 @@ mod tests {
     use super::WORKFLOW_REFUSAL_NAME_LIMIT;
     use crate::tests::harness::open_registered_test_database_fixture;
     use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
-    use tracedecay_runtime_core::db::engine::{QueryExecutor, TestConnection, params};
+    use tracedecay_runtime_core::db::engine::{
+        IntoParams, QueryExecutor, Rows, TestConnection, params,
+    };
 
     async fn install_registered_schema(database_path: &std::path::Path) {
         drop(
@@ -2545,18 +2597,18 @@ mod tests {
         );
     }
 
-    /// The workflow payload table and identity digest a store written by
-    /// beta.90 through beta.92 carries: the shape before the artifact size
-    /// ceiling was removed.
-    const BETA_92_ARTIFACT_PAYLOADS_SQL: &str = "CREATE TABLE workflow_artifact_payloads (
+    /// A digest the workflow schema carried in a published release.
+    const BETA_92_WORKFLOW_DIGEST: &str =
+        "sha256:a292df6bc47e763f0d20bdb44a4032c0b1d7ac8e4cb83173b66ae7d1ff0d03be";
+
+    /// A ceiling no release ever shipped, under the published identity.
+    const FOREIGN_ARTIFACT_PAYLOADS_SQL: &str = "CREATE TABLE workflow_artifact_payloads (
     payload_digest TEXT NOT NULL PRIMARY KEY,
     byte_length INTEGER NOT NULL CHECK (
-        byte_length = length(payload) AND byte_length <= 4194304
+        byte_length = length(payload) AND byte_length <= 8388608
     ),
     payload BLOB NOT NULL
 ) STRICT";
-    const BETA_92_WORKFLOW_DIGEST: &str =
-        "sha256:a292df6bc47e763f0d20bdb44a4032c0b1d7ac8e4cb83173b66ae7d1ff0d03be";
 
     /// Admit a fresh session store, run `shape` against it, and return the
     /// workflow refusal the next admission reports.
@@ -2585,15 +2637,14 @@ mod tests {
         (database_path, directory, reason)
     }
 
-    /// A store a published release wrote, whose workflow payload table still
-    /// carries the artifact size ceiling, has no in-place upgrade: it is
-    /// refused for its workflow features, and the refusal names the drifted
-    /// table and both identities so an operator can tell it from damage.
+    /// A payload table that resembles the published one but is not it stays
+    /// refused, and the refusal names the drifted table and both identities so
+    /// an operator can tell it from damage.
     #[asupersync::test]
-    async fn published_workflow_shape_refusal_names_the_table_and_both_identities() {
+    async fn altered_artifact_table_refusal_names_the_table_and_both_identities() {
         let shape = format!(
             "DROP TABLE workflow_artifact_payloads;
-             {BETA_92_ARTIFACT_PAYLOADS_SQL};
+             {FOREIGN_ARTIFACT_PAYLOADS_SQL};
              UPDATE workflow_schema SET definition_digest = '{BETA_92_WORKFLOW_DIGEST}';"
         );
         let (database_path, _directory, reason) = workflow_refusal_after(&shape).await;
@@ -2618,7 +2669,7 @@ mod tests {
             "{reason}"
         );
         assert!(
-            !reason.contains("CREATE TABLE") && !reason.contains("4194304"),
+            !reason.contains("CREATE TABLE") && !reason.contains("8388608"),
             "stored schema SQL must not leak into the refusal: {reason}"
         );
         // Admission stays read-only: the refused table is left as found.
@@ -2630,7 +2681,53 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(stored, BETA_92_ARTIFACT_PAYLOADS_SQL);
+        assert_eq!(stored, FOREIGN_ARTIFACT_PAYLOADS_SQL);
+    }
+
+    /// `workflow_schema` that cannot answer the identity query is one more
+    /// drifted object to report, not a reason to fail the open.
+    #[asupersync::test]
+    async fn undecodable_recorded_identity_is_reported_as_unreadable() {
+        let (_database_path, _directory, reason) = workflow_refusal_after(
+            "DROP TABLE workflow_schema;
+             CREATE TABLE workflow_schema (singleton INTEGER PRIMARY KEY);",
+        )
+        .await;
+        assert!(
+            reason.contains("the store's recorded workflow identity is unreadable"),
+            "{reason}"
+        );
+    }
+
+    struct BusyConnection;
+
+    impl QueryExecutor for BusyConnection {
+        async fn query<P>(
+            &self,
+            _sql: &str,
+            _params: P,
+        ) -> tracedecay_runtime_core::db::engine::Result<Rows>
+        where
+            P: IntoParams,
+        {
+            Err(tracedecay_runtime_core::db::engine::Error::Busy)
+        }
+    }
+
+    /// A held database says nothing about the store, so it must not turn into
+    /// reset wording.
+    #[asupersync::test]
+    async fn busy_identity_read_stays_a_typed_failure_instead_of_a_reset_reason() {
+        let error = super::recorded_workflow_identity(&BusyConnection)
+            .await
+            .expect_err("a held database is not an unreadable identity");
+        assert!(!error.is_store_reset_required(), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("read recorded workflow identity"),
+            "{error}"
+        );
     }
 
     #[asupersync::test]

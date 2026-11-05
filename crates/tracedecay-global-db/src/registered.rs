@@ -114,7 +114,8 @@ impl RegisteredGlobalDbOwnerV1 {
     /// cannot honor, and an admissibly-fresh existing store receives the full
     /// install. Nothing steps an incompatible store forward in place; the
     /// only in-place changes admission performs are the additive columns for
-    /// shapes released binaries actually shipped.
+    /// shapes released binaries actually shipped and the one published
+    /// workflow shape proven byte-exact by the schema stages.
     ///
     /// Short-lived attaches have no background maintenance task, so the
     /// authority-invariant convergence runs synchronously here: a store whose

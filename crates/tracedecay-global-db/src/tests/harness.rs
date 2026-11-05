@@ -29,7 +29,7 @@ use tracedecay_store::{
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
 };
 
-pub(super) static TEST_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
+pub(crate) static TEST_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 #[cfg(test)]
 static HOST_ADMISSION_TEST_RESIDENT_MEMORY: OnceLock<
     Arc<tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1>,
