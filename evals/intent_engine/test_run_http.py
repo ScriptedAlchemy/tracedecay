@@ -13,7 +13,7 @@ import tempfile
 import unittest
 import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from threading import Thread
+from threading import Event, Thread
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -91,6 +91,54 @@ class RunHttpTest(unittest.TestCase):
         self.assertEqual(result["rows"][0]["server_ms"], 0)
         self.assertFalse(self.partial.exists())
 
+
+    def test_concurrent_same_tag_writers_cannot_corrupt_resumable_evidence(self):
+        entered, release = Event(), Event()
+        errors = []
+
+        def inference(url, body):
+            if not entered.is_set():
+                entered.set()
+                if not release.wait(10):
+                    raise OSError("inference barrier was never released")
+            return self.response(url, body)
+
+        def first_run():
+            try:
+                self.run_main()
+            except Exception as error:
+                errors.append(error)
+
+        with patch.object(run_http, "post", side_effect=inference) as post:
+            worker = Thread(target=first_run)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(10), "first inference did not start")
+                before = self.partial.read_bytes()
+                with self.assertRaisesRegex(ValueError, "another evaluator"):
+                    self.run_main()
+                self.assertEqual(self.partial.read_bytes(), before)
+            finally:
+                release.set()
+                worker.join(10)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(post.call_count, len(self.dataset))
+        result = json.loads(self.output.read_text())
+        self.assertEqual([row["id"] for row in result["rows"]], ["first", "second"])
+
+    @unittest.skipUnless(os.name == "posix", "symlink identity check requires POSIX")
+    def test_symlinked_partial_cannot_write_to_another_file(self):
+        self.partial.parent.mkdir(parents=True, exist_ok=True)
+        unrelated = self.root / "other.json"
+        unrelated.write_text("unchanged", encoding="utf-8")
+        self.partial.symlink_to(unrelated)
+        with patch.object(run_http, "post") as post:
+            with self.assertRaisesRegex(ValueError, "replaced or redirected"):
+                self.run_main()
+            post.assert_not_called()
+        self.assertEqual(unrelated.read_text(encoding="utf-8"), "unchanged")
+        self.assertFalse(self.output.exists())
 
     def test_input_tokens_do_not_fabricate_state_or_truncation_measurements(self):
         self.interrupt()

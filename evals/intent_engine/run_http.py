@@ -7,6 +7,7 @@ Only an exact experiment identity may resume an interrupted .partial output.
 See HTTP_RUNNER.md for invocation and provenance limits.
 """
 import argparse
+import errno
 import hashlib
 import json
 import math
@@ -214,6 +215,35 @@ def serialize_result(row, questions, temperature):
     return json.dumps(row, allow_nan=False)
 
 
+def lock_partial_writer(partial, path):
+    """Lock the resumable log itself, without crash-stale lockfile state.
+
+    Refuse an opened file whose pathname was replaced or redirected. Otherwise
+    two same-tag writers could rewrite a partial log and corrupt evaluation.
+    """
+    try:
+        if os.name == "nt":
+            import msvcrt
+            partial.seek(0)
+            msvcrt.locking(partial.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(partial.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as error:
+        if error.errno in (errno.EACCES, errno.EAGAIN):
+            raise ValueError(f"another evaluator is writing this partial output: {path}") from error
+        raise
+
+    try:
+        current = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError as error:
+        raise ValueError(f"partial output disappeared during writer admission: {path}") from error
+    opened = os.fstat(partial.fileno())
+    if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+        raise ValueError(f"partial output was replaced or redirected: {path}")
+    partial.seek(0)
+
+
 def resume_rows(partial, header, cases, requests, questions, temperature):
     """Validate the whole existing log before appending or issuing HTTP work."""
     first = partial.readline()
@@ -311,6 +341,7 @@ def main(argv=None):
             partial = open(partial_path, "r+", encoding="utf-8")
             created = False
         with partial:
+            lock_partial_writer(partial, partial_path)
             if created:
                 partial.write(json.dumps(header, allow_nan=False) + "\n")
                 partial.flush()
