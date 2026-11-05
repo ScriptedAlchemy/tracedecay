@@ -461,7 +461,9 @@ impl RepositoryRuntimePhysicalAttachment {
         }
         state.lost_readers = None;
         state.lost_writer = None;
-        if state.file_lost && let Some(pin) = state.retained_file_pin.take() {
+        if state.file_lost
+            && let Some(pin) = state.retained_file_pin.take()
+        {
             // Both worker groups have exited. Clear the shared descriptor,
             // not just this handle: a caller may still retain a closed pool.
             pin.release_after_workers_exit();
