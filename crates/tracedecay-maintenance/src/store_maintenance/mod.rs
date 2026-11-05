@@ -16,7 +16,6 @@ use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1, CodeGenerationRetentionPlanV1,
     CodeGenerationRetentionReportV1, CodeIndexScopeV1, code_index_scopes, code_index_store_root,
     execute_code_generation_retention_cancellable,
-    prepare_next_code_generation_retention_cancellable,
 };
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_domain::CodeGenerationId;
@@ -30,6 +29,8 @@ mod scope_reconciliation;
 use graph_replay::{defer_graph_replay_pool_busy, log_code_generation_retention_degraded};
 #[cfg(test)]
 pub(crate) mod registered_tests;
+#[cfg(test)]
+mod text_artifact_scan_tests;
 pub use scope_reconciliation::{run_code_index_scope_reconciliation, scheduler_owner_roots};
 
 /// Outcome of one bounded code-generation retention pass.
@@ -150,6 +151,7 @@ async fn plan_collection(
     protected_sources: &BTreeSet<CodeGenerationId>,
     graph_replay_pool_root: &Path,
     backoff_root: &Path,
+    scan_owner_root: &Path,
     observations: &StoreTelemetrySamplingRegistry,
     cancellation: &CancellationToken,
 ) -> Result<CodeGenerationRetentionPlanV1, CodeGenerationRetentionOutcomeV1> {
@@ -157,13 +159,19 @@ async fn plan_collection(
     let plan_sources = protected_sources.clone();
     let plan_cancellation = cancellation.clone();
     let plan_pool_root = graph_replay_pool_root.to_path_buf();
+    let scan = observations.text_artifact_scan(scan_owner_root, store_root);
     let plan = native_runtime::spawn_blocking(move || {
-        prepare_next_code_generation_retention_cancellable(
+        let mut scan = scan.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let plan = scan.prepare(
             &plan_root,
             &plan_sources,
             &|| plan_cancellation.is_cancelled(),
             Some(&plan_pool_root),
-        )
+        )?;
+        if !plan.has_collectable_work() {
+            scan.complete(&plan);
+        }
+        Ok(plan)
     })
     .await;
     match plan {
@@ -207,6 +215,7 @@ async fn execute_collection(
     plan: CodeGenerationRetentionPlanV1,
     graph_replay_pool_root: &Path,
     backoff_root: &Path,
+    scan_owner_root: &Path,
     observations: &StoreTelemetrySamplingRegistry,
     cancellation: &CancellationToken,
 ) -> Result<CodeGenerationRetentionReportV1, CodeGenerationRetentionOutcomeV1> {
@@ -218,15 +227,20 @@ async fn execute_collection(
     let execution_root = store_root.to_path_buf();
     let execution_pool_root = graph_replay_pool_root.to_path_buf();
     let execution_cancellation = cancellation.clone();
+    let scan = observations.text_artifact_scan(scan_owner_root, store_root);
     let report = native_runtime::spawn_blocking(move || {
-        execute_code_generation_retention_cancellable(
+        let report = execute_code_generation_retention_cancellable(
             &execution_root,
             plan,
             CodeGenerationRetentionModeV1::Apply,
             completed_at,
             Some(&execution_pool_root),
             &|| execution_cancellation.is_cancelled(),
-        )
+        )?;
+        scan.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .complete(&report.plan);
+        Ok(report)
     })
     .await;
     match report {
@@ -310,6 +324,7 @@ async fn execute_collection(
 /// cost only.
 fn collection_left_work(report: &CodeGenerationRetentionReportV1) -> bool {
     report.generation_segment_batch_exhausted
+        || report.plan.has_pending_text_artifact_inventory()
         || !report.deleted_generations.is_empty()
         || !report.deleted_text_artifacts.is_empty()
 }
@@ -387,6 +402,7 @@ pub async fn run_code_generation_retention(
         &protection.sources,
         &graph_replay_pool_root,
         lease.project_root(),
+        &layout.data_root,
         observations,
         cancellation,
     )
@@ -436,9 +452,10 @@ pub async fn run_code_generation_retention(
     // its bytes wait for the next full interval (a day by default).
     let awaits_transient_release = plan.awaits_transient_release(&protection.serving);
     if !plan.has_collectable_work() {
+        let inventory_pending = plan.has_pending_text_artifact_inventory();
         return if replay_reconcile_failed {
             CodeGenerationRetentionOutcomeV1::Failed
-        } else if release_backlog_remains || awaits_transient_release {
+        } else if release_backlog_remains || awaits_transient_release || inventory_pending {
             CodeGenerationRetentionOutcomeV1::MoreWork
         } else {
             CodeGenerationRetentionOutcomeV1::Complete
@@ -453,6 +470,7 @@ pub async fn run_code_generation_retention(
         plan,
         &graph_replay_pool_root,
         lease.project_root(),
+        &layout.data_root,
         observations,
         cancellation,
     )
@@ -597,6 +615,7 @@ pub async fn run_registered_code_generation_retention(
             &protection.sources,
             &graph_replay_pool_root,
             &root,
+            &store.data_root,
             observations,
             cancellation,
         )
@@ -609,6 +628,9 @@ pub async fn run_registered_code_generation_retention(
             }
         };
         if !plan.has_collectable_work() {
+            if plan.has_pending_text_artifact_inventory() {
+                outcome = outcome.with_pass(CodeGenerationRetentionOutcomeV1::MoreWork);
+            }
             continue;
         }
         match execute_collection(
@@ -616,6 +638,7 @@ pub async fn run_registered_code_generation_retention(
             plan,
             &graph_replay_pool_root,
             &root,
+            &store.data_root,
             observations,
             cancellation,
         )

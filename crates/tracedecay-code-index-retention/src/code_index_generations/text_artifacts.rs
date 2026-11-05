@@ -16,6 +16,7 @@ use super::journal::{
     BoundedJournalSpec, clear_journal, journal_path, load_journal, persist_journal,
 };
 use super::receipt_store;
+use super::text_artifact_scan::TextArtifactPageV1;
 use super::receipt_store::{ReceiptStoreSpec, receipt_digest_file_component};
 use super::{
     ACTIVE_POINTER_FILE, CodeGenerationRetentionErrorV1, CodeGenerationRetentionPlanV1,
@@ -245,12 +246,26 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
     )
 }
 
+#[cfg(test)]
 pub(super) fn plan_collectable_text_artifacts_budgeted_cancellable(
     store_root: &Path,
     active_pointer: Option<&DurablePublicationPointerV1>,
     verification: GenerationDigestVerificationV1,
     remaining_entries: &mut usize,
     is_cancelled: &dyn Fn() -> bool,
+) -> Result<CodeTextArtifactRetentionInventoryV1, CodeGenerationRetentionErrorV1> {
+    plan_collectable_text_artifacts_budgeted_page_cancellable(
+        store_root, active_pointer, verification, remaining_entries, is_cancelled, None,
+    )
+}
+
+pub(super) fn plan_collectable_text_artifacts_budgeted_page_cancellable(
+    store_root: &Path,
+    active_pointer: Option<&DurablePublicationPointerV1>,
+    verification: GenerationDigestVerificationV1,
+    remaining_entries: &mut usize,
+    is_cancelled: &dyn Fn() -> bool,
+    page: Option<&TextArtifactPageV1>,
 ) -> Result<CodeTextArtifactRetentionInventoryV1, CodeGenerationRetentionErrorV1> {
     if is_cancelled() {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
@@ -356,49 +371,63 @@ pub(super) fn plan_collectable_text_artifacts_budgeted_cancellable(
     // untrusted files. Alternate bounded entry observations with the
     // independent staging namespace so those files cannot consume every
     // scan slot and suppress otherwise verified staging cleanup.
-    let mut completed_entries = if root_present {
+    let mut completed_entries = if page.is_none() && root_present {
         Some(std::fs::read_dir(&root).map_err(storage)?)
     } else {
         None
     };
-    let mut staging_entries = if private_directory_exists(&staging_root)? {
+    let staging_present = private_directory_exists(&staging_root)?;
+    let mut staging_entries = if page.is_none() && staging_present {
         Some(std::fs::read_dir(&staging_root).map_err(storage)?)
     } else {
         None
     };
     let mut candidates = BTreeMap::new();
+    let mut page_entries = page.map(|page| page.entries.iter());
+    let mut scanned_entries = 0;
     let mut remaining = MAX_CODE_TEXT_ARTIFACT_INVENTORY_ENTRIES_V1;
     let mut scan_completed = true;
     while remaining > 0 && candidates.len() < MAX_CODE_TEXT_ARTIFACT_RETENTION_BATCH_V1 {
         if is_cancelled() {
             return Err(CodeGenerationRetentionErrorV1::Cancelled);
         }
-        if completed_entries.is_none() && staging_entries.is_none() {
-            break;
-        }
-        let shared = scan_completed;
-        scan_completed = !scan_completed;
-        let listing = if shared {
-            &mut completed_entries
+        let (shared, path) = if let Some(entries) = page_entries.as_mut() {
+            let Some((shared, path)) = entries.next() else {
+                break;
+            };
+            (*shared, path.clone())
         } else {
-            &mut staging_entries
-        };
-        let Some(entry) = listing.as_mut().and_then(|entries| entries.next()) else {
-            *listing = None;
-            continue;
+            if completed_entries.is_none() && staging_entries.is_none() {
+                break;
+            }
+            let shared = scan_completed;
+            scan_completed = !scan_completed;
+            let listing = if shared {
+                &mut completed_entries
+            } else {
+                &mut staging_entries
+            };
+            let Some(entry) = listing.as_mut().and_then(|entries| entries.next()) else {
+                *listing = None;
+                continue;
+            };
+            (shared, entry.map_err(storage)?.path())
         };
         if *remaining_entries == 0 {
             return Err(CodeGenerationRetentionErrorV1::EntryBudgetExceeded);
         }
         *remaining_entries -= 1;
         remaining -= 1;
-        let entry = entry.map_err(storage)?;
-        let file_name = entry.file_name().into_string().map_err(|_| {
-            CodeGenerationRetentionErrorV1::UnsafeState(
-                "code text artifact inventory filename is not UTF-8".to_owned(),
-            )
-        })?;
-        let path = entry.path();
+        scanned_entries += 1;
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                CodeGenerationRetentionErrorV1::UnsafeState(
+                    "code text artifact inventory filename is not UTF-8".to_owned(),
+                )
+            })?
+            .to_owned();
         // This inventory reads the artifact directories without the
         // generation-store lock, so an entry the listing just named can
         // already be gone: the text-artifact builder retires a `.staging`
@@ -502,6 +531,7 @@ pub(super) fn plan_collectable_text_artifacts_budgeted_cancellable(
         }
     }
     Ok(CodeTextArtifactRetentionInventoryV1 {
+        scanned_entries,
         candidates: candidates.into_values().collect(),
         unique_bytes: inventory
             .values()
@@ -571,7 +601,7 @@ fn scope_text_artifact_marks(
     Ok(marked)
 }
 
-fn private_directory_exists(path: &Path) -> Result<bool, CodeGenerationRetentionErrorV1> {
+pub(super) fn private_directory_exists(path: &Path) -> Result<bool, CodeGenerationRetentionErrorV1> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_dir() => Ok(true),
         Ok(_) => Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
