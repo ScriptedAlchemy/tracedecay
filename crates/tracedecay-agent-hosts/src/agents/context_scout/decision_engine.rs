@@ -525,7 +525,11 @@ fn choice_probabilities(
     // A map containing every label is still malformed if it is not a
     // distribution. In particular, two individually valid 0.8 scores are
     // not a valid two-way choice.
-    if (probabilities.values().sum::<f64>() - 1.0).abs() > CHOICE_EPSILON {
+    // A three-decimal response can deviate by up to 0.0005 per option.
+    // Scale the sum tolerance with cardinality, but cap it at one percent
+    // so a large choice set cannot excuse a genuinely unnormalized answer.
+    let rounding_tolerance = (CHOICE_EPSILON * probabilities.len() as f64 / 2.0).min(0.01);
+    if (probabilities.values().sum::<f64>() - 1.0).abs() > rounding_tolerance {
         return None;
     }
     Some(probabilities)
@@ -977,6 +981,53 @@ mod tests {
                 ]),
             }
         );
+    }
+
+    #[test]
+    fn six_way_choice_accepts_decimal_rounding_but_not_invalid_totals() {
+        for (probability, valid) in [(0.167, true), (0.166, false), (0.17, false)] {
+            let body = answers_body(
+                None,
+                &[(
+                    "route",
+                    choice_answer(
+                        None,
+                        "probabilities",
+                        &[
+                            ("a", probability),
+                            ("b", probability),
+                            ("c", probability),
+                            ("d", probability),
+                            ("e", probability),
+                            ("f", probability),
+                        ],
+                    ),
+                )],
+            );
+            let server = fake_decision_engine(200, &body, Duration::ZERO);
+            let result = client(&server.url).ask_blocking(&request(
+                "state",
+                vec![choice("route", &["a", "b", "c", "d", "e", "f"])],
+            ));
+            if valid {
+                assert_eq!(
+                    answered(result).answers["route"],
+                    DecisionAnswerV1::Choice {
+                        chosen: None,
+                        probabilities: BTreeMap::from([
+                            ("a".to_owned(), probability),
+                            ("b".to_owned(), probability),
+                            ("c".to_owned(), probability),
+                            ("d".to_owned(), probability),
+                            ("e".to_owned(), probability),
+                            ("f".to_owned(), probability),
+                        ]),
+                    }
+                );
+            } else {
+                assert_eq!(result, DecisionEngineOutcomeV1::Malformed, "{body}");
+            }
+        }
     }
 
     #[test]
