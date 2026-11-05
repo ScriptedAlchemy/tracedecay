@@ -17,6 +17,7 @@ import secrets
 import sys
 import time
 import urllib.request
+from urllib.parse import urlsplit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -124,10 +125,27 @@ class RefuseDecisionRedirects(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def post(url, body, timeout=1800):
-    req = urllib.request.Request(
-        url, request_bytes(body), {"content-type": "application/json"}
-    )
+def load_bearer_token(name, url):
+    """Read an optional bearer credential without persisting it in evidence."""
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        raise ValueError("--bearer-token-env requires an environment variable name")
+    token = os.environ.get(name)
+    if not token or not re.fullmatch(r"[A-Za-z0-9._~+/-]+=*", token):
+        raise ValueError(f"--bearer-token-env {name} must contain a valid bearer token")
+    endpoint = urlsplit(url)
+    if endpoint.scheme != "https" and not (
+        endpoint.scheme == "http"
+        and endpoint.hostname in ("localhost", "127.0.0.1", "::1")
+    ):
+        raise ValueError("bearer authentication requires HTTPS or a loopback HTTP endpoint")
+    return token
+
+
+def post(url, body, timeout=1800, bearer_token=None):
+    headers = {"content-type": "application/json"}
+    if bearer_token is not None:
+        headers["Authorization"] = f"Bearer {bearer_token}"
+    req = urllib.request.Request(url, request_bytes(body), headers)
     # Transcript state belongs to the operator-selected endpoint. Ambient
     # proxies and redirects can leak the request or misattribute model results.
     opener = urllib.request.build_opener(
@@ -274,6 +292,8 @@ def main(argv=None):
     ap.add_argument("--server-config", required=True, help="JSON file with immutable serving identity; omit credentials")
     ap.add_argument("--subset")
     ap.add_argument("--send-model")
+    ap.add_argument("--bearer-token-env", metavar="NAME",
+                    help="name of an environment variable holding a bearer token (never recorded)")
     ap.add_argument("--sample-out", help="write the first raw response here")
     ap.add_argument("--noul-temperature", type=float, help="client calibration temperature; raw probabilities are retained")
     ap.add_argument("configs", nargs="+", choices=tuple(STATES))
@@ -284,6 +304,8 @@ def main(argv=None):
             and (not math.isfinite(args.noul_temperature) or args.noul_temperature <= 0)):
         raise ValueError("--noul-temperature must be finite and greater than zero")
     server_config = load_server_config(args.server_config)
+    bearer_token = (load_bearer_token(args.bearer_token_env, args.url)
+                    if args.bearer_token_env is not None else None)
     if args.sample_out and os.path.lexists(args.sample_out) and not os.path.isfile(args.sample_out):
         raise ValueError(f"sample path exists but is not a regular file: {args.sample_out}")
     with open(os.path.join(HERE, "dataset.json"), "rb") as source:
@@ -352,7 +374,10 @@ def main(argv=None):
                 if case["id"] in done:
                     continue
                 body, request_sha = requests[case["id"]]
-                response, ms = post(args.url, body)
+                if bearer_token is None:
+                    response, ms = post(args.url, body)
+                else:
+                    response, ms = post(args.url, body, bearer_token=bearer_token)
                 probs = noul_probabilities(response, questions)
                 server_ms = response.get("latency_ms")
                 if server_ms is None:

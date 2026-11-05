@@ -11,6 +11,14 @@ python evals/intent_engine/run_http.py \
   B_noul_text
 ```
 
+For an authenticated server, set a bearer-token environment variable and pass
+`--bearer-token-env NAME` (for example, `SYSTEMONE_TOKEN`). The runner
+reads it before creating partial output or issuing requests, sends it only in
+the HTTP Authorization header, and never stores the credential or its variable
+name in result evidence. An authenticated remote endpoint must use HTTPS;
+plain HTTP is accepted only for direct loopback addresses. Ambient proxies
+and HTTP redirects are disabled, including for authenticated requests.
+
 The JSON declaration must contain nonempty `checkpoint`, `server_revision`,
 `backend`, and `dtype` strings, and the actual finite, nonnegative server
 `temperature`. Include other settings that affect inference as additional keys.
@@ -33,7 +41,7 @@ duplicate/foreign cases, and malformed probability maps also refuse; no migratio
 or silent salvage is performed. Choose a new tag for another experiment or an
 old unidentifiable log. Completed output files are never overwritten.
 
-Use only one writer per tag/configuration. Rows are flushed after each response;
+An exclusive lock on the partial log rejects concurrent writers for the same tag/configuration. Rows are flushed after each response;
 this is not a crash-durable database or a concurrent-writer protocol. The runner
 writes and syncs the final result to a temporary file in the results directory,
 then publishes it with a hard link, which fails if the output path already

@@ -749,6 +749,78 @@ class RunHttpTest(unittest.TestCase):
         self.assertEqual(sent, run_http.request_bytes(body))
         self.assertEqual(hashlib.sha256(sent).hexdigest(), hashlib.sha256(run_http.request_bytes(body)).hexdigest())
 
+
+    def test_authentication_reads_env_without_persisting_credentials(self):
+        token = "opaque.Test~7+/-=="
+        response, elapsed = self.response("", {"questions": run_http.noul_questions()})
+        with patch.dict(os.environ, {"TRACEDECAY_EVAL_TEST_TOKEN": token}):
+            with patch.object(run_http, "post", return_value=(response, elapsed)) as post:
+                self.run_main(["--bearer-token-env", "TRACEDECAY_EVAL_TEST_TOKEN"])
+        self.assertEqual(post.call_count, len(self.dataset))
+        self.assertTrue(all(call.kwargs == {"bearer_token": token}
+                            for call in post.call_args_list))
+        result = self.output.read_text(encoding="utf-8")
+        self.assertNotIn(token, result)
+        self.assertNotIn("TRACEDECAY_EVAL_TEST_TOKEN", result)
+        self.assertFalse(self.partial.exists())
+
+    def test_bad_auth_configuration_refuses_before_http_or_partial_writes(self):
+        variable = "TRACEDECAY_EVAL_TEST_TOKEN"
+        for token, url in (
+            (None, "http://localhost:8009/v1/systemone"),
+            ("bad" + chr(13) + chr(10) + "X-Header: injected", "http://localhost:8009/v1/systemone"),
+            ("opaque-token", "http://model.example/v1/systemone"),
+            ("opaque-token", "http://localhost.attacker.example/v1/systemone"),
+        ):
+            with self.subTest(token=token, url=url):
+                environment = {variable: token} if token is not None else {}
+                with patch.dict(os.environ, environment, clear=True):
+                    with patch.object(run_http, "post") as post:
+                        with self.assertRaises(ValueError):
+                            self.run_main(["--bearer-token-env", variable, "--url", url])
+                        post.assert_not_called()
+                self.assertFalse(self.partial.exists())
+                self.assertFalse(self.output.exists())
+        with patch.object(run_http, "post") as post:
+            with self.assertRaisesRegex(ValueError, "environment variable name"):
+                self.run_main(["--bearer-token-env", ""])
+            post.assert_not_called()
+        self.assertFalse(self.partial.exists())
+
+    def test_bearer_transport_sends_only_to_selected_loopback_server(self):
+        received = []
+
+        class Answer(BaseHTTPRequestHandler):
+            def do_POST(self):
+                received.append((
+                    self.headers.get("Authorization"),
+                    self.rfile.read(int(self.headers["Content-Length"])),
+                ))
+                reply = b'{"answers":{}}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
+
+            def log_message(self, *_):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Answer)
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        body = {"state": "private transcript", "questions": {}}
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/v1/systemone"
+            with patch.dict(os.environ, {"TRACEDECAY_EVAL_TEST_TOKEN": "opaque-token"}):
+                token = run_http.load_bearer_token("TRACEDECAY_EVAL_TEST_TOKEN", url)
+                reply, _ = run_http.post(url, body, timeout=2, bearer_token=token)
+            self.assertEqual(reply, {"answers": {}})
+            self.assertEqual(received, [("Bearer opaque-token", run_http.request_bytes(body))])
+        finally:
+            server.shutdown()
+            worker.join(timeout=2)
+            server.server_close()
+
     def test_decision_request_does_not_use_environment_proxy(self):
         received = []
 
