@@ -64,6 +64,60 @@ def publish_sample(path, serialized):
         os.unlink(staged)
 
 
+def require_exclusive_publication(directory):
+    """Refuse unsupported result volumes before spending inference tokens.
+
+    Both completed output and first-response samples use no-clobber hard links.
+    A writable directory alone does not prove that publication will work:
+    FAT/exFAT volumes can accept the partial log but never complete the run.
+    """
+    staged = os.path.join(directory, f".noul-link-probe-{secrets.token_hex(16)}")
+    linked = staged + ".linked"
+    descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    linked_created = False
+    try:
+        os.close(descriptor)
+        try:
+            os.link(staged, linked)
+            linked_created = True
+        except OSError as error:
+            raise OSError(
+                error.errno,
+                f"exclusive publication requires hard links in {directory}; "
+                f"probe failed: {error}",
+                directory,
+            ) from error
+    finally:
+        try:
+            # A failed exclusive link may have collided with someone else's
+            # file. Path existence is not proof that this probe created it.
+            if linked_created:
+                os.unlink(linked)
+        finally:
+            os.unlink(staged)
+
+
+def publish_final_result(path, document):
+    """Expose a completed JSON result only after its bytes are fully written.
+
+    The same-directory hard link is an exclusive publication: a competing
+    writer's result cannot be replaced, and a failed staged write cannot leave
+    an apparently completed but truncated JSON file.
+    """
+    serialized = json.dumps(document, indent=1, allow_nan=False)
+    directory = os.path.dirname(os.path.abspath(path))
+    staged = os.path.join(directory, f".noul-result-{secrets.token_hex(16)}")
+    descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            output.write(serialized)
+            output.flush()
+            os.fsync(output.fileno())
+        os.link(staged, path)
+    finally:
+        os.unlink(staged)
+
+
 def post(url, body, timeout=1800):
     req = urllib.request.Request(
         url, request_bytes(body), {"content-type": "application/json"}
@@ -206,8 +260,11 @@ def main(argv=None):
     for cfg in args.configs:
         name = f"{args.tag}_{cfg}"
         path = os.path.join(HERE, "results", name + ".json")
-        if os.path.exists(path):
+        if os.path.lexists(path):
             raise ValueError(f"completed output already exists: {path}; use a new tag")
+        require_exclusive_publication(os.path.dirname(os.path.abspath(path)))
+        if args.sample_out and not os.path.isfile(args.sample_out):
+            require_exclusive_publication(os.path.dirname(os.path.abspath(args.sample_out)))
         requests = {}
         for case in dataset:
             body = {"state": STATES[cfg](case), "questions": questions}
@@ -279,13 +336,15 @@ def main(argv=None):
                 partial.flush()
                 done[case["id"]] = row
                 print(cfg, index, case["id"], "%.0f ms" % ms, flush=True)
-        # Never overwrite another completed experiment, even with the same tag.
-        with open(path, "x", encoding="utf-8") as output:
-            json.dump({"config": name, "dataset_sha256": dataset_sha,
-                       "noul_temperature": args.noul_temperature,
-                       "subset": args.subset and os.path.basename(args.subset),
-                       **header, "rows": [done[case_id] for case_id in cases]},
-                      output, indent=1, allow_nan=False)
+        # Exclusive publication must never expose a truncated final result:
+        # an interrupted or failed write leaves the complete partial log
+        # available for an exact-identity retry without new model calls.
+        publish_final_result(path, {
+            "config": name, "dataset_sha256": dataset_sha,
+            "noul_temperature": args.noul_temperature,
+            "subset": args.subset and os.path.basename(args.subset),
+            **header, "rows": [done[case_id] for case_id in cases],
+        })
         os.remove(partial_path)
         print(cfg, "done", flush=True)
 

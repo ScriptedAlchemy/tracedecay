@@ -34,9 +34,17 @@ or silent salvage is performed. Choose a new tag for another experiment or an
 old unidentifiable log. Completed output files are never overwritten.
 
 Use only one writer per tag/configuration. Rows are flushed after each response;
-this is not a crash-durable database or a concurrent-writer protocol. If final
-output publication itself is interrupted, the partial log remains, but an
-incomplete final file requires operator inspection before retrying that tag.
+this is not a crash-durable database or a concurrent-writer protocol. Final
+results are fully rendered and synced in a same-directory temporary file, then
+published exclusively using an atomic hard link. A failed write/link cannot
+expose truncated completed JSON and leaves the exact-identity `.partial` log
+available for a retry without repeating inference. Completion does not
+guarantee directory metadata durability across an abrupt OS crash. Before
+making HTTP requests, the runner probes no-clobber hard-link publication in
+the results directory and (if needed) the optional sample directory. Volumes
+without hard-link support, such as FAT/exFAT, refuse immediately without
+creating a partial log or spending inference tokens; use a compatible output
+filesystem instead. No unsafe replace-on-rename fallback is attempted.
 
 ## Token and truncation evidence
 
