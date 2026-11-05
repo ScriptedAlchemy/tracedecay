@@ -19,7 +19,7 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from common import noul_questions, prompt_only, text_window
+from common import calibrated, noul_questions, prompt_only, text_window
 
 STATES = {
     "A_noul_prompt": prompt_only,
@@ -185,16 +185,6 @@ def noul_probabilities(response, questions):
             raise ValueError(f"invalid noul answer for {key}")
         values[key] = answer["noul"]
     return probabilities(values, questions)
-
-
-def calibrated(probability, temperature):
-    if probability in (0, 1):
-        return probability
-    log_odds = (math.log(probability) - math.log1p(-probability)) / temperature
-    if log_odds >= 0:
-        return 1 / (1 + math.exp(-log_odds))
-    exp_odds = math.exp(log_odds)
-    return exp_odds / (1 + exp_odds)
 
 
 def serialize_result(row, questions, temperature):

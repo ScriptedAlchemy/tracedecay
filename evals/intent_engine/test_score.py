@@ -229,6 +229,54 @@ class ScoringTests(unittest.TestCase):
                   "probs": {**original["probs"], "none": 0.2}}
         self.assertEqual(score.score_config({"config": "choice", "rows": [choice]})["latency"]["total_cases"], 1)
 
+    def test_http_calibration_must_match_raw_evidence(self):
+        original = row("a", [score.CATS[0]])
+        raw = dict(original["probs"])
+        temperature = 2.0
+        measured = {cat: score.calibrated(p, temperature) for cat, p in raw.items()}
+        calibrated_row = {**original, "probs_raw": raw, "probs": measured}
+        result = {
+            "config": "http_calibrated",
+            "experiment": {"version": 2, "noul_temperature": temperature},
+            "noul_temperature": temperature,
+            "rows": [calibrated_row],
+        }
+        self.assertEqual(score.score_config(result)["latency"]["total_cases"], 1)
+
+        conflicting = {**calibrated_row, "probs": raw}
+        with self.assertRaisesRegex(ValueError, "calibrated probabilities disagree"):
+            score.score_config({**result, "rows": [conflicting]})
+        missing_raw = {k: v for k, v in calibrated_row.items() if k != "probs_raw"}
+        with self.assertRaisesRegex(ValueError, "missing raw probabilities"):
+            score.score_config({**result, "rows": [missing_raw]})
+        with self.assertRaisesRegex(ValueError, "temperature differs"):
+            score.score_config({**result, "noul_temperature": 3.0})
+        with self.assertRaisesRegex(ValueError, "invalid HTTP calibration temperature"):
+            score.score_config({
+                **result, "experiment": {"version": 2, "noul_temperature": 0.0},
+                "noul_temperature": 0.0,
+            })
+        with self.assertRaisesRegex(ValueError, "uncalibrated HTTP result"):
+            score.score_config({
+                **result, "experiment": {"version": 2, "noul_temperature": None},
+                "noul_temperature": None,
+            })
+
+        # A corrupt calibrated result must not replace a previous scored summary.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.stage_scripts(root)
+            (root / "results").mkdir()
+            (root / "results" / "bad.json").write_text(
+                json.dumps({**result, "rows": [conflicting]}), encoding="utf-8",
+            )
+            summary = root / "summary.json"
+            summary.write_bytes(b"last verified summary\n")
+            attempt = self.run_script(root, "score.py")
+            self.assertNotEqual(attempt.returncode, 0)
+            self.assertIn("calibrated probabilities disagree", attempt.stderr)
+            self.assertEqual(summary.read_bytes(), b"last verified summary\n")
+
     def test_invalid_probability_cannot_replace_previous_cli_summary(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

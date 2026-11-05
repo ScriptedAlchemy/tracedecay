@@ -6,7 +6,7 @@ macro F1 retains the historical fixed-CATS, zero-for-undefined convention.
 """
 import json, glob, math, os, statistics, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import CATS
+from common import CATS, calibrated
 
 TH = [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
@@ -65,6 +65,36 @@ def validate_rows(rows, config):
         if (isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)) or
                 not math.isfinite(elapsed) or elapsed < 0):
             raise ValueError(f"configuration {config!r} case {case_id} has invalid elapsed ms")
+
+
+def validate_calibration(result, rows):
+    """Check HTTP calibration against its raw measurements before scoring."""
+    if "experiment" not in result:
+        return  # Historical local scoring files have no HTTP calibration.
+    temperature = result["experiment"].get("noul_temperature")
+    if temperature is not None and (
+        isinstance(temperature, bool)
+        or not isinstance(temperature, (int, float))
+        or not math.isfinite(temperature)
+        or temperature <= 0
+    ):
+        raise ValueError("invalid HTTP calibration temperature")
+    if ("noul_temperature" in result
+            and result["noul_temperature"] != temperature):
+        raise ValueError("HTTP calibration temperature differs from recorded experiment")
+    if temperature is None:
+        if any("probs_raw" in row for row in rows):
+            raise ValueError("uncalibrated HTTP result contains raw probabilities")
+        return
+    for row in rows:
+        if "probs_raw" not in row:
+            raise ValueError("calibrated HTTP result is missing raw probabilities")
+        expected = {
+            category: calibrated(value, temperature)
+            for category, value in row["probs_raw"].items()
+        }
+        if row["probs"] != expected:
+            raise ValueError("calibrated probabilities disagree with raw telemetry")
 
 
 def auc(pos, neg):
@@ -149,6 +179,7 @@ def score_config(res, fixed_t=None):
             raise ValueError("HTTP result telemetry version is unsupported; rerun with a new tag")
     rows = res["rows"]
     validate_rows(rows, res.get("config"))
+    validate_calibration(res, rows)
     choices = ["choice" in row for row in rows]
     if any(choices) and not all(choices):
         raise ValueError("configuration %r has incomplete choice coverage" % res.get("config"))
