@@ -4,11 +4,27 @@ Empty slices have unknown rates, not zero accuracy. Macro AUC averages only
 categories with both label classes and reports its category coverage. Nonempty
 macro F1 retains the historical fixed-CATS, zero-for-undefined convention.
 """
-import json, glob, os, statistics, sys
+import json, glob, os, statistics, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import CATS
 
 TH = [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+
+def publish_summary(path, summary):
+    # Publish a complete scored snapshot without truncating the last good one.
+    directory = os.path.dirname(os.path.abspath(path))
+    descriptor, staged = tempfile.mkstemp(prefix=".intent-summary-", suffix=".json", dir=directory)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(summary, output, indent=1, allow_nan=False)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(staged, path)
+    finally:
+        if os.path.lexists(staged):
+            os.unlink(staged)
+
 
 def auc(pos, neg):
     if not pos or not neg: return None
@@ -161,7 +177,7 @@ if __name__ == "__main__":
     # establish hybrid latency or usage, and must never replace an actual run.
     for k, res in allres.items():
         summary[k] = score_config(res, fixed)
-    json.dump(summary, open(os.path.join(here, "summary.json"), "w"), indent=1)
+    publish_summary(os.path.join(here, "summary.json"), summary)
     f2 = lambda x: "  -  " if x is None else "%.2f" % x
     print("config                     macroAUC ctxAUC | t0.5: mF1 top1 top1ctx noneFH | t0.6: mF1 top1 top1ctx noneFH | best: mF1 top1 top1ctx noneFH | ECE  | med/p90 ms")
     for k, s in summary.items():

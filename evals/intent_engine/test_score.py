@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import score
 
@@ -281,6 +282,50 @@ class ScoringTests(unittest.TestCase):
             self.assertIn("duplicate configuration", scored.stderr)
             self.assertIn("same", scored.stderr)
             self.assertEqual(summary.read_bytes(), b"existing summary\n")
+
+    def test_summary_publication_replaces_only_a_complete_scored_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            summary = Path(directory) / "summary.json"
+            previous = b'{"prior": true}\n'
+            summary.write_bytes(previous)
+            expected = {"measured": {"macro_f1": 0.91}}
+            replace = score.os.replace
+
+            def inspect_replace(staged, destination):
+                self.assertEqual(summary.read_bytes(), previous)
+                self.assertEqual(
+                    json.loads(Path(staged).read_text(encoding="utf-8")), expected
+                )
+                replace(staged, destination)
+
+            with mock.patch.object(score.os, "replace", side_effect=inspect_replace):
+                score.publish_summary(summary, expected)
+            self.assertEqual(json.loads(summary.read_text(encoding="utf-8")), expected)
+            self.assertEqual(set(Path(directory).iterdir()), {summary})
+
+    def test_summary_publication_errors_preserve_previous_bytes_and_remove_staging(self):
+        for failure in ("serialize", "fsync", "replace"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                summary = Path(directory) / "summary.json"
+                previous = b'{"completed": true}\n'
+                summary.write_bytes(previous)
+                if failure == "serialize":
+                    with self.assertRaisesRegex(ValueError, "Out of range"):
+                        score.publish_summary(summary, {"invalid": float("nan")})
+                elif failure == "fsync":
+                    with mock.patch.object(
+                        score.os, "fsync", side_effect=OSError("sync failed")
+                    ):
+                        with self.assertRaisesRegex(OSError, "sync failed"):
+                            score.publish_summary(summary, {"new": 1})
+                else:
+                    with mock.patch.object(
+                        score.os, "replace", side_effect=PermissionError("publish denied")
+                    ):
+                        with self.assertRaisesRegex(PermissionError, "publish denied"):
+                            score.publish_summary(summary, {"new": 1})
+                self.assertEqual(summary.read_bytes(), previous)
+                self.assertEqual(set(Path(directory).iterdir()), {summary})
 
     @staticmethod
     def stage_scripts(root):
