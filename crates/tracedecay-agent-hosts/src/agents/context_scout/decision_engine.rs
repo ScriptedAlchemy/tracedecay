@@ -444,7 +444,12 @@ fn parse_answer(
     answer: &Map<String, Value>,
     kind: &DecisionQuestionKindV1,
 ) -> Option<DecisionAnswerV1> {
-    let declared = answer.get("type").and_then(Value::as_str);
+    // An omitted tag is supported, but a malformed explicit tag must not
+    // disappear into the same optional state and bypass kind validation.
+    let declared = match answer.get("type") {
+        None => None,
+        Some(declared) => Some(declared.as_str()?),
+    };
     match kind {
         DecisionQuestionKindV1::Noul => {
             if declared.is_some_and(|declared| declared != "noul") {
@@ -1132,6 +1137,44 @@ mod tests {
                 expected,
                 "{status} {body}"
             );
+        }
+    }
+
+    #[test]
+    fn explicit_answer_types_must_not_be_treated_as_omitted_when_malformed() {
+        for (question, answer) in [
+            (noul("q"), json!({"noul": 0.5})),
+            (
+                choice("q", &["code", "memory"]),
+                json!({"probs": {"code": 0.7, "memory": 0.3}}),
+            ),
+            (score("q", &["low", "high"]), json!({"score": 0.5})),
+        ] {
+            // A genuinely omitted tag remains compatible for every kind.
+            let body = json!({"answers": {"q": &answer}}).to_string();
+            let server = fake_decision_engine(200, &body, Duration::ZERO);
+            let result = answered(
+                client(&server.url).ask_blocking(&request("state", vec![question.clone()])),
+            );
+            assert_eq!(result.answers.len(), 1);
+
+            for declared in [
+                Value::Null,
+                json!(false),
+                json!(1),
+                json!(["noul"]),
+                json!({"type": "noul"}),
+            ] {
+                let mut malformed = answer.clone();
+                malformed["type"] = declared;
+                let body = json!({"answers": {"q": malformed}}).to_string();
+                let server = fake_decision_engine(200, &body, Duration::ZERO);
+                assert_eq!(
+                    client(&server.url).ask_blocking(&request("state", vec![question.clone()])),
+                    DecisionEngineOutcomeV1::Malformed,
+                    "{body}"
+                );
+            }
         }
     }
 
