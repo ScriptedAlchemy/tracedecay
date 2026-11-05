@@ -118,12 +118,22 @@ def publish_final_result(path, document):
         os.unlink(staged)
 
 
+class RefuseDecisionRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def post(url, body, timeout=1800):
     req = urllib.request.Request(
         url, request_bytes(body), {"content-type": "application/json"}
     )
+    # Transcript state belongs to the operator-selected endpoint. Ambient
+    # proxies and redirects can leak the request or misattribute model results.
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), RefuseDecisionRedirects()
+    )
     started = time.perf_counter()
-    with urllib.request.urlopen(req, timeout=timeout) as response:
+    with opener.open(req, timeout=timeout) as response:
         out = json.loads(response.read())
     return out, (time.perf_counter() - started) * 1000
 

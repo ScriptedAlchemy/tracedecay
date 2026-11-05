@@ -11,6 +11,9 @@ import stat
 import sys
 import tempfile
 import unittest
+import urllib.error
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -691,11 +694,78 @@ class RunHttpTest(unittest.TestCase):
     def test_transmitted_bytes_match_the_recorded_request_fingerprint(self):
         response = io.BytesIO(json.dumps({"answers": {}}).encode())
         body = {"state": "Unicode λ", "questions": {"a": {}, "b": {}}}
-        with patch("urllib.request.urlopen", return_value=response) as urlopen:
+        with patch("urllib.request.build_opener") as build_opener:
+            build_opener.return_value.open.return_value = response
             run_http.post("http://localhost:8009/v1/systemone", body)
-        sent = urlopen.call_args.args[0].data
+        sent = build_opener.return_value.open.call_args.args[0].data
         self.assertEqual(sent, run_http.request_bytes(body))
         self.assertEqual(hashlib.sha256(sent).hexdigest(), hashlib.sha256(run_http.request_bytes(body)).hexdigest())
+
+    def test_decision_request_does_not_use_environment_proxy(self):
+        received = []
+
+        class Answer(BaseHTTPRequestHandler):
+            def do_POST(self):
+                received.append(self.rfile.read(int(self.headers["Content-Length"])))
+                body = b'{"answers":{}}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Answer)
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        body = {"state": "private transcript", "questions": {"q": {"type": "noul"}}}
+        try:
+            # A dead proxy and an empty bypass list prevent an unguarded
+            # urllib opener from reaching the explicitly configured server.
+            with patch.dict(os.environ, {
+                "http_proxy": "http://127.0.0.1:1",
+                "HTTP_PROXY": "http://127.0.0.1:1",
+                "no_proxy": "",
+                "NO_PROXY": "",
+            }):
+                reply, _ = run_http.post(
+                    f"http://127.0.0.1:{server.server_port}/v1/systemone", body, timeout=2,
+                )
+            self.assertEqual(reply, {"answers": {}})
+            self.assertEqual(received, [run_http.request_bytes(body)])
+        finally:
+            server.shutdown()
+            worker.join(timeout=2)
+            server.server_close()
+
+    def test_decision_request_refuses_cross_endpoint_redirect(self):
+        class Redirect(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                self.send_response(302)
+                self.send_header("Location", "http://127.0.0.1:1/other-model")
+                self.end_headers()
+
+            def log_message(self, *_):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Redirect)
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as refused:
+                run_http.post(
+                    f"http://127.0.0.1:{server.server_port}/v1/systemone",
+                    {"state": "private transcript", "questions": {}}, timeout=2,
+                )
+            # Preserve the original 302 instead of following it to an
+            # unapproved model endpoint and observing a downstream failure.
+            self.assertEqual(refused.exception.code, 302)
+        finally:
+            server.shutdown()
+            worker.join(timeout=2)
+            server.server_close()
 
 
 if __name__ == "__main__":
