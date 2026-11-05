@@ -1934,8 +1934,7 @@ mod tests {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            output.status.success()
-                && stdout.contains("storage-report-verified-external-blocker"),
+            output.status.success() && stdout.contains("storage-report-verified-external-blocker"),
             "external probe failed or selected no tests: {}\n{stdout}\n{stderr}",
             output.status
         );
@@ -1976,15 +1975,10 @@ mod tests {
             .await
             .unwrap();
 
-        let page = build_storage_report_page_from_registered_global_db(
-            profile_root,
-            &db,
-            None,
-            None,
-            4,
-        )
-        .await
-        .unwrap();
+        let page =
+            build_storage_report_page_from_registered_global_db(profile_root, &db, None, None, 4)
+                .await
+                .unwrap();
         assert_eq!(page.stores.len(), 1);
         assert!(page.stores[0].total_bytes > 0);
         assert_eq!(page.stores[0].free_bytes, None);
