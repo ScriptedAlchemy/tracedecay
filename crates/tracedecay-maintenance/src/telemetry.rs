@@ -26,6 +26,9 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::tick::MaintenanceTickOutcome;
 
+mod text_artifact_scans;
+use text_artifact_scans::TextArtifactScansV1;
+
 const STORAGE_TELEMETRY_CONTEXT_HORIZON_MICROS: i64 = 30_000_000;
 const STORAGE_TELEMETRY_CAPABILITY: &str = "capability.application.storage.telemetry";
 const STORAGE_TELEMETRY_USE_CASE: &str = "use-case.application.storage.telemetry.read";
@@ -477,6 +480,7 @@ pub struct StoreTelemetrySamplingRegistry {
     /// Where table-growth state survives a restart; `None` keeps it in memory.
     table_growth_state_path: Option<PathBuf>,
     graph_replay_release: Arc<std::sync::Mutex<HashMap<PathBuf, GraphReplayReleaseProgressV1>>>,
+    text_artifact_scans: TextArtifactScansV1,
     graph_staging_release:
         Arc<std::sync::Mutex<HashMap<PathBuf, tracedecay_store::GraphProjectionIdentityV1>>>,
     /// Whether the by-design quiet `retry` tick line has already been written.
@@ -629,6 +633,10 @@ impl StoreTelemetrySamplingRegistry {
     }
 
     pub fn release_retained_handles_for_shutdown(&self) {
+        self.text_artifact_scans
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         self.ports
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -640,6 +648,16 @@ impl StoreTelemetrySamplingRegistry {
         self.quiet_retry_tick_logged.store(false, Ordering::Release);
         self.loud_retention_this_tick
             .store(false, Ordering::Release);
+    }
+
+    /// Retain scan cursors for every registered project, including those with
+    /// no mounted graph. Mounted-only pruning would restart a registered
+    /// scope at the same preserved directory prefix on every tick.
+    pub fn retain_text_artifact_scan_projects(&self, active_data_roots: &BTreeSet<PathBuf>) {
+        self.text_artifact_scans
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, entry| active_data_roots.contains(&entry.data_root));
     }
 
     pub fn retain_project_maintenance_state(&self, active_projects: &BTreeSet<PathBuf>) {
