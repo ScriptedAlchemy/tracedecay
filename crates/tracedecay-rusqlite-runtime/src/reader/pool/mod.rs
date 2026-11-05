@@ -840,6 +840,15 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         }
     }
 
+    /// Release the shared descriptor after every lost-file SQLite worker exits.
+    /// Held reader-pool handles must not keep an unlinked inode alive.
+    pub(crate) fn release_lost_file_pin_after_workers_exit(&self) {
+        debug_assert!(self.workers_exited());
+        self.inner
+            .locator
+            .release_opened_database_after_workers_exit();
+    }
+
     /// Test-only: run `hook` once, between the next growing acquire's worker
     /// spawn and its registration.
     #[cfg(test)]

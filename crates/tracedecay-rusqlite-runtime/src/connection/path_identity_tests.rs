@@ -322,7 +322,9 @@ fn dropping_secondary_identity_pins_never_unlocks_live_wal_journal() {
     probe_external_connection(&path, "journal", true);
     drop(writer_pin);
     probe_external_connection(&path, "journal", true);
-    pinned.verify_current_path(&path).expect("original file identity");
+    pinned
+        .verify_current_path(&path)
+        .expect("original file identity");
     probe_external_connection(&path, "journal", true);
 
     connection.execute_batch("COMMIT").expect("commit");

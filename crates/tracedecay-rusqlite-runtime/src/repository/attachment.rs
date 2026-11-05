@@ -459,11 +459,19 @@ impl RepositoryRuntimePhysicalAttachment {
         {
             return false;
         }
+        if state.file_lost {
+            // A retained reader lease may keep its pool alive after every
+            // SQLite worker exits. Close the shared pin in-place so that
+            // held pool handles cannot pin an unlinked inode indefinitely.
+            if let Some(readers) = state.lost_readers.as_ref() {
+                readers.release_lost_file_pin_after_workers_exit();
+            }
+        }
         state.lost_readers = None;
         state.lost_writer = None;
         if state.file_lost {
-            // Both worker groups have exited; no live SQLite lock can be
-            // released by closing the retained identity descriptor.
+            // All workers are gone, so releasing the physical descriptor
+            // cannot disturb live SQLite POSIX locks.
             state.retained_file_pin.take();
         }
         true

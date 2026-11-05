@@ -98,6 +98,15 @@ impl OpenedDatabaseFile {
         })
     }
 
+    /// Close the physical descriptor only after every SQLite worker holding
+    /// this inode has exited. All shared locator clones then refuse reuse.
+    pub(crate) fn release_after_workers_exit(&self) {
+        self.file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
+
     pub(crate) const fn identity(&self) -> u64 {
         self.identity
     }
