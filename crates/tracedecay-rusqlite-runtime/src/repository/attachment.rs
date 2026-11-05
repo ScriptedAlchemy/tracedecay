@@ -1463,6 +1463,7 @@ mod tests {
             held_pin.try_clone().is_err(),
             "retaining a pin handle must not retain the descriptor after worker exit"
         );
+        #[cfg(target_os = "linux")]
         assert!(
             deleted_descriptors(directory.path()).is_empty(),
             "the last lost worker exiting must release every deleted-file descriptor"
