@@ -1,6 +1,7 @@
 """Runner persistence tests. HTTP inference is substituted, not qualified here."""
 import contextlib
 import copy
+import errno
 import hashlib
 import io
 import json
@@ -354,6 +355,70 @@ class RunHttpTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.run_main(["--subset", str(self.root / "subset.json")])
                 post.assert_not_called()
+
+    def test_failed_probe_preserves_a_link_target_it_did_not_create(self):
+        self.output.parent.mkdir()
+        foreign = self.output.parent / ".noul-link-probe-collision.linked"
+        content = b"another publication owns this file\n"
+        foreign.write_bytes(content)
+        # Force a collision with a real existing file; os.link itself must
+        # refuse it. Cleanup is not authorized to remove the winning file.
+        with patch.object(run_http.secrets, "token_hex", return_value="collision"):
+            with patch.object(run_http, "post") as post:
+                with self.assertRaises(OSError):
+                    self.run_main()
+                post.assert_not_called()
+        self.assertEqual(foreign.read_bytes(), content)
+        self.assertEqual(list(self.output.parent.iterdir()), [foreign])
+        self.assertFalse(self.partial.exists())
+
+    def test_probe_permission_error_preserves_the_underlying_cause(self):
+        error = PermissionError(errno.EACCES, "policy denied link creation")
+        with patch.object(run_http, "post") as post:
+            with patch.object(run_http.os, "link", side_effect=error):
+                with self.assertRaises(OSError) as caught:
+                    self.run_main()
+            post.assert_not_called()
+        self.assertEqual(caught.exception.errno, errno.EACCES)
+        self.assertIs(caught.exception.__cause__, error)
+        self.assertIn("policy denied link creation", str(caught.exception))
+        self.assertIn(str(self.output.parent), str(caught.exception))
+        self.assertEqual(list(self.output.parent.iterdir()), [])
+
+    def test_probe_close_failure_still_removes_owned_staging(self):
+        actual_close = os.close
+
+        def close_then_fail(descriptor):
+            actual_close(descriptor)
+            raise OSError(errno.EIO, "probe close failed")
+
+        with patch.object(run_http, "post") as post:
+            with patch.object(run_http.os, "close", side_effect=close_then_fail):
+                with self.assertRaisesRegex(OSError, "probe close failed"):
+                    self.run_main()
+            post.assert_not_called()
+        self.assertEqual(list(self.output.parent.iterdir()), [])
+        self.assertFalse(self.partial.exists())
+
+    def test_link_cleanup_failure_does_not_skip_owned_staging_cleanup(self):
+        actual_unlink = os.unlink
+        blocked = []
+
+        def refuse_link_cleanup(path, *args, **kwargs):
+            if str(path).endswith(".linked"):
+                blocked.append(Path(path))
+                raise PermissionError(errno.EACCES, "probe link cleanup denied")
+            return actual_unlink(path, *args, **kwargs)
+
+        with patch.object(run_http, "post") as post:
+            with patch.object(run_http.os, "unlink", side_effect=refuse_link_cleanup):
+                with self.assertRaisesRegex(OSError, "probe link cleanup denied"):
+                    self.run_main()
+            post.assert_not_called()
+        self.assertEqual(len(blocked), 1)
+        self.assertEqual(list(self.output.parent.iterdir()), blocked)
+        self.assertFalse(self.partial.exists())
+        actual_unlink(blocked[0])
 
     def test_unsupported_results_volume_refuses_before_any_http_work(self):
         with patch.object(run_http, "post") as post:

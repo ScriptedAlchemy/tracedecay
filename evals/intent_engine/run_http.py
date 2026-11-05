@@ -74,19 +74,27 @@ def require_exclusive_publication(directory):
     staged = os.path.join(directory, f".noul-link-probe-{secrets.token_hex(16)}")
     linked = staged + ".linked"
     descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    os.close(descriptor)
+    linked_created = False
     try:
+        os.close(descriptor)
         try:
             os.link(staged, linked)
+            linked_created = True
         except OSError as error:
             raise OSError(
+                error.errno,
                 f"exclusive publication requires hard links in {directory}; "
-                "choose a hard-link-capable output directory"
+                f"probe failed: {error}",
+                directory,
             ) from error
     finally:
-        if os.path.lexists(linked):
-            os.unlink(linked)
-        os.unlink(staged)
+        try:
+            # A failed exclusive link may have collided with someone else's
+            # file. Path existence is not proof that this probe created it.
+            if linked_created:
+                os.unlink(linked)
+        finally:
+            os.unlink(staged)
 
 
 def publish_final_result(path, document):
