@@ -262,7 +262,6 @@ fn external_read_only_wal_reader_survives_live_writer_identity_checks() {
     assert_committed_data(&path);
 }
 
-
 #[test]
 fn dropping_secondary_identity_pins_never_releases_rollback_writer_locks() {
     let temp = TempDir::new().expect("tempdir");
