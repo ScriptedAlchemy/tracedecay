@@ -127,6 +127,65 @@ class RunHttpTest(unittest.TestCase):
         result = json.loads(self.output.read_text())
         self.assertEqual([row["id"] for row in result["rows"]], ["first", "second"])
 
+    def test_partial_lock_covers_final_result_publication(self):
+        entered, release = Event(), Event()
+        errors = []
+        original_publish = run_http.publish_final_result
+
+        def paused_publish(path, document):
+            if not entered.is_set():
+                entered.set()
+                if not release.wait(10):
+                    raise OSError("publication barrier was never released")
+            return original_publish(path, document)
+
+        def first_run():
+            try:
+                self.run_main()
+            except Exception as error:
+                errors.append(error)
+
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            with patch.object(run_http, "publish_final_result",
+                              side_effect=paused_publish) as publish:
+                worker = Thread(target=first_run)
+                worker.start()
+                try:
+                    self.assertTrue(entered.wait(10), "first publication did not start")
+                    before = self.partial.read_bytes()
+                    with self.assertRaisesRegex(ValueError, "another evaluator"):
+                        self.run_main()
+                    self.assertEqual(self.partial.read_bytes(), before)
+                    self.assertFalse(self.output.exists())
+                finally:
+                    release.set()
+                    worker.join(10)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(errors, [])
+                self.assertEqual(post.call_count, len(self.dataset))
+                publish.assert_called_once()
+        self.assertTrue(self.output.exists())
+        self.assertFalse(self.partial.exists())
+
+    def test_completion_between_preflight_and_lock_refuses_resume(self):
+        self.interrupt()
+        original_lock = run_http.lock_partial_writer
+        before = self.partial.read_bytes()
+        previous = '{"previous":true}'
+
+        def publish_before_locked_check(partial, path):
+            original_lock(partial, path)
+            self.output.write_text(previous, encoding="utf-8")
+
+        with patch.object(run_http, "lock_partial_writer",
+                          side_effect=publish_before_locked_check):
+            with patch.object(run_http, "post") as post:
+                with self.assertRaisesRegex(ValueError, "completed output already exists"):
+                    self.run_main()
+                post.assert_not_called()
+        self.assertEqual(self.output.read_text(encoding="utf-8"), previous)
+        self.assertEqual(self.partial.read_bytes(), before)
+
     @unittest.skipUnless(os.name == "posix", "symlink identity check requires POSIX")
     def test_symlinked_partial_cannot_write_to_another_file(self):
         self.partial.parent.mkdir(parents=True, exist_ok=True)

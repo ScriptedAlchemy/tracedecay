@@ -381,6 +381,9 @@ def main(argv=None):
             created = False
         with partial:
             lock_partial_writer(partial, partial_path)
+            # Another writer may have completed this tag since the preflight.
+            if os.path.lexists(path):
+                raise ValueError(f"completed output already exists: {path}; use a new tag")
             if created:
                 partial.write(json.dumps(header, allow_nan=False) + "\n")
                 partial.flush()
@@ -428,15 +431,15 @@ def main(argv=None):
                 partial.flush()
                 done[case["id"]] = row
                 print(cfg, index, case["id"], "%.0f ms" % ms, flush=True)
-        # An interrupted or failed write leaves no truncated result at the
-        # output path. The complete partial log stays in place, so a retry with
-        # the same identity makes no new model calls.
-        publish_final_result(path, {
-            "config": name, "dataset_sha256": dataset_sha,
-            "noul_temperature": args.noul_temperature,
-            "subset": args.subset and os.path.basename(args.subset),
-            **header, "rows": [done[case_id] for case_id in cases],
-        })
+            # Hold the partial writer lock through exclusive publication.
+            # A second evaluator must not publish the same complete log first.
+            # Failed publication retains the partial for an exact resume.
+            publish_final_result(path, {
+                "config": name, "dataset_sha256": dataset_sha,
+                "noul_temperature": args.noul_temperature,
+                "subset": args.subset and os.path.basename(args.subset),
+                **header, "rows": [done[case_id] for case_id in cases],
+            })
         os.remove(partial_path)
         print(cfg, "done", flush=True)
 
