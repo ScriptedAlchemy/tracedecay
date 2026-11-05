@@ -15,7 +15,10 @@ async fn maintenance_owner_advances_noop_pages_and_applies_a_later_orphan() {
     let mut contents = BTreeMap::new();
     for index in 0..150 {
         let bytes = format!("orphan payload {index}");
-        let path = artifacts.join(format!("text-artifact-{}.bin", sha256_hex(bytes.as_bytes())));
+        let path = artifacts.join(format!(
+            "text-artifact-{}.bin",
+            sha256_hex(bytes.as_bytes())
+        ));
         std::fs::write(&path, b"untrusted content").unwrap();
         contents.insert(path, bytes);
     }

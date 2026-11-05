@@ -16,8 +16,8 @@ use super::journal::{
     BoundedJournalSpec, clear_journal, journal_path, load_journal, persist_journal,
 };
 use super::receipt_store;
-use super::text_artifact_scan::TextArtifactPageV1;
 use super::receipt_store::{ReceiptStoreSpec, receipt_digest_file_component};
+use super::text_artifact_scan::TextArtifactPageV1;
 use super::{
     ACTIVE_POINTER_FILE, CodeGenerationRetentionErrorV1, CodeGenerationRetentionPlanV1,
     CodeGenerationStoreLockV1, CodeTextArtifactRetentionCandidateV1,
@@ -255,7 +255,12 @@ pub(super) fn plan_collectable_text_artifacts_budgeted_cancellable(
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<CodeTextArtifactRetentionInventoryV1, CodeGenerationRetentionErrorV1> {
     plan_collectable_text_artifacts_budgeted_page_cancellable(
-        store_root, active_pointer, verification, remaining_entries, is_cancelled, None,
+        store_root,
+        active_pointer,
+        verification,
+        remaining_entries,
+        is_cancelled,
+        None,
     )
 }
 
@@ -601,7 +606,9 @@ fn scope_text_artifact_marks(
     Ok(marked)
 }
 
-pub(super) fn private_directory_exists(path: &Path) -> Result<bool, CodeGenerationRetentionErrorV1> {
+pub(super) fn private_directory_exists(
+    path: &Path,
+) -> Result<bool, CodeGenerationRetentionErrorV1> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_dir() => Ok(true),
         Ok(_) => Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(

@@ -177,7 +177,10 @@ mod tests {
     fn write_orphan(root: &Path, index: usize) -> PathBuf {
         std::fs::create_dir_all(root).unwrap();
         let bytes = format!("verified artifact {index}");
-        let path = root.join(format!("text-artifact-{}.bin", sha256_hex(bytes.as_bytes())));
+        let path = root.join(format!(
+            "text-artifact-{}.bin",
+            sha256_hex(bytes.as_bytes())
+        ));
         std::fs::write(&path, bytes).unwrap();
         path
     }
@@ -204,8 +207,12 @@ mod tests {
         std::fs::write(&last, &original[&last]).unwrap();
         for _ in 0..2 {
             let stateless = prepare_next_code_generation_retention_cancellable(
-                store.path(), &BTreeSet::new(), &|| false, None,
-            ).unwrap();
+                store.path(),
+                &BTreeSet::new(),
+                &|| false,
+                None,
+            )
+            .unwrap();
             assert_eq!(stateless.collectable_text_artifact_count(), 0);
         }
 
@@ -213,15 +220,21 @@ mod tests {
         let mut empty_continuations = 0;
         let mut finished = false;
         for tick in 0..(count + 4) {
-            let plan = scan.prepare(store.path(), &BTreeSet::new(), &|| false, None).unwrap();
+            let plan = scan
+                .prepare(store.path(), &BTreeSet::new(), &|| false, None)
+                .unwrap();
             let progress = plan.text_artifact_page_progress.as_ref().unwrap();
             assert!(progress.page.entries.len() <= MAX_CODE_TEXT_ARTIFACT_INVENTORY_ENTRIES_V1);
             let more = plan.has_pending_text_artifact_inventory();
             if plan.has_collectable_work() {
                 let report = execute_code_generation_retention(
-                    store.path(), plan, CodeGenerationRetentionModeV1::Apply,
-                    UtcMicros(tick as i64), None,
-                ).unwrap();
+                    store.path(),
+                    plan,
+                    CodeGenerationRetentionModeV1::Apply,
+                    UtcMicros(tick as i64),
+                    None,
+                )
+                .unwrap();
                 scan.complete(&report.plan);
             } else {
                 empty_continuations += usize::from(more);
@@ -233,7 +246,10 @@ mod tests {
             }
         }
         assert!(finished);
-        assert!(empty_continuations > 0, "an all-preserved page is not completion");
+        assert!(
+            empty_continuations > 0,
+            "an all-preserved page is not completion"
+        );
         assert!(!last.exists());
         for path in original.keys().filter(|path| **path != last) {
             assert_eq!(std::fs::read(path).unwrap(), b"untrusted content");
@@ -244,12 +260,18 @@ mod tests {
     fn successful_batches_keep_unvisited_page_tails_and_reject_stale_acknowledgements() {
         let store = tempfile::tempdir().unwrap();
         let root = code_text_artifacts_root(store.path());
-        let paths = (0..100).map(|index| write_orphan(&root, index)).collect::<Vec<_>>();
+        let paths = (0..100)
+            .map(|index| write_orphan(&root, index))
+            .collect::<Vec<_>>();
         let mut scan = CodeGenerationRetentionScanV1::default();
         let mut stale = None;
         for tick in 0..20 {
-            let plan = scan.prepare(store.path(), &BTreeSet::new(), &|| false, None).unwrap();
-            assert!(plan.collectable_text_artifact_count() <= MAX_CODE_TEXT_ARTIFACT_RETENTION_BATCH_V1);
+            let plan = scan
+                .prepare(store.path(), &BTreeSet::new(), &|| false, None)
+                .unwrap();
+            assert!(
+                plan.collectable_text_artifact_count() <= MAX_CODE_TEXT_ARTIFACT_RETENTION_BATCH_V1
+            );
             let more = plan.has_pending_text_artifact_inventory();
             if let Some(stale) = stale.as_ref() {
                 let current = Arc::clone(scan.page.as_ref().unwrap());
@@ -258,20 +280,28 @@ mod tests {
             }
             if plan.has_collectable_work() {
                 let report = execute_code_generation_retention(
-                    store.path(), plan, CodeGenerationRetentionModeV1::Apply,
-                    UtcMicros(tick), None,
-                ).unwrap();
+                    store.path(),
+                    plan,
+                    CodeGenerationRetentionModeV1::Apply,
+                    UtcMicros(tick),
+                    None,
+                )
+                .unwrap();
                 scan.complete(&report.plan);
                 stale = Some(report.plan);
             } else {
                 scan.complete(&plan);
             }
-            if !more { break; }
+            if !more {
+                break;
+            }
         }
         assert!(paths.iter().all(|path| !path.exists()));
         assert!(scan.completed.is_none() && scan.staging.is_none());
         let newly_published = write_orphan(&root, 101);
-        let next = scan.prepare(store.path(), &BTreeSet::new(), &|| false, None).unwrap();
+        let next = scan
+            .prepare(store.path(), &BTreeSet::new(), &|| false, None)
+            .unwrap();
         assert_eq!(next.collectable_text_artifact_count(), 1);
         assert!(newly_published.exists(), "preparing never unlinks");
     }
@@ -280,20 +310,37 @@ mod tests {
     fn cancelled_enumeration_and_failed_apply_keep_the_pending_page() {
         let store = tempfile::tempdir().unwrap();
         let root = code_text_artifacts_root(store.path());
-        for index in 0..100 { write_orphan(&root, index); }
+        for index in 0..100 {
+            write_orphan(&root, index);
+        }
         let mut scan = CodeGenerationRetentionScanV1::default();
         let polls = Cell::new(0);
-        let cancelled = || { polls.set(polls.get() + 1); polls.get() > 10 };
-        assert!(matches!(scan.prepare(store.path(), &BTreeSet::new(), &cancelled, None),
-            Err(CodeGenerationRetentionErrorV1::Cancelled)));
+        let cancelled = || {
+            polls.set(polls.get() + 1);
+            polls.get() > 10
+        };
+        assert!(matches!(
+            scan.prepare(store.path(), &BTreeSet::new(), &cancelled, None),
+            Err(CodeGenerationRetentionErrorV1::Cancelled)
+        ));
         assert!(!scan.pending.is_empty());
-        let plan = scan.prepare(store.path(), &BTreeSet::new(), &|| false, None).unwrap();
+        let plan = scan
+            .prepare(store.path(), &BTreeSet::new(), &|| false, None)
+            .unwrap();
         let page = Arc::clone(&plan.text_artifact_page_progress.as_ref().unwrap().page);
         // No acknowledgement: the next preparation must revalidate the same
         // page, as after an apply conflict or cancellation.
-        let retry = scan.prepare(store.path(), &BTreeSet::new(), &|| false, None).unwrap();
-        assert!(Arc::ptr_eq(&page, &retry.text_artifact_page_progress.as_ref().unwrap().page));
-        assert_eq!(plan.collectable_text_artifact_count(), retry.collectable_text_artifact_count());
+        let retry = scan
+            .prepare(store.path(), &BTreeSet::new(), &|| false, None)
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &page,
+            &retry.text_artifact_page_progress.as_ref().unwrap().page
+        ));
+        assert_eq!(
+            plan.collectable_text_artifact_count(),
+            retry.collectable_text_artifact_count()
+        );
     }
 
     #[test]
@@ -301,13 +348,19 @@ mod tests {
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
         let mut scan = CodeGenerationRetentionScanV1::default();
-        let empty = scan.prepare(first.path(), &BTreeSet::new(), &|| false, None).unwrap();
+        let empty = scan
+            .prepare(first.path(), &BTreeSet::new(), &|| false, None)
+            .unwrap();
         assert!(!empty.has_pending_text_artifact_inventory());
         scan.complete(&empty);
         let live = write_orphan(&code_text_artifacts_root(first.path()), 1);
-        let first_plan = scan.prepare(first.path(), &BTreeSet::new(), &|| false, None).unwrap();
+        let first_plan = scan
+            .prepare(first.path(), &BTreeSet::new(), &|| false, None)
+            .unwrap();
         assert_eq!(first_plan.collectable_text_artifact_count(), 1);
-        let second_plan = scan.prepare(second.path(), &BTreeSet::new(), &|| false, None).unwrap();
+        let second_plan = scan
+            .prepare(second.path(), &BTreeSet::new(), &|| false, None)
+            .unwrap();
         scan.complete(&first_plan);
         assert_eq!(second_plan.collectable_text_artifact_count(), 0);
         assert!(live.exists());
@@ -316,7 +369,9 @@ mod tests {
         std::fs::create_dir_all(&staging).unwrap();
         let debris = staging.join(format!(".text-artifact-{}.staging", "a".repeat(64)));
         std::fs::write(&debris, b"abandoned staging").unwrap();
-        let next = scan.prepare(second.path(), &BTreeSet::new(), &|| false, None).unwrap();
+        let next = scan
+            .prepare(second.path(), &BTreeSet::new(), &|| false, None)
+            .unwrap();
         assert_eq!(next.collectable_text_artifact_count(), 1);
         assert!(debris.exists());
     }

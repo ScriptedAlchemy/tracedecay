@@ -70,10 +70,10 @@ pub async fn run_project_generation_maintenance(
                 code_index_schedulers,
                 maintenance_observations,
             )
-                .instrument(tracing::trace_span!(
-                    "daemon.maintenance.scope_reconciliation"
-                ))
-                .await
+            .instrument(tracing::trace_span!(
+                "daemon.maintenance.scope_reconciliation"
+            ))
+            .await
         });
     }
     if !cancellation.is_cancelled()

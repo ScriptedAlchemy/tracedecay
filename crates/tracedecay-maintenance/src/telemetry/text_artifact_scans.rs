@@ -28,12 +28,13 @@ impl StoreTelemetrySamplingRegistry {
             .text_artifact_scans
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let entry = scans.entry(store_root.to_path_buf()).or_insert_with(|| {
-            TextArtifactScanEntryV1 {
-                data_root: data_root.to_path_buf(),
-                scan: Arc::new(Mutex::new(CodeGenerationRetentionScanV1::default())),
-            }
-        });
+        let entry =
+            scans
+                .entry(store_root.to_path_buf())
+                .or_insert_with(|| TextArtifactScanEntryV1 {
+                    data_root: data_root.to_path_buf(),
+                    scan: Arc::new(Mutex::new(CodeGenerationRetentionScanV1::default())),
+                });
         Arc::clone(&entry.scan)
     }
 
@@ -104,10 +105,8 @@ mod tests {
 
         // The registered project is still present. Only its *scope* inventory
         // changed, so the retired scan must not keep its ReadDir handles.
-        registry.retain_text_artifact_scan_scopes(
-            project,
-            &BTreeSet::from([survivor.to_path_buf()]),
-        );
+        registry
+            .retain_text_artifact_scan_scopes(project, &BTreeSet::from([survivor.to_path_buf()]));
         assert!(removed_weak.upgrade().is_none());
         assert!(Arc::ptr_eq(
             &live,
@@ -151,14 +150,17 @@ mod tests {
         let another_root = data_root.join("code-index-v1").join("live");
         let live = registry.text_artifact_scan(&data_root, &another_root);
         registry.release_text_artifact_scans_before_scope_collection(&BTreeSet::from([
-            scope_root.clone(),
+            scope_root.clone()
         ]));
         assert!(Arc::ptr_eq(
             &live,
             &registry.text_artifact_scan(&data_root, &another_root)
         ));
         assert!(
-            !Arc::ptr_eq(&retained, &registry.text_artifact_scan(&data_root, &scope_root)),
+            !Arc::ptr_eq(
+                &retained,
+                &registry.text_artifact_scan(&data_root, &scope_root)
+            ),
             "a retired scope must not keep a reusable scan owner"
         );
         // On Windows a live ReadDir inside the source prevents this rename.
@@ -180,7 +182,10 @@ mod tests {
         let first = registry.text_artifact_scan(project, scope);
         // An unmounted registered project is absent from mounted graph
         // maintenance but must retain scan progress across short ticks.
-        assert!(Arc::ptr_eq(&first, &clone.text_artifact_scan(project, scope)));
+        assert!(Arc::ptr_eq(
+            &first,
+            &clone.text_artifact_scan(project, scope)
+        ));
         let second = registry.text_artifact_scan(project, Path::new("other-scope"));
         assert!(!Arc::ptr_eq(&first, &second));
         let retired = registry.text_artifact_scan(other, retired_scope);
@@ -189,7 +194,10 @@ mod tests {
         registry.retain_project_maintenance_state(&BTreeSet::new());
         registry.retain_text_artifact_scan_projects(&BTreeSet::from([project.to_path_buf()]));
         assert!(retired_weak.upgrade().is_none());
-        assert!(Arc::ptr_eq(&first, &clone.text_artifact_scan(project, scope)));
+        assert!(Arc::ptr_eq(
+            &first,
+            &clone.text_artifact_scan(project, scope)
+        ));
         let first_weak = Arc::downgrade(&first);
         let second_weak = Arc::downgrade(&second);
         drop(first);

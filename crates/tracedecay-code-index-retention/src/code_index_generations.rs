@@ -51,8 +51,6 @@ mod scope_quarantine;
 mod scope_roots;
 mod text_artifact_scan;
 mod text_artifacts;
-pub use text_artifact_scan::CodeGenerationRetentionScanV1;
-use text_artifact_scan::{TextArtifactPageV1, TextArtifactPageProgressV1};
 pub use graph_replay_release::{
     CodeGenerationGraphReplayReleasePageV1, CodeGenerationGraphReplayReleaseV1,
     code_generation_graph_replay_release_page, complete_code_generation_graph_replay_release,
@@ -72,6 +70,8 @@ pub use scope_roots::{
     plan_scope_root_retention, plan_scope_root_retention_with_liveness_proof, record_scope_root,
     recover_scope_root_retention, resolve_live_code_index_roots, scope_root_liveness_proof,
 };
+pub use text_artifact_scan::CodeGenerationRetentionScanV1;
+use text_artifact_scan::{TextArtifactPageProgressV1, TextArtifactPageV1};
 pub use text_artifacts::{
     attach_verified_text_artifact_under_lock, find_shared_text_artifact,
     withdraw_verified_text_artifact_under_lock,
@@ -603,9 +603,11 @@ impl CodeGenerationRetentionPlanV1 {
     /// including a page containing only preserved files.
     #[must_use]
     pub fn has_pending_text_artifact_inventory(&self) -> bool {
-        self.text_artifact_page_progress.as_ref().is_some_and(|progress| {
-            progress.page.more || progress.consumed < progress.page.entries.len()
-        })
+        self.text_artifact_page_progress
+            .as_ref()
+            .is_some_and(|progress| {
+                progress.page.more || progress.consumed < progress.page.entries.len()
+            })
     }
 
     /// What this plan proved about unreferenced generation segments.

@@ -161,7 +161,9 @@ async fn plan_collection(
     let plan_pool_root = graph_replay_pool_root.to_path_buf();
     let scan = observations.text_artifact_scan(scan_owner_root, store_root);
     let plan = native_runtime::spawn_blocking(move || {
-        let mut scan = scan.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut scan = scan
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let plan = scan.prepare(
             &plan_root,
             &plan_sources,
