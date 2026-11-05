@@ -700,7 +700,7 @@ export type AutomationRunTerminalV1 =
     summary: AutomationRunSummaryV1;
   };
 
-export type AutomationSchedulerAvailabilityV1 = "automation_disabled" | "backend_disabled" | "configured" | "delegated_host" | "paused";
+export type AutomationSchedulerAvailabilityV1 = "automation_disabled" | "backend_disabled" | "backend_unconfigured" | "configured" | "delegated_host" | "paused";
 
 export type AutomationSchedulerStatusV1 = {
   configuration_revision_id: string;
@@ -728,7 +728,7 @@ export type AutomationSkillsPayloadV1 = {
   skills: Array<ManagedSkill>;
 };
 
-export type AutomationSkipReasonV1 = "automation_disabled" | "backend_disabled" | "backend_identity_suppressed" | "combined_review_disabled" | "delegated_host_mode" | "job_commands_disabled" | "job_lock_active" | "memory_curator_disabled" | "no_new_session_activity" | "no_session_evidence" | "nothing_to_review" | "partial_coverage_no_candidates" | "scheduler_cooldown_active" | "scheduler_cron_not_due" | "scheduler_history_invalid" | "scheduler_idle_window_active" | "scheduler_interval_not_elapsed" | "scheduler_lock_active" | "scheduler_non_retryable_failure" | "scheduler_paused" | "scheduler_schedule_invalid" | "scheduler_schedule_manual" | "session_cursor_manifest_limit_exceeded" | "session_evidence_budget_exhausted" | "session_evidence_budget_suppressed" | "session_evidence_cancelled" | "session_evidence_denied" | "session_evidence_filter_unavailable" | "session_evidence_locked" | "session_evidence_partial" | "session_evidence_reset_required" | "session_evidence_retrieval_unavailable" | "session_evidence_stale" | "session_evidence_timed_out" | "session_evidence_unavailable" | "session_reflector_disabled" | "similarity_authority_unavailable" | "skill_writer_disabled" | "task_not_schedulable" | "user_job_disabled";
+export type AutomationSkipReasonV1 = "automation_disabled" | "backend_disabled" | "backend_identity_suppressed" | "backend_unconfigured" | "combined_review_disabled" | "delegated_host_mode" | "job_commands_disabled" | "job_lock_active" | "memory_curator_disabled" | "no_new_session_activity" | "no_session_evidence" | "nothing_to_review" | "partial_coverage_no_candidates" | "scheduler_cooldown_active" | "scheduler_cron_not_due" | "scheduler_history_invalid" | "scheduler_idle_window_active" | "scheduler_interval_not_elapsed" | "scheduler_lock_active" | "scheduler_non_retryable_failure" | "scheduler_paused" | "scheduler_schedule_invalid" | "scheduler_schedule_manual" | "session_cursor_manifest_limit_exceeded" | "session_evidence_budget_exhausted" | "session_evidence_budget_suppressed" | "session_evidence_cancelled" | "session_evidence_denied" | "session_evidence_filter_unavailable" | "session_evidence_locked" | "session_evidence_partial" | "session_evidence_reset_required" | "session_evidence_retrieval_unavailable" | "session_evidence_stale" | "session_evidence_timed_out" | "session_evidence_unavailable" | "session_reflector_disabled" | "similarity_authority_unavailable" | "skill_writer_disabled" | "task_not_schedulable" | "user_job_disabled";
 
 export type AutomationTaskStatusV1 = {
   due: boolean;

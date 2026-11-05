@@ -238,6 +238,13 @@ export function schedulerReading(status: AutomationSchedulerStatusV1): Scheduler
         word: 'backend disabled',
         sentence: 'no agent backend is configured, so scheduled tasks cannot run',
       };
+    case 'backend_unconfigured':
+      return {
+        tone: DISCONNECTED,
+        word: 'backend unconfigured',
+        sentence:
+          'the backend has no executable in lcm.summarizer_executables.v1, so nothing runs until one is configured',
+      };
     case 'delegated_host':
       return {
         tone: DISCONNECTED,

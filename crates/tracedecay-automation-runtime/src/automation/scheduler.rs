@@ -26,6 +26,7 @@ use super::run_ledger::{
     latest_record_by_canonical_completion, latest_record_by_canonical_completion_key,
 };
 use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
+use tracedecay_domain::configuration::LcmSummarizerExecutableV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_private_fs::FileLease;
@@ -277,6 +278,42 @@ pub fn schedule_decision(
     now_secs: i64,
 ) -> AutomationScheduleDecision {
     schedule_decision_or_history_denial(config, executable, task, records, activity, now_secs, true)
+}
+
+/// Whether the configured backend has no executable bound for it. Only a
+/// configuration revision can change this, so spawning a run to rediscover it
+/// on every cadence would only accumulate failures.
+pub fn backend_executable_unconfigured(
+    config: &AutomationSettingsV1,
+    codex: &LcmSummarizerExecutableV1,
+) -> bool {
+    config.backend == AutomationBackendV1::CodexAppServer && codex.canonical_path().is_none()
+}
+
+/// [`schedule_decision`] for the backend the configuration snapshot binds: a
+/// task that would be due reads `backend_unconfigured` instead. Nothing is
+/// recorded, so the next tick after a configuration change admits the task
+/// with no failure history or cooldown to outlast.
+pub fn configured_backend_schedule_decision(
+    config: &AdmittedAutomationConfig,
+    codex: &LcmSummarizerExecutableV1,
+    task: AgentTaskKind,
+    records: &[AutomationRunLedgerRecord],
+    activity: SessionActivity,
+    now_secs: i64,
+) -> AutomationScheduleDecision {
+    let decision = schedule_decision(
+        config,
+        codex.canonical_path(),
+        task,
+        records,
+        activity,
+        now_secs,
+    );
+    if decision.is_due() && backend_executable_unconfigured(config, codex) {
+        return AutomationScheduleDecision::skipped(AutomationSkipReasonV1::BackendUnconfigured);
+    }
+    decision
 }
 
 pub fn host_receipt_decision(
@@ -1266,6 +1303,87 @@ disconnected: config error: codex app-server closed stdout before completing";
                 "tick at {now_secs} must stay settled, not relaunch",
             );
         }
+    }
+
+    #[test]
+    fn unconfigured_backend_blocks_a_due_task_until_configuration_binds_an_executable() {
+        let config = curator_config();
+        let admitted = tracedecay_automation::config::admit_config(&config).unwrap();
+        let unconfigured = LcmSummarizerExecutableV1::Unconfigured;
+        let decide = |codex: &LcmSummarizerExecutableV1, records: &[_], now_secs| {
+            configured_backend_schedule_decision(
+                &admitted,
+                codex,
+                AgentTaskKind::MemoryCurator,
+                records,
+                SessionActivity::none(),
+                now_secs,
+            )
+        };
+
+        // The ledger stays empty across ticks: the block itself writes nothing.
+        for now_secs in [2_000, 2_060, 2_000 + 86_400] {
+            assert_eq!(
+                decide(&unconfigured, &[], now_secs).skip_reason(),
+                Some(AutomationSkipReasonV1::BackendUnconfigured),
+            );
+        }
+
+        // Binding an executable admits the very next tick.
+        let executable = tempfile::NamedTempFile::new().expect("codex placeholder");
+        let configured =
+            LcmSummarizerExecutableV1::configured(executable.path().to_path_buf()).unwrap();
+        assert!(decide(&configured, &[], 2_060).is_due());
+
+        // The failures unconfigured runs recorded before this state existed
+        // do not outlast it: once their cooldown has passed the block reads
+        // as itself, and the configured backend is admitted.
+        let historical = settled_backend_failure(
+            &config,
+            None,
+            crate::automation::backend::CODEX_EXECUTABLE_UNCONFIGURED,
+            AgentTaskFailureClass::Unavailable,
+            3,
+            2_000,
+            None,
+        );
+        let elapsed = 2_000 + DEFAULT_FAILURE_COOLDOWN_SECS as i64;
+        assert_eq!(
+            decide(&unconfigured, std::slice::from_ref(&historical), elapsed).skip_reason(),
+            Some(AutomationSkipReasonV1::BackendUnconfigured),
+        );
+        assert!(decide(&configured, std::slice::from_ref(&historical), elapsed).is_due());
+    }
+
+    #[test]
+    fn only_a_backend_that_needs_an_executable_reads_unconfigured() {
+        let unconfigured = LcmSummarizerExecutableV1::Unconfigured;
+        let disabled = AutomationSettingsV1 {
+            backend: AutomationBackendV1::Disabled,
+            ..AutomationSettingsV1::default()
+        };
+        assert!(!backend_executable_unconfigured(&disabled, &unconfigured));
+        assert!(backend_executable_unconfigured(
+            &curator_config(),
+            &unconfigured
+        ));
+        // An operator's own switch is reported as itself, not as a missing binary.
+        assert_eq!(
+            configured_backend_schedule_decision(
+                &tracedecay_automation::config::admit_config(&AutomationSettingsV1 {
+                    enabled: false,
+                    ..AutomationSettingsV1::default()
+                })
+                .unwrap(),
+                &unconfigured,
+                AgentTaskKind::MemoryCurator,
+                &[],
+                SessionActivity::none(),
+                2_000,
+            )
+            .skip_reason(),
+            Some(AutomationSkipReasonV1::AutomationDisabled),
+        );
     }
 
     #[test]

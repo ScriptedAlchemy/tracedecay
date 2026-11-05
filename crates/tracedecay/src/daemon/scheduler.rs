@@ -24,7 +24,7 @@ use crate::daemon::branch_admin::StoreAdministration;
 use crate::daemon::engine::DaemonEngine;
 use crate::daemon::project_open_admission::ProjectServerKey;
 use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
-use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::logging::{StateChangeLogGate, log_daemon_event};
 use tracedecay_runtime_core::native_runtime::{self, timeout};
 
 mod combined_effect;
@@ -80,15 +80,112 @@ fn scheduler_task_error_log_fields(
     fields
 }
 
+/// One identical task error per (project, task) reaches the log until the task
+/// is admitted again; a condition that persists across ticks is one state, not
+/// one event per tick.
+static SCHEDULER_TASK_ERROR_GATE: StateChangeLogGate<(PathBuf, &'static str), String> =
+    StateChangeLogGate::new();
+
+/// The last failed tick per project: logged when it first appears or changes,
+/// and once more when a tick clears it.
+static SCHEDULER_TICK_ERROR_GATE: StateChangeLogGate<PathBuf, String> = StateChangeLogGate::new();
+
 fn log_scheduler_task_error(
     project_path: &Path,
     task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
     error: &impl std::fmt::Display,
 ) {
+    let gate_key = (
+        project_path.to_path_buf(),
+        tracedecay_automation_runtime::automation::backend::task_key(task),
+    );
+    if !SCHEDULER_TASK_ERROR_GATE.admit(gate_key, error.to_string()) {
+        return;
+    }
     log_daemon_event(
         "scheduler_task_error",
         &scheduler_task_error_log_fields(project_path, task, error),
     );
+}
+
+fn forget_scheduler_task_error(
+    project_path: &Path,
+    task: tracedecay_automation_runtime::automation::backend::AgentTaskKind,
+) {
+    SCHEDULER_TASK_ERROR_GATE.clear(&(
+        project_path.to_path_buf(),
+        tracedecay_automation_runtime::automation::backend::task_key(task),
+    ));
+}
+
+/// What the loop does after a tick.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SchedulerTickDisposition {
+    /// The next tick can observe a different outcome on its own.
+    Cadence,
+    /// A store refuses until its reset, and that reset runs with the daemon
+    /// stopped, so repeating the tick cannot change the outcome. The loop holds
+    /// until a project open or reconcile wakes it to look again. The store's
+    /// standing state stays served through the daemon's reset-required census.
+    ParkUntilWake,
+}
+
+/// What one tick's result means for the loop and for the log.
+fn classify_scheduler_tick_result(
+    project_path: &Path,
+    result: &Result<()>,
+) -> (SchedulerTickDisposition, Option<&'static str>) {
+    let error = match result {
+        Ok(()) => {
+            let cleared = SCHEDULER_TICK_ERROR_GATE.clear(&project_path.to_path_buf());
+            return (
+                SchedulerTickDisposition::Cadence,
+                cleared.then_some("recovered"),
+            );
+        }
+        Err(error) => error,
+    };
+    let (disposition, outcome) = if error.is_store_reset_required() {
+        (
+            SchedulerTickDisposition::ParkUntilWake,
+            "blocked_reset_required",
+        )
+    } else {
+        (SchedulerTickDisposition::Cadence, "error")
+    };
+    let changed = SCHEDULER_TICK_ERROR_GATE.admit(project_path.to_path_buf(), error.to_string());
+    (disposition, changed.then_some(outcome))
+}
+
+/// Logs one tick's result as a state change and decides what follows it.
+fn observe_scheduler_tick_result(
+    project_path: &Path,
+    result: &Result<()>,
+) -> SchedulerTickDisposition {
+    let (disposition, outcome) = classify_scheduler_tick_result(project_path, result);
+    if let Some(outcome) = outcome {
+        let mut fields = vec![
+            ("project", project_path.display().to_string()),
+            ("outcome", outcome.to_string()),
+        ];
+        if let Err(error) = result {
+            fields.push(("error", error.to_string()));
+        }
+        log_daemon_event("scheduler_tick", &fields);
+    }
+    disposition
+}
+
+/// Waits out a burst of wakes, restarting the quiet period on each one, so a
+/// burst produces one follow-up rather than one per signal. `false` when the
+/// timer is unavailable.
+async fn scheduler_wake_quiet_period(project_path: &Path, wake: &tokio::sync::Notify) -> bool {
+    loop {
+        tokio::select! {
+            slept = scheduler_sleep(project_path, Duration::from_secs(5)) => return slept,
+            () = wake.notified() => {}
+        }
+    }
 }
 
 fn log_scheduler_automation_replay(
@@ -998,6 +1095,8 @@ async fn retire_matching_automation_scheduler(
         let handle = schedulers.get_mut(&owner)?;
         let reservation = store_administration.reserve_retirement_reaper(&owner)?;
         handle.stop_requested.request();
+        // A loop held on a reset refusal observes the stop only through a wake.
+        handle.wake.notify_one();
         handle.lifecycle = AutomationSchedulerLifecycle::Retiring;
         handle
             .generation
@@ -1279,15 +1378,20 @@ async fn run_automation_scheduler_loop(
         let tick_result =
             boxed_automation_scheduler_tick(&project_path, &cg, &handshake, &engine, &run_control)
                 .await;
-        if let Err(e) = tick_result {
-            log_daemon_event(
-                "scheduler_tick",
-                &[
-                    ("project", project_path.display().to_string()),
-                    ("outcome", "error".to_string()),
-                    ("error", e.to_string()),
-                ],
-            );
+        #[cfg(test)]
+        engine
+            .automation_scheduler_tick_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if observe_scheduler_tick_result(&project_path, &tick_result)
+            == SchedulerTickDisposition::ParkUntilWake
+        {
+            wake.notified().await;
+            if run_control.read_control().interrupted()
+                || !scheduler_wake_quiet_period(&project_path, &wake).await
+            {
+                break 'scheduler;
+            }
+            continue;
         }
         if let Err(error) =
             boxed_host_receipt_review(&project_path, &cg, &handshake, &engine, &run_control).await
@@ -1319,19 +1423,10 @@ async fn run_automation_scheduler_loop(
                 if run_control.read_control().interrupted() {
                     break 'scheduler;
                 }
-                // Receipts arrive at tool cadence. Wait for a short quiet
-                // period and reset it for every later receipt, producing one
-                // review for the burst rather than one review per command.
-                loop {
-                    tokio::select! {
-                        slept = scheduler_sleep(&project_path, Duration::from_secs(5)) => {
-                            if !slept {
-                                break 'scheduler;
-                            }
-                            break;
-                        }
-                        () = wake.notified() => {}
-                    }
+                // Receipts arrive at tool cadence: one review for the burst
+                // rather than one review per command.
+                if !scheduler_wake_quiet_period(&project_path, &wake).await {
+                    break 'scheduler;
                 }
                 if let Err(error) = boxed_host_receipt_review(
                     &project_path,

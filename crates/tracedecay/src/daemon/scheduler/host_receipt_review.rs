@@ -166,6 +166,14 @@ async fn run_one_host_receipt_review(
             .owner_home()
             .map(Path::to_path_buf),
     )?;
+    if tracedecay_automation_runtime::automation::scheduler::backend_executable_unconfigured(
+        config,
+        &configuration.codex_executable,
+    ) {
+        // The receipt stays pending: reviewing it needs a backend, and a later
+        // configuration change makes the next pass able to run one.
+        return Ok(HostReceiptReviewProgress::Deferred);
+    }
     let session_id = pending
         .route
         .as_ref()

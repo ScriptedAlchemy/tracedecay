@@ -16,8 +16,9 @@ use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunLedgerTaskSummary, load_run_ledger_task_summary,
 };
 use tracedecay_automation_runtime::automation::scheduler::{
-    AutomationSchedulerControl, SessionActivity, load_scheduler_control, load_session_activity,
-    save_scheduler_control, schedule_decision, scheduler_control_path,
+    AutomationSchedulerControl, SessionActivity, backend_executable_unconfigured,
+    configured_backend_schedule_decision, load_scheduler_control, load_session_activity,
+    save_scheduler_control, scheduler_control_path,
 };
 use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 use tracedecay_domain::configuration::LcmSummarizerExecutableV1;
@@ -55,6 +56,7 @@ pub(super) enum AutomationSchedulerAvailabilityV1 {
     AutomationDisabled,
     DelegatedHost,
     BackendDisabled,
+    BackendUnconfigured,
     Configured,
 }
 
@@ -131,7 +133,7 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
         None => SessionActivity::none(),
     };
     Ok(Json(AutomationSchedulerStatusV1 {
-        status: scheduler_status_label(&effective, control.paused),
+        status: scheduler_status_label(&effective, &codex, control.paused),
         paused: control.paused,
         enabled: effective.enabled,
         scheduler_tick_secs: effective.scheduler_tick_secs,
@@ -187,14 +189,7 @@ fn task_status(
             AutomationSkipReasonV1::SchedulerPaused,
         )
     } else {
-        schedule_decision(
-            config,
-            codex.canonical_path(),
-            task,
-            summary.records(),
-            activity,
-            now,
-        )
+        configured_backend_schedule_decision(config, codex, task, summary.records(), activity, now)
     };
     AutomationTaskStatusV1 {
         task: task_key(task).to_string(),
@@ -206,6 +201,7 @@ fn task_status(
 
 fn scheduler_status_label(
     config: &AutomationSettingsV1,
+    codex: &LcmSummarizerExecutableV1,
     paused: bool,
 ) -> AutomationSchedulerAvailabilityV1 {
     if paused {
@@ -223,6 +219,9 @@ fn scheduler_status_label(
         == tracedecay_automation_runtime::automation::config::AutomationBackendV1::Disabled
     {
         return AutomationSchedulerAvailabilityV1::BackendDisabled;
+    }
+    if backend_executable_unconfigured(config, codex) {
+        return AutomationSchedulerAvailabilityV1::BackendUnconfigured;
     }
     AutomationSchedulerAvailabilityV1::Configured
 }
@@ -261,6 +260,59 @@ mod tests {
             "completed_at_micros": completed_at_micros,
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn status_reports_an_unconfigured_backend_until_an_executable_is_bound() {
+        let mut config = AutomationSettingsV1 {
+            enabled: true,
+            backend: AutomationBackendV1::CodexAppServer,
+            ..AutomationSettingsV1::default()
+        };
+        config.tasks.memory_curator = AutomationTaskSettingsV1 {
+            enabled: true,
+            schedule: Some("every:1m".to_string()),
+            ..AutomationTaskSettingsV1::default()
+        };
+        let admitted = tracedecay_automation::config::admit_config(&config).unwrap();
+        let empty = AutomationRunLedgerTaskSummary::default();
+        let read = |codex: &LcmSummarizerExecutableV1| {
+            task_status(
+                &admitted,
+                codex,
+                false,
+                &empty,
+                SessionActivity::none(),
+                150,
+                AgentTaskKind::MemoryCurator,
+            )
+        };
+
+        let unconfigured = LcmSummarizerExecutableV1::Unconfigured;
+        let blocked = read(&unconfigured);
+        assert!(!blocked.due);
+        assert_eq!(
+            blocked.skip_reason,
+            Some(AutomationSkipReasonV1::BackendUnconfigured)
+        );
+        assert_eq!(
+            scheduler_status_label(&config, &unconfigured, false),
+            AutomationSchedulerAvailabilityV1::BackendUnconfigured
+        );
+        // An operator's pause stays what it is.
+        assert_eq!(
+            scheduler_status_label(&config, &unconfigured, true),
+            AutomationSchedulerAvailabilityV1::Paused
+        );
+
+        let executable = tempfile::NamedTempFile::new().unwrap();
+        let configured =
+            LcmSummarizerExecutableV1::configured(executable.path().to_path_buf()).unwrap();
+        assert!(read(&configured).due);
+        assert_eq!(
+            scheduler_status_label(&config, &configured, false),
+            AutomationSchedulerAvailabilityV1::Configured
+        );
     }
 
     #[tokio::test]

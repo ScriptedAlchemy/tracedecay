@@ -3058,6 +3058,7 @@
         "automation_disabled",
         "delegated_host",
         "backend_disabled",
+        "backend_unconfigured",
         "configured"
       ],
       "type": "string"
@@ -3189,6 +3190,7 @@
         "job_lock_active",
         "delegated_host_mode",
         "backend_disabled",
+        "backend_unconfigured",
         "backend_identity_suppressed",
         "scheduler_lock_active",
         "scheduler_paused",

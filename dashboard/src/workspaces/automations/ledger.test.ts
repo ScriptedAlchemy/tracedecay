@@ -159,6 +159,7 @@ describe('schedulerReading', () => {
     expect(schedulerReading(status('paused')).tone.kind).toBe('partial');
     expect(schedulerReading(status('automation_disabled')).tone.kind).toBe('cancelled');
     expect(schedulerReading(status('backend_disabled')).word).toBe('backend disabled');
+    expect(schedulerReading(status('backend_unconfigured')).word).toBe('backend unconfigured');
     expect(schedulerReading(status('delegated_host')).word).toBe('delegated host');
   });
 });

@@ -17,6 +17,8 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 
 #[cfg(unix)]
 mod paused_tick;
+#[cfg(unix)]
+mod reset_blocked_tick;
 
 #[cfg(unix)]
 struct AutomationExitBarrierRelease(Arc<AutomationSchedulerExitBarrier>);

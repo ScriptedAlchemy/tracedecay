@@ -125,6 +125,8 @@ pub(super) struct DaemonEngine {
     #[cfg(test)]
     pub(super) automation_config_probe_attempts: Arc<AtomicUsize>,
     #[cfg(test)]
+    pub(super) automation_scheduler_tick_attempts: Arc<AtomicUsize>,
+    #[cfg(test)]
     pub(super) automation_configured_override: Arc<AtomicBool>,
     #[cfg(test)]
     pub(super) automation_scheduler_exit_barrier: Arc<

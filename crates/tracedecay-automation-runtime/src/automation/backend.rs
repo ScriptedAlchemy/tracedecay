@@ -171,6 +171,7 @@ pub async fn run_agent_task_with_retry_report(
                 let backoff = policy.backoff_before_attempt(attempt + 1);
                 let should_retry = attempt < max_attempts
                     && classification.is_retryable()
+                    && backend.retry_can_recover()
                     && start.elapsed().saturating_add(backoff) < policy.budget;
                 report.attempts.push(AgentTaskRetryAttempt {
                     attempt,
@@ -301,6 +302,10 @@ impl AgentTaskBackend for CodexAppServerBackend {
             .as_ref()
             .map(|config| config.codex_bin.as_path())
     }
+
+    fn retry_can_recover(&self) -> bool {
+        self.config.is_some()
+    }
 }
 
 #[cfg(test)]
@@ -326,6 +331,35 @@ mod tests {
                 error,
             }
         }
+    }
+
+    #[tokio::test]
+    async fn unconfigured_executable_settles_on_its_first_attempt() {
+        let backend =
+            CodexAppServerBackend::new(None, 60, &LcmSummarizerExecutableV1::Unconfigured);
+        let request = AgentTaskRequest::new(
+            "run_unconfigured".to_string(),
+            AgentTaskKind::SkillWriter,
+            "backend prompt".to_string(),
+            None,
+            json!({}),
+        );
+        let mut report = AgentTaskRetryReport::default();
+        let started = Instant::now();
+
+        let error = run_agent_task_with_retry_report(
+            &backend,
+            &request,
+            &BackendRetryPolicy::from_timeout_secs(60),
+            &mut report,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.failure_class(), AgentTaskFailureClass::Unavailable);
+        assert_eq!(report.attempt_count(), 1);
+        assert_eq!(report.attempts()[0].backoff_millis, 0);
+        assert!(started.elapsed() < AGENT_TASK_RETRY_BACKOFFS[0]);
     }
 
     impl AgentTaskBackend for FlakyBackend {
