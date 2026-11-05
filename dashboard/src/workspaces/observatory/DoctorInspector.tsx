@@ -170,6 +170,7 @@ function convergenceStateLabel(state: SchemaConvergenceFindingV1['state']): stri
     {
       pending: 'Schema convergence pending',
       running: 'Schema convergence running',
+      retrying: 'Schema convergence retrying',
       degraded: 'Schema convergence degraded',
       completed: 'Schema convergence completed',
     } satisfies Record<SchemaConvergenceFindingV1['state'], string>

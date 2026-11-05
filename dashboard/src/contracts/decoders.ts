@@ -8954,7 +8954,7 @@ export const SchemaConvergenceFindingV1Schema: z.ZodObject<{
 
 export const SchemaConvergenceStageV1Schema: z.ZodLiteral<"registered_schema"> = z.literal("registered_schema");
 
-export const SchemaConvergenceStateV1Schema: z.ZodEnum<{ "completed": "completed"; "degraded": "degraded"; "pending": "pending"; "running": "running" }> = z.enum(["completed", "degraded", "pending", "running"]);
+export const SchemaConvergenceStateV1Schema: z.ZodType<"completed" | "pending" | "running" | "retrying" | "degraded", unknown> = z.union([z.enum(["completed", "pending", "running"]), z.literal("retrying"), z.literal("degraded")]);
 
 /** Stable, canonical catalog identity for `SchemaId`. */
 export const SchemaIdSchema: z.ZodType<string, unknown> = z.string();

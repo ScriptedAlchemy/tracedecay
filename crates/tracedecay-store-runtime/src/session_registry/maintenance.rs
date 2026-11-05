@@ -19,6 +19,7 @@ use tracedecay_domain::errors::{
 use tracedecay_global_db::RegisteredGlobalDbWeakLeaseIssuerV1;
 use tracedecay_global_db::schema_stages::RegisteredSchemaConvergence;
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::db::DatabaseOwnerWeakLeaseIssuerErrorV1;
 use tracedecay_runtime_core::native_runtime::{self, NativeTask};
 use tracedecay_runtime_core::storage::profile_root_of_sharded_data_root;
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1, StoreShardScopeV1};
@@ -36,7 +37,14 @@ pub enum RegisteredSchemaConvergenceStatus {
     Pending,
     Running,
     Complete,
-    Degraded { message: String },
+    /// The last attempt failed and the store's task tries again by itself.
+    Retrying {
+        message: String,
+    },
+    /// Convergence stopped on a failure and nothing retries it on this mount.
+    Degraded {
+        message: String,
+    },
 }
 
 type RegisteredSchemaConvergenceStatuses =
@@ -51,6 +59,26 @@ pub(super) type ResetRequiredStores = StdMutex<BTreeMap<StoreShardIdV1, StoreRes
 /// this bounds that cost on a store that keeps failing to about one attempt a
 /// minute. Nothing signals that a full disk or a held lock has cleared.
 const WORKFLOW_RECOVERY_RETRY_DELAY: Duration = Duration::from_mins(1);
+
+/// Ends a retrying worker that can make no further attempt. A worker replaced
+/// over its failed upgrade or retired has already lost the status to its
+/// successor, which this must not overwrite.
+fn stop_retrying(
+    statuses: &StdMutex<RegisteredSchemaConvergenceStatuses>,
+    shard_id: &StoreShardIdV1,
+    message: String,
+) {
+    let mut statuses = lock_registered_schema_convergence_statuses(statuses);
+    if matches!(
+        statuses.get(shard_id),
+        Some(RegisteredSchemaConvergenceStatus::Retrying { .. })
+    ) {
+        statuses.insert(
+            shard_id.clone(),
+            RegisteredSchemaConvergenceStatus::Degraded { message },
+        );
+    }
+}
 
 fn lock_registered_schema_convergence_statuses(
     statuses: &StdMutex<RegisteredSchemaConvergenceStatuses>,
@@ -81,6 +109,9 @@ pub(super) struct RegisteredSchemaConvergenceMaintenance {
     concurrency: Arc<Semaphore>,
     statuses: Arc<StdMutex<RegisteredSchemaConvergenceStatuses>>,
     metadata: Arc<StdMutex<RegisteredSchemaConvergenceMetadata>>,
+    /// The plan of each scheduled store, kept past a retirement that interrupted
+    /// it so a retirement rolled back can run it again.
+    plans: StdMutex<BTreeMap<StoreShardIdV1, RegisteredSchemaConvergence>>,
     tasks: StdMutex<BTreeMap<StoreShardIdV1, Arc<NativeTask<()>>>>,
     #[cfg(any(test, feature = "test-helpers"))]
     schedule_count: std::sync::atomic::AtomicUsize,
@@ -146,13 +177,13 @@ impl SchemaConvergenceTarget {
         }
     }
 
-    /// The next attempt's target, or `None` once the store's owner is gone.
+    /// The next attempt's target, unless the store's owner cannot issue one.
     fn reissued(
         issuer: &RegisteredGlobalDbWeakLeaseIssuerV1,
         convergence: RegisteredSchemaConvergence,
         cancellation: &CancellationToken,
-    ) -> Option<Self> {
-        issuer.issue_lease().ok().map(|database| Self::Registered {
+    ) -> std::result::Result<Self, DatabaseOwnerWeakLeaseIssuerErrorV1> {
+        issuer.issue_lease().map(|database| Self::Registered {
             database,
             convergence,
             cancellation: cancellation.clone(),
@@ -217,6 +248,7 @@ impl RegisteredSchemaConvergenceMaintenance {
             concurrency: Arc::new(Semaphore::new(1)),
             statuses: Arc::new(StdMutex::new(BTreeMap::new())),
             metadata: Arc::new(StdMutex::new(BTreeMap::new())),
+            plans: StdMutex::new(BTreeMap::new()),
             tasks: StdMutex::new(BTreeMap::new()),
             #[cfg(any(test, feature = "test-helpers"))]
             schedule_count: std::sync::atomic::AtomicUsize::new(0),
@@ -244,8 +276,8 @@ impl RegisteredSchemaConvergenceMaintenance {
     /// Every shard whose schema convergence has not completed.
     ///
     /// Convergence runs the authority-invariant audit, whose cost scales with
-    /// the store, so on a large store it can be pending, running, or degraded
-    /// for a long while after the daemon starts serving. Reporting that is what
+    /// the store, so on a large store it can be pending, running, retrying, or
+    /// degraded for a long while after the daemon starts serving. Reporting that is what
     /// makes the daemon's own answer honest: an operator sees which shard has
     /// not converged and why, instead of a healthy claim or a crash loop.
     pub(super) fn unconverged(&self) -> Vec<(StoreShardIdV1, RegisteredSchemaConvergenceStatus)> {
@@ -275,6 +307,9 @@ impl RegisteredSchemaConvergenceMaintenance {
                     }
                     RegisteredSchemaConvergenceStatus::Complete => {
                         (SchemaConvergenceStateV1::Completed, None)
+                    }
+                    RegisteredSchemaConvergenceStatus::Retrying { message } => {
+                        (SchemaConvergenceStateV1::Retrying, Some(message.clone()))
                     }
                     RegisteredSchemaConvergenceStatus::Degraded { message } => {
                         (SchemaConvergenceStateV1::Degraded, Some(message.clone()))
@@ -358,9 +393,10 @@ impl RegisteredSchemaConvergenceMaintenance {
                 // An attempt holds its store's owner open, so a store mounted
                 // again over a failed upgrade has a new owner. The old worker
                 // can only find its own owner gone; this owner needs its own.
-                Some(RegisteredSchemaConvergenceStatus::Degraded { .. })
-                    if convergence.recovers_published_workflow_shape() =>
-                {
+                Some(
+                    RegisteredSchemaConvergenceStatus::Retrying { .. }
+                    | RegisteredSchemaConvergenceStatus::Degraded { .. },
+                ) if convergence.recovers_published_workflow_shape() => {
                     if let Some(superseded) = tasks.remove(&shard_id) {
                         superseded.abort();
                     }
@@ -375,6 +411,10 @@ impl RegisteredSchemaConvergenceMaintenance {
             statuses.insert(shard_id.clone(), RegisteredSchemaConvergenceStatus::Pending);
         }
         drop(metadata);
+        self.plans
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(shard_id.clone(), convergence);
         #[cfg(any(test, feature = "test-helpers"))]
         self.schedule_count.fetch_add(1, Ordering::Relaxed);
         #[cfg(any(test, feature = "test-helpers"))]
@@ -391,15 +431,38 @@ impl RegisteredSchemaConvergenceMaintenance {
         let task_shard_id = shard_id.clone();
         // Erase the worker state machine before instrumentation retains it.
         let work: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async move {
-            let mut target = target;
+            let mut first_target = Some(target);
             #[cfg(any(test, feature = "test-helpers"))]
             let mut first_attempt_gate = gate.clone();
             loop {
+                if first_target.is_none() {
+                    #[cfg(any(test, feature = "test-helpers"))]
+                    let delay = match &gate {
+                        Some(gate) => gate.pace_retry().await,
+                        None => WORKFLOW_RECOVERY_RETRY_DELAY,
+                    };
+                    #[cfg(not(any(test, feature = "test-helpers")))]
+                    let delay = WORKFLOW_RECOVERY_RETRY_DELAY;
+                    // Retirement and shutdown abort this wait with the task.
+                    if let Err(error) = native_runtime::sleep_until(Instant::now() + delay).await {
+                        // Without a timer every wait would return at once and spin.
+                        tracing::error!(
+                            event = "registered_schema_convergence_timer_unavailable",
+                            %error
+                        );
+                        stop_retrying(
+                            &statuses,
+                            &task_shard_id,
+                            format!("the workflow upgrade retry timer is unavailable: {error}"),
+                        );
+                        return;
+                    }
+                }
                 foreground_project_opens.wait_until_settled().await;
                 let permit = match Arc::clone(&concurrency).acquire_owned().await {
                     Ok(permit) => permit,
                     Err(error) => {
-                        drop(target);
+                        drop(first_target);
                         lock_registered_schema_convergence_statuses(&statuses).insert(
                             task_shard_id,
                             RegisteredSchemaConvergenceStatus::Degraded {
@@ -410,6 +473,35 @@ impl RegisteredSchemaConvergenceMaintenance {
                         );
                         return;
                     }
+                };
+                // A retry takes its lease only once it may run, so queueing
+                // behind project opens or another store's convergence holds
+                // nothing that would block this store's retirement.
+                let target = match first_target.take() {
+                    Some(target) => target,
+                    None => match SchemaConvergenceTarget::reissued(
+                        &retry_issuer,
+                        convergence,
+                        &cancellation,
+                    ) {
+                        Ok(target) => target,
+                        // A retirement fence can still roll back to this owner,
+                        // and nothing would restart a worker that left now.
+                        Err(DatabaseOwnerWeakLeaseIssuerErrorV1::Retiring) => continue,
+                        Err(
+                            DatabaseOwnerWeakLeaseIssuerErrorV1::Terminal
+                            | DatabaseOwnerWeakLeaseIssuerErrorV1::Unavailable,
+                        ) => {
+                            stop_retrying(
+                                &statuses,
+                                &task_shard_id,
+                                "the store was closed before its workflow upgrade finished; \
+                                 mounting it again resumes the upgrade"
+                                    .to_owned(),
+                            );
+                            return;
+                        }
+                    },
                 };
                 lock_registered_schema_convergence_statuses(&statuses).insert(
                     task_shard_id.clone(),
@@ -439,7 +531,6 @@ impl RegisteredSchemaConvergenceMaintenance {
                 // large heap, which would stall this native worker's I/O.
                 let _ = native_runtime::spawn_blocking(release_process_allocator_memory_v1).await;
                 drop(permit);
-                let mut retry = false;
                 let status = match result {
                     Ok(()) => {
                         crate::session_registry::log_store_runtime_event(
@@ -463,24 +554,28 @@ impl RegisteredSchemaConvergenceMaintenance {
                                 Some(&refused),
                             );
                         }
-                        retry = target.awaits_workflow_recovery();
-                        let message = if retry {
-                            format!("{error}; retrying the workflow upgrade in the background")
-                        } else {
-                            error.to_string()
-                        };
+                        let retry = target.awaits_workflow_recovery();
+                        let message = error.to_string();
                         crate::session_registry::log_store_runtime_event(
                             "registered_schema_convergence",
                             &[
-                                ("outcome", "degraded".to_owned()),
+                                (
+                                    "outcome",
+                                    if retry { "retrying" } else { "degraded" }.to_owned(),
+                                ),
                                 ("database", target.db_path().display().to_string()),
                                 ("shard", format!("{task_shard_id:?}")),
                                 ("error", message.clone()),
                             ],
                         );
-                        RegisteredSchemaConvergenceStatus::Degraded { message }
+                        if retry {
+                            RegisteredSchemaConvergenceStatus::Retrying { message }
+                        } else {
+                            RegisteredSchemaConvergenceStatus::Degraded { message }
+                        }
                     }
                 };
+                let retry = matches!(status, RegisteredSchemaConvergenceStatus::Retrying { .. });
                 // Between attempts the task holds only the weak issuer, so a
                 // store waiting out a full disk never blocks its owner's
                 // retirement.
@@ -490,28 +585,6 @@ impl RegisteredSchemaConvergenceMaintenance {
                 if !retry {
                     return;
                 }
-                #[cfg(any(test, feature = "test-helpers"))]
-                let delay = match &gate {
-                    Some(gate) => gate.pace_retry().await,
-                    None => WORKFLOW_RECOVERY_RETRY_DELAY,
-                };
-                #[cfg(not(any(test, feature = "test-helpers")))]
-                let delay = WORKFLOW_RECOVERY_RETRY_DELAY;
-                // Retirement and shutdown abort this wait with the task.
-                if let Err(error) = native_runtime::sleep_until(Instant::now() + delay).await {
-                    // Without a timer every wait would return at once and spin.
-                    tracing::error!(
-                        event = "registered_schema_convergence_timer_unavailable",
-                        %error
-                    );
-                    return;
-                }
-                let Some(next) =
-                    SchemaConvergenceTarget::reissued(&retry_issuer, convergence, &cancellation)
-                else {
-                    return;
-                };
-                target = next;
             }
         });
         match NativeTask::spawn(tracing::Instrument::instrument(
@@ -568,9 +641,71 @@ impl RegisteredSchemaConvergenceMaintenance {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(shard_id);
-            lock_registered_schema_convergence_statuses(&self.statuses).remove(shard_id);
+            let status =
+                lock_registered_schema_convergence_statuses(&self.statuses).remove(shard_id);
+            if !matches!(
+                status,
+                Some(
+                    RegisteredSchemaConvergenceStatus::Pending
+                        | RegisteredSchemaConvergenceStatus::Running
+                        | RegisteredSchemaConvergenceStatus::Retrying { .. }
+                )
+            ) {
+                self.plans
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(shard_id);
+            }
         }
         Ok(())
+    }
+
+    /// Runs again the plan a retirement interrupted, now that the retirement has
+    /// rolled back and the same owner serves. Without this a store it cut short
+    /// would stay recovering, with nothing left to finish its upgrade.
+    pub(super) fn resume_interrupted(
+        &self,
+        shard_id: &StoreShardIdV1,
+        retry_issuer: RegisteredGlobalDbWeakLeaseIssuerV1,
+        cancellation: CancellationToken,
+        reset_required_stores: Arc<ResetRequiredStores>,
+    ) {
+        let plan = self
+            .plans
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(shard_id);
+        let Some(convergence) = plan else {
+            return;
+        };
+        match retry_issuer.issue_lease() {
+            Ok(database) => self.schedule(
+                database,
+                retry_issuer,
+                Some(convergence),
+                cancellation,
+                reset_required_stores,
+            ),
+            Err(error) => {
+                self.metadata
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .entry(shard_id.clone())
+                    .or_insert((
+                        SchemaConvergenceStageV1::RegisteredSchema,
+                        tracedecay_contracts::now_micros().0,
+                    ));
+                lock_registered_schema_convergence_statuses(&self.statuses).insert(
+                    shard_id.clone(),
+                    RegisteredSchemaConvergenceStatus::Degraded {
+                        message: format!(
+                            "schema convergence did not restart after a rolled-back retirement: \
+                             {error:?}"
+                        ),
+                    },
+                );
+            }
+        }
     }
 
     pub(super) fn begin_shutdown(&self) {
@@ -959,6 +1094,13 @@ impl DaemonSessionRuntimeRegistryV1 {
         &self,
     ) -> RegisteredSchemaConvergenceTestGate {
         self.registered_schema_convergence.install_gate()
+    }
+
+    /// Closes the session-graph open task's admission, so every store mounted
+    /// after this settles detached, the state a failed graph open leaves behind.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn detach_session_graphs_for_test(&self) {
+        self.retained_hook_tasks.begin_shutdown();
     }
 
     #[cfg(any(test, feature = "test-helpers"))]

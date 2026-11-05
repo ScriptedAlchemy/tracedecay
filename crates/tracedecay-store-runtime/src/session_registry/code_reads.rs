@@ -246,12 +246,21 @@ impl DaemonSessionRuntimeRegistryV1 {
         let lease = replacement.issue_old_lease()?;
         let path = lease.db_path().to_path_buf();
         let (issuer, binding, locator, path) = replacement.replay_descriptor(path)?;
+        let convergence_issuer = issuer.clone();
+        let shard_id = binding.shard_id.clone();
         self.rebind_project_session_sync(project_id, &lease).await?;
         drop(lease);
         self.remote_replay_transaction
             .register_target(project_id.clone(), issuer, binding, locator, path)
             .map_err(|error| session_registry_error("restore project replay target", error))?;
-        replacement.restore_old_ready()
+        replacement.restore_old_ready()?;
+        self.registered_schema_convergence.resume_interrupted(
+            &shard_id,
+            convergence_issuer,
+            self.registry.open_cancellation().clone(),
+            Arc::clone(&self.reset_required_stores),
+        );
+        Ok(())
     }
 
     /// Rolls an unattached session-store retirement back to serving: the sync

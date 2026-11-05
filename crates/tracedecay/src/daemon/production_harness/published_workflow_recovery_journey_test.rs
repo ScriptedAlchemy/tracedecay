@@ -154,6 +154,30 @@ async fn wait_for_status(
     .expect("the store's upgrade must reach the expected state")
 }
 
+/// What the status tool tells an MCP client about a store between attempts.
+async fn assert_status_reports_retrying(composition: &ProductionProjectComposition) {
+    let response = call(composition, "tracedecay_status", json!({"format": "json"})).await;
+    let wire = serde_json::to_value(&response).expect("tool response wire");
+    let status: Value = serde_json::from_str(
+        wire.pointer("/result/content/0/text")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("status has no JSON text: {wire}")),
+    )
+    .expect("status JSON");
+    let convergence = &status["schema_convergence"];
+    assert_eq!(convergence["status"], "retrying", "{convergence}");
+    let retrying = convergence["findings"]
+        .as_array()
+        .expect("convergence findings")
+        .iter()
+        .find(|finding| finding["state"] == "retrying")
+        .unwrap_or_else(|| panic!("no retrying finding: {convergence}"));
+    assert!(
+        retrying["degraded_row"].is_string(),
+        "the attempt's failure stays visible: {retrying}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn code_reads_serve_while_a_transient_lock_blocks_the_workflow_upgrade() {
     let isolation = TempDir::new().expect("production harness isolation");
@@ -211,15 +235,11 @@ async fn code_reads_serve_while_a_transient_lock_blocks_the_workflow_upgrade() {
     peer.execute_batch("BEGIN IMMEDIATE")
         .expect("hold the write lock");
     gate.release();
-    let status = wait_for_status(&registry, &shard, |status| {
-        matches!(status, RegisteredSchemaConvergenceStatus::Degraded { .. })
+    wait_for_status(&registry, &shard, |status| {
+        matches!(status, RegisteredSchemaConvergenceStatus::Retrying { .. })
     })
     .await;
-    assert!(
-        matches!(&status, RegisteredSchemaConvergenceStatus::Degraded { message }
-            if message.contains("retrying")),
-        "{status:?}"
-    );
+    assert_status_reports_retrying(&composition).await;
 
     assert_code_reads_serve(&composition, "a held lock fails the upgrade").await;
     assert_workflow_tools_recovering(&composition, "a held lock fails the upgrade").await;

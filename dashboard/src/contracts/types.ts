@@ -4997,7 +4997,7 @@ export type SchemaConvergenceFindingV1 = {
 
 export type SchemaConvergenceStageV1 = "registered_schema";
 
-export type SchemaConvergenceStateV1 = "completed" | "degraded" | "pending" | "running";
+export type SchemaConvergenceStateV1 = "completed" | "pending" | "running" | "retrying" | "degraded";
 
 export type SchemaId = string;
 

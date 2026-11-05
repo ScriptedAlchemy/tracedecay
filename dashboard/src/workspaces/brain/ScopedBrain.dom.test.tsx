@@ -178,6 +178,7 @@ describe('ScopedBrain', () => {
     const schemaConvergences = [
       'pending',
       'running',
+      'retrying',
       'degraded',
       'completed',
     ].map((state, index) => ({
@@ -214,6 +215,7 @@ describe('ScopedBrain', () => {
 
     expect(await screen.findByText('Schema convergence pending')).toBeTruthy();
     expect(screen.getByText('Schema convergence running')).toBeTruthy();
+    expect(screen.getByText('Schema convergence retrying')).toBeTruthy();
     expect(screen.getByText('Schema convergence degraded')).toBeTruthy();
     expect(screen.getByText('Schema convergence completed')).toBeTruthy();
   });

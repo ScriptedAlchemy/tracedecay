@@ -24919,13 +24919,26 @@
       "type": "string"
     },
     "SchemaConvergenceStateV1": {
-      "enum": [
-        "pending",
-        "running",
-        "degraded",
-        "completed"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "pending",
+            "running",
+            "completed"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "retrying",
+          "description": "The last attempt failed and the store's convergence task tries again by\nitself. `degraded_row` carries that attempt's failure.",
+          "type": "string"
+        },
+        {
+          "const": "degraded",
+          "description": "Convergence stopped on a failure and nothing retries it on this mount.",
+          "type": "string"
+        }
+      ]
     },
     "SchemaId": {
       "description": "Stable, canonical catalog identity for `SchemaId`.",

@@ -467,6 +467,12 @@ fn render_schema_convergences(
                 Some(row) => dc.fail(&format!("{message}: {row}")),
                 None => dc.fail(&message),
             },
+            // The daemon clears this by itself once the obstruction passes, so
+            // it warns with the failure rather than failing the report.
+            SchemaConvergenceStateV1::Retrying => match &finding.degraded_row {
+                Some(row) => dc.warn(&format!("{message}: {row}")),
+                None => dc.warn(&message),
+            },
             SchemaConvergenceStateV1::Pending | SchemaConvergenceStateV1::Running => {
                 dc.warn(&message);
             }
