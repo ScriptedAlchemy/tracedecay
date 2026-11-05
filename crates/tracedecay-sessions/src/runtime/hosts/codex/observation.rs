@@ -701,52 +701,6 @@ fn codex_admission_gate(scope: &ObservationScopeV1, path: &Path) -> CodexAdmissi
         .gate_for((scope.clone(), path.to_path_buf()))
 }
 
-#[cfg(test)]
-mod admission_gate_tests {
-    use super::{CodexAdmissionGates, MIN_CODEX_ADMISSION_GATE_SWEEP_INTERVAL};
-    use std::path::PathBuf;
-    use std::sync::Arc;
-    use tracedecay_domain::ObservationScopeV1;
-
-    #[test]
-    fn live_codex_admission_gates_survive_amortized_reclamation() {
-        let scope = ObservationScopeV1::Profile;
-        let mut registry = CodexAdmissionGates::default();
-        let key = (scope.clone(), PathBuf::from("rollout-active.jsonl"));
-        let first = registry.gate_for(key.clone());
-        let concurrent = registry.gate_for(key.clone());
-        assert!(Arc::ptr_eq(&first, &concurrent));
-        let independent = registry.gate_for((scope.clone(), PathBuf::from("other.jsonl")));
-        assert!(!Arc::ptr_eq(&first, &independent));
-        drop(independent);
-
-        // Many completed rollouts must not retain a gate per historical file.
-        // The active gate must survive sweeps so two callers still serialize.
-        for index in 0..(MIN_CODEX_ADMISSION_GATE_SWEEP_INTERVAL * 3) {
-            let disposable = registry.gate_for((
-                scope.clone(),
-                PathBuf::from(format!("rollout-{index}.jsonl")),
-            ));
-            drop(disposable);
-        }
-        assert!(
-            registry.by_source.len() <= MIN_CODEX_ADMISSION_GATE_SWEEP_INTERVAL + 2,
-            "stale rollout gates must be periodically reclaimed"
-        );
-        assert!(Arc::ptr_eq(&first, &registry.gate_for(key.clone())));
-
-        // Once the final holder releases the gate, the next same-source
-        // admission must receive a new one rather than resurrecting a stale lock.
-        let retired = Arc::downgrade(&first);
-        drop(first);
-        drop(concurrent);
-        assert!(retired.upgrade().is_none());
-        let replacement = registry.gate_for(key);
-        assert!(retired.upgrade().is_none());
-        drop(replacement);
-    }
-}
-
 async fn try_admit_codex_jsonl_observations(
     path: &Path,
     admission_scope: CodexObservationAdmission<'_>,
@@ -914,4 +868,50 @@ async fn admit_codex_jsonl_page(
         io: progress.io,
         prior_context_bytes,
     })
+}
+
+#[cfg(test)]
+mod admission_gate_tests {
+    use super::{CodexAdmissionGates, MIN_CODEX_ADMISSION_GATE_SWEEP_INTERVAL};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tracedecay_domain::ObservationScopeV1;
+
+    #[test]
+    fn live_codex_admission_gates_survive_amortized_reclamation() {
+        let scope = ObservationScopeV1::Profile;
+        let mut registry = CodexAdmissionGates::default();
+        let key = (scope.clone(), PathBuf::from("rollout-active.jsonl"));
+        let first = registry.gate_for(key.clone());
+        let concurrent = registry.gate_for(key.clone());
+        assert!(Arc::ptr_eq(&first, &concurrent));
+        let independent = registry.gate_for((scope.clone(), PathBuf::from("other.jsonl")));
+        assert!(!Arc::ptr_eq(&first, &independent));
+        drop(independent);
+
+        // Many completed rollouts must not retain a gate per historical file.
+        // The active gate must survive sweeps so two callers still serialize.
+        for index in 0..(MIN_CODEX_ADMISSION_GATE_SWEEP_INTERVAL * 3) {
+            let disposable = registry.gate_for((
+                scope.clone(),
+                PathBuf::from(format!("rollout-{index}.jsonl")),
+            ));
+            drop(disposable);
+        }
+        assert!(
+            registry.by_source.len() <= MIN_CODEX_ADMISSION_GATE_SWEEP_INTERVAL + 2,
+            "stale rollout gates must be periodically reclaimed"
+        );
+        assert!(Arc::ptr_eq(&first, &registry.gate_for(key.clone())));
+
+        // Once the final holder releases the gate, the next same-source
+        // admission must receive a new one rather than resurrecting a stale lock.
+        let retired = Arc::downgrade(&first);
+        drop(first);
+        drop(concurrent);
+        assert!(retired.upgrade().is_none());
+        let replacement = registry.gate_for(key);
+        assert!(retired.upgrade().is_none());
+        drop(replacement);
+    }
 }
