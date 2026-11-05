@@ -1157,6 +1157,7 @@ pub async fn build_project_storage_report_from_daemon(
             &project_id,
             &canonical_root,
             protection,
+            cfg!(not(unix)), // The daemon may hold POSIX locks on this database.
             &walk_control,
         )
     })
@@ -1198,6 +1199,7 @@ pub fn build_project_storage_report(
         project_id,
         canonical_root,
         vector_readable_sources,
+        true, // Only the daemon-independent offline path may sample the header.
         &StorageReportWalkControl::default(),
     )
 }
@@ -1207,6 +1209,7 @@ fn build_project_storage_report_with_control(
     project_id: &str,
     canonical_root: &Path,
     vector_readable_sources: RetentionProtection,
+    sample_free_page_header: bool,
     walk_control: &StorageReportWalkControl,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
     tracedecay_runtime_core::storage::validate_project_id(project_id).map_err(|message| {
@@ -1226,7 +1229,7 @@ fn build_project_storage_report_with_control(
         &mut stores,
         &mut code_generation_retention,
         &mut code_generation_retention_availability,
-        true, // This direct report is used by the separate offline CLI.
+        sample_free_page_header,
         &mut remaining_entries,
         walk_control,
     )?;
@@ -1986,6 +1989,24 @@ mod tests {
         assert!(page.stores[0].total_bytes > 0);
         assert_eq!(page.stores[0].free_bytes, None);
         assert_eq!(page.stores[0].free_page_ratio, None);
+
+        // The project-scoped admin route shares this builder with the offline
+        // CLI. It must use the daemon policy, not open and close a second FD.
+        let project_report = build_project_storage_report_from_daemon(
+            profile_root,
+            &project.project_id,
+            &checkout,
+            &db,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(project_report.stores.len(), 1);
+        assert!(project_report.stores[0].total_bytes > 0);
+        assert_eq!(project_report.stores[0].free_bytes, None);
+        assert_eq!(project_report.stores[0].free_page_ratio, None);
 
         let probe = db_path.clone();
         native_runtime::spawn_blocking(move || assert_external_writer_blocked(&probe))
