@@ -88,9 +88,25 @@ class RunHttpTest(unittest.TestCase):
         self.assertEqual([row["id"] for row in result["rows"]], ["first", "second"])
         self.assertEqual(result["experiment"]["server_config"], self.server)
         self.assertEqual(result["experiment_sha256"], run_http.digest(result["experiment"]))
+        self.assertEqual(result["experiment"]["case_annotations_sha256"], run_http.digest([
+            [case["id"], case["labels"], case["context_needed"]]
+            for case in self.dataset
+        ]))
         self.assertEqual(result["rows"][0]["server_ms"], 0)
         self.assertFalse(self.partial.exists())
 
+
+    def test_completed_rows_cannot_be_relabelled_for_scoring(self):
+        with patch.object(run_http, "post", side_effect=self.response):
+            self.run_main()
+        original = json.loads(self.output.read_text())
+        self.assertEqual(score.score_config(original)["latency"]["total_cases"], 2)
+        for field, value in (("labels", []), ("context_needed", False)):
+            with self.subTest(field=field):
+                changed = copy.deepcopy(original)
+                changed["rows"][0][field] = value
+                with self.assertRaisesRegex(ValueError, "case annotations disagree"):
+                    score.score_config(changed)
 
     def test_concurrent_same_tag_writers_cannot_corrupt_resumable_evidence(self):
         entered, release = Event(), Event()

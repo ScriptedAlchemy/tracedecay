@@ -90,6 +90,11 @@ def validate_http_provenance(result, rows):
     case_ids = [row["id"] for row in rows]
     if experiment.get("case_ids") != case_ids:
         raise ValueError("HTTP experiment case IDs or ordering disagree with result rows")
+    annotations = [
+        [row["id"], row["labels"], row["context_needed"]] for row in rows
+    ]
+    if experiment.get("case_annotations_sha256") != evidence_digest(annotations):
+        raise ValueError("HTTP case annotations disagree with experiment identity")
     requests = []
     for row in rows:
         request_sha = row.get("request_sha256")

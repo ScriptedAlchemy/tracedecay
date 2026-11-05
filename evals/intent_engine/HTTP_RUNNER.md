@@ -34,8 +34,9 @@ The optional `--noul-temperature` is a separate client-side calibration step;
 it must be finite and strictly positive.
 
 The existing `.partial` log starts with the experiment identity. This binds the
-whole dataset hash, selected case IDs and order, the exact rendered HTTP request
-bytes for each case, endpoint hash, requested model, client calibration, and the
+whole dataset hash, selected case IDs and order, the original labels and
+context-needed annotations, the exact rendered HTTP request bytes for each
+case, endpoint hash, requested model, client calibration, and the
 serving declaration. A completed result retains the same identity and each row's
 request fingerprint. The endpoint itself is not copied into the identity.
 
@@ -84,8 +85,11 @@ Version-1 completed HTTP results are also refused by the scorer. Historical
 reports are not rewritten or retrospectively qualified.
 
 The scorer also rejects completed HTTP results whose experiment-identity digest,
-per-case request fingerprints, recorded order, dataset digest, or configuration
-disagree with the output. This detects accidental edits and mismatched runs;
+per-case request fingerprints, recorded order, case labels/context annotations,
+dataset digest, or configuration disagree with the output. Earlier version-2 HTTP
+results without the case-annotation digest must be rerun with a new tag; they
+cannot be independently scored against their original annotations. These checks
+detect accidental edits and mismatched runs;
 these operator-written hashes do not authenticate the remote model or verify
 independent ground-truth labels.
 

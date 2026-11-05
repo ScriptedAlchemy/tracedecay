@@ -390,6 +390,12 @@ def main(argv=None):
             "config": cfg,
             "dataset_sha256": dataset_sha,
             "case_ids": list(cases),
+            # Preserve the original annotation evidence for later scoring.
+            # A result's labels or context status must not silently drift.
+            "case_annotations_sha256": digest([
+                [case["id"], case["labels"], case["context_needed"]]
+                for case in dataset
+            ]),
             "requests_sha256": digest([[key, value[1]] for key, value in requests.items()]),
             "endpoint_sha256": hashlib.sha256(args.url.encode("utf-8")).hexdigest(),
             "requested_model": args.send_model,

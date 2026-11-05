@@ -42,6 +42,9 @@ def signed_http_result(config, rows, temperature=None):
     experiment = {
         "version": 2, "config": config, "dataset_sha256": "a" * 64,
         "case_ids": [item["id"] for item in rows],
+        "case_annotations_sha256": fingerprint([
+            [item["id"], item["labels"], item["context_needed"]] for item in rows
+        ]),
         "requests_sha256": fingerprint(
             [[item["id"], item["request_sha256"]] for item in rows]
         ),
@@ -409,6 +412,9 @@ class ScoringTests(unittest.TestCase):
             ("missing_digest", "identity digest"),
             ("request", "request fingerprints"),
             ("case_order", "case IDs or ordering"),
+            ("labels", "case annotations disagree"),
+            ("context", "case annotations disagree"),
+            ("missing_case_digest", "case annotations disagree"),
             ("dataset", "dataset digest"),
             ("config", "configuration disagrees"),
         ]:
@@ -421,6 +427,13 @@ class ScoringTests(unittest.TestCase):
                 changed["rows"][0]["request_sha256"] = "c" * 64
             elif mutation == "case_order":
                 changed["rows"].reverse()
+            elif mutation == "labels":
+                changed["rows"][0]["labels"] = [score.CATS[0]]
+            elif mutation == "context":
+                changed["rows"][0]["context_needed"] = True
+            elif mutation == "missing_case_digest":
+                del changed["experiment"]["case_annotations_sha256"]
+                changed["experiment_sha256"] = score.evidence_digest(changed["experiment"])
             elif mutation == "dataset":
                 changed["dataset_sha256"] = "f" * 64
             elif mutation == "config":
@@ -435,7 +448,7 @@ class ScoringTests(unittest.TestCase):
             self.stage_scripts(root)
             (root / "results").mkdir()
             changed = json.loads(json.dumps(original))
-            changed["rows"][1]["request_sha256"] = "c" * 64
+            changed["rows"][1]["labels"] = [score.CATS[0]]
             (root / "results" / "bad.json").write_text(
                 json.dumps(changed), encoding="utf-8"
             )
@@ -443,7 +456,7 @@ class ScoringTests(unittest.TestCase):
             summary.write_bytes(b"last verified summary\n")
             attempt = self.run_script(root, "score.py")
             self.assertNotEqual(attempt.returncode, 0)
-            self.assertIn("request fingerprints", attempt.stderr)
+            self.assertIn("case annotations disagree", attempt.stderr)
             self.assertEqual(summary.read_bytes(), b"last verified summary\n")
 
     def test_invalid_probability_cannot_replace_previous_cli_summary(self):
