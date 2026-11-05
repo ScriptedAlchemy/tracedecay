@@ -326,6 +326,39 @@ def resume_rows(partial, header, cases, requests, questions, temperature):
     return done
 
 
+def validate_dataset(dataset, questions):
+    """Refuse unscorable or malformed input before spending inference tokens."""
+    if not isinstance(dataset, list) or not dataset:
+        raise ValueError("dataset must be a nonempty list of cases")
+    ids = []
+    seen = set()
+    for case in dataset:
+        if not isinstance(case, dict):
+            raise ValueError("dataset must contain case objects")
+        case_id = case.get("id")
+        if not isinstance(case_id, str) or not case_id or case_id in seen:
+            raise ValueError("dataset must have unique nonempty string case IDs")
+        seen.add(case_id)
+        ids.append(case_id)
+        labels = case.get("labels")
+        if (not isinstance(labels, list)
+                or any(not isinstance(label, str) or label not in questions for label in labels)
+                or len(set(labels)) != len(labels)):
+            raise ValueError(f"dataset case {case_id} has invalid labels")
+        if not isinstance(case.get("context_needed"), bool):
+            raise ValueError(f"dataset case {case_id} has invalid context_needed")
+        if not isinstance(case.get("current_prompt"), str):
+            raise ValueError(f"dataset case {case_id} has invalid current_prompt")
+        turns = case.get("turns")
+        if (not isinstance(turns, list)
+                or any(not isinstance(turn, dict)
+                       or turn.get("role") not in ("user", "assistant", "tool")
+                       or not isinstance(turn.get("text"), str)
+                       for turn in turns)):
+            raise ValueError(f"dataset case {case_id} has invalid turns")
+    return ids
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--url", required=True)
@@ -354,9 +387,8 @@ def main(argv=None):
         dataset_bytes = source.read()
     dataset = json.loads(dataset_bytes)
     dataset_sha = hashlib.sha256(dataset_bytes).hexdigest()
-    case_ids = [case["id"] for case in dataset]
-    if any(not isinstance(case_id, str) for case_id in case_ids) or len(set(case_ids)) != len(case_ids):
-        raise ValueError("dataset must have unique string case IDs")
+    questions = noul_questions()
+    case_ids = validate_dataset(dataset, questions)
     if args.subset:
         with open(args.subset, encoding="utf-8") as source:
             ids = json.load(source)["ids"]
@@ -368,7 +400,6 @@ def main(argv=None):
         dataset = [case for case in dataset if case["id"] in keep]
     if not dataset:
         raise ValueError("the experiment must contain at least one case")
-    questions = noul_questions()
     cases = {case["id"]: case for case in dataset}
     os.makedirs(os.path.join(HERE, "results"), exist_ok=True)
     for cfg in args.configs:

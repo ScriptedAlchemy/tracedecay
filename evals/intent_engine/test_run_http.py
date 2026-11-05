@@ -78,6 +78,39 @@ class RunHttpTest(unittest.TestCase):
         self.assertEqual(self.partial.read_bytes(), before)
         self.assertFalse(self.output.exists())
 
+    def test_invalid_dataset_is_refused_before_network_or_partial_output(self):
+        malformed = [
+            ("not_a_list", {"cases": self.dataset}),
+            ("not_an_object", [None]),
+            ("duplicate_id", [self.dataset[0], self.dataset[0]]),
+        ]
+        for field, value in (
+            ("labels", ["not_a_question"]),
+            ("labels", ["impact", "impact"]),
+            ("labels", None),
+            ("context_needed", 1),
+            ("current_prompt", None),
+            ("turns", [{"role": "system", "text": "not a dataset turn"}]),
+            ("turns", [{"role": "tool", "text": 8}]),
+        ):
+            changed = copy.deepcopy(self.dataset)
+            changed[0][field] = value
+            malformed.append((field + "_" + repr(value), changed))
+
+        try:
+            for reason, dataset in malformed:
+                with self.subTest(reason=reason):
+                    self.write("dataset.json", dataset)
+                    with patch.object(run_http, "post") as post:
+                        with self.assertRaisesRegex(ValueError, "dataset"):
+                            self.run_main()
+                        post.assert_not_called()
+                    self.assertFalse(self.output.exists())
+                    self.assertFalse(self.partial.exists())
+                    self.assertFalse((self.root / "results").exists())
+        finally:
+            self.write("dataset.json", self.dataset)
+
     def test_exact_resume_only_requests_the_missing_case(self):
         self.interrupt()
         with patch.object(run_http, "post", side_effect=self.response) as post:
