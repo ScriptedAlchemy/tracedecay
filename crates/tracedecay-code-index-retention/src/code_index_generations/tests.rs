@@ -1609,6 +1609,113 @@ fn generation_receipt_is_pruned_once_the_release_queue_no_longer_names_it() {
     assert_eq!(receipt_count(store.path(), RECEIPTS_DIRECTORY), 0);
 }
 
+/// Invalid unreferenced bytes and unknown names have no deletion proof,
+/// but cannot starve an unrelated verified retirement batch. Referenced
+/// corruption must still fail closed (covered separately).
+#[test]
+fn unverified_unreferenced_artifacts_do_not_block_other_retention() {
+    let (store, generations) = fixture_store(5);
+    let active = generations.last().expect("active generation");
+    let referenced = attach_fixture_text_artifact(&store, active, b"durably referenced");
+    let referenced_path =
+        code_text_artifact_path(store.path(), &referenced).expect("referenced artifact path");
+
+    let damaged = text_artifact_for_bytes(&active.id, b"expected orphan identity");
+    let damaged_path = write_text_artifact(&store, &damaged, b"different orphan bytes");
+    let valid = text_artifact_for_bytes(&active.id, b"valid unreferenced artifact");
+    let valid_path = write_text_artifact(&store, &valid, b"valid unreferenced artifact");
+    let unknown_path = code_text_artifacts_root(store.path()).join("unexpected-artifact");
+    std::fs::write(&unknown_path, b"not an artifact").expect("unknown regular file");
+
+    let plan = prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("invalid unreferenced artifacts must not starve valid work");
+    assert_eq!(plan.collectable_generations.len(), 4);
+    assert!(
+        plan.collectable_text_artifacts
+            .iter()
+            .any(|entry| entry.artifact_file == valid.artifact_file)
+    );
+    assert!(
+        plan.collectable_text_artifacts
+            .iter()
+            .all(|entry| entry.artifact_file != damaged.artifact_file)
+    );
+
+    let report = execute_code_generation_retention(
+        store.path(),
+        plan,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(51),
+        None,
+    )
+    .expect("collect verified artifacts and superseded generations");
+    assert_eq!(report.deleted_generations.len(), 4);
+    assert!(!valid_path.exists(), "verified orphan is reclaimed");
+    assert!(damaged_path.is_file(), "damaged orphan is preserved");
+    assert!(unknown_path.is_file(), "unrecognized data is preserved");
+    assert!(
+        referenced_path.is_file(),
+        "referenced artifact remains live"
+    );
+}
+
+/// Permanently untrusted shared files must not consume the whole bounded scan
+/// before independent staging debris can be observed and safely reclaimed.
+#[test]
+fn unsafe_shared_artifacts_do_not_starve_staging_debris() {
+    let (store, _) = fixture_store(1);
+    let shared_root = code_text_artifacts_root(store.path());
+    std::fs::create_dir_all(&shared_root).expect("create shared artifact root");
+    for index in 0..MAX_CODE_TEXT_ARTIFACT_INVENTORY_ENTRIES_V1 {
+        std::fs::write(shared_root.join(format!("unknown-{index:03}")), b"preserve")
+            .expect("write unknown artifact");
+    }
+    let staging_root = code_text_artifact_staging_root(store.path());
+    std::fs::create_dir_all(&staging_root).expect("create staging root");
+    let staging_name = format!(".text-artifact-{}.staging", "e".repeat(64));
+    let staging_path = staging_root.join(&staging_name);
+    std::fs::write(&staging_path, b"abandoned").expect("write abandoned staging file");
+
+    let plan = prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("preserved shared entries must not block staging cleanup");
+    assert!(
+        plan.collectable_text_artifacts
+            .iter()
+            .any(|candidate| candidate.artifact_file == staging_name),
+        "staging debris must retain bounded collection opportunity"
+    );
+    let report = execute_code_generation_retention(
+        store.path(),
+        plan,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(52),
+        None,
+    )
+    .expect("reclaim independently verified staging debris");
+    assert_eq!(report.deleted_text_artifacts.len(), 1);
+    assert!(
+        !staging_path.exists(),
+        "abandoned staging file is reclaimed"
+    );
+    assert_eq!(
+        std::fs::read_dir(&shared_root)
+            .expect("read preserved artifacts")
+            .count(),
+        MAX_CODE_TEXT_ARTIFACT_INVENTORY_ENTRIES_V1,
+        "all unknown shared files are preserved"
+    );
+}
+
 /// A text-artifact receipt is read only by recovery of its own journal, so a
 /// committed sweep's receipt is removed by the next pass.
 #[test]
@@ -2891,10 +2998,25 @@ fn metadata_only_artifact_census_does_not_hash_unlink_evidence() {
     )
     .expect("metadata census uses bounded filename/type/size identity");
     assert_eq!(metadata_only.collectable_text_artifacts.len(), 1);
-    let full = plan_code_generation_retention(store.path(), &BTreeSet::new());
+    let full = plan_code_generation_retention(store.path(), &BTreeSet::new())
+        .expect("a damaged orphan must not veto unrelated verified retention");
     assert!(
-        matches!(full, Err(CodeGenerationRetentionErrorV1::UnsafeState(_))),
-        "only full verification may trust the content address for unlinking"
+        full.collectable_text_artifacts.is_empty(),
+        "full verification must exclude a tampered content address from unlinking"
+    );
+    let report = execute_code_generation_retention(
+        store.path(),
+        full,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(14),
+        None,
+    )
+    .expect("apply verified retention without deleting the damaged orphan");
+    assert!(report.deleted_text_artifacts.is_empty());
+    assert_eq!(
+        std::fs::read(&orphan_path).expect("damaged orphan remains"),
+        b"evil",
+        "preservation must leave the original damaged bytes untouched"
     );
 }
 
