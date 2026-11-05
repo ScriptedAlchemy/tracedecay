@@ -614,17 +614,6 @@ pub async fn compute_status(
                 {
                     Ok(ingest) => {
                         status.session_ingest = Some(serde_json::to_value(&ingest)?);
-                        // `session_ingest` stays cursor-scoped so it keeps matching the
-                        // doctor-owned signal. Historical catch-up is measured across
-                        // providers and remains explicitly partial while the retained
-                        // daemon authority drains its bounded backlog.
-                        status.session_history_catch_up = Some(
-                            tracing::Instrument::instrument(
-                                historical_session_catch_up(db, history_progress.as_ref()),
-                                tracing::trace_span!("mcp.info.status.session_history"),
-                            )
-                            .await,
-                        );
                     }
                     Err(error) => {
                         status.session_ingest = Some(json!({
@@ -634,6 +623,19 @@ pub async fn compute_status(
                         }));
                     }
                 }
+                // A corrupt cursor health read must not suppress the independent
+                // historical worker's blocker or its across-provider coverage.
+                status.session_history_catch_up = Some(
+                    tracing::Instrument::instrument(
+                        historical_session_catch_up(
+                            db,
+                            history_progress.as_ref(),
+                            status.session_projection.reason.as_deref(),
+                        ),
+                        tracing::trace_span!("mcp.info.status.session_history"),
+                    )
+                    .await,
+                );
             }
         }
     }
@@ -809,6 +811,7 @@ fn session_git_evidence_state(health: CorrelationIndexHealth) -> StatusSessionGi
 async fn historical_session_catch_up(
     db: &RegisteredGlobalDb,
     progress: Option<&SessionHistoryCatchUpProgress>,
+    projection_reason: Option<&str>,
 ) -> Value {
     let mut state = match db.session_ingest_health_for_provider(None).await {
         Ok(ingest) => historical_session_catch_up_state(&ingest),
@@ -820,8 +823,32 @@ async fn historical_session_catch_up(
             "message": error,
         }),
     };
+    apply_historical_worker_blocker(&mut state, projection_reason);
     state["progress"] = historical_session_catch_up_progress(progress);
     state
+}
+
+/// A complete database sweep cannot establish current history when the
+/// independently mounted refresh worker has a terminal provider blocker.
+/// Preserve an unavailable measurement instead of disguising its failure.
+fn apply_historical_worker_blocker(state: &mut Value, projection_reason: Option<&str>) {
+    let Some(reason) = projection_reason.filter(|reason| {
+        reason
+            .strip_prefix("historical_blocked:")
+            .is_some_and(|code| !code.is_empty())
+    }) else {
+        return;
+    };
+    if state["status"] == "unavailable" {
+        state["worker_blocker"] = json!(reason);
+    } else {
+        state["status"] = json!("blocked");
+        state["coverage"] = json!("partial");
+        state["reason"] = json!(reason);
+        state["message"] = json!(
+            "Historical session recall catch-up is blocked by the historical refresh worker."
+        );
+    }
 }
 
 fn historical_session_catch_up_progress(progress: Option<&SessionHistoryCatchUpProgress>) -> Value {
@@ -1155,11 +1182,11 @@ mod tests {
 
     use super::{
         CodeIndexReadinessWaitReadV1, CorrelationIndexHealth, FreshnessLabelV1,
-        SessionHistoryCatchUpProgress, code_index_freshness_projection,
-        code_index_freshness_status, git_staleness, graph_statistics_value,
-        historical_session_catch_up_progress, historical_session_catch_up_state,
-        readiness_wait_outcome, render_status_md, schema_convergence_status,
-        session_git_evidence_state,
+        SessionHistoryCatchUpProgress, apply_historical_worker_blocker,
+        code_index_freshness_projection, code_index_freshness_status, git_staleness,
+        graph_statistics_value, historical_session_catch_up_progress,
+        historical_session_catch_up_state, readiness_wait_outcome, render_status_md,
+        schema_convergence_status, session_git_evidence_state,
     };
     use tracedecay_contracts::code_index_freshness::{
         CodeGraphServingReadinessV1, CodeIndexFreshnessCoverageV1, CodeIndexFreshnessPayloadV1,
@@ -2165,6 +2192,79 @@ mod tests {
         assert_eq!(state["coverage"], "partial");
         assert_eq!(state["authority"], "daemon");
         assert!(!state.to_string().contains("sessions ingest"));
+    }
+
+    #[test]
+    fn historical_worker_blocker_prevents_false_current_catch_up() {
+        let mut state = historical_session_catch_up_state(&SessionIngestHealth {
+            observed_providers: vec!["cursor".into()],
+            ..SessionIngestHealth::default()
+        });
+        assert_eq!(state["status"], "current");
+
+        apply_historical_worker_blocker(
+            &mut state,
+            Some("historical_blocked:projection_store_corrupt"),
+        );
+        assert_eq!(state["status"], "blocked");
+        assert_eq!(state["coverage"], "partial");
+        assert_eq!(
+            state["reason"],
+            "historical_blocked:projection_store_corrupt"
+        );
+        assert_eq!(state["authority"], "daemon");
+        let blocked_message =
+            "Historical session recall catch-up is blocked by the historical refresh worker.";
+        assert_eq!(state["message"], blocked_message);
+
+        let mut warming = json!({
+            "status": "warming",
+            "coverage": "partial",
+            "reason": "historical_transcript_backlog",
+            "message": "Background historical catch-up still running.",
+        });
+        apply_historical_worker_blocker(
+            &mut warming,
+            Some("historical_blocked:projection_store_corrupt"),
+        );
+        assert_eq!(warming["status"], "blocked");
+        assert_eq!(warming["coverage"], "partial");
+        assert_eq!(
+            warming["reason"],
+            "historical_blocked:projection_store_corrupt"
+        );
+        assert_eq!(warming["message"], blocked_message);
+
+        let mut no_blocker = historical_session_catch_up_state(&SessionIngestHealth {
+            observed_providers: vec!["cursor".into()],
+            ..SessionIngestHealth::default()
+        });
+        apply_historical_worker_blocker(&mut no_blocker, None);
+        assert_eq!(no_blocker["status"], "current");
+        assert_eq!(no_blocker["coverage"], "complete");
+    }
+
+    #[test]
+    fn historical_worker_blocker_keeps_unavailable_measurements_truthful() {
+        let mut state = json!({
+            "status": "unavailable",
+            "coverage": "unknown",
+            "authority": "daemon",
+            "reason": "historical_backlog_measurement_failed",
+            "message": "database unavailable",
+        });
+        apply_historical_worker_blocker(
+            &mut state,
+            Some("historical_blocked:projection_store_corrupt"),
+        );
+        assert_eq!(state["status"], "unavailable");
+        assert_eq!(state["coverage"], "unknown");
+        assert_eq!(state["reason"], "historical_backlog_measurement_failed");
+        assert_eq!(state["message"], "database unavailable");
+        assert_eq!(
+            state["worker_blocker"],
+            "historical_blocked:projection_store_corrupt"
+        );
     }
 
     #[test]
