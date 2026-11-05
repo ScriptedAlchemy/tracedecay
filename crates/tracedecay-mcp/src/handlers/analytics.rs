@@ -7,7 +7,7 @@
 //! ([`tracedecay_global_db::RegisteredGlobalDb::query_analytics_tool_counts`],
 //! [`tracedecay_global_db::RegisteredGlobalDb::query_analytics_hint_counts`],
 //! [`tracedecay_dashboard_api::analytics_api::hint_summary_from_counts`],
-//! [`tracedecay_automation_runtime::automation::run_ledger::load_run_records`]) rather than
+//! [`tracedecay_automation_runtime::automation::run_ledger::load_run_records_page`]) rather than
 //! re-implementing queries against those tables.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -35,7 +35,7 @@ use tracedecay_store::{FactReadControl, StoreShardScopeV1};
 
 use tracedecay_automation_runtime::automation::backend::task_key;
 use tracedecay_automation_runtime::automation::run_ledger::{
-    AutomationRunStatus, canonical_record_started_at_seconds, load_run_records,
+    AutomationRunStatus, canonical_record_started_at_seconds, load_run_records_page,
 };
 use tracedecay_daemon_service::retained_owner::open_project_retained_memory_target;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -580,8 +580,8 @@ async fn automation_section(
             ));
         }
     };
-    let records = match load_run_records(&dashboard_root, AUTOMATION_RECORD_LIMIT).await {
-        Ok(records) => records,
+    let page = match load_run_records_page(&dashboard_root, AUTOMATION_RECORD_LIMIT).await {
+        Ok(page) => page,
         Err(err) => {
             return AnalyticsAutomationSectionV1::LedgerUnavailable(AnalyticsLedgerUnavailableV1 {
                 available: false,
@@ -590,6 +590,8 @@ async fn automation_section(
             });
         }
     };
+    let records_truncated = !page.is_complete();
+    let records = page.records;
 
     let mut in_window = 0usize;
     let mut by_job: BTreeMap<String, AnalyticsAutomationJobOutcomesV1> = BTreeMap::new();
@@ -625,7 +627,12 @@ async fn automation_section(
         dashboard_root: dashboard_root.display().to_string(),
         records_considered: records.len(),
         records_in_window: in_window,
-        records_truncated: records.len() >= AUTOMATION_RECORD_LIMIT,
+        // A page that read exactly the limit is complete when the ledger holds
+        // nothing older; `records.len() >= limit` claimed the newest 200 rows
+        // were a truncated window even when the ledger held exactly 200. The
+        // page's own completeness is the authority: it knows whether a row was
+        // left behind and whether any row could not be read.
+        records_truncated,
         by_job: by_job.into_values().collect(),
     })
 }
