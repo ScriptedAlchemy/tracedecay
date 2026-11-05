@@ -286,6 +286,7 @@ pub struct StatusSchemaConvergenceV1 {
 pub enum StatusSchemaConvergenceStateV1 {
     Completed,
     InProgress,
+    Retrying,
     Degraded,
 }
 

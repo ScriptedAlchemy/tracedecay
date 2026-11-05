@@ -848,7 +848,7 @@ mod readiness;
 
 pub use readiness::{
     HookCompletedReadinessDistributions, aggregate_hook_completed_readiness,
-    install_dashboard_hook_readiness_projection,
+    install_hook_readiness_projection,
 };
 #[cfg(test)]
 use readiness::{

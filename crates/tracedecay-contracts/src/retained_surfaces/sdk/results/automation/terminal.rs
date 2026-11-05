@@ -50,6 +50,7 @@ automation_skip_reasons! {
     (JobLockActive, "job_lock_active"),
     (DelegatedHostMode, "delegated_host_mode"),
     (BackendDisabled, "backend_disabled"),
+    (BackendUnconfigured, "backend_unconfigured"),
     (BackendIdentitySuppressed, "backend_identity_suppressed"),
     (SchedulerLockActive, "scheduler_lock_active"),
     (SchedulerPaused, "scheduler_paused"),
@@ -107,6 +108,7 @@ impl AutomationSkipReasonV1 {
             | Self::UserJobDisabled
             | Self::DelegatedHostMode
             | Self::BackendDisabled
+            | Self::BackendUnconfigured
             | Self::BackendIdentitySuppressed
             | Self::SchedulerLockActive
             | Self::SchedulerPaused
@@ -195,6 +197,7 @@ impl AutomationSkipReasonV1 {
             Self::AutomationDisabled
             | Self::DelegatedHostMode
             | Self::BackendDisabled
+            | Self::BackendUnconfigured
             | Self::BackendIdentitySuppressed
             | Self::SchedulerLockActive
             | Self::SchedulerPaused

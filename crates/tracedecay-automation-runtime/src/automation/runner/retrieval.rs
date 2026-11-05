@@ -932,6 +932,75 @@ mod authority_tests {
         );
     }
 
+    /// An isolated, registered, genuinely empty project session store reports
+    /// `no_session_evidence` rather than failing or fabricating evidence.
+    ///
+    /// The runner's own tests stub retrieval as `CompleteZero`, so they prove
+    /// the runner's branch but not that an empty production store reaches it.
+    /// This drives the real production retrieval and the real evidence builder
+    /// against a freshly registered project store that holds no sessions.
+    #[tokio::test]
+    async fn an_empty_registered_project_store_reports_no_session_evidence() {
+        let directory = tempdir().expect("temporary profile");
+        let project_id = ProjectId::new("project.automation.empty-evidence").expect("project id");
+        let runtime = RegisteredGlobalDbTestRuntime::project(
+            directory.path().join("profile"),
+            directory.path().join("project"),
+            project_id.clone(),
+        )
+        .await
+        .expect("registered test runtime");
+        let database = runtime.project_database_arc().expect("project database");
+        let shard = database.binding().shard_id.clone();
+        let profile_identity = FixtureProfileIdentity::new(
+            directory.path().join("profile"),
+            shard.brain_id.clone(),
+            shard.profile_id.clone(),
+        );
+        let retrieval = ProductionAutomationSessionRetrieval {
+            database,
+            identity: project_automation_identity(&shard, &profile_identity, &project_id)
+                .expect("project identity"),
+            anchor_session_id: SessionId::new("session.automation.empty-evidence")
+                .expect("session id"),
+        };
+
+        let outcome = crate::automation::runner::evidence::build_session_reflector_evidence(
+            &retrieval,
+            &crate::automation::runner::SessionReflectorAutomationOptions::default(),
+        )
+        .await
+        .expect("an empty store is a settled outcome, not a failure");
+
+        match outcome {
+            crate::automation::runner::evidence::SessionReflectorEvidenceOutcome::Skipped {
+                reason,
+                budget_stage,
+                evidence_hash,
+            } => {
+                assert_eq!(
+                    reason, "no_session_evidence",
+                    "an empty registered store is genuinely empty evidence, not a refusal"
+                );
+                assert_eq!(budget_stage, None);
+                assert!(
+                    evidence_hash.is_some(),
+                    "the empty evidence is still hashed so the skip is attributable"
+                );
+            }
+            crate::automation::runner::evidence::SessionReflectorEvidenceOutcome::Ready(bundle) => {
+                panic!(
+                    "an empty store must not produce evidence; got {} hits",
+                    bundle
+                        .evidence
+                        .get("hits")
+                        .and_then(Value::as_array)
+                        .map_or(0, Vec::len)
+                )
+            }
+        }
+    }
+
     #[tokio::test]
     async fn registered_identities_keep_typed_unavailable_without_active_anchor() {
         let directory = tempdir().expect("temporary profile");

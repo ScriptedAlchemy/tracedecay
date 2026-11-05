@@ -79,6 +79,11 @@ fn schema_convergence_status(findings: &[SchemaConvergenceFindingV1]) -> StatusS
         .any(|finding| finding.state == SchemaConvergenceStateV1::Degraded)
     {
         StatusSchemaConvergenceStateV1::Degraded
+    } else if findings
+        .iter()
+        .any(|finding| finding.state == SchemaConvergenceStateV1::Retrying)
+    {
+        StatusSchemaConvergenceStateV1::Retrying
     } else if findings.iter().any(|finding| {
         matches!(
             finding.state,
@@ -1564,6 +1569,7 @@ mod tests {
         for (state, expected) in [
             (SchemaConvergenceStateV1::Pending, "in_progress"),
             (SchemaConvergenceStateV1::Running, "in_progress"),
+            (SchemaConvergenceStateV1::Retrying, "retrying"),
             (SchemaConvergenceStateV1::Degraded, "degraded"),
             (SchemaConvergenceStateV1::Completed, "completed"),
         ] {
@@ -1572,8 +1578,11 @@ mod tests {
                 stage: SchemaConvergenceStageV1::RegisteredSchema,
                 state,
                 started_at_micros: 42,
-                degraded_row: (state == SchemaConvergenceStateV1::Degraded)
-                    .then(|| "observation_id=obs-7".to_owned()),
+                degraded_row: matches!(
+                    state,
+                    SchemaConvergenceStateV1::Retrying | SchemaConvergenceStateV1::Degraded
+                )
+                .then(|| "observation_id=obs-7".to_owned()),
             };
             let value = serde_json::to_value(schema_convergence_status(&[finding]))
                 .expect("schema convergence serializes");
@@ -1583,7 +1592,10 @@ mod tests {
             let rendered = render_status_md(&serde_json::json!({"schema_convergence": value}));
             assert!(rendered.contains(state.as_str()));
             assert!(rendered.contains("profile-sessions"));
-            if state == SchemaConvergenceStateV1::Degraded {
+            if matches!(
+                state,
+                SchemaConvergenceStateV1::Retrying | SchemaConvergenceStateV1::Degraded
+            ) {
                 assert!(rendered.contains("observation_id=obs-7"));
             }
         }

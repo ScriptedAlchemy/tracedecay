@@ -112,7 +112,8 @@ pub fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
         "tool_dispatch_effect_unknown" => Some("effect_unknown"),
         "tool_dispatch_shutdown"
         | "mcp_dispatch_effect_journey_unverified"
-        | "application_surface_unavailable" => Some("unavailable"),
+        | "application_surface_unavailable"
+        | "workflow_authority_recovering" => Some("unavailable"),
         "application_surface_invalid_request"
         | TOOL_ARGUMENTS_INVALID
         | "project_required"
@@ -571,6 +572,22 @@ mod tests {
             wire["error"]["data"]["code"],
             "application_surface_invalid_request"
         );
+    }
+
+    #[test]
+    fn workflow_recovery_is_a_retryable_unavailable_problem_on_the_wire() {
+        let response = tool_error_response(
+            json!(7),
+            "tracedecay_workflow_list_definitions",
+            &TraceDecayError::workflow_authority_recovering(),
+        );
+        let wire = serde_json::to_value(response).expect("JSON-RPC wire response");
+        let data = &wire["error"]["data"];
+
+        assert_eq!(data["kind"], "unavailable");
+        assert_eq!(data["code"], "workflow_authority_recovering");
+        assert_eq!(data["retryable"], true);
+        assert_eq!(data["tool"], "tracedecay_workflow_list_definitions");
     }
 
     #[test]

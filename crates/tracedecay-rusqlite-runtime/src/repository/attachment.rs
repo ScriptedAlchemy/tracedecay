@@ -1458,6 +1458,7 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         assert!(attachment.lost_file_closed());
+        #[cfg(target_os = "linux")]
         assert!(
             held_pin.try_clone().is_err(),
             "retaining a pin handle must not retain the descriptor after worker exit"

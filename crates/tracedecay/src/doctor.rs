@@ -467,6 +467,12 @@ fn render_schema_convergences(
                 Some(row) => dc.fail(&format!("{message}: {row}")),
                 None => dc.fail(&message),
             },
+            // The daemon clears this by itself once the obstruction passes, so
+            // it warns with the failure rather than failing the report.
+            SchemaConvergenceStateV1::Retrying => match &finding.degraded_row {
+                Some(row) => dc.warn(&format!("{message}: {row}")),
+                None => dc.warn(&message),
+            },
             SchemaConvergenceStateV1::Pending | SchemaConvergenceStateV1::Running => {
                 dc.warn(&message);
             }
@@ -941,6 +947,12 @@ fn daemon_service_doctor_message(
     }
     match proof {
         tracedecay_daemon_control::DaemonProcessProofV1::Ready => state.lifecycle_operator_advice(),
+        tracedecay_daemon_control::DaemonProcessProofV1::BlockedResetRequired {
+            reset_required_stores,
+        } => format!(
+            "The daemon is running, but {} store(s) require reset. Inspect tracedecay daemon status for the exact refusal and remedy.",
+            reset_required_stores.len()
+        ),
         tracedecay_daemon_control::DaemonProcessProofV1::VersionMismatch { observed, expected } => {
             format!(
                 "TraceDecay daemon unit is active, but initialize reported version {} not {expected}. Unit state is not proof this binary is serving.",

@@ -401,24 +401,11 @@ impl ProfileHostAdmissionBootstrapContext {
             })
             .await
             .map(Arc::clone)
-            .map_err(|error| {
-                TraceDecayError::project_route(
-                    "registered_authority_unavailable",
-                    true,
-                    error.to_string(),
-                )
-            })?;
-        let user_session_db =
-            session_runtime_registry
-                .profile_sessions()
-                .await
-                .map_err(|error| {
-                    TraceDecayError::project_route(
-                        "registered_authority_unavailable",
-                        true,
-                        error.to_string(),
-                    )
-                })?;
+            .map_err(profile_bootstrap_open_error)?;
+        let user_session_db = session_runtime_registry
+            .profile_sessions()
+            .await
+            .map_err(profile_bootstrap_open_error)?;
         let broker_path =
             authority::canonical_identity_path(user_session_db.db_path()).map_err(|error| {
                 TraceDecayError::project_route(
@@ -445,6 +432,35 @@ impl ProfileHostAdmissionBootstrapContext {
             .await;
         Ok(())
     }
+}
+
+/// Preserve the opening authority's disposition; only unclassified operational
+/// failures need the bootstrap route's availability context.
+fn profile_bootstrap_open_error(error: TraceDecayError) -> TraceDecayError {
+    if error.is_store_reset_required()
+        || error.project_route_context().is_some()
+        || error.hook_runtime_context().is_some()
+    {
+        return error;
+    }
+    let retryable = match &error {
+        TraceDecayError::Database { .. } | TraceDecayError::LockDeadline { .. } => true,
+        TraceDecayError::Io(error) => matches!(
+            error.kind(),
+            std::io::ErrorKind::Interrupted
+                | std::io::ErrorKind::WouldBlock
+                | std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::ConnectionRefused
+        ),
+        _ => return error,
+    };
+    TraceDecayError::project_route(
+        "registered_authority_unavailable",
+        retryable,
+        error.to_string(),
+    )
 }
 
 /// Returns the cached broker for `path`, opening its runtime at most once.
@@ -2196,6 +2212,187 @@ mod tests {
         let meta_path = spool_path.join("meta.json");
         std::fs::write(&meta_path, &bytes).unwrap();
         (meta_path, bytes)
+    }
+
+    #[tokio::test]
+    async fn profile_bootstrap_preserves_session_store_reset_dispositions() {
+        for (filename, malformed_schema, expected_authority) in [
+            (
+                tracedecay_runtime_core::storage::USER_SESSIONS_DB_FILENAME,
+                "DROP TABLE workflow_effect_journal; CREATE TABLE workflow_effect_journal (broken TEXT);",
+                "workflow",
+            ),
+            (
+                tracedecay_runtime_core::storage::USER_SESSIONS_DB_FILENAME,
+                "UPDATE tracedecay_schema_version SET version = version + 1 WHERE component = 'lcm';",
+                "LCM",
+            ),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let profile_root = temp.path().join("profile");
+            let identity = profile_identity::load_or_create(&profile_root).unwrap();
+            let database_path = profile_root.join(filename);
+            let registry =
+                tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity.clone())
+                    .await
+                    .unwrap();
+            drop(registry.profile_sessions().await.unwrap());
+            drop(registry);
+            rusqlite::Connection::open(&database_path)
+                .unwrap()
+                .execute_batch(malformed_schema)
+                .unwrap();
+            let administration = StoreAdministration::default().with_profile_identity(identity);
+            administration
+                .ensure_profile_host_admission_bootstrap(&profile_root)
+                .await
+                .unwrap();
+            assert_eq!(
+                administration
+                    .profile_host_admission_replay
+                    .wait_bootstrap_completed(&profile_root, None)
+                    .await,
+                BootstrapCompletion::Completed
+            );
+            let Some(ProfileHostAdmissionBootstrapStatus::Terminal(error)) = administration
+                .profile_host_admission_bootstrap_status(&profile_root)
+                .await
+                .unwrap()
+            else {
+                panic!("{filename}: refused schema must stop bootstrap");
+            };
+            assert!(error.is_store_reset_required(), "{filename}: {error:?}");
+            if expected_authority == "LCM" {
+                assert!(
+                    matches!(
+                        &*error,
+                        TraceDecayError::ProfileResetRequired {
+                            component: "LCM",
+                            ..
+                        }
+                    ),
+                    "{error:?}"
+                );
+            } else {
+                assert_eq!(
+                    error
+                        .reset_required_context()
+                        .map(|(authority, _)| authority),
+                    Some(expected_authority)
+                );
+            }
+            assert!(error.project_route_context().is_none(), "{error:?}");
+            let registries = administration.session_runtime_registries.lock().await;
+            assert!(
+                registries
+                    .get(&std::fs::canonicalize(&profile_root).unwrap())
+                    .unwrap()
+                    .registry
+                    .get()
+                    .is_some(),
+                "the refusal must originate at the selected opening boundary"
+            );
+            drop(registries);
+            assert_eq!(
+                administration
+                    .profile_host_admission_replay
+                    .bootstrap_attempt_count(&profile_root)
+                    .await,
+                1
+            );
+            assert_eq!(
+                administration
+                    .profile_host_admission_replay
+                    .bootstrap_backoff_count(&profile_root)
+                    .await,
+                0
+            );
+            administration.shutdown_host_admission_replay().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_bootstrap_operational_open_failure_remains_retryable() {
+        for registry_open in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let profile_root = temp.path().join("profile");
+            let identity = profile_identity::load_or_create(&profile_root).unwrap();
+            let obstruction = if registry_open {
+                // A failed node census is operational, not a persisted-shape verdict.
+                std::fs::create_dir_all(profile_root.join("remote")).unwrap();
+                let path = profile_root.join("remote/nodes");
+                std::fs::write(&path, b"not a directory").unwrap();
+                path
+            } else {
+                let path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+                std::fs::create_dir(&path).unwrap();
+                path
+            };
+            let replay = Arc::new(ProfileHostAdmissionReplayRegistry::default());
+            let context = ProfileHostAdmissionBootstrapContext {
+                profile_root,
+                profile_identity: identity,
+                session_runtime_registry: Arc::new(tokio::sync::OnceCell::new()),
+                host_admission_brokers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+                profile_host_admission_replay: Arc::downgrade(&replay),
+            };
+            let error = context.ensure().await.unwrap_err();
+            assert_eq!(
+                error
+                    .project_route_context()
+                    .map(|(code, retryable, _)| (code, retryable)),
+                Some(("registered_authority_unavailable", true))
+            );
+            assert_eq!(
+                context.session_runtime_registry.get().is_none(),
+                registry_open
+            );
+            if registry_open {
+                std::fs::remove_file(obstruction).unwrap();
+            } else {
+                std::fs::remove_dir(obstruction).unwrap();
+            }
+            context.ensure().await.unwrap();
+            assert!(context.session_runtime_registry.get().is_some());
+            replay.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(not(windows))]
+    async fn profile_bootstrap_invalid_registry_authority_is_terminal() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile_root = temp.path().join("profile");
+        let identity = profile_identity::load_or_create(&profile_root).unwrap();
+        std::fs::write(profile_root.join("daemon-authority.json"), b"not json").unwrap();
+        let administration = StoreAdministration::default().with_profile_identity(identity);
+        administration
+            .ensure_profile_host_admission_bootstrap(&profile_root)
+            .await
+            .unwrap();
+        assert_eq!(
+            administration
+                .profile_host_admission_replay
+                .wait_bootstrap_completed(&profile_root, None)
+                .await,
+            BootstrapCompletion::Completed
+        );
+        let Some(ProfileHostAdmissionBootstrapStatus::Terminal(error)) = administration
+            .profile_host_admission_bootstrap_status(&profile_root)
+            .await
+            .unwrap()
+        else {
+            panic!("invalid authority record must not be retried as unavailable");
+        };
+        assert!(error.project_route_context().is_none(), "{error:?}");
+        assert_eq!(
+            administration
+                .profile_host_admission_replay
+                .bootstrap_backoff_count(&profile_root)
+                .await,
+            0
+        );
+        administration.shutdown_host_admission_replay().await;
     }
 
     /// Rank 1 regression: a git-watch sync of project A used to hold the one

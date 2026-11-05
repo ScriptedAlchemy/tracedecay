@@ -1678,9 +1678,25 @@ pub struct DaemonServiceStatus {
 }
 
 impl DaemonServiceStatus {
+    /// This build answered initialize and admitted every registered store.
+    /// A process holding stores reset-required is serving, but it is not
+    /// ready: the operator still has to run the reported remedy.
     #[must_use]
     pub fn is_ready(&self) -> bool {
+        self.process.version_matches() && self.process.reset_required_stores().is_empty()
+    }
+
+    /// This build answered initialize, whether or not it admitted every store.
+    #[must_use]
+    pub fn is_serving(&self) -> bool {
         self.process.version_matches()
+    }
+
+    /// The exact stores the daemon reported in their typed reset-required
+    /// state, each with the command that resets it.
+    #[must_use]
+    pub fn reset_required_stores(&self) -> &[tracedecay_domain::errors::StoreResetRequiredV1] {
+        self.process.reset_required_stores()
     }
 }
 
@@ -1745,8 +1761,26 @@ pub fn service_status(
     };
     let transport_kind = if cfg!(unix) { "socket" } else { "endpoint" };
     let transport = daemon_transport_display(&transport_path);
+    // The exact refusals and their remedies, so an operator reading `daemon
+    // status` does not have to re-derive the pending reset from a debug line.
+    let resets = if process.reset_required_stores().is_empty() {
+        String::new()
+    } else {
+        let refusals = process
+            .reset_required_stores()
+            .iter()
+            .map(|refusal| {
+                format!(
+                    "  {} ({}) - {}\n    remedy: {}\n",
+                    refusal.store, refusal.authority, refusal.reason, refusal.remedy
+                )
+            })
+            .collect::<Vec<_>>()
+            .concat();
+        format!("reset required:\n{refusals}")
+    };
     let display = format!(
-        "state: {state}\nservice: {service}\nservice manager: {service_manager}\n{transport_kind}: {transport} ({socket_state})\nprotocol: {process:?}\n{detail}logs: {logs}\n",
+        "state: {state}\nservice: {service}\nservice manager: {service_manager}\n{transport_kind}: {transport} ({socket_state})\nprotocol: {process}\n{resets}{detail}logs: {logs}\n",
     );
     DaemonServiceStatus { process, display }
 }
@@ -1754,7 +1788,10 @@ pub fn service_status(
 fn daemon_is_serving(socket: DaemonSocketState, process: &DaemonProcessProofV1) -> bool {
     matches!(
         (socket, process),
-        (DaemonSocketState::Connectable, DaemonProcessProofV1::Ready)
+        (
+            DaemonSocketState::Connectable,
+            DaemonProcessProofV1::Ready | DaemonProcessProofV1::BlockedResetRequired { .. }
+        )
     )
 }
 
@@ -1764,6 +1801,9 @@ fn daemon_is_serving(socket: DaemonSocketState, process: &DaemonProcessProofV1) 
 fn daemon_headline(socket: DaemonSocketState, process: &DaemonProcessProofV1) -> &'static str {
     match (socket, process) {
         (DaemonSocketState::Connectable, DaemonProcessProofV1::Ready) => "running",
+        (DaemonSocketState::Connectable, DaemonProcessProofV1::BlockedResetRequired { .. }) => {
+            "blocked: reset required"
+        }
         (DaemonSocketState::Connectable, DaemonProcessProofV1::VersionMismatch { .. }) => {
             "running a different build"
         }

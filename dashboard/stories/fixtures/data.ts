@@ -2449,6 +2449,7 @@ function schedulerStatusPayload(): Record<string, unknown> {
     paused: false,
     enabled: true,
     scheduler_tick_secs: 900,
+    reset_required_stores: [],
     now: nowSecs,
     last_session_activity: nowSecs - 1200,
     configuration_revision_id: 'configuration.revision.automation.fixture',

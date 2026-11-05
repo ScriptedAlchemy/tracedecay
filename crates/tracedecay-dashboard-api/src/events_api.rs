@@ -1218,6 +1218,7 @@ pub(crate) async fn dashboard_state_fixture(
         automation_authority: None,
         automation_observation: None,
         automation_scheduler_reconciler: None,
+        scheduler_reset_census_reader: None,
         automation_writer: crate::standalone_dashboard_automation_writer(),
         doctor_report_reader: None,
         remote_operational_status_reader: None,

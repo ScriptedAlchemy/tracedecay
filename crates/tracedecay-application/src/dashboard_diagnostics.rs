@@ -490,7 +490,17 @@ impl DashboardDiagnosticsAuthorityV1 {
                 native_runtime::sleep_until(std::time::Instant::now() + Duration::from_millis(750))
                     .await;
             for language in languages {
-                let _ = authority.refresh_language(&request, &language).await;
+                // The broker already recorded this failure as the language's
+                // engine error, which the dashboard reads. Log it here as well
+                // so an idle backfill that produced nothing is attributable
+                // instead of looking like a backfill that had no work.
+                if let Err(error) = authority.refresh_language(&request, &language).await {
+                    tracing::warn!(
+                        language,
+                        error = %error,
+                        "code diagnostics idle backfill refresh failed"
+                    );
+                }
             }
         });
         if let Err(error) = started {

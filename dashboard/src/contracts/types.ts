@@ -125,7 +125,7 @@ export type AnalyticsDiagnosticsPayloadV1 = {
   hook_sources: Array<unknown>;
   hook_window: AnalyticsHookWindowV1;
   mcp_tool_call_count: number;
-  message_count: number;
+  message_count: number | null;
   ratios: AnalyticsDiagnosticsRatiosV1;
   recent_events: Array<AnalyticsRecentEventV1>;
   recent_hooks: Array<AnalyticsRecentHookV1>;
@@ -135,10 +135,10 @@ export type AnalyticsDiagnosticsPayloadV1 = {
 };
 
 export type AnalyticsDiagnosticsRatiosV1 = {
-  events_per_message: number;
-  hook_calls_per_message: number;
-  mcp_tool_calls_per_message: number;
-  tool_calls_per_message: number;
+  events_per_message: number | null;
+  hook_calls_per_message: number | null;
+  mcp_tool_calls_per_message: number | null;
+  tool_calls_per_message: number | null;
 };
 
 export type AnalyticsEventKindCountV1 = {
@@ -232,6 +232,7 @@ export type AnalyticsPromptCategoryCountV1 = {
 export type AnalyticsRecentEventV1 = {
   cost?: RequestCostReceiptV1 | null | undefined;
   event_kind: string;
+  failure_reason?: string | null | undefined;
   hook_name: string;
   outcome: string;
   timestamp: number | null;
@@ -700,7 +701,7 @@ export type AutomationRunTerminalV1 =
     summary: AutomationRunSummaryV1;
   };
 
-export type AutomationSchedulerAvailabilityV1 = "automation_disabled" | "backend_disabled" | "configured" | "delegated_host" | "paused";
+export type AutomationSchedulerAvailabilityV1 = "automation_disabled" | "backend_disabled" | "backend_unconfigured" | "blocked_reset_required" | "configured" | "delegated_host" | "paused";
 
 export type AutomationSchedulerStatusV1 = {
   configuration_revision_id: string;
@@ -709,6 +710,7 @@ export type AutomationSchedulerStatusV1 = {
   last_session_activity: number | null;
   now: number;
   paused: boolean;
+  reset_required_stores: Array<StoreResetRequiredV1>;
   scheduler_tick_secs: number;
   status: AutomationSchedulerAvailabilityV1;
   tasks: Array<AutomationTaskStatusV1>;
@@ -728,7 +730,7 @@ export type AutomationSkillsPayloadV1 = {
   skills: Array<ManagedSkill>;
 };
 
-export type AutomationSkipReasonV1 = "automation_disabled" | "backend_disabled" | "backend_identity_suppressed" | "combined_review_disabled" | "delegated_host_mode" | "job_commands_disabled" | "job_lock_active" | "memory_curator_disabled" | "no_new_session_activity" | "no_session_evidence" | "nothing_to_review" | "partial_coverage_no_candidates" | "scheduler_cooldown_active" | "scheduler_cron_not_due" | "scheduler_history_invalid" | "scheduler_idle_window_active" | "scheduler_interval_not_elapsed" | "scheduler_lock_active" | "scheduler_non_retryable_failure" | "scheduler_paused" | "scheduler_schedule_invalid" | "scheduler_schedule_manual" | "session_cursor_manifest_limit_exceeded" | "session_evidence_budget_exhausted" | "session_evidence_budget_suppressed" | "session_evidence_cancelled" | "session_evidence_denied" | "session_evidence_filter_unavailable" | "session_evidence_locked" | "session_evidence_partial" | "session_evidence_reset_required" | "session_evidence_retrieval_unavailable" | "session_evidence_stale" | "session_evidence_timed_out" | "session_evidence_unavailable" | "session_reflector_disabled" | "similarity_authority_unavailable" | "skill_writer_disabled" | "task_not_schedulable" | "user_job_disabled";
+export type AutomationSkipReasonV1 = "automation_disabled" | "backend_disabled" | "backend_identity_suppressed" | "backend_unconfigured" | "combined_review_disabled" | "delegated_host_mode" | "job_commands_disabled" | "job_lock_active" | "memory_curator_disabled" | "no_new_session_activity" | "no_session_evidence" | "nothing_to_review" | "partial_coverage_no_candidates" | "scheduler_cooldown_active" | "scheduler_cron_not_due" | "scheduler_history_invalid" | "scheduler_idle_window_active" | "scheduler_interval_not_elapsed" | "scheduler_lock_active" | "scheduler_non_retryable_failure" | "scheduler_paused" | "scheduler_schedule_invalid" | "scheduler_schedule_manual" | "session_cursor_manifest_limit_exceeded" | "session_evidence_budget_exhausted" | "session_evidence_budget_suppressed" | "session_evidence_cancelled" | "session_evidence_denied" | "session_evidence_filter_unavailable" | "session_evidence_locked" | "session_evidence_partial" | "session_evidence_reset_required" | "session_evidence_retrieval_unavailable" | "session_evidence_stale" | "session_evidence_timed_out" | "session_evidence_unavailable" | "session_reflector_disabled" | "similarity_authority_unavailable" | "skill_writer_disabled" | "task_not_schedulable" | "user_job_disabled";
 
 export type AutomationTaskStatusV1 = {
   due: boolean;
@@ -4995,7 +4997,7 @@ export type SchemaConvergenceFindingV1 = {
 
 export type SchemaConvergenceStageV1 = "registered_schema";
 
-export type SchemaConvergenceStateV1 = "completed" | "degraded" | "pending" | "running";
+export type SchemaConvergenceStateV1 = "completed" | "pending" | "running" | "retrying" | "degraded";
 
 export type SchemaId = string;
 
@@ -5335,6 +5337,15 @@ export type StoreKeyV1 = string;
 export type StorePointReadsV1 = {
   graph_sealed: number;
   graph_staging: number;
+};
+
+export type StoreResetRequiredV1 = {
+  authority: string;
+  found_version: number | null;
+  reason: string;
+  remedy: string;
+  required_version: number | null;
+  store: string;
 };
 
 export type StoreSizeSampleV1 = {

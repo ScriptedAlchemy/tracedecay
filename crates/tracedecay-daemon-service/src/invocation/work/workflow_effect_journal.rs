@@ -22,8 +22,9 @@ use tracedecay_daemon_protocol::{
 use tracedecay_domain::errors::TraceDecayError;
 
 use super::workflow_run_control::{
-    workflow_coordination_problem, workflow_final_conflict, workflow_invalid_request,
-    workflow_not_found, workflow_reset_required, workflow_runtime_unavailable,
+    workflow_authority_recovering, workflow_coordination_problem, workflow_final_conflict,
+    workflow_invalid_request, workflow_not_found, workflow_reset_required,
+    workflow_runtime_unavailable,
 };
 use super::{RegisteredWorkRuntime, work_command_effect, work_effect, work_evidence_packet};
 use tracedecay_contracts::now_micros;
@@ -373,6 +374,7 @@ pub(super) fn workflow_storage_problem(error: &TraceDecayError) -> ApplicationPr
         {
             workflow_reset_required()
         }
+        error if error.is_workflow_authority_recovering() => workflow_authority_recovering(),
         _ => workflow_runtime_unavailable(),
     }
 }
@@ -581,5 +583,37 @@ pub(super) fn task_handoff_refusal(error: TaskHandoffError) -> ApplicationProble
         TaskHandoffError::Conflict => handoff_token_conflict(),
         TaskHandoffError::Expired => handoff_expired(),
         TaskHandoffError::Replay => handoff_replayed(),
+    }
+}
+
+#[cfg(test)]
+mod storage_problem_tests {
+    use tracedecay_contracts::{ApplicationProblem, RetryDirective};
+    use tracedecay_domain::errors::TraceDecayError;
+
+    use super::workflow_storage_problem;
+
+    #[test]
+    fn workflow_recovery_keeps_its_own_retryable_problem() {
+        let problem = workflow_storage_problem(&TraceDecayError::workflow_authority_recovering());
+        let ApplicationProblem::Unavailable {
+            diagnostic, retry, ..
+        } = problem
+        else {
+            panic!("recovering must stay unavailable: {problem:?}");
+        };
+        assert_eq!(diagnostic.code, "workflow.authority_recovering");
+        assert_eq!(retry, RetryDirective::AfterDelay);
+    }
+
+    #[test]
+    fn other_storage_failures_keep_their_problems() {
+        let unrelated = TraceDecayError::project_route("another_route_refusal", true, "detail");
+        let ApplicationProblem::Unavailable { diagnostic, .. } =
+            workflow_storage_problem(&unrelated)
+        else {
+            panic!("an unrelated failure stays unavailable");
+        };
+        assert_eq!(diagnostic.code, "workflow.unavailable");
     }
 }

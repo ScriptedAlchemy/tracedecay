@@ -56,6 +56,10 @@ const DAEMON_REACHABILITY_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 pub enum DaemonProcessProofV1 {
     /// initialize returned `serverInfo.name = tracedecay` at `expected_version`.
     Ready,
+    /// The process matches, but one or more stores cannot admit work.
+    BlockedResetRequired {
+        reset_required_stores: Vec<StoreResetRequiredV1>,
+    },
     /// A `TraceDecay` process answered initialize at a different version.
     VersionMismatch {
         observed: Option<String>,
@@ -69,13 +73,50 @@ impl DaemonProcessProofV1 {
     /// A `TraceDecay` process answered, regardless of version.
     #[must_use]
     pub fn names_tracedecay(&self) -> bool {
-        matches!(self, Self::Ready | Self::VersionMismatch { .. })
+        matches!(
+            self,
+            Self::Ready | Self::BlockedResetRequired { .. } | Self::VersionMismatch { .. }
+        )
     }
 
     /// The answering process is this binary's version.
     #[must_use]
     pub fn version_matches(&self) -> bool {
-        matches!(self, Self::Ready)
+        matches!(self, Self::Ready | Self::BlockedResetRequired { .. })
+    }
+
+    /// Stores this process reported as held in their typed reset-required
+    /// state. Empty for a process that admitted every store, and for one that
+    /// never completed initialize.
+    #[must_use]
+    pub fn reset_required_stores(&self) -> &[StoreResetRequiredV1] {
+        match self {
+            Self::BlockedResetRequired {
+                reset_required_stores,
+            } => reset_required_stores,
+            _ => &[],
+        }
+    }
+}
+
+impl std::fmt::Display for DaemonProcessProofV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ready => formatter.write_str("Ready"),
+            Self::BlockedResetRequired {
+                reset_required_stores,
+            } => write!(
+                formatter,
+                "blocked: reset required ({} store(s))",
+                reset_required_stores.len()
+            ),
+            Self::VersionMismatch { observed, expected } => write!(
+                formatter,
+                "version mismatch (observed={}, expected={expected})",
+                observed.as_deref().unwrap_or("missing")
+            ),
+            Self::Unproven { detail } => write!(formatter, "unproven ({detail})"),
+        }
     }
 }
 
@@ -165,7 +206,17 @@ pub(super) fn probe_daemon_process_with_timeout(
 
 fn proof_from_protocol(protocol: DaemonProtocolState) -> DaemonProcessProofV1 {
     match protocol {
-        DaemonProtocolState::Ready { .. } => DaemonProcessProofV1::Ready,
+        DaemonProtocolState::Ready {
+            reset_required_stores,
+        } => {
+            if reset_required_stores.is_empty() {
+                DaemonProcessProofV1::Ready
+            } else {
+                DaemonProcessProofV1::BlockedResetRequired {
+                    reset_required_stores,
+                }
+            }
+        }
         DaemonProtocolState::IdentityMismatch {
             name,
             version,
@@ -775,6 +826,44 @@ mod identity_classification_tests {
     use super::{DaemonInitializeIdentity, DaemonProtocolState, classify_daemon_protocol_identity};
 
     const SHA: &str = "84598a0b9c841b914565f46b20bb6c765706e8e5";
+
+    #[test]
+    fn reset_stores_are_blocked_not_ready_but_retain_process_and_version_identity() {
+        let refusal = tracedecay_domain::errors::TraceDecayError::reset_required(
+            "workflow",
+            "retired schema",
+        )
+        .store_reset_required(
+            "project:test",
+            tracedecay_domain::errors::STALE_STORE_RESET_COMMAND,
+        )
+        .unwrap();
+        let proof = super::proof_from_protocol(DaemonProtocolState::Ready {
+            reset_required_stores: vec![refusal.clone()],
+        });
+        assert_eq!(
+            proof,
+            super::DaemonProcessProofV1::BlockedResetRequired {
+                reset_required_stores: vec![refusal],
+            }
+        );
+        assert!(proof.names_tracedecay());
+        assert!(proof.version_matches());
+        assert_eq!(
+            super::super::daemon_headline(super::DaemonSocketState::Connectable, &proof),
+            "blocked: reset required"
+        );
+        assert!(super::super::daemon_is_serving(
+            super::DaemonSocketState::Connectable,
+            &proof
+        ));
+        assert_eq!(
+            super::proof_from_protocol(DaemonProtocolState::Ready {
+                reset_required_stores: Vec::new(),
+            }),
+            super::DaemonProcessProofV1::Ready
+        );
+    }
 
     /// The identity a `tracedecay` daemon reporting `version` answers with.
     fn identity(version: &str) -> DaemonInitializeIdentity {

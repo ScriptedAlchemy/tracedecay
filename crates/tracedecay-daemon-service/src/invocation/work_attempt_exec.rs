@@ -719,17 +719,6 @@ async fn run_attempt(
             return;
         }
     };
-    let workflow_artifacts = registered
-        .database
-        .workflow_storage()
-        .await
-        .map_err(|error| {
-            tracing::warn!(
-                task = attempt.identity().task_id().as_str(),
-                ?error,
-                "work attempt provider output store could not be attached"
-            );
-        });
     let identity = attempt.identity().clone();
     // The registration-pinned work topology policy carries the concurrency
     // policy this attempt was admitted under; its canonical digest is the
@@ -765,38 +754,56 @@ async fn run_attempt(
                 ))
             });
     match selection {
-        Ok(selection) => match selection.provider.protocol {
-            WorkProviderProtocol::CodexAppServerJsonRpc => {
-                execute_app_server(
-                    &services,
-                    workflow_artifacts.as_ref().ok(),
-                    &context,
-                    &attempt,
-                    &selection,
-                    &admitted_environment,
-                    cancel,
-                    observability_producer.as_deref(),
-                    topology_policy_digest.as_ref(),
-                    timing,
-                )
-                .await;
+        Ok(selection) => {
+            // Bind output authority after provider resolution, not at task start.
+            // Recovery can finish while the binding probe is in flight. Once
+            // admitted, retain this exact store through output persistence;
+            // never execute effects without somewhere to retain their output.
+            let Some(workflow_artifacts) = bind_attempt_output(
+                &registered.database,
+                &services,
+                &context,
+                &attempt,
+                selection.fallback.clone(),
+                observability_producer.as_deref(),
+            )
+            .await
+            else {
+                return;
+            };
+            match selection.provider.protocol {
+                WorkProviderProtocol::CodexAppServerJsonRpc => {
+                    execute_app_server(
+                        &services,
+                        Some(&workflow_artifacts),
+                        &context,
+                        &attempt,
+                        &selection,
+                        &admitted_environment,
+                        cancel,
+                        observability_producer.as_deref(),
+                        topology_policy_digest.as_ref(),
+                        timing,
+                    )
+                    .await;
+                }
+                _ => {
+                    execute_provider_with_environment(
+                        &services,
+                        Some(&workflow_artifacts),
+                        &context,
+                        &attempt,
+                        &selection,
+                        &admitted_environment,
+                        cancel,
+                        observability_producer.as_deref(),
+                        topology_policy_digest.as_ref(),
+                        timing,
+                    )
+                    .await;
+                }
             }
-            _ => {
-                execute_provider_with_environment(
-                    &services,
-                    workflow_artifacts.as_ref().ok(),
-                    &context,
-                    &attempt,
-                    &selection,
-                    &admitted_environment,
-                    cancel,
-                    observability_producer.as_deref(),
-                    topology_policy_digest.as_ref(),
-                    timing,
-                )
-                .await;
-            }
-        },
+        }
         Err(denial) => {
             settle_unstarted(
                 &services,
@@ -1080,6 +1087,99 @@ enum EffectDispatchAdmission {
     Unavailable,
 }
 
+async fn bind_attempt_output(
+    database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    steps: &impl AttemptStepsV1,
+    context: &RequestContext,
+    attempt: &WorkAttemptV1,
+    fallback: Option<WorkProviderFallbackRecordV1>,
+    observability_producer: Option<&BoundedObservabilityProducerV1>,
+) -> Option<tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority> {
+    match database.workflow_storage().await {
+        Ok(store) => Some(store),
+        Err(error) if error.is_workflow_authority_recovering() => {
+            admit_provider_output(
+                steps,
+                context,
+                attempt,
+                None,
+                fallback,
+                observability_producer,
+            )
+            .await;
+            None
+        }
+        Err(error) => {
+            tracing::warn!(
+                task = attempt.identity().task_id().as_str(),
+                ?error,
+                "work attempt output authority could not be admitted"
+            );
+            settle_unstarted(
+                steps,
+                context,
+                attempt.identity(),
+                attempt,
+                WorkAttemptProviderOutcomeV1::ProviderUnavailable {
+                    state: WorkProviderAvailabilityV1::Unavailable,
+                },
+                fallback,
+                observability_producer,
+            )
+            .await;
+            None
+        }
+    }
+}
+
+/// A recovering output authority fences the existing attempt for explicit
+/// revalidated retry. Its effect receipt proves that no provider launched, so
+/// non-repeatable work can also retry safely. No terminal protocol evidence is
+/// manufactured. A concurrent cancellation wins
+/// through the same durable transition rules as provider admission.
+async fn admit_provider_output(
+    steps: &impl AttemptStepsV1,
+    context: &RequestContext,
+    attempt: &WorkAttemptV1,
+    store: Option<&tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority>,
+    fallback: Option<WorkProviderFallbackRecordV1>,
+    observability_producer: Option<&BoundedObservabilityProducerV1>,
+) -> bool {
+    if store.is_some() {
+        return true;
+    }
+    match steps
+        .mark_provider_unavailable(context, attempt.identity(), now_micros())
+        .await
+    {
+        Ok(_) => {
+            if matches!(
+                record_effect_dispatch(steps, context, attempt).await,
+                EffectDispatchAdmission::Recorded
+            ) {
+                let _ = settle_effect_dispatch(steps, context, attempt, false).await;
+            }
+        }
+        Err(problem) => {
+            tracing::warn!(
+                task = attempt.identity().task_id().as_str(),
+                ?problem,
+                "work attempt could not be fenced while output authority recovers"
+            );
+            seal_cancellation_before_running(
+                steps,
+                context,
+                attempt,
+                None,
+                fallback,
+                observability_producer,
+            )
+            .await;
+        }
+    }
+    false
+}
+
 async fn record_effect_dispatch(
     steps: &impl AttemptStepsV1,
     context: &RequestContext,
@@ -1167,6 +1267,18 @@ async fn execute_provider_with_environment(
     topology_policy_digest: Option<&TopologyPolicyDigestV1>,
     timing: AttemptAdmissionTimingV1,
 ) {
+    if !admit_provider_output(
+        steps,
+        context,
+        attempt,
+        workflow_artifacts,
+        selection.fallback.clone(),
+        observability_producer,
+    )
+    .await
+    {
+        return;
+    }
     let identity = attempt.identity().clone();
     let envelope = attempt.execution();
     let resolved = &selection.provider;
@@ -1397,6 +1509,18 @@ async fn execute_app_server(
     topology_policy_digest: Option<&TopologyPolicyDigestV1>,
     timing: AttemptAdmissionTimingV1,
 ) {
+    if !admit_provider_output(
+        steps,
+        context,
+        attempt,
+        workflow_artifacts,
+        selection.fallback.clone(),
+        observability_producer,
+    )
+    .await
+    {
+        return;
+    }
     let identity = attempt.identity().clone();
     let envelope = attempt.execution();
     let snapshot = envelope.execution_snapshot();

@@ -4,7 +4,7 @@ use std::pin::Pin;
 use tracedecay_daemon_protocol::DaemonHandshake;
 
 use tracedecay_automation_runtime::automation::AutomationRunControl;
-use tracedecay_automation_runtime::automation::backend::{AgentTaskBackend, AgentTaskKind};
+use tracedecay_automation_runtime::automation::backend::AgentTaskKind;
 
 use super::{
     automation_scheduler_has_work, effective_automation_config_for_project,
@@ -79,6 +79,7 @@ pub(super) fn note_scheduler_task_admitted(
 ) {
     SCHEDULER_PRE_ADMISSION_PROBLEM_GATE
         .clear(&scheduler_pre_admission_gate_key(project_path, task));
+    super::forget_scheduler_task_error(project_path, task);
 }
 
 pub(super) fn log_scheduler_admission_conflict(
@@ -126,7 +127,7 @@ fn log_scheduler_schedule_skip(
 async fn fixed_task_schedule_decision(
     dashboard_root: &Path,
     config: &tracedecay_automation_runtime::automation::config::AdmittedAutomationConfig,
-    executable: Option<&Path>,
+    codex: &tracedecay_domain::configuration::LcmSummarizerExecutableV1,
     task: AgentTaskKind,
     activity: tracedecay_automation_runtime::automation::scheduler::SessionActivity,
     now_secs: i64,
@@ -139,9 +140,9 @@ async fn fixed_task_schedule_decision(
         )
         .await?;
     Ok(
-        tracedecay_automation_runtime::automation::scheduler::schedule_decision(
+        tracedecay_automation_runtime::automation::scheduler::configured_backend_schedule_decision(
             config,
-            executable,
+            codex,
             task,
             summary.records(),
             activity,
@@ -438,7 +439,7 @@ fn run_automation_scheduler_tick_inner<'a>(
         let memory_curator_decision = fixed_task_schedule_decision(
             &cg.store_layout().dashboard_root,
             config,
-            backend.executable(),
+            &configuration.codex_executable,
             AgentTaskKind::MemoryCurator,
             schedule_activity,
             schedule_now_secs,
@@ -447,7 +448,7 @@ fn run_automation_scheduler_tick_inner<'a>(
         let session_reflector_decision = fixed_task_schedule_decision(
             &cg.store_layout().dashboard_root,
             config,
-            backend.executable(),
+            &configuration.codex_executable,
             AgentTaskKind::SessionReflector,
             schedule_activity,
             schedule_now_secs,
@@ -456,7 +457,7 @@ fn run_automation_scheduler_tick_inner<'a>(
         let skill_writer_decision = fixed_task_schedule_decision(
             &cg.store_layout().dashboard_root,
             config,
-            backend.executable(),
+            &configuration.codex_executable,
             AgentTaskKind::SkillWriter,
             schedule_activity,
             schedule_now_secs,
@@ -922,6 +923,53 @@ mod tests {
         assert_eq!(event_lines(&after_admission), 1);
     }
 
+    /// The two recurring failures measured in the daemon log: a store refusing
+    /// until its reset and an authority that can still appear. Both are one
+    /// state in the log; only the first stops the cadence.
+    #[test]
+    fn a_persisting_tick_failure_is_logged_once_and_only_a_reset_refusal_parks() {
+        use tracedecay_domain::errors::TraceDecayError;
+
+        use super::super::SchedulerTickDisposition::{Cadence, ParkUntilWake};
+        use super::super::classify_scheduler_tick_result as classify;
+
+        let reset = std::path::Path::new("/isolated/project/tick-reset");
+        let refusal: Result<(), TraceDecayError> = Err(TraceDecayError::reset_required(
+            "workflow",
+            "workflow tables are absent, incomplete, or not exact",
+        ));
+        assert_eq!(
+            classify(reset, &refusal),
+            (ParkUntilWake, Some("blocked_reset_required"))
+        );
+        for _ in 0..20 {
+            assert_eq!(classify(reset, &refusal), (ParkUntilWake, None));
+        }
+        assert_eq!(classify(reset, &Ok(())), (Cadence, Some("recovered")));
+        assert_eq!(classify(reset, &Ok(())), (Cadence, None));
+        // The same refusal after recovery is a new transition.
+        assert_eq!(
+            classify(reset, &refusal),
+            (ParkUntilWake, Some("blocked_reset_required"))
+        );
+
+        let unavailable = std::path::Path::new("/isolated/project/tick-authority");
+        let missing_authority: Result<(), TraceDecayError> = Err(TraceDecayError::Config {
+            message: "automation retained application authority is unavailable".to_owned(),
+        });
+        assert_eq!(
+            classify(unavailable, &missing_authority),
+            (Cadence, Some("error"))
+        );
+        for _ in 0..20 {
+            assert_eq!(classify(unavailable, &missing_authority), (Cadence, None));
+        }
+        let changed: Result<(), TraceDecayError> = Err(TraceDecayError::Config {
+            message: "a different condition".to_owned(),
+        });
+        assert_eq!(classify(unavailable, &changed), (Cadence, Some("error")));
+    }
+
     #[tokio::test]
     async fn disabled_fixed_task_preflight_creates_no_effect_journal() {
         let dashboard = tempfile::tempdir().expect("dashboard root");
@@ -933,7 +981,7 @@ mod tests {
         let decision = fixed_task_schedule_decision(
             dashboard.path(),
             &tracedecay_automation::config::admit_config(&config).unwrap(),
-            None,
+            &tracedecay_domain::configuration::LcmSummarizerExecutableV1::Unconfigured,
             tracedecay_automation_runtime::automation::backend::AgentTaskKind::MemoryCurator,
             tracedecay_automation_runtime::automation::scheduler::SessionActivity::none(),
             1,

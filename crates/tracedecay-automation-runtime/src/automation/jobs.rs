@@ -459,16 +459,30 @@ pub fn job_schedule_decision(
     records: &[AutomationRunLedgerRecord],
     now_secs: i64,
 ) -> Option<AutomationSkipReasonV1> {
-    match checked_job_schedule_decision(job, records, now_secs) {
+    match checked_job_schedule_decision(job, records, now_secs, None) {
         Ok(decision) => decision,
         Err(_) => Some(AutomationSkipReasonV1::SchedulerHistoryInvalid),
     }
+}
+
+/// A failure under a replaced backend is not evidence about the currently
+/// configured backend. Successful cadence and unstamped failures still stand.
+pub fn configured_job_schedule_decision(
+    config: &AutomationSettingsV1,
+    executable: Option<&Path>,
+    job: &AdmittedAutomationJob,
+    records: &[AutomationRunLedgerRecord],
+    now_secs: i64,
+) -> Result<Option<AutomationSkipReasonV1>> {
+    let identity = super::backend_identity::backend_identity(config, executable)?;
+    checked_job_schedule_decision(job, records, now_secs, Some(&identity))
 }
 
 fn checked_job_schedule_decision(
     job: &AdmittedAutomationJob,
     records: &[AutomationRunLedgerRecord],
     now_secs: i64,
+    backend_identity: Option<&str>,
 ) -> Result<Option<AutomationSkipReasonV1>> {
     if !job.enabled {
         return Ok(Some(AutomationSkipReasonV1::UserJobDisabled));
@@ -481,7 +495,12 @@ fn checked_job_schedule_decision(
     }
 
     let task_key = job_task_key(&job.id);
-    let last = latest_terminal_job_record(records, &task_key, Some(AutomationTrigger::Scheduler))?;
+    let last = latest_terminal_job_record(
+        records,
+        &task_key,
+        Some(AutomationTrigger::Scheduler),
+        backend_identity,
+    )?;
     if let Some((record, completed_at)) = last {
         if record.status == AutomationRunStatus::Failed {
             let disposition = super::backend::agent_task_failure_disposition(
@@ -522,10 +541,15 @@ fn latest_terminal_job_record<'a>(
     records: &'a [AutomationRunLedgerRecord],
     task_key: &str,
     trigger: Option<AutomationTrigger>,
+    backend_identity: Option<&str>,
 ) -> Result<Option<(&'a AutomationRunLedgerRecord, i64)>> {
     latest_record_by_canonical_completion(records.iter().filter(|record| {
         record.task_key == task_key
             && trigger.is_none_or(|trigger| record.trigger == trigger)
+            && !(record.status == AutomationRunStatus::Failed
+                && backend_identity
+                    .zip(record.backend_identity.as_deref())
+                    .is_some_and(|(current, recorded)| current != recorded))
             && matches!(
                 record.status,
                 AutomationRunStatus::Succeeded | AutomationRunStatus::Failed
@@ -630,7 +654,13 @@ async fn run_retained_user_job(
     };
     if let Some(scheduler_summary) = scheduler_summary.as_ref() {
         let now_secs = current_timestamp();
-        let decision = job_schedule_decision(job, scheduler_summary.records(), now_secs);
+        let decision = configured_job_schedule_decision(
+            config,
+            backend.executable(),
+            job,
+            scheduler_summary.records(),
+            now_secs,
+        )?;
         if let Some(reason) = decision {
             return ctx.skipped(reason).await.map_err(Into::into);
         }

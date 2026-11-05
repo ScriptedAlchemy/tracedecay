@@ -80,7 +80,7 @@ async fn open_project_composition(
 /// projection and never replays its partitions to seat a second copy, so the
 /// probe is asserted here on the publishing open and the caller proves the
 /// reopen serves that same generation by its id.
-async fn open_project(
+pub(super) async fn open_project(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
     instance: &str,
@@ -130,7 +130,7 @@ async fn open_project(
     Ok((composition, serving))
 }
 
-async fn seed_project_sessions_pending_convergence(
+pub(super) async fn seed_project_sessions_pending_convergence(
     profile_root: &Path,
     project_root: &Path,
     project_id: &tracedecay_domain::ProjectId,

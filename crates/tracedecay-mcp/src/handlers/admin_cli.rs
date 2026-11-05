@@ -330,6 +330,12 @@ async fn dispatch_admin_cli(
             no_sync,
         } => {
             let project = context.scoped_project(scope)?;
+            // The readiness fold is composed by the crate that owns the hook
+            // contract; the application port reads it. Mount it here, in the
+            // one dispatch every diagnostics surface (CLI, MCP admin tool,
+            // daemon-served dashboard) passes through, so no surface serves
+            // readiness as permanently unavailable.
+            tracedecay_agent_hosts::hooks::install_hook_readiness_projection()?;
             AdminCliResultV1::AnalyticsDiagnostics(
                 tracedecay_application::analytics_bridge::analytics_diagnostics_with_db(
                     context.require_accounting_db()?,
@@ -935,6 +941,63 @@ mod tests {
             error
                 .to_string()
                 .contains("requires an initialized project")
+        );
+    }
+
+    /// The admin-CLI diagnostics action is the one dispatch the CLI, the MCP
+    /// admin tool, and the daemon-served dashboard all cross. It must mount the
+    /// hook readiness projection, or every one of those surfaces reports
+    /// readiness as permanently unavailable.
+    #[tokio::test]
+    async fn analytics_diagnostics_dispatch_mounts_the_hook_readiness_projection() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = directory.path().join("profile");
+        let (project, _runtime) = project_fixture(
+            &directory.path().join("project"),
+            &profile,
+            "project.readiness",
+        )
+        .await;
+        let profile_database = project
+            .store_runtime_registry()
+            .profile_sessions()
+            .await
+            .unwrap();
+        let context = AdminCliContext::projectless(
+            &profile_database,
+            Some(std::convert::AsRef::as_ref(&profile_database)),
+            &profile,
+            None,
+            None,
+        );
+
+        let result = dispatch_admin_cli(
+            context,
+            AdminCliSurfaceRequestV1::AnalyticsDiagnostics {
+                scope: AdminCliScopeV1::Profile,
+                all: true,
+                no_sync: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let AdminCliResultV1::AnalyticsDiagnostics(summary) = result else {
+            panic!("analytics diagnostics answered with another action's result");
+        };
+        let readiness = &summary["hook_readiness"];
+        assert_eq!(readiness["source_event"], "hook_completed");
+        assert_ne!(
+            readiness["collection_status"], "unavailable",
+            "the dispatch must mount the projection before folding readiness: {readiness}"
+        );
+        assert!(
+            !readiness["unavailable_metrics"]
+                .as_array()
+                .is_some_and(|metrics| metrics
+                    .iter()
+                    .any(|metric| metric["metric"] == "hook_readiness")),
+            "the unmounted-projection blocker must be absent: {readiness}"
         );
     }
 

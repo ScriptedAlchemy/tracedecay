@@ -9,6 +9,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::UtcMicros;
 
+use super::super::workflow_effect_journal::workflow_storage_problem;
 use super::super::workflow_run_control::{
     workflow_run_storage_problem, workflow_runtime_unavailable,
 };
@@ -61,7 +62,7 @@ async fn reconcile_active_workflow_fan_out_page(
         &registered.database,
     )
     .await
-    .map_err(|_| workflow_runtime_unavailable())?;
+    .map_err(|error| workflow_storage_problem(&error))?;
     let registered_authority = tracedecay_domain::WorkAuthority::new(
         registered.grant.scope.project_id.clone(),
         registered.grant.scope.repository_id.clone(),
