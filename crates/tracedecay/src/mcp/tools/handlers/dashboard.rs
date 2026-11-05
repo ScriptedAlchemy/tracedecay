@@ -1096,8 +1096,8 @@ pub(super) async fn compute_dashboard(
                         let project_id = cg.store_layout().identity.project_id.clone();
                         Arc::new(move || registry.reset_required_stores().into_iter().filter(|refusal| {
                             match tracedecay_domain::errors::ResettableStoreV1::from_label(&refusal.store) {
-                                Some(tracedecay_domain::errors::ResettableStoreV1::ProjectSessions { project_id: target })
-                                | Some(tracedecay_domain::errors::ResettableStoreV1::ProjectHookAdmissions { project_id: target }) => project_id.as_deref() == Some(target.as_str()),
+                                Some(tracedecay_domain::errors::ResettableStoreV1::ProjectSessions { project_id: target }
+                                | tracedecay_domain::errors::ResettableStoreV1::ProjectHookAdmissions { project_id: target }) => project_id.as_deref() == Some(target.as_str()),
                                 _ => true,
                             }
                         }).collect())
