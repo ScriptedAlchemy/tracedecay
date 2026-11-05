@@ -55,11 +55,6 @@ impl ExistingReaderLocator {
         self.opened_database = Some(Arc::new(opened_database));
         self
     }
-    pub(crate) fn release_opened_database_after_workers_exit(&self) {
-        if let Some(opened) = &self.opened_database {
-            opened.release_after_workers_exit();
-        }
-    }
     pub(crate) fn expected_file_identity(&self) -> Option<u64> {
         self.opened_database
             .as_deref()
