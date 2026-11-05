@@ -298,6 +298,101 @@ fn job_scheduler_fails_closed_on_invalid_completion_history() {
 }
 
 #[tokio::test]
+async fn unconfigured_backend_jobs_are_blocked_without_failure_cooldown_and_recover() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let mut job = interval_job();
+    let config = AutomationSettingsV1 {
+        enabled: true,
+        backend: crate::automation::config::AutomationBackendV1::CodexAppServer,
+        allow_job_commands: true,
+        ..AutomationSettingsV1::default()
+    };
+    // A command is pre-run context, not a command-only job.
+    job.pre_run_command = Some("printf context".to_owned());
+    let read = |executable, run_id| {
+        super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
+            temp.path(),
+            &config,
+            executable,
+            &job,
+            run_id,
+            150,
+            None,
+        )
+    };
+    let blocked = read(None, "unconfigured-occurrence")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(blocked.ledger_record.status, AutomationRunStatus::Skipped);
+    assert_eq!(
+        blocked.ledger_record.error.as_deref(),
+        Some("backend_unconfigured")
+    );
+    let repeated = read(None, "unconfigured-occurrence")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(repeated.ledger_record, blocked.ledger_record);
+    let records = load_run_records_for_task_key(temp.path(), &super::job_task_key(&job.id), 100)
+        .await
+        .unwrap();
+    assert!(
+        records
+            .iter()
+            .all(|record| record.status == AutomationRunStatus::Skipped)
+    );
+    let executable = tempfile::NamedTempFile::new().unwrap();
+    assert!(
+        read(Some(executable.path()), "configured-occurrence")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut historical = ledger_record(
+        "unconfigured-failure",
+        AutomationRunStatus::Failed,
+        Some(crate::automation::backend::CODEX_EXECUTABLE_UNCONFIGURED),
+        149,
+    );
+    historical.backend_identity =
+        Some(crate::automation::backend_identity::backend_identity(&config, None).unwrap());
+    historical.error_classification = Some(AgentTaskFailureClass::Unavailable);
+    historical.error_retryable = Some(true);
+    append_run_record(temp.path(), &historical).await.unwrap();
+    assert!(
+        read(Some(executable.path()), "recovered-occurrence")
+            .await
+            .unwrap()
+            .is_none(),
+        "a prior unconfigured attempt must not impose cooldown after recovery"
+    );
+    historical.backend_identity = Some(
+        crate::automation::backend_identity::backend_identity(&config, Some(executable.path()))
+            .unwrap(),
+    );
+    assert_eq!(
+        super::configured_job_schedule_decision(
+            &config,
+            Some(executable.path()),
+            &super::admit_job(&job).unwrap(),
+            &[historical],
+            150,
+        )
+        .unwrap(),
+        Some(AutomationSkipReasonV1::SchedulerCooldownActive),
+        "a failure under the current backend must keep its cooldown"
+    );
+    let isolated = tempfile::TempDir::new().unwrap();
+    assert!(
+        load_run_records_for_task_key(isolated.path(), &super::job_task_key(&job.id), 100)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     let temp = tempfile::TempDir::new().unwrap();
     let job = interval_job();
@@ -308,10 +403,11 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     .await
     .unwrap();
     let config = AutomationSettingsV1::default();
+    let executable = tempfile::NamedTempFile::new().unwrap();
     let first = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
         temp.path(),
         &config,
-        None,
+        Some(executable.path()),
         &job,
         "next-occurrence",
         101,
@@ -328,7 +424,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     let repeated = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
         temp.path(),
         &config,
-        None,
+        Some(executable.path()),
         &job,
         "next-occurrence",
         102,
@@ -357,7 +453,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     let due = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
         temp.path(),
         &config,
-        None,
+        Some(executable.path()),
         &job,
         "next-occurrence",
         160,
@@ -384,7 +480,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     let next_skip = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
         temp.path(),
         &config,
-        None,
+        Some(executable.path()),
         &job,
         "following-occurrence",
         161,
@@ -397,7 +493,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     let repeated_next = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
         temp.path(),
         &config,
-        None,
+        Some(executable.path()),
         &job,
         "following-occurrence",
         162,
@@ -427,7 +523,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
     let after_noise = super::scheduler_gate::evaluate_and_record_scheduler_skip_at(
         temp.path(),
         &config,
-        None,
+        Some(executable.path()),
         &job,
         "following-occurrence",
         163,

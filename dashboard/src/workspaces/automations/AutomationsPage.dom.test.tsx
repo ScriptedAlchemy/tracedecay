@@ -398,6 +398,7 @@ function scheduler(overrides: { paused?: boolean; status?: string; tasks?: unkno
     paused: overrides.paused ?? false,
     enabled: true,
     scheduler_tick_secs: 900,
+    reset_required_stores: [],
     now: NOW,
     last_session_activity: NOW - 1200,
     configuration_revision_id: "configuration.revision.automation.test",

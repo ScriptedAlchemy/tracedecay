@@ -15,6 +15,7 @@ function scheduler(overrides: Record<string, unknown> = {}) {
     paused: false,
     enabled: true,
     scheduler_tick_secs: 300,
+    reset_required_stores: [],
     now: 1_700_000_000,
     last_session_activity: 1_699_999_000,
     configuration_revision_id: "configuration.revision.test",

@@ -65,6 +65,7 @@ function schedulerBody(paused: boolean) {
     paused,
     enabled: true,
     scheduler_tick_secs: 900,
+    reset_required_stores: [],
     now,
     last_session_activity: null,
     configuration_revision_id: "configuration.revision.scope.test",

@@ -212,8 +212,29 @@ interface SchedulerReading {
   readonly sentence: string;
 }
 
+/**
+ * The blocked reading names every store, its refusal and the exact command
+ * that resets it, so the operator never has to open another surface to learn
+ * what to run. The daemon lists the stores in registry order; one refusal per
+ * store is the whole census, not a sample.
+ */
+function blockedResetSentence(stores: AutomationSchedulerStatusV1['reset_required_stores']): string {
+  if (stores.length === 0) {
+    return 'the scheduler is blocked on a reset-required store; no census was reported';
+  }
+  return stores
+    .map((store) => `${store.store} (${store.authority}) requires reset: ${store.reason}. Remedy: ${store.remedy}`)
+    .join(' ');
+}
+
 export function schedulerReading(status: AutomationSchedulerStatusV1): SchedulerReading {
   switch (status.status) {
+    case 'blocked_reset_required':
+      return {
+        tone: DEGRADED,
+        word: 'reset required',
+        sentence: blockedResetSentence(status.reset_required_stores),
+      };
     case 'configured':
       return {
         tone: SIGNAL,

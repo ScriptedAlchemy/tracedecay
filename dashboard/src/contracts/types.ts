@@ -232,6 +232,7 @@ export type AnalyticsPromptCategoryCountV1 = {
 export type AnalyticsRecentEventV1 = {
   cost?: RequestCostReceiptV1 | null | undefined;
   event_kind: string;
+  failure_reason?: string | null | undefined;
   hook_name: string;
   outcome: string;
   timestamp: number | null;
@@ -700,7 +701,7 @@ export type AutomationRunTerminalV1 =
     summary: AutomationRunSummaryV1;
   };
 
-export type AutomationSchedulerAvailabilityV1 = "automation_disabled" | "backend_disabled" | "backend_unconfigured" | "configured" | "delegated_host" | "paused";
+export type AutomationSchedulerAvailabilityV1 = "automation_disabled" | "backend_disabled" | "backend_unconfigured" | "blocked_reset_required" | "configured" | "delegated_host" | "paused";
 
 export type AutomationSchedulerStatusV1 = {
   configuration_revision_id: string;
@@ -709,6 +710,7 @@ export type AutomationSchedulerStatusV1 = {
   last_session_activity: number | null;
   now: number;
   paused: boolean;
+  reset_required_stores: Array<StoreResetRequiredV1>;
   scheduler_tick_secs: number;
   status: AutomationSchedulerAvailabilityV1;
   tasks: Array<AutomationTaskStatusV1>;
@@ -5335,6 +5337,15 @@ export type StoreKeyV1 = string;
 export type StorePointReadsV1 = {
   graph_sealed: number;
   graph_staging: number;
+};
+
+export type StoreResetRequiredV1 = {
+  authority: string;
+  found_version: number | null;
+  reason: string;
+  remedy: string;
+  required_version: number | null;
+  store: string;
 };
 
 export type StoreSizeSampleV1 = {

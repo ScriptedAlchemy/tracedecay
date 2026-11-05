@@ -34,6 +34,16 @@ pub type AutomationSchedulerReconcileFuture = Pin<
 >;
 pub type AutomationSchedulerReconciler =
     Arc<dyn Fn() -> AutomationSchedulerReconcileFuture + Send + Sync + 'static>;
+/// The scheduler's own reset census: every store this project's scheduler
+/// owner reports in its typed reset-required state, each with the exact
+/// command that resets it.
+///
+/// The reader is bound to one project's exact store identity, so a project's
+/// dashboard never adopts another project's refusal. A standalone dashboard
+/// has no daemon registry to read and leaves this `None`; the ledger refusal
+/// path still reports the run ledger's own reset.
+pub type SchedulerResetCensusReader =
+    Arc<dyn Fn() -> Vec<tracedecay_domain::errors::StoreResetRequiredV1> + Send + Sync + 'static>;
 pub type DashboardAutomationObservationRecorderV1 = Arc<
     dyn Fn(tracedecay_automation_runtime::automation::run_ledger::AutomationRunLedgerRecord)
         + Send
@@ -107,6 +117,7 @@ pub struct DashboardStateCompositionV1 {
         Arc<dyn Fn(PathBuf) -> DashboardAutomationObservationFuture + Send + Sync + 'static>,
     >,
     pub automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
+    pub scheduler_reset_census_reader: Option<SchedulerResetCensusReader>,
     pub automation_writer: DashboardAutomationWriter,
     pub doctor_report_reader: Option<DoctorReportReader>,
     /// Daemon-owned Remote Brain operational read. Standalone dashboards leave
@@ -288,6 +299,7 @@ pub struct DashboardState {
         Arc<dyn Fn(PathBuf) -> DashboardAutomationObservationFuture + Send + Sync + 'static>,
     >,
     pub automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
+    pub scheduler_reset_census_reader: Option<SchedulerResetCensusReader>,
     /// Lifetime-owning capability for complete dashboard automation writes.
     pub automation_writer: DashboardAutomationWriter,
     /// Admitted canonical Doctor report source. Absent when the dashboard was
@@ -421,6 +433,7 @@ pub(super) async fn build_state_inner(
         automation_authority,
         automation_observation,
         automation_scheduler_reconciler,
+        scheduler_reset_census_reader,
         automation_writer,
         doctor_report_reader,
         remote_operational_status_reader,
@@ -543,6 +556,7 @@ pub(super) async fn build_state_inner(
         automation_authority,
         automation_observation,
         automation_scheduler_reconciler,
+        scheduler_reset_census_reader,
         automation_writer,
         doctor_report_reader,
         remote_operational_status_reader,
@@ -595,6 +609,9 @@ pub async fn build_selected_project_state(
             automation_authority: active.automation_authority.clone(),
             automation_observation: active.automation_observation.clone(),
             automation_scheduler_reconciler: None,
+            // The active reader carries that project's exact store identity.
+            // A selected lightweight state must not alias its reset census.
+            scheduler_reset_census_reader: None,
             automation_writer: Arc::clone(&active.automation_writer),
             // Doctor authority is bound to the active project's exact scope.
             // Freshness is different: its daemon registry reader resolves the

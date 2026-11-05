@@ -944,6 +944,13 @@
         "event_kind": {
           "type": "string"
         },
+        "failure_reason": {
+          "description": "The bounded, sanitized reason a failed call recorded.\n\n`outcome` alone says a call failed; without the reason an operator can\nsee that something broke but not what. The durable metadata column is\nnot a disclosure boundary, so the text crosses the privacy authority\nand a bounded length before it is served, and text the sanitizer\nquarantines is omitted rather than echoed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "hook_name": {
           "type": "string"
         },
@@ -3076,6 +3083,7 @@
         "delegated_host",
         "backend_disabled",
         "backend_unconfigured",
+        "blocked_reset_required",
         "configured"
       ],
       "type": "string"
@@ -3107,6 +3115,12 @@
         "paused": {
           "type": "boolean"
         },
+        "reset_required_stores": {
+          "items": {
+            "$ref": "#/$defs/StoreResetRequiredV1"
+          },
+          "type": "array"
+        },
         "scheduler_tick_secs": {
           "format": "uint64",
           "minimum": 0,
@@ -3131,7 +3145,8 @@
         "last_session_activity",
         "configuration_revision_id",
         "control_path",
-        "tasks"
+        "tasks",
+        "reset_required_stores"
       ],
       "type": "object"
     },
@@ -26318,6 +26333,46 @@
       "required": [
         "graph_sealed",
         "graph_staging"
+      ],
+      "type": "object"
+    },
+    "StoreResetRequiredV1": {
+      "description": "A persisted store the daemon keeps mounted in a typed reset-required state\ninstead of refusing to serve: every read against it returns the typed\nrefusal, stores that admit keep serving, and `remedy` is the exact command\nthe operator runs to reset it.",
+      "properties": {
+        "authority": {
+          "type": "string"
+        },
+        "found_version": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "remedy": {
+          "type": "string"
+        },
+        "required_version": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "store": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "store",
+        "authority",
+        "found_version",
+        "required_version",
+        "reason",
+        "remedy"
       ],
       "type": "object"
     },

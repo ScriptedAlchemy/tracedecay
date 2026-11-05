@@ -7,7 +7,7 @@ use super::admit_job;
 use super::{
     AdmittedAutomationJob, AgentTaskKind, AutomationJob, AutomationRunLedgerPublication,
     AutomationSettingsV1, AutomationTrigger, JobRunContext, Result, TraceDecayError,
-    UserJobAutomationRun, config_skip_reason, current_timestamp, job_schedule_decision,
+    UserJobAutomationRun, config_skip_reason, configured_job_schedule_decision, current_timestamp,
     job_task_key, load_run_ledger_task_summary, try_acquire_job_task_lock,
 };
 /// Applies the configuration, canonical job-lock, and schedule gates before
@@ -43,7 +43,7 @@ pub async fn evaluate_and_record_scheduler_skip(
     run_id: &str,
     occurrence_anchor_run_id: Option<&str>,
 ) -> Result<Option<UserJobAutomationRun>> {
-    if let Some(reason) = config_skip_reason(config) {
+    if let Some(reason) = job_backend_skip_reason(config, executable) {
         return record_scheduler_diagnostic(
             dashboard_root,
             config,
@@ -77,7 +77,14 @@ pub async fn evaluate_and_record_scheduler_skip(
 
     let summary = load_scheduler_summary(dashboard_root, job).await?;
     let decision_time = current_timestamp();
-    let Some(reason) = job_schedule_decision(job, summary.records(), decision_time) else {
+    let Some(reason) = configured_job_schedule_decision(
+        config,
+        executable,
+        job,
+        summary.records(),
+        decision_time,
+    )?
+    else {
         crate::automation::scheduler_trace::observe_due();
         return Ok(None);
     };
@@ -107,7 +114,7 @@ pub(super) async fn evaluate_and_record_scheduler_skip_at(
     occurrence_anchor_run_id: Option<&str>,
 ) -> Result<Option<UserJobAutomationRun>> {
     let admitted_job = admit_job(job)?;
-    if let Some(reason) = config_skip_reason(config) {
+    if let Some(reason) = job_backend_skip_reason(config, executable) {
         return record_scheduler_diagnostic(
             dashboard_root,
             config,
@@ -137,7 +144,14 @@ pub(super) async fn evaluate_and_record_scheduler_skip_at(
     };
 
     let summary = load_scheduler_summary(dashboard_root, job).await?;
-    let Some(reason) = job_schedule_decision(&admitted_job, summary.records(), now_secs) else {
+    let Some(reason) = configured_job_schedule_decision(
+        config,
+        executable,
+        &admitted_job,
+        summary.records(),
+        now_secs,
+    )?
+    else {
         return Ok(None);
     };
     record_scheduler_diagnostic(
@@ -152,6 +166,20 @@ pub(super) async fn evaluate_and_record_scheduler_skip_at(
     )
     .await
     .map(Some)
+}
+
+fn job_backend_skip_reason(
+    config: &AutomationSettingsV1,
+    executable: Option<&Path>,
+) -> Option<AutomationSkipReasonV1> {
+    config_skip_reason(config).or_else(|| {
+        // pre_run_command supplies context; every user job still invokes
+        // the backend. Refuse before external-effect admission, not as a
+        // failed attempt that imposes a cooldown after configuration recovery.
+        (config.backend == crate::automation::config::AutomationBackendV1::CodexAppServer
+            && executable.is_none())
+        .then_some(AutomationSkipReasonV1::BackendUnconfigured)
+    })
 }
 
 async fn load_scheduler_summary(

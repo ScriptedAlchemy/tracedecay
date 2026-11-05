@@ -54,6 +54,7 @@ use tracedecay_contracts::project_open::ProjectOpenStatusStateV1;
 #[cfg(unix)]
 use tracedecay_daemon_identity::profile_identity;
 use tracedecay_daemon_protocol::DaemonHandshake;
+use tracedecay_daemon_service::project_runtime::ProjectRuntimePublicationStateV1;
 #[cfg(unix)]
 #[cfg(unix)]
 use tracedecay_daemon_service::shutdown::{DAEMON_TASK_ABORT_DEADLINE, DaemonLifecycle};
@@ -787,7 +788,6 @@ impl DaemonEngine {
                     composition.key.clone(),
                     composition.canonical_project_path.clone(),
                     handshake.clone(),
-                    Arc::clone(&composition.server),
                 );
             }
             Ok((
@@ -882,30 +882,43 @@ impl DaemonEngine {
         })
     }
 
-    fn spawn_project_maintenance_activation(
+    pub(super) fn spawn_project_maintenance_activation(
         &self,
         key: ProjectServerKey,
         project_path: PathBuf,
         handshake: DaemonHandshake,
-        server: Arc<crate::mcp::McpServer>,
     ) {
         let engine = self.clone();
-        let recovery_server = Arc::clone(&server);
         spawn_lifecycle_automation_scheduler_activation(
             self.lifecycle.clone(),
             tracing::Instrument::instrument(
                 async move {
-                    let cg = recovery_server.cg_snapshot().await;
-                    project_open_owners::reconcile_project_open_automation_effects(cg).await;
-                },
-                tracing::trace_span!("daemon.engine.reconcile_automation_effects"),
-            ),
-        );
-        spawn_lifecycle_automation_scheduler_activation(
-            self.lifecycle.clone(),
-            tracing::Instrument::instrument(
-                async move {
+                    // The core route precedes mandatory retained owners. Subscribe
+                    // before reading so publication cannot race this waiter.
+                    loop {
+                        let (publication, mut changed) = engine
+                            .invocation
+                            .service
+                            .project_runtimes
+                            .publication_view(&project_path);
+                        match publication {
+                            Some(ProjectRuntimePublicationStateV1::Ready) => break,
+                            Some(ProjectRuntimePublicationStateV1::Warming) => {
+                                if changed.changed().await.is_err() {
+                                    return;
+                                }
+                            }
+                            _ => return,
+                        }
+                    }
+                    let server = {
+                        let servers = engine.store_administration.project_servers().lock().await;
+                        servers.get(&key).cloned()
+                    };
+                    let Some(server) = server else { return };
                     let cg = server.cg_snapshot().await;
+                    project_open_owners::reconcile_project_open_automation_effects(Arc::clone(&cg))
+                        .await;
                     engine
                         .activate_automation_scheduler_for_open_project(
                             key,

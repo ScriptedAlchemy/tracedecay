@@ -709,6 +709,7 @@ import type {
   StoreGrowthDimensionV1,
   StoreKeyV1,
   StorePointReadsV1,
+  StoreResetRequiredV1,
   StoreSizeSampleV1,
   StoreTelemetryEntryV1,
   StrataClusterV1,
@@ -1375,6 +1376,7 @@ export const AnalyticsPromptCategoryCountV1Schema: z.ZodObject<{
 export const AnalyticsRecentEventV1Schema: z.ZodObject<{
   cost: z.ZodOptional<z.ZodType<RequestCostReceiptV1 | null, unknown>>;
   event_kind: z.ZodType<string, unknown>;
+  failure_reason: z.ZodOptional<z.ZodType<string | null, unknown>>;
   hook_name: z.ZodType<string, unknown>;
   outcome: z.ZodType<string, unknown>;
   timestamp: z.ZodType<number | null, unknown>;
@@ -1382,6 +1384,7 @@ export const AnalyticsRecentEventV1Schema: z.ZodObject<{
 }> = z.object({
   cost: z.union([z.lazy(() => RequestCostReceiptV1Schema), z.null()]).optional(),
   event_kind: z.string(),
+  failure_reason: z.string().nullable().optional(),
   hook_name: z.string(),
   outcome: z.string(),
   timestamp: z.number().int().nullable(),
@@ -2154,7 +2157,7 @@ export const AutomationRunTerminalV1Schema: z.ZodType<AutomationRunTerminalV1, u
 
 Wire tokens stay the historical labels. A new state is a compile error in
 [`scheduler_status_label`] until this enum gains a variant. */
-export const AutomationSchedulerAvailabilityV1Schema: z.ZodEnum<{ "automation_disabled": "automation_disabled"; "backend_disabled": "backend_disabled"; "backend_unconfigured": "backend_unconfigured"; "configured": "configured"; "delegated_host": "delegated_host"; "paused": "paused" }> = z.enum(["automation_disabled", "backend_disabled", "backend_unconfigured", "configured", "delegated_host", "paused"]);
+export const AutomationSchedulerAvailabilityV1Schema: z.ZodEnum<{ "automation_disabled": "automation_disabled"; "backend_disabled": "backend_disabled"; "backend_unconfigured": "backend_unconfigured"; "blocked_reset_required": "blocked_reset_required"; "configured": "configured"; "delegated_host": "delegated_host"; "paused": "paused" }> = z.enum(["automation_disabled", "backend_disabled", "backend_unconfigured", "blocked_reset_required", "configured", "delegated_host", "paused"]);
 
 /** The scheduler reading served by `status`, `pause`, and `resume`.
 
@@ -2168,6 +2171,7 @@ export const AutomationSchedulerStatusV1Schema: z.ZodObject<{
   last_session_activity: z.ZodType<number | null, unknown>;
   now: z.ZodType<number, unknown>;
   paused: z.ZodType<boolean, unknown>;
+  reset_required_stores: z.ZodType<Array<StoreResetRequiredV1>, unknown>;
   scheduler_tick_secs: z.ZodType<number, unknown>;
   status: z.ZodType<AutomationSchedulerAvailabilityV1, unknown>;
   tasks: z.ZodType<Array<AutomationTaskStatusV1>, unknown>;
@@ -2178,6 +2182,7 @@ export const AutomationSchedulerStatusV1Schema: z.ZodObject<{
   last_session_activity: z.number().int().nullable(),
   now: z.number().int(),
   paused: z.boolean(),
+  reset_required_stores: z.array(z.lazy(() => StoreResetRequiredV1Schema)),
   scheduler_tick_secs: z.number().int().min(0),
   status: z.lazy(() => AutomationSchedulerAvailabilityV1Schema),
   tasks: z.array(z.lazy(() => AutomationTaskStatusV1Schema)),
@@ -9439,6 +9444,26 @@ export const StorePointReadsV1Schema: z.ZodObject<{
   graph_sealed: z.number().int().min(0),
   graph_staging: z.number().int().min(0),
 }).strict();
+
+/** A persisted store the daemon keeps mounted in a typed reset-required state
+instead of refusing to serve: every read against it returns the typed
+refusal, stores that admit keep serving, and `remedy` is the exact command
+the operator runs to reset it. */
+export const StoreResetRequiredV1Schema: z.ZodObject<{
+  authority: z.ZodType<string, unknown>;
+  found_version: z.ZodType<number | null, unknown>;
+  reason: z.ZodType<string, unknown>;
+  remedy: z.ZodType<string, unknown>;
+  required_version: z.ZodType<number | null, unknown>;
+  store: z.ZodType<string, unknown>;
+}> = z.object({
+  authority: z.string(),
+  found_version: z.number().int().nullable(),
+  reason: z.string(),
+  remedy: z.string(),
+  required_version: z.number().int().nullable(),
+  store: z.string(),
+});
 
 /** One cheap size sample for a single store, derived from page-count pragmas.
 

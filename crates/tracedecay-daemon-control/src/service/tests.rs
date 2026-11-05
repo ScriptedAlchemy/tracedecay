@@ -1182,6 +1182,62 @@ fn daemon_status_reports_the_initialize_proof_not_only_the_socket() {
     );
 }
 
+/// A daemon serving a store it holds reset-required is running, but it is not
+/// ready, and `daemon status` prints the exact refusal and remedy instead of
+/// the bare word "Ready".
+#[cfg(unix)]
+#[test]
+fn daemon_status_reports_a_reset_required_store_as_blocked_with_its_remedy() {
+    let profile_dir = TempDir::new().expect("profile temp dir");
+    let profile = ProfileRoot::new(profile_dir.path());
+    let socket = profile_dir.path().join("blocked.sock");
+    let authority = seed_socket_authority(&socket);
+    let listener = UnixListener::bind(&socket).expect("bind blocked socket");
+    let server = serve_probe_result(
+        listener,
+        serde_json::json!({
+            "serverInfo": {"name": "tracedecay", "version": env!("CARGO_PKG_VERSION")},
+            "_meta": {
+                tracedecay_daemon_protocol::contract::RESET_REQUIRED_STORES_META_KEY: [{
+                    "store": "profile sessions",
+                    "authority": "git correlation",
+                    "found_version": 5,
+                    "required_version": 6,
+                    "reason": "git correlation profile schema 5 is incompatible with required schema 6",
+                    "remedy": "tracedecay wipe --stale --yes",
+                }],
+            },
+        }),
+        authority.auth_token().to_owned(),
+    );
+    let status = super::service_status(&profile, &socket, env!("CARGO_PKG_VERSION"));
+    server.join().expect("join blocked status server");
+
+    assert!(status.is_serving(), "the process answered initialize");
+    assert!(
+        !status.is_ready(),
+        "a store held reset-required is the operator's pending reset, not readiness"
+    );
+    assert_eq!(status.reset_required_stores().len(), 1);
+    let status = status.to_string();
+    assert!(
+        status.starts_with("state: blocked: reset required\n"),
+        "the headline must name the block, got:\n{status}"
+    );
+    assert!(
+        status.contains("protocol: blocked: reset required (1 store(s))"),
+        "the protocol line must not claim readiness, got:\n{status}"
+    );
+    assert!(
+        status.contains("  profile sessions (git correlation) - git correlation profile schema 5"),
+        "the census must name the store, authority and reason, got:\n{status}"
+    );
+    assert!(
+        status.contains("    remedy: tracedecay wipe --stale --yes"),
+        "the census must carry the exact remedy, got:\n{status}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn daemon_status_is_not_ready_when_no_daemon_is_listening() {

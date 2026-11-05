@@ -199,3 +199,79 @@ async fn retirement_reaches_a_loop_parked_on_a_reset_refusal() {
     );
     engine.shutdown_all().await;
 }
+
+#[tokio::test]
+async fn scheduler_admission_waits_for_mandatory_runtime_publication() {
+    let (fixture, _scope) = project_with_refusing_ledger().await;
+    let engine = &fixture.engine;
+    let retirement = engine
+        .retire_automation_scheduler_locked(&fixture.key)
+        .await
+        .unwrap();
+    retirement.wait().await;
+    let registry = &engine.invocation.service.project_runtimes;
+    let publication = registry.begin_publication(&fixture.project).unwrap();
+    let cg = fixture._server.cg_snapshot().await;
+    assert_eq!(
+        engine
+            .start_automation_scheduler(
+                fixture.key.clone(),
+                fixture.project.clone(),
+                fixture.handshake.clone(),
+                cg.clone()
+            )
+            .await,
+        AutomationSchedulerReconcileOutcome::OwnerUnavailable,
+    );
+    assert!(
+        engine
+            .store_administration
+            .automation_schedulers()
+            .lock()
+            .await
+            .is_empty()
+    );
+    let before = tick_attempts(engine);
+    engine.spawn_project_maintenance_activation(
+        fixture.key.clone(),
+        fixture.project.clone(),
+        fixture.handshake.clone(),
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        tick_attempts(engine),
+        before,
+        "core publication must not tick"
+    );
+    assert!(registry.mark_publication_ready(&publication));
+    wait_for_ticks(engine, before + 1, "full publication wakes activation").await;
+    engine.shutdown_all().await;
+}
+
+#[tokio::test]
+async fn retirement_interrupts_a_reset_reconcile_quiet_period() {
+    let (fixture, _scope) = project_with_refusing_ledger().await;
+    let engine = &fixture.engine;
+    wait_for_ticks(engine, 1, "first refused tick").await;
+    engine
+        .ensure_automation_scheduler(
+            fixture.key.clone(),
+            fixture.project.clone(),
+            fixture.handshake.clone(),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let started = std::time::Instant::now();
+    let retirement = engine
+        .retire_automation_scheduler_locked(&fixture.key)
+        .await
+        .unwrap();
+    retirement.wait().await;
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "quiet debounce delayed retirement: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(tick_attempts(engine), 1);
+    engine.shutdown_all().await;
+}

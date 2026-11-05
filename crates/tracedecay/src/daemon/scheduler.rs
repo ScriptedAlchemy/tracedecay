@@ -179,10 +179,17 @@ fn observe_scheduler_tick_result(
 /// Waits out a burst of wakes, restarting the quiet period on each one, so a
 /// burst produces one follow-up rather than one per signal. `false` when the
 /// timer is unavailable.
-async fn scheduler_wake_quiet_period(project_path: &Path, wake: &tokio::sync::Notify) -> bool {
+async fn scheduler_wake_quiet_period(
+    project_path: &Path,
+    wake: &tokio::sync::Notify,
+    run_control: &AutomationRunControl,
+) -> bool {
     loop {
+        if run_control.read_control().interrupted() {
+            return false;
+        }
         tokio::select! {
-            slept = scheduler_sleep(project_path, Duration::from_secs(5)) => return slept,
+            slept = scheduler_sleep(project_path, Duration::from_secs(5)) => return slept && !run_control.read_control().interrupted(),
             () = wake.notified() => {}
         }
     }
@@ -786,6 +793,17 @@ impl DaemonEngine {
         if !self.lifecycle.accepting() {
             return AutomationSchedulerReconcileOutcome::LifecycleInactive;
         }
+        if self
+            .invocation
+            .service
+            .project_runtimes
+            .publication_state(&project_path)
+            .is_some_and(|state| {
+                state != tracedecay_daemon_service::project_runtime::ProjectRuntimePublicationStateV1::Ready
+            })
+        {
+            return AutomationSchedulerReconcileOutcome::OwnerUnavailable;
+        }
         let mut schedulers = self
             .store_administration
             .automation_schedulers()
@@ -1387,7 +1405,7 @@ async fn run_automation_scheduler_loop(
         {
             wake.notified().await;
             if run_control.read_control().interrupted()
-                || !scheduler_wake_quiet_period(&project_path, &wake).await
+                || !scheduler_wake_quiet_period(&project_path, &wake, &run_control).await
             {
                 break 'scheduler;
             }
@@ -1425,7 +1443,7 @@ async fn run_automation_scheduler_loop(
                 }
                 // Receipts arrive at tool cadence: one review for the burst
                 // rather than one review per command.
-                if !scheduler_wake_quiet_period(&project_path, &wake).await {
+                if !scheduler_wake_quiet_period(&project_path, &wake, &run_control).await {
                     break 'scheduler;
                 }
                 if let Err(error) = boxed_host_receipt_review(

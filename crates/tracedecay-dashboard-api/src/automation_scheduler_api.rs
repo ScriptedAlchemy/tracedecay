@@ -22,6 +22,7 @@ use tracedecay_automation_runtime::automation::scheduler::{
 };
 use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 use tracedecay_domain::configuration::LcmSummarizerExecutableV1;
+use tracedecay_domain::errors::{StoreResetRequiredV1, TraceDecayError};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 type ApiResult = std::result::Result<Json<AutomationSchedulerStatusV1>, JsonError>;
@@ -43,6 +44,7 @@ pub(super) struct AutomationSchedulerStatusV1 {
     pub configuration_revision_id: String,
     pub control_path: String,
     pub tasks: Vec<AutomationTaskStatusV1>,
+    pub reset_required_stores: Vec<StoreResetRequiredV1>,
 }
 
 /// Closed availability vocabulary for the scheduler status reading.
@@ -57,6 +59,7 @@ pub(super) enum AutomationSchedulerAvailabilityV1 {
     DelegatedHost,
     BackendDisabled,
     BackendUnconfigured,
+    BlockedResetRequired,
     Configured,
 }
 
@@ -106,34 +109,50 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
     let control = load_scheduler_control(&state.dashboard_root)
         .await
         .map_err(|err| internal_error(&err))?;
-    let memory_summary = load_run_ledger_task_summary(
-        &state.dashboard_root,
-        AgentTaskKind::MemoryCurator,
-        task_key(AgentTaskKind::MemoryCurator),
-    )
-    .await
-    .map_err(|err| internal_error(&err))?;
-    let session_summary = load_run_ledger_task_summary(
-        &state.dashboard_root,
-        AgentTaskKind::SessionReflector,
-        task_key(AgentTaskKind::SessionReflector),
-    )
-    .await
-    .map_err(|err| internal_error(&err))?;
-    let skill_summary = load_run_ledger_task_summary(
-        &state.dashboard_root,
-        AgentTaskKind::SkillWriter,
-        task_key(AgentTaskKind::SkillWriter),
-    )
-    .await
-    .map_err(|err| internal_error(&err))?;
+    let mut reset_required_stores = state
+        .scheduler_reset_census_reader
+        .as_ref()
+        .map(|read| read())
+        .unwrap_or_default();
+    let memory_summary = scheduler_summary_or_refusal(
+        load_run_ledger_task_summary(
+            &state.dashboard_root,
+            AgentTaskKind::MemoryCurator,
+            task_key(AgentTaskKind::MemoryCurator),
+        )
+        .await,
+        &mut reset_required_stores,
+    )?;
+    let session_summary = scheduler_summary_or_refusal(
+        load_run_ledger_task_summary(
+            &state.dashboard_root,
+            AgentTaskKind::SessionReflector,
+            task_key(AgentTaskKind::SessionReflector),
+        )
+        .await,
+        &mut reset_required_stores,
+    )?;
+    let skill_summary = scheduler_summary_or_refusal(
+        load_run_ledger_task_summary(
+            &state.dashboard_root,
+            AgentTaskKind::SkillWriter,
+            task_key(AgentTaskKind::SkillWriter),
+        )
+        .await,
+        &mut reset_required_stores,
+    )?;
     let now = current_timestamp();
     let activity = match state.lcm_db.as_deref() {
         Some(sessions_db) => load_session_activity(sessions_db).await,
         None => SessionActivity::none(),
     };
+    let blocked = !reset_required_stores.is_empty();
     Ok(Json(AutomationSchedulerStatusV1 {
-        status: scheduler_status_label(&effective, &codex, control.paused),
+        status: if blocked {
+            AutomationSchedulerAvailabilityV1::BlockedResetRequired
+        } else {
+            scheduler_status_label(&effective, &codex, control.paused)
+        },
         paused: control.paused,
         enabled: effective.enabled,
         scheduler_tick_secs: effective.scheduler_tick_secs,
@@ -143,36 +162,65 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
         control_path: scheduler_control_path(&state.dashboard_root)
             .display()
             .to_string(),
-        tasks: vec![
-            task_status(
-                &effective,
-                &codex,
-                control.paused,
-                &memory_summary,
-                activity,
-                now,
-                AgentTaskKind::MemoryCurator,
-            ),
-            task_status(
-                &effective,
-                &codex,
-                control.paused,
-                &session_summary,
-                activity,
-                now,
-                AgentTaskKind::SessionReflector,
-            ),
-            task_status(
-                &effective,
-                &codex,
-                control.paused,
-                &skill_summary,
-                activity,
-                now,
-                AgentTaskKind::SkillWriter,
-            ),
-        ],
+        // A refused ledger has no authoritative schedule or last-run reading.
+        tasks: if let (false, Some(memory_summary), Some(session_summary), Some(skill_summary)) =
+            (blocked, memory_summary, session_summary, skill_summary)
+        {
+            vec![
+                task_status(
+                    &effective,
+                    &codex,
+                    control.paused,
+                    &memory_summary,
+                    activity,
+                    now,
+                    AgentTaskKind::MemoryCurator,
+                ),
+                task_status(
+                    &effective,
+                    &codex,
+                    control.paused,
+                    &session_summary,
+                    activity,
+                    now,
+                    AgentTaskKind::SessionReflector,
+                ),
+                task_status(
+                    &effective,
+                    &codex,
+                    control.paused,
+                    &skill_summary,
+                    activity,
+                    now,
+                    AgentTaskKind::SkillWriter,
+                ),
+            ]
+        } else {
+            Vec::new()
+        },
+        reset_required_stores,
     }))
+}
+
+fn scheduler_summary_or_refusal(
+    result: Result<AutomationRunLedgerTaskSummary, TraceDecayError>,
+    refusals: &mut Vec<StoreResetRequiredV1>,
+) -> Result<Option<AutomationRunLedgerTaskSummary>, JsonError> {
+    match result {
+        Ok(summary) => Ok(Some(summary)),
+        Err(error) => {
+            let Some(refusal) = error.store_reset_required(
+                "automation",
+                tracedecay_domain::errors::PROFILE_RESET_COMMAND,
+            ) else {
+                return Err(internal_error(&error));
+            };
+            if !refusals.contains(&refusal) {
+                refusals.push(refusal);
+            }
+            Ok(None)
+        }
+    }
 }
 
 fn task_status(
@@ -237,6 +285,62 @@ mod tests {
     use tracedecay_automation_runtime::automation::run_ledger::{
         AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, run_ledger_path,
     };
+
+    #[tokio::test]
+    async fn refused_ledger_status_keeps_the_reset_census_and_recovers_without_fake_history() {
+        let temp = tempfile::TempDir::new().unwrap();
+        // A complete retired row: the ledger refuses it as a reset, which is a
+        // different state from a malformed row (a config error).
+        std::fs::write(
+            run_ledger_path(temp.path()),
+            "{\"schema_version\":1,\"run_id\":\"retired\",\"trigger\":\"scheduler\",\
+             \"task\":\"memory_curator\",\"task_key\":\"memory_curator\",\
+             \"backend\":\"codex_app_server\",\"status\":\"succeeded\",\
+             \"accepted_count\":0,\"rejected_count\":0,\"started_at\":\"1970-01-01T00:00:01Z\",\
+             \"completed_at\":\"1970-01-01T00:00:02Z\"}\n",
+        )
+        .unwrap();
+        let mut census = Vec::new();
+        for task in [
+            AgentTaskKind::MemoryCurator,
+            AgentTaskKind::SessionReflector,
+        ] {
+            scheduler_summary_or_refusal(
+                load_run_ledger_task_summary(temp.path(), task, task_key(task)).await,
+                &mut census,
+            )
+            .unwrap();
+        }
+        assert_eq!(census.len(), 1);
+        assert!(!census[0].reason.is_empty());
+        assert_eq!(census[0].store, "automation");
+        std::fs::remove_file(run_ledger_path(temp.path())).unwrap();
+        let mut recovered_census = Vec::new();
+        let summary = scheduler_summary_or_refusal(
+            load_run_ledger_task_summary(
+                temp.path(),
+                AgentTaskKind::MemoryCurator,
+                "memory_curator",
+            )
+            .await,
+            &mut recovered_census,
+        )
+        .unwrap();
+        assert!(recovered_census.is_empty());
+        assert!(summary.unwrap().records().is_empty());
+        let isolated = tempfile::TempDir::new().unwrap();
+        assert!(
+            load_run_ledger_task_summary(
+                isolated.path(),
+                AgentTaskKind::MemoryCurator,
+                "memory_curator"
+            )
+            .await
+            .unwrap()
+            .records()
+            .is_empty()
+        );
+    }
 
     fn record(
         run_id: &str,
