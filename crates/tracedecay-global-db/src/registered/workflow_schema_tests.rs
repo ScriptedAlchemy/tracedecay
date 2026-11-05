@@ -225,7 +225,7 @@ async fn extra_workflow_schema_identity_requires_reset_without_mutation() {
 mod published_artifact_ceiling {
     use std::future::Future as _;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Poll;
 
     use rusqlite::Connection;
@@ -234,11 +234,14 @@ mod published_artifact_ceiling {
     use tracedecay_lcm::LCM_SCHEMA_VERSION;
     use tracedecay_runtime_core::cancellation::CancellationToken;
     use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
+    use tracedecay_runtime_core::db::engine;
     use tracedecay_rusqlite_runtime::workflow::{
         WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1, WORKFLOW_TABLE_CONTRACTS_V1,
     };
 
+    use super::fs;
     use crate::RegisteredGlobalDbOwnerV1;
+    use crate::schema_stages::upgrade_published_artifact_ceiling;
     use crate::tests::harness::open_registered_test_database_fixture;
 
     /// The artifact table as `git show v1.0.0-beta.92` defines it, deliberately
@@ -493,11 +496,11 @@ mod published_artifact_ceiling {
         assert_eq!(upgraded.artifacts.len(), 4);
     }
 
-    /// A failure at the very last step, after the rows moved and the published
-    /// table was dropped, must restore all of it, and the store must take the
-    /// upgrade once the cause is gone.
+    /// A trigger that would block the identity swap is visible before anything
+    /// runs, so the census can name it too: the store is refused untouched, and
+    /// takes the upgrade once it is gone.
     #[asupersync::test]
-    async fn failed_upgrade_rolls_back_every_step_and_succeeds_once_unblocked() {
+    async fn identity_blocking_trigger_refuses_until_it_is_gone() {
         let store = PublishedStore::create().await;
         store.run(
             "CREATE TRIGGER block_workflow_identity BEFORE UPDATE ON workflow_schema
@@ -505,17 +508,8 @@ mod published_artifact_ceiling {
         );
         let before = store.state();
 
-        let error = open_registered_test_database_fixture(
-            &store.path,
-            TestDatabaseRuntimeScope::ProfileSessions,
-        )
-        .await
-        .err()
-        .expect("an upgrade that cannot finish must not publish the store");
-        let Some(("workflow", reason)) = error.reset_required_context() else {
-            panic!("refused with the wrong typed state: {error}");
-        };
-        assert!(reason.contains("left as found"), "{reason}");
+        let reason = assert_workflow_refusal(store.admit().await);
+        assert!(reason.contains("1 other schema object(s)"), "{reason}");
         assert!(!reason.contains("foreign trigger text"), "{reason}");
         assert_eq!(store.state(), before);
 
@@ -524,6 +518,23 @@ mod published_artifact_ceiling {
         let after = store.state();
         assert_eq!(after.digest, WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1);
         assert_eq!(after.artifacts, before.artifacts);
+    }
+
+    /// A row STRICT would reject, reachable only by a store edited around it,
+    /// under the exact published table text.
+    fn written_around_strict_types(values: &str) -> String {
+        format!(
+            "PRAGMA ignore_check_constraints = ON;
+             PRAGMA writable_schema = ON;
+             UPDATE sqlite_master SET sql = replace(sql, ') STRICT', ')')
+              WHERE name = 'workflow_artifact_payloads';
+             PRAGMA writable_schema = RESET;
+             INSERT INTO workflow_artifact_payloads VALUES ({values});
+             PRAGMA writable_schema = ON;
+             UPDATE sqlite_master SET sql = sql || ' STRICT'
+              WHERE name = 'workflow_artifact_payloads';
+             PRAGMA writable_schema = RESET;"
+        )
     }
 
     /// Each case differs from the proven shape in one way and must be refused
@@ -592,6 +603,41 @@ mod published_artifact_ceiling {
                 "a table in the displaced table's name",
                 "CREATE TABLE workflow_artifact_payloads_published (value TEXT);".to_owned(),
                 "1 other schema object(s)",
+            ),
+            (
+                "a trigger named exactly after the artifact table",
+                "CREATE TRIGGER workflow_artifact_payloads AFTER INSERT ON workflow_artifact_payloads
+                 BEGIN SELECT 1; END;"
+                    .to_owned(),
+                "1 other schema object(s)",
+            ),
+            (
+                "a trigger on the identity table",
+                "CREATE TRIGGER identity_audit AFTER UPDATE ON workflow_schema
+                 BEGIN SELECT 1; END;"
+                    .to_owned(),
+                "1 other schema object(s)",
+            ),
+            (
+                "an index on the artifact table",
+                "CREATE INDEX artifact_length ON workflow_artifact_payloads (byte_length);"
+                    .to_owned(),
+                "1 other schema object(s)",
+            ),
+            (
+                "a digest written around the strict column type",
+                written_around_strict_types("x'00', 1, x'aa'"),
+                "1 row(s)",
+            ),
+            (
+                "a byte length written around the strict column type",
+                written_around_strict_types("'sha256:text-length', 'one', x'aa'"),
+                "1 row(s)",
+            ),
+            (
+                "a payload written around the strict column type",
+                written_around_strict_types("'sha256:text-payload', 2, 'ab'"),
+                "1 row(s)",
             ),
             (
                 "a row whose length disagrees",
@@ -743,7 +789,7 @@ mod published_artifact_ceiling {
     }
 
     /// The census asks what attach would decide. It must admit a store the
-    /// real attach can upgrade, and must not perform that upgrade itself.
+    /// real attach can upgrade, and must not leave that upgrade behind.
     #[asupersync::test(flavor = "multi_thread")]
     async fn attach_refusal_inspection_admits_without_upgrading() {
         let daemon_store = DaemonPublishedStore::create().await;
@@ -793,6 +839,7 @@ mod published_artifact_ceiling {
         }
 
         let reference = DaemonPublishedStore::create().await;
+        reference.store.run(BULK_ROWS);
         let before = reference.store.state();
         let (outcome, total_polls) = admit_cancelled_at(&reference.store.path, usize::MAX).await;
         outcome.unwrap();
@@ -805,6 +852,7 @@ mod published_artifact_ceiling {
         for cancel_at in (1..total_polls).step_by(stride) {
             let daemon_store = DaemonPublishedStore::create().await;
             let store = &daemon_store.store;
+            store.run(BULK_ROWS);
             let (outcome, _) = admit_cancelled_at(&store.path, cancel_at).await;
             let state = store.state();
             match outcome {
@@ -813,7 +861,7 @@ mod published_artifact_ceiling {
                     assert!(error.is_store_open_cancelled(), "poll {cancel_at}: {error}");
                     assert!(
                         state == before || state == completed,
-                        "poll {cancel_at} left a partial upgrade: {state:?}"
+                        "poll {cancel_at} left a partial upgrade"
                     );
                     cancelled += 1;
                     let (reopened, _) = admit_cancelled_at(&store.path, usize::MAX).await;
@@ -823,6 +871,376 @@ mod published_artifact_ceiling {
             }
         }
         assert!(cancelled > 0, "the sweep never observed a cancellation");
+    }
+
+    /// Rows spread over several copy batches, with rowid gaps and a negative
+    /// rowid a batch cursor starting at zero would lose.
+    const BULK_ROWS: &str = "
+        WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100)
+        INSERT INTO workflow_artifact_payloads (rowid, payload_digest, byte_length, payload)
+        SELECT i * 3 + 100, 'sha256:bulk-' || i, 8, CAST(printf('%08d', i) AS BLOB) FROM n;
+        INSERT INTO workflow_artifact_payloads (rowid, payload_digest, byte_length, payload)
+        VALUES (-5, 'sha256:negative-rowid', 1, x'07');";
+
+    /// An attached runtime whose statements fail at one chosen occurrence, for
+    /// the faults a healthy store never produces.
+    struct FailingStatement<'a, T> {
+        inner: &'a T,
+        needle: &'static str,
+        occurrence: AtomicUsize,
+        error: fn() -> engine::Error,
+    }
+
+    impl<'a, T> FailingStatement<'a, T> {
+        fn new(
+            inner: &'a T,
+            needle: &'static str,
+            occurrence: usize,
+            error: fn() -> engine::Error,
+        ) -> Self {
+            Self {
+                inner,
+                needle,
+                occurrence: AtomicUsize::new(occurrence),
+                error,
+            }
+        }
+
+        fn check(&self, sql: &str) -> engine::Result<()> {
+            if sql.contains(self.needle) && self.occurrence.fetch_sub(1, Ordering::Relaxed) == 1 {
+                return Err((self.error)());
+            }
+            Ok(())
+        }
+    }
+
+    impl<T: engine::QueryExecutor + Sync> engine::QueryExecutor for FailingStatement<'_, T> {
+        async fn query<P>(&self, sql: &str, params: P) -> engine::Result<engine::Rows>
+        where
+            P: engine::IntoParams,
+        {
+            self.check(sql)?;
+            self.inner.query(sql, params).await
+        }
+    }
+
+    impl<T: engine::Executor + Sync> engine::Executor for FailingStatement<'_, T> {
+        async fn execute<P>(&self, sql: &str, params: P) -> engine::Result<u64>
+        where
+            P: engine::IntoParams,
+        {
+            self.check(sql)?;
+            self.inner.execute(sql, params).await
+        }
+
+        async fn execute_batch(&self, sql: &str) -> engine::Result<()> {
+            self.check(sql)?;
+            self.inner.execute_batch(sql).await
+        }
+    }
+
+    /// A step failing anywhere in the upgrade, including between copy batches
+    /// and in the final proof, restores everything once the admission
+    /// transaction rolls back. A refused statement is the store's typed reset;
+    /// a held database is not, so a passing condition never asks for one.
+    #[asupersync::test(flavor = "multi_thread")]
+    async fn failure_at_any_upgrade_step_rolls_back_with_the_right_typed_state() {
+        let daemon_store = DaemonPublishedStore::create().await;
+        let store = &daemon_store.store;
+        store.run(BULK_ROWS);
+        let before = store.state();
+        let (database, _runtime, _retirement) =
+            publish_daemon_runtime(&store.path).await.into_parts();
+        let lease = database.issue_lease().unwrap();
+
+        for (needle, occurrence) in [
+            ("ALTER TABLE", 1),
+            ("CREATE TABLE workflow_artifact_payloads", 1),
+            ("INSERT INTO workflow_artifact_payloads", 1),
+            ("INSERT INTO workflow_artifact_payloads", 3),
+            ("DROP TABLE", 1),
+            ("UPDATE workflow_schema", 1),
+            ("table_info", 1),
+        ] {
+            let transaction = lease.begin_bulk_write_transaction("fault").await.unwrap();
+            let busy = upgrade_published_artifact_ceiling(&FailingStatement::new(
+                &transaction,
+                needle,
+                occurrence,
+                || engine::Error::Busy,
+            ))
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{needle}#{occurrence} must fail the upgrade"));
+            assert!(!busy.is_store_reset_required(), "{needle}: {busy}");
+            transaction.rollback().await.unwrap();
+            assert_eq!(
+                store.state(),
+                before,
+                "{needle}#{occurrence} was not undone"
+            );
+        }
+
+        for (needle, occurrence) in [
+            ("INSERT INTO workflow_artifact_payloads", 2),
+            ("DROP TABLE", 1),
+            ("UPDATE workflow_schema", 1),
+        ] {
+            let transaction = lease.begin_bulk_write_transaction("fault").await.unwrap();
+            let refused = upgrade_published_artifact_ceiling(&FailingStatement::new(
+                &transaction,
+                needle,
+                occurrence,
+                || engine::Error::InvalidOperation("refused".to_owned()),
+            ))
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{needle}#{occurrence} must fail the upgrade"));
+            let reason = assert_workflow_refusal(Some(refused));
+            assert!(reason.contains("left as found"), "{reason}");
+            transaction.rollback().await.unwrap();
+            assert_eq!(
+                store.state(),
+                before,
+                "{needle}#{occurrence} was not undone"
+            );
+        }
+
+        // The same runtime takes the upgrade once nothing interferes, and
+        // moves every row of every batch.
+        let transaction = lease.begin_bulk_write_transaction("upgrade").await.unwrap();
+        assert!(
+            upgrade_published_artifact_ceiling(&transaction)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        transaction.commit().await.unwrap();
+        let after = store.state();
+        assert_eq!(after.table_sql, final_table_sql());
+        assert_eq!(after.artifacts, before.artifacts);
+        assert_eq!(after.artifacts.len(), 104);
+        assert_eq!(after.artifacts[0].0, -5);
+    }
+
+    /// Classification runs before the write lock. A peer that finished the
+    /// upgrade in between leaves nothing to do; one that changed the store into
+    /// another shape in between gets the refusal, not a blind rewrite.
+    #[asupersync::test(flavor = "multi_thread")]
+    async fn the_write_lock_proof_decides_after_a_stale_classification() {
+        let daemon_store = DaemonPublishedStore::create().await;
+        let store = &daemon_store.store;
+        let (database, _runtime, _retirement) =
+            publish_daemon_runtime(&store.path).await.into_parts();
+        let lease = database.issue_lease().unwrap();
+
+        store.run(
+            "CREATE TRIGGER peer_audit AFTER DELETE ON workflow_artifact_payloads
+                   BEGIN SELECT 1; END;",
+        );
+        let before = store.state();
+        let transaction = lease.begin_bulk_write_transaction("stale").await.unwrap();
+        let refused = upgrade_published_artifact_ceiling(&transaction)
+            .await
+            .unwrap()
+            .expect("a shape changed under the classification is refused");
+        assert!(
+            assert_workflow_refusal(Some(refused.error())).contains("1 other schema object(s)")
+        );
+        transaction.commit().await.unwrap();
+        assert_eq!(store.state(), before);
+        store.run("DROP TRIGGER peer_audit;");
+
+        for _ in 0..2 {
+            let transaction = lease.begin_bulk_write_transaction("peer").await.unwrap();
+            assert!(
+                upgrade_published_artifact_ceiling(&transaction)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            transaction.commit().await.unwrap();
+        }
+        let after = store.state();
+        assert_eq!(after.digest, WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1);
+        assert_eq!(after.artifacts, before.artifacts);
+    }
+
+    /// A peer holding the write lock delays the upgrade and says nothing about
+    /// the store: the attach fails retryably, and the next one upgrades.
+    #[asupersync::test(flavor = "multi_thread")]
+    async fn held_write_lock_delays_the_upgrade_without_a_reset() {
+        let daemon_store = DaemonPublishedStore::create().await;
+        let store = &daemon_store.store;
+        let before = store.state();
+        let peer = Connection::open(&store.path).unwrap();
+        peer.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let (database, _runtime, _retirement) =
+            publish_daemon_runtime(&store.path).await.into_parts();
+        let error = RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
+            database,
+            &CancellationToken::new(),
+        )
+        .await
+        .err()
+        .expect("the write lock is held");
+        assert!(!error.is_store_reset_required(), "{error}");
+        peer.execute_batch("ROLLBACK").unwrap();
+        drop(peer);
+        assert_eq!(store.state(), before);
+
+        let (database, _runtime, _retirement) =
+            publish_daemon_runtime(&store.path).await.into_parts();
+        let (owner, _) = RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
+            database,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(owner.reset_required().is_none());
+        drop(owner);
+        assert_eq!(store.state().digest, WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1);
+    }
+
+    /// A store whose schema refuses the rename keeps serving its other
+    /// authorities, and the census names the same refusal attach reaches.
+    #[asupersync::test(flavor = "multi_thread")]
+    async fn census_and_attach_agree_on_a_schema_that_refuses_the_move() {
+        let daemon_store = DaemonPublishedStore::create().await;
+        let store = &daemon_store.store;
+        store.run("CREATE VIEW broken_view AS SELECT missing FROM nowhere;");
+        let before = store.state();
+
+        let (database, _runtime, _retirement) =
+            publish_daemon_runtime(&store.path).await.into_parts();
+        let census = RegisteredGlobalDbOwnerV1::attach_reset_refusal(&database)
+            .await
+            .unwrap();
+        let census_reason = assert_workflow_refusal(census);
+        assert!(census_reason.contains("moving"), "{census_reason}");
+        assert_eq!(store.state(), before);
+
+        let (owner, _) = RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
+            database,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("the store's other authorities stay available");
+        let attach_reason = assert_workflow_refusal(owner.reset_required());
+        assert_eq!(attach_reason, census_reason);
+        drop(owner);
+        assert_eq!(store.state(), before);
+    }
+
+    /// Asking whether a store can upgrade costs no payload IO: the census
+    /// leaves the WAL at its prior size however much the store holds, while the
+    /// same store's real attach still moves every row.
+    #[asupersync::test(flavor = "multi_thread")]
+    async fn census_writes_no_payload_bytes() {
+        let daemon_store = DaemonPublishedStore::create().await;
+        let store = &daemon_store.store;
+        store.run(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 64)
+             INSERT INTO workflow_artifact_payloads
+             SELECT 'sha256:large-' || i, 1048576, randomblob(1048576) FROM n;",
+        );
+        let wal_path = format!("{}-wal", store.path.display());
+        let wal_bytes = || fs::metadata(&wal_path).map_or(0, |metadata| metadata.len());
+        let before = store.state();
+
+        let (database, _runtime, _retirement) =
+            publish_daemon_runtime(&store.path).await.into_parts();
+        let wal_before = wal_bytes();
+        for _ in 0..2 {
+            let refusal = RegisteredGlobalDbOwnerV1::attach_reset_refusal(&database)
+                .await
+                .unwrap();
+            assert!(refusal.is_none(), "{refusal:?}");
+        }
+        assert_eq!(wal_bytes(), wal_before, "the census rewrote the table");
+        assert_eq!(store.state(), before);
+
+        let (owner, _) = RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
+            database,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(owner.reset_required().is_none());
+        drop(owner);
+        assert_eq!(store.state().artifacts, before.artifacts);
+    }
+
+    /// An observation refusal surfaces late in the stage sequence, after the
+    /// workflow stage. It still leaves the published shape in place.
+    #[asupersync::test]
+    async fn observation_refusal_keeps_the_published_shape() {
+        let store = PublishedStore::create().await;
+        store.run(
+            "DELETE FROM tracedecay_schema_version
+             WHERE component = 'observations-unified-identity-v1';",
+        );
+        let before = store.state();
+
+        let refusal = store.admit().await.expect("old observations refuse");
+        let Some(("observations", _)) = refusal.reset_required_context() else {
+            panic!("refused with the wrong typed state: {refusal}");
+        };
+        assert_eq!(store.state(), before);
+    }
+
+    /// The classification page boundary must not hide a bad row, and a store
+    /// past one page still upgrades whole.
+    #[asupersync::test]
+    async fn row_classification_reaches_every_page() {
+        const PAGED_ROWS: &str = "
+            WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 4200)
+            INSERT INTO workflow_artifact_payloads
+            SELECT 'sha256:paged-' || i, 1, x'01' FROM n;";
+        let store = PublishedStore::create().await;
+        store.run(PAGED_ROWS);
+        store.run(
+            "PRAGMA ignore_check_constraints = ON;
+             INSERT INTO workflow_artifact_payloads VALUES ('sha256:liar', 1, x'0011');",
+        );
+        let reason = assert_workflow_refusal(store.admit().await);
+        assert!(reason.contains("1 row(s)"), "{reason}");
+
+        let store = PublishedStore::create().await;
+        store.run(PAGED_ROWS);
+        let before = store.state();
+        assert!(store.admit().await.is_none());
+        assert_eq!(store.state().artifacts, before.artifacts);
+    }
+
+    /// A store that already carries the final contract is complete, with no
+    /// upgrade work, whatever version label the binary that wrote it carried.
+    #[asupersync::test(flavor = "multi_thread")]
+    async fn final_shape_store_has_nothing_to_upgrade() {
+        let daemon_store = DaemonPublishedStore::create().await;
+        let store = &daemon_store.store;
+        store.run(&format!(
+            "DELETE FROM workflow_artifact_payloads;
+             DROP TABLE workflow_artifact_payloads;
+             {};
+             INSERT INTO workflow_artifact_payloads VALUES ('sha256:final', 1, x'01');
+             UPDATE workflow_schema SET definition_digest = '{WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1}';",
+            final_table_sql()
+        ));
+        let before = store.state();
+        let (database, _runtime, _retirement) =
+            publish_daemon_runtime(&store.path).await.into_parts();
+        let lease = database.issue_lease().unwrap();
+        let transaction = lease.begin_bulk_write_transaction("final").await.unwrap();
+        assert!(
+            upgrade_published_artifact_ceiling(&transaction)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        transaction.commit().await.unwrap();
+        assert_eq!(store.state(), before);
     }
 
     /// The profile authority holds no workflow rows and never reads these

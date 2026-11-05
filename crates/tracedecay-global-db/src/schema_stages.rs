@@ -6,9 +6,10 @@ use std::time::{Duration, Instant};
 use tracedecay_domain::errors::ProjectOpenFailureKind;
 
 mod workflow_artifact_ceiling_upgrade;
+pub(crate) use workflow_artifact_ceiling_upgrade::upgrade_published_artifact_ceiling;
 use workflow_artifact_ceiling_upgrade::{
     PublishedArtifactCeilingShape, classify_published_artifact_ceiling,
-    upgrade_published_artifact_ceiling,
+    rehearse_published_artifact_ceiling_upgrade,
 };
 
 use super::schema_contract::{
@@ -416,6 +417,14 @@ enum SessionFeatureSchema {
     /// An existing profile authority: these schemas are left exactly as
     /// found and never read.
     NotHosted,
+}
+
+impl SessionFeatureSchema {
+    fn upgrades_published_workflow_shape(self) -> bool {
+        self == Self::Hosted {
+            workflow: WorkflowSchemaAdmission::UpgradePublishedArtifactCeiling,
+        }
+    }
 }
 
 /// The profile authority (`global.db`) holds the project registry, usage
@@ -909,13 +918,9 @@ where
             transaction.commit().await.map_err(|error| {
                 global_db_operation_error(commit_operation, std::io::Error::other(error))
             })?;
-            if session_features
-                == (SessionFeatureSchema::Hosted {
-                    workflow: WorkflowSchemaAdmission::UpgradePublishedArtifactCeiling,
-                })
-            {
+            if session_features.upgrades_published_workflow_shape() && refused_authority.is_none() {
                 tracing::info!(
-                    "upgraded the published workflow artifact table to the final contract"
+                    "the published workflow artifact table now carries the final contract"
                 );
             }
             Ok(refused_authority)
@@ -1112,13 +1117,6 @@ async fn install_registered_schema_stage_sequence(
             .await
             .map_err(|error| global_db_operation_error("initialize workflow schema", error))?;
     }
-    if session_features
-        == (SessionFeatureSchema::Hosted {
-            workflow: WorkflowSchemaAdmission::UpgradePublishedArtifactCeiling,
-        })
-    {
-        upgrade_published_artifact_ceiling(transaction).await?;
-    }
     transaction
         .execute_batch(WORK_SCHEMA_V1)
         .await
@@ -1224,6 +1222,10 @@ async fn install_registered_schema_stage_sequence(
             .map_err(|error| {
                 global_db_operation_error("initialize workflow index schema", error)
             })?;
+    }
+    // Last, so a store any earlier stage refuses keeps its published shape.
+    if session_features.upgrades_published_workflow_shape() && refused_authority.is_none() {
+        return upgrade_published_artifact_ceiling(transaction).await;
     }
     Ok(refused_authority)
 }
@@ -1432,7 +1434,11 @@ pub(crate) async fn ensure_attached_registered_schema(
 /// store keeps exactly its prior schema. The post-commit index builds and the
 /// composed authority-schema validation are left to the store's own attach:
 /// an older admissible store would otherwise build its historical indexes
-/// only to discard them.
+/// only to discard them. The published workflow upgrade is left to it for the
+/// same reason: classification proved its rows and dependents without a write,
+/// and only its catalog-only rename runs here, so a census never copies a
+/// payload.
+#[tracing::instrument(name = "global_db.schema.persist.census", level = "trace", skip_all)]
 pub(crate) async fn attached_registered_schema_reset_refusal(
     database: &Database,
 ) -> tracedecay_domain::errors::Result<Option<tracedecay_domain::errors::TraceDecayError>> {
@@ -1471,6 +1477,14 @@ pub(crate) async fn attached_registered_schema_reset_refusal(
         Box<dyn Future<Output = tracedecay_domain::errors::Result<bool>> + Send + '_>,
     > = Box::pin(authority_invariant_triggers_intact(&read_connection));
     let force_exhaustive = !triggers_intact.await?;
+    let upgrades_workflow = session_features.upgrades_published_workflow_shape();
+    let staged_features = if upgrades_workflow {
+        SessionFeatureSchema::Hosted {
+            workflow: WorkflowSchemaAdmission::Complete,
+        }
+    } else {
+        session_features
+    };
     let transaction = database.begin_bulk_write_transaction(OPERATION).await?;
     let staged: Pin<
         Box<
@@ -1482,10 +1496,15 @@ pub(crate) async fn attached_registered_schema_reset_refusal(
         &transaction,
         configuration_fresh.as_ref(),
         temporal_admission,
-        session_features,
+        staged_features,
         force_exhaustive,
     ));
-    let admission = staged.await;
+    let admission = match staged.await {
+        Ok(None) if upgrades_workflow => {
+            rehearse_published_artifact_ceiling_upgrade(&transaction).await
+        }
+        staged => staged,
+    };
     transaction
         .rollback()
         .await
@@ -1736,13 +1755,15 @@ async fn recorded_workflow_identity(
     conn: &impl QueryExecutor,
 ) -> tracedecay_domain::errors::Result<String> {
     match read_recorded_workflow_identity(conn).await {
-        Ok(Some((version, digest, false))) => Ok(format!(
-            "the store records version {version} with {}",
-            workflow_digest_label(&digest)
+        Ok(Some(identity)) if identity.extra => Ok(format!(
+            "the store records several identity rows, the first version {} with {}",
+            identity.version,
+            workflow_digest_label(&identity.digest)
         )),
-        Ok(Some((version, digest, true))) => Ok(format!(
-            "the store records several identity rows, the first version {version} with {}",
-            workflow_digest_label(&digest)
+        Ok(Some(identity)) => Ok(format!(
+            "the store records version {} with {}",
+            identity.version,
+            workflow_digest_label(&identity.digest)
         )),
         Ok(None) => Ok("the store records no workflow identity".to_owned()),
         Err(error) if error.is_transient_read_failure() => Err(global_db_operation_error(
@@ -1753,12 +1774,19 @@ async fn recorded_workflow_identity(
     }
 }
 
+struct RecordedWorkflowIdentity {
+    singleton: i64,
+    version: i64,
+    digest: String,
+    extra: bool,
+}
+
 async fn read_recorded_workflow_identity(
     conn: &impl QueryExecutor,
-) -> engine::Result<Option<(i64, String, bool)>> {
+) -> engine::Result<Option<RecordedWorkflowIdentity>> {
     let mut rows = conn
         .query(
-            "SELECT schema_version, definition_digest FROM workflow_schema
+            "SELECT singleton, schema_version, definition_digest FROM workflow_schema
              ORDER BY singleton LIMIT 2",
             (),
         )
@@ -1766,10 +1794,16 @@ async fn read_recorded_workflow_identity(
     let Some(first) = rows.next().await? else {
         return Ok(None);
     };
-    let version = first.get::<i64>(0)?;
-    let digest = first.get::<String>(1)?;
+    let singleton = first.get::<i64>(0)?;
+    let version = first.get::<i64>(1)?;
+    let digest = first.get::<String>(2)?;
     let extra = rows.next().await?.is_some();
-    Ok(Some((version, digest, extra)))
+    Ok(Some(RecordedWorkflowIdentity {
+        singleton,
+        version,
+        digest,
+        extra,
+    }))
 }
 
 fn workflow_table_drift_reason(
