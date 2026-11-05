@@ -157,6 +157,26 @@ def probabilities(values, questions):
     return values
 
 
+def noul_probabilities(response, questions):
+    """Validate the typed server answer before recording model evidence."""
+    if not isinstance(response, dict):
+        raise ValueError("decision response must be a JSON object")
+    answers = response.get("answers")
+    if not isinstance(answers, dict) or set(answers) != set(questions):
+        raise ValueError("noul answers must cover exactly the requested questions")
+    values = {}
+    for key, answer in answers.items():
+        # Older decision servers omit the kind, but a present tag must agree
+        # with the requested question. A Score response with an incidental
+        # noul field is not evidence of a successful Noul prediction.
+        if (not isinstance(answer, dict)
+                or ("type" in answer and answer["type"] != "noul")
+                or "noul" not in answer):
+            raise ValueError(f"invalid noul answer for {key}")
+        values[key] = answer["noul"]
+    return probabilities(values, questions)
+
+
 def calibrated(probability, temperature):
     if probability in (0, 1):
         return probability
@@ -302,8 +322,7 @@ def main(argv=None):
                     continue
                 body, request_sha = requests[case["id"]]
                 response, ms = post(args.url, body)
-                answers = response["answers"]
-                probs = probabilities({key: value["noul"] for key, value in answers.items()}, questions)
+                probs = noul_probabilities(response, questions)
                 server_ms = response.get("latency_ms")
                 if server_ms is None:
                     server_ms = (response.get("timing") or {}).get("inference_ms")

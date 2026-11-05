@@ -568,6 +568,53 @@ class RunHttpTest(unittest.TestCase):
                         self.run_main()
                 self.assertEqual(self.partial.read_bytes(), before)
 
+    def test_invalid_answer_kinds_and_shapes_preserve_resumable_rows(self):
+        self.interrupt()
+        before = self.partial.read_bytes()
+        sample = self.root / "rejected-response.json"
+        response, elapsed = self.response("", {"questions": run_http.noul_questions()})
+        invalid = []
+        for declared_type in ("score", None, False, [], {"kind": "noul"}):
+            malformed = copy.deepcopy(response)
+            malformed["answers"]["impact"]["type"] = declared_type
+            invalid.append(malformed)
+        for answer in (None, False, [0.25], "noul"):
+            malformed = copy.deepcopy(response)
+            malformed["answers"]["impact"] = answer
+            invalid.append(malformed)
+        invalid.extend([
+            None,
+            [],
+            {"answers": []},
+            {"answers": {"impact": {"noul": 0.25}}},
+        ])
+        for malformed in invalid:
+            with self.subTest(response=repr(malformed)[:90]):
+                with patch.object(run_http, "post", return_value=(malformed, elapsed)):
+                    with self.assertRaisesRegex(ValueError, "noul|decision response"):
+                        self.run_main(["--sample-out", str(sample)])
+                self.assertEqual(self.partial.read_bytes(), before)
+                self.assertFalse(self.output.exists())
+                self.assertFalse(sample.exists())
+
+        # The rejected response did not poison the partial log; valid
+        # inference can continue from the already-settled first case.
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main()
+        post.assert_called_once()
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+
+    def test_explicit_noul_answer_kind_still_records_valid_predictions(self):
+        response, elapsed = self.response("", {"questions": run_http.noul_questions()})
+        for answer in response["answers"].values():
+            answer["type"] = "noul"
+        with patch.object(run_http, "post", return_value=(response, elapsed)) as post:
+            self.run_main()
+        self.assertEqual(post.call_count, len(self.dataset))
+        rows = json.loads(self.output.read_text())["rows"]
+        self.assertEqual(len(rows), len(self.dataset))
+        self.assertTrue(all(row["probs"]["impact"] == 0.25 for row in rows))
+
     def test_malformed_response_does_not_poison_first_sample_on_resume(self):
         sample = self.root / "first-response.json"
         response, elapsed = self.response("", {"questions": run_http.noul_questions()})
