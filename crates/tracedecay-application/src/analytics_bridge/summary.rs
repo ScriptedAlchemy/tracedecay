@@ -118,6 +118,15 @@ pub struct AnalyticsRecentEventV1 {
     /// What the call cost its stores, for tool calls whose read was metered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<RequestCostReceiptV1>,
+    /// The bounded, sanitized reason a failed call recorded.
+    ///
+    /// `outcome` alone says a call failed; without the reason an operator can
+    /// see that something broke but not what. The durable metadata column is
+    /// not a disclosure boundary, so the text crosses the privacy authority
+    /// and a bounded length before it is served, and text the sanitizer
+    /// quarantines is omitted rather than echoed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -836,8 +845,42 @@ fn recent_event_rows(events: &[AnalyticsEventRecord], limit: usize) -> Vec<Analy
             tool_name: event.tool_name.clone().unwrap_or_default(),
             outcome: event.outcome.clone().unwrap_or_default(),
             cost: recorded_cost(event),
+            failure_reason: recorded_failure_reason(event),
         })
         .collect()
+}
+
+/// Upper bound on a served failure reason, in characters.
+///
+/// The writer caps what it records at the same bound, so this is a ceiling on
+/// a value the analytics writer already truncated rather than a second policy.
+const SERVED_FAILURE_REASON_MAX_CHARS: usize = 160;
+
+/// The bounded, sanitized failure reason a failed event recorded.
+///
+/// Only `outcome == "error"` events carry one; a success that happens to have a
+/// `failure_reason` in metadata is not a failure and must not be served as one.
+fn recorded_failure_reason(event: &AnalyticsEventRecord) -> Option<String> {
+    if event.outcome.as_deref() != Some("error") {
+        return None;
+    }
+    let metadata: Value = serde_json::from_str(event.metadata_json.as_deref()?).ok()?;
+    let reason = metadata.get("failure_reason")?.as_str()?;
+    let collapsed = tracedecay_domain::collapse_whitespace(reason);
+    if collapsed.is_empty() {
+        return None;
+    }
+    // The sanitizer refuses text it quarantines; omit rather than echo it.
+    let sanitized = tracedecay_privacy::sanitize_provider_metadata_text(&collapsed)?;
+    let bounded = if sanitized.chars().count() <= SERVED_FAILURE_REASON_MAX_CHARS {
+        sanitized
+    } else {
+        sanitized
+            .chars()
+            .take(SERVED_FAILURE_REASON_MAX_CHARS)
+            .collect()
+    };
+    (!bounded.is_empty()).then_some(bounded)
 }
 
 /// The cost receipt the MCP server recorded in the event's metadata.
@@ -909,6 +952,102 @@ mod tests {
             outcome: Some("success".to_owned()),
             metadata_json: Some(metadata_json.to_owned()),
         }
+    }
+
+    #[test]
+    fn a_failed_call_serves_its_bounded_sanitized_reason() {
+        let mut failed = mcp_call(
+            1,
+            "tracedecay_ast_rewrite",
+            r#"{"failure_reason":"old_str  not\nfound in src/main.rs"}"#,
+        );
+        failed.outcome = Some("error".to_owned());
+        let payload = diagnostics_payload_from_parts(
+            Some(0),
+            &HookAnalyticsRows::empty(),
+            Some(std::slice::from_ref(&failed)),
+        );
+
+        assert_eq!(
+            payload.recent_events[0].failure_reason.as_deref(),
+            Some("old_str not found in src/main.rs"),
+            "the recorded reason crosses the tape, whitespace-collapsed"
+        );
+    }
+
+    #[test]
+    fn a_successful_call_never_serves_a_failure_reason() {
+        let event = mcp_call(
+            1,
+            "tracedecay_search",
+            r#"{"failure_reason":"should not surface on success"}"#,
+        );
+        let payload = diagnostics_payload_from_parts(
+            Some(0),
+            &HookAnalyticsRows::empty(),
+            Some(std::slice::from_ref(&event)),
+        );
+
+        assert_eq!(payload.recent_events[0].outcome, "success");
+        assert_eq!(
+            payload.recent_events[0].failure_reason, None,
+            "a reason recorded beside a success is not a failure to report"
+        );
+        let encoded = serde_json::to_value(&payload).expect("payload encodes");
+        assert!(
+            encoded["recent_events"][0].get("failure_reason").is_none(),
+            "an absent reason stays off the wire: {}",
+            encoded["recent_events"][0]
+        );
+    }
+
+    #[test]
+    fn a_credential_shaped_failure_reason_is_omitted_not_echoed() {
+        // Split so this file never contains a contiguous credential-shaped
+        // token; the tail is base32 as real AWS key ids are.
+        let secret = ["AKIA", "SYNTHETIC", "CANARY", "7"].concat();
+        let mut failed = mcp_call(
+            1,
+            "tracedecay_edit",
+            &serde_json::json!({ "failure_reason": format!("auth failed for {secret}") })
+                .to_string(),
+        );
+        failed.outcome = Some("error".to_owned());
+        let payload = diagnostics_payload_from_parts(
+            Some(0),
+            &HookAnalyticsRows::empty(),
+            Some(std::slice::from_ref(&failed)),
+        );
+
+        let served = payload.recent_events[0].failure_reason.as_deref();
+        assert!(
+            served.is_none_or(|reason| !reason.contains(&secret)),
+            "the privacy authority must keep the credential off the tape, got {served:?}"
+        );
+    }
+
+    #[test]
+    fn a_long_failure_reason_is_capped_on_the_tape() {
+        let mut failed = mcp_call(
+            1,
+            "tracedecay_edit",
+            &serde_json::json!({ "failure_reason": "x".repeat(500) }).to_string(),
+        );
+        failed.outcome = Some("error".to_owned());
+        let payload = diagnostics_payload_from_parts(
+            Some(0),
+            &HookAnalyticsRows::empty(),
+            Some(std::slice::from_ref(&failed)),
+        );
+
+        let served = payload.recent_events[0]
+            .failure_reason
+            .as_deref()
+            .expect("a plain long reason is still served, bounded");
+        assert_eq!(
+            served.chars().count(),
+            super::SERVED_FAILURE_REASON_MAX_CHARS
+        );
     }
 
     #[test]
