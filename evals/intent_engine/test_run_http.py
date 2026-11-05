@@ -355,6 +355,71 @@ class RunHttpTest(unittest.TestCase):
                     self.run_main(["--subset", str(self.root / "subset.json")])
                 post.assert_not_called()
 
+    def test_completed_output_is_fully_valid_before_its_name_is_published(self):
+        actual_link = os.link
+        inspected = []
+
+        def inspect_staged_file(source, destination):
+            if destination == str(self.output):
+                self.assertFalse(os.path.lexists(destination))
+                with open(source, encoding="utf-8") as staged:
+                    data = json.load(staged)
+                self.assertEqual([row["id"] for row in data["rows"]], ["first", "second"])
+                self.assertEqual(data["experiment_sha256"], run_http.digest(data["experiment"]))
+                inspected.append(source)
+            return actual_link(source, destination)
+
+        with patch.object(run_http, "post", side_effect=self.response):
+            with patch.object(run_http.os, "link", side_effect=inspect_staged_file):
+                self.run_main()
+        self.assertEqual(len(inspected), 1)
+        self.assertFalse(os.path.exists(inspected[0]))
+        self.assertFalse(self.partial.exists())
+        self.assertEqual([row["id"] for row in json.loads(self.output.read_text())["rows"]],
+                         ["first", "second"])
+
+    def test_final_link_failure_preserves_a_complete_resumable_partial(self):
+        with patch.object(run_http, "post", side_effect=self.response):
+            with patch.object(run_http.os, "link", side_effect=OSError("link refused")):
+                with self.assertRaisesRegex(OSError, "link refused"):
+                    self.run_main()
+        self.assertFalse(self.output.exists())
+        self.assertEqual(len(self.partial.read_text().splitlines()), 3)
+        self.assertEqual(list(self.partial.parent.glob(".noul-result-*")), [])
+
+        with patch.object(run_http, "post") as post:
+            self.run_main()
+            post.assert_not_called()
+        self.assertFalse(self.partial.exists())
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+
+    def test_staged_flush_failure_leaves_no_apparently_completed_result(self):
+        with patch.object(run_http, "post", side_effect=self.response):
+            with patch.object(run_http.os, "fsync", side_effect=OSError("staging sync failed")):
+                with self.assertRaisesRegex(OSError, "staging sync failed"):
+                    self.run_main()
+        self.assertFalse(self.output.exists())
+        self.assertEqual(len(self.partial.read_text().splitlines()), 3)
+        self.assertEqual(list(self.partial.parent.glob(".noul-result-*")), [])
+        with patch.object(run_http, "post") as post:
+            self.run_main()
+            post.assert_not_called()
+        self.assertFalse(self.partial.exists())
+
+    def test_competing_final_publication_cannot_be_overwritten(self):
+        def race_at_publication(source, destination):
+            self.assertEqual(destination, str(self.output))
+            self.output.write_text('{"other_writer": true}', encoding="utf-8")
+            raise FileExistsError("another result won publication")
+
+        with patch.object(run_http, "post", side_effect=self.response):
+            with patch.object(run_http.os, "link", side_effect=race_at_publication):
+                with self.assertRaises(FileExistsError):
+                    self.run_main()
+        self.assertEqual(json.loads(self.output.read_text()), {"other_writer": True})
+        self.assertEqual(len(self.partial.read_text().splitlines()), 3)
+        self.assertEqual(list(self.partial.parent.glob(".noul-result-*")), [])
+
     def test_completed_outputs_are_not_overwritten(self):
         with patch.object(run_http, "post", side_effect=self.response):
             self.run_main()
