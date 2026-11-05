@@ -614,21 +614,6 @@ pub async fn compute_status(
                 {
                     Ok(ingest) => {
                         status.session_ingest = Some(serde_json::to_value(&ingest)?);
-                        // `session_ingest` stays cursor-scoped so it keeps matching the
-                        // doctor-owned signal. Historical catch-up is measured across
-                        // providers and remains explicitly partial while the retained
-                        // daemon authority drains its bounded backlog.
-                        status.session_history_catch_up = Some(
-                            tracing::Instrument::instrument(
-                                historical_session_catch_up(
-                                    db,
-                                    history_progress.as_ref(),
-                                    status.session_projection.reason.as_deref(),
-                                ),
-                                tracing::trace_span!("mcp.info.status.session_history"),
-                            )
-                            .await,
-                        );
                     }
                     Err(error) => {
                         status.session_ingest = Some(json!({
@@ -638,6 +623,19 @@ pub async fn compute_status(
                         }));
                     }
                 }
+                // A corrupt cursor health read must not suppress the independent
+                // historical worker's blocker or its across-provider coverage.
+                status.session_history_catch_up = Some(
+                    tracing::Instrument::instrument(
+                        historical_session_catch_up(
+                            db,
+                            history_progress.as_ref(),
+                            status.session_projection.reason.as_deref(),
+                        ),
+                        tracing::trace_span!("mcp.info.status.session_history"),
+                    )
+                    .await,
+                );
             }
         }
     }
