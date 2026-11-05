@@ -208,7 +208,7 @@ fn canonical_binding_fences_recovering_work_without_terminal_failure() {
         let recovery = fixture.current_attempt();
         assert_eq!(recovery.state(), WorkAttemptStateV1::RecoveryRequired);
         assert!(recovery.terminal().is_none());
-        assert!(recovery.artifacts().is_empty());
+        assert_eq!(recovery.artifacts(), Vec::<WorkArtifactRefV1>::new());
         assert_eq!(
             fixture
                 .effects
@@ -255,7 +255,10 @@ fn still_recovering_admission_executes_no_effect_and_leaves_retryable_work() {
             execute(&fixture, executable, None, protocol).await;
             assert!(!marker.exists());
             assert_eq!(fixture.state(), WorkAttemptStateV1::RecoveryRequired);
-            assert!(fixture.current_attempt().artifacts().is_empty());
+            assert_eq!(
+                fixture.current_attempt().artifacts(),
+                Vec::<WorkArtifactRefV1>::new()
+            );
             assert_eq!(
                 fixture
                     .effects
