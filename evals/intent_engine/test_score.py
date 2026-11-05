@@ -1,4 +1,5 @@
 """Behavioral coverage for sparse evaluation slices and their CLI reports."""
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -24,6 +25,37 @@ def row(case_id, labels=(), context=False, choice=None):
     if choice is not None:
         result["choice"] = choice
     return result
+
+
+def signed_http_result(config, rows, temperature=None):
+    # Fixture independently reproduces the fingerprint scheme in run_http.py.
+    rows = [
+        {**item, "request_sha256": hashlib.sha256(item["id"].encode()).hexdigest()}
+        for item in rows
+    ]
+
+    def fingerprint(value):
+        return hashlib.sha256(
+            json.dumps(value, sort_keys=True, allow_nan=False).encode("utf-8")
+        ).hexdigest()
+
+    experiment = {
+        "version": 2, "config": config, "dataset_sha256": "a" * 64,
+        "case_ids": [item["id"] for item in rows],
+        "requests_sha256": fingerprint(
+            [[item["id"], item["request_sha256"]] for item in rows]
+        ),
+        "endpoint_sha256": "b" * 64, "requested_model": None,
+        "noul_temperature": temperature,
+        "server_config": {"checkpoint": "weights@immutable", "server_revision": "server@one",
+                          "backend": "cpu", "dtype": "float32", "temperature": 1.0},
+    }
+    return {
+        "config": config, "experiment": experiment,
+        "experiment_sha256": fingerprint(experiment),
+        "dataset_sha256": experiment["dataset_sha256"],
+        "noul_temperature": temperature, "rows": rows,
+    }
 
 
 class ScoringTests(unittest.TestCase):
@@ -235,18 +267,13 @@ class ScoringTests(unittest.TestCase):
         temperature = 2.0
         measured = {cat: score.calibrated(p, temperature) for cat, p in raw.items()}
         calibrated_row = {**original, "probs_raw": raw, "probs": measured}
-        result = {
-            "config": "http_calibrated",
-            "experiment": {"version": 2, "noul_temperature": temperature},
-            "noul_temperature": temperature,
-            "rows": [calibrated_row],
-        }
+        result = signed_http_result("http_calibrated", [calibrated_row], temperature)
         self.assertEqual(score.score_config(result)["latency"]["total_cases"], 1)
 
-        conflicting = {**calibrated_row, "probs": raw}
+        conflicting = {**result["rows"][0], "probs": raw}
         with self.assertRaisesRegex(ValueError, "calibrated probabilities disagree"):
             score.score_config({**result, "rows": [conflicting]})
-        missing_raw = {k: v for k, v in calibrated_row.items() if k != "probs_raw"}
+        missing_raw = {k: v for k, v in result["rows"][0].items() if k != "probs_raw"}
         with self.assertRaisesRegex(ValueError, "missing raw probabilities"):
             score.score_config({**result, "rows": [missing_raw]})
         with self.assertRaisesRegex(ValueError, "temperature differs"):
@@ -276,6 +303,51 @@ class ScoringTests(unittest.TestCase):
             self.assertNotEqual(attempt.returncode, 0)
             self.assertIn("calibrated probabilities disagree", attempt.stderr)
             self.assertEqual(summary.read_bytes(), b"last verified summary\n")
+
+    def test_http_result_fingerprints_bind_case_order_and_experiment(self):
+        original = signed_http_result("B_noul_text", [row("first"), row("second")])
+        self.assertEqual(score.score_config(original)["latency"]["total_cases"], 2)
+        for mutation, diagnostic in [
+            ("identity", "identity digest"),
+            ("missing_digest", "identity digest"),
+            ("request", "request fingerprints"),
+            ("case_order", "case IDs or ordering"),
+            ("dataset", "dataset digest"),
+            ("config", "configuration disagrees"),
+        ]:
+            changed = json.loads(json.dumps(original))
+            if mutation == "identity":
+                changed["experiment"]["server_config"]["checkpoint"] = "different"
+            elif mutation == "missing_digest":
+                del changed["experiment_sha256"]
+            elif mutation == "request":
+                changed["rows"][0]["request_sha256"] = "c" * 64
+            elif mutation == "case_order":
+                changed["rows"].reverse()
+            elif mutation == "dataset":
+                changed["dataset_sha256"] = "f" * 64
+            elif mutation == "config":
+                changed["config"] = "different"
+            with self.subTest(mutation=mutation):
+                with self.assertRaisesRegex(ValueError, diagnostic):
+                    score.score_config(changed)
+
+        # An altered completed result cannot destroy the last scored summary.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.stage_scripts(root)
+            (root / "results").mkdir()
+            changed = json.loads(json.dumps(original))
+            changed["rows"][1]["request_sha256"] = "c" * 64
+            (root / "results" / "bad.json").write_text(
+                json.dumps(changed), encoding="utf-8"
+            )
+            summary = root / "summary.json"
+            summary.write_bytes(b"last verified summary\\n")
+            attempt = self.run_script(root, "score.py")
+            self.assertNotEqual(attempt.returncode, 0)
+            self.assertIn("request fingerprints", attempt.stderr)
+            self.assertEqual(summary.read_bytes(), b"last verified summary\\n")
 
     def test_invalid_probability_cannot_replace_previous_cli_summary(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -331,14 +403,10 @@ class ScoringTests(unittest.TestCase):
             self.stage_scripts(root)
             results = root / "results"
             results.mkdir()
-            hybrid = {
-                "config": "H_hybrid_text",
-                "experiment": {"version": 2},
-                "rows": [{
-                    **row("a", [score.CATS[0]], True), "ms": 17,
-                    "input_tokens": 151, "state_tokens": 93, "dropped": 4,
-                }],
-            }
+            hybrid = signed_http_result("H_hybrid_text", [{
+                **row("a", [score.CATS[0]], True), "ms": 17,
+                "input_tokens": 151, "state_tokens": 93, "dropped": 4,
+            }])
             configurations = [
                 {"config": "B_noul_text", "rows": [row("a")]},
                 {"config": "C_choice_text", "rows": [row("a", choice="none")]},

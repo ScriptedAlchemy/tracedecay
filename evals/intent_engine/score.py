@@ -4,7 +4,7 @@ Empty slices have unknown rates, not zero accuracy. Macro AUC averages only
 categories with both label classes and reports its category coverage. Nonempty
 macro F1 retains the historical fixed-CATS, zero-for-undefined convention.
 """
-import json, glob, math, os, statistics, sys, tempfile
+import hashlib, json, glob, math, os, re, statistics, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import CATS, calibrated
 
@@ -65,6 +65,39 @@ def validate_rows(rows, config):
         if (isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)) or
                 not math.isfinite(elapsed) or elapsed < 0):
             raise ValueError(f"configuration {config!r} case {case_id} has invalid elapsed ms")
+
+
+def evidence_digest(value):
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, allow_nan=False).encode("utf-8")
+    ).hexdigest()
+
+
+def validate_http_provenance(result, rows):
+    """Bind scored HTTP rows to the recorded experiment and request order."""
+    if "experiment" not in result:
+        return  # Local-only scoring inputs do not claim HTTP provenance.
+    experiment = result["experiment"]
+    if result.get("experiment_sha256") != evidence_digest(experiment):
+        raise ValueError("HTTP experiment identity digest disagrees with recorded settings")
+    case_ids = [row["id"] for row in rows]
+    if experiment.get("case_ids") != case_ids:
+        raise ValueError("HTTP experiment case IDs or ordering disagree with result rows")
+    requests = []
+    for row in rows:
+        request_sha = row.get("request_sha256")
+        if not isinstance(request_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", request_sha):
+            raise ValueError(f"HTTP case {row['id']} has an invalid request fingerprint")
+        requests.append([row["id"], request_sha])
+    if experiment.get("requests_sha256") != evidence_digest(requests):
+        raise ValueError("HTTP request fingerprints disagree with experiment identity")
+    if result.get("dataset_sha256") != experiment.get("dataset_sha256"):
+        raise ValueError("HTTP dataset digest disagrees with experiment identity")
+    config = result.get("config")
+    variant = experiment.get("config")
+    if (not isinstance(config, str) or not isinstance(variant, str)
+            or (config != variant and not config.endswith("_" + variant))):
+        raise ValueError("HTTP configuration disagrees with experiment identity")
 
 
 def validate_calibration(result, rows):
@@ -180,6 +213,7 @@ def score_config(res, fixed_t=None):
     rows = res["rows"]
     validate_rows(rows, res.get("config"))
     validate_calibration(res, rows)
+    validate_http_provenance(res, rows)
     choices = ["choice" in row for row in rows]
     if any(choices) and not all(choices):
         raise ValueError("configuration %r has incomplete choice coverage" % res.get("config"))
