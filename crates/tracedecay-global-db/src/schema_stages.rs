@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
@@ -36,7 +37,7 @@ use tracedecay_rusqlite_runtime::work::{
 };
 use tracedecay_rusqlite_runtime::workflow::{
     WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1, WORKFLOW_SCHEMA_IDENTITY_V1, WORKFLOW_SCHEMA_VERSION_V1,
-    WORKFLOW_TABLE_CONTRACTS_V1,
+    WORKFLOW_TABLE_CONTRACTS_V1, WorkflowTableContractV1,
 };
 use tracedecay_sessions::runtime::git_correlation::{
     GIT_CORRELATION_SCHEMA_VERSION, recorded_git_correlation_schema_version,
@@ -509,7 +510,7 @@ macro_rules! impl_registered_schema_admission_classify {
                         .map_err(configuration_schema_error(
                             "inspect configuration schema freshness",
                         ))
-                        .map_err(surface(refused_lcm))?;
+                        .map_err(surface(refused_lcm.clone()))?;
                     let temporal_admission: Pin<
                         Box<
                             dyn Future<
@@ -528,9 +529,12 @@ macro_rules! impl_registered_schema_admission_classify {
                             configuration_fresh.as_ref(),
                         ),
                     );
-                    let temporal_admission =
-                        temporal_admission.await.map_err(surface(refused_lcm))?;
-                    let refused = refused_lcm.or(temporal_admission.err());
+                    let temporal_admission = temporal_admission
+                        .await
+                        .map_err(surface(refused_lcm.clone()))?;
+                    let refused = refused_lcm
+                        .clone()
+                        .or(temporal_admission.as_ref().err().cloned());
                     let session_features =
                         if hosts_session_features || configuration_fresh.is_some() {
                             let workflow: Pin<
@@ -545,12 +549,12 @@ macro_rules! impl_registered_schema_admission_classify {
                             > = Box::pin(inspect_workflow_schema_for_admission(self));
                             workflow
                                 .await
-                                .map_err(surface(refused))?
+                                .map_err(surface(refused.clone()))?
                                 .map(|workflow| SessionFeatureSchema::Hosted { workflow })
                         } else {
                             Ok(SessionFeatureSchema::NotHosted)
                         };
-                    let refused = refused.or(session_features.err());
+                    let refused = refused.or(session_features.as_ref().err().cloned());
                     let refused_git_correlation = if hosts_session_features {
                         let refused_git: Pin<
                             Box<
@@ -562,7 +566,7 @@ macro_rules! impl_registered_schema_admission_classify {
                                     + '_,
                             >,
                         > = Box::pin(git_correlation_schema_refusal(self));
-                        refused_git.await.map_err(surface(refused))?
+                        refused_git.await.map_err(surface(refused.clone()))?
                     } else {
                         None
                     };
@@ -580,7 +584,7 @@ macro_rules! impl_registered_schema_admission_classify {
                     admitted
                         .await
                         .map_err(configuration_schema_error("admit configuration schema"))
-                        .map_err(surface(refused))?;
+                        .map_err(surface(refused.clone()))?;
                     // An existing catalog whose remote-deletion tombstone table drifted from the
                     // contract cannot be trusted to gate replay or admission, so admission fails
                     // closed with the tip's typed reset authority rather than silently
@@ -594,7 +598,7 @@ macro_rules! impl_registered_schema_admission_classify {
                             >,
                         > = Box::pin(validate_remote_deletion_schema_contract(self));
                         if let Err(error) = remote.await {
-                            return Err(surface(refused)(
+                            return Err(surface(refused.clone())(
                                 tracedecay_domain::errors::TraceDecayError::reset_required(
                                     "remote deletion tombstones",
                                     error.to_string(),
@@ -1535,9 +1539,18 @@ async fn inspect_workflow_schema_for_admission(
         .map(|contract| (contract.name, Some(contract.sql)))
         .collect::<Vec<_>>();
     if actual_workflow_tables != expected_workflow_tables {
-        return Ok(Err(workflow_schema_refusal(
-            "workflow tables are absent, incomplete, or not exact",
-        )));
+        let identity = if actual_workflow_tables
+            .iter()
+            .any(|(name, _)| *name == "workflow_schema")
+        {
+            Some(recorded_workflow_identity(conn).await)
+        } else {
+            None
+        };
+        return Ok(Err(workflow_schema_refusal(workflow_table_drift_reason(
+            &actual_workflow_tables,
+            identity,
+        ))));
     }
 
     let mut schema = conn
@@ -1577,7 +1590,12 @@ async fn inspect_workflow_schema_for_admission(
         || extra_identity
     {
         return Ok(Err(workflow_schema_refusal(
-            "workflow schema identity does not match the final contract",
+            workflow_identity_drift_reason(
+                singleton,
+                schema_version,
+                &definition_digest,
+                extra_identity,
+            ),
         )));
     }
 
@@ -1618,20 +1636,217 @@ async fn inspect_workflow_schema_for_admission(
                         && actual.3 == expected.primary_key
                 });
         if !exact {
-            return Ok(Err(workflow_schema_refusal(
-                "workflow table columns do not match the final contract",
-            )));
+            return Ok(Err(workflow_schema_refusal(workflow_column_drift_reason(
+                table,
+                &actual_columns,
+            ))));
         }
     }
 
     Ok(Ok(WorkflowSchemaAdmission::Complete))
 }
 
-fn workflow_schema_refusal(reason: &'static str) -> RefusedAuthorityV1 {
+fn workflow_schema_refusal(reason: impl Into<Cow<'static, str>>) -> RefusedAuthorityV1 {
     RefusedAuthorityV1::Shape {
         authority: "workflow",
-        reason,
+        reason: reason.into(),
     }
+}
+
+/// Most object names one workflow refusal lists. The contract has a fixed,
+/// small table set, so the cap only bounds the message if that set grows.
+const WORKFLOW_REFUSAL_NAME_LIMIT: usize = 8;
+
+fn bounded_name_list(names: &[&str]) -> String {
+    let shown = names
+        .iter()
+        .take(WORKFLOW_REFUSAL_NAME_LIMIT)
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match names.len().checked_sub(WORKFLOW_REFUSAL_NAME_LIMIT) {
+        Some(rest) if rest > 0 => format!("{shown} and {rest} more"),
+        _ => shown,
+    }
+}
+
+/// A digest echoes only in the exact form this binary writes; any other
+/// stored text is reported as unrecognized rather than copied out.
+fn workflow_digest_label(digest: &str) -> String {
+    let hex = digest.strip_prefix("sha256:");
+    if hex.is_some_and(|hex| {
+        hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    }) {
+        digest.to_owned()
+    } else {
+        "an unrecognized digest".to_owned()
+    }
+}
+
+fn required_workflow_identity() -> String {
+    format!(
+        "this binary requires version {WORKFLOW_SCHEMA_VERSION_V1} with digest \
+         {WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1}"
+    )
+}
+
+/// The identity a store with drifted workflow tables records, read only to
+/// make the refusal actionable: comparing it with the required digest tells
+/// a store written by another release from a damaged one.
+async fn recorded_workflow_identity(conn: &impl QueryExecutor) -> String {
+    let read = async {
+        let mut rows = conn
+            .query(
+                "SELECT schema_version, definition_digest FROM workflow_schema
+                 ORDER BY singleton LIMIT 2",
+                (),
+            )
+            .await
+            .ok()?;
+        let first = rows.next().await.ok()??;
+        let version = first.get::<i64>(0).ok()?;
+        let digest = first.get::<String>(1).ok()?;
+        let extra = rows.next().await.ok()?.is_some();
+        Some((version, digest, extra))
+    };
+    match read.await {
+        Some((version, digest, false)) => format!(
+            "the store records version {version} with {}",
+            workflow_digest_label(&digest)
+        ),
+        Some((version, digest, true)) => format!(
+            "the store records several identity rows, the first version {version} with {}",
+            workflow_digest_label(&digest)
+        ),
+        None => "the store's recorded workflow identity is unreadable".to_owned(),
+    }
+}
+
+fn workflow_table_drift_reason(
+    actual: &[(&str, Option<&str>)],
+    identity: Option<String>,
+) -> String {
+    let missing = WORKFLOW_TABLE_CONTRACTS_V1
+        .iter()
+        .filter(|contract| !actual.iter().any(|(name, _)| *name == contract.name))
+        .map(|contract| contract.name)
+        .collect::<Vec<_>>();
+    let altered = WORKFLOW_TABLE_CONTRACTS_V1
+        .iter()
+        .filter(|contract| {
+            actual
+                .iter()
+                .any(|(name, sql)| *name == contract.name && *sql != Some(contract.sql))
+        })
+        .map(|contract| contract.name)
+        .collect::<Vec<_>>();
+    if actual.is_empty() {
+        return format!(
+            "workflow tables are absent from a store that holds other tables: all {} \
+             contract tables ({}) are missing",
+            missing.len(),
+            bounded_name_list(&missing),
+        );
+    }
+    let mut parts = Vec::new();
+    if !missing.is_empty() {
+        parts.push(format!(
+            "missing {} ({})",
+            missing.len(),
+            bounded_name_list(&missing)
+        ));
+    }
+    if !altered.is_empty() {
+        parts.push(format!(
+            "definition differs from the final contract for {} ({})",
+            altered.len(),
+            bounded_name_list(&altered)
+        ));
+    }
+    if parts.is_empty() {
+        parts.push("table set differs from the final contract".to_owned());
+    }
+    let mut reason = format!("workflow tables are not exact: {}", parts.join("; "));
+    if let Some(identity) = identity {
+        reason.push_str(&format!("; {identity}; {}", required_workflow_identity()));
+    }
+    reason
+}
+
+fn workflow_identity_drift_reason(
+    singleton: i64,
+    schema_version: i64,
+    definition_digest: &str,
+    extra_identity: bool,
+) -> String {
+    let mut parts = Vec::new();
+    if singleton != 1 {
+        parts.push(format!("identity row key is {singleton}, not 1"));
+    }
+    if schema_version != WORKFLOW_SCHEMA_VERSION_V1 {
+        parts.push(format!(
+            "version is {schema_version}, not {WORKFLOW_SCHEMA_VERSION_V1}"
+        ));
+    }
+    if definition_digest != WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1 {
+        parts.push(format!(
+            "digest is {}, not {WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1}",
+            workflow_digest_label(definition_digest)
+        ));
+    }
+    if extra_identity {
+        parts.push("more than one identity row is recorded".to_owned());
+    }
+    format!(
+        "workflow schema identity does not match the final contract: {}",
+        parts.join("; ")
+    )
+}
+
+fn workflow_column_drift_reason(
+    table: &WorkflowTableContractV1,
+    actual: &[(String, String, i64, i64)],
+) -> String {
+    let detail = if actual.len() != table.columns.len() {
+        format!(
+            "{} columns are stored, {} are required",
+            actual.len(),
+            table.columns.len()
+        )
+    } else {
+        actual
+            .iter()
+            .zip(table.columns)
+            .enumerate()
+            .find_map(|(index, (actual, expected))| {
+                let mut differs = Vec::new();
+                if actual.0 != expected.name {
+                    differs.push("name");
+                }
+                if actual.1 != expected.sql_type {
+                    differs.push("type");
+                }
+                if actual.2 != expected.not_null {
+                    differs.push("not-null flag");
+                }
+                if actual.3 != expected.primary_key {
+                    differs.push("primary-key position");
+                }
+                (!differs.is_empty()).then(|| {
+                    format!(
+                        "column {} (required `{}`) differs in {}",
+                        index + 1,
+                        expected.name,
+                        differs.join(", ")
+                    )
+                })
+            })
+            .unwrap_or_else(|| "column set differs".to_owned())
+    };
+    format!(
+        "workflow table columns do not match the final contract: `{}`: {detail}",
+        table.name
+    )
 }
 
 /// Wall-clock budget for one diagnostic run of the exhaustive authority audit.
@@ -1738,8 +1953,12 @@ pub async fn audit_observation_authority(
 mod tests {
     use tempfile::TempDir;
     use tracedecay_lcm::LCM_SCHEMA_VERSION;
+    use tracedecay_rusqlite_runtime::workflow::{
+        WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1, WORKFLOW_TABLE_CONTRACTS_V1,
+    };
     use tracedecay_sessions::runtime::git_correlation::GIT_CORRELATION_SCHEMA_VERSION;
 
+    use super::WORKFLOW_REFUSAL_NAME_LIMIT;
     use crate::tests::harness::open_registered_test_database_fixture;
     use tracedecay_runtime_core::db::TestDatabaseRuntimeScope;
     use tracedecay_runtime_core::db::engine::{QueryExecutor, TestConnection, params};
@@ -2323,6 +2542,220 @@ mod tests {
             rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
             2,
             "admission must restore every dropped guard trigger"
+        );
+    }
+
+    /// The workflow payload table and identity digest a store written by
+    /// beta.90 through beta.92 carries: the shape before the artifact size
+    /// ceiling was removed.
+    const BETA_92_ARTIFACT_PAYLOADS_SQL: &str = "CREATE TABLE workflow_artifact_payloads (
+    payload_digest TEXT NOT NULL PRIMARY KEY,
+    byte_length INTEGER NOT NULL CHECK (
+        byte_length = length(payload) AND byte_length <= 4194304
+    ),
+    payload BLOB NOT NULL
+) STRICT";
+    const BETA_92_WORKFLOW_DIGEST: &str =
+        "sha256:a292df6bc47e763f0d20bdb44a4032c0b1d7ac8e4cb83173b66ae7d1ff0d03be";
+
+    /// Admit a fresh session store, run `shape` against it, and return the
+    /// workflow refusal the next admission reports.
+    async fn workflow_refusal_after(shape: &str) -> (std::path::PathBuf, TempDir, String) {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("sessions.db");
+        install_registered_schema(&database_path).await;
+        rusqlite::Connection::open(&database_path)
+            .unwrap()
+            .execute_batch(shape)
+            .expect("shape the stored workflow schema");
+        let (lease, owner) = open_registered_test_database_fixture(
+            &database_path,
+            TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+        .expect("a refused workflow schema must not stop the store's other authorities");
+        let refusal = owner
+            .reset_required()
+            .expect("drifted workflow schema must refuse session features");
+        drop((lease, owner));
+        let Some(("workflow", reason)) = refusal.reset_required_context() else {
+            panic!("workflow drift refused with the wrong typed state: {refusal}");
+        };
+        let reason = reason.to_owned();
+        (database_path, directory, reason)
+    }
+
+    /// A store a published release wrote, whose workflow payload table still
+    /// carries the artifact size ceiling, has no in-place upgrade: it is
+    /// refused for its workflow features, and the refusal names the drifted
+    /// table and both identities so an operator can tell it from damage.
+    #[asupersync::test]
+    async fn published_workflow_shape_refusal_names_the_table_and_both_identities() {
+        let shape = format!(
+            "DROP TABLE workflow_artifact_payloads;
+             {BETA_92_ARTIFACT_PAYLOADS_SQL};
+             UPDATE workflow_schema SET definition_digest = '{BETA_92_WORKFLOW_DIGEST}';"
+        );
+        let (database_path, _directory, reason) = workflow_refusal_after(&shape).await;
+
+        assert!(
+            reason.contains(
+                "definition differs from the final contract for 1 (`workflow_artifact_payloads`)"
+            ),
+            "{reason}"
+        );
+        assert!(!reason.contains("missing"), "{reason}");
+        assert!(
+            reason.contains(&format!(
+                "the store records version 1 with {BETA_92_WORKFLOW_DIGEST}"
+            )),
+            "{reason}"
+        );
+        assert!(
+            reason.contains(&format!(
+                "this binary requires version 1 with digest {WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1}"
+            )),
+            "{reason}"
+        );
+        assert!(
+            !reason.contains("CREATE TABLE") && !reason.contains("4194304"),
+            "stored schema SQL must not leak into the refusal: {reason}"
+        );
+        // Admission stays read-only: the refused table is left as found.
+        let stored: String = rusqlite::Connection::open(&database_path)
+            .unwrap()
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'workflow_artifact_payloads'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, BETA_92_ARTIFACT_PAYLOADS_SQL);
+    }
+
+    #[asupersync::test]
+    async fn missing_workflow_table_is_named_without_blaming_present_tables() {
+        let (_database_path, _directory, reason) =
+            workflow_refusal_after("DROP TABLE workflow_handoffs;").await;
+
+        assert!(
+            reason.contains("workflow tables are not exact: missing 1 (`workflow_handoffs`)"),
+            "{reason}"
+        );
+        assert!(!reason.contains("definition differs"), "{reason}");
+        assert!(
+            reason.contains(&format!(
+                "the store records version 1 with {WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1}"
+            )),
+            "{reason}"
+        );
+    }
+
+    #[asupersync::test]
+    async fn store_without_any_workflow_table_reports_them_absent() {
+        let drops = WORKFLOW_TABLE_CONTRACTS_V1
+            .iter()
+            .map(|table| format!("DROP TABLE {};", table.name))
+            .collect::<String>();
+        let (_database_path, _directory, reason) = workflow_refusal_after(&drops).await;
+
+        assert!(
+            reason.contains("workflow tables are absent from a store that holds other tables"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains(&format!(
+                "all {} contract tables",
+                WORKFLOW_TABLE_CONTRACTS_V1.len()
+            )),
+            "{reason}"
+        );
+        assert!(!reason.contains("the store records"), "{reason}");
+    }
+
+    #[asupersync::test]
+    async fn workflow_identity_refusal_names_the_differing_fields_and_hides_foreign_text() {
+        // The stored table pins `schema_version = 1`, so a digest is the one
+        // identity field a store can disagree on while its tables stay exact.
+        let (_database_path, _directory, reason) = workflow_refusal_after(
+            "UPDATE workflow_schema SET definition_digest = 'operator secret token';",
+        )
+        .await;
+
+        assert!(
+            reason.contains("workflow schema identity does not match the final contract"),
+            "{reason}"
+        );
+        assert!(!reason.contains("version is"), "{reason}");
+        assert!(
+            reason.contains(&format!(
+                "digest is an unrecognized digest, not {WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1}"
+            )),
+            "{reason}"
+        );
+        assert!(!reason.contains("operator secret token"), "{reason}");
+    }
+
+    #[test]
+    fn workflow_identity_refusal_reports_every_differing_field() {
+        let reason = super::workflow_identity_drift_reason(2, 3, BETA_92_WORKFLOW_DIGEST, true);
+        assert!(reason.contains("identity row key is 2, not 1"), "{reason}");
+        assert!(reason.contains("version is 3, not 1"), "{reason}");
+        assert!(
+            reason.contains(&format!(
+                "digest is {BETA_92_WORKFLOW_DIGEST}, not {WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1}"
+            )),
+            "{reason}"
+        );
+        assert!(reason.contains("more than one identity row"), "{reason}");
+    }
+
+    #[test]
+    fn workflow_table_refusal_lists_a_bounded_number_of_names() {
+        let names = (0..WORKFLOW_REFUSAL_NAME_LIMIT + 3)
+            .map(|index| format!("t{index}"))
+            .collect::<Vec<_>>();
+        let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let listed = super::bounded_name_list(&names);
+        assert!(listed.starts_with("`t0`, `t1`"), "{listed}");
+        assert!(listed.ends_with("and 3 more"), "{listed}");
+        assert_eq!(listed.matches('`').count(), WORKFLOW_REFUSAL_NAME_LIMIT * 2);
+    }
+
+    #[test]
+    fn workflow_column_refusal_names_the_required_column_and_attributes() {
+        let table = WORKFLOW_TABLE_CONTRACTS_V1
+            .iter()
+            .find(|table| table.name == "workflow_artifact_payloads")
+            .unwrap();
+        let mut columns = table
+            .columns
+            .iter()
+            .map(|column| {
+                (
+                    column.name.to_owned(),
+                    column.sql_type.to_owned(),
+                    column.not_null,
+                    column.primary_key,
+                )
+            })
+            .collect::<Vec<_>>();
+        columns[1].1 = "secret-type-text".to_owned();
+        columns[1].2 = 1 - columns[1].2;
+        let reason = super::workflow_column_drift_reason(table, &columns);
+        assert!(
+            reason.contains(
+                "`workflow_artifact_payloads`: column 2 (required `byte_length`) differs in type, not-null flag"
+            ),
+            "{reason}"
+        );
+        assert!(!reason.contains("secret-type-text"), "{reason}");
+
+        columns.pop();
+        let reason = super::workflow_column_drift_reason(table, &columns);
+        assert!(
+            reason.contains("2 columns are stored, 3 are required"),
+            "{reason}"
         );
     }
 }

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -40,12 +41,13 @@ type SessionRelationGraphStateV1 = RwLock<
 /// A session authority inside an admitted store whose persisted shape this
 /// binary refuses to read. The store serves its other authorities; every
 /// session feature gets [`Self::error`] until the store is reset.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RefusedAuthorityV1 {
-    /// Rows or tables whose shape nothing converts.
+    /// Rows or tables whose shape nothing converts. `reason` names the
+    /// drifted objects but never carries stored SQL or row payloads.
     Shape {
         authority: &'static str,
-        reason: &'static str,
+        reason: Cow<'static, str>,
     },
     /// A recorded schema version other than the one this binary writes.
     Version {
@@ -214,7 +216,7 @@ impl RegisteredGlobalDbOwnerV1 {
                 Arc::clone(&self.project_graph),
                 Arc::clone(&self.session_relation_graph),
                 Arc::clone(&self.transcript_progress_proofs),
-                self.refused_authority,
+                self.refused_authority.clone(),
             ),
         ))
     }
@@ -223,7 +225,9 @@ impl RegisteredGlobalDbOwnerV1 {
     /// to read, `None` when every authority it holds is admissible.
     #[must_use]
     pub fn reset_required(&self) -> Option<TraceDecayError> {
-        self.refused_authority.map(RefusedAuthorityV1::error)
+        self.refused_authority
+            .clone()
+            .map(RefusedAuthorityV1::error)
     }
 
     /// Issues a mode-reduced client that can never regain write authority.
@@ -234,7 +238,7 @@ impl RegisteredGlobalDbOwnerV1 {
                 Arc::clone(&self.project_graph),
                 Arc::clone(&self.session_relation_graph),
                 Arc::clone(&self.transcript_progress_proofs),
-                self.refused_authority,
+                self.refused_authority.clone(),
             ),
         ))
     }
@@ -248,7 +252,7 @@ impl RegisteredGlobalDbOwnerV1 {
             project_graph: Arc::clone(&self.project_graph),
             session_relation_graph: Arc::downgrade(&self.session_relation_graph),
             transcript_progress_proofs: Arc::downgrade(&self.transcript_progress_proofs),
-            refused_authority: self.refused_authority,
+            refused_authority: self.refused_authority.clone(),
         }
     }
 
@@ -302,7 +306,7 @@ impl RegisteredGlobalDbWeakLeaseIssuerV1 {
                 Arc::clone(&self.project_graph),
                 session_relation_graph,
                 transcript_progress_proofs,
-                self.refused_authority,
+                self.refused_authority.clone(),
             ),
         ))
     }
@@ -457,7 +461,9 @@ impl RegisteredGlobalDb {
     /// refuses to read, `None` when every authority it holds is admissible.
     #[must_use]
     pub fn reset_required(&self) -> Option<TraceDecayError> {
-        self.refused_authority.map(RefusedAuthorityV1::error)
+        self.refused_authority
+            .clone()
+            .map(RefusedAuthorityV1::error)
     }
 
     /// Wraps an already-published guarded database for WAL maintenance tests.
