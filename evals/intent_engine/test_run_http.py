@@ -1050,5 +1050,54 @@ class RunHttpTest(unittest.TestCase):
             server.server_close()
 
 
+    def test_decision_response_rejects_oversized_or_invalid_http_bodies(self):
+        class Answer(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                valid = b'{"answers":{}}'
+                self.send_response(200)
+                if self.path == "/declared":
+                    # The server claims a huge body but sends valid, small JSON.
+                    # A check after an unrestricted read would accept this.
+                    self.send_header("Content-Length", str(run_http.MAX_DECISION_RESPONSE_BYTES + 1))
+                    self.end_headers()
+                    self.wfile.write(valid)
+                elif self.path == "/invalid":
+                    self.send_header("Content-Length", "not-a-number")
+                    self.end_headers()
+                    self.wfile.write(valid)
+                else:
+                    # No Content-Length: a streaming server must also be bounded.
+                    payload = (b'{"answers":{},"padding":"' +
+                               b"x" * run_http.MAX_DECISION_RESPONSE_BYTES + b'"}')
+                    self.end_headers()
+                    try:
+                        self.wfile.write(payload)
+                    except BrokenPipeError:
+                        pass
+
+            def log_message(self, *_):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Answer)
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            base = f"http://127.0.0.1:{server.server_port}"
+            body = {"state": "private transcript", "questions": {}}
+            for path, message in (
+                ("/declared", "size limit"),
+                ("/streamed", "size limit"),
+                ("/invalid", "invalid Content-Length"),
+            ):
+                with self.subTest(path=path):
+                    with self.assertRaisesRegex(ValueError, message):
+                        run_http.post(base + path, body, timeout=2)
+        finally:
+            server.shutdown()
+            worker.join(timeout=2)
+            server.server_close()
+
+
 if __name__ == "__main__":
     unittest.main()

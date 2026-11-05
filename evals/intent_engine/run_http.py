@@ -30,6 +30,10 @@ STATES = {
     "B2_noul_text_promptfirst": lambda c: text_window(c, prompt_first=True),
 }
 
+# Each server response contains only a bounded set of typed decision answers.
+# Refuse an oversized or streaming response before parsing untrusted JSON.
+MAX_DECISION_RESPONSE_BYTES = 1024 * 1024
+
 
 def digest(value):
     return hashlib.sha256(
@@ -170,7 +174,18 @@ def post(url, body, timeout=1800, bearer_token=None):
     )
     started = time.perf_counter()
     with opener.open(req, timeout=timeout) as response:
-        out = json.loads(response.read())
+        declared = response.headers.get("Content-Length")
+        if declared is not None:
+            try:
+                declared = int(declared)
+            except ValueError as error:
+                raise ValueError("decision response has an invalid Content-Length") from error
+            if declared < 0 or declared > MAX_DECISION_RESPONSE_BYTES:
+                raise ValueError("decision response exceeds the 1 MiB size limit")
+        payload = response.read(MAX_DECISION_RESPONSE_BYTES + 1)
+        if len(payload) > MAX_DECISION_RESPONSE_BYTES:
+            raise ValueError("decision response exceeds the 1 MiB size limit")
+        out = json.loads(payload)
     return out, (time.perf_counter() - started) * 1000
 
 
