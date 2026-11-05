@@ -53,6 +53,26 @@ impl StoreTelemetrySamplingRegistry {
                 entry.data_root != data_root || live_store_roots.contains(store_root)
             });
     }
+
+    /// A scope selected for quarantine must not be pinned by an unfinished
+    /// staging-directory scan. Reset even if a blocking caller still holds an
+    /// Arc to the scan, so its ReadDir handles are closed before the rename.
+    /// The maintenance writer serializes this with scan preparation.
+    pub(crate) fn release_text_artifact_scans_before_scope_collection(
+        &self,
+        collectable_store_roots: &BTreeSet<PathBuf>,
+    ) {
+        let mut scans = self
+            .text_artifact_scans
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for root in collectable_store_roots {
+            if let Some(entry) = scans.remove(root) {
+                *entry.scan.lock().unwrap_or_else(PoisonError::into_inner) =
+                    CodeGenerationRetentionScanV1::default();
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -60,6 +80,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::path::Path;
     use std::sync::Arc;
+    use tracedecay_code_index_retention::code_index_generations::code_text_artifact_staging_root;
 
     use super::StoreTelemetrySamplingRegistry;
 
@@ -101,6 +122,51 @@ mod tests {
         registry.retain_text_artifact_scan_scopes(project, &BTreeSet::new());
         assert!(live_weak.upgrade().is_none());
         assert!(elsewhere_weak.upgrade().is_some());
+    }
+
+    #[test]
+    fn scope_quarantine_releases_live_staging_directory_streams() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_root = temp.path().join("project");
+        let scope_root = data_root.join("code-index-v1").join("retired");
+        let staging = code_text_artifact_staging_root(&scope_root);
+        std::fs::create_dir_all(&staging).unwrap();
+        // More than one bounded page keeps a real ReadDir open after prepare.
+        for i in 0..96 {
+            std::fs::write(
+                staging.join(format!(".text-artifact-{i:064x}.staging")),
+                b"unpublished staging",
+            )
+            .unwrap();
+        }
+        let registry = StoreTelemetrySamplingRegistry::default();
+        let retained = registry.text_artifact_scan(&data_root, &scope_root);
+        let planned = retained
+            .lock()
+            .unwrap()
+            .prepare(&scope_root, &BTreeSet::new(), &|| false, None)
+            .unwrap();
+        assert!(planned.has_pending_text_artifact_inventory());
+
+        let another_root = data_root.join("code-index-v1").join("live");
+        let live = registry.text_artifact_scan(&data_root, &another_root);
+        registry.release_text_artifact_scans_before_scope_collection(&BTreeSet::from([
+            scope_root.clone(),
+        ]));
+        assert!(Arc::ptr_eq(
+            &live,
+            &registry.text_artifact_scan(&data_root, &another_root)
+        ));
+        assert!(
+            !Arc::ptr_eq(&retained, &registry.text_artifact_scan(&data_root, &scope_root)),
+            "a retired scope must not keep a reusable scan owner"
+        );
+        // On Windows a live ReadDir inside the source prevents this rename.
+        // Keep the prior Arc alive: removal alone is insufficient unless its
+        // open directory streams were also reset.
+        let quarantined = data_root.join("quarantined-scope");
+        std::fs::rename(&scope_root, &quarantined).unwrap();
+        assert!(quarantined.join("code-text-artifact-staging-v1").is_dir());
     }
 
     #[test]
