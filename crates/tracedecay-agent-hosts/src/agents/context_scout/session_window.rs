@@ -902,9 +902,8 @@ mod tests {
             seed.message(record).await;
         }
         let mut assistant = record(PROVIDER, SESSION, 2, "assistant", "real tool");
-        assistant.metadata_json = Some(
-            json!({"tool_events": [{"type": "tool_use", "tool_name": "Grep"}]}).to_string(),
-        );
+        assistant.metadata_json =
+            Some(json!({"tool_events": [{"type": "tool_use", "tool_name": "Grep"}]}).to_string());
         seed.message(assistant).await;
 
         let window = ready(read_session_window(seed.db(), &request(limits())).await);
