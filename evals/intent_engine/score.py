@@ -4,7 +4,7 @@ Empty slices have unknown rates, not zero accuracy. Macro AUC averages only
 categories with both label classes and reports its category coverage. Nonempty
 macro F1 retains the historical fixed-CATS, zero-for-undefined convention.
 """
-import hashlib, json, glob, math, os, re, statistics, sys, tempfile
+import bisect, hashlib, json, glob, math, os, re, statistics, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import CATS, calibrated
 
@@ -132,8 +132,14 @@ def validate_calibration(result, rows):
 
 def auc(pos, neg):
     if not pos or not neg: return None
-    s = sum((p > n) + 0.5 * (p == n) for p in pos for n in neg)
-    return s / (len(pos) * len(neg))
+    # Count strict wins and half-credit ties using negative-score ranks.
+    # This preserves pairwise AUC without the quadratic comparison matrix.
+    ordered_neg = sorted(neg)
+    twice_wins = sum(
+        bisect.bisect_left(ordered_neg, p) + bisect.bisect_right(ordered_neg, p)
+        for p in pos
+    )
+    return twice_wins / (2 * len(pos) * len(neg))
 
 def mean_defined(values):
     values = [value for value in values if value is not None]
@@ -234,10 +240,25 @@ def score_config(res, fixed_t=None):
             per[c].update(loo_f1=None, loo_p=None, loo_r=None)
             continue
         tp = fp = fn = 0
-        for i, r in enumerate(rows):
-            rest = rows[:i] + rows[i + 1:]
-            t = max(TH, key=lambda t: (prf(rest, c, t)["f1"] or 0, t))
-            hit = r["probs"][c] >= t; y = c in r["labels"]
+        # Each held-out training sweep differs from the full sweep by one
+        # row. Subtract that row's contribution instead of rescanning all
+        # other rows for every threshold and every held-out case.
+        full_sweep = per[c]["sweep"]
+        for r in rows:
+            probability = r["probs"][c]
+            y = c in r["labels"]
+
+            def training_f1(t):
+                counts = full_sweep[str(t)]
+                predicted = probability >= t
+                held_tp = counts["tp"] - int(predicted and y)
+                held_fp = counts["fp"] - int(predicted and not y)
+                held_fn = counts["fn"] - int(not predicted and y)
+                denominator = 2 * held_tp + held_fp + held_fn
+                return 2 * held_tp / denominator if denominator else 0
+
+            t = max(TH, key=lambda threshold: (training_f1(threshold), threshold))
+            hit = probability >= t
             tp += hit and y; fp += hit and not y; fn += (not hit) and y
         per[c]["loo_f1"] = 2 * tp / (2 * tp + fp + fn) if tp + fp + fn else None
         per[c]["loo_p"] = tp / (tp + fp) if tp + fp else None

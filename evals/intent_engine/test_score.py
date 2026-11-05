@@ -141,6 +141,64 @@ class ScoringTests(unittest.TestCase):
             self.assertEqual(result[name]["macro_f1"], 1.0)
             self.assertEqual(result[name]["all"]["exact_set_acc"], 1.0)
 
+    def test_ranked_auc_matches_exhaustive_pairwise_ties(self):
+        for pos, neg in (
+            ([], []), ([0.5], []), ([], [0.5]),
+            ([0.5], [0.5]), ([0.0, 0.5, 1.0], [1.0, 0.5, 0.0]),
+            ([0.1, 0.1, 0.4, 0.8, 1.0], [0.0, 0.1, 0.3, 0.8, 0.8]),
+        ):
+            with self.subTest(pos=pos, neg=neg):
+                expected = (sum((p > n) + 0.5 * (p == n)
+                                for p in pos for n in neg) / (len(pos) * len(neg))
+                            if pos and neg else None)
+                self.assertEqual(score.auc(pos, neg), expected)
+
+    def test_leave_one_out_matches_independent_training_rescans(self):
+        levels = [0, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0]
+        for count in (2, 3, 11, 24):
+            rows = []
+            for index in range(count):
+                labels = [cat for j, cat in enumerate(score.CATS)
+                          if (index + 3 * j) % 5 == 0]
+                item = row(str(index), labels, index % 2 == 0)
+                item["probs"] = {
+                    cat: levels[(3 * index + 7 * j) % len(levels)]
+                    for j, cat in enumerate(score.CATS)
+                }
+                rows.append(item)
+            actual = score.score_config({"config": "loo-check", "rows": rows})
+            self.assertEqual(actual["loo_evaluated_cases"], count)
+            for category in score.CATS:
+                tp = fp = fn = 0
+                for index, item in enumerate(rows):
+                    train = rows[:index] + rows[index + 1:]
+                    threshold = max(
+                        score.TH,
+                        key=lambda t: (score.prf(train, category, t)["f1"] or 0, t),
+                    )
+                    hit = item["probs"][category] >= threshold
+                    positive = category in item["labels"]
+                    tp += hit and positive
+                    fp += hit and not positive
+                    fn += not hit and positive
+                expected = {
+                    "loo_f1": 2 * tp / (2 * tp + fp + fn) if tp + fp + fn else None,
+                    "loo_p": tp / (tp + fp) if tp + fp else None,
+                    "loo_r": tp / (tp + fn) if tp + fn else None,
+                }
+                for metric, value in expected.items():
+                    self.assertEqual(actual["per_cat"][category][metric], value)
+
+    def test_scoring_large_held_out_cohort_without_pairwise_rescans(self):
+        rows = [
+            row(str(i), [score.CATS[0]] if i % 2 else [], bool(i % 3))
+            for i in range(1200)
+        ]
+        result = score.score_config({"config": "large", "rows": rows})
+        self.assertEqual(result["loo_evaluated_cases"], len(rows))
+        self.assertEqual(result["latency"]["total_cases"], len(rows))
+        self.assertEqual(result["per_cat"][score.CATS[0]]["auc"], 1.0)
+
     def test_cli_reports_the_scored_subset_without_loading_the_full_dataset(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
