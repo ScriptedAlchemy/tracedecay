@@ -159,6 +159,10 @@ describe('DoctorInspector', () => {
       convergence('pending', 1),
       convergence('running', 2),
       {
+        ...convergence('retrying', 5),
+        degraded_row: 'database is locked',
+      },
+      {
         ...convergence('degraded', 3),
         degraded_row: 'observation_id=obs-7 projector=session_message',
       },
@@ -170,6 +174,8 @@ describe('DoctorInspector', () => {
 
     expect(await screen.findByText('Schema convergence pending')).toBeTruthy();
     expect(screen.getByText('Schema convergence running')).toBeTruthy();
+    expect(screen.getByText('Schema convergence retrying')).toBeTruthy();
+    expect(screen.getByText(/database is locked/)).toBeTruthy();
     expect(screen.getByText('Schema convergence degraded')).toBeTruthy();
     expect(screen.getByText('Schema convergence completed')).toBeTruthy();
     expect(screen.getByText(/observation_id=obs-7 projector=session_message/)).toBeTruthy();

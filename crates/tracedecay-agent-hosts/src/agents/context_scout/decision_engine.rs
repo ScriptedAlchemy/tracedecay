@@ -36,6 +36,10 @@ const SYSTEMONE_PATH: &str = "/v1/systemone";
 /// Tolerance when checking a `score` against the rubric's last level index.
 const SCORE_EPSILON: f64 = 1e-6;
 
+/// Decision servers return a probability distribution, not independent scores.
+/// Allow a small rounding error when servers serialize decimal probabilities.
+const CHOICE_EPSILON: f64 = 1e-3;
+
 /// What one question asks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecisionQuestionKindV1 {
@@ -440,7 +444,12 @@ fn parse_answer(
     answer: &Map<String, Value>,
     kind: &DecisionQuestionKindV1,
 ) -> Option<DecisionAnswerV1> {
-    let declared = answer.get("type").and_then(Value::as_str);
+    // An omitted tag is valid, but a non-string tag must not also become
+    // `None` and skip kind validation.
+    let declared = match answer.get("type") {
+        None => None,
+        Some(declared) => Some(declared.as_str()?),
+    };
     match kind {
         DecisionQuestionKindV1::Noul => {
             if declared.is_some_and(|declared| declared != "noul") {
@@ -470,6 +479,15 @@ fn parse_answer(
             // hide a malformed map or contradict the first one's values.
             for alias in reported {
                 if choice_probabilities(alias.as_object()?, options)? != probabilities {
+                    return None;
+                }
+            }
+            if let Some(chosen) = &chosen {
+                let selected_probability = *probabilities.get(chosen)?;
+                if probabilities
+                    .values()
+                    .any(|probability| *probability > selected_probability + CHOICE_EPSILON)
+                {
                     return None;
                 }
             }
@@ -503,6 +521,16 @@ fn choice_probabilities(
     let mut probabilities = BTreeMap::new();
     for label in options {
         probabilities.insert(label.clone(), unit_interval(reported.get(label)?)?);
+    }
+    // A map containing every label is still malformed if it is not a
+    // distribution. In particular, two individually valid 0.8 scores are
+    // not a valid two-way choice.
+    // A three-decimal response can deviate by up to 0.0005 per option.
+    // Scale the sum tolerance with cardinality, but cap it at one percent
+    // so a large choice set cannot excuse an unnormalized answer.
+    let rounding_tolerance = (CHOICE_EPSILON * probabilities.len() as f64 / 2.0).min(0.01);
+    if (probabilities.values().sum::<f64>() - 1.0).abs() > rounding_tolerance {
+        return None;
     }
     Some(probabilities)
 }
@@ -832,6 +860,10 @@ mod tests {
             json!({"options": {"code": 0.7, "other": 0.3}}),
             json!({"probs": {"code": 0.7, "memory": 0.3, "other": 0.0}}),
             json!({"probs": {"code": "0.7", "memory": 0.3}}),
+            json!({"choice": "code", "probs": {"code": 0.8, "memory": 0.8}}),
+            json!({"choice": "code", "probs": {"code": 0.1, "memory": 0.9}}),
+            json!({"probs": {"code": 0.0, "memory": 0.0}}),
+            json!({"probs": {"code": 0.4, "memory": 0.4}}),
         ];
         for answer in cases {
             let body = json!({"answers": {"route": answer}}).to_string();
@@ -918,6 +950,84 @@ mod tests {
                 probabilities: BTreeMap::from([("code".to_owned(), 0.0), ("none".to_owned(), 1.0)]),
             }
         );
+    }
+
+    #[test]
+    fn rounded_choice_distribution_is_accepted_without_exact_float_equality() {
+        let body = answers_body(
+            None,
+            &[(
+                "route",
+                choice_answer(
+                    None,
+                    "probabilities",
+                    &[("code", 0.3333), ("memory", 0.3333), ("none", 0.3333)],
+                ),
+            )],
+        );
+        let server = fake_decision_engine(200, &body, Duration::ZERO);
+        let answers = answered(client(&server.url).ask_blocking(&request(
+            "state",
+            vec![choice("route", &["code", "memory", "none"])],
+        )));
+        assert_eq!(
+            answers.answers["route"],
+            DecisionAnswerV1::Choice {
+                chosen: None,
+                probabilities: BTreeMap::from([
+                    ("code".to_owned(), 0.3333),
+                    ("memory".to_owned(), 0.3333),
+                    ("none".to_owned(), 0.3333),
+                ]),
+            }
+        );
+    }
+
+    #[test]
+    fn six_way_choice_accepts_decimal_rounding_but_not_invalid_totals() {
+        for (probability, valid) in [(0.167, true), (0.166, false), (0.17, false)] {
+            let body = answers_body(
+                None,
+                &[(
+                    "route",
+                    choice_answer(
+                        None,
+                        "probabilities",
+                        &[
+                            ("a", probability),
+                            ("b", probability),
+                            ("c", probability),
+                            ("d", probability),
+                            ("e", probability),
+                            ("f", probability),
+                        ],
+                    ),
+                )],
+            );
+            let server = fake_decision_engine(200, &body, Duration::ZERO);
+            let result = client(&server.url).ask_blocking(&request(
+                "state",
+                vec![choice("route", &["a", "b", "c", "d", "e", "f"])],
+            ));
+            if valid {
+                assert_eq!(
+                    answered(result).answers["route"],
+                    DecisionAnswerV1::Choice {
+                        chosen: None,
+                        probabilities: BTreeMap::from([
+                            ("a".to_owned(), probability),
+                            ("b".to_owned(), probability),
+                            ("c".to_owned(), probability),
+                            ("d".to_owned(), probability),
+                            ("e".to_owned(), probability),
+                            ("f".to_owned(), probability),
+                        ]),
+                    }
+                );
+            } else {
+                assert_eq!(result, DecisionEngineOutcomeV1::Malformed, "{body}");
+            }
+        }
     }
 
     #[test]
@@ -1078,6 +1188,44 @@ mod tests {
                 expected,
                 "{status} {body}"
             );
+        }
+    }
+
+    #[test]
+    fn explicit_answer_types_must_not_be_treated_as_omitted_when_malformed() {
+        for (question, answer) in [
+            (noul("q"), json!({"noul": 0.5})),
+            (
+                choice("q", &["code", "memory"]),
+                json!({"probs": {"code": 0.7, "memory": 0.3}}),
+            ),
+            (score("q", &["low", "high"]), json!({"score": 0.5})),
+        ] {
+            // An omitted tag is valid for every kind.
+            let body = json!({"answers": {"q": &answer}}).to_string();
+            let server = fake_decision_engine(200, &body, Duration::ZERO);
+            let result = answered(
+                client(&server.url).ask_blocking(&request("state", vec![question.clone()])),
+            );
+            assert_eq!(result.answers.len(), 1);
+
+            for declared in [
+                Value::Null,
+                json!(false),
+                json!(1),
+                json!(["noul"]),
+                json!({"type": "noul"}),
+            ] {
+                let mut malformed = answer.clone();
+                malformed["type"] = declared;
+                let body = json!({"answers": {"q": malformed}}).to_string();
+                let server = fake_decision_engine(200, &body, Duration::ZERO);
+                assert_eq!(
+                    client(&server.url).ask_blocking(&request("state", vec![question.clone()])),
+                    DecisionEngineOutcomeV1::Malformed,
+                    "{body}"
+                );
+            }
         }
     }
 

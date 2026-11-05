@@ -1368,9 +1368,12 @@ fn usage_count_rows(counts: BTreeMap<(String, String), i64>) -> Vec<AnalyticsUsa
 /// ceiling as [`session_message_rows`] so the diagnostics `message_count`
 /// keeps its meaning without hauling full rows (text and metadata included)
 /// through the JSON layer just to be counted.
-async fn session_message_count(db: Option<&RegisteredGlobalDb>) -> Result<i64, String> {
+///
+/// `None` when no session-message authority is mounted for this state: an
+/// unmounted store cannot report a measured zero.
+async fn session_message_count(db: Option<&RegisteredGlobalDb>) -> Result<Option<i64>, String> {
     let Some(db) = db else {
-        return Ok(0);
+        return Ok(None);
     };
     let connection = db.read_connection();
     query_i64_result(
@@ -1379,6 +1382,7 @@ async fn session_message_count(db: Option<&RegisteredGlobalDb>) -> Result<i64, S
         (),
     )
     .await
+    .map(Some)
     .map_err(|error| format!("session-message count query failed: {error}"))
 }
 
@@ -1863,7 +1867,7 @@ mod tests {
             window: HookAnalyticsWindow::default(),
         };
 
-        let summary = diagnostics_summary_from_parts(0, &hook_analytics, None);
+        let summary = diagnostics_summary_from_parts(None, &hook_analytics, None);
         let readiness = &summary["hook_readiness"];
 
         // Fail closed: no projection means no measurement, said plainly.
@@ -1871,6 +1875,10 @@ mod tests {
         assert_eq!(readiness["events_considered"], 0);
         assert_eq!(readiness["input_rows_received"], 1);
         assert_eq!(readiness["input_rows_processed"], 0);
+        assert_eq!(
+            readiness["events_skipped_non_completed"], 0,
+            "the only row is a completed hook, so the unavailable fallback must not call it skipped"
+        );
         assert_eq!(
             readiness["unavailable_metrics"][0]["blocker"],
             "hook readiness projection is not mounted"
@@ -1909,8 +1917,8 @@ mod tests {
         .expect("diagnostics summary");
         assert_eq!(
             (summary.message_count, summary.hook_call_count),
-            (0, 0),
-            "an empty fixture store reports no messages and no hook calls"
+            (None, 0),
+            "an unmounted session-message authority is unknown, not a measured zero"
         );
     }
 }

@@ -216,9 +216,10 @@ fn code_index_mount_state(staleness: Option<CodeIndexStalenessStateV1>) -> CodeI
 /// for minutes after the daemon is already serving. That is deliberate: it
 /// runs after the fail-closed admission checks and outside any caller's write
 /// lease, so it blocks neither admission nor retrieval. What it must not do is
-/// stay invisible. A shard still pending or running reads as `Stale`, and one
-/// whose convergence failed reads as `Degraded`, carrying the failure the
-/// convergence task recorded. An empty set is absent rather than a healthy claim, since a
+/// stay invisible. A shard still pending or running reads as `Stale`. One whose
+/// last attempt failed reads as `Degraded` and carries the failure the
+/// convergence task recorded, named `retrying` while the task will try again by
+/// itself and `stopped` once nothing will. An empty set is absent rather than a healthy claim, since a
 /// daemon with no mounted shard has converged nothing.
 #[must_use]
 pub fn schema_convergence_incomplete_read(
@@ -243,6 +244,12 @@ pub fn schema_convergence_incomplete_read(
                 DoctorEvidenceStateV1::Stale,
                 "running".to_owned(),
                 "schema convergence is running; the store stays served meanwhile",
+            ),
+            RegisteredSchemaConvergenceStatus::Retrying { message } => (
+                DoctorEvidenceStateV1::Degraded,
+                format!("retrying.{message}"),
+                "schema convergence failed an attempt and retries by itself; workflow storage \
+                 answers typed recovering meanwhile",
             ),
             RegisteredSchemaConvergenceStatus::Degraded { message } => (
                 DoctorEvidenceStateV1::Degraded,

@@ -65,11 +65,15 @@ pub async fn run_project_generation_maintenance(
     if !cancellation.is_cancelled() {
         outcome = outcome.combine({
             use tracing::Instrument as _;
-            run_code_index_scope_reconciliation(lease, code_index_schedulers)
-                .instrument(tracing::trace_span!(
-                    "daemon.maintenance.scope_reconciliation"
-                ))
-                .await
+            run_code_index_scope_reconciliation(
+                lease,
+                code_index_schedulers,
+                maintenance_observations,
+            )
+            .instrument(tracing::trace_span!(
+                "daemon.maintenance.scope_reconciliation"
+            ))
+            .await
         });
     }
     if !cancellation.is_cancelled()

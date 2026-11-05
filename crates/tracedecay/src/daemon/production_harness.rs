@@ -1949,3 +1949,6 @@ mod unknown_node_id_readiness_journey_test;
 
 #[cfg(test)]
 mod drop_shutdown_journey_test;
+
+#[cfg(test)]
+mod published_workflow_recovery_journey_test;

@@ -4,16 +4,154 @@ Empty slices have unknown rates, not zero accuracy. Macro AUC averages only
 categories with both label classes and reports its category coverage. Nonempty
 macro F1 retains the historical fixed-CATS, zero-for-undefined convention.
 """
-import json, glob, os, statistics, sys
+import bisect, hashlib, json, glob, math, os, re, statistics, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import CATS
+from common import CATS, calibrated
 
 TH = [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
+def publish_summary(path, summary):
+    # Publish a complete scored snapshot without truncating the last good one.
+    directory = os.path.dirname(os.path.abspath(path))
+    descriptor, staged = tempfile.mkstemp(prefix=".intent-summary-", suffix=".json", dir=directory)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(summary, output, indent=1, allow_nan=False)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(staged, path)
+    finally:
+        if os.path.lexists(staged):
+            os.unlink(staged)
+
+
+def validate_rows(rows, config):
+    """Refuse invalid measured evidence before any threshold or AUC arithmetic."""
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("configuration %r has no rows to score" % config)
+    categories = set(CATS)
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("configuration %r has a non-object result row" % config)
+        case_id = row.get("id")
+        if not isinstance(case_id, str) or not case_id or case_id in seen:
+            raise ValueError("configuration %r has a missing or duplicate case ID" % config)
+        seen.add(case_id)
+        labels = row.get("labels")
+        if (not isinstance(labels, list) or
+                any(not isinstance(label, str) or label not in categories for label in labels) or
+                len(set(labels)) != len(labels)):
+            raise ValueError(f"configuration {config!r} case {case_id} has invalid labels")
+        if not isinstance(row.get("context_needed"), bool):
+            raise ValueError(f"configuration {config!r} case {case_id} has invalid context_needed")
+        for field in ("probs", "probs_raw"):
+            if field == "probs_raw" and field not in row:
+                continue
+            probs = row.get(field)
+            if (not isinstance(probs, dict) or not categories.issubset(probs) or
+                    set(probs) - categories - {"none"}):
+                raise ValueError(f"configuration {config!r} case {case_id} has invalid {field} coverage")
+            for label, value in probs.items():
+                if (isinstance(value, bool) or not isinstance(value, (int, float)) or
+                        not math.isfinite(value) or not 0 <= value <= 1):
+                    raise ValueError(f"configuration {config!r} case {case_id} has invalid {field} value for {label}")
+        if "choice" in row:
+            choice = row["choice"]
+            if choice is not None and (not isinstance(choice, str) or choice not in categories | {"none"}):
+                raise ValueError(f"configuration {config!r} case {case_id} has invalid choice")
+        elapsed = row.get("ms")
+        if (isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)) or
+                not math.isfinite(elapsed) or elapsed < 0):
+            raise ValueError(f"configuration {config!r} case {case_id} has invalid elapsed ms")
+
+
+def evidence_digest(value):
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, allow_nan=False).encode("utf-8")
+    ).hexdigest()
+
+
+def validate_http_provenance(result, rows):
+    """Bind scored HTTP rows to the recorded experiment and request order."""
+    if "experiment" not in result:
+        # Historical local runs can carry a dataset digest, but HTTP request
+        # fingerprints and experiment digests require a matching identity.
+        # Losing the identity cannot silently downgrade HTTP evidence to local.
+        if "experiment_sha256" in result or any(
+            "request_sha256" in row for row in rows
+        ):
+            raise ValueError("HTTP result is missing its experiment identity")
+        return
+    experiment = result["experiment"]
+    if result.get("experiment_sha256") != evidence_digest(experiment):
+        raise ValueError("HTTP experiment identity digest disagrees with recorded settings")
+    case_ids = [row["id"] for row in rows]
+    if experiment.get("case_ids") != case_ids:
+        raise ValueError("HTTP experiment case IDs or ordering disagree with result rows")
+    annotations = [
+        [row["id"], row["labels"], row["context_needed"]] for row in rows
+    ]
+    if experiment.get("case_annotations_sha256") != evidence_digest(annotations):
+        raise ValueError("HTTP case annotations disagree with experiment identity")
+    requests = []
+    for row in rows:
+        request_sha = row.get("request_sha256")
+        if not isinstance(request_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", request_sha):
+            raise ValueError(f"HTTP case {row['id']} has an invalid request fingerprint")
+        requests.append([row["id"], request_sha])
+    if experiment.get("requests_sha256") != evidence_digest(requests):
+        raise ValueError("HTTP request fingerprints disagree with experiment identity")
+    if result.get("dataset_sha256") != experiment.get("dataset_sha256"):
+        raise ValueError("HTTP dataset digest disagrees with experiment identity")
+    config = result.get("config")
+    variant = experiment.get("config")
+    if (not isinstance(config, str) or not isinstance(variant, str)
+            or (config != variant and not config.endswith("_" + variant))):
+        raise ValueError("HTTP configuration disagrees with experiment identity")
+
+
+def validate_calibration(result, rows):
+    """Check HTTP calibration against its raw measurements before scoring."""
+    if "experiment" not in result:
+        return  # Historical local scoring files have no HTTP calibration.
+    temperature = result["experiment"].get("noul_temperature")
+    if temperature is not None and (
+        isinstance(temperature, bool)
+        or not isinstance(temperature, (int, float))
+        or not math.isfinite(temperature)
+        or temperature <= 0
+    ):
+        raise ValueError("invalid HTTP calibration temperature")
+    if ("noul_temperature" in result
+            and result["noul_temperature"] != temperature):
+        raise ValueError("HTTP calibration temperature differs from recorded experiment")
+    if temperature is None:
+        if any("probs_raw" in row for row in rows):
+            raise ValueError("uncalibrated HTTP result contains raw probabilities")
+        return
+    for row in rows:
+        if "probs_raw" not in row:
+            raise ValueError("calibrated HTTP result is missing raw probabilities")
+        expected = {
+            category: calibrated(value, temperature)
+            for category, value in row["probs_raw"].items()
+        }
+        if row["probs"] != expected:
+            raise ValueError("calibrated probabilities disagree with raw telemetry")
+
+
 def auc(pos, neg):
     if not pos or not neg: return None
-    s = sum((p > n) + 0.5 * (p == n) for p in pos for n in neg)
-    return s / (len(pos) * len(neg))
+    # Count strict wins and half-credit ties using negative-score ranks.
+    # This preserves pairwise AUC without the quadratic comparison matrix.
+    ordered_neg = sorted(neg)
+    twice_wins = sum(
+        bisect.bisect_left(ordered_neg, p) + bisect.bisect_right(ordered_neg, p)
+        for p in pos
+    )
+    return twice_wins / (2 * len(pos) * len(neg))
 
 def mean_defined(values):
     values = [value for value in values if value is not None]
@@ -91,8 +229,9 @@ def score_config(res, fixed_t=None):
         if not isinstance(experiment, dict) or experiment.get("version") != 2:
             raise ValueError("HTTP result telemetry version is unsupported; rerun with a new tag")
     rows = res["rows"]
-    if not rows:
-        raise ValueError("configuration %r has no rows to score" % res.get("config"))
+    validate_rows(rows, res.get("config"))
+    validate_calibration(res, rows)
+    validate_http_provenance(res, rows)
     choices = ["choice" in row for row in rows]
     if any(choices) and not all(choices):
         raise ValueError("configuration %r has incomplete choice coverage" % res.get("config"))
@@ -113,10 +252,25 @@ def score_config(res, fixed_t=None):
             per[c].update(loo_f1=None, loo_p=None, loo_r=None)
             continue
         tp = fp = fn = 0
-        for i, r in enumerate(rows):
-            rest = rows[:i] + rows[i + 1:]
-            t = max(TH, key=lambda t: (prf(rest, c, t)["f1"] or 0, t))
-            hit = r["probs"][c] >= t; y = c in r["labels"]
+        # Each held-out training sweep differs from the full sweep by one
+        # row. Subtract that row's contribution instead of rescanning all
+        # other rows for every threshold and every held-out case.
+        full_sweep = per[c]["sweep"]
+        for r in rows:
+            probability = r["probs"][c]
+            y = c in r["labels"]
+
+            def training_f1(t):
+                counts = full_sweep[str(t)]
+                predicted = probability >= t
+                held_tp = counts["tp"] - int(predicted and y)
+                held_fp = counts["fp"] - int(predicted and not y)
+                held_fn = counts["fn"] - int(not predicted and y)
+                denominator = 2 * held_tp + held_fp + held_fn
+                return 2 * held_tp / denominator if denominator else 0
+
+            t = max(TH, key=lambda threshold: (training_f1(threshold), threshold))
+            hit = probability >= t
             tp += hit and y; fp += hit and not y; fn += (not hit) and y
         per[c]["loo_f1"] = 2 * tp / (2 * tp + fp + fn) if tp + fp + fn else None
         per[c]["loo_p"] = tp / (tp + fp) if tp + fp else None
@@ -153,19 +307,15 @@ if __name__ == "__main__":
     fixed = json.load(open(os.path.join(here, "fixed_thresholds.json"))) if os.path.exists(os.path.join(here, "fixed_thresholds.json")) else None
     summary = {}; allres = {}
     for f in sorted(glob.glob(os.path.join(here, "results", "*.json"))):
-        res = json.load(open(f)); allres[res["config"]] = res
-    if "B_noul_text" in allres and "C_choice_text" in allres:
-        # derived: noul probs for session_recall/memory_store, choice probs for the rest (two calls: 2 noul rows + 1 choice row)
-        b = {r["id"]: r for r in allres["B_noul_text"]["rows"]}
-        rows = []
-        for r in allres["C_choice_text"]["rows"]:
-            p = dict(r["probs"]); p["session_recall"] = b[r["id"]]["probs"]["session_recall"]; p["memory_store"] = b[r["id"]]["probs"]["memory_store"]
-            rows.append({**r, "probs": p, "ms": r["ms"] + 2 * 340})
-            rows[-1].pop("choice")
-        allres["H_hybrid_text"] = {"config": "H_hybrid_text", "rows": rows}
+        res = json.load(open(f))
+        if res["config"] in allres:
+            raise ValueError("duplicate configuration %r in result files" % res["config"])
+        allres[res["config"]] = res
+    # Score recorded runs only. Combining independently measured arms cannot
+    # establish hybrid latency or usage, and must never replace an actual run.
     for k, res in allres.items():
         summary[k] = score_config(res, fixed)
-    json.dump(summary, open(os.path.join(here, "summary.json"), "w"), indent=1)
+    publish_summary(os.path.join(here, "summary.json"), summary)
     f2 = lambda x: "  -  " if x is None else "%.2f" % x
     print("config                     macroAUC ctxAUC | t0.5: mF1 top1 top1ctx noneFH | t0.6: mF1 top1 top1ctx noneFH | best: mF1 top1 top1ctx noneFH | ECE  | med/p90 ms")
     for k, s in summary.items():

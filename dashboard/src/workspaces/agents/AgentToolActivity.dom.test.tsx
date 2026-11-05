@@ -63,6 +63,17 @@ describe('AgentToolActivity', () => {
     expect(screen.queryByText('not through MCP')).toBeNull();
   });
 
+  it('states no per-message rate when the fold served none', () => {
+    render(<AgentToolActivity payload={read({ ratios: { tool_calls_per_message: null } })} />);
+
+    // A null rate is an absence, not a measured zero: the sentence must drop
+    // the clause entirely rather than print "0.00 per message".
+    const headline = document.querySelector('[data-agent-tool-activity="read"] > p')!;
+    expect(headline.textContent).toContain('1,000 tool calls in the window');
+    expect(headline.textContent).not.toContain('per message');
+    expect(headline.textContent).not.toContain('0.00');
+  });
+
   it('reports a store that disagrees with itself rather than clamping the remainder', () => {
     render(<AgentToolActivity payload={read({ tool_call_count: 100, mcp_tool_call_count: 750 })} />);
 

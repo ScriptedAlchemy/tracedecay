@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -40,12 +41,13 @@ type SessionRelationGraphStateV1 = RwLock<
 /// A session authority inside an admitted store whose persisted shape this
 /// binary refuses to read. The store serves its other authorities; every
 /// session feature gets [`Self::error`] until the store is reset.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RefusedAuthorityV1 {
-    /// Rows or tables whose shape nothing converts.
+    /// Rows or tables whose shape nothing converts. `reason` names the
+    /// drifted objects but never carries stored SQL or row payloads.
     Shape {
         authority: &'static str,
-        reason: &'static str,
+        reason: Cow<'static, str>,
     },
     /// A recorded schema version other than the one this binary writes.
     Version {
@@ -72,6 +74,56 @@ impl RefusedAuthorityV1 {
     }
 }
 
+/// What a registered store's session authorities answer right now. Every lease
+/// of one owner shares it, so a background upgrade's outcome reaches clients
+/// issued before it committed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SessionAuthorityV1 {
+    Serving,
+    /// Workflow tables in the published shape background convergence is
+    /// upgrading. Only workflow storage answers typed recovering; every other
+    /// authority of the store serves.
+    RecoveringWorkflow,
+    Refused(RefusedAuthorityV1),
+}
+
+/// Shared by an owner and its leases, see [`SessionAuthorityV1`].
+#[derive(Debug)]
+struct SessionAuthorityStateV1(RwLock<SessionAuthorityV1>);
+
+impl SessionAuthorityStateV1 {
+    fn new(authority: SessionAuthorityV1) -> Arc<Self> {
+        Arc::new(Self(RwLock::new(authority)))
+    }
+
+    fn current(&self) -> SessionAuthorityV1 {
+        self.0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn publish(&self, authority: SessionAuthorityV1) {
+        *self
+            .0
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = authority;
+    }
+
+    fn reset_required(&self) -> Option<TraceDecayError> {
+        match self.current() {
+            SessionAuthorityV1::Refused(refused) => Some(refused.error()),
+            SessionAuthorityV1::Serving | SessionAuthorityV1::RecoveringWorkflow => None,
+        }
+    }
+}
+
+impl From<Option<RefusedAuthorityV1>> for SessionAuthorityV1 {
+    fn from(refused: Option<RefusedAuthorityV1>) -> Self {
+        refused.map_or(Self::Serving, Self::Refused)
+    }
+}
+
 /// The sole map owner for one registered global-database publication.
 ///
 /// It can issue independently counted client leases, but cannot be cloned or
@@ -82,7 +134,7 @@ pub struct RegisteredGlobalDbOwnerV1 {
     project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
     session_relation_graph: Arc<SessionRelationGraphStateV1>,
     transcript_progress_proofs: Arc<SessionTranscriptProgressProofs>,
-    refused_authority: Option<RefusedAuthorityV1>,
+    session_authority: Arc<SessionAuthorityStateV1>,
 }
 
 /// Cloneable, weak issuance route for one registered global-database owner.
@@ -96,7 +148,7 @@ pub struct RegisteredGlobalDbWeakLeaseIssuerV1 {
     project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
     session_relation_graph: Weak<SessionRelationGraphStateV1>,
     transcript_progress_proofs: Weak<SessionTranscriptProgressProofs>,
-    refused_authority: Option<RefusedAuthorityV1>,
+    session_authority: Arc<SessionAuthorityStateV1>,
 }
 
 impl RegisteredGlobalDbOwnerV1 {
@@ -111,11 +163,13 @@ impl RegisteredGlobalDbOwnerV1 {
     /// authority's exact typed reset identity instead of opening on schema it
     /// cannot honor, and an admissibly-fresh existing store receives the full
     /// install. Nothing steps an incompatible store forward in place; the
-    /// only in-place changes admission performs are the additive columns for
-    /// shapes released binaries actually shipped.
+    /// only in-place changes are the additive columns for shapes released
+    /// binaries actually shipped and, in convergence, the one published
+    /// workflow shape proven byte-exact by the schema stages.
     ///
     /// Short-lived attaches have no background maintenance task, so the
-    /// authority-invariant convergence runs synchronously here: a store whose
+    /// published workflow upgrade and the authority-invariant convergence run
+    /// synchronously here: a store whose
     /// tamper-invalidation triggers deleted the trusted audit checkpoint (or
     /// whose guard triggers were altered) fails the attach instead of opening
     /// on unaudited authority rows.
@@ -132,10 +186,30 @@ impl RegisteredGlobalDbOwnerV1 {
         )
         .await?
         {
-            RegisteredSchemaAttachmentV1::Admitted(_) => {
-                super::schema_stages::converge_attached_registered_schema(&registered.database)
+            RegisteredSchemaAttachmentV1::Admitted(convergence) => {
+                let cancellation = CancellationToken::new();
+                let refused = if convergence.recovers_published_workflow_shape() {
+                    let recovered = super::schema_stages::recover_published_artifact_ceiling(
+                        &registered.database,
+                        &cancellation,
+                    )
                     .await?;
-                None
+                    if recovered.is_none() {
+                        super::schema_stages::reclaim_freed_artifact_pages(
+                            &registered.database,
+                            &cancellation,
+                        )
+                        .await?;
+                    }
+                    recovered
+                } else {
+                    None
+                };
+                if refused.is_none() {
+                    super::schema_stages::converge_attached_registered_schema(&registered.database)
+                        .await?;
+                }
+                refused
             }
             RegisteredSchemaAttachmentV1::SessionsRefused(refused) => Some(refused),
         };
@@ -145,7 +219,7 @@ impl RegisteredGlobalDbOwnerV1 {
             project_graph: Arc::new(OnceLock::new()),
             session_relation_graph: Arc::new(RwLock::new(None)),
             transcript_progress_proofs: Arc::new(SessionTranscriptProgressProofs::default()),
-            refused_authority,
+            session_authority: SessionAuthorityStateV1::new(refused_authority.into()),
         })
     }
 
@@ -177,9 +251,18 @@ impl RegisteredGlobalDbOwnerV1 {
             &registered.database,
             cancellation,
         ));
-        let (convergence, refused_authority) = match attached.await? {
-            RegisteredSchemaAttachmentV1::Admitted(convergence) => (Some(convergence), None),
-            RegisteredSchemaAttachmentV1::SessionsRefused(refused) => (None, Some(refused)),
+        let (convergence, session_authority) = match attached.await? {
+            RegisteredSchemaAttachmentV1::Admitted(convergence) => (
+                Some(convergence),
+                if convergence.recovers_published_workflow_shape() {
+                    SessionAuthorityV1::RecoveringWorkflow
+                } else {
+                    SessionAuthorityV1::Serving
+                },
+            ),
+            RegisteredSchemaAttachmentV1::SessionsRefused(refused) => {
+                (None, SessionAuthorityV1::Refused(refused))
+            }
         };
         drop(registered);
         Ok((
@@ -188,7 +271,7 @@ impl RegisteredGlobalDbOwnerV1 {
                 project_graph: Arc::new(OnceLock::new()),
                 session_relation_graph: Arc::new(RwLock::new(None)),
                 transcript_progress_proofs: Arc::new(SessionTranscriptProgressProofs::default()),
-                refused_authority,
+                session_authority: SessionAuthorityStateV1::new(session_authority),
             },
             convergence,
         ))
@@ -214,7 +297,7 @@ impl RegisteredGlobalDbOwnerV1 {
                 Arc::clone(&self.project_graph),
                 Arc::clone(&self.session_relation_graph),
                 Arc::clone(&self.transcript_progress_proofs),
-                self.refused_authority,
+                Arc::clone(&self.session_authority),
             ),
         ))
     }
@@ -223,7 +306,7 @@ impl RegisteredGlobalDbOwnerV1 {
     /// to read, `None` when every authority it holds is admissible.
     #[must_use]
     pub fn reset_required(&self) -> Option<TraceDecayError> {
-        self.refused_authority.map(RefusedAuthorityV1::error)
+        self.session_authority.reset_required()
     }
 
     /// Issues a mode-reduced client that can never regain write authority.
@@ -234,7 +317,7 @@ impl RegisteredGlobalDbOwnerV1 {
                 Arc::clone(&self.project_graph),
                 Arc::clone(&self.session_relation_graph),
                 Arc::clone(&self.transcript_progress_proofs),
-                self.refused_authority,
+                Arc::clone(&self.session_authority),
             ),
         ))
     }
@@ -248,7 +331,7 @@ impl RegisteredGlobalDbOwnerV1 {
             project_graph: Arc::clone(&self.project_graph),
             session_relation_graph: Arc::downgrade(&self.session_relation_graph),
             transcript_progress_proofs: Arc::downgrade(&self.transcript_progress_proofs),
-            refused_authority: self.refused_authority,
+            session_authority: Arc::clone(&self.session_authority),
         }
     }
 
@@ -302,7 +385,7 @@ impl RegisteredGlobalDbWeakLeaseIssuerV1 {
                 Arc::clone(&self.project_graph),
                 session_relation_graph,
                 transcript_progress_proofs,
-                self.refused_authority,
+                Arc::clone(&self.session_authority),
             ),
         ))
     }
@@ -371,7 +454,7 @@ pub struct RegisteredGlobalDb {
     project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
     session_relation_graph: Arc<SessionRelationGraphStateV1>,
     pub(crate) transcript_progress_proofs: Arc<SessionTranscriptProgressProofs>,
-    refused_authority: Option<RefusedAuthorityV1>,
+    session_authority: Arc<SessionAuthorityStateV1>,
 }
 
 // Futures that capture this client were proving the database lease and the
@@ -386,13 +469,13 @@ const _: fn(&RegisteredGlobalDb) = |value| {
         project_graph,
         session_relation_graph,
         transcript_progress_proofs,
-        refused_authority,
+        session_authority,
     } = value;
     assert_send_sync(database);
     assert_send_sync(project_graph);
     assert_send_sync(session_relation_graph);
     assert_send_sync(transcript_progress_proofs);
-    assert_send_sync(refused_authority);
+    assert_send_sync(session_authority);
 };
 
 impl RegisteredGlobalDb {
@@ -400,8 +483,52 @@ impl RegisteredGlobalDb {
     pub async fn converge_schema(
         &self,
         convergence: super::schema_stages::RegisteredSchemaConvergence,
+        cancellation: &CancellationToken,
     ) -> tracedecay_domain::errors::Result<()> {
+        if convergence.recovers_published_workflow_shape() {
+            Box::pin(self.recover_published_workflow_shape(cancellation)).await?;
+        }
         super::schema_stages::converge_registered_schema(self.runtime_database(), convergence).await
+    }
+
+    /// Settles the store's session authority on the background upgrade's
+    /// outcome. A failure that can clear rolls back and keeps workflow storage
+    /// recovering, and the convergence task runs this again; a store that
+    /// refuses the upgrade is held in its typed reset state like one refused at
+    /// attach. Workflow
+    /// storage serves from the commit on, so the reclaim that follows delays
+    /// nothing.
+    async fn recover_published_workflow_shape(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> tracedecay_domain::errors::Result<()> {
+        let refused = match super::schema_stages::recover_published_artifact_ceiling(
+            self.runtime_database(),
+            cancellation,
+        )
+        .await
+        {
+            Ok(refused) => refused,
+            Err(error) => {
+                if let Some((_, reason)) = error.reset_required_context() {
+                    self.session_authority.publish(SessionAuthorityV1::Refused(
+                        RefusedAuthorityV1::Shape {
+                            authority: "workflow",
+                            reason: Cow::Owned(reason.to_owned()),
+                        },
+                    ));
+                }
+                return Err(error);
+            }
+        };
+        if let Some(refused) = refused {
+            self.session_authority
+                .publish(SessionAuthorityV1::Refused(refused.clone()));
+            return Err(refused.error());
+        }
+        self.session_authority.publish(SessionAuthorityV1::Serving);
+        super::schema_stages::reclaim_freed_artifact_pages(self.runtime_database(), cancellation)
+            .await
     }
 
     pub async fn release_connection_memory(&self) -> tracedecay_domain::errors::Result<()> {
@@ -433,7 +560,7 @@ impl RegisteredGlobalDb {
             Arc::new(OnceLock::new()),
             Arc::new(RwLock::new(None)),
             Arc::new(SessionTranscriptProgressProofs::default()),
-            None,
+            SessionAuthorityStateV1::new(SessionAuthorityV1::Serving),
         )
     }
 
@@ -442,14 +569,14 @@ impl RegisteredGlobalDb {
         project_graph: Arc<OnceLock<VerifiedGraphRuntimeWeakProxyV1>>,
         session_relation_graph: Arc<SessionRelationGraphStateV1>,
         transcript_progress_proofs: Arc<SessionTranscriptProgressProofs>,
-        refused_authority: Option<RefusedAuthorityV1>,
+        session_authority: Arc<SessionAuthorityStateV1>,
     ) -> Self {
         Self {
             database,
             project_graph,
             session_relation_graph,
             transcript_progress_proofs,
-            refused_authority,
+            session_authority,
         }
     }
 
@@ -457,7 +584,13 @@ impl RegisteredGlobalDb {
     /// refuses to read, `None` when every authority it holds is admissible.
     #[must_use]
     pub fn reset_required(&self) -> Option<TraceDecayError> {
-        self.refused_authority.map(RefusedAuthorityV1::error)
+        self.session_authority.reset_required()
+    }
+
+    /// Whether workflow storage still waits on the background upgrade.
+    #[must_use]
+    pub fn workflow_recovery_pending(&self) -> bool {
+        self.session_authority.current() == SessionAuthorityV1::RecoveringWorkflow
     }
 
     /// Wraps an already-published guarded database for WAL maintenance tests.
@@ -720,6 +853,9 @@ impl RegisteredGlobalDb {
     ) -> tracedecay_domain::errors::Result<
         tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
     > {
+        if self.workflow_recovery_pending() {
+            return Err(TraceDecayError::workflow_authority_recovering());
+        }
         self.database.workflow_storage().await
     }
 

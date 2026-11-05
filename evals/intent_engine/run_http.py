@@ -7,19 +7,22 @@ Only an exact experiment identity may resume an interrupted .partial output.
 See HTTP_RUNNER.md for invocation and provenance limits.
 """
 import argparse
+import errno
 import hashlib
 import json
 import math
 import os
 import re
 import secrets
+import stat
 import sys
 import time
 import urllib.request
+from urllib.parse import urlsplit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from common import noul_questions, prompt_only, text_window
+from common import calibrated, noul_questions, prompt_only, text_window
 
 STATES = {
     "A_noul_prompt": prompt_only,
@@ -64,12 +67,109 @@ def publish_sample(path, serialized):
         os.unlink(staged)
 
 
-def post(url, body, timeout=1800):
-    req = urllib.request.Request(
-        url, request_bytes(body), {"content-type": "application/json"}
+def require_exclusive_publication(directory):
+    """Refuse unsupported result volumes before spending inference tokens.
+
+    Both completed output and first-response samples use no-clobber hard links.
+    A writable directory alone does not prove that publication will work:
+    FAT/exFAT volumes can accept the partial log but never complete the run.
+    """
+    staged = os.path.join(directory, f".noul-link-probe-{secrets.token_hex(16)}")
+    linked = staged + ".linked"
+    descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    linked_created = False
+    try:
+        os.close(descriptor)
+        try:
+            os.link(staged, linked)
+            linked_created = True
+        except OSError as error:
+            raise OSError(
+                error.errno,
+                f"exclusive publication requires hard links in {directory}; "
+                f"probe failed: {error}",
+                directory,
+            ) from error
+    finally:
+        try:
+            # A failed exclusive link may have collided with someone else's
+            # file. Path existence is not proof that this probe created it.
+            if linked_created:
+                os.unlink(linked)
+        finally:
+            os.unlink(staged)
+
+
+def publish_final_result(path, document):
+    """Expose a completed JSON result only after its bytes are fully written.
+
+    The hard link fails if the output path exists, so it cannot replace a
+    competing writer's result. A failed staged write leaves nothing at the
+    output path, so no truncated JSON can look complete.
+    """
+    serialized = json.dumps(document, indent=1, allow_nan=False)
+    directory = os.path.dirname(os.path.abspath(path))
+    staged = os.path.join(directory, f".noul-result-{secrets.token_hex(16)}")
+    descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            output.write(serialized)
+            output.flush()
+            os.fsync(output.fileno())
+        os.link(staged, path)
+    finally:
+        os.unlink(staged)
+
+
+class RefuseDecisionRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def require_http_endpoint(url):
+    """Require a real HTTP transport before writing evaluation evidence."""
+    try:
+        endpoint = urlsplit(url)
+        # Accessing port also refuses malformed explicit port declarations.
+        _ = endpoint.port
+    except ValueError as error:
+        raise ValueError("--url must be a valid HTTP(S) endpoint") from error
+    if endpoint.scheme not in ("http", "https") or not endpoint.hostname:
+        raise ValueError("--url must use HTTP or HTTPS with a hostname")
+    if endpoint.username is not None or endpoint.password is not None:
+        raise ValueError("--url must not include credentials; use --bearer-token-env")
+    return endpoint
+
+
+def load_bearer_token(name, url):
+    """Read an optional bearer credential without persisting it in evidence."""
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+        raise ValueError("--bearer-token-env requires an environment variable name")
+    token = os.environ.get(name)
+    if not token or not re.fullmatch(r"[A-Za-z0-9._~+/-]+=*", token):
+        raise ValueError(f"--bearer-token-env {name} must contain a valid bearer token")
+    endpoint = require_http_endpoint(url)
+    if endpoint.scheme != "https" and not (
+        endpoint.scheme == "http"
+        and endpoint.hostname in ("localhost", "127.0.0.1", "::1")
+    ):
+        raise ValueError("bearer authentication requires HTTPS or a loopback HTTP endpoint")
+    return token
+
+
+def post(url, body, timeout=1800, bearer_token=None):
+    require_http_endpoint(url)
+    headers = {"content-type": "application/json"}
+    if bearer_token is not None:
+        headers["Authorization"] = f"Bearer {bearer_token}"
+    req = urllib.request.Request(url, request_bytes(body), headers)
+    # Transcript state belongs to the operator-selected endpoint. Ambient
+    # proxies and redirects can leak the request or misattribute model results.
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), RefuseDecisionRedirects()
     )
     started = time.perf_counter()
-    with urllib.request.urlopen(req, timeout=timeout) as response:
+    with opener.open(req, timeout=timeout) as response:
         out = json.loads(response.read())
     return out, (time.perf_counter() - started) * 1000
 
@@ -103,14 +203,24 @@ def probabilities(values, questions):
     return values
 
 
-def calibrated(probability, temperature):
-    if probability in (0, 1):
-        return probability
-    log_odds = (math.log(probability) - math.log1p(-probability)) / temperature
-    if log_odds >= 0:
-        return 1 / (1 + math.exp(-log_odds))
-    exp_odds = math.exp(log_odds)
-    return exp_odds / (1 + exp_odds)
+def noul_probabilities(response, questions):
+    """Validate the typed server answer before recording model evidence."""
+    if not isinstance(response, dict):
+        raise ValueError("decision response must be a JSON object")
+    answers = response.get("answers")
+    if not isinstance(answers, dict) or set(answers) != set(questions):
+        raise ValueError("noul answers must cover exactly the requested questions")
+    values = {}
+    for key, answer in answers.items():
+        # Older decision servers omit the kind, but a present tag must agree
+        # with the requested question. A Score response with an incidental
+        # noul field is not evidence of a successful Noul prediction.
+        if (not isinstance(answer, dict)
+                or ("type" in answer and answer["type"] != "noul")
+                or "noul" not in answer):
+            raise ValueError(f"invalid noul answer for {key}")
+        values[key] = answer["noul"]
+    return probabilities(values, questions)
 
 
 def serialize_result(row, questions, temperature):
@@ -140,6 +250,59 @@ def serialize_result(row, questions, temperature):
     return json.dumps(row, allow_nan=False)
 
 
+def lock_partial_writer(partial, path):
+    """Lock the resumable log itself, without crash-stale lockfile state.
+
+    Refuse an opened file whose pathname was replaced or redirected. Otherwise
+    two same-tag writers could rewrite a partial log and corrupt evaluation.
+    """
+    try:
+        if os.name == "nt":
+            import msvcrt
+            partial.seek(0)
+            msvcrt.locking(partial.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(partial.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as error:
+        if error.errno in (errno.EACCES, errno.EAGAIN):
+            raise ValueError(f"another evaluator is writing this partial output: {path}") from error
+        raise
+
+    try:
+        current = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError as error:
+        raise ValueError(f"partial output disappeared during writer admission: {path}") from error
+    opened = os.fstat(partial.fileno())
+    if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+        raise ValueError(f"partial output was replaced or redirected: {path}")
+    partial.seek(0)
+
+
+def open_partial_for_resume(path):
+    """Open only regular resumable evidence, without blocking on a FIFO.
+
+    A pre-existing .partial path is untrusted filesystem state. Opening it
+    as r+ before inspecting its type can hang forever on a named pipe, so
+    request nonblocking/no-follow admission and check the opened descriptor.
+    The later lock still checks inode identity against the pathname.
+    """
+    flags = os.O_RDWR | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise ValueError(f"partial output was replaced or redirected: {path}") from error
+        raise
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError(f"partial output must be a regular file: {path}")
+        return os.fdopen(descriptor, "r+", encoding="utf-8")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def resume_rows(partial, header, cases, requests, questions, temperature):
     """Validate the whole existing log before appending or issuing HTTP work."""
     first = partial.readline()
@@ -163,6 +326,39 @@ def resume_rows(partial, header, cases, requests, questions, temperature):
     return done
 
 
+def validate_dataset(dataset, questions):
+    """Refuse unscorable or malformed input before spending inference tokens."""
+    if not isinstance(dataset, list) or not dataset:
+        raise ValueError("dataset must be a nonempty list of cases")
+    ids = []
+    seen = set()
+    for case in dataset:
+        if not isinstance(case, dict):
+            raise ValueError("dataset must contain case objects")
+        case_id = case.get("id")
+        if not isinstance(case_id, str) or not case_id or case_id in seen:
+            raise ValueError("dataset must have unique nonempty string case IDs")
+        seen.add(case_id)
+        ids.append(case_id)
+        labels = case.get("labels")
+        if (not isinstance(labels, list)
+                or any(not isinstance(label, str) or label not in questions for label in labels)
+                or len(set(labels)) != len(labels)):
+            raise ValueError(f"dataset case {case_id} has invalid labels")
+        if not isinstance(case.get("context_needed"), bool):
+            raise ValueError(f"dataset case {case_id} has invalid context_needed")
+        if not isinstance(case.get("current_prompt"), str):
+            raise ValueError(f"dataset case {case_id} has invalid current_prompt")
+        turns = case.get("turns")
+        if (not isinstance(turns, list)
+                or any(not isinstance(turn, dict)
+                       or turn.get("role") not in ("user", "assistant", "tool")
+                       or not isinstance(turn.get("text"), str)
+                       for turn in turns)):
+            raise ValueError(f"dataset case {case_id} has invalid turns")
+    return ids
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--url", required=True)
@@ -170,6 +366,8 @@ def main(argv=None):
     ap.add_argument("--server-config", required=True, help="JSON file with immutable serving identity; omit credentials")
     ap.add_argument("--subset")
     ap.add_argument("--send-model")
+    ap.add_argument("--bearer-token-env", metavar="NAME",
+                    help="name of an environment variable holding a bearer token (never recorded)")
     ap.add_argument("--sample-out", help="write the first raw response here")
     ap.add_argument("--noul-temperature", type=float, help="client calibration temperature; raw probabilities are retained")
     ap.add_argument("configs", nargs="+", choices=tuple(STATES))
@@ -179,16 +377,18 @@ def main(argv=None):
     if (args.noul_temperature is not None
             and (not math.isfinite(args.noul_temperature) or args.noul_temperature <= 0)):
         raise ValueError("--noul-temperature must be finite and greater than zero")
+    require_http_endpoint(args.url)
     server_config = load_server_config(args.server_config)
+    bearer_token = (load_bearer_token(args.bearer_token_env, args.url)
+                    if args.bearer_token_env is not None else None)
     if args.sample_out and os.path.lexists(args.sample_out) and not os.path.isfile(args.sample_out):
         raise ValueError(f"sample path exists but is not a regular file: {args.sample_out}")
     with open(os.path.join(HERE, "dataset.json"), "rb") as source:
         dataset_bytes = source.read()
     dataset = json.loads(dataset_bytes)
     dataset_sha = hashlib.sha256(dataset_bytes).hexdigest()
-    case_ids = [case["id"] for case in dataset]
-    if any(not isinstance(case_id, str) for case_id in case_ids) or len(set(case_ids)) != len(case_ids):
-        raise ValueError("dataset must have unique string case IDs")
+    questions = noul_questions()
+    case_ids = validate_dataset(dataset, questions)
     if args.subset:
         with open(args.subset, encoding="utf-8") as source:
             ids = json.load(source)["ids"]
@@ -200,14 +400,16 @@ def main(argv=None):
         dataset = [case for case in dataset if case["id"] in keep]
     if not dataset:
         raise ValueError("the experiment must contain at least one case")
-    questions = noul_questions()
     cases = {case["id"]: case for case in dataset}
     os.makedirs(os.path.join(HERE, "results"), exist_ok=True)
     for cfg in args.configs:
         name = f"{args.tag}_{cfg}"
         path = os.path.join(HERE, "results", name + ".json")
-        if os.path.exists(path):
+        if os.path.lexists(path):
             raise ValueError(f"completed output already exists: {path}; use a new tag")
+        require_exclusive_publication(os.path.dirname(os.path.abspath(path)))
+        if args.sample_out and not os.path.isfile(args.sample_out):
+            require_exclusive_publication(os.path.dirname(os.path.abspath(args.sample_out)))
         requests = {}
         for case in dataset:
             body = {"state": STATES[cfg](case), "questions": questions}
@@ -219,6 +421,12 @@ def main(argv=None):
             "config": cfg,
             "dataset_sha256": dataset_sha,
             "case_ids": list(cases),
+            # Preserve the original annotation evidence for later scoring.
+            # A result's labels or context status must not silently drift.
+            "case_annotations_sha256": digest([
+                [case["id"], case["labels"], case["context_needed"]]
+                for case in dataset
+            ]),
             "requests_sha256": digest([[key, value[1]] for key, value in requests.items()]),
             "endpoint_sha256": hashlib.sha256(args.url.encode("utf-8")).hexdigest(),
             "requested_model": args.send_model,
@@ -231,9 +439,13 @@ def main(argv=None):
             partial = open(partial_path, "x+", encoding="utf-8")
             created = True
         except FileExistsError:
-            partial = open(partial_path, "r+", encoding="utf-8")
+            partial = open_partial_for_resume(partial_path)
             created = False
         with partial:
+            lock_partial_writer(partial, partial_path)
+            # Another writer may have completed this tag since the preflight.
+            if os.path.lexists(path):
+                raise ValueError(f"completed output already exists: {path}; use a new tag")
             if created:
                 partial.write(json.dumps(header, allow_nan=False) + "\n")
                 partial.flush()
@@ -244,9 +456,11 @@ def main(argv=None):
                 if case["id"] in done:
                     continue
                 body, request_sha = requests[case["id"]]
-                response, ms = post(args.url, body)
-                answers = response["answers"]
-                probs = probabilities({key: value["noul"] for key, value in answers.items()}, questions)
+                if bearer_token is None:
+                    response, ms = post(args.url, body)
+                else:
+                    response, ms = post(args.url, body, bearer_token=bearer_token)
+                probs = noul_probabilities(response, questions)
                 server_ms = response.get("latency_ms")
                 if server_ms is None:
                     server_ms = (response.get("timing") or {}).get("inference_ms")
@@ -279,13 +493,15 @@ def main(argv=None):
                 partial.flush()
                 done[case["id"]] = row
                 print(cfg, index, case["id"], "%.0f ms" % ms, flush=True)
-        # Never overwrite another completed experiment, even with the same tag.
-        with open(path, "x", encoding="utf-8") as output:
-            json.dump({"config": name, "dataset_sha256": dataset_sha,
-                       "noul_temperature": args.noul_temperature,
-                       "subset": args.subset and os.path.basename(args.subset),
-                       **header, "rows": [done[case_id] for case_id in cases]},
-                      output, indent=1, allow_nan=False)
+            # Hold the partial writer lock through exclusive publication.
+            # A second evaluator must not publish the same complete log first.
+            # Failed publication retains the partial for an exact resume.
+            publish_final_result(path, {
+                "config": name, "dataset_sha256": dataset_sha,
+                "noul_temperature": args.noul_temperature,
+                "subset": args.subset and os.path.basename(args.subset),
+                **header, "rows": [done[case_id] for case_id in cases],
+            })
         os.remove(partial_path)
         print(cfg, "done", flush=True)
 

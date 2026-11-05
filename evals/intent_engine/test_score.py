@@ -1,10 +1,12 @@
 """Behavioral coverage for sparse evaluation slices and their CLI reports."""
+import hashlib
 import json
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import score
 
@@ -23,6 +25,40 @@ def row(case_id, labels=(), context=False, choice=None):
     if choice is not None:
         result["choice"] = choice
     return result
+
+
+def signed_http_result(config, rows, temperature=None):
+    # Fixture independently reproduces the fingerprint scheme in run_http.py.
+    rows = [
+        {**item, "request_sha256": hashlib.sha256(item["id"].encode()).hexdigest()}
+        for item in rows
+    ]
+
+    def fingerprint(value):
+        return hashlib.sha256(
+            json.dumps(value, sort_keys=True, allow_nan=False).encode("utf-8")
+        ).hexdigest()
+
+    experiment = {
+        "version": 2, "config": config, "dataset_sha256": "a" * 64,
+        "case_ids": [item["id"] for item in rows],
+        "case_annotations_sha256": fingerprint([
+            [item["id"], item["labels"], item["context_needed"]] for item in rows
+        ]),
+        "requests_sha256": fingerprint(
+            [[item["id"], item["request_sha256"]] for item in rows]
+        ),
+        "endpoint_sha256": "b" * 64, "requested_model": None,
+        "noul_temperature": temperature,
+        "server_config": {"checkpoint": "weights@immutable", "server_revision": "server@one",
+                          "backend": "cpu", "dtype": "float32", "temperature": 1.0},
+    }
+    return {
+        "config": config, "experiment": experiment,
+        "experiment_sha256": fingerprint(experiment),
+        "dataset_sha256": experiment["dataset_sha256"],
+        "noul_temperature": temperature, "rows": rows,
+    }
 
 
 class ScoringTests(unittest.TestCase):
@@ -107,6 +143,64 @@ class ScoringTests(unittest.TestCase):
         for name in ("t0.5", "t0.6", "t0.7", "best_t_in_sample", "fixed"):
             self.assertEqual(result[name]["macro_f1"], 1.0)
             self.assertEqual(result[name]["all"]["exact_set_acc"], 1.0)
+
+    def test_ranked_auc_matches_exhaustive_pairwise_ties(self):
+        for pos, neg in (
+            ([], []), ([0.5], []), ([], [0.5]),
+            ([0.5], [0.5]), ([0.0, 0.5, 1.0], [1.0, 0.5, 0.0]),
+            ([0.1, 0.1, 0.4, 0.8, 1.0], [0.0, 0.1, 0.3, 0.8, 0.8]),
+        ):
+            with self.subTest(pos=pos, neg=neg):
+                expected = (sum((p > n) + 0.5 * (p == n)
+                                for p in pos for n in neg) / (len(pos) * len(neg))
+                            if pos and neg else None)
+                self.assertEqual(score.auc(pos, neg), expected)
+
+    def test_leave_one_out_matches_independent_training_rescans(self):
+        levels = [0, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0]
+        for count in (2, 3, 11, 24):
+            rows = []
+            for index in range(count):
+                labels = [cat for j, cat in enumerate(score.CATS)
+                          if (index + 3 * j) % 5 == 0]
+                item = row(str(index), labels, index % 2 == 0)
+                item["probs"] = {
+                    cat: levels[(3 * index + 7 * j) % len(levels)]
+                    for j, cat in enumerate(score.CATS)
+                }
+                rows.append(item)
+            actual = score.score_config({"config": "loo-check", "rows": rows})
+            self.assertEqual(actual["loo_evaluated_cases"], count)
+            for category in score.CATS:
+                tp = fp = fn = 0
+                for index, item in enumerate(rows):
+                    train = rows[:index] + rows[index + 1:]
+                    threshold = max(
+                        score.TH,
+                        key=lambda t: (score.prf(train, category, t)["f1"] or 0, t),
+                    )
+                    hit = item["probs"][category] >= threshold
+                    positive = category in item["labels"]
+                    tp += hit and positive
+                    fp += hit and not positive
+                    fn += not hit and positive
+                expected = {
+                    "loo_f1": 2 * tp / (2 * tp + fp + fn) if tp + fp + fn else None,
+                    "loo_p": tp / (tp + fp) if tp + fp else None,
+                    "loo_r": tp / (tp + fn) if tp + fn else None,
+                }
+                for metric, value in expected.items():
+                    self.assertEqual(actual["per_cat"][category][metric], value)
+
+    def test_scoring_large_held_out_cohort_without_pairwise_rescans(self):
+        rows = [
+            row(str(i), [score.CATS[0]] if i % 2 else [], bool(i % 3))
+            for i in range(1200)
+        ]
+        result = score.score_config({"config": "large", "rows": rows})
+        self.assertEqual(result["loo_evaluated_cases"], len(rows))
+        self.assertEqual(result["latency"]["total_cases"], len(rows))
+        self.assertEqual(result["per_cat"][score.CATS[0]]["auc"], 1.0)
 
     def test_cli_reports_the_scored_subset_without_loading_the_full_dataset(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -200,12 +294,309 @@ class ScoringTests(unittest.TestCase):
             compared = self.run_script(root, "compare.py", "unknown")
             self.assertEqual(compared.returncode, 0, compared.stderr)
 
+    def test_result_rows_require_valid_predictions_and_verifiable_case_labels(self):
+        original = row("a", [score.CATS[0]])
+        cases = [
+            ({"probs": {**original["probs"], score.CATS[0]: True}}, "probs value"),
+            ({"probs": {**original["probs"], score.CATS[0]: float("nan")}}, "probs value"),
+            ({"probs": {**original["probs"], score.CATS[0]: float("inf")}}, "probs value"),
+            ({"probs": {**original["probs"], score.CATS[0]: -0.1}}, "probs value"),
+            ({"probs": {**original["probs"], score.CATS[0]: 1.1}}, "probs value"),
+            ({"probs": {k: v for k, v in original["probs"].items() if k != score.CATS[0]}}, "probs coverage"),
+            ({"probs": {**original["probs"], "unexpected": 0.2}}, "probs coverage"),
+            ({"probs_raw": {**original["probs"], score.CATS[0]: False}}, "probs_raw value"),
+            ({"labels": ["not_an_intent"]}, "invalid labels"),
+            ({"labels": [score.CATS[0], score.CATS[0]]}, "invalid labels"),
+            ({"context_needed": "true"}, "context_needed"),
+            ({"choice": "not_an_option"}, "invalid choice"),
+            ({"ms": True}, "elapsed ms"),
+            ({"ms": float("nan")}, "elapsed ms"),
+        ]
+        for changed, message in cases:
+            with self.subTest(changed=changed):
+                with self.assertRaisesRegex(ValueError, message):
+                    score.score_config({"config": "invalid", "rows": [{**original, **changed}]})
+        with self.assertRaisesRegex(ValueError, "duplicate case ID"):
+            score.score_config({"config": "duplicate", "rows": [original, dict(original)]})
+        choice = {**original, "choice": "none",
+                  "probs": {**original["probs"], "none": 0.2}}
+        self.assertEqual(score.score_config({"config": "choice", "rows": [choice]})["latency"]["total_cases"], 1)
+
+    def test_http_calibration_must_match_raw_evidence(self):
+        original = row("a", [score.CATS[0]])
+        raw = dict(original["probs"])
+        temperature = 2.0
+        measured = {cat: score.calibrated(p, temperature) for cat, p in raw.items()}
+        calibrated_row = {**original, "probs_raw": raw, "probs": measured}
+        result = signed_http_result("http_calibrated", [calibrated_row], temperature)
+        self.assertEqual(score.score_config(result)["latency"]["total_cases"], 1)
+
+        conflicting = {**result["rows"][0], "probs": raw}
+        with self.assertRaisesRegex(ValueError, "calibrated probabilities disagree"):
+            score.score_config({**result, "rows": [conflicting]})
+        missing_raw = {k: v for k, v in result["rows"][0].items() if k != "probs_raw"}
+        with self.assertRaisesRegex(ValueError, "missing raw probabilities"):
+            score.score_config({**result, "rows": [missing_raw]})
+        with self.assertRaisesRegex(ValueError, "temperature differs"):
+            score.score_config({**result, "noul_temperature": 3.0})
+        with self.assertRaisesRegex(ValueError, "invalid HTTP calibration temperature"):
+            score.score_config({
+                **result, "experiment": {"version": 2, "noul_temperature": 0.0},
+                "noul_temperature": 0.0,
+            })
+        with self.assertRaisesRegex(ValueError, "uncalibrated HTTP result"):
+            score.score_config({
+                **result, "experiment": {"version": 2, "noul_temperature": None},
+                "noul_temperature": None,
+            })
+
+        # A corrupt calibrated result must not replace a previous scored summary.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.stage_scripts(root)
+            (root / "results").mkdir()
+            (root / "results" / "bad.json").write_text(
+                json.dumps({**result, "rows": [conflicting]}), encoding="utf-8",
+            )
+            summary = root / "summary.json"
+            summary.write_bytes(b"last verified summary\n")
+            attempt = self.run_script(root, "score.py")
+            self.assertNotEqual(attempt.returncode, 0)
+            self.assertIn("calibrated probabilities disagree", attempt.stderr)
+            self.assertEqual(summary.read_bytes(), b"last verified summary\n")
+
+    def test_http_provenance_cannot_be_downgraded_to_local_scoring(self):
+        original = signed_http_result("B_noul_text", [row("first"), row("second")])
+        self.assertEqual(score.score_config(original)["latency"]["total_cases"], 2)
+        for missing in (
+            ("experiment",),
+            ("experiment", "experiment_sha256"),
+        ):
+            with self.subTest(missing=missing):
+                damaged = json.loads(json.dumps(original))
+                for field in missing:
+                    del damaged[field]
+                with self.assertRaisesRegex(ValueError, "missing its experiment identity"):
+                    score.score_config(damaged)
+
+        # Local evaluations record dataset_sha256 too; preserve their format.
+        local = {
+            "config": "local", "dataset_sha256": "a" * 64,
+            "rows": [row("local")],
+        }
+        self.assertEqual(score.score_config(local)["latency"]["total_cases"], 1)
+
+        # Failed HTTP provenance checks cannot overwrite a scored snapshot.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.stage_scripts(root)
+            (root / "results").mkdir()
+            damaged = json.loads(json.dumps(original))
+            del damaged["experiment"]
+            del damaged["experiment_sha256"]
+            (root / "results" / "damaged.json").write_text(
+                json.dumps(damaged), encoding="utf-8",
+            )
+            summary = root / "summary.json"
+            summary.write_bytes(b"last verified summary\n")
+            attempt = self.run_script(root, "score.py")
+            self.assertNotEqual(attempt.returncode, 0)
+            self.assertIn("missing its experiment identity", attempt.stderr)
+            self.assertEqual(summary.read_bytes(), b"last verified summary\n")
+
+    def test_http_result_fingerprints_bind_case_order_and_experiment(self):
+        original = signed_http_result("B_noul_text", [row("first"), row("second")])
+        self.assertEqual(score.score_config(original)["latency"]["total_cases"], 2)
+        for mutation, diagnostic in [
+            ("identity", "identity digest"),
+            ("missing_digest", "identity digest"),
+            ("request", "request fingerprints"),
+            ("case_order", "case IDs or ordering"),
+            ("labels", "case annotations disagree"),
+            ("context", "case annotations disagree"),
+            ("missing_case_digest", "case annotations disagree"),
+            ("dataset", "dataset digest"),
+            ("config", "configuration disagrees"),
+        ]:
+            changed = json.loads(json.dumps(original))
+            if mutation == "identity":
+                changed["experiment"]["server_config"]["checkpoint"] = "different"
+            elif mutation == "missing_digest":
+                del changed["experiment_sha256"]
+            elif mutation == "request":
+                changed["rows"][0]["request_sha256"] = "c" * 64
+            elif mutation == "case_order":
+                changed["rows"].reverse()
+            elif mutation == "labels":
+                changed["rows"][0]["labels"] = [score.CATS[0]]
+            elif mutation == "context":
+                changed["rows"][0]["context_needed"] = True
+            elif mutation == "missing_case_digest":
+                del changed["experiment"]["case_annotations_sha256"]
+                changed["experiment_sha256"] = score.evidence_digest(changed["experiment"])
+            elif mutation == "dataset":
+                changed["dataset_sha256"] = "f" * 64
+            elif mutation == "config":
+                changed["config"] = "different"
+            with self.subTest(mutation=mutation):
+                with self.assertRaisesRegex(ValueError, diagnostic):
+                    score.score_config(changed)
+
+        # An altered completed result cannot destroy the last scored summary.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.stage_scripts(root)
+            (root / "results").mkdir()
+            changed = json.loads(json.dumps(original))
+            changed["rows"][1]["labels"] = [score.CATS[0]]
+            (root / "results" / "bad.json").write_text(
+                json.dumps(changed), encoding="utf-8"
+            )
+            summary = root / "summary.json"
+            summary.write_bytes(b"last verified summary\n")
+            attempt = self.run_script(root, "score.py")
+            self.assertNotEqual(attempt.returncode, 0)
+            self.assertIn("case annotations disagree", attempt.stderr)
+            self.assertEqual(summary.read_bytes(), b"last verified summary\n")
+
+    def test_invalid_probability_cannot_replace_previous_cli_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.stage_scripts(root)
+            (root / "results").mkdir()
+            invalid = row("a", [score.CATS[0]])
+            invalid["probs"][score.CATS[0]] = True
+            (root / "results" / "bad.json").write_text(
+                json.dumps({"config": "bad", "rows": [invalid]}), encoding="utf-8",
+            )
+            summary = root / "summary.json"
+            summary.write_bytes(b"previous valid summary\n")
+            result = self.run_script(root, "score.py")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("invalid probs value", result.stderr)
+            self.assertEqual(summary.read_bytes(), b"previous valid summary\n")
+
     def test_invalid_usage_is_not_silently_discarded_as_missing(self):
         for field in ("state_tokens", "input_tokens", "dropped"):
             for value in (True, -1, 1.5, "12", float("nan")):
                 with self.subTest(field=field, value=value):
                     with self.assertRaisesRegex(ValueError, field):
                         score.lat([{**row("invalid"), field: value}])
+
+    def test_cli_does_not_invent_an_unmeasured_hybrid_arm(self):
+        for same_cases in (True, False):
+            with self.subTest(same_cases=same_cases), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.stage_scripts(root)
+                results = root / "results"
+                results.mkdir()
+                configurations = {
+                    "B_noul_text": {"config": "B_noul_text", "rows": [row("a")]},
+                    "C_choice_text": {
+                        "config": "C_choice_text",
+                        "rows": [row("a" if same_cases else "b", choice="none")],
+                    },
+                }
+                for name, result in configurations.items():
+                    (results / f"{name}.json").write_text(json.dumps(result), encoding="utf-8")
+                scored = self.run_script(root, "score.py")
+                self.assertEqual(scored.returncode, 0, scored.stderr)
+                summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
+                self.assertEqual(set(summary), set(configurations))
+                for name, result in configurations.items():
+                    self.assertEqual(summary[name], score.score_config(result))
+                self.assertNotIn("H_hybrid_text", scored.stdout)
+
+    def test_cli_preserves_a_recorded_hybrid_instead_of_replacing_its_measurements(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.stage_scripts(root)
+            results = root / "results"
+            results.mkdir()
+            hybrid = signed_http_result("H_hybrid_text", [{
+                **row("a", [score.CATS[0]], True), "ms": 17,
+                "input_tokens": 151, "state_tokens": 93, "dropped": 4,
+            }])
+            configurations = [
+                {"config": "B_noul_text", "rows": [row("a")]},
+                {"config": "C_choice_text", "rows": [row("a", choice="none")]},
+                hybrid,
+            ]
+            for result in configurations:
+                (results / f"{result['config']}.json").write_text(
+                    json.dumps(result), encoding="utf-8",
+                )
+            original_inputs = {path: path.read_bytes() for path in results.iterdir()}
+            scored = self.run_script(root, "score.py")
+            self.assertEqual(scored.returncode, 0, scored.stderr)
+            summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["H_hybrid_text"], score.score_config(hybrid))
+            self.assertEqual({path: path.read_bytes() for path in results.iterdir()}, original_inputs)
+            compared = self.run_script(root, "compare.py", "H_hybrid_text")
+            self.assertEqual(compared.returncode, 0, compared.stderr)
+            self.assertIn("| median ms / call | 17 |", compared.stdout)
+
+    def test_duplicate_configuration_files_are_refused_before_summary_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.stage_scripts(root)
+            results = root / "results"
+            results.mkdir()
+            for name, ms in [("first", 10), ("second", 900)]:
+                (results / f"{name}.json").write_text(json.dumps({
+                    "config": "same", "rows": [{**row(name), "ms": ms}],
+                }), encoding="utf-8")
+            summary = root / "summary.json"
+            summary.write_bytes(b"existing summary\n")
+            scored = self.run_script(root, "score.py")
+            self.assertNotEqual(scored.returncode, 0)
+            self.assertIn("duplicate configuration", scored.stderr)
+            self.assertIn("same", scored.stderr)
+            self.assertEqual(summary.read_bytes(), b"existing summary\n")
+
+    def test_summary_publication_replaces_only_a_complete_scored_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            summary = Path(directory) / "summary.json"
+            previous = b'{"prior": true}\n'
+            summary.write_bytes(previous)
+            expected = {"measured": {"macro_f1": 0.91}}
+            replace = score.os.replace
+
+            def inspect_replace(staged, destination):
+                self.assertEqual(summary.read_bytes(), previous)
+                self.assertEqual(
+                    json.loads(Path(staged).read_text(encoding="utf-8")), expected
+                )
+                replace(staged, destination)
+
+            with mock.patch.object(score.os, "replace", side_effect=inspect_replace):
+                score.publish_summary(summary, expected)
+            self.assertEqual(json.loads(summary.read_text(encoding="utf-8")), expected)
+            self.assertEqual(set(Path(directory).iterdir()), {summary})
+
+    def test_summary_publication_errors_preserve_previous_bytes_and_remove_staging(self):
+        for failure in ("serialize", "fsync", "replace"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                summary = Path(directory) / "summary.json"
+                previous = b'{"completed": true}\n'
+                summary.write_bytes(previous)
+                if failure == "serialize":
+                    with self.assertRaisesRegex(ValueError, "Out of range"):
+                        score.publish_summary(summary, {"invalid": float("nan")})
+                elif failure == "fsync":
+                    with mock.patch.object(
+                        score.os, "fsync", side_effect=OSError("sync failed")
+                    ):
+                        with self.assertRaisesRegex(OSError, "sync failed"):
+                            score.publish_summary(summary, {"new": 1})
+                else:
+                    with mock.patch.object(
+                        score.os, "replace", side_effect=PermissionError("publish denied")
+                    ):
+                        with self.assertRaisesRegex(PermissionError, "publish denied"):
+                            score.publish_summary(summary, {"new": 1})
+                self.assertEqual(summary.read_bytes(), previous)
+                self.assertEqual(set(Path(directory).iterdir()), {summary})
 
     @staticmethod
     def stage_scripts(root):

@@ -21,6 +21,7 @@ use tracedecay_runtime_core::native_runtime;
 
 use crate::clock::now_secs_i64;
 use crate::lease::ProjectStoreMaintenanceLeaseV1;
+use crate::telemetry::StoreTelemetrySamplingRegistry;
 use crate::tick::{MaintenanceContinuation, MaintenanceTickOutcome};
 
 /// Collect every scope of this project's `code-index-v1/` whose root is no
@@ -50,6 +51,7 @@ use crate::tick::{MaintenanceContinuation, MaintenanceTickOutcome};
 pub async fn run_code_index_scope_reconciliation(
     lease: &ProjectStoreMaintenanceLeaseV1,
     schedulers: &CodeIndexSchedulerRegistryV1,
+    observations: &StoreTelemetrySamplingRegistry,
 ) -> MaintenanceTickOutcome {
     let store_root = code_index_scope_store_root(&lease.store_layout().data_root);
     if !store_root.is_dir()
@@ -97,9 +99,19 @@ pub async fn run_code_index_scope_reconciliation(
 
     let mounted = scheduler_owner_roots(schedulers).await;
     let completed_at = tracedecay_contracts::clock::now_micros();
+    let observations = observations.clone();
     let executed = native_runtime::spawn_blocking(move || {
         let revalidated = scope_root_liveness_proof(&project_root, &mounted)
             .map_err(|failure| (failure, None))?;
+        // The admitted maintenance unit has finished its bounded generation
+        // pass. Drop only the scopes now selected for collection, before the
+        // executor's Windows quarantine rename; other scopes retain progress.
+        let retired_scopes = plan
+            .collectable_scopes
+            .iter()
+            .map(|scope| store_root.join(&scope.scope_hash))
+            .collect::<BTreeSet<_>>();
+        observations.release_text_artifact_scans_before_scope_collection(&retired_scopes);
         execute_scope_root_retention(
             &store_root,
             plan,

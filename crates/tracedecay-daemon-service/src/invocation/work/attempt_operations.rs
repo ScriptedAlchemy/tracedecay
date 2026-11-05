@@ -21,6 +21,7 @@ use tracedecay_daemon_protocol::{DaemonInvocationResponse, WorkApplicationOutcom
 
 use super::super::work_attempt_exec::{WorkAttemptProcessRegistryV1, spawn_attempt_execution};
 use super::preparation;
+use super::workflow_run_control::workflow_authority_recovering;
 use super::{
     RegisteredWorkRuntime, complete_work_effect, complete_work_read,
     reconcile_active_workflow_fan_out, work_product_problem,
@@ -404,7 +405,10 @@ async fn workflow_retry_rebind(
         &registered.database,
     )
     .await
-    .map_err(|_| {
+    .map_err(|error| {
+        if error.is_workflow_authority_recovering() {
+            return workflow_authority_recovering();
+        }
         ApplicationProblem::unavailable(SafeDiagnostic {
             code: "application.work-retry.workflow-authority-unavailable".to_owned(),
             message: "The workflow retry binding authority is unavailable.".to_owned(),

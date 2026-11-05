@@ -286,6 +286,7 @@ where
             automation_authority: authority.automation_authority.clone(),
             automation_observation: None,
             automation_scheduler_reconciler: None,
+            scheduler_reset_census_reader: None,
             automation_writer: authority
                 .automation_writer
                 .clone()

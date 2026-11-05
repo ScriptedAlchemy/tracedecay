@@ -20,8 +20,8 @@ pub use summary::{
     HookAnalyticsRows, HookAnalyticsWindow, HookReadinessProjectionPort,
     aggregate_hook_completed_readiness, diagnostics_payload_from_parts,
     diagnostics_summary_from_parts, durable_analytics_event_row, hint_efficacy_from_events,
-    install_hook_readiness_projection, read_hook_analytics_file, read_hook_analytics_rows_at,
-    recent_hook_rows, sort_hook_analytics_rows,
+    install_hook_readiness_projection, non_completed_row_count, read_hook_analytics_file,
+    read_hook_analytics_rows_at, recent_hook_rows, sort_hook_analytics_rows,
 };
 
 use std::fs::File;

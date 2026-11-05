@@ -154,9 +154,35 @@ fn python() -> &'static str {
     }
 }
 
+/// Warm the analyzer interpreter before a test measures the refresh.
+///
+/// The first interpreter spawn in a test process costs materially more than
+/// every later one: measured in this target, the first `StdioLspClient` start
+/// against the fixture took 0.49-1.66s while the second and third took 27-90ms
+/// for the same script. That one-time cost is unrelated to the diagnostics path
+/// under test, and on a loaded host it consumed the refresh's 5s initialize
+/// budget, which is what produced `initialize timed out after 5000 ms`.
+/// Paying it once here, before the authority is built, keeps both assertions
+/// timing the refresh instead of the process's first spawn.
+fn warm_analyzer_interpreter() {
+    static WARMED: std::sync::Once = std::sync::Once::new();
+    WARMED.call_once(|| {
+        // Import what the fixture analyzer imports, so the warm-up exercises
+        // the same interpreter startup work. It exits at EOF, no handshake.
+        let _ = std::process::Command::new(python())
+            .arg("-c")
+            .arg("import json, sys")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    });
+}
+
 /// A dashboard authority over a one-file project whose fake analyzer reports
 /// one type error.
 fn fake_analyzer_authority(project: &std::path::Path) -> DashboardDiagnosticsAuthorityV1 {
+    warm_analyzer_interpreter();
     std::fs::create_dir_all(project.join("src")).expect("source dir");
     std::fs::write(project.join("src/lib.fake"), "let nope\n").expect("source");
     let analyzer = project.join("fake_analyzer.py");

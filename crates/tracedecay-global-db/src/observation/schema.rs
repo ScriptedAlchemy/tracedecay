@@ -30,7 +30,9 @@ pub(crate) const OBSERVATION_ADMISSION_MARKERS: [&str; 2] = [
 pub(crate) const OBSERVATIONS_PREDATE_UNIFIED_IDENTITY: crate::registered::RefusedAuthorityV1 =
     crate::registered::RefusedAuthorityV1::Shape {
         authority: "observations",
-        reason: "observation rows predate the unified observation identity and cannot be read; reset the profile so ingestion can rebuild them from host transcripts",
+        reason: std::borrow::Cow::Borrowed(
+            "observation rows predate the unified observation identity and cannot be read; reset the profile so ingestion can rebuild them from host transcripts",
+        ),
     };
 
 const OBSERVATION_SCHEMA_OPERATION: &str = "ensure observation authority schema";

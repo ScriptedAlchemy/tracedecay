@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracedecay_runtime_core::config::ProfileRoot;
@@ -258,13 +259,7 @@ async fn brokered_storage_report(
             ),
             tracing::trace_span!("cli.profile_storage.report_page"),
         );
-        let result = native_runtime::timeout(Duration::from_secs(10), request)
-            .await
-            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!(
-                    "daemon storage report authority did not answer within 10 seconds: {error}"
-                ),
-            })??;
+        let result = storage_report_page(request).await?;
         let AdminCliResultV1::StorageReport(page) = result else {
             return Err(super::daemon::admin_cli_result_mismatch("storage_report"));
         };
@@ -284,6 +279,27 @@ async fn brokered_storage_report(
         }
     }
     Ok(report)
+}
+
+async fn storage_report_page(
+    request: impl Future<Output = tracedecay_domain::errors::Result<AdminCliResultV1>>,
+) -> tracedecay_domain::errors::Result<AdminCliResultV1> {
+    const DEADLINE: Duration = Duration::from_secs(10);
+    native_runtime::timeout(DEADLINE, request)
+        .await
+        .map_err(|error| match error {
+            native_runtime::TimeoutError::Elapsed => {
+                tracedecay_mcp::tools::dispatch_ceiling::tool_dispatch_deadline_error(
+                    "storage_report",
+                    DEADLINE,
+                )
+            }
+            native_runtime::TimeoutError::TimerUnavailable(message) => {
+                tracedecay_domain::errors::TraceDecayError::Config {
+                    message: format!("storage report deadline timer unavailable: {message}"),
+                }
+            }
+        })?
 }
 
 fn merge_storage_report_page(report: &mut StorageReport, page: StorageReport) {
@@ -685,6 +701,48 @@ fn footprint_lines(
             footprint.total_bound_bytes,
         )))
         .collect()
+}
+
+#[cfg(test)]
+mod storage_report_deadline_tests {
+    use super::*;
+    use tracedecay_domain::errors::TraceDecayError;
+
+    #[tokio::test]
+    async fn storage_report_page_timeout_is_retryable_deadline() {
+        let error = storage_report_page(std::future::pending())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error
+                .project_route_context()
+                .map(|(code, retryable, _)| (code, retryable)),
+            Some(("tool_dispatch_deadline_exceeded", true))
+        );
+        assert_eq!(
+            tracedecay_mcp::tool_errors::project_route_problem_kind(
+                "tool_dispatch_deadline_exceeded"
+            ),
+            Some("deadline_exceeded")
+        );
+        assert!(error.to_string().contains("storage_report"));
+    }
+
+    #[tokio::test]
+    async fn storage_report_page_preserves_completed_authority_refusal() {
+        let error = storage_report_page(async {
+            Err(TraceDecayError::reset_required(
+                "profile",
+                "incompatible schema",
+            ))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.reset_required_context(),
+            Some(("profile", "incompatible schema"))
+        );
+    }
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@ use thiserror::Error;
 use crate::ApplicationProblemDetailV1;
 
 const STORE_OPEN_CANCELLED_REASON_CODE: &str = "store_open_cancelled";
+const WORKFLOW_AUTHORITY_RECOVERING_REASON_CODE: &str = "workflow_authority_recovering";
 
 #[derive(Error, Debug)]
 #[error("{detail}")]
@@ -496,6 +497,25 @@ impl TraceDecayError {
     pub fn is_store_open_cancelled(&self) -> bool {
         self.project_route_context()
             .is_some_and(|(reason_code, _, _)| reason_code == STORE_OPEN_CANCELLED_REASON_CODE)
+    }
+
+    /// The store's workflow tables are still in a published shape that
+    /// background convergence is upgrading. The store's other authorities keep
+    /// serving, and the same request succeeds once the upgrade commits.
+    pub fn workflow_authority_recovering() -> Self {
+        Self::project_route(
+            WORKFLOW_AUTHORITY_RECOVERING_REASON_CODE,
+            true,
+            "workflow storage is upgrading in the background; retry once the store's schema \
+             convergence completes",
+        )
+    }
+
+    pub fn is_workflow_authority_recovering(&self) -> bool {
+        self.project_route_context()
+            .is_some_and(|(reason_code, _, _)| {
+                reason_code == WORKFLOW_AUTHORITY_RECOVERING_REASON_CODE
+            })
     }
 
     pub fn project_route_with_detail(

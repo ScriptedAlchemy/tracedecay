@@ -600,6 +600,13 @@ pub trait AgentTaskBackend: Send + Sync {
     /// backend identity stamps the opened file behind this path so replacing
     /// the binary in place re-admits a settled deterministic failure.
     fn executable(&self) -> Option<&std::path::Path>;
+
+    /// Whether another attempt in the same run could observe a different
+    /// outcome. A backend whose executable is unbound by the run's pinned
+    /// configuration cannot recover inside that run, whatever its failure class.
+    fn retry_can_recover(&self) -> bool {
+        true
+    }
 }
 
 /// Availability state returned by runtime adapters. This crate does not probe

@@ -414,6 +414,7 @@ async fn handle_status_command_within(
                 match finding.state {
                     SchemaConvergenceStateV1::Pending
                     | SchemaConvergenceStateV1::Running
+                    | SchemaConvergenceStateV1::Retrying
                     | SchemaConvergenceStateV1::Degraded
                     | SchemaConvergenceStateV1::Completed => {
                         println!("{}", schema_convergence_line(finding));
@@ -677,6 +678,16 @@ mod tests {
         assert_eq!(
             schema_convergence_line(&convergence),
             "schema convergence: profile-sessions registered_schema running, started_at=42"
+        );
+        let retrying = SchemaConvergenceFindingV1 {
+            state: SchemaConvergenceStateV1::Retrying,
+            degraded_row: Some("database is locked".to_owned()),
+            ..convergence
+        };
+        assert_eq!(
+            schema_convergence_line(&retrying),
+            "schema convergence: profile-sessions registered_schema retrying, started_at=42, \
+             row database is locked"
         );
 
         let project_open = ProjectOpenStatusV1 {

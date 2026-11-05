@@ -895,9 +895,15 @@ pub fn mentions_external_project_scope(text: &str) -> bool {
 }
 
 pub fn asks_for_repo_discovery(text: &str) -> bool {
+    // Match whole words so reports/findings and relocated files do not spend
+    // a session's repository-discovery hint budget.
+    let mut words = text.split(|character: char| !character.is_alphanumeric() && character != '_');
+    let has_repository = words
+        .clone()
+        .any(|word| matches!(word, "repo" | "repos" | "repository" | "repositories"));
     !mentions_current_project_scope(text)
-        && contains_any(text, &[" repo", " repository"])
-        && contains_any(text, &["find", "locate", "where", "which"])
+        && has_repository
+        && words.any(|word| matches!(word, "find" | "locate" | "where" | "which"))
 }
 
 pub fn mentions_current_project_scope(text: &str) -> bool {
@@ -1154,6 +1160,30 @@ pub fn matches_normalized(value: &str, expected: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn repository_discovery_requires_whole_nouns_and_verbs() {
+        for prompt in [
+            "their children keep reporting findings",
+            "find the report-script",
+            "No repository files were touched; relocatedtext",
+            "the repository allocated memory",
+            "repository files are somewhere else",
+        ] {
+            assert!(!super::asks_for_repo_discovery(prompt), "{prompt}");
+        }
+        for prompt in [
+            "find the orchestrator repo",
+            "where are the repositories?",
+            "repo: which one owns the scheduler?",
+            "locate sibling repos",
+        ] {
+            assert!(super::asks_for_repo_discovery(prompt), "{prompt}");
+        }
+        assert!(!super::asks_for_repo_discovery(
+            "find the module in this repo"
+        ));
+    }
+
     use super::*;
 
     fn input<'a>(

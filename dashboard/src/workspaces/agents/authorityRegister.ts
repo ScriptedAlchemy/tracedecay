@@ -62,7 +62,10 @@ export function usageAuthority(
     return {
       ...base,
       kind: 'partial',
-      detail: `${payload.message_count.toLocaleString()} messages · event count not served`,
+      detail:
+        payload.message_count == null
+          ? 'session-message authority not mounted · event count not served'
+          : `${payload.message_count.toLocaleString()} messages · event count not served`,
       source: payload.source,
     };
   }

@@ -72,9 +72,9 @@ pub fn wal_checkpoint_pinned_finding(
 /// Convergence runs the authority-invariant audit, whose cost scales with the
 /// store, after admission rather than inside an open's write lease, and the
 /// daemon serves while it runs. `state` carries what the convergence authority
-/// observed: `Stale` while it is pending or running, and `Degraded` once it
-/// has stopped on a failure. Coverage is complete either way; the state is
-/// observed, not inferred.
+/// observed: `Stale` while it is pending or running, and `Degraded` once an
+/// attempt has failed, whether it retries by itself or has stopped. Coverage is
+/// complete either way; the state is observed, not inferred.
 pub fn schema_convergence_incomplete_finding(
     store: &StoreKeyV1,
     state: DoctorEvidenceStateV1,

@@ -20,6 +20,10 @@ impl SchemaConvergenceStageV1 {
 pub enum SchemaConvergenceStateV1 {
     Pending,
     Running,
+    /// The last attempt failed and the store's convergence task tries again by
+    /// itself. `degraded_row` carries that attempt's failure.
+    Retrying,
+    /// Convergence stopped on a failure and nothing retries it on this mount.
     Degraded,
     Completed,
 }
@@ -29,6 +33,7 @@ impl SchemaConvergenceStateV1 {
         match self {
             Self::Pending => "pending",
             Self::Running => "running",
+            Self::Retrying => "retrying",
             Self::Degraded => "degraded",
             Self::Completed => "completed",
         }

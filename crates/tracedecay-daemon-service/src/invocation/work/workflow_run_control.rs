@@ -385,6 +385,15 @@ pub(super) fn workflow_runtime_unavailable() -> ApplicationProblem {
     })
 }
 
+/// Workflow storage waits on the store's background upgrade: the same request
+/// succeeds once it commits, with no operator action.
+pub(super) fn workflow_authority_recovering() -> ApplicationProblem {
+    ApplicationProblem::unavailable(SafeDiagnostic {
+        code: "workflow.authority_recovering".to_owned(),
+        message: "Workflow storage is upgrading in the background; retry shortly".to_owned(),
+    })
+}
+
 pub(super) fn workflow_invalid_request() -> ApplicationProblem {
     ApplicationProblem::invalid_request(
         "workflow.invalid_request",

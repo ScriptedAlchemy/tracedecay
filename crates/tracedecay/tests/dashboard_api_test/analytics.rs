@@ -670,6 +670,18 @@ fn analytics_diagnostics_reports_tool_hook_and_prompt_rollups() {
         assert_eq!(diagnostics["hook_call_count"], 2);
         assert_eq!(diagnostics["ratios"]["mcp_tool_calls_per_message"], 0.25);
         assert_eq!(diagnostics["ratios"]["hook_calls_per_message"], 0.5);
+        // The readiness fold is mounted by the composition serving this route,
+        // so it answers over the served rows instead of reporting the
+        // projection itself as unmounted.
+        assert_eq!(
+            diagnostics["hook_readiness"]["collection_status"], "no_samples",
+            "seeded rows are hook_invoked only, so readiness has no completed samples"
+        );
+        assert_eq!(diagnostics["hook_readiness"]["input_rows_received"], 2);
+        assert_eq!(
+            diagnostics["hook_readiness"]["events_skipped_non_completed"],
+            2
+        );
 
         assert_eq!(
             find_row(&diagnostics["by_tool_category"], "tool_category", "mcp")["count"],

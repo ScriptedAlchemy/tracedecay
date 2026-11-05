@@ -176,11 +176,13 @@ function diagnosticsModel() {
     },
     mcp_tool_call_count: 0,
     message_count: 0,
+    // A measured zero-message store cannot denominate a rate, so the daemon
+    // serves nulls here rather than 0.0.
     ratios: {
-      events_per_message: 0,
-      hook_calls_per_message: 0,
-      mcp_tool_calls_per_message: 0,
-      tool_calls_per_message: 0,
+      events_per_message: null,
+      hook_calls_per_message: null,
+      mcp_tool_calls_per_message: null,
+      tool_calls_per_message: null,
     },
     recent_events: [],
     recent_hooks: [],

@@ -147,6 +147,7 @@ describe('schedulerReading', () => {
     configuration_revision_id: 'rev',
     control_path: '/x',
     tasks: [],
+    reset_required_stores: [],
   });
 
   it('reads configured as a configuration state, not a liveness claim', () => {
@@ -155,10 +156,63 @@ describe('schedulerReading', () => {
     expect(reading.sentence).toMatch(/no liveness heartbeat/);
   });
 
+  it('shows reset refusal and remedy rather than configured', () => {
+    const blocked = status('blocked_reset_required');
+    blocked.reset_required_stores = [{
+      store: 'project sessions test',
+      authority: 'workflow',
+      found_version: 1,
+      required_version: 2,
+      reason: 'retired schema',
+      remedy: 'tracedecay wipe --stale --yes',
+    }];
+    const reading = schedulerReading(blocked);
+    expect(reading.word).toBe('reset required');
+    expect(reading.sentence).toContain('project sessions test (workflow) requires reset: retired schema');
+    expect(reading.sentence).toContain('tracedecay wipe --stale --yes');
+    expect(reading.tone.kind).toBe('partial');
+  });
+
+  it('names every refused store when several are blocked', () => {
+    const blocked = status('blocked_reset_required');
+    blocked.reset_required_stores = [
+      {
+        store: 'profile authority',
+        authority: 'global',
+        found_version: 3,
+        required_version: 4,
+        reason: 'retired profile schema',
+        remedy: 'tracedecay wipe --all --yes',
+      },
+      {
+        store: 'project sessions p1',
+        authority: 'sessions',
+        found_version: null,
+        required_version: null,
+        reason: 'store files were lost while open',
+        remedy: 'tracedecay daemon restart',
+      },
+    ];
+    const sentence = schedulerReading(blocked).sentence;
+    expect(sentence).toContain('profile authority (global) requires reset: retired profile schema');
+    expect(sentence).toContain('tracedecay wipe --all --yes');
+    expect(sentence).toContain('project sessions p1 (sessions) requires reset: store files were lost while open');
+    expect(sentence).toContain('tracedecay daemon restart');
+  });
+
+  it('says the census was not reported rather than claiming no refusal', () => {
+    const blocked = status('blocked_reset_required');
+    blocked.reset_required_stores = [];
+    const reading = schedulerReading(blocked);
+    expect(reading.word).toBe('reset required');
+    expect(reading.sentence).toContain('no census was reported');
+  });
+
   it('keeps paused, disabled and delegated states distinct', () => {
     expect(schedulerReading(status('paused')).tone.kind).toBe('partial');
     expect(schedulerReading(status('automation_disabled')).tone.kind).toBe('cancelled');
     expect(schedulerReading(status('backend_disabled')).word).toBe('backend disabled');
+    expect(schedulerReading(status('backend_unconfigured')).word).toBe('backend unconfigured');
     expect(schedulerReading(status('delegated_host')).word).toBe('delegated host');
   });
 });

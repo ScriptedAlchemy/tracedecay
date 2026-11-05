@@ -98,6 +98,136 @@ fn ledger_row(run_id: &str, task: &str, status: &str, started_at: i64) -> String
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
+async fn analytics_automation_reports_a_ledger_that_exactly_fills_the_page_as_complete() {
+    // The newest-rows page is bounded. A ledger holding exactly that many rows
+    // is the whole ledger, not a truncated window: nothing was left behind.
+    let fixture = production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+
+    let empty = extract_json(
+        &handle_real_server_tool_call(
+            &server,
+            "tracedecay_analytics",
+            json!({"section": "automation", "format": "json"}),
+        )
+        .await,
+    );
+    let dashboard_root = empty["automation"]["dashboard_root"]
+        .as_str()
+        .expect("enrolled dashboard root")
+        .to_string();
+    let dashboard_path = std::path::PathBuf::from(&dashboard_root);
+    std::fs::create_dir_all(&dashboard_path).expect("dashboard root");
+
+    // Derive the page bound from the service instead of duplicating the
+    // handler's constant: write well past any plausible bound and let the
+    // report say how many rows it actually read.
+    let now = current_timestamp();
+    let probe_rows = 512usize;
+    let mut ledger = String::new();
+    for index in 0..probe_rows {
+        ledger.push_str(&ledger_row(
+            &format!("analytics-page-probe-{index}"),
+            "memory_curator",
+            "succeeded",
+            now - 60,
+        ));
+        ledger.push('\n');
+    }
+    std::fs::write(dashboard_path.join("automation_runs.jsonl"), ledger)
+        .expect("automation ledger");
+    let probe = extract_json(
+        &handle_real_server_tool_call(
+            &server,
+            "tracedecay_analytics",
+            json!({"section": "automation", "format": "json"}),
+        )
+        .await,
+    );
+    let page_bound = probe["automation"]["records_considered"]
+        .as_u64()
+        .expect("records considered") as usize;
+    assert!(
+        page_bound > 0 && page_bound < probe_rows,
+        "the probe must exceed the page bound for the boundary to be testable, got {page_bound}"
+    );
+    assert_eq!(
+        probe["automation"]["records_truncated"], true,
+        "a ledger larger than the page is a partial window"
+    );
+
+    // Exactly the page bound: the page is the whole ledger, nothing older was
+    // left behind, so the window is complete.
+    let mut ledger = String::new();
+    for index in 0..page_bound {
+        ledger.push_str(&ledger_row(
+            &format!("analytics-full-page-{index}"),
+            "memory_curator",
+            "succeeded",
+            now - 60,
+        ));
+        ledger.push('\n');
+    }
+    std::fs::write(dashboard_path.join("automation_runs.jsonl"), ledger)
+        .expect("automation ledger");
+
+    let automation = extract_json(
+        &handle_real_server_tool_call(
+            &server,
+            "tracedecay_analytics",
+            json!({"section": "automation", "format": "json"}),
+        )
+        .await,
+    );
+    assert_eq!(
+        automation["automation"]["records_considered"].as_u64(),
+        Some(page_bound as u64),
+    );
+    assert_eq!(
+        automation["automation"]["records_in_window"].as_u64(),
+        Some(page_bound as u64),
+    );
+    assert_eq!(
+        automation["automation"]["records_truncated"], false,
+        "a ledger that exactly fills the page has no older rows to truncate"
+    );
+
+    // One more row pushes the oldest out of the page, which is a real
+    // truncation and must be reported.
+    let mut extended = std::fs::read_to_string(dashboard_path.join("automation_runs.jsonl"))
+        .expect("automation ledger");
+    extended.push_str(&ledger_row(
+        "analytics-overflow",
+        "memory_curator",
+        "succeeded",
+        now - 120,
+    ));
+    extended.push('\n');
+    std::fs::write(dashboard_path.join("automation_runs.jsonl"), extended)
+        .expect("automation ledger");
+
+    let truncated = extract_json(
+        &handle_real_server_tool_call(
+            &server,
+            "tracedecay_analytics",
+            json!({"section": "automation", "format": "json"}),
+        )
+        .await,
+    );
+    assert_eq!(
+        truncated["automation"]["records_truncated"], true,
+        "a ledger older than the page bound is a partial window"
+    );
+
+    drop(server);
+    fixture.harness.shutdown().await;
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
 async fn analytics_reports_tool_tiers_top_tools_and_zero_call_tools() {
     let fixture = production_composition_fixture().await;
     let server = fixture

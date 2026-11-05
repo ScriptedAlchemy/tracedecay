@@ -655,24 +655,50 @@ async fn shared_session_meta_with_provenance(
 /// The gate is per process. Cross-process writers still meet at the store's
 /// own transaction, which is what the replay verification is there for.
 type CodexAdmissionGate = Arc<tokio::sync::Mutex<()>>;
-type CodexAdmissionGates =
-    Mutex<HashMap<(ObservationScopeV1, PathBuf), Weak<tokio::sync::Mutex<()>>>>;
+type CodexAdmissionGateKey = (ObservationScopeV1, PathBuf);
+const MIN_CODEX_ADMISSION_GATE_SWEEP_INTERVAL: usize = 128;
 
-static CODEX_ADMISSION_GATES: OnceLock<CodexAdmissionGates> = OnceLock::new();
+#[derive(Default)]
+struct CodexAdmissionGates {
+    by_source: HashMap<CodexAdmissionGateKey, Weak<tokio::sync::Mutex<()>>>,
+    new_gates_since_sweep: usize,
+    sweep_after: usize,
+}
 
-/// ponytail: linear sweep of live gates per acquisition; keyed eviction if a
-/// scope ever admits enough rollouts at once for the sweep to show up.
-fn codex_admission_gate(scope: &ObservationScopeV1, path: &Path) -> CodexAdmissionGate {
-    let gates = CODEX_ADMISSION_GATES.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut gates = gates.lock().unwrap_or_else(PoisonError::into_inner);
-    gates.retain(|_, gate| gate.strong_count() > 0);
-    let key = (scope.clone(), path.to_path_buf());
-    if let Some(gate) = gates.get(&key).and_then(Weak::upgrade) {
-        return gate;
+impl CodexAdmissionGates {
+    fn gate_for(&mut self, key: CodexAdmissionGateKey) -> CodexAdmissionGate {
+        // Keep the exact live gate for this source: hook and catch-up admission
+        // must still serialize the cursor read with its subsequent write.
+        if let Some(gate) = self.by_source.get(&key).and_then(Weak::upgrade) {
+            return gate;
+        }
+        // A per-rollout full-map retain makes concurrent catch-up contend on
+        // this process-global mutex for every new source. Sweep only after a
+        // number of new gates proportional to the last retained live set.
+        if self.new_gates_since_sweep
+            >= self
+                .sweep_after
+                .max(MIN_CODEX_ADMISSION_GATE_SWEEP_INTERVAL)
+        {
+            self.by_source.retain(|_, gate| gate.strong_count() > 0);
+            self.sweep_after = self.by_source.len();
+            self.new_gates_since_sweep = 0;
+        }
+        let gate = CodexAdmissionGate::new(tokio::sync::Mutex::new(()));
+        self.by_source.insert(key, Arc::downgrade(&gate));
+        self.new_gates_since_sweep = self.new_gates_since_sweep.saturating_add(1);
+        gate
     }
-    let gate = CodexAdmissionGate::new(tokio::sync::Mutex::new(()));
-    gates.insert(key, Arc::downgrade(&gate));
-    gate
+}
+
+static CODEX_ADMISSION_GATES: OnceLock<Mutex<CodexAdmissionGates>> = OnceLock::new();
+
+fn codex_admission_gate(scope: &ObservationScopeV1, path: &Path) -> CodexAdmissionGate {
+    CODEX_ADMISSION_GATES
+        .get_or_init(|| Mutex::new(CodexAdmissionGates::default()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .gate_for((scope.clone(), path.to_path_buf()))
 }
 
 async fn try_admit_codex_jsonl_observations(
@@ -842,4 +868,50 @@ async fn admit_codex_jsonl_page(
         io: progress.io,
         prior_context_bytes,
     })
+}
+
+#[cfg(test)]
+mod admission_gate_tests {
+    use super::{CodexAdmissionGates, MIN_CODEX_ADMISSION_GATE_SWEEP_INTERVAL};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tracedecay_domain::ObservationScopeV1;
+
+    #[test]
+    fn live_codex_admission_gates_survive_amortized_reclamation() {
+        let scope = ObservationScopeV1::Profile;
+        let mut registry = CodexAdmissionGates::default();
+        let key = (scope.clone(), PathBuf::from("rollout-active.jsonl"));
+        let first = registry.gate_for(key.clone());
+        let concurrent = registry.gate_for(key.clone());
+        assert!(Arc::ptr_eq(&first, &concurrent));
+        let independent = registry.gate_for((scope.clone(), PathBuf::from("other.jsonl")));
+        assert!(!Arc::ptr_eq(&first, &independent));
+        drop(independent);
+
+        // Many completed rollouts must not retain a gate per historical file.
+        // The active gate must survive sweeps so two callers still serialize.
+        for index in 0..(MIN_CODEX_ADMISSION_GATE_SWEEP_INTERVAL * 3) {
+            let disposable = registry.gate_for((
+                scope.clone(),
+                PathBuf::from(format!("rollout-{index}.jsonl")),
+            ));
+            drop(disposable);
+        }
+        assert!(
+            registry.by_source.len() <= MIN_CODEX_ADMISSION_GATE_SWEEP_INTERVAL + 2,
+            "stale rollout gates must be periodically reclaimed"
+        );
+        assert!(Arc::ptr_eq(&first, &registry.gate_for(key.clone())));
+
+        // Once the final holder releases the gate, the next same-source
+        // admission must receive a new one rather than reuse a stale lock.
+        let retired = Arc::downgrade(&first);
+        drop(first);
+        drop(concurrent);
+        assert!(retired.upgrade().is_none());
+        let replacement = registry.gate_for(key);
+        assert!(retired.upgrade().is_none());
+        drop(replacement);
+    }
 }

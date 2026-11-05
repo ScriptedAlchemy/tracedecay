@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -48,6 +49,7 @@ mod locking;
 mod receipt_store;
 mod scope_quarantine;
 mod scope_roots;
+mod text_artifact_scan;
 mod text_artifacts;
 pub use graph_replay_release::{
     CodeGenerationGraphReplayReleasePageV1, CodeGenerationGraphReplayReleaseV1,
@@ -68,6 +70,8 @@ pub use scope_roots::{
     plan_scope_root_retention, plan_scope_root_retention_with_liveness_proof, record_scope_root,
     recover_scope_root_retention, resolve_live_code_index_roots, scope_root_liveness_proof,
 };
+pub use text_artifact_scan::CodeGenerationRetentionScanV1;
+use text_artifact_scan::{TextArtifactPageProgressV1, TextArtifactPageV1};
 pub use text_artifacts::{
     attach_verified_text_artifact_under_lock, find_shared_text_artifact,
     withdraw_verified_text_artifact_under_lock,
@@ -97,13 +101,14 @@ use scope_roots::{
 };
 use text_artifacts::{
     TEXT_ARTIFACT_RECEIPT_STORE, execute_text_artifact_retention_under_store_lock,
-    plan_collectable_text_artifacts_budgeted_cancellable,
+    plan_collectable_text_artifacts_budgeted_page_cancellable,
     recover_pending_text_artifact_transaction_unlocked, text_artifact_transaction_path,
     total_text_artifact_bytes,
 };
 #[cfg(test)]
 use text_artifacts::{
     TEXT_ARTIFACT_TRANSACTION_JOURNAL, build_text_artifact_receipt,
+    plan_collectable_text_artifacts_budgeted_cancellable,
     plan_collectable_text_artifacts_cancellable, stage_collectable_text_artifacts,
 };
 
@@ -176,8 +181,9 @@ pub const MAX_CODE_GENERATION_RETENTION_BATCH_V1: usize = 32;
 ///
 /// The bounded durable index can protect at most 32 completed artifacts and
 /// the active generation can own one resumable staging file. The inventory
-/// reads that fixed liveness window plus one removal page, so a restart reaches
-/// later debris without ever materializing an unbounded directory listing.
+/// reads that fixed liveness window plus one removal page. Daemon maintenance
+/// retains directory progress across ticks; preserved files do not bound how
+/// far a later page may reach.
 const MAX_CODE_TEXT_ARTIFACT_RETENTION_BATCH_V1: usize = 32;
 const MAX_CODE_TEXT_ARTIFACT_INVENTORY_ENTRIES_V1: usize =
     MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1 + 1 + MAX_CODE_TEXT_ARTIFACT_RETENTION_BATCH_V1;
@@ -543,6 +549,9 @@ pub struct CodeGenerationRetentionPlanV1 {
     /// staging file exists, so a successor build is in flight whose
     /// publication replaces that artifact and leaves it unreferenced.
     active_text_replacement_in_flight: bool,
+    /// Enumeration progress only; current liveness and identity remain the
+    /// sole deletion authority. The owner acknowledges this page after apply.
+    text_artifact_page_progress: Option<TextArtifactPageProgressV1>,
     /// How thoroughly this plan proved generation integrity. Apply-mode
     /// execution refuses anything but [`GenerationDigestVerificationV1::Full`].
     pub verification: GenerationDigestVerificationV1,
@@ -588,6 +597,17 @@ impl CodeGenerationRetentionPlanV1 {
             || self
                 .collectable_generation_segments
                 .may_have_collectable_segments()
+    }
+
+    /// Whether a retained directory scan still has entries to inspect,
+    /// including a page containing only preserved files.
+    #[must_use]
+    pub fn has_pending_text_artifact_inventory(&self) -> bool {
+        self.text_artifact_page_progress
+            .as_ref()
+            .is_some_and(|progress| {
+                progress.page.more || progress.consumed < progress.page.entries.len()
+            })
     }
 
     /// What this plan proved about unreferenced generation segments.
@@ -722,6 +742,7 @@ struct CodeTextArtifactRetentionTransactionV1 {
 
 #[derive(Debug)]
 struct CodeTextArtifactRetentionInventoryV1 {
+    scanned_entries: usize,
     candidates: Vec<CodeTextArtifactRetentionCandidateV1>,
     unique_bytes: u64,
     active_text_replacement_in_flight: bool,
@@ -856,6 +877,7 @@ fn unpublished_store_plan(
         collectable_generation_segments: GenerationSegmentCensusV1::NoneFound,
         text_artifact_inventory_bytes: 0,
         active_text_replacement_in_flight: false,
+        text_artifact_page_progress: None,
         verification: GenerationDigestVerificationV1::Full,
         active_pointer: None,
     }
@@ -879,6 +901,22 @@ pub fn prepare_next_code_generation_retention_cancellable(
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
     is_cancelled: &dyn Fn() -> bool,
     graph_replay_pool_root: Option<&Path>,
+) -> Result<CodeGenerationRetentionPlanV1, CodeGenerationRetentionErrorV1> {
+    prepare_next_code_generation_retention_page_cancellable(
+        store_root,
+        vector_readable_sources,
+        is_cancelled,
+        graph_replay_pool_root,
+        None,
+    )
+}
+
+fn prepare_next_code_generation_retention_page_cancellable(
+    store_root: &Path,
+    vector_readable_sources: &BTreeSet<CodeGenerationId>,
+    is_cancelled: &dyn Fn() -> bool,
+    graph_replay_pool_root: Option<&Path>,
+    text_page: Option<&Arc<TextArtifactPageV1>>,
 ) -> Result<CodeGenerationRetentionPlanV1, CodeGenerationRetentionErrorV1> {
     if is_cancelled() {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
@@ -918,12 +956,15 @@ pub fn prepare_next_code_generation_retention_cancellable(
     // when this exact census found bytes that may be unlinked. The executor
     // still refuses metadata-only plans, so no deletion can cross this gate
     // without the canonical full verification below.
-    let mut census = plan_code_generation_retention_with_verification_cancellable(
+    let mut census_remaining_entries = usize::MAX;
+    let mut census = plan_code_generation_retention_page_cancellable(
         store_root,
         vector_readable_sources,
         GenerationDigestVerificationV1::MetadataOnly,
         graph_replay_pool_root,
+        &mut census_remaining_entries,
         is_cancelled,
+        text_page,
     )?;
     // The bounded census leaves segments typed unknown rather than paying the
     // mark phase. Resolve exactly that question with the sweep alone: a store
@@ -947,12 +988,15 @@ pub fn prepare_next_code_generation_retention_cancellable(
     if !census.has_collectable_work() {
         return Ok(census);
     }
-    plan_code_generation_retention_with_verification_cancellable(
+    let mut plan_remaining_entries = usize::MAX;
+    plan_code_generation_retention_page_cancellable(
         store_root,
         vector_readable_sources,
         GenerationDigestVerificationV1::Full,
         graph_replay_pool_root,
+        &mut plan_remaining_entries,
         is_cancelled,
+        text_page,
     )
 }
 
@@ -986,6 +1030,26 @@ pub fn plan_code_generation_retention_with_verification_budgeted_cancellable(
     graph_replay_pool_root: Option<&Path>,
     remaining_entries: &mut usize,
     is_cancelled: &dyn Fn() -> bool,
+) -> Result<CodeGenerationRetentionPlanV1, CodeGenerationRetentionErrorV1> {
+    plan_code_generation_retention_page_cancellable(
+        store_root,
+        vector_readable_sources,
+        verification,
+        graph_replay_pool_root,
+        remaining_entries,
+        is_cancelled,
+        None,
+    )
+}
+
+fn plan_code_generation_retention_page_cancellable(
+    store_root: &Path,
+    vector_readable_sources: &BTreeSet<CodeGenerationId>,
+    verification: GenerationDigestVerificationV1,
+    graph_replay_pool_root: Option<&Path>,
+    remaining_entries: &mut usize,
+    is_cancelled: &dyn Fn() -> bool,
+    text_page: Option<&Arc<TextArtifactPageV1>>,
 ) -> Result<CodeGenerationRetentionPlanV1, CodeGenerationRetentionErrorV1> {
     if is_cancelled() {
         return Err(CodeGenerationRetentionErrorV1::Cancelled);
@@ -1189,12 +1253,13 @@ pub fn plan_code_generation_retention_with_verification_budgeted_cancellable(
         .take(MAX_CODE_GENERATION_RETENTION_BATCH_V1)
         .cloned()
         .collect::<Vec<_>>();
-    let text_artifact_inventory = plan_collectable_text_artifacts_budgeted_cancellable(
+    let text_artifact_inventory = plan_collectable_text_artifacts_budgeted_page_cancellable(
         store_root,
         active_pointer.as_ref(),
         verification,
         remaining_entries,
         is_cancelled,
+        text_page.map(Arc::as_ref),
     )?;
     // The segment mark phase streams every retained manifest end to end and
     // fails closed when one no longer matches its content-addressed name. That
@@ -1237,6 +1302,10 @@ pub fn plan_code_generation_retention_with_verification_budgeted_cancellable(
         text_artifact_inventory_bytes: text_artifact_inventory.unique_bytes,
         active_text_replacement_in_flight: text_artifact_inventory
             .active_text_replacement_in_flight,
+        text_artifact_page_progress: text_page.map(|page| TextArtifactPageProgressV1 {
+            page: Arc::clone(page),
+            consumed: text_artifact_inventory.scanned_entries,
+        }),
         verification,
         active_pointer,
     })

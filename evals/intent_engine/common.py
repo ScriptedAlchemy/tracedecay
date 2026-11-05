@@ -1,5 +1,6 @@
 """Shared questions and state renderers. Written after the dataset was frozen."""
 import json
+import math
 
 CATS = ["session_recall", "memory_store", "call_graph", "impact", "refactor_edit",
         "review_changes", "type_orientation", "project_context", "unexpected_changes"]
@@ -15,6 +16,16 @@ NOUL_INS = {
     "project_context": "Does the user's latest message ask about code in another repository or a sibling project?",
     "unexpected_changes": "Does the user's latest message ask about commits or file edits that neither the user nor the assistant made?",
 }
+
+def calibrated(probability, temperature):
+    if probability in (0, 1):
+        return probability
+    log_odds = (math.log(probability) - math.log1p(-probability)) / temperature
+    if log_odds >= 0:
+        return 1 / (1 + math.exp(-log_odds))
+    exp_odds = math.exp(log_odds)
+    return exp_odds / (1 + exp_odds)
+
 
 def noul_questions(cats=CATS):
     return {c: {"type": "noul", "instructions": NOUL_INS[c]} for c in cats}

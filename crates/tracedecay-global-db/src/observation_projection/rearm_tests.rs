@@ -203,7 +203,10 @@ async fn daemon_admission_defers_rearm_to_background_convergence() {
 
     harness
         .registered
-        .converge_schema(convergence)
+        .converge_schema(
+            convergence,
+            &tracedecay_runtime_core::cancellation::CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert_eq!(

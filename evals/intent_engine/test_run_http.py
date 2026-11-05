@@ -1,6 +1,7 @@
 """Runner persistence tests. HTTP inference is substituted, not qualified here."""
 import contextlib
 import copy
+import errno
 import hashlib
 import io
 import json
@@ -10,6 +11,9 @@ import stat
 import sys
 import tempfile
 import unittest
+import urllib.error
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Event, Thread
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -74,6 +78,39 @@ class RunHttpTest(unittest.TestCase):
         self.assertEqual(self.partial.read_bytes(), before)
         self.assertFalse(self.output.exists())
 
+    def test_invalid_dataset_is_refused_before_network_or_partial_output(self):
+        malformed = [
+            ("not_a_list", {"cases": self.dataset}),
+            ("not_an_object", [None]),
+            ("duplicate_id", [self.dataset[0], self.dataset[0]]),
+        ]
+        for field, value in (
+            ("labels", ["not_a_question"]),
+            ("labels", ["impact", "impact"]),
+            ("labels", None),
+            ("context_needed", 1),
+            ("current_prompt", None),
+            ("turns", [{"role": "system", "text": "not a dataset turn"}]),
+            ("turns", [{"role": "tool", "text": 8}]),
+        ):
+            changed = copy.deepcopy(self.dataset)
+            changed[0][field] = value
+            malformed.append((field + "_" + repr(value), changed))
+
+        try:
+            for reason, dataset in malformed:
+                with self.subTest(reason=reason):
+                    self.write("dataset.json", dataset)
+                    with patch.object(run_http, "post") as post:
+                        with self.assertRaisesRegex(ValueError, "dataset"):
+                            self.run_main()
+                        post.assert_not_called()
+                    self.assertFalse(self.output.exists())
+                    self.assertFalse(self.partial.exists())
+                    self.assertFalse((self.root / "results").exists())
+        finally:
+            self.write("dataset.json", self.dataset)
+
     def test_exact_resume_only_requests_the_missing_case(self):
         self.interrupt()
         with patch.object(run_http, "post", side_effect=self.response) as post:
@@ -84,9 +121,161 @@ class RunHttpTest(unittest.TestCase):
         self.assertEqual([row["id"] for row in result["rows"]], ["first", "second"])
         self.assertEqual(result["experiment"]["server_config"], self.server)
         self.assertEqual(result["experiment_sha256"], run_http.digest(result["experiment"]))
+        self.assertEqual(result["experiment"]["case_annotations_sha256"], run_http.digest([
+            [case["id"], case["labels"], case["context_needed"]]
+            for case in self.dataset
+        ]))
         self.assertEqual(result["rows"][0]["server_ms"], 0)
         self.assertFalse(self.partial.exists())
 
+
+    def test_completed_rows_cannot_be_relabelled_for_scoring(self):
+        with patch.object(run_http, "post", side_effect=self.response):
+            self.run_main()
+        original = json.loads(self.output.read_text())
+        self.assertEqual(score.score_config(original)["latency"]["total_cases"], 2)
+        for field, value in (("labels", []), ("context_needed", False)):
+            with self.subTest(field=field):
+                changed = copy.deepcopy(original)
+                changed["rows"][0][field] = value
+                with self.assertRaisesRegex(ValueError, "case annotations disagree"):
+                    score.score_config(changed)
+
+    def test_concurrent_same_tag_writers_cannot_corrupt_resumable_evidence(self):
+        entered, release = Event(), Event()
+        errors = []
+
+        def inference(url, body):
+            if not entered.is_set():
+                entered.set()
+                if not release.wait(10):
+                    raise OSError("inference barrier was never released")
+            return self.response(url, body)
+
+        def first_run():
+            try:
+                self.run_main()
+            except Exception as error:
+                errors.append(error)
+
+        with patch.object(run_http, "post", side_effect=inference) as post:
+            worker = Thread(target=first_run)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(10), "first inference did not start")
+                before = self.partial.read_bytes()
+                with self.assertRaisesRegex(ValueError, "another evaluator"):
+                    self.run_main()
+                self.assertEqual(self.partial.read_bytes(), before)
+            finally:
+                release.set()
+                worker.join(10)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(post.call_count, len(self.dataset))
+        result = json.loads(self.output.read_text())
+        self.assertEqual([row["id"] for row in result["rows"]], ["first", "second"])
+
+    def test_partial_lock_covers_final_result_publication(self):
+        entered, release = Event(), Event()
+        errors = []
+        original_publish = run_http.publish_final_result
+
+        def paused_publish(path, document):
+            if not entered.is_set():
+                entered.set()
+                if not release.wait(10):
+                    raise OSError("publication barrier was never released")
+            return original_publish(path, document)
+
+        def first_run():
+            try:
+                self.run_main()
+            except Exception as error:
+                errors.append(error)
+
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            with patch.object(run_http, "publish_final_result",
+                              side_effect=paused_publish) as publish:
+                worker = Thread(target=first_run)
+                worker.start()
+                try:
+                    self.assertTrue(entered.wait(10), "first publication did not start")
+                    before = self.partial.read_bytes()
+                    with self.assertRaisesRegex(ValueError, "another evaluator"):
+                        self.run_main()
+                    self.assertEqual(self.partial.read_bytes(), before)
+                    self.assertFalse(self.output.exists())
+                finally:
+                    release.set()
+                    worker.join(10)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(errors, [])
+                self.assertEqual(post.call_count, len(self.dataset))
+                publish.assert_called_once()
+        self.assertTrue(self.output.exists())
+        self.assertFalse(self.partial.exists())
+
+    def test_completion_between_preflight_and_lock_refuses_resume(self):
+        self.interrupt()
+        original_lock = run_http.lock_partial_writer
+        before = self.partial.read_bytes()
+        previous = '{"previous":true}'
+
+        def publish_before_locked_check(partial, path):
+            original_lock(partial, path)
+            self.output.write_text(previous, encoding="utf-8")
+
+        with patch.object(run_http, "lock_partial_writer",
+                          side_effect=publish_before_locked_check):
+            with patch.object(run_http, "post") as post:
+                with self.assertRaisesRegex(ValueError, "completed output already exists"):
+                    self.run_main()
+                post.assert_not_called()
+        self.assertEqual(self.output.read_text(encoding="utf-8"), previous)
+        self.assertEqual(self.partial.read_bytes(), before)
+
+    @unittest.skipUnless(os.name == "posix", "symlink identity check requires POSIX")
+    def test_symlinked_partial_cannot_write_to_another_file(self):
+        self.partial.parent.mkdir(parents=True, exist_ok=True)
+        unrelated = self.root / "other.json"
+        unrelated.write_text("unchanged", encoding="utf-8")
+        self.partial.symlink_to(unrelated)
+        with patch.object(run_http, "post") as post:
+            with self.assertRaisesRegex(ValueError, "replaced or redirected"):
+                self.run_main()
+            post.assert_not_called()
+        self.assertEqual(unrelated.read_text(encoding="utf-8"), "unchanged")
+        self.assertFalse(self.output.exists())
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "named pipes require POSIX")
+    def test_named_pipe_partial_is_refused_without_waiting_for_a_writer(self):
+        self.partial.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(self.partial)
+        outcome = {}
+        finished = Event()
+
+        def resume():
+            try:
+                self.run_main()
+            except Exception as error:
+                outcome["error"] = error
+            finally:
+                finished.set()
+
+        with patch.object(run_http, "post") as post:
+            worker = Thread(target=resume, daemon=True)
+            worker.start()
+            self.assertTrue(
+                finished.wait(5),
+                "resume blocked on a FIFO before it could refuse non-file evidence",
+            )
+            worker.join()
+            self.assertIsInstance(outcome.get("error"), ValueError)
+            self.assertIn("regular file", str(outcome["error"]))
+            post.assert_not_called()
+        self.assertTrue(stat.S_ISFIFO(self.partial.lstat().st_mode))
+        self.assertFalse(self.output.exists())
 
     def test_input_tokens_do_not_fabricate_state_or_truncation_measurements(self):
         self.interrupt()
@@ -355,6 +544,196 @@ class RunHttpTest(unittest.TestCase):
                     self.run_main(["--subset", str(self.root / "subset.json")])
                 post.assert_not_called()
 
+    def test_failed_probe_preserves_a_link_target_it_did_not_create(self):
+        self.output.parent.mkdir()
+        foreign = self.output.parent / ".noul-link-probe-collision.linked"
+        content = b"another publication owns this file\n"
+        foreign.write_bytes(content)
+        # Force a collision with a real existing file. os.link itself must
+        # refuse it, and cleanup must not remove the existing file.
+        with patch.object(run_http.secrets, "token_hex", return_value="collision"):
+            with patch.object(run_http, "post") as post:
+                with self.assertRaises(OSError):
+                    self.run_main()
+                post.assert_not_called()
+        self.assertEqual(foreign.read_bytes(), content)
+        self.assertEqual(list(self.output.parent.iterdir()), [foreign])
+        self.assertFalse(self.partial.exists())
+
+    def test_probe_permission_error_preserves_the_underlying_cause(self):
+        error = PermissionError(errno.EACCES, "policy denied link creation")
+        with patch.object(run_http, "post") as post:
+            with patch.object(run_http.os, "link", side_effect=error):
+                with self.assertRaises(OSError) as caught:
+                    self.run_main()
+            post.assert_not_called()
+        self.assertEqual(caught.exception.errno, errno.EACCES)
+        self.assertIs(caught.exception.__cause__, error)
+        self.assertIn("policy denied link creation", str(caught.exception))
+        self.assertIn(str(self.output.parent), str(caught.exception))
+        self.assertEqual(list(self.output.parent.iterdir()), [])
+
+    def test_probe_close_failure_still_removes_owned_staging(self):
+        actual_close = os.close
+
+        def close_then_fail(descriptor):
+            actual_close(descriptor)
+            raise OSError(errno.EIO, "probe close failed")
+
+        with patch.object(run_http, "post") as post:
+            with patch.object(run_http.os, "close", side_effect=close_then_fail):
+                with self.assertRaisesRegex(OSError, "probe close failed"):
+                    self.run_main()
+            post.assert_not_called()
+        self.assertEqual(list(self.output.parent.iterdir()), [])
+        self.assertFalse(self.partial.exists())
+
+    def test_link_cleanup_failure_does_not_skip_owned_staging_cleanup(self):
+        actual_unlink = os.unlink
+        blocked = []
+
+        def refuse_link_cleanup(path, *args, **kwargs):
+            if str(path).endswith(".linked"):
+                blocked.append(Path(path))
+                raise PermissionError(errno.EACCES, "probe link cleanup denied")
+            return actual_unlink(path, *args, **kwargs)
+
+        with patch.object(run_http, "post") as post:
+            with patch.object(run_http.os, "unlink", side_effect=refuse_link_cleanup):
+                with self.assertRaisesRegex(OSError, "probe link cleanup denied"):
+                    self.run_main()
+            post.assert_not_called()
+        self.assertEqual(len(blocked), 1)
+        self.assertEqual(list(self.output.parent.iterdir()), blocked)
+        self.assertFalse(self.partial.exists())
+        actual_unlink(blocked[0])
+
+    def test_unsupported_results_volume_refuses_before_any_http_work(self):
+        with patch.object(run_http, "post") as post:
+            with patch.object(run_http.os, "link", side_effect=OSError("unsupported links")):
+                with self.assertRaisesRegex(OSError, "requires hard links"):
+                    self.run_main()
+            post.assert_not_called()
+        self.assertFalse(self.partial.exists())
+        self.assertFalse(self.output.exists())
+        self.assertEqual(list(self.output.parent.glob(".noul-link-probe-*")), [])
+
+        # A real partial on a newly unavailable volume stays intact, and a
+        # retry refuses without duplicating already recorded inference.
+        self.interrupt()
+        preserved = self.partial.read_bytes()
+        with patch.object(run_http, "post") as post:
+            with patch.object(run_http.os, "link", side_effect=OSError("unsupported links")):
+                with self.assertRaisesRegex(OSError, "requires hard links"):
+                    self.run_main()
+            post.assert_not_called()
+        self.assertEqual(self.partial.read_bytes(), preserved)
+
+    def test_unsupported_sample_volume_refuses_before_any_http_work(self):
+        sample = self.root / "first-response.json"
+        actual_link = os.link
+
+        def refuse_sample_volume(source, destination):
+            if os.path.dirname(source) == str(self.root):
+                raise OSError("sample volume lacks hard links")
+            return actual_link(source, destination)
+
+        with patch.object(run_http, "post") as post:
+            with patch.object(run_http.os, "link", side_effect=refuse_sample_volume):
+                with self.assertRaisesRegex(OSError, "requires hard links"):
+                    self.run_main(["--sample-out", str(sample)])
+            post.assert_not_called()
+        self.assertFalse(self.partial.exists())
+        self.assertFalse(sample.exists())
+        self.assertEqual(list(self.root.glob(".noul-link-probe-*")), [])
+        self.assertEqual(list(self.output.parent.glob(".noul-link-probe-*")), [])
+
+    @unittest.skipUnless(os.name == "posix", "dangling symlinks require POSIX")
+    def test_dangling_completed_output_refuses_before_inference(self):
+        self.output.parent.mkdir()
+        self.output.symlink_to("missing-result.json")
+        with patch.object(run_http, "post") as post:
+            with self.assertRaisesRegex(ValueError, "already exists"):
+                self.run_main()
+            post.assert_not_called()
+        self.assertTrue(self.output.is_symlink())
+        self.assertFalse(self.partial.exists())
+
+    def test_completed_output_is_fully_valid_before_its_name_is_published(self):
+        actual_link = os.link
+        inspected = []
+
+        def inspect_staged_file(source, destination):
+            if destination == str(self.output):
+                self.assertFalse(os.path.lexists(destination))
+                with open(source, encoding="utf-8") as staged:
+                    data = json.load(staged)
+                self.assertEqual([row["id"] for row in data["rows"]], ["first", "second"])
+                self.assertEqual(data["experiment_sha256"], run_http.digest(data["experiment"]))
+                inspected.append(source)
+            return actual_link(source, destination)
+
+        with patch.object(run_http, "post", side_effect=self.response):
+            with patch.object(run_http.os, "link", side_effect=inspect_staged_file):
+                self.run_main()
+        self.assertEqual(len(inspected), 1)
+        self.assertFalse(os.path.exists(inspected[0]))
+        self.assertFalse(self.partial.exists())
+        self.assertEqual([row["id"] for row in json.loads(self.output.read_text())["rows"]],
+                         ["first", "second"])
+
+    def test_final_link_failure_preserves_a_complete_resumable_partial(self):
+        actual_link = os.link
+
+        def fail_final_only(source, destination):
+            if destination == str(self.output):
+                raise OSError("link refused")
+            return actual_link(source, destination)
+
+        with patch.object(run_http, "post", side_effect=self.response):
+            with patch.object(run_http.os, "link", side_effect=fail_final_only):
+                with self.assertRaisesRegex(OSError, "link refused"):
+                    self.run_main()
+        self.assertFalse(self.output.exists())
+        self.assertEqual(len(self.partial.read_text().splitlines()), 3)
+        self.assertEqual(list(self.partial.parent.glob(".noul-result-*")), [])
+
+        with patch.object(run_http, "post") as post:
+            self.run_main()
+            post.assert_not_called()
+        self.assertFalse(self.partial.exists())
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+
+    def test_staged_flush_failure_leaves_no_apparently_completed_result(self):
+        with patch.object(run_http, "post", side_effect=self.response):
+            with patch.object(run_http.os, "fsync", side_effect=OSError("staging sync failed")):
+                with self.assertRaisesRegex(OSError, "staging sync failed"):
+                    self.run_main()
+        self.assertFalse(self.output.exists())
+        self.assertEqual(len(self.partial.read_text().splitlines()), 3)
+        self.assertEqual(list(self.partial.parent.glob(".noul-result-*")), [])
+        with patch.object(run_http, "post") as post:
+            self.run_main()
+            post.assert_not_called()
+        self.assertFalse(self.partial.exists())
+
+    def test_competing_final_publication_cannot_be_overwritten(self):
+        actual_link = os.link
+
+        def race_at_publication(source, destination):
+            if destination != str(self.output):
+                return actual_link(source, destination)
+            self.output.write_text('{"other_writer": true}', encoding="utf-8")
+            raise FileExistsError("another result won publication")
+
+        with patch.object(run_http, "post", side_effect=self.response):
+            with patch.object(run_http.os, "link", side_effect=race_at_publication):
+                with self.assertRaises(FileExistsError):
+                    self.run_main()
+        self.assertEqual(json.loads(self.output.read_text()), {"other_writer": True})
+        self.assertEqual(len(self.partial.read_text().splitlines()), 3)
+        self.assertEqual(list(self.partial.parent.glob(".noul-result-*")), [])
+
     def test_completed_outputs_are_not_overwritten(self):
         with patch.object(run_http, "post", side_effect=self.response):
             self.run_main()
@@ -376,6 +755,53 @@ class RunHttpTest(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         self.run_main()
                 self.assertEqual(self.partial.read_bytes(), before)
+
+    def test_invalid_answer_kinds_and_shapes_preserve_resumable_rows(self):
+        self.interrupt()
+        before = self.partial.read_bytes()
+        sample = self.root / "rejected-response.json"
+        response, elapsed = self.response("", {"questions": run_http.noul_questions()})
+        invalid = []
+        for declared_type in ("score", None, False, [], {"kind": "noul"}):
+            malformed = copy.deepcopy(response)
+            malformed["answers"]["impact"]["type"] = declared_type
+            invalid.append(malformed)
+        for answer in (None, False, [0.25], "noul"):
+            malformed = copy.deepcopy(response)
+            malformed["answers"]["impact"] = answer
+            invalid.append(malformed)
+        invalid.extend([
+            None,
+            [],
+            {"answers": []},
+            {"answers": {"impact": {"noul": 0.25}}},
+        ])
+        for malformed in invalid:
+            with self.subTest(response=repr(malformed)[:90]):
+                with patch.object(run_http, "post", return_value=(malformed, elapsed)):
+                    with self.assertRaisesRegex(ValueError, "noul|decision response"):
+                        self.run_main(["--sample-out", str(sample)])
+                self.assertEqual(self.partial.read_bytes(), before)
+                self.assertFalse(self.output.exists())
+                self.assertFalse(sample.exists())
+
+        # The rejected response did not poison the partial log; valid
+        # inference can continue from the already-settled first case.
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main()
+        post.assert_called_once()
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+
+    def test_explicit_noul_answer_kind_still_records_valid_predictions(self):
+        response, elapsed = self.response("", {"questions": run_http.noul_questions()})
+        for answer in response["answers"].values():
+            answer["type"] = "noul"
+        with patch.object(run_http, "post", return_value=(response, elapsed)) as post:
+            self.run_main()
+        self.assertEqual(post.call_count, len(self.dataset))
+        rows = json.loads(self.output.read_text())["rows"]
+        self.assertEqual(len(rows), len(self.dataset))
+        self.assertTrue(all(row["probs"]["impact"] == 0.25 for row in rows))
 
     def test_malformed_response_does_not_poison_first_sample_on_resume(self):
         sample = self.root / "first-response.json"
@@ -453,11 +879,175 @@ class RunHttpTest(unittest.TestCase):
     def test_transmitted_bytes_match_the_recorded_request_fingerprint(self):
         response = io.BytesIO(json.dumps({"answers": {}}).encode())
         body = {"state": "Unicode λ", "questions": {"a": {}, "b": {}}}
-        with patch("urllib.request.urlopen", return_value=response) as urlopen:
+        with patch("urllib.request.build_opener") as build_opener:
+            build_opener.return_value.open.return_value = response
             run_http.post("http://localhost:8009/v1/systemone", body)
-        sent = urlopen.call_args.args[0].data
+        sent = build_opener.return_value.open.call_args.args[0].data
         self.assertEqual(sent, run_http.request_bytes(body))
         self.assertEqual(hashlib.sha256(sent).hexdigest(), hashlib.sha256(run_http.request_bytes(body)).hexdigest())
+
+
+    def test_non_http_and_url_embedded_credentials_refused_before_any_evidence(self):
+        # urllib.request normally accepts POST-style Request bodies for file:
+        # and data: handlers, which could fabricate evaluated model answers.
+        static = self.root / "fake-server-answer.json"
+        static.write_text('{"answers":{}}', encoding="utf-8")
+        for url in (
+            static.as_uri(),
+            "data:application/json,%7B%22answers%22%3A%7B%7D%7D",
+            "ftp://localhost/answer.json",
+            "https:///missing-host",
+            "http://name:password@127.0.0.1:8009/v1/systemone",
+            "http://model.example:invalid/v1/systemone",
+        ):
+            with self.subTest(url=url):
+                with patch.object(run_http, "post") as post:
+                    with self.assertRaisesRegex(ValueError, "HTTP|credentials"):
+                        self.run_main(["--url", url])
+                    post.assert_not_called()
+                self.assertFalse(self.partial.exists())
+                self.assertFalse(self.output.exists())
+                with patch("urllib.request.build_opener") as opener:
+                    with self.assertRaisesRegex(ValueError, "HTTP|credentials"):
+                        run_http.post(url, {"state": "private transcript", "questions": {}})
+                    opener.assert_not_called()
+
+    def test_authentication_reads_env_without_persisting_credentials(self):
+        token = "opaque.Test~7+/-=="
+        response, elapsed = self.response("", {"questions": run_http.noul_questions()})
+        with patch.dict(os.environ, {"TRACEDECAY_EVAL_TEST_TOKEN": token}):
+            with patch.object(run_http, "post", return_value=(response, elapsed)) as post:
+                self.run_main(["--bearer-token-env", "TRACEDECAY_EVAL_TEST_TOKEN"])
+        self.assertEqual(post.call_count, len(self.dataset))
+        self.assertTrue(all(call.kwargs == {"bearer_token": token}
+                            for call in post.call_args_list))
+        result = self.output.read_text(encoding="utf-8")
+        self.assertNotIn(token, result)
+        self.assertNotIn("TRACEDECAY_EVAL_TEST_TOKEN", result)
+        self.assertFalse(self.partial.exists())
+
+    def test_bad_auth_configuration_refuses_before_http_or_partial_writes(self):
+        variable = "TRACEDECAY_EVAL_TEST_TOKEN"
+        for token, url in (
+            (None, "http://localhost:8009/v1/systemone"),
+            ("bad" + chr(13) + chr(10) + "X-Header: injected", "http://localhost:8009/v1/systemone"),
+            ("opaque-token", "http://model.example/v1/systemone"),
+            ("opaque-token", "http://localhost.attacker.example/v1/systemone"),
+        ):
+            with self.subTest(token=token, url=url):
+                environment = {variable: token} if token is not None else {}
+                with patch.dict(os.environ, environment, clear=True):
+                    with patch.object(run_http, "post") as post:
+                        with self.assertRaises(ValueError):
+                            self.run_main(["--bearer-token-env", variable, "--url", url])
+                        post.assert_not_called()
+                self.assertFalse(self.partial.exists())
+                self.assertFalse(self.output.exists())
+        with patch.object(run_http, "post") as post:
+            with self.assertRaisesRegex(ValueError, "environment variable name"):
+                self.run_main(["--bearer-token-env", ""])
+            post.assert_not_called()
+        self.assertFalse(self.partial.exists())
+
+    def test_bearer_transport_sends_only_to_selected_loopback_server(self):
+        received = []
+
+        class Answer(BaseHTTPRequestHandler):
+            def do_POST(self):
+                received.append((
+                    self.headers.get("Authorization"),
+                    self.rfile.read(int(self.headers["Content-Length"])),
+                ))
+                reply = b'{"answers":{}}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
+
+            def log_message(self, *_):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Answer)
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        body = {"state": "private transcript", "questions": {}}
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/v1/systemone"
+            with patch.dict(os.environ, {"TRACEDECAY_EVAL_TEST_TOKEN": "opaque-token"}):
+                token = run_http.load_bearer_token("TRACEDECAY_EVAL_TEST_TOKEN", url)
+                reply, _ = run_http.post(url, body, timeout=2, bearer_token=token)
+            self.assertEqual(reply, {"answers": {}})
+            self.assertEqual(received, [("Bearer opaque-token", run_http.request_bytes(body))])
+        finally:
+            server.shutdown()
+            worker.join(timeout=2)
+            server.server_close()
+
+    def test_decision_request_does_not_use_environment_proxy(self):
+        received = []
+
+        class Answer(BaseHTTPRequestHandler):
+            def do_POST(self):
+                received.append(self.rfile.read(int(self.headers["Content-Length"])))
+                body = b'{"answers":{}}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Answer)
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        body = {"state": "private transcript", "questions": {"q": {"type": "noul"}}}
+        try:
+            # A dead proxy and an empty bypass list prevent an unguarded
+            # urllib opener from reaching the explicitly configured server.
+            with patch.dict(os.environ, {
+                "http_proxy": "http://127.0.0.1:1",
+                "HTTP_PROXY": "http://127.0.0.1:1",
+                "no_proxy": "",
+                "NO_PROXY": "",
+            }):
+                reply, _ = run_http.post(
+                    f"http://127.0.0.1:{server.server_port}/v1/systemone", body, timeout=2,
+                )
+            self.assertEqual(reply, {"answers": {}})
+            self.assertEqual(received, [run_http.request_bytes(body)])
+        finally:
+            server.shutdown()
+            worker.join(timeout=2)
+            server.server_close()
+
+    def test_decision_request_refuses_cross_endpoint_redirect(self):
+        class Redirect(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                self.send_response(302)
+                self.send_header("Location", "http://127.0.0.1:1/other-model")
+                self.end_headers()
+
+            def log_message(self, *_):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Redirect)
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as refused:
+                run_http.post(
+                    f"http://127.0.0.1:{server.server_port}/v1/systemone",
+                    {"state": "private transcript", "questions": {}}, timeout=2,
+                )
+            # Preserve the original 302 instead of following it to an
+            # unapproved model endpoint and observing a downstream failure.
+            self.assertEqual(refused.exception.code, 302)
+        finally:
+            server.shutdown()
+            worker.join(timeout=2)
+            server.server_close()
 
 
 if __name__ == "__main__":

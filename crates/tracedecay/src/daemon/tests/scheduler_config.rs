@@ -17,6 +17,8 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 
 #[cfg(unix)]
 mod paused_tick;
+#[cfg(unix)]
+mod reset_blocked_tick;
 
 #[cfg(unix)]
 struct AutomationExitBarrierRelease(Arc<AutomationSchedulerExitBarrier>);
@@ -916,8 +918,11 @@ async fn disabled_scheduler_reconcile_cannot_acknowledge_an_owner_that_then_exit
         apply_project_automation_patch_via_surface(&engine, &handshake, scheduled.clone()).await;
     let cg = server.cg_snapshot().await;
     let key = ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
-    // Project-open setup owns the loop; ensure must notify it rather than
-    // publish a second owner.
+    // Project-open setup owns the loop, but it registers that owner only after
+    // the project's runtime publication commits. Settle on it before
+    // reconciling: the point of this test is that a reconcile of a live owner
+    // notifies it instead of publishing a second one.
+    wait_for_automation_scheduler_state(&engine, |schedulers| schedulers.contains_key(&key)).await;
     assert_eq!(
         engine
             .ensure_automation_scheduler(key.clone(), project.clone(), handshake.clone())

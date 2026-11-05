@@ -475,8 +475,12 @@
           "type": "integer"
         },
         "message_count": {
+          "description": "Session messages in the counted window, or `None` when the\nsession-message authority was not mounted for this read. An absent\nauthority is not a measured zero.",
           "format": "int64",
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "ratios": {
           "$ref": "#/$defs/AnalyticsDiagnosticsRatiosV1"
@@ -533,22 +537,35 @@
       "type": "object"
     },
     "AnalyticsDiagnosticsRatiosV1": {
+      "description": "Per-message rates over the diagnostics window.\n\nEvery member is nullable because a rate needs a denominator: when the\nsession-message authority is absent the message count is unknown, and when\nit is a known zero there is no per-message rate to state. Neither case is\n`0.0`, which would read as a measured rate of zero.",
       "properties": {
         "events_per_message": {
           "format": "double",
-          "type": "number"
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "hook_calls_per_message": {
           "format": "double",
-          "type": "number"
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "mcp_tool_calls_per_message": {
           "format": "double",
-          "type": "number"
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "tool_calls_per_message": {
           "format": "double",
-          "type": "number"
+          "type": [
+            "number",
+            "null"
+          ]
         }
       },
       "required": [
@@ -926,6 +943,13 @@
         },
         "event_kind": {
           "type": "string"
+        },
+        "failure_reason": {
+          "description": "The bounded, sanitized reason a failed call recorded.\n\n`outcome` alone says a call failed; without the reason an operator can\nsee that something broke but not what. The durable metadata column is\nnot a disclosure boundary, so the text crosses the privacy authority\nand a bounded length before it is served, and text the sanitizer\nquarantines is omitted rather than echoed.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "hook_name": {
           "type": "string"
@@ -3058,6 +3082,8 @@
         "automation_disabled",
         "delegated_host",
         "backend_disabled",
+        "backend_unconfigured",
+        "blocked_reset_required",
         "configured"
       ],
       "type": "string"
@@ -3089,6 +3115,12 @@
         "paused": {
           "type": "boolean"
         },
+        "reset_required_stores": {
+          "items": {
+            "$ref": "#/$defs/StoreResetRequiredV1"
+          },
+          "type": "array"
+        },
         "scheduler_tick_secs": {
           "format": "uint64",
           "minimum": 0,
@@ -3113,7 +3145,8 @@
         "last_session_activity",
         "configuration_revision_id",
         "control_path",
-        "tasks"
+        "tasks",
+        "reset_required_stores"
       ],
       "type": "object"
     },
@@ -3189,6 +3222,7 @@
         "job_lock_active",
         "delegated_host_mode",
         "backend_disabled",
+        "backend_unconfigured",
         "backend_identity_suppressed",
         "scheduler_lock_active",
         "scheduler_paused",
@@ -24885,13 +24919,26 @@
       "type": "string"
     },
     "SchemaConvergenceStateV1": {
-      "enum": [
-        "pending",
-        "running",
-        "degraded",
-        "completed"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "pending",
+            "running",
+            "completed"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "retrying",
+          "description": "The last attempt failed and the store's convergence task tries again by\nitself. `degraded_row` carries that attempt's failure.",
+          "type": "string"
+        },
+        {
+          "const": "degraded",
+          "description": "Convergence stopped on a failure and nothing retries it on this mount.",
+          "type": "string"
+        }
+      ]
     },
     "SchemaId": {
       "description": "Stable, canonical catalog identity for `SchemaId`.",
@@ -26299,6 +26346,46 @@
       "required": [
         "graph_sealed",
         "graph_staging"
+      ],
+      "type": "object"
+    },
+    "StoreResetRequiredV1": {
+      "description": "A persisted store the daemon keeps mounted in a typed reset-required state\ninstead of refusing to serve: every read against it returns the typed\nrefusal, stores that admit keep serving, and `remedy` is the exact command\nthe operator runs to reset it.",
+      "properties": {
+        "authority": {
+          "type": "string"
+        },
+        "found_version": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "remedy": {
+          "type": "string"
+        },
+        "required_version": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "store": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "store",
+        "authority",
+        "found_version",
+        "required_version",
+        "reason",
+        "remedy"
       ],
       "type": "object"
     },

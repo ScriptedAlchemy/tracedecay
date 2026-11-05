@@ -182,6 +182,35 @@ async fn wait_for_schema_convergence(
     .expect("registered schema convergence must reach a terminal state")
 }
 
+/// Bound on an attempt failing behind a held write lock, and on the attempt
+/// after the lock clears committing. A failing attempt lasts the writer's whole
+/// busy timeout.
+const RECOVERY_OBSTRUCTION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// [`wait_for_schema_convergence`] for an attempt that first has to outlast the
+/// writer's busy timeout behind a held lock.
+async fn wait_for_schema_convergence_past_obstruction(
+    registry: &DaemonSessionRuntimeRegistryV1,
+    shard_id: &StoreShardIdV1,
+) -> RegisteredSchemaConvergenceStatus {
+    tokio::time::timeout(RECOVERY_OBSTRUCTION_DEADLINE, async {
+        loop {
+            if let Some(status) = registry.registered_schema_convergence_status(shard_id)
+                && !matches!(
+                    status,
+                    RegisteredSchemaConvergenceStatus::Pending
+                        | RegisteredSchemaConvergenceStatus::Running
+                )
+            {
+                return status;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the obstructed attempt must reach a terminal state")
+}
+
 /// The `SQLite` scalar one query returns, for the fixtures that assert on a
 /// single count or marker.
 async fn scalar_i64(connection: &(impl QueryExecutor + ?Sized), sql: &str) -> i64 {
@@ -817,6 +846,720 @@ async fn terminal_shutdown_cancels_and_joins_blocked_schema_convergence() {
         Some(RegisteredSchemaConvergenceStatus::Running),
         "a cancelled convergence task must not publish a fabricated completion"
     );
+}
+
+/// The artifact table as every release through `v1.0.0-beta.92` defined it.
+const PUBLISHED_WORKFLOW_ARTIFACT_TABLE_SQL: &str = "CREATE TABLE workflow_artifact_payloads (
+    payload_digest TEXT NOT NULL PRIMARY KEY,
+    byte_length INTEGER NOT NULL CHECK (
+        byte_length = length(payload) AND byte_length <= 4194304
+    ),
+    payload BLOB NOT NULL
+) STRICT";
+pub(crate) const PUBLISHED_WORKFLOW_DIGEST: &str =
+    "sha256:a292df6bc47e763f0d20bdb44a4032c0b1d7ac8e4cb83173b66ae7d1ff0d03be";
+
+pub(crate) fn age_session_store_to_published_workflow_shape(sessions_path: &std::path::Path) {
+    rusqlite::Connection::open(sessions_path)
+        .expect("open the stopped session store")
+        .execute_batch(&format!(
+            "DROP TABLE workflow_artifact_payloads;
+             {PUBLISHED_WORKFLOW_ARTIFACT_TABLE_SQL};
+             UPDATE workflow_schema SET definition_digest = '{PUBLISHED_WORKFLOW_DIGEST}';
+             INSERT INTO workflow_artifact_payloads VALUES ('sha256:kept', 3, x'010203');"
+        ))
+        .expect("give the store the published workflow shape");
+}
+
+/// What an outside reader finds: the identity digest and the artifact rows.
+pub(crate) fn published_workflow_state(
+    sessions_path: &std::path::Path,
+) -> (String, Vec<(String, Vec<u8>)>) {
+    let connection = rusqlite::Connection::open(sessions_path).expect("open the session store");
+    let digest = connection
+        .query_row("SELECT definition_digest FROM workflow_schema", [], |row| {
+            row.get(0)
+        })
+        .expect("read the workflow identity");
+    let rows = connection
+        .prepare("SELECT payload_digest, payload FROM workflow_artifact_payloads")
+        .expect("prepare the artifact read")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("read the artifact rows")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("decode the artifact rows");
+    (digest, rows)
+}
+
+/// The published upgrade is historical convergence: the shard mounts, its other
+/// authorities serve, repeated mounts schedule it once, and only workflow
+/// storage answers typed recovering until the background worker has committed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn published_workflow_shape_recovers_behind_a_serving_session_store() {
+    let (_temporary, identity, project_id, project_root, sessions_path, _database_scope) =
+        project_sessions_convergence_fixture("project.published-workflow-recovery", false).await;
+    age_session_store_to_published_workflow_shape(&sessions_path);
+    let published = published_workflow_state(&sessions_path);
+    let shard_id = StoreShardIdV1::project_sessions(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        project_id.clone(),
+    );
+    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
+        .await
+        .expect("session runtime registry");
+    let convergence_gate = registry.block_registered_schema_convergence_for_test();
+
+    let database = tokio::time::timeout(
+        MUST_NOT_BLOCK,
+        registry.project_sessions(project_id.clone(), [project_root.clone()]),
+    )
+    .await
+    .expect("mounting must not wait for the artifact copy")
+    .expect("a published store admits");
+    convergence_gate.wait_until_blocked().await;
+
+    assert_eq!(published_workflow_state(&sessions_path), published);
+    let (again, store) = tokio::join!(
+        registry.project_sessions(project_id.clone(), [project_root.clone()]),
+        registry.project_session_store(project_id.clone(), [project_root]),
+    );
+    let again = again.expect("a recovering store keeps serving session clients");
+    store.expect("a recovering store keeps serving its other authorities");
+    assert!(
+        registry
+            .mounted_project_sessions(&project_id)
+            .await
+            .is_some(),
+        "only workflow storage waits for the upgrade"
+    );
+    assert_eq!(
+        registry.registered_schema_convergence_schedule_count_for_test(),
+        1,
+        "concurrent admission must schedule the upgrade once"
+    );
+    assert!(
+        registry.reset_required_stores().is_empty(),
+        "a transient failure is not a reset"
+    );
+    let finding = registry
+        .registered_schema_convergence_observations()
+        .into_iter()
+        .next()
+        .expect("the running upgrade is observable");
+    assert_eq!(
+        finding.state,
+        tracedecay_contracts::storage::SchemaConvergenceStateV1::Running
+    );
+    for client in [&database, &again] {
+        let refused = client
+            .workflow_storage()
+            .await
+            .err()
+            .expect("workflow storage waits for the upgrade");
+        assert!(refused.is_workflow_authority_recovering(), "{refused}");
+    }
+    let mut served = database
+        .read_connection()
+        .query("SELECT count(*) FROM parse_offsets", ())
+        .await
+        .expect("the store's other authorities read while recovering");
+    served
+        .next()
+        .await
+        .expect("read the count")
+        .expect("a count row");
+
+    convergence_gate.release();
+    assert_eq!(
+        wait_for_schema_convergence(&registry, &shard_id).await,
+        RegisteredSchemaConvergenceStatus::Complete
+    );
+    database
+        .workflow_storage()
+        .await
+        .expect("a client issued before the commit serves after it");
+    let (digest, rows) = published_workflow_state(&sessions_path);
+    assert_ne!(digest, PUBLISHED_WORKFLOW_DIGEST);
+    assert_eq!(rows, published.1);
+}
+
+/// A peer holding the store's write lock fails the upgrade. Nothing reopens the
+/// store: its one convergence task tries again until the lock clears, each
+/// failed attempt rolled back and the store typed recovering rather than reset.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn published_workflow_recovery_outlasts_a_transient_lock_without_a_reopen() {
+    let (_temporary, identity, project_id, project_root, sessions_path, _database_scope) =
+        project_sessions_convergence_fixture("project.published-workflow-retry", false).await;
+    age_session_store_to_published_workflow_shape(&sessions_path);
+    let published = published_workflow_state(&sessions_path);
+    let shard_id = StoreShardIdV1::project_sessions(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        project_id.clone(),
+    );
+    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
+        .await
+        .expect("session runtime registry");
+    let convergence_gate = registry.block_registered_schema_convergence_for_test();
+    let database = registry
+        .project_sessions(project_id, [project_root])
+        .await
+        .expect("a published store admits");
+    convergence_gate.wait_until_blocked().await;
+    let attempts_before = registry.registered_schema_convergence_execution_count_for_test();
+
+    let peer = rusqlite::Connection::open(&sessions_path).expect("open the session store");
+    peer.execute_batch("BEGIN IMMEDIATE")
+        .expect("hold the write lock");
+    convergence_gate.retry_on_timer(std::time::Duration::from_millis(20));
+    convergence_gate.release();
+
+    tokio::time::timeout(RECOVERY_OBSTRUCTION_DEADLINE, async {
+        while registry.registered_schema_convergence_execution_count_for_test()
+            < attempts_before + 2
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a failed attempt must be followed by another one");
+    assert_eq!(
+        registry.registered_schema_convergence_schedule_count_for_test(),
+        1,
+        "retries belong to the one scheduled task"
+    );
+    assert!(
+        registry.reset_required_stores().is_empty(),
+        "a transient failure is not a reset"
+    );
+    let refused = database
+        .workflow_storage()
+        .await
+        .err()
+        .expect("nothing committed");
+    assert!(refused.is_workflow_authority_recovering(), "{refused}");
+    assert_eq!(published_workflow_state(&sessions_path), published);
+
+    peer.execute_batch("ROLLBACK").expect("drop the write lock");
+    drop(peer);
+    tokio::time::timeout(RECOVERY_OBSTRUCTION_DEADLINE, async {
+        while registry.registered_schema_convergence_status(&shard_id)
+            != Some(RegisteredSchemaConvergenceStatus::Complete)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the attempt after the lock clears must commit");
+    database
+        .workflow_storage()
+        .await
+        .expect("a client issued before the failure serves after the retry commits");
+    let (digest, rows) = published_workflow_state(&sessions_path);
+    assert_ne!(digest, PUBLISHED_WORKFLOW_DIGEST);
+    assert_eq!(rows, published.1);
+}
+
+/// A store waiting for its next attempt holds no writer and no admission
+/// permit, so shutdown ends the wait at once and the restart resumes the move.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_ends_the_wait_between_published_workflow_attempts() {
+    let (_temporary, identity, project_id, project_root, sessions_path, _database_scope) =
+        project_sessions_convergence_fixture("project.published-workflow-retry-stop", false).await;
+    age_session_store_to_published_workflow_shape(&sessions_path);
+    let published = published_workflow_state(&sessions_path);
+    let shard_id = StoreShardIdV1::project_sessions(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        project_id.clone(),
+    );
+    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
+        .await
+        .expect("session runtime registry");
+    let convergence_gate = registry.block_registered_schema_convergence_for_test();
+    let database = registry
+        .project_sessions(project_id, [project_root])
+        .await
+        .expect("a published store admits");
+    convergence_gate.wait_until_blocked().await;
+
+    let peer = rusqlite::Connection::open(&sessions_path).expect("open the session store");
+    peer.execute_batch("BEGIN IMMEDIATE")
+        .expect("hold the write lock");
+    convergence_gate.release();
+    let status = wait_for_schema_convergence_past_obstruction(&registry, &shard_id).await;
+    assert!(
+        matches!(status, RegisteredSchemaConvergenceStatus::Retrying { .. }),
+        "the held lock must fail the attempt and leave it retrying: {status:?}"
+    );
+    peer.execute_batch("ROLLBACK").expect("drop the write lock");
+    drop(peer);
+    let attempts = registry.registered_schema_convergence_execution_count_for_test();
+
+    registry.cancel_terminal_tasks();
+    tokio::time::timeout(
+        MUST_NOT_BLOCK,
+        registry.shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap()),
+    )
+    .await
+    .expect("shutdown must not wait out the delay between attempts")
+    .expect("session runtime terminal tasks shut down cleanly");
+    convergence_gate.release();
+    tokio::task::yield_now().await;
+
+    assert_eq!(
+        registry.registered_schema_convergence_execution_count_for_test(),
+        attempts,
+        "a stopped daemon starts no further attempt"
+    );
+    assert!(
+        database
+            .workflow_storage()
+            .await
+            .err()
+            .expect("nothing committed")
+            .is_workflow_authority_recovering()
+    );
+    assert_eq!(published_workflow_state(&sessions_path), published);
+}
+
+/// The doctor's evidence reference for the one store still converging.
+fn schema_convergence_doctor_evidence(registry: &DaemonSessionRuntimeRegistryV1) -> String {
+    let report = tracedecay_daemon_service::doctor_kernel::schema_convergence_incomplete_read(
+        &registry.unconverged_registered_schemas(),
+    );
+    let tracedecay_contracts::doctor::DoctorStorageFamilyReadV1::Observed { findings } = report
+    else {
+        panic!("an unconverged store must be reported: {report:?}");
+    };
+    let [finding] = findings.as_slice() else {
+        panic!("one unconverged store is one finding: {findings:?}");
+    };
+    assert_eq!(
+        finding.finding().state(),
+        tracedecay_contracts::doctor::DoctorEvidenceStateV1::Degraded
+    );
+    finding.finding().evidence()[0]
+        .reference()
+        .as_str()
+        .to_owned()
+}
+
+/// A mounted published store whose first upgrade attempt failed behind a real
+/// write lock, parked between attempts with the lock released, so nothing but
+/// the waiting task stands between it and the next attempt.
+struct PublishedStoreBetweenAttempts {
+    _temporary: tempfile::TempDir,
+    _database_scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
+    _session_sync: Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>,
+    registry: DaemonSessionRuntimeRegistryV1,
+    gate: tracedecay_store_runtime::RegisteredSchemaConvergenceTestGate,
+    database: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
+    project_id: ProjectId,
+    project_root: PathBuf,
+    sessions_path: PathBuf,
+    shard_id: StoreShardIdV1,
+    published: (String, Vec<(String, Vec<u8>)>),
+}
+
+async fn published_store_between_attempts(
+    project_name: &str,
+    detached_session_graph: bool,
+) -> PublishedStoreBetweenAttempts {
+    let (temporary, identity, project_id, project_root, sessions_path, database_scope) =
+        project_sessions_convergence_fixture(project_name, false).await;
+    age_session_store_to_published_workflow_shape(&sessions_path);
+    let published = published_workflow_state(&sessions_path);
+    let shard_id = StoreShardIdV1::project_sessions(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        project_id.clone(),
+    );
+    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
+        .await
+        .expect("session runtime registry");
+    let session_sync =
+        Arc::new(tracedecay_session_runtime::session_sync::DaemonSessionSyncService::default());
+    registry
+        .install_session_sync_service(&session_sync)
+        .expect("install session sync lifecycle authority");
+    if detached_session_graph {
+        registry.detach_session_graphs_for_test();
+    }
+    let gate = registry.block_registered_schema_convergence_for_test();
+    let database = registry
+        .project_sessions(project_id.clone(), [project_root.clone()])
+        .await
+        .expect("a published store admits");
+    gate.wait_until_blocked().await;
+    let peer = rusqlite::Connection::open(&sessions_path).expect("open the session store");
+    peer.execute_batch("BEGIN IMMEDIATE")
+        .expect("hold the write lock");
+    gate.release();
+    let status = wait_for_schema_convergence_past_obstruction(&registry, &shard_id).await;
+    assert!(
+        matches!(status, RegisteredSchemaConvergenceStatus::Retrying { .. }),
+        "a held lock leaves the upgrade retrying: {status:?}"
+    );
+    peer.execute_batch("ROLLBACK").expect("drop the write lock");
+    drop(peer);
+    registry
+        .settle_project_session_graph(&project_id)
+        .await
+        .expect("the session graph settles");
+    PublishedStoreBetweenAttempts {
+        _temporary: temporary,
+        _database_scope: database_scope,
+        _session_sync: session_sync,
+        registry,
+        gate,
+        database: Some(database),
+        project_id,
+        project_root,
+        sessions_path,
+        shard_id,
+        published,
+    }
+}
+
+impl PublishedStoreBetweenAttempts {
+    async fn assert_mounted_again_finishes_the_upgrade(&self) {
+        let schedules = self
+            .registry
+            .registered_schema_convergence_schedule_count_for_test();
+        let attempts = self
+            .registry
+            .registered_schema_convergence_execution_count_for_test();
+        let database = self
+            .registry
+            .project_sessions(self.project_id.clone(), [self.project_root.clone()])
+            .await
+            .expect("a store mounted again admits");
+        assert_eq!(
+            self.registry
+                .registered_schema_convergence_schedule_count_for_test(),
+            schedules + 1,
+            "the new owner must get a worker of its own"
+        );
+        self.gate.release();
+        assert_eq!(
+            wait_for_schema_convergence_past_obstruction(&self.registry, &self.shard_id).await,
+            RegisteredSchemaConvergenceStatus::Complete
+        );
+        assert_eq!(
+            self.registry
+                .registered_schema_convergence_execution_count_for_test(),
+            attempts + 1,
+            "only the new worker attempts the upgrade"
+        );
+        database
+            .workflow_storage()
+            .await
+            .expect("the mount's own worker finished the upgrade");
+        let (digest, rows) = published_workflow_state(&self.sessions_path);
+        assert_ne!(digest, PUBLISHED_WORKFLOW_DIGEST);
+        assert_eq!(rows, self.published.1);
+    }
+}
+
+/// The doctor names a failed attempt that will retry by itself as retrying, with
+/// its failure, rather than as stopped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn doctor_reports_a_store_between_upgrade_attempts_as_retrying() {
+    let store =
+        published_store_between_attempts("project.published-workflow-doctor-retrying", false).await;
+    let evidence = schema_convergence_doctor_evidence(&store.registry);
+    assert!(evidence.contains(".retrying."), "{evidence}");
+    assert!(!evidence.contains("stopped"), "{evidence}");
+    let finding = store
+        .registry
+        .registered_schema_convergence_observations()
+        .into_iter()
+        .next()
+        .expect("the waiting store is observable");
+    assert_eq!(
+        finding.state,
+        tracedecay_contracts::storage::SchemaConvergenceStateV1::Retrying
+    );
+    assert!(finding.degraded_row.is_some(), "the failure stays visible");
+}
+
+/// Retiring a store between attempts ends the wait at once, whatever is left of
+/// it: the gate never lets this wait finish. Its status leaves with it, and
+/// mounting the store again starts a worker over the new owner.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retiring_a_store_between_upgrade_attempts_ends_the_wait() {
+    let mut store =
+        published_store_between_attempts("project.published-workflow-retry-retire", false).await;
+    let attempts = store
+        .registry
+        .registered_schema_convergence_execution_count_for_test();
+    retire_published_store(&mut store).await;
+    assert_eq!(
+        store
+            .registry
+            .registered_schema_convergence_status(&store.shard_id),
+        None,
+        "a retired store reports nothing"
+    );
+    assert_eq!(
+        store.registry.registered_schema_convergence_observations(),
+        Vec::new()
+    );
+    assert_eq!(
+        store
+            .registry
+            .registered_schema_convergence_execution_count_for_test(),
+        attempts,
+        "the retired wait starts no attempt"
+    );
+    store.assert_mounted_again_finishes_the_upgrade().await;
+}
+
+/// Closes the store through its registry. The fixture's own client is the only
+/// lease that could block this: the waiting task holds none.
+async fn retire_published_store(store: &mut PublishedStoreBetweenAttempts) {
+    store.database = None;
+    tokio::time::timeout(
+        MUST_NOT_BLOCK,
+        store
+            .registry
+            .retire_project_session_relation_graph(&store.project_id),
+    )
+    .await
+    .expect("retirement must not wait out the delay between attempts")
+    .expect("a store between attempts retires");
+    assert!(
+        store
+            .registry
+            .mounted_project_sessions(&store.project_id)
+            .await
+            .is_none()
+    );
+}
+
+/// A retirement that does not retire the worker leaves it waiting on an owner
+/// that is gone. Mounting the store again must not trust that worker: only a new
+/// one can finish the upgrade.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_remount_replaces_the_worker_of_a_store_still_retrying() {
+    let mut store =
+        published_store_between_attempts("project.published-workflow-remount-retrying", true).await;
+    retire_published_store(&mut store).await;
+    assert!(
+        matches!(
+            store
+                .registry
+                .registered_schema_convergence_status(&store.shard_id),
+            Some(RegisteredSchemaConvergenceStatus::Retrying { .. })
+        ),
+        "this retirement path leaves the worker's status behind"
+    );
+    store.assert_mounted_again_finishes_the_upgrade().await;
+}
+
+/// A worker that wakes to find its owner gone stops claiming to retry, and a
+/// mount over that stopped upgrade still gets a worker of its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_remount_replaces_the_worker_of_a_previously_failed_upgrade() {
+    let mut store =
+        published_store_between_attempts("project.published-workflow-remount-failed", true).await;
+    let attempts = store
+        .registry
+        .registered_schema_convergence_execution_count_for_test();
+    retire_published_store(&mut store).await;
+    store.gate.release();
+    let message = tokio::time::timeout(MUST_NOT_BLOCK, async {
+        loop {
+            if let Some(RegisteredSchemaConvergenceStatus::Degraded { message }) = store
+                .registry
+                .registered_schema_convergence_status(&store.shard_id)
+            {
+                return message;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a worker whose owner is gone must stop claiming to retry");
+    assert!(message.contains("mounting it again"), "{message}");
+    assert_eq!(
+        store
+            .registry
+            .registered_schema_convergence_execution_count_for_test(),
+        attempts,
+        "nothing can attempt the upgrade of a closed store"
+    );
+    let evidence = schema_convergence_doctor_evidence(&store.registry);
+    assert!(evidence.contains(".stopped."), "{evidence}");
+    assert!(!evidence.contains(".retrying."), "{evidence}");
+    store.assert_mounted_again_finishes_the_upgrade().await;
+}
+
+/// A retirement refused by an outstanding client rolls back to the same owner.
+/// It already stopped the worker, so without a new one the mounted store would
+/// answer recovering until the daemon restarted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rolled_back_retirement_restarts_the_interrupted_upgrade() {
+    let store =
+        published_store_between_attempts("project.published-workflow-retire-rollback", false).await;
+    let client = store
+        .database
+        .as_ref()
+        .expect("the fixture's client")
+        .clone();
+    let refusal = store
+        .registry
+        .retire_project_session_relation_graph(&store.project_id)
+        .await
+        .expect_err("an outstanding client refuses the Store close");
+    assert!(refusal.to_string().contains("ClientLeases"), "{refusal}");
+    assert_eq!(
+        store
+            .registry
+            .registered_schema_convergence_schedule_count_for_test(),
+        2,
+        "the rolled-back retirement restarts the interrupted plan"
+    );
+    assert!(
+        client
+            .workflow_storage()
+            .await
+            .err()
+            .expect("nothing committed yet")
+            .is_workflow_authority_recovering()
+    );
+
+    store.gate.release();
+    assert_eq!(
+        wait_for_schema_convergence_past_obstruction(&store.registry, &store.shard_id).await,
+        RegisteredSchemaConvergenceStatus::Complete
+    );
+    client
+        .workflow_storage()
+        .await
+        .expect("the same mount finishes the upgrade");
+    let (digest, rows) = published_workflow_state(&store.sessions_path);
+    assert_ne!(digest, PUBLISHED_WORKFLOW_DIGEST);
+    assert_eq!(rows, store.published.1);
+}
+
+/// A store that stops being the proven shape refuses the upgrade for good. That
+/// is the typed reset, never another attempt, however soon the timer would fire.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_upgrade_is_terminal_rather_than_retrying() {
+    let (_temporary, identity, project_id, project_root, sessions_path, _database_scope) =
+        project_sessions_convergence_fixture("project.published-workflow-refused", false).await;
+    age_session_store_to_published_workflow_shape(&sessions_path);
+    let shard_id = StoreShardIdV1::project_sessions(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        project_id.clone(),
+    );
+    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
+        .await
+        .expect("session runtime registry");
+    let gate = registry.block_registered_schema_convergence_for_test();
+    let database = registry
+        .project_sessions(project_id, [project_root])
+        .await
+        .expect("a published store admits");
+    gate.wait_until_blocked().await;
+    rusqlite::Connection::open(&sessions_path)
+        .expect("open the session store")
+        .execute_batch(
+            "CREATE INDEX artifact_digest_copy ON workflow_artifact_payloads (byte_length)",
+        )
+        .expect("add an object the proven shape does not include");
+    gate.retry_on_timer(std::time::Duration::from_millis(1));
+    gate.release();
+
+    let status = wait_for_schema_convergence_past_obstruction(&registry, &shard_id).await;
+    assert!(
+        matches!(status, RegisteredSchemaConvergenceStatus::Degraded { .. }),
+        "a refusal must not read as retrying: {status:?}"
+    );
+    let attempts = registry.registered_schema_convergence_execution_count_for_test();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(
+        registry.registered_schema_convergence_execution_count_for_test(),
+        attempts,
+        "a refusal is not attempted again"
+    );
+    assert!(
+        !registry.reset_required_stores().is_empty(),
+        "a refusal is recorded as the typed reset"
+    );
+    let evidence = schema_convergence_doctor_evidence(&registry);
+    assert!(evidence.contains(".stopped."), "{evidence}");
+    assert!(
+        database.workflow_storage().await.is_err(),
+        "a refused store does not serve workflow storage"
+    );
+}
+
+/// Shutdown stops the upgrade before it commits, and a daemon restart over the
+/// same store recognizes it and finishes the move.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_during_published_workflow_recovery_resumes_on_restart() {
+    let (_temporary, identity, project_id, project_root, sessions_path, _database_scope) =
+        project_sessions_convergence_fixture("project.published-workflow-restart", false).await;
+    age_session_store_to_published_workflow_shape(&sessions_path);
+    let published = published_workflow_state(&sessions_path);
+    let shard_id = StoreShardIdV1::project_sessions(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        project_id.clone(),
+    );
+    {
+        let registry =
+            DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity.clone(), true)
+                .await
+                .expect("session runtime registry");
+        let convergence_gate = registry.block_registered_schema_convergence_for_test();
+        let database = registry
+            .project_sessions(project_id.clone(), [project_root.clone()])
+            .await
+            .expect("a published store admits");
+        convergence_gate.wait_until_blocked().await;
+
+        registry.cancel_terminal_tasks();
+        tokio::time::timeout(
+            MUST_NOT_BLOCK,
+            registry
+                .shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap()),
+        )
+        .await
+        .expect("shutdown must not wait for the upgrade")
+        .expect("session runtime terminal tasks shut down cleanly");
+        assert!(
+            database
+                .workflow_storage()
+                .await
+                .err()
+                .expect("nothing committed")
+                .is_workflow_authority_recovering()
+        );
+    }
+    assert_eq!(published_workflow_state(&sessions_path), published);
+
+    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
+        .await
+        .expect("restarted session runtime registry");
+    let database = registry
+        .project_sessions(project_id, [project_root])
+        .await
+        .expect("the restarted daemon admits the store");
+    assert_eq!(
+        wait_for_schema_convergence(&registry, &shard_id).await,
+        RegisteredSchemaConvergenceStatus::Complete
+    );
+    database
+        .workflow_storage()
+        .await
+        .expect("the restart finished the upgrade");
+    assert_eq!(published_workflow_state(&sessions_path).1, published.1);
 }
 
 /// Runs background schema convergence on a fresh project-sessions shard and

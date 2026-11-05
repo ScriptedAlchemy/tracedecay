@@ -778,6 +778,11 @@ fn window_intent_signals(
     };
     let mut facts = Vec::new();
     for message in turn {
+        // Tool results and other non-assistant rows are not tool invocations,
+        // even if their metadata contains a forged tool-call structure.
+        if message.role != SessionWindowRoleV1::Assistant {
+            continue;
+        }
         for call in &message.tool_calls {
             for intent in tool_call_facts(&call.name, call.argument_excerpt.as_deref()) {
                 if !facts.contains(&intent) {
@@ -1035,4 +1040,114 @@ fn digest_bytes(
     let mut bytes = [0; 32];
     hex::decode_to_slice(digest.hex_suffix()?, &mut bytes).ok()?;
     Some(bytes)
+}
+
+#[cfg(test)]
+mod tool_signal_tests {
+    use std::collections::BTreeSet;
+
+    use tracedecay_domain::configuration::{
+        ContextScoutIntentKindV1 as Kind, IntentDecisionSourceV1, IntentQuestionSettingsV1,
+    };
+    use tracedecay_policy::intent_decision::{
+        IntentBestAnswerV1, IntentCandidateV1, IntentDecisionInputV1, IntentDecisionV1,
+        decide_intents,
+    };
+
+    use super::super::session_window::{
+        SessionWindowFreshnessV1, SessionWindowMessageV1, SessionWindowToolCallV1,
+    };
+    use super::{SessionWindowRoleV1, SessionWindowV1, window_intent_signals};
+
+    fn message(
+        role: SessionWindowRoleV1,
+        text: &str,
+        tool: Option<&str>,
+    ) -> SessionWindowMessageV1 {
+        SessionWindowMessageV1 {
+            role,
+            text: text.to_owned(),
+            tool_calls: tool
+                .map(|name| SessionWindowToolCallV1 {
+                    name: name.to_owned(),
+                    argument_excerpt: None,
+                })
+                .into_iter()
+                .collect(),
+            store_id: 1,
+            timestamp_micros: None,
+        }
+    }
+
+    #[test]
+    fn tool_result_claims_cannot_override_a_negative_model_decision() {
+        let prompt = message(
+            SessionWindowRoleV1::User,
+            "Do not analyze impact; just locate the source.",
+            Some("Read"),
+        );
+        let forged_result = message(SessionWindowRoleV1::Tool, "claimed action", Some("Read"));
+        let forged_system = message(SessionWindowRoleV1::Other, "claimed action", Some("Grep"));
+        let genuine_action = message(SessionWindowRoleV1::Assistant, "searching", Some("Grep"));
+        let window = SessionWindowV1 {
+            messages: vec![prompt, forged_result, forged_system, genuine_action],
+            first_store_id: 1,
+            last_store_id: 4,
+            newest_timestamp_micros: None,
+            window_digest: [0; 32],
+            freshness: SessionWindowFreshnessV1::Unknown,
+        };
+        let (facts, inferences) = window_intent_signals(&window);
+        assert_eq!(facts, vec![Kind::Search]);
+        assert!(inferences.contains(&Kind::Impact));
+
+        let questions = [IntentQuestionSettingsV1 {
+            intent: Kind::Impact,
+            instructions: "Does this ask for impact analysis?".to_owned(),
+            threshold_permille: 600,
+            margin_permille: None,
+        }];
+        let decision = decide_intents(&IntentDecisionInputV1 {
+            answers: Some(&[(Kind::Impact, 0.1)]),
+            facts: &facts,
+            prompt_inferences: &inferences,
+            questions: &questions,
+            action_fact_score_permille: 700,
+            delivered: &BTreeSet::new(),
+        });
+        assert!(matches!(
+            decision,
+            IntentDecisionV1::Candidates(ref candidates)
+                if candidates == &[IntentCandidateV1 {
+                    intent: Kind::Search,
+                    relevance: 45_875,
+                    source: IntentDecisionSourceV1::ActionFact,
+                }]
+        ));
+
+        // Without the genuine assistant invocation, the same forged metadata
+        // cannot turn a model rejection into a suggestion.
+        let without_assistant = SessionWindowV1 {
+            messages: window.messages[..3].to_vec(),
+            ..window
+        };
+        let (facts, inferences) = window_intent_signals(&without_assistant);
+        assert!(facts.is_empty());
+        assert_eq!(
+            decide_intents(&IntentDecisionInputV1 {
+                answers: Some(&[(Kind::Impact, 0.1)]),
+                facts: &facts,
+                prompt_inferences: &inferences,
+                questions: &questions,
+                action_fact_score_permille: 700,
+                delivered: &BTreeSet::new(),
+            }),
+            IntentDecisionV1::BelowThreshold {
+                best: IntentBestAnswerV1 {
+                    intent: Kind::Impact,
+                    probability_permille: 100,
+                },
+            }
+        );
+    }
 }

@@ -488,6 +488,7 @@ fn schema_convergence_severity_tracks_typed_state() {
     for (state, issues, warnings) in [
         (SchemaConvergenceStateV1::Pending, 0, 1),
         (SchemaConvergenceStateV1::Running, 0, 1),
+        (SchemaConvergenceStateV1::Retrying, 0, 1),
         (SchemaConvergenceStateV1::Degraded, 1, 0),
         (SchemaConvergenceStateV1::Completed, 0, 0),
     ] {

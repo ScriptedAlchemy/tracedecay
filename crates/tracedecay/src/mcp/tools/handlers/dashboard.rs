@@ -1074,7 +1074,7 @@ pub(super) async fn compute_dashboard(
                     );
                 Arc::new(adapter) as Arc<dyn tracedecay_dashboard_api::DashboardDeliveryReadPortV1>
             });
-            tracedecay_agent_hosts::hooks::install_dashboard_hook_readiness_projection()?;
+            tracedecay_agent_hosts::hooks::install_hook_readiness_projection()?;
             // One fetch covers the served bundle and the advertised build
             // version; both come from the registered product runtime.
             let product_runtime = tracedecay_project::product_runtime::product_runtime()?;
@@ -1091,6 +1091,17 @@ pub(super) async fn compute_dashboard(
                     delivery_read_authority,
                     registered_savings_db,
                     automation_scheduler_reconciler,
+                    scheduler_reset_census_reader: Some({
+                        let registry = cg.retained_store_runtime_registry();
+                        let project_id = cg.store_layout().identity.project_id.clone();
+                        Arc::new(move || registry.reset_required_stores().into_iter().filter(|refusal| {
+                            match tracedecay_domain::errors::ResettableStoreV1::from_label(&refusal.store) {
+                                Some(tracedecay_domain::errors::ResettableStoreV1::ProjectSessions { project_id: target }
+                                | tracedecay_domain::errors::ResettableStoreV1::ProjectHookAdmissions { project_id: target }) => project_id.as_deref() == Some(target.as_str()),
+                                _ => true,
+                            }
+                        }).collect())
+                    }),
                     automation_authority,
                     automation_observation,
                     automation_writer,

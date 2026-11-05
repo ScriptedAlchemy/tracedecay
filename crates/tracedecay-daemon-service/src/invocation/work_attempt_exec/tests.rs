@@ -19,6 +19,9 @@
 
 use super::*;
 
+#[cfg(unix)]
+mod output_admission;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Mutex;
@@ -741,6 +744,20 @@ impl AttemptStepsV1 for FixtureSteps<'_> {
 /// provider-runtime fixture does not invent routing evidence through a Work
 /// event-store double.
 fn leased_attempt(worktree_root: &Path, instructions: &str, shape: &SnapshotShape) -> Fixture {
+    leased_attempt_with_effect(
+        worktree_root,
+        instructions,
+        shape,
+        WorkEffectStateV1::Observational,
+    )
+}
+
+fn leased_attempt_with_effect(
+    worktree_root: &Path,
+    instructions: &str,
+    shape: &SnapshotShape,
+    effect: WorkEffectStateV1,
+) -> Fixture {
     let rows = AttemptStore::default();
     let attempts = WorkAttemptService::new(rows.clone());
     let context = request_context();
@@ -781,7 +798,7 @@ fn leased_attempt(worktree_root: &Path, instructions: &str, shape: &SnapshotShap
         id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
         instructions.to_owned(),
         1,
-        WorkEffectStateV1::Observational,
+        effect,
     )
     .unwrap();
     let attempt = WorkAttemptV1::new(

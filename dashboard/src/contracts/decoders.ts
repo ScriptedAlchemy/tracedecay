@@ -709,6 +709,7 @@ import type {
   StoreGrowthDimensionV1,
   StoreKeyV1,
   StorePointReadsV1,
+  StoreResetRequiredV1,
   StoreSizeSampleV1,
   StoreTelemetryEntryV1,
   StrataClusterV1,
@@ -1171,7 +1172,7 @@ export const AnalyticsDiagnosticsPayloadV1Schema: z.ZodObject<{
   hook_sources: z.ZodType<Array<unknown>, unknown>;
   hook_window: z.ZodType<AnalyticsHookWindowV1, unknown>;
   mcp_tool_call_count: z.ZodType<number, unknown>;
-  message_count: z.ZodType<number, unknown>;
+  message_count: z.ZodType<number | null, unknown>;
   ratios: z.ZodType<AnalyticsDiagnosticsRatiosV1, unknown>;
   recent_events: z.ZodType<Array<AnalyticsRecentEventV1>, unknown>;
   recent_hooks: z.ZodType<Array<AnalyticsRecentHookV1>, unknown>;
@@ -1195,7 +1196,7 @@ export const AnalyticsDiagnosticsPayloadV1Schema: z.ZodObject<{
   hook_sources: z.array(z.unknown()),
   hook_window: z.lazy(() => AnalyticsHookWindowV1Schema),
   mcp_tool_call_count: z.number().int(),
-  message_count: z.number().int(),
+  message_count: z.number().int().nullable(),
   ratios: z.lazy(() => AnalyticsDiagnosticsRatiosV1Schema),
   recent_events: z.array(z.lazy(() => AnalyticsRecentEventV1Schema)),
   recent_hooks: z.array(z.lazy(() => AnalyticsRecentHookV1Schema)),
@@ -1204,16 +1205,22 @@ export const AnalyticsDiagnosticsPayloadV1Schema: z.ZodObject<{
   tracedecay_call_count: z.number().int(),
 });
 
+/** Per-message rates over the diagnostics window.
+
+Every member is nullable because a rate needs a denominator: when the
+session-message authority is absent the message count is unknown, and when
+it is a known zero there is no per-message rate to state. Neither case is
+`0.0`, which would read as a measured rate of zero. */
 export const AnalyticsDiagnosticsRatiosV1Schema: z.ZodObject<{
-  events_per_message: z.ZodType<number, unknown>;
-  hook_calls_per_message: z.ZodType<number, unknown>;
-  mcp_tool_calls_per_message: z.ZodType<number, unknown>;
-  tool_calls_per_message: z.ZodType<number, unknown>;
+  events_per_message: z.ZodType<number | null, unknown>;
+  hook_calls_per_message: z.ZodType<number | null, unknown>;
+  mcp_tool_calls_per_message: z.ZodType<number | null, unknown>;
+  tool_calls_per_message: z.ZodType<number | null, unknown>;
 }> = z.object({
-  events_per_message: z.number(),
-  hook_calls_per_message: z.number(),
-  mcp_tool_calls_per_message: z.number(),
-  tool_calls_per_message: z.number(),
+  events_per_message: z.number().nullable(),
+  hook_calls_per_message: z.number().nullable(),
+  mcp_tool_calls_per_message: z.number().nullable(),
+  tool_calls_per_message: z.number().nullable(),
 });
 
 export const AnalyticsEventKindCountV1Schema: z.ZodObject<{
@@ -1369,6 +1376,7 @@ export const AnalyticsPromptCategoryCountV1Schema: z.ZodObject<{
 export const AnalyticsRecentEventV1Schema: z.ZodObject<{
   cost: z.ZodOptional<z.ZodType<RequestCostReceiptV1 | null, unknown>>;
   event_kind: z.ZodType<string, unknown>;
+  failure_reason: z.ZodOptional<z.ZodType<string | null, unknown>>;
   hook_name: z.ZodType<string, unknown>;
   outcome: z.ZodType<string, unknown>;
   timestamp: z.ZodType<number | null, unknown>;
@@ -1376,6 +1384,7 @@ export const AnalyticsRecentEventV1Schema: z.ZodObject<{
 }> = z.object({
   cost: z.union([z.lazy(() => RequestCostReceiptV1Schema), z.null()]).optional(),
   event_kind: z.string(),
+  failure_reason: z.string().nullable().optional(),
   hook_name: z.string(),
   outcome: z.string(),
   timestamp: z.number().int().nullable(),
@@ -2148,7 +2157,7 @@ export const AutomationRunTerminalV1Schema: z.ZodType<AutomationRunTerminalV1, u
 
 Wire tokens stay the historical labels. A new state is a compile error in
 [`scheduler_status_label`] until this enum gains a variant. */
-export const AutomationSchedulerAvailabilityV1Schema: z.ZodEnum<{ "automation_disabled": "automation_disabled"; "backend_disabled": "backend_disabled"; "configured": "configured"; "delegated_host": "delegated_host"; "paused": "paused" }> = z.enum(["automation_disabled", "backend_disabled", "configured", "delegated_host", "paused"]);
+export const AutomationSchedulerAvailabilityV1Schema: z.ZodEnum<{ "automation_disabled": "automation_disabled"; "backend_disabled": "backend_disabled"; "backend_unconfigured": "backend_unconfigured"; "blocked_reset_required": "blocked_reset_required"; "configured": "configured"; "delegated_host": "delegated_host"; "paused": "paused" }> = z.enum(["automation_disabled", "backend_disabled", "backend_unconfigured", "blocked_reset_required", "configured", "delegated_host", "paused"]);
 
 /** The scheduler reading served by `status`, `pause`, and `resume`.
 
@@ -2162,6 +2171,7 @@ export const AutomationSchedulerStatusV1Schema: z.ZodObject<{
   last_session_activity: z.ZodType<number | null, unknown>;
   now: z.ZodType<number, unknown>;
   paused: z.ZodType<boolean, unknown>;
+  reset_required_stores: z.ZodType<Array<StoreResetRequiredV1>, unknown>;
   scheduler_tick_secs: z.ZodType<number, unknown>;
   status: z.ZodType<AutomationSchedulerAvailabilityV1, unknown>;
   tasks: z.ZodType<Array<AutomationTaskStatusV1>, unknown>;
@@ -2172,6 +2182,7 @@ export const AutomationSchedulerStatusV1Schema: z.ZodObject<{
   last_session_activity: z.number().int().nullable(),
   now: z.number().int(),
   paused: z.boolean(),
+  reset_required_stores: z.array(z.lazy(() => StoreResetRequiredV1Schema)),
   scheduler_tick_secs: z.number().int().min(0),
   status: z.lazy(() => AutomationSchedulerAvailabilityV1Schema),
   tasks: z.array(z.lazy(() => AutomationTaskStatusV1Schema)),
@@ -2202,7 +2213,7 @@ export const AutomationSkillsPayloadV1Schema: z.ZodObject<{
   skills: z.array(z.lazy(() => ManagedSkillSchema)),
 });
 
-export const AutomationSkipReasonV1Schema: z.ZodEnum<{ "automation_disabled": "automation_disabled"; "backend_disabled": "backend_disabled"; "backend_identity_suppressed": "backend_identity_suppressed"; "combined_review_disabled": "combined_review_disabled"; "delegated_host_mode": "delegated_host_mode"; "job_commands_disabled": "job_commands_disabled"; "job_lock_active": "job_lock_active"; "memory_curator_disabled": "memory_curator_disabled"; "no_new_session_activity": "no_new_session_activity"; "no_session_evidence": "no_session_evidence"; "nothing_to_review": "nothing_to_review"; "partial_coverage_no_candidates": "partial_coverage_no_candidates"; "scheduler_cooldown_active": "scheduler_cooldown_active"; "scheduler_cron_not_due": "scheduler_cron_not_due"; "scheduler_history_invalid": "scheduler_history_invalid"; "scheduler_idle_window_active": "scheduler_idle_window_active"; "scheduler_interval_not_elapsed": "scheduler_interval_not_elapsed"; "scheduler_lock_active": "scheduler_lock_active"; "scheduler_non_retryable_failure": "scheduler_non_retryable_failure"; "scheduler_paused": "scheduler_paused"; "scheduler_schedule_invalid": "scheduler_schedule_invalid"; "scheduler_schedule_manual": "scheduler_schedule_manual"; "session_cursor_manifest_limit_exceeded": "session_cursor_manifest_limit_exceeded"; "session_evidence_budget_exhausted": "session_evidence_budget_exhausted"; "session_evidence_budget_suppressed": "session_evidence_budget_suppressed"; "session_evidence_cancelled": "session_evidence_cancelled"; "session_evidence_denied": "session_evidence_denied"; "session_evidence_filter_unavailable": "session_evidence_filter_unavailable"; "session_evidence_locked": "session_evidence_locked"; "session_evidence_partial": "session_evidence_partial"; "session_evidence_reset_required": "session_evidence_reset_required"; "session_evidence_retrieval_unavailable": "session_evidence_retrieval_unavailable"; "session_evidence_stale": "session_evidence_stale"; "session_evidence_timed_out": "session_evidence_timed_out"; "session_evidence_unavailable": "session_evidence_unavailable"; "session_reflector_disabled": "session_reflector_disabled"; "similarity_authority_unavailable": "similarity_authority_unavailable"; "skill_writer_disabled": "skill_writer_disabled"; "task_not_schedulable": "task_not_schedulable"; "user_job_disabled": "user_job_disabled" }> = z.enum(["automation_disabled", "backend_disabled", "backend_identity_suppressed", "combined_review_disabled", "delegated_host_mode", "job_commands_disabled", "job_lock_active", "memory_curator_disabled", "no_new_session_activity", "no_session_evidence", "nothing_to_review", "partial_coverage_no_candidates", "scheduler_cooldown_active", "scheduler_cron_not_due", "scheduler_history_invalid", "scheduler_idle_window_active", "scheduler_interval_not_elapsed", "scheduler_lock_active", "scheduler_non_retryable_failure", "scheduler_paused", "scheduler_schedule_invalid", "scheduler_schedule_manual", "session_cursor_manifest_limit_exceeded", "session_evidence_budget_exhausted", "session_evidence_budget_suppressed", "session_evidence_cancelled", "session_evidence_denied", "session_evidence_filter_unavailable", "session_evidence_locked", "session_evidence_partial", "session_evidence_reset_required", "session_evidence_retrieval_unavailable", "session_evidence_stale", "session_evidence_timed_out", "session_evidence_unavailable", "session_reflector_disabled", "similarity_authority_unavailable", "skill_writer_disabled", "task_not_schedulable", "user_job_disabled"]);
+export const AutomationSkipReasonV1Schema: z.ZodEnum<{ "automation_disabled": "automation_disabled"; "backend_disabled": "backend_disabled"; "backend_identity_suppressed": "backend_identity_suppressed"; "backend_unconfigured": "backend_unconfigured"; "combined_review_disabled": "combined_review_disabled"; "delegated_host_mode": "delegated_host_mode"; "job_commands_disabled": "job_commands_disabled"; "job_lock_active": "job_lock_active"; "memory_curator_disabled": "memory_curator_disabled"; "no_new_session_activity": "no_new_session_activity"; "no_session_evidence": "no_session_evidence"; "nothing_to_review": "nothing_to_review"; "partial_coverage_no_candidates": "partial_coverage_no_candidates"; "scheduler_cooldown_active": "scheduler_cooldown_active"; "scheduler_cron_not_due": "scheduler_cron_not_due"; "scheduler_history_invalid": "scheduler_history_invalid"; "scheduler_idle_window_active": "scheduler_idle_window_active"; "scheduler_interval_not_elapsed": "scheduler_interval_not_elapsed"; "scheduler_lock_active": "scheduler_lock_active"; "scheduler_non_retryable_failure": "scheduler_non_retryable_failure"; "scheduler_paused": "scheduler_paused"; "scheduler_schedule_invalid": "scheduler_schedule_invalid"; "scheduler_schedule_manual": "scheduler_schedule_manual"; "session_cursor_manifest_limit_exceeded": "session_cursor_manifest_limit_exceeded"; "session_evidence_budget_exhausted": "session_evidence_budget_exhausted"; "session_evidence_budget_suppressed": "session_evidence_budget_suppressed"; "session_evidence_cancelled": "session_evidence_cancelled"; "session_evidence_denied": "session_evidence_denied"; "session_evidence_filter_unavailable": "session_evidence_filter_unavailable"; "session_evidence_locked": "session_evidence_locked"; "session_evidence_partial": "session_evidence_partial"; "session_evidence_reset_required": "session_evidence_reset_required"; "session_evidence_retrieval_unavailable": "session_evidence_retrieval_unavailable"; "session_evidence_stale": "session_evidence_stale"; "session_evidence_timed_out": "session_evidence_timed_out"; "session_evidence_unavailable": "session_evidence_unavailable"; "session_reflector_disabled": "session_reflector_disabled"; "similarity_authority_unavailable": "similarity_authority_unavailable"; "skill_writer_disabled": "skill_writer_disabled"; "task_not_schedulable": "task_not_schedulable"; "user_job_disabled": "user_job_disabled" }> = z.enum(["automation_disabled", "backend_disabled", "backend_identity_suppressed", "backend_unconfigured", "combined_review_disabled", "delegated_host_mode", "job_commands_disabled", "job_lock_active", "memory_curator_disabled", "no_new_session_activity", "no_session_evidence", "nothing_to_review", "partial_coverage_no_candidates", "scheduler_cooldown_active", "scheduler_cron_not_due", "scheduler_history_invalid", "scheduler_idle_window_active", "scheduler_interval_not_elapsed", "scheduler_lock_active", "scheduler_non_retryable_failure", "scheduler_paused", "scheduler_schedule_invalid", "scheduler_schedule_manual", "session_cursor_manifest_limit_exceeded", "session_evidence_budget_exhausted", "session_evidence_budget_suppressed", "session_evidence_cancelled", "session_evidence_denied", "session_evidence_filter_unavailable", "session_evidence_locked", "session_evidence_partial", "session_evidence_reset_required", "session_evidence_retrieval_unavailable", "session_evidence_stale", "session_evidence_timed_out", "session_evidence_unavailable", "session_reflector_disabled", "similarity_authority_unavailable", "skill_writer_disabled", "task_not_schedulable", "user_job_disabled"]);
 
 export const AutomationTaskStatusV1Schema: z.ZodObject<{
   due: z.ZodType<boolean, unknown>;
@@ -8943,7 +8954,7 @@ export const SchemaConvergenceFindingV1Schema: z.ZodObject<{
 
 export const SchemaConvergenceStageV1Schema: z.ZodLiteral<"registered_schema"> = z.literal("registered_schema");
 
-export const SchemaConvergenceStateV1Schema: z.ZodEnum<{ "completed": "completed"; "degraded": "degraded"; "pending": "pending"; "running": "running" }> = z.enum(["completed", "degraded", "pending", "running"]);
+export const SchemaConvergenceStateV1Schema: z.ZodType<"completed" | "pending" | "running" | "retrying" | "degraded", unknown> = z.union([z.enum(["completed", "pending", "running"]), z.literal("retrying"), z.literal("degraded")]);
 
 /** Stable, canonical catalog identity for `SchemaId`. */
 export const SchemaIdSchema: z.ZodType<string, unknown> = z.string();
@@ -9433,6 +9444,26 @@ export const StorePointReadsV1Schema: z.ZodObject<{
   graph_sealed: z.number().int().min(0),
   graph_staging: z.number().int().min(0),
 }).strict();
+
+/** A persisted store the daemon keeps mounted in a typed reset-required state
+instead of refusing to serve: every read against it returns the typed
+refusal, stores that admit keep serving, and `remedy` is the exact command
+the operator runs to reset it. */
+export const StoreResetRequiredV1Schema: z.ZodObject<{
+  authority: z.ZodType<string, unknown>;
+  found_version: z.ZodType<number | null, unknown>;
+  reason: z.ZodType<string, unknown>;
+  remedy: z.ZodType<string, unknown>;
+  required_version: z.ZodType<number | null, unknown>;
+  store: z.ZodType<string, unknown>;
+}> = z.object({
+  authority: z.string(),
+  found_version: z.number().int().nullable(),
+  reason: z.string(),
+  remedy: z.string(),
+  required_version: z.number().int().nullable(),
+  store: z.string(),
+});
 
 /** One cheap size sample for a single store, derived from page-count pragmas.
 
