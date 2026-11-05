@@ -88,8 +88,9 @@ pub struct StoreSizeReportEntry {
     pub unavailable_entry_count: usize,
     /// Whether the store walk was complete, partial, or unavailable.
     pub size_coverage: StorageReportSizeCoverageV1,
-    /// Reclaimable free-page bytes of the graph database, or `None` when it
-    /// could not be sampled without waiting on a live writer.
+    /// Reclaimable free-page bytes, or `None` when unmeasured. A live Unix
+    /// daemon cannot open and close a second raw descriptor of its SQLite
+    /// database without risking process-wide POSIX lock loss.
     pub free_bytes: Option<u64>,
     /// Free pages as a fraction of total pages, or `None` when unsampled.
     pub free_page_ratio: Option<f64>,
@@ -760,6 +761,7 @@ fn sample_registered_storage(
             &mut stores,
             &mut code_generation_retention,
             &mut code_generation_retention_availability,
+            true, // The offline CLI is a separate process from the live daemon.
             remaining_entries,
             walk_control,
         )?;
@@ -1029,6 +1031,7 @@ async fn project_storage_report_page(
                 &mut report.stores,
                 &mut report.code_generation_retention,
                 &mut report.code_generation_retention_availability,
+                cfg!(not(unix)), // Avoid raw descriptor closes on live POSIX SQLite stores.
                 &mut remaining_entries,
                 &walk_control,
             )?;
@@ -1154,6 +1157,7 @@ pub async fn build_project_storage_report_from_daemon(
             &project_id,
             &canonical_root,
             protection,
+            cfg!(not(unix)), // The daemon may hold POSIX locks on this database.
             &walk_control,
         )
     })
@@ -1195,6 +1199,7 @@ pub fn build_project_storage_report(
         project_id,
         canonical_root,
         vector_readable_sources,
+        true, // Only the daemon-independent offline path may sample the header.
         &StorageReportWalkControl::default(),
     )
 }
@@ -1204,6 +1209,7 @@ fn build_project_storage_report_with_control(
     project_id: &str,
     canonical_root: &Path,
     vector_readable_sources: RetentionProtection,
+    sample_free_page_header: bool,
     walk_control: &StorageReportWalkControl,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
     tracedecay_runtime_core::storage::validate_project_id(project_id).map_err(|message| {
@@ -1223,6 +1229,7 @@ fn build_project_storage_report_with_control(
         &mut stores,
         &mut code_generation_retention,
         &mut code_generation_retention_availability,
+        sample_free_page_header,
         &mut remaining_entries,
         walk_control,
     )?;
@@ -1267,6 +1274,7 @@ fn append_project_report(
     stores: &mut Vec<StoreSizeReportEntry>,
     code_generation_retention: &mut Vec<CodeGenerationRetentionDryRunEntry>,
     code_generation_retention_availability: &mut Vec<CodeGenerationRetentionAvailabilityEntry>,
+    sample_free_page_header: bool,
     remaining_entries: &mut usize,
     walk_control: &StorageReportWalkControl,
 ) -> tracedecay_domain::errors::Result<()> {
@@ -1327,7 +1335,10 @@ fn append_project_report(
         (true, Err(_)) => {}
     }
     let total_bytes = kinds.total();
-    let (free_bytes, free_page_ratio) = if project_chain_is_nofollow {
+    // File::open + close on Unix may release an unrelated SQLite connection's
+    // process-wide record locks. In-process daemon reports do not inspect
+    // these header bytes; unknown is safer than a fabricated zero.
+    let (free_bytes, free_page_ratio) = if project_chain_is_nofollow && sample_free_page_header {
         sample_free_pages(&data_root.join(tracedecay_runtime_core::config::DB_FILENAME))
             .map_or((None, None), |(free_bytes, ratio)| {
                 (Some(free_bytes), Some(ratio))
@@ -1527,12 +1538,11 @@ fn sqlite_family_member(database_path: &Path, suffix: &str) -> PathBuf {
     }
 }
 
-/// Reads the free pages from the database file header with a plain file
-/// read. Opening a SQLite connection on a live store would make the report a
-/// reader the writer's checkpoint has to wait for; the header takes no lock
-/// and no WAL read slot. It reflects the last checkpoint, which is precise
-/// enough for a size report. `None` for a file that is not a SQLite database
-/// or whose header counts are stale.
+/// Reads the free-page header for a separate-process offline report.
+/// Although this takes no SQLite read slot, opening and closing a raw file
+/// descriptor in a process with live SQLite connections can silently drop
+/// their Unix POSIX locks. Daemon-backed Unix reports must not call this.
+/// The header reflects the last checkpoint; `None` means unmeasured.
 fn sample_free_pages(graph_db_path: &Path) -> Option<(u64, f64)> {
     if !std::fs::symlink_metadata(graph_db_path)
         .is_ok_and(|metadata| metadata.file_type().is_file())
@@ -1887,6 +1897,120 @@ mod tests {
         connection
             .execute_batch("CREATE TABLE fixture (id INTEGER PRIMARY KEY);")
             .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn storage_report_external_writer_probe() {
+        let Some(path) = std::env::var_os("TRACEDECAY_STORAGE_REPORT_PROBE_DB") else {
+            return;
+        };
+        let connection = rusqlite::Connection::open(PathBuf::from(path)).unwrap();
+        connection.busy_timeout(std::time::Duration::ZERO).unwrap();
+        let result = connection.execute_batch("BEGIN IMMEDIATE; ROLLBACK;");
+        assert!(
+            matches!(
+                &result,
+                Err(rusqlite::Error::SqliteFailure(error, _))
+                    if error.code == rusqlite::ErrorCode::DatabaseBusy
+            ),
+            "external writer must see SQLITE_BUSY: {result:?}"
+        );
+        println!("storage-report-verified-external-blocker");
+    }
+
+    #[cfg(unix)]
+    fn assert_external_writer_blocked(path: &Path) {
+        let (_, module) = module_path!().split_once("::").unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("{module}::storage_report_external_writer_probe"),
+                "--nocapture",
+            ])
+            .env("TRACEDECAY_STORAGE_REPORT_PROBE_DB", path)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("storage-report-verified-external-blocker"),
+            "external probe failed or selected no tests: {}\n{stdout}\n{stderr}",
+            output.status
+        );
+    }
+
+    #[cfg(unix)]
+    #[asupersync::test]
+    async fn daemon_storage_report_keeps_independent_writer_excluded() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path();
+        let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
+            profile_root,
+        )
+        .await
+        .unwrap();
+        let db = runtime.profile_database_arc();
+        let checkout = profile_root.join("checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let project = db
+            .upsert_code_project("proj_lock_probe", &checkout, None, None, None)
+            .await
+            .unwrap();
+        seed_graph_db(profile_root, &project.project_id);
+        let db_path = profile_root
+            .join("projects")
+            .join(&project.project_id)
+            .join(tracedecay_runtime_core::config::DB_FILENAME);
+        let writer = rusqlite::Connection::open(&db_path).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode = DELETE;
+                 BEGIN IMMEDIATE;
+                 INSERT INTO fixture VALUES (1);",
+            )
+            .unwrap();
+        let probe = db_path.clone();
+        native_runtime::spawn_blocking(move || assert_external_writer_blocked(&probe))
+            .await
+            .unwrap();
+
+        let page =
+            build_storage_report_page_from_registered_global_db(profile_root, &db, None, None, 4)
+                .await
+                .unwrap();
+        assert_eq!(page.stores.len(), 1);
+        assert!(page.stores[0].total_bytes > 0);
+        assert_eq!(page.stores[0].free_bytes, None);
+        assert_eq!(page.stores[0].free_page_ratio, None);
+
+        // The project-scoped admin route shares this builder with the offline
+        // CLI. It must use the daemon policy, not open and close a second FD.
+        let project_report = build_project_storage_report_from_daemon(
+            profile_root,
+            &project.project_id,
+            &checkout,
+            &db,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(project_report.stores.len(), 1);
+        assert!(project_report.stores[0].total_bytes > 0);
+        assert_eq!(project_report.stores[0].free_bytes, None);
+        assert_eq!(project_report.stores[0].free_page_ratio, None);
+
+        let probe = db_path.clone();
+        native_runtime::spawn_blocking(move || assert_external_writer_blocked(&probe))
+            .await
+            .unwrap();
+        writer.execute_batch("COMMIT").unwrap();
+        let integrity: String = writer
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
     }
 
     /// Inventory positions survive directory mutation without repeating records.
@@ -3240,6 +3364,7 @@ mod tests {
             &mut stores,
             &mut plans,
             &mut availability,
+            false,
             &mut exact_budget,
             &StorageReportWalkControl::default(),
         )
@@ -3281,6 +3406,7 @@ mod tests {
             &mut stores,
             &mut plans,
             &mut availability,
+            false,
             &mut remaining,
             &StorageReportWalkControl::default(),
         )
@@ -3316,6 +3442,7 @@ mod tests {
             &mut stores,
             &mut Vec::new(),
             &mut Vec::new(),
+            false,
             &mut remaining,
             &StorageReportWalkControl::default(),
         )
@@ -3354,6 +3481,7 @@ mod tests {
             &mut stores,
             &mut Vec::new(),
             &mut availability,
+            false,
             &mut remaining,
             &StorageReportWalkControl::default(),
         )
@@ -3409,6 +3537,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &mut availability,
+            false,
             &mut remaining,
             &StorageReportWalkControl::default(),
         )
