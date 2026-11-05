@@ -343,11 +343,11 @@ class ScoringTests(unittest.TestCase):
                 json.dumps(changed), encoding="utf-8"
             )
             summary = root / "summary.json"
-            summary.write_bytes(b"last verified summary\\n")
+            summary.write_bytes(b"last verified summary\n")
             attempt = self.run_script(root, "score.py")
             self.assertNotEqual(attempt.returncode, 0)
             self.assertIn("request fingerprints", attempt.stderr)
-            self.assertEqual(summary.read_bytes(), b"last verified summary\\n")
+            self.assertEqual(summary.read_bytes(), b"last verified summary\n")
 
     def test_invalid_probability_cannot_replace_previous_cli_summary(self):
         with tempfile.TemporaryDirectory() as directory:

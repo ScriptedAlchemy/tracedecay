@@ -70,7 +70,13 @@ cannot be recovered as measurements. Use a new tag; do not relabel old logs.
 Version-1 completed HTTP results are also refused by the scorer. Historical
 reports are not rewritten or retrospectively qualified.
 
-The scorer also rejects completed HTTP results whose experiment-identity digest,\nper-case request fingerprints, recorded order, dataset digest, or configuration\ndisagree with the output. This detects accidental edits and mismatched runs;\nthese operator-written hashes do not authenticate the remote model or verify\nindependent ground-truth labels.\n\nThe runner still uses the historical nine-category evaluation in `common.py`.
+The scorer also rejects completed HTTP results whose experiment-identity digest,
+per-case request fingerprints, recorded order, dataset digest, or configuration
+disagree with the output. This detects accidental edits and mismatched runs;
+these operator-written hashes do not authenticate the remote model or verify
+independent ground-truth labels.
+
+The runner still uses the historical nine-category evaluation in `common.py`.
 Runtime-renderer parity, qualified labels, held-out quality, and independent
 verification of server-reported telemetry remain separate qualification work.
 
