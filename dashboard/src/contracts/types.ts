@@ -125,7 +125,7 @@ export type AnalyticsDiagnosticsPayloadV1 = {
   hook_sources: Array<unknown>;
   hook_window: AnalyticsHookWindowV1;
   mcp_tool_call_count: number;
-  message_count: number;
+  message_count: number | null;
   ratios: AnalyticsDiagnosticsRatiosV1;
   recent_events: Array<AnalyticsRecentEventV1>;
   recent_hooks: Array<AnalyticsRecentHookV1>;
@@ -135,10 +135,10 @@ export type AnalyticsDiagnosticsPayloadV1 = {
 };
 
 export type AnalyticsDiagnosticsRatiosV1 = {
-  events_per_message: number;
-  hook_calls_per_message: number;
-  mcp_tool_calls_per_message: number;
-  tool_calls_per_message: number;
+  events_per_message: number | null;
+  hook_calls_per_message: number | null;
+  mcp_tool_calls_per_message: number | null;
+  tool_calls_per_message: number | null;
 };
 
 export type AnalyticsEventKindCountV1 = {

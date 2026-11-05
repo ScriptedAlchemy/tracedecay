@@ -1171,7 +1171,7 @@ export const AnalyticsDiagnosticsPayloadV1Schema: z.ZodObject<{
   hook_sources: z.ZodType<Array<unknown>, unknown>;
   hook_window: z.ZodType<AnalyticsHookWindowV1, unknown>;
   mcp_tool_call_count: z.ZodType<number, unknown>;
-  message_count: z.ZodType<number, unknown>;
+  message_count: z.ZodType<number | null, unknown>;
   ratios: z.ZodType<AnalyticsDiagnosticsRatiosV1, unknown>;
   recent_events: z.ZodType<Array<AnalyticsRecentEventV1>, unknown>;
   recent_hooks: z.ZodType<Array<AnalyticsRecentHookV1>, unknown>;
@@ -1195,7 +1195,7 @@ export const AnalyticsDiagnosticsPayloadV1Schema: z.ZodObject<{
   hook_sources: z.array(z.unknown()),
   hook_window: z.lazy(() => AnalyticsHookWindowV1Schema),
   mcp_tool_call_count: z.number().int(),
-  message_count: z.number().int(),
+  message_count: z.number().int().nullable(),
   ratios: z.lazy(() => AnalyticsDiagnosticsRatiosV1Schema),
   recent_events: z.array(z.lazy(() => AnalyticsRecentEventV1Schema)),
   recent_hooks: z.array(z.lazy(() => AnalyticsRecentHookV1Schema)),
@@ -1204,16 +1204,22 @@ export const AnalyticsDiagnosticsPayloadV1Schema: z.ZodObject<{
   tracedecay_call_count: z.number().int(),
 });
 
+/** Per-message rates over the diagnostics window.
+
+Every member is nullable because a rate needs a denominator: when the
+session-message authority is absent the message count is unknown, and when
+it is a known zero there is no per-message rate to state. Neither case is
+`0.0`, which would read as a measured rate of zero. */
 export const AnalyticsDiagnosticsRatiosV1Schema: z.ZodObject<{
-  events_per_message: z.ZodType<number, unknown>;
-  hook_calls_per_message: z.ZodType<number, unknown>;
-  mcp_tool_calls_per_message: z.ZodType<number, unknown>;
-  tool_calls_per_message: z.ZodType<number, unknown>;
+  events_per_message: z.ZodType<number | null, unknown>;
+  hook_calls_per_message: z.ZodType<number | null, unknown>;
+  mcp_tool_calls_per_message: z.ZodType<number | null, unknown>;
+  tool_calls_per_message: z.ZodType<number | null, unknown>;
 }> = z.object({
-  events_per_message: z.number(),
-  hook_calls_per_message: z.number(),
-  mcp_tool_calls_per_message: z.number(),
-  tool_calls_per_message: z.number(),
+  events_per_message: z.number().nullable(),
+  hook_calls_per_message: z.number().nullable(),
+  mcp_tool_calls_per_message: z.number().nullable(),
+  tool_calls_per_message: z.number().nullable(),
 });
 
 export const AnalyticsEventKindCountV1Schema: z.ZodObject<{

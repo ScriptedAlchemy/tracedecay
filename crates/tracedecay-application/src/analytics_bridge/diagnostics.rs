@@ -27,16 +27,17 @@ async fn registered_diagnostics_message_count(
     project_sessions: Option<&RegisteredGlobalDb>,
     user_sessions: Option<&RegisteredGlobalDb>,
     all_projects: bool,
-) -> tracedecay_domain::errors::Result<i64> {
-    let mut total = match project_sessions {
-        Some(database) => database.session_message_count().await.map_err(cli_error)?,
-        None => 0,
+) -> tracedecay_domain::errors::Result<Option<i64>> {
+    let mut total: Option<i64> = match project_sessions {
+        Some(database) => Some(database.session_message_count().await.map_err(cli_error)?),
+        None => None,
     };
     if all_projects
         && let Some(database) = user_sessions
         && project_sessions.is_none_or(|project| project.db_path() != database.db_path())
     {
-        total += database.session_message_count().await.map_err(cli_error)?;
+        let user_total = database.session_message_count().await.map_err(cli_error)?;
+        total = Some(total.map_or(user_total, |project_total| project_total + user_total));
     }
     Ok(total)
 }

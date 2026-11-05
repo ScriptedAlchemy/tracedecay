@@ -62,6 +62,10 @@ pub async fn run_until_shutdown_for_tests_with_host_admission<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
+    // The readiness fold is composed by the crate that owns the hook contract;
+    // this entry point mounts it for a directly served dashboard, whose
+    // diagnostics route reads readiness through the application port.
+    tracedecay_agent_hosts::hooks::install_hook_readiness_projection()?;
     tracedecay_dashboard_api::run_until_shutdown_for_tests_with_host_admission(
         std::sync::Arc::new(tracedecay_project::dashboard::dashboard_project_context(
             &graph,

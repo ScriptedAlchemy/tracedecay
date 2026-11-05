@@ -38,7 +38,10 @@ pub fn aggregate_hook_completed_readiness(rows: &[Value]) -> Value {
                 "input_rows_processed": 0,
                 "input_rows_dropped_at_cap": 0,
                 "events_considered": 0,
-                "events_skipped_non_completed": rows.len(),
+                // An unmounted projection still knows which rows the readiness
+                // fold would have skipped: only non-`hook_completed` rows. The
+                // row count is not the skip count.
+                "events_skipped_non_completed": non_completed_row_count(rows),
                 "unavailable_metrics": [{
                     "metric": "hook_readiness",
                     "status": "unavailable",
@@ -50,12 +53,30 @@ pub fn aggregate_hook_completed_readiness(rows: &[Value]) -> Value {
     )
 }
 
+/// Rows the readiness fold would skip because their `event` is not
+/// `hook_completed`.
+///
+/// Both the unmounted fallback and the mounted aggregation's own serialization
+/// failure report this instead of the raw row count, which would claim that
+/// completed rows were skipped.
+pub fn non_completed_row_count(rows: &[Value]) -> usize {
+    rows.iter()
+        .filter(|row| row.get("event").and_then(Value::as_str) != Some("hook_completed"))
+        .count()
+}
+
+/// Per-message rates over the diagnostics window.
+///
+/// Every member is nullable because a rate needs a denominator: when the
+/// session-message authority is absent the message count is unknown, and when
+/// it is a known zero there is no per-message rate to state. Neither case is
+/// `0.0`, which would read as a measured rate of zero.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct AnalyticsDiagnosticsRatiosV1 {
-    pub events_per_message: f64,
-    pub tool_calls_per_message: f64,
-    pub mcp_tool_calls_per_message: f64,
-    pub hook_calls_per_message: f64,
+    pub events_per_message: Option<f64>,
+    pub tool_calls_per_message: Option<f64>,
+    pub mcp_tool_calls_per_message: Option<f64>,
+    pub hook_calls_per_message: Option<f64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -156,7 +177,10 @@ pub struct AnalyticsHintEfficacyV1 {
 pub struct AnalyticsDiagnosticsPayloadV1 {
     pub available: bool,
     pub source: String,
-    pub message_count: i64,
+    /// Session messages in the counted window, or `None` when the
+    /// session-message authority was not mounted for this read. An absent
+    /// authority is not a measured zero.
+    pub message_count: Option<i64>,
     pub event_count: i64,
     pub tool_call_count: i64,
     pub mcp_tool_call_count: i64,
@@ -285,7 +309,7 @@ fn apply_hint_efficacy_event(
 }
 
 pub fn diagnostics_summary_from_parts(
-    message_count: i64,
+    message_count: Option<i64>,
     hook_analytics: &HookAnalyticsRows,
     durable_events: Option<&[Value]>,
 ) -> Value {
@@ -329,7 +353,7 @@ fn analytics_event_from_json_row(row: &Value) -> AnalyticsEventRecord {
 }
 
 pub fn diagnostics_payload_from_parts(
-    message_count: i64,
+    message_count: Option<i64>,
     hook_analytics: &HookAnalyticsRows,
     durable_events: Option<&[AnalyticsEventRecord]>,
 ) -> AnalyticsDiagnosticsPayloadV1 {
@@ -339,7 +363,7 @@ pub fn diagnostics_payload_from_parts(
 
     let Some(events) = durable_events else {
         return AnalyticsDiagnosticsPayloadV1 {
-            available: !hook_rows.is_empty() || message_count > 0,
+            available: !hook_rows.is_empty() || message_count.is_some_and(|count| count > 0),
             source: "session_messages_and_hook_analytics".to_owned(),
             message_count,
             event_count: 0,
@@ -418,11 +442,10 @@ pub fn diagnostics_payload_from_parts(
         (Some(first), Some(last)) => last.saturating_sub(first).max(1),
         _ => 0,
     };
-    let events_per_hour = if span_secs > 0 {
-        (events.len() as f64) * 3600.0 / span_secs as f64
-    } else {
-        0.0
-    };
+    // No event timestamps means no observed span, so there is no rate to
+    // report. `0.0` would claim a measured rate of zero.
+    let events_per_hour =
+        (span_secs > 0).then(|| (events.len() as f64) * 3600.0 / span_secs as f64);
 
     AnalyticsDiagnosticsPayloadV1 {
         available: true,
@@ -435,7 +458,7 @@ pub fn diagnostics_payload_from_parts(
         hook_call_count,
         hook_sources: hook_analytics.sources.clone(),
         hook_readiness,
-        events_per_hour: Some(events_per_hour),
+        events_per_hour,
         ratios: diagnostics_ratios(
             message_count,
             events.len() as i64,
@@ -476,7 +499,7 @@ pub fn diagnostics_payload_from_parts(
 }
 
 fn diagnostics_ratios(
-    message_count: i64,
+    message_count: Option<i64>,
     event_count: i64,
     tool_call_count: i64,
     mcp_tool_call_count: i64,
@@ -490,12 +513,15 @@ fn diagnostics_ratios(
     }
 }
 
-fn per_message(count: i64, message_count: i64) -> f64 {
-    if message_count <= 0 {
-        0.0
-    } else {
-        count as f64 / message_count as f64
-    }
+/// A count per session message, or `None` when the denominator is not a
+/// positive measured count.
+///
+/// An unmounted session authority leaves the message count unknown and a
+/// mounted empty store measures zero; neither supports a rate, and reporting
+/// `0.0` for them would state a measured rate nobody measured.
+fn per_message(count: i64, message_count: Option<i64>) -> Option<f64> {
+    let message_count = message_count.filter(|count| *count > 0)?;
+    Some(count as f64 / message_count as f64)
 }
 
 fn increment_string_count(counts: &mut BTreeMap<String, i64>, key: &str) {
@@ -858,10 +884,13 @@ fn normalize(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::{Value, json};
     use tracedecay_contracts::{RequestCostReceiptV1, StorePointReadsV1};
     use tracedecay_global_db::AnalyticsEventRecord;
 
-    use super::{HookAnalyticsRows, diagnostics_payload_from_parts};
+    use super::{
+        HookAnalyticsRows, aggregate_hook_completed_readiness, diagnostics_payload_from_parts,
+    };
 
     fn mcp_call(id: i64, tool_name: &str, metadata_json: &str) -> AnalyticsEventRecord {
         AnalyticsEventRecord {
@@ -892,7 +921,8 @@ mod tests {
                 r#"{"duration_us":1500,"cost":{"wall_micros":1234,"point_reads":{"graph_sealed":21,"graph_staging":0},"adjacency_queries":1,"adjacency_rows":107,"bytes_hydrated":40960,"catalog_symbols":7}}"#,
             ),
         ];
-        let payload = diagnostics_payload_from_parts(0, &HookAnalyticsRows::empty(), Some(&events));
+        let payload =
+            diagnostics_payload_from_parts(Some(0), &HookAnalyticsRows::empty(), Some(&events));
         assert_eq!(
             payload
                 .recent_events
@@ -916,6 +946,70 @@ mod tests {
                 ),
                 ("tracedecay_search", None),
             ]
+        );
+    }
+
+    #[test]
+    fn an_unmounted_session_authority_reports_no_message_count_and_no_rates() {
+        let events = [mcp_call(1, "tracedecay_search", "{}")];
+        let payload =
+            diagnostics_payload_from_parts(None, &HookAnalyticsRows::empty(), Some(&events));
+
+        assert_eq!(
+            payload.message_count, None,
+            "an absent session-message authority is not a measured zero"
+        );
+        assert_eq!(payload.ratios.events_per_message, None);
+        assert_eq!(payload.ratios.tool_calls_per_message, None);
+        assert_eq!(payload.ratios.mcp_tool_calls_per_message, None);
+        assert_eq!(payload.ratios.hook_calls_per_message, None);
+
+        let encoded = serde_json::to_value(&payload).expect("payload encodes");
+        assert_eq!(encoded["message_count"], Value::Null);
+        assert_eq!(encoded["ratios"]["tool_calls_per_message"], Value::Null);
+    }
+
+    #[test]
+    fn a_measured_zero_message_store_serves_no_per_message_rate() {
+        let events = [mcp_call(1, "tracedecay_search", "{}")];
+        let payload =
+            diagnostics_payload_from_parts(Some(0), &HookAnalyticsRows::empty(), Some(&events));
+
+        assert_eq!(payload.message_count, Some(0));
+        assert_eq!(
+            payload.ratios.tool_calls_per_message, None,
+            "zero messages cannot denominate a rate; 0.0 would be a fabricated measurement"
+        );
+        assert_eq!(payload.ratios.events_per_message, None);
+    }
+
+    #[test]
+    fn a_measured_message_count_serves_real_rates() {
+        let events = [
+            mcp_call(1, "tracedecay_search", "{}"),
+            mcp_call(2, "tracedecay_callees", "{}"),
+        ];
+        let payload =
+            diagnostics_payload_from_parts(Some(4), &HookAnalyticsRows::empty(), Some(&events));
+
+        assert_eq!(payload.ratios.events_per_message, Some(0.5));
+        assert_eq!(payload.ratios.tool_calls_per_message, Some(0.5));
+        assert_eq!(payload.ratios.mcp_tool_calls_per_message, Some(0.5));
+    }
+
+    #[test]
+    fn an_unmounted_readiness_projection_does_not_count_completed_rows_as_skipped() {
+        let completed = json!({"event": "hook_completed", "agent": "claude"});
+        let invoked = json!({"event": "hook_invoked", "agent": "claude"});
+        let rows = vec![completed, invoked.clone(), invoked];
+
+        let readiness = aggregate_hook_completed_readiness(&rows);
+
+        assert_eq!(readiness["collection_status"], "unavailable");
+        assert_eq!(readiness["input_rows_received"], 3);
+        assert_eq!(
+            readiness["events_skipped_non_completed"], 2,
+            "only the non-hook_completed rows would have been skipped"
         );
     }
 }

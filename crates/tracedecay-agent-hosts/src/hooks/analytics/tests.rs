@@ -1312,6 +1312,51 @@ fn readiness_aggregate_bounds_untrusted_hook_dimensions() {
     }
 }
 
+/// The readiness fold is only reachable through the application port, and the
+/// port is only answerable once a composition mounts it. Mounting is
+/// process-global, so this test proves the mounted composition answers real
+/// `hook_completed` rows — and that a second mount is satisfied rather than a
+/// conflict.
+#[test]
+fn installing_the_projection_answers_readiness_through_the_application_port() {
+    super::install_hook_readiness_projection().unwrap();
+    // A second composition in the same process must not fail or replace it.
+    super::install_hook_readiness_projection().unwrap();
+
+    let rows = vec![sample_completed(CompletedSample {
+        agent: "claude",
+        hook_name: "PostToolUse",
+        wall_us: Some(12_000),
+        rtt_us: Some(900),
+        payload_bytes: Some(1_024),
+        daemon_ipc_bytes: Some(2_048),
+        timed_out: Some(false),
+        budget_ms: Some(50),
+        disposition: Some(serde_json::json!({
+            "status": "supported",
+            "retryable": false,
+            "class": "application"
+        })),
+    })];
+    let readiness =
+        tracedecay_application::analytics_bridge::aggregate_hook_completed_readiness(&rows);
+
+    assert_eq!(
+        readiness["collection_status"], "measured",
+        "the mounted projection must fold real completed rows, not report itself unmounted"
+    );
+    assert_eq!(readiness["events_considered"], 1);
+    assert_eq!(readiness["events_skipped_non_completed"], 0);
+    assert!(
+        readiness["unavailable_metrics"]
+            .as_array()
+            .is_some_and(|metrics| metrics
+                .iter()
+                .all(|metric| metric["metric"] != "hook_readiness")),
+        "the unmounted-projection blocker must be gone once mounted: {readiness}"
+    );
+}
+
 /// Two owners in one process, each with its own profile, record hook analytics
 /// for the same checkout at the same time. Each owner's rows land only in its
 /// own profile's store for that checkout.

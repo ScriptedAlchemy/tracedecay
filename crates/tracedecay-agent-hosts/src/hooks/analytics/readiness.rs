@@ -505,6 +505,14 @@ fn host_admission_status_rank(status: HostAdmissionStatus) -> u8 {
     }
 }
 
+/// Readiness rows this fold skips: everything whose `event` is not
+/// `hook_completed`. Unavailable fallbacks report this instead of the raw row
+/// count, which would claim completed rows were skipped.
+fn skipped_non_completed_rows(rows: &[Value]) -> u64 {
+    u64::try_from(tracedecay_application::analytics_bridge::non_completed_row_count(rows))
+        .unwrap_or(u64::MAX)
+}
+
 struct HookReadinessProjection;
 
 impl tracedecay_application::analytics_bridge::HookReadinessProjectionPort
@@ -523,7 +531,7 @@ impl tracedecay_application::analytics_bridge::HookReadinessProjectionPort
                 "input_rows_processed": 0,
                 "input_rows_dropped_at_cap": 0,
                 "events_considered": 0,
-                "events_skipped_non_completed": rows.len(),
+                "events_skipped_non_completed": skipped_non_completed_rows(rows),
                 "unavailable_metrics": [{
                     "metric": "hook_readiness",
                     "status": "unavailable",
@@ -537,7 +545,7 @@ impl tracedecay_application::analytics_bridge::HookReadinessProjectionPort
 }
 
 #[tracing::instrument(name = "hints.hook_install", level = "trace", skip_all)]
-pub fn install_dashboard_hook_readiness_projection() -> tracedecay_domain::errors::Result<()> {
+pub fn install_hook_readiness_projection() -> tracedecay_domain::errors::Result<()> {
     static INSTALLATION: std::sync::LazyLock<std::result::Result<(), String>> =
         std::sync::LazyLock::new(|| {
             tracedecay_application::analytics_bridge::install_hook_readiness_projection(
