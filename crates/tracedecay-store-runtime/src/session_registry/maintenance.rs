@@ -4,6 +4,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 #[cfg(any(test, feature = "test-helpers"))]
 use tokio::sync::Notify;
@@ -15,6 +16,7 @@ use tracedecay_domain::errors::{
     DAEMON_RESTART_COMMAND, PROFILE_RESET_COMMAND, ResettableStoreV1, STALE_STORE_RESET_COMMAND,
     StoreResetRequiredV1, TraceDecayError,
 };
+use tracedecay_global_db::RegisteredGlobalDbWeakLeaseIssuerV1;
 use tracedecay_global_db::schema_stages::RegisteredSchemaConvergence;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::native_runtime::{self, NativeTask};
@@ -42,6 +44,13 @@ type RegisteredSchemaConvergenceStatuses =
 type RegisteredSchemaConvergenceMetadata =
     BTreeMap<StoreShardIdV1, (SchemaConvergenceStageV1, i64)>;
 pub(super) type ResetRequiredStores = StdMutex<BTreeMap<StoreShardIdV1, StoreResetRequiredV1>>;
+
+/// How long a store whose published workflow upgrade failed waits before its
+/// convergence task tries again, the delay the daemon's maintenance loop gives
+/// a failed tick. An attempt can hold the store's writer for the whole copy, so
+/// this bounds that cost on a store that keeps failing to about one attempt a
+/// minute. Nothing signals that a full disk or a held lock has cleared.
+const WORKFLOW_RECOVERY_RETRY_DELAY: Duration = Duration::from_mins(1);
 
 fn lock_registered_schema_convergence_statuses(
     statuses: &StdMutex<RegisteredSchemaConvergenceStatuses>,
@@ -122,6 +131,32 @@ impl SchemaConvergenceTarget {
         match self {
             Self::Registered { database, .. } => database.reset_required(),
         }
+    }
+
+    /// Whether a failed attempt left the store's workflow storage waiting on
+    /// another one. A store that refused is held in its reset state instead,
+    /// and shutdown ends the wait with the daemon.
+    fn awaits_workflow_recovery(&self) -> bool {
+        match self {
+            Self::Registered {
+                database,
+                cancellation,
+                ..
+            } => database.workflow_recovery_pending() && !cancellation.is_cancelled(),
+        }
+    }
+
+    /// The next attempt's target, or `None` once the store's owner is gone.
+    fn reissued(
+        issuer: &RegisteredGlobalDbWeakLeaseIssuerV1,
+        convergence: RegisteredSchemaConvergence,
+        cancellation: &CancellationToken,
+    ) -> Option<Self> {
+        issuer.issue_lease().ok().map(|database| Self::Registered {
+            database,
+            convergence,
+            cancellation: cancellation.clone(),
+        })
     }
 }
 
@@ -274,6 +309,7 @@ impl RegisteredSchemaConvergenceMaintenance {
     pub(super) fn schedule(
         &self,
         database: RegisteredGlobalDbLeaseV1,
+        retry_issuer: RegisteredGlobalDbWeakLeaseIssuerV1,
         convergence: Option<RegisteredSchemaConvergence>,
         cancellation: CancellationToken,
         reset_required_stores: Arc<ResetRequiredStores>,
@@ -281,12 +317,16 @@ impl RegisteredSchemaConvergenceMaintenance {
         let Some(convergence) = convergence else {
             return;
         };
+        let target = SchemaConvergenceTarget::Registered {
+            database,
+            convergence,
+            cancellation: cancellation.clone(),
+        };
         self.schedule_target(
-            SchemaConvergenceTarget::Registered {
-                database,
-                convergence,
-                cancellation,
-            },
+            target,
+            retry_issuer,
+            convergence,
+            cancellation,
             reset_required_stores,
         );
     }
@@ -294,6 +334,9 @@ impl RegisteredSchemaConvergenceMaintenance {
     fn schedule_target(
         &self,
         target: SchemaConvergenceTarget,
+        retry_issuer: RegisteredGlobalDbWeakLeaseIssuerV1,
+        convergence: RegisteredSchemaConvergence,
+        cancellation: CancellationToken,
         reset_required_stores: Arc<ResetRequiredStores>,
     ) {
         let shard_id = target.binding().shard_id.clone();
@@ -311,8 +354,19 @@ impl RegisteredSchemaConvergenceMaintenance {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         {
             let mut statuses = lock_registered_schema_convergence_statuses(&self.statuses);
-            if statuses.contains_key(&shard_id) {
-                return;
+            match statuses.get(&shard_id) {
+                // An attempt holds its store's owner open, so a store mounted
+                // again over a failed upgrade has a new owner. The old worker
+                // can only find its own owner gone; this owner needs its own.
+                Some(RegisteredSchemaConvergenceStatus::Degraded { .. })
+                    if convergence.recovers_published_workflow_shape() =>
+                {
+                    if let Some(superseded) = tasks.remove(&shard_id) {
+                        superseded.abort();
+                    }
+                }
+                Some(_) => return,
+                None => {}
             }
             metadata.insert(
                 shard_id.clone(),
@@ -337,88 +391,128 @@ impl RegisteredSchemaConvergenceMaintenance {
         let task_shard_id = shard_id.clone();
         // Erase the worker state machine before instrumentation retains it.
         let work: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async move {
-            foreground_project_opens.wait_until_settled().await;
-            let permit = match concurrency.acquire_owned().await {
-                Ok(permit) => permit,
-                Err(error) => {
-                    drop(target);
-                    lock_registered_schema_convergence_statuses(&statuses).insert(
-                        task_shard_id,
-                        RegisteredSchemaConvergenceStatus::Degraded {
-                            message: format!(
-                                "registered schema convergence admission closed: {error}"
-                            ),
-                        },
-                    );
-                    return;
-                }
-            };
-            lock_registered_schema_convergence_statuses(&statuses).insert(
-                task_shard_id.clone(),
-                RegisteredSchemaConvergenceStatus::Running,
-            );
+            let mut target = target;
             #[cfg(any(test, feature = "test-helpers"))]
-            execution_count.fetch_add(1, Ordering::Relaxed);
-            #[cfg(any(test, feature = "test-helpers"))]
-            if let Some(gate) = gate {
-                gate.block().await;
-            }
-            let convergence: Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> =
-                Box::pin(target.converge());
-            let result = convergence.await;
-            if let Err(error) = target.release_connection_memory().await {
-                crate::session_registry::log_store_runtime_event(
-                    "registered_schema_convergence_memory_release",
-                    &[
-                        ("outcome", "degraded".to_owned()),
-                        ("database", target.db_path().display().to_string()),
-                        ("shard", format!("{task_shard_id:?}")),
-                        ("error", error.to_string()),
-                    ],
-                );
-            }
-            // `malloc_trim` walks every glibc arena: up to 0.8 s of CPU on a
-            // large heap, which would stall this native worker's I/O.
-            let _ = native_runtime::spawn_blocking(release_process_allocator_memory_v1).await;
-            drop(permit);
-            let status = match result {
-                Ok(()) => {
-                    crate::session_registry::log_store_runtime_event(
-                        "registered_schema_convergence",
-                        &[
-                            ("outcome", "complete".to_owned()),
-                            ("database", target.db_path().display().to_string()),
-                            ("shard", format!("{task_shard_id:?}")),
-                        ],
-                    );
-                    RegisteredSchemaConvergenceStatus::Complete
-                }
-                Err(error) => {
-                    // Convergence can find a store it cannot take after the
-                    // store was admitted, and that store is then held like one
-                    // refused at attach.
-                    if let Some(refused) = target.reset_required() {
-                        record_registered_reset_required(
-                            &reset_required_stores,
-                            task_shard_id.clone(),
-                            Some(&refused),
+            let mut first_attempt_gate = gate.clone();
+            loop {
+                foreground_project_opens.wait_until_settled().await;
+                let permit = match Arc::clone(&concurrency).acquire_owned().await {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        drop(target);
+                        lock_registered_schema_convergence_statuses(&statuses).insert(
+                            task_shard_id,
+                            RegisteredSchemaConvergenceStatus::Degraded {
+                                message: format!(
+                                    "registered schema convergence admission closed: {error}"
+                                ),
+                            },
                         );
+                        return;
                     }
-                    let message = error.to_string();
+                };
+                lock_registered_schema_convergence_statuses(&statuses).insert(
+                    task_shard_id.clone(),
+                    RegisteredSchemaConvergenceStatus::Running,
+                );
+                #[cfg(any(test, feature = "test-helpers"))]
+                execution_count.fetch_add(1, Ordering::Relaxed);
+                #[cfg(any(test, feature = "test-helpers"))]
+                if let Some(gate) = first_attempt_gate.take() {
+                    gate.block().await;
+                }
+                let convergence_pass: Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> =
+                    Box::pin(target.converge());
+                let result = convergence_pass.await;
+                if let Err(error) = target.release_connection_memory().await {
                     crate::session_registry::log_store_runtime_event(
-                        "registered_schema_convergence",
+                        "registered_schema_convergence_memory_release",
                         &[
                             ("outcome", "degraded".to_owned()),
                             ("database", target.db_path().display().to_string()),
                             ("shard", format!("{task_shard_id:?}")),
-                            ("error", message.clone()),
+                            ("error", error.to_string()),
                         ],
                     );
-                    RegisteredSchemaConvergenceStatus::Degraded { message }
                 }
-            };
-            drop(target);
-            lock_registered_schema_convergence_statuses(&statuses).insert(task_shard_id, status);
+                // `malloc_trim` walks every glibc arena: up to 0.8 s of CPU on a
+                // large heap, which would stall this native worker's I/O.
+                let _ = native_runtime::spawn_blocking(release_process_allocator_memory_v1).await;
+                drop(permit);
+                let mut retry = false;
+                let status = match result {
+                    Ok(()) => {
+                        crate::session_registry::log_store_runtime_event(
+                            "registered_schema_convergence",
+                            &[
+                                ("outcome", "complete".to_owned()),
+                                ("database", target.db_path().display().to_string()),
+                                ("shard", format!("{task_shard_id:?}")),
+                            ],
+                        );
+                        RegisteredSchemaConvergenceStatus::Complete
+                    }
+                    Err(error) => {
+                        // Convergence can find a store it cannot take after the
+                        // store was admitted, and that store is then held like one
+                        // refused at attach.
+                        if let Some(refused) = target.reset_required() {
+                            record_registered_reset_required(
+                                &reset_required_stores,
+                                task_shard_id.clone(),
+                                Some(&refused),
+                            );
+                        }
+                        retry = target.awaits_workflow_recovery();
+                        let message = if retry {
+                            format!("{error}; retrying the workflow upgrade in the background")
+                        } else {
+                            error.to_string()
+                        };
+                        crate::session_registry::log_store_runtime_event(
+                            "registered_schema_convergence",
+                            &[
+                                ("outcome", "degraded".to_owned()),
+                                ("database", target.db_path().display().to_string()),
+                                ("shard", format!("{task_shard_id:?}")),
+                                ("error", message.clone()),
+                            ],
+                        );
+                        RegisteredSchemaConvergenceStatus::Degraded { message }
+                    }
+                };
+                // Between attempts the task holds only the weak issuer, so a
+                // store waiting out a full disk never blocks its owner's
+                // retirement.
+                drop(target);
+                lock_registered_schema_convergence_statuses(&statuses)
+                    .insert(task_shard_id.clone(), status);
+                if !retry {
+                    return;
+                }
+                #[cfg(any(test, feature = "test-helpers"))]
+                let delay = match &gate {
+                    Some(gate) => gate.pace_retry().await,
+                    None => WORKFLOW_RECOVERY_RETRY_DELAY,
+                };
+                #[cfg(not(any(test, feature = "test-helpers")))]
+                let delay = WORKFLOW_RECOVERY_RETRY_DELAY;
+                // Retirement and shutdown abort this wait with the task.
+                if let Err(error) = native_runtime::sleep_until(Instant::now() + delay).await {
+                    // Without a timer every wait would return at once and spin.
+                    tracing::error!(
+                        event = "registered_schema_convergence_timer_unavailable",
+                        %error
+                    );
+                    return;
+                }
+                let Some(next) =
+                    SchemaConvergenceTarget::reissued(&retry_issuer, convergence, &cancellation)
+                else {
+                    return;
+                };
+                target = next;
+            }
         });
         match NativeTask::spawn(tracing::Instrument::instrument(
             work,
@@ -520,6 +614,7 @@ impl RegisteredSchemaConvergenceMaintenance {
             started: AtomicBool::new(false),
             started_notify: Notify::new(),
             release: Semaphore::new(0),
+            retry_timer: StdMutex::new(None),
         });
         *self
             .gate
@@ -548,6 +643,7 @@ pub(super) struct RegisteredSchemaConvergenceTestGateState {
     started: AtomicBool,
     started_notify: Notify,
     release: Semaphore,
+    retry_timer: StdMutex<Option<Duration>>,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -560,6 +656,20 @@ impl RegisteredSchemaConvergenceTestGateState {
             .await
             .expect("registered schema convergence test gate remains open")
             .forget();
+    }
+
+    /// The first attempt parks at the gate. A retry parks here instead, with
+    /// its failure still on display, unless the test put retries on a timer.
+    async fn pace_retry(&self) -> Duration {
+        let timer = *self
+            .retry_timer
+            .lock()
+            .expect("registered schema convergence retry timer lock remains healthy");
+        if let Some(delay) = timer {
+            return delay;
+        }
+        self.block().await;
+        Duration::ZERO
     }
 }
 
@@ -582,6 +692,15 @@ impl RegisteredSchemaConvergenceTestGate {
 
     pub fn release(&self) {
         self.state.release.add_permits(1);
+    }
+
+    /// Retries wait out `delay` as production does, instead of `release`.
+    pub fn retry_on_timer(&self, delay: Duration) {
+        *self
+            .state
+            .retry_timer
+            .lock()
+            .expect("registered schema convergence retry timer lock remains healthy") = Some(delay);
     }
 }
 
@@ -798,6 +917,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 })?;
                 self.registered_schema_convergence.schedule(
                     lease,
+                    database.weak_lease_issuer(),
                     convergence,
                     self.registry.open_cancellation().clone(),
                     Arc::clone(&self.reset_required_stores),

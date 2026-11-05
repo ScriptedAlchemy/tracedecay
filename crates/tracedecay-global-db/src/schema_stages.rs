@@ -406,7 +406,8 @@ pub struct RegisteredSchemaConvergence {
 impl RegisteredSchemaConvergence {
     /// Whether this store's workflow tables still carry the one published
     /// shape, which convergence upgrades before anything else.
-    pub(crate) fn recovers_published_workflow_shape(self) -> bool {
+    #[must_use]
+    pub fn recovers_published_workflow_shape(self) -> bool {
         self.recovers_published_workflow_shape
     }
 }

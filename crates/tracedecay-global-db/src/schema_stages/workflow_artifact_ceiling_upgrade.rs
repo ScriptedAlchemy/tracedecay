@@ -469,8 +469,9 @@ fn is_store_refusal(error: &engine::Error) -> bool {
 
 /// A failure that will recur on every open means this store cannot take the
 /// upgrade, which is the store's typed refusal. One that can clear by itself,
-/// such as a held lock or a full disk, stays an operation failure the next
-/// open retries, so a passing condition never tells an operator to reset.
+/// such as a held lock or a full disk, stays an operation failure the store's
+/// convergence task retries, so a passing condition never tells an operator to
+/// reset.
 fn upgrade_step_error(step: &'static str, error: engine::Error) -> TraceDecayError {
     if is_store_refusal(&error) {
         upgrade_refusal(&format!("the store refused the step to {step}"))

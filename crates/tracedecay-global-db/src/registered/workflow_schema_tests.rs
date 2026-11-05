@@ -1013,7 +1013,6 @@ mod published_artifact_ceiling {
         let mut upgrade = Box::pin(upgrade_published_artifact_ceiling(&copying));
         drive_until(&mut upgrade, || copying.seen() >= 2).await;
         drop(upgrade);
-        drop(copying);
         drop(transaction);
 
         assert_eq!(store.state(), before, "a dropped upgrade left a trace");
@@ -1080,7 +1079,6 @@ mod published_artifact_ceiling {
 
         assert!(upgrade.as_mut().await.unwrap().is_none());
         drop(upgrade);
-        drop(copying);
         transaction.commit().await.unwrap();
         assert_eq!(store.state().digest, WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1);
 
@@ -1112,8 +1110,7 @@ mod published_artifact_ceiling {
         let refused = lease
             .converge_schema(convergence, &CancellationToken::new())
             .await
-            .err()
-            .expect("the store changed under its plan");
+            .expect_err("the store changed under its plan");
         assert!(refused.is_store_reset_required(), "{refused}");
         assert!(assert_workflow_refusal(lease.reset_required()).contains("1 other schema object"));
         assert!(assert_workflow_refusal(owner.reset_required()).contains("1 other schema object"));
@@ -1122,7 +1119,7 @@ mod published_artifact_ceiling {
     }
 
     /// A failure that can clear says nothing about the store: workflow storage
-    /// stays recovering, nothing changed, and the next open finishes.
+    /// stays recovering, nothing changed, and the next attempt finishes.
     #[asupersync::test(flavor = "multi_thread")]
     async fn held_lock_at_convergence_keeps_the_store_recovering() {
         let daemon_store = DaemonPublishedStore::create().await;
@@ -1136,25 +1133,26 @@ mod published_artifact_ceiling {
         let error = lease
             .converge_schema(convergence, &CancellationToken::new())
             .await
-            .err()
-            .expect("the write lock is held");
+            .expect_err("the write lock is held");
         assert!(!error.is_store_reset_required(), "{error}");
         assert!(lease.reset_required().is_none());
         assert_workflow_recovering(&lease).await;
         peer.execute_batch("ROLLBACK").unwrap();
         drop(peer);
         assert_eq!(store.state(), before);
-        drop((lease, owner, held));
 
-        let (owner, convergence, _held) = admit_for_daemon(&store.path).await;
-        owner
-            .issue_lease()
-            .unwrap()
+        lease
             .converge_schema(convergence, &CancellationToken::new())
             .await
             .unwrap();
         assert_eq!(store.state().digest, WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1);
+        assert_eq!(store.state().artifacts, before.artifacts);
+        lease.workflow_storage().await.unwrap();
+        drop((lease, owner, held));
     }
+
+    /// `SQLITE_FULL`, which the guarded writer cannot be made to raise here.
+    const SQLITE_FULL: i32 = 13;
 
     /// Rows spread over several copy batches, with rowid gaps and a negative
     /// rowid a batch cursor starting at zero would lose.
@@ -1292,7 +1290,8 @@ mod published_artifact_ceiling {
     /// A step failing anywhere in the upgrade, including between copy batches
     /// and in the final proof, restores everything once the admission
     /// transaction rolls back. A refused statement is the store's typed reset;
-    /// a held database is not, so a passing condition never asks for one.
+    /// a held database or a full disk is not, so a passing condition never asks
+    /// for one.
     #[asupersync::test(flavor = "multi_thread")]
     async fn failure_at_any_upgrade_step_rolls_back_with_the_right_typed_state() {
         let daemon_store = DaemonPublishedStore::create().await;
@@ -1303,32 +1302,43 @@ mod published_artifact_ceiling {
             publish_daemon_runtime(&store.path).await.into_parts();
         let lease = database.issue_lease().unwrap();
 
-        for (needle, occurrence) in [
-            ("ALTER TABLE", 1),
-            ("CREATE TABLE workflow_artifact_payloads", 1),
-            ("INSERT INTO workflow_artifact_payloads", 1),
-            ("INSERT INTO workflow_artifact_payloads", 3),
-            ("DROP TABLE", 1),
-            ("UPDATE workflow_schema", 1),
-            ("table_info", 1),
-        ] {
-            let transaction = lease.begin_bulk_write_transaction("fault").await.unwrap();
-            let busy = upgrade_published_artifact_ceiling(&FailingStatement::new(
-                &transaction,
-                needle,
-                occurrence,
-                || engine::Error::Busy,
-            ))
-            .await
-            .err()
-            .unwrap_or_else(|| panic!("{needle}#{occurrence} must fail the upgrade"));
-            assert!(!busy.is_store_reset_required(), "{needle}: {busy}");
-            transaction.rollback().await.unwrap();
-            assert_eq!(
-                store.state(),
-                before,
-                "{needle}#{occurrence} was not undone"
-            );
+        let transient: [fn() -> engine::Error; 2] = [
+            || engine::Error::Busy,
+            || engine::Error::Sqlite {
+                operation: "step",
+                code: Some(SQLITE_FULL),
+                extended_code: Some(SQLITE_FULL),
+                message: "database or disk is full".to_owned(),
+            },
+        ];
+        for fault in transient {
+            for (needle, occurrence) in [
+                ("ALTER TABLE", 1),
+                ("CREATE TABLE workflow_artifact_payloads", 1),
+                ("INSERT INTO workflow_artifact_payloads", 1),
+                ("INSERT INTO workflow_artifact_payloads", 3),
+                ("DROP TABLE", 1),
+                ("UPDATE workflow_schema", 1),
+                ("table_info", 1),
+            ] {
+                let transaction = lease.begin_bulk_write_transaction("fault").await.unwrap();
+                let failed = upgrade_published_artifact_ceiling(&FailingStatement::new(
+                    &transaction,
+                    needle,
+                    occurrence,
+                    fault,
+                ))
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{needle}#{occurrence} must fail the upgrade"));
+                assert!(!failed.is_store_reset_required(), "{needle}: {failed}");
+                transaction.rollback().await.unwrap();
+                assert_eq!(
+                    store.state(),
+                    before,
+                    "{needle}#{occurrence} was not undone"
+                );
+            }
         }
 
         for (needle, occurrence) in [

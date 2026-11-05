@@ -492,9 +492,10 @@ impl RegisteredGlobalDb {
     }
 
     /// Settles the store's session authority on the background upgrade's
-    /// outcome. A failure that can clear keeps workflow storage recovering, and
-    /// the next open of the store retries; a store that refuses the upgrade is
-    /// held in its typed reset state like one refused at attach. Workflow
+    /// outcome. A failure that can clear rolls back and keeps workflow storage
+    /// recovering, and the convergence task runs this again; a store that
+    /// refuses the upgrade is held in its typed reset state like one refused at
+    /// attach. Workflow
     /// storage serves from the commit on, so the reclaim that follows delays
     /// nothing.
     async fn recover_published_workflow_shape(
@@ -584,6 +585,12 @@ impl RegisteredGlobalDb {
     #[must_use]
     pub fn reset_required(&self) -> Option<TraceDecayError> {
         self.session_authority.reset_required()
+    }
+
+    /// Whether workflow storage still waits on the background upgrade.
+    #[must_use]
+    pub fn workflow_recovery_pending(&self) -> bool {
+        self.session_authority.current() == SessionAuthorityV1::RecoveringWorkflow
     }
 
     /// Wraps an already-published guarded database for WAL maintenance tests.
@@ -846,7 +853,7 @@ impl RegisteredGlobalDb {
     ) -> tracedecay_domain::errors::Result<
         tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
     > {
-        if self.session_authority.current() == SessionAuthorityV1::RecoveringWorkflow {
+        if self.workflow_recovery_pending() {
             return Err(TraceDecayError::workflow_authority_recovering());
         }
         self.database.workflow_storage().await

@@ -575,6 +575,22 @@ mod tests {
     }
 
     #[test]
+    fn workflow_recovery_is_a_retryable_unavailable_problem_on_the_wire() {
+        let response = tool_error_response(
+            json!(7),
+            "tracedecay_workflow_list_definitions",
+            &TraceDecayError::workflow_authority_recovering(),
+        );
+        let wire = serde_json::to_value(response).expect("JSON-RPC wire response");
+        let data = &wire["error"]["data"];
+
+        assert_eq!(data["kind"], "unavailable");
+        assert_eq!(data["code"], "workflow_authority_recovering");
+        assert_eq!(data["retryable"], true);
+        assert_eq!(data["tool"], "tracedecay_workflow_list_definitions");
+    }
+
+    #[test]
     fn project_route_parked_detail_stays_structured_on_the_wire() {
         let response = tool_error_response(
             json!(11),
