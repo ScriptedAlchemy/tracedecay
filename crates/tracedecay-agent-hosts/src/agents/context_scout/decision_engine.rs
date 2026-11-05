@@ -38,7 +38,7 @@ const SCORE_EPSILON: f64 = 1e-6;
 
 /// Decision servers return a probability distribution, not independent scores.
 /// Allow a small rounding error when servers serialize decimal probabilities.
-const CHOICE_PROBABILITY_EPSILON: f64 = 1e-3;
+const CHOICE_EPSILON: f64 = 1e-3;
 
 /// What one question asks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -481,7 +481,7 @@ fn parse_answer(
                 let selected_probability = *probabilities.get(chosen)?;
                 if probabilities
                     .values()
-                    .any(|probability| *probability > selected_probability + CHOICE_PROBABILITY_EPSILON)
+                    .any(|probability| *probability > selected_probability + CHOICE_EPSILON)
                 {
                     return None;
                 }
@@ -520,7 +520,7 @@ fn choice_probabilities(
     // A map containing every label is still malformed if it is not a
     // distribution. In particular, two individually valid 0.8 scores are
     // not a valid two-way choice.
-    if (probabilities.values().sum::<f64>() - 1.0).abs() > CHOICE_PROBABILITY_EPSILON {
+    if (probabilities.values().sum::<f64>() - 1.0).abs() > CHOICE_EPSILON {
         return None;
     }
     Some(probabilities)
