@@ -3364,6 +3364,7 @@ mod tests {
             &mut stores,
             &mut plans,
             &mut availability,
+            false,
             &mut exact_budget,
             &StorageReportWalkControl::default(),
         )
@@ -3405,6 +3406,7 @@ mod tests {
             &mut stores,
             &mut plans,
             &mut availability,
+            false,
             &mut remaining,
             &StorageReportWalkControl::default(),
         )
@@ -3440,6 +3442,7 @@ mod tests {
             &mut stores,
             &mut Vec::new(),
             &mut Vec::new(),
+            false,
             &mut remaining,
             &StorageReportWalkControl::default(),
         )
@@ -3478,6 +3481,7 @@ mod tests {
             &mut stores,
             &mut Vec::new(),
             &mut availability,
+            false,
             &mut remaining,
             &StorageReportWalkControl::default(),
         )
@@ -3533,6 +3537,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &mut availability,
+            false,
             &mut remaining,
             &StorageReportWalkControl::default(),
         )
