@@ -845,6 +845,9 @@ fn apply_historical_worker_blocker(state: &mut Value, projection_reason: Option<
         state["status"] = json!("blocked");
         state["coverage"] = json!("partial");
         state["reason"] = json!(reason);
+        state["message"] = json!(
+            "Historical session recall catch-up is blocked by the historical refresh worker."
+        );
     }
 }
 
@@ -2205,8 +2208,32 @@ mod tests {
         );
         assert_eq!(state["status"], "blocked");
         assert_eq!(state["coverage"], "partial");
-        assert_eq!(state["reason"], "historical_blocked:projection_store_corrupt");
+        assert_eq!(
+            state["reason"],
+            "historical_blocked:projection_store_corrupt"
+        );
         assert_eq!(state["authority"], "daemon");
+        let blocked_message =
+            "Historical session recall catch-up is blocked by the historical refresh worker.";
+        assert_eq!(state["message"], blocked_message);
+
+        let mut warming = json!({
+            "status": "warming",
+            "coverage": "partial",
+            "reason": "historical_transcript_backlog",
+            "message": "Background historical catch-up still running.",
+        });
+        apply_historical_worker_blocker(
+            &mut warming,
+            Some("historical_blocked:projection_store_corrupt"),
+        );
+        assert_eq!(warming["status"], "blocked");
+        assert_eq!(warming["coverage"], "partial");
+        assert_eq!(
+            warming["reason"],
+            "historical_blocked:projection_store_corrupt"
+        );
+        assert_eq!(warming["message"], blocked_message);
 
         let mut no_blocker = historical_session_catch_up_state(&SessionIngestHealth {
             observed_providers: vec!["cursor".into()],
