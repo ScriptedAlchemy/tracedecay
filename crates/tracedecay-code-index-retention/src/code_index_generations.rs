@@ -956,12 +956,13 @@ fn prepare_next_code_generation_retention_page_cancellable(
     // when this exact census found bytes that may be unlinked. The executor
     // still refuses metadata-only plans, so no deletion can cross this gate
     // without the canonical full verification below.
+    let mut census_remaining_entries = usize::MAX;
     let mut census = plan_code_generation_retention_page_cancellable(
         store_root,
         vector_readable_sources,
         GenerationDigestVerificationV1::MetadataOnly,
         graph_replay_pool_root,
-        &mut usize::MAX,
+        &mut census_remaining_entries,
         is_cancelled,
         text_page,
     )?;
@@ -987,12 +988,13 @@ fn prepare_next_code_generation_retention_page_cancellable(
     if !census.has_collectable_work() {
         return Ok(census);
     }
+    let mut plan_remaining_entries = usize::MAX;
     plan_code_generation_retention_page_cancellable(
         store_root,
         vector_readable_sources,
         GenerationDigestVerificationV1::Full,
         graph_replay_pool_root,
-        &mut usize::MAX,
+        &mut plan_remaining_entries,
         is_cancelled,
         text_page,
     )

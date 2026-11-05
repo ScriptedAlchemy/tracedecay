@@ -40,7 +40,7 @@ impl StoreTelemetrySamplingRegistry {
 
     /// Release directory streams for scopes absent from a successfully read
     /// project scope inventory. A registered project can outlive many retired
-    /// worktrees; pruning by project alone would retain their open ReadDir
+    /// worktrees; pruning by project alone would retain their open `ReadDir`
     /// handles indefinitely.
     pub(crate) fn retain_text_artifact_scan_scopes(
         &self,
@@ -57,7 +57,7 @@ impl StoreTelemetrySamplingRegistry {
 
     /// A scope selected for quarantine must not be pinned by an unfinished
     /// staging-directory scan. Reset even if a blocking caller still holds an
-    /// Arc to the scan, so its ReadDir handles are closed before the rename.
+    /// Arc to the scan, so its `ReadDir` handles are closed before the rename.
     /// The maintenance writer serializes this with scan preparation.
     pub(crate) fn release_text_artifact_scans_before_scope_collection(
         &self,
