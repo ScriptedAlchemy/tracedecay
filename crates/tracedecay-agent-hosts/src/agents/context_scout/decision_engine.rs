@@ -36,6 +36,10 @@ const SYSTEMONE_PATH: &str = "/v1/systemone";
 /// Tolerance when checking a `score` against the rubric's last level index.
 const SCORE_EPSILON: f64 = 1e-6;
 
+/// Decision servers return a probability distribution, not independent scores.
+/// Allow a small rounding error when servers serialize decimal probabilities.
+const CHOICE_PROBABILITY_EPSILON: f64 = 1e-3;
+
 /// What one question asks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecisionQuestionKindV1 {
@@ -473,6 +477,15 @@ fn parse_answer(
                     return None;
                 }
             }
+            if let Some(chosen) = &chosen {
+                let selected_probability = *probabilities.get(chosen)?;
+                if probabilities
+                    .values()
+                    .any(|probability| *probability > selected_probability + CHOICE_PROBABILITY_EPSILON)
+                {
+                    return None;
+                }
+            }
             Some(DecisionAnswerV1::Choice {
                 chosen,
                 probabilities,
@@ -503,6 +516,12 @@ fn choice_probabilities(
     let mut probabilities = BTreeMap::new();
     for label in options {
         probabilities.insert(label.clone(), unit_interval(reported.get(label)?)?);
+    }
+    // A map containing every label is still malformed if it is not a
+    // distribution. In particular, two individually valid 0.8 scores are
+    // not a valid two-way choice.
+    if (probabilities.values().sum::<f64>() - 1.0).abs() > CHOICE_PROBABILITY_EPSILON {
+        return None;
     }
     Some(probabilities)
 }
@@ -832,6 +851,10 @@ mod tests {
             json!({"options": {"code": 0.7, "other": 0.3}}),
             json!({"probs": {"code": 0.7, "memory": 0.3, "other": 0.0}}),
             json!({"probs": {"code": "0.7", "memory": 0.3}}),
+            json!({"choice": "code", "probs": {"code": 0.8, "memory": 0.8}}),
+            json!({"choice": "code", "probs": {"code": 0.1, "memory": 0.9}}),
+            json!({"probs": {"code": 0.0, "memory": 0.0}}),
+            json!({"probs": {"code": 0.4, "memory": 0.4}}),
         ];
         for answer in cases {
             let body = json!({"answers": {"route": answer}}).to_string();
@@ -916,6 +939,37 @@ mod tests {
             DecisionAnswerV1::Choice {
                 chosen: Some("none".to_owned()),
                 probabilities: BTreeMap::from([("code".to_owned(), 0.0), ("none".to_owned(), 1.0)]),
+            }
+        );
+    }
+
+    #[test]
+    fn rounded_choice_distribution_is_accepted_without_exact_float_equality() {
+        let body = answers_body(
+            None,
+            &[(
+                "route",
+                choice_answer(
+                    None,
+                    "probabilities",
+                    &[("code", 0.3333), ("memory", 0.3333), ("none", 0.3333)],
+                ),
+            )],
+        );
+        let server = fake_decision_engine(200, &body, Duration::ZERO);
+        let answers = answered(client(&server.url).ask_blocking(&request(
+            "state",
+            vec![choice("route", &["code", "memory", "none"])],
+        )));
+        assert_eq!(
+            answers.answers["route"],
+            DecisionAnswerV1::Choice {
+                chosen: None,
+                probabilities: BTreeMap::from([
+                    ("code".to_owned(), 0.3333),
+                    ("memory".to_owned(), 0.3333),
+                    ("none".to_owned(), 0.3333),
+                ]),
             }
         );
     }
