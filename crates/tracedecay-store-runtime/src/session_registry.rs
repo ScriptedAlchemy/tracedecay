@@ -2717,7 +2717,7 @@ pub struct DaemonSessionRuntimeRegistryV1 {
     /// Registered stores whose last attach was refused with a typed reset.
     /// The refused store stays unmounted, so every open re-runs admission and
     /// a reset store serves on its next open without a daemon restart.
-    reset_required_stores: StdMutex<BTreeMap<StoreShardIdV1, StoreResetRequiredV1>>,
+    reset_required_stores: Arc<maintenance::ResetRequiredStores>,
     /// Store files deleted or replaced while this daemon held them open,
     /// keyed by path. The writer's file probe closes the store's connections,
     /// but the mounted owners keep their lease on the closed runtime until a

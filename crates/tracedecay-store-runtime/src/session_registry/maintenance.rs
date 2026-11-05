@@ -16,6 +16,7 @@ use tracedecay_domain::errors::{
     StoreResetRequiredV1, TraceDecayError,
 };
 use tracedecay_global_db::schema_stages::RegisteredSchemaConvergence;
+use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::native_runtime::{self, NativeTask};
 use tracedecay_runtime_core::storage::profile_root_of_sharded_data_root;
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1, StoreShardScopeV1};
@@ -40,6 +41,7 @@ type RegisteredSchemaConvergenceStatuses =
     BTreeMap<StoreShardIdV1, RegisteredSchemaConvergenceStatus>;
 type RegisteredSchemaConvergenceMetadata =
     BTreeMap<StoreShardIdV1, (SchemaConvergenceStageV1, i64)>;
+pub(super) type ResetRequiredStores = StdMutex<BTreeMap<StoreShardIdV1, StoreResetRequiredV1>>;
 
 fn lock_registered_schema_convergence_statuses(
     statuses: &StdMutex<RegisteredSchemaConvergenceStatuses>,
@@ -83,6 +85,7 @@ enum SchemaConvergenceTarget {
     Registered {
         database: RegisteredGlobalDbLeaseV1,
         convergence: RegisteredSchemaConvergence,
+        cancellation: CancellationToken,
     },
 }
 
@@ -104,13 +107,20 @@ impl SchemaConvergenceTarget {
             Self::Registered {
                 database,
                 convergence,
-            } => database.converge_schema(*convergence).await,
+                cancellation,
+            } => database.converge_schema(*convergence, cancellation).await,
         }
     }
 
     async fn release_connection_memory(&self) -> Result<()> {
         match self {
             Self::Registered { database, .. } => database.release_connection_memory().await,
+        }
+    }
+
+    fn reset_required(&self) -> Option<TraceDecayError> {
+        match self {
+            Self::Registered { database, .. } => database.reset_required(),
         }
     }
 }
@@ -265,17 +275,27 @@ impl RegisteredSchemaConvergenceMaintenance {
         &self,
         database: RegisteredGlobalDbLeaseV1,
         convergence: Option<RegisteredSchemaConvergence>,
+        cancellation: CancellationToken,
+        reset_required_stores: Arc<ResetRequiredStores>,
     ) {
         let Some(convergence) = convergence else {
             return;
         };
-        self.schedule_target(SchemaConvergenceTarget::Registered {
-            database,
-            convergence,
-        });
+        self.schedule_target(
+            SchemaConvergenceTarget::Registered {
+                database,
+                convergence,
+                cancellation,
+            },
+            reset_required_stores,
+        );
     }
 
-    fn schedule_target(&self, target: SchemaConvergenceTarget) {
+    fn schedule_target(
+        &self,
+        target: SchemaConvergenceTarget,
+        reset_required_stores: Arc<ResetRequiredStores>,
+    ) {
         let shard_id = target.binding().shard_id.clone();
         let stage = SchemaConvergenceStageV1::RegisteredSchema;
         let mut tasks = self
@@ -374,6 +394,16 @@ impl RegisteredSchemaConvergenceMaintenance {
                     RegisteredSchemaConvergenceStatus::Complete
                 }
                 Err(error) => {
+                    // Convergence can find a store it cannot take after the
+                    // store was admitted, and that store is then held like one
+                    // refused at attach.
+                    if let Some(refused) = target.reset_required() {
+                        record_registered_reset_required(
+                            &reset_required_stores,
+                            task_shard_id.clone(),
+                            Some(&refused),
+                        );
+                    }
                     let message = error.to_string();
                     crate::session_registry::log_store_runtime_event(
                         "registered_schema_convergence",
@@ -555,6 +585,54 @@ impl RegisteredSchemaConvergenceTestGate {
     }
 }
 
+fn record_registered_reset_required(
+    stores: &ResetRequiredStores,
+    shard_id: StoreShardIdV1,
+    refusal: Option<&TraceDecayError>,
+) {
+    let reset_required = refusal.and_then(|error| {
+        let resettable = match &shard_id.scope {
+            StoreShardScopeV1::Profile => Some(ResettableStoreV1::ProfileAuthority),
+            StoreShardScopeV1::ProfileSessions => Some(ResettableStoreV1::ProfileSessions),
+            StoreShardScopeV1::ProjectSessions { project_id } => {
+                Some(ResettableStoreV1::ProjectSessions {
+                    project_id: project_id.to_string(),
+                })
+            }
+            _ => None,
+        };
+        match resettable {
+            Some(store) => error.store_reset_required(store.label(), STALE_STORE_RESET_COMMAND),
+            None => {
+                error.store_reset_required(format!("{:?}", shard_id.scope), PROFILE_RESET_COMMAND)
+            }
+        }
+    });
+    let mut stores = stores
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match reset_required {
+        Some(state) => {
+            if stores.get(&shard_id) != Some(&state) {
+                tracing::warn!(
+                    event = "store_reset_required",
+                    store = %state.store,
+                    authority = %state.authority,
+                    remedy = %state.remedy,
+                    "registered store is served in its typed reset-required state"
+                );
+            }
+            stores.insert(shard_id, state);
+        }
+        // Any other failure says nothing about the persisted shape, so
+        // only a successful attach clears a recorded reset.
+        None if refusal.is_none() => {
+            stores.remove(&shard_id);
+        }
+        None => {}
+    }
+}
+
 impl DaemonSessionRuntimeRegistryV1 {
     #[tracing::instrument(
         name = "daemon.session_registry.attach_registered",
@@ -589,47 +667,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         shard_id: StoreShardIdV1,
         refusal: Option<&TraceDecayError>,
     ) {
-        let reset_required = refusal.and_then(|error| {
-            let resettable = match &shard_id.scope {
-                StoreShardScopeV1::Profile => Some(ResettableStoreV1::ProfileAuthority),
-                StoreShardScopeV1::ProfileSessions => Some(ResettableStoreV1::ProfileSessions),
-                StoreShardScopeV1::ProjectSessions { project_id } => {
-                    Some(ResettableStoreV1::ProjectSessions {
-                        project_id: project_id.to_string(),
-                    })
-                }
-                _ => None,
-            };
-            match resettable {
-                Some(store) => error.store_reset_required(store.label(), STALE_STORE_RESET_COMMAND),
-                None => error
-                    .store_reset_required(format!("{:?}", shard_id.scope), PROFILE_RESET_COMMAND),
-            }
-        });
-        let mut stores = self
-            .reset_required_stores
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match reset_required {
-            Some(state) => {
-                if stores.get(&shard_id) != Some(&state) {
-                    tracing::warn!(
-                        event = "store_reset_required",
-                        store = %state.store,
-                        authority = %state.authority,
-                        remedy = %state.remedy,
-                        "registered store is served in its typed reset-required state"
-                    );
-                }
-                stores.insert(shard_id, state);
-            }
-            // Any other failure says nothing about the persisted shape, so
-            // only a successful attach clears a recorded reset.
-            None if refusal.is_none() => {
-                stores.remove(&shard_id);
-            }
-            None => {}
-        }
+        record_registered_reset_required(&self.reset_required_stores, shard_id, refusal);
     }
 
     /// Hold a store file that was deleted or replaced on disk while mounted in
@@ -758,8 +796,12 @@ impl DaemonSessionRuntimeRegistryV1 {
                         format!("{error:?}"),
                     )
                 })?;
-                self.registered_schema_convergence
-                    .schedule(lease, convergence);
+                self.registered_schema_convergence.schedule(
+                    lease,
+                    convergence,
+                    self.registry.open_cancellation().clone(),
+                    Arc::clone(&self.reset_required_stores),
+                );
             }
             Ok(database)
         })

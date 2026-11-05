@@ -13,18 +13,30 @@
 //! final shape, so only the store's own text decides.
 //!
 //! The exact-SQL guard denies catalog edits on the registered writer, so the
-//! change is a real table move: it costs one copy of the artifact rows, once, on
-//! the attach that upgrades. Deciding whether a store can take it costs no copy.
+//! change is a real table move: it costs one copy of the artifact rows, once.
+//! Deciding whether a store can take it costs no copy, so admission only decides
+//! and the copy is historical convergence: a daemon runs it in its bounded
+//! background maintenance while the store's other authorities serve and workflow
+//! storage answers typed recovering. One transaction carries the whole move, so
+//! interruption at any point leaves the published store, and the next open
+//! recognizes it and starts over. For as long as that transaction runs it holds
+//! the store's writer lane, and its pages live in the WAL beside the old table's,
+//! so the store's other writers queue behind it and the store briefly takes
+//! about twice the payload's space. The dropped table's pages are reclaimed
+//! afterwards.
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::{self, Executor, QueryExecutor};
 use tracedecay_rusqlite_runtime::workflow::{
     WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1, WORKFLOW_SCHEMA_VERSION_V1, WORKFLOW_TABLE_CONTRACTS_V1,
 };
 
 use super::{
-    WorkflowSchemaAdmission, inspect_workflow_schema_for_admission,
-    read_recorded_workflow_identity, workflow_schema_refusal,
+    CANONICAL_BODY_RECLAIM_PAGES, CancellableSchemaTransaction, WorkflowSchemaAdmission,
+    inspect_workflow_schema_for_admission, read_recorded_workflow_identity,
+    schema_install_checkpoint, settle_schema_transaction, workflow_schema_refusal,
 };
 use crate::registered::RefusedAuthorityV1;
 use crate::{global_db_operation_error, global_db_operation_message};
@@ -222,14 +234,77 @@ async fn single_count(
         .map_err(|error| global_db_operation_error(operation, error))
 }
 
-/// Upgrades the published shape inside the caller's admission transaction, or
-/// returns the refusal that stops it before anything of the upgrade has run.
+/// Runs the upgrade in one transaction of its own. `cancellation` is observed
+/// before every statement, so shutdown stops the copy within one batch and rolls
+/// it back. `Some` is the refusal that stopped it before anything had changed.
+#[tracing::instrument(
+    name = "global_db.schema.workflow_artifact_ceiling.recover",
+    level = "trace",
+    skip_all
+)]
+pub(crate) async fn recover_published_artifact_ceiling(
+    database: &Database,
+    cancellation: &CancellationToken,
+) -> Result<Option<RefusedAuthorityV1>> {
+    const OPERATION: &str = "upgrade published workflow artifact table";
+    const COMMIT: &str = "commit published workflow artifact upgrade";
+    const ROLLBACK: &str = "roll back published workflow artifact upgrade";
+    schema_install_checkpoint(cancellation, OPERATION)?;
+    let transaction = database.begin_bulk_write_transaction(OPERATION).await?;
+    let install = CancellableSchemaTransaction {
+        transaction,
+        cancellation,
+    };
+    let upgraded = Box::pin(upgrade_published_artifact_ceiling(&install))
+        .await
+        .and_then(|refused| schema_install_checkpoint(cancellation, COMMIT).map(|()| refused));
+    let settled = tracing::Instrument::instrument(
+        settle_schema_transaction(install, upgraded, COMMIT, ROLLBACK),
+        tracing::trace_span!("global_db.schema.workflow_artifact_ceiling.settle"),
+    )
+    .await?;
+    if settled.is_none() {
+        tracing::info!("the published workflow artifact table now carries the final contract");
+    }
+    Ok(settled)
+}
+
+/// Returns the dropped table's pages to the filesystem one bounded compaction at
+/// a time, so readers and writers interleave. A store created without
+/// incremental auto-vacuum reports the same free pages after a pass, which ends
+/// the loop; SQLite then reuses those pages for later writes.
+#[tracing::instrument(
+    name = "global_db.schema.workflow_artifact_ceiling.reclaim",
+    level = "trace",
+    skip_all
+)]
+pub(crate) async fn reclaim_freed_artifact_pages(
+    database: &Database,
+    cancellation: &CancellationToken,
+) -> Result<()> {
+    const OPERATION: &str = "reclaim published workflow artifact pages";
+    let mut remaining = u64::MAX;
+    loop {
+        schema_install_checkpoint(cancellation, OPERATION)?;
+        let (_, _, free_pages) = database.storage_page_counts().await?;
+        if free_pages == 0 || free_pages >= remaining {
+            return Ok(());
+        }
+        remaining = free_pages;
+        database
+            .run_incremental_vacuum(CANONICAL_BODY_RECLAIM_PAGES)
+            .await?;
+    }
+}
+
+/// Upgrades the published shape inside the caller's transaction, or returns the
+/// refusal that stops it before anything of the upgrade has run.
 ///
-/// Classification ran on a read connection, so the shape is proven again under
-/// the write lock before anything changes: a peer that upgraded in the meantime
-/// makes this a no-op, and one that changed the store into anything else
-/// refuses. Every step shares the caller's transaction, so any failure leaves
-/// the store exactly as found. Only payload bytes the transaction itself wrote
+/// Classification ran on a read connection, possibly long before, so the shape
+/// is proven again under the write lock before anything changes: a peer that
+/// upgraded in the meantime makes this a no-op, and one that changed the store
+/// into anything else refuses. Every step shares the caller's transaction, so
+/// any failure leaves the store exactly as found. Only payload bytes the transaction itself wrote
 /// are read back, which SQLite already guarantees, so the copy is checked by row
 /// count rather than by reading every payload twice more.
 #[tracing::instrument(
@@ -267,10 +342,13 @@ pub(crate) async fn upgrade_published_artifact_ceiling(
     )
     .await?;
     copy_artifact_rows(transaction).await?;
-    run_step(
-        transaction,
-        &format!("DROP TABLE {DISPLACED_ARTIFACT_TABLE}"),
-        "drop the published artifact table",
+    tracing::Instrument::instrument(
+        run_step(
+            transaction,
+            &format!("DROP TABLE {DISPLACED_ARTIFACT_TABLE}"),
+            "drop the published artifact table",
+        ),
+        tracing::trace_span!("global_db.schema.workflow_artifact_ceiling.drop"),
     )
     .await?;
     record_final_identity(transaction).await?;
@@ -330,6 +408,11 @@ async fn run_step(
         .map_err(|error| upgrade_step_error(step, error))
 }
 
+#[tracing::instrument(
+    name = "global_db.schema.workflow_artifact_ceiling.copy",
+    level = "trace",
+    skip_all
+)]
 async fn copy_artifact_rows(transaction: &(impl Executor + Sync)) -> Result<()> {
     const STEP: &str = "copy artifact rows";
     let published = single_count(transaction, PUBLISHED_ROW_COUNT_SQL, STEP).await?;

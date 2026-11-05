@@ -819,6 +819,200 @@ async fn terminal_shutdown_cancels_and_joins_blocked_schema_convergence() {
     );
 }
 
+/// The artifact table as every release through `v1.0.0-beta.92` defined it.
+const PUBLISHED_WORKFLOW_ARTIFACT_TABLE_SQL: &str = "CREATE TABLE workflow_artifact_payloads (
+    payload_digest TEXT NOT NULL PRIMARY KEY,
+    byte_length INTEGER NOT NULL CHECK (
+        byte_length = length(payload) AND byte_length <= 4194304
+    ),
+    payload BLOB NOT NULL
+) STRICT";
+const PUBLISHED_WORKFLOW_DIGEST: &str =
+    "sha256:a292df6bc47e763f0d20bdb44a4032c0b1d7ac8e4cb83173b66ae7d1ff0d03be";
+
+fn age_session_store_to_published_workflow_shape(sessions_path: &std::path::Path) {
+    rusqlite::Connection::open(sessions_path)
+        .expect("open the stopped session store")
+        .execute_batch(&format!(
+            "DROP TABLE workflow_artifact_payloads;
+             {PUBLISHED_WORKFLOW_ARTIFACT_TABLE_SQL};
+             UPDATE workflow_schema SET definition_digest = '{PUBLISHED_WORKFLOW_DIGEST}';
+             INSERT INTO workflow_artifact_payloads VALUES ('sha256:kept', 3, x'010203');"
+        ))
+        .expect("give the store the published workflow shape");
+}
+
+/// What an outside reader finds: the identity digest and the artifact rows.
+fn published_workflow_state(sessions_path: &std::path::Path) -> (String, Vec<(String, Vec<u8>)>) {
+    let connection = rusqlite::Connection::open(sessions_path).expect("open the session store");
+    let digest = connection
+        .query_row("SELECT definition_digest FROM workflow_schema", [], |row| {
+            row.get(0)
+        })
+        .expect("read the workflow identity");
+    let rows = connection
+        .prepare("SELECT payload_digest, payload FROM workflow_artifact_payloads")
+        .expect("prepare the artifact read")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("read the artifact rows")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("decode the artifact rows");
+    (digest, rows)
+}
+
+/// The published upgrade is historical convergence: the shard mounts, its other
+/// authorities serve, repeated mounts schedule it once, and only workflow
+/// storage answers typed recovering until the background worker has committed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn published_workflow_shape_recovers_behind_a_serving_session_store() {
+    let (_temporary, identity, project_id, project_root, sessions_path, _database_scope) =
+        project_sessions_convergence_fixture("project.published-workflow-recovery", false).await;
+    age_session_store_to_published_workflow_shape(&sessions_path);
+    let published = published_workflow_state(&sessions_path);
+    let shard_id = StoreShardIdV1::project_sessions(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        project_id.clone(),
+    );
+    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
+        .await
+        .expect("session runtime registry");
+    let convergence_gate = registry.block_registered_schema_convergence_for_test();
+
+    let database = tokio::time::timeout(
+        MUST_NOT_BLOCK,
+        registry.project_sessions(project_id.clone(), [project_root.clone()]),
+    )
+    .await
+    .expect("mounting must not wait for the artifact copy")
+    .expect("a published store admits");
+    convergence_gate.wait_until_blocked().await;
+
+    assert_eq!(published_workflow_state(&sessions_path), published);
+    let (again, store) = tokio::join!(
+        registry.project_sessions(project_id.clone(), [project_root.clone()]),
+        registry.project_session_store(project_id.clone(), [project_root]),
+    );
+    let again = again.expect("a recovering store keeps serving session clients");
+    store.expect("a recovering store keeps serving its other authorities");
+    assert!(
+        registry
+            .mounted_project_sessions(&project_id)
+            .await
+            .is_some(),
+        "only workflow storage waits for the upgrade"
+    );
+    assert_eq!(
+        registry.registered_schema_convergence_schedule_count_for_test(),
+        1,
+        "concurrent admission must schedule the upgrade once"
+    );
+    assert!(registry.reset_required_stores().is_empty());
+    let finding = registry
+        .registered_schema_convergence_observations()
+        .into_iter()
+        .next()
+        .expect("the running upgrade is observable");
+    assert_eq!(
+        finding.state,
+        tracedecay_contracts::storage::SchemaConvergenceStateV1::Running
+    );
+    for client in [&database, &again] {
+        let refused = client
+            .workflow_storage()
+            .await
+            .err()
+            .expect("workflow storage waits for the upgrade");
+        assert!(refused.is_workflow_authority_recovering(), "{refused}");
+    }
+    let mut served = database
+        .read_connection()
+        .query("SELECT count(*) FROM parse_offsets", ())
+        .await
+        .expect("the store's other authorities read while recovering");
+    served
+        .next()
+        .await
+        .expect("read the count")
+        .expect("a count row");
+
+    convergence_gate.release();
+    assert_eq!(
+        wait_for_schema_convergence(&registry, &shard_id).await,
+        RegisteredSchemaConvergenceStatus::Complete
+    );
+    database
+        .workflow_storage()
+        .await
+        .expect("a client issued before the commit serves after it");
+    let (digest, rows) = published_workflow_state(&sessions_path);
+    assert_ne!(digest, PUBLISHED_WORKFLOW_DIGEST);
+    assert_eq!(rows, published.1);
+}
+
+/// Shutdown stops the upgrade before it commits, and a daemon restart over the
+/// same store recognizes it and finishes the move.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_during_published_workflow_recovery_resumes_on_restart() {
+    let (_temporary, identity, project_id, project_root, sessions_path, _database_scope) =
+        project_sessions_convergence_fixture("project.published-workflow-restart", false).await;
+    age_session_store_to_published_workflow_shape(&sessions_path);
+    let published = published_workflow_state(&sessions_path);
+    let shard_id = StoreShardIdV1::project_sessions(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        project_id.clone(),
+    );
+    {
+        let registry =
+            DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity.clone(), true)
+                .await
+                .expect("session runtime registry");
+        let convergence_gate = registry.block_registered_schema_convergence_for_test();
+        let database = registry
+            .project_sessions(project_id.clone(), [project_root.clone()])
+            .await
+            .expect("a published store admits");
+        convergence_gate.wait_until_blocked().await;
+
+        registry.cancel_terminal_tasks();
+        tokio::time::timeout(
+            MUST_NOT_BLOCK,
+            registry
+                .shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap()),
+        )
+        .await
+        .expect("shutdown must not wait for the upgrade")
+        .expect("session runtime terminal tasks shut down cleanly");
+        assert!(
+            database
+                .workflow_storage()
+                .await
+                .err()
+                .expect("nothing committed")
+                .is_workflow_authority_recovering()
+        );
+    }
+    assert_eq!(published_workflow_state(&sessions_path), published);
+
+    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
+        .await
+        .expect("restarted session runtime registry");
+    let database = registry
+        .project_sessions(project_id, [project_root])
+        .await
+        .expect("the restarted daemon admits the store");
+    assert_eq!(
+        wait_for_schema_convergence(&registry, &shard_id).await,
+        RegisteredSchemaConvergenceStatus::Complete
+    );
+    database
+        .workflow_storage()
+        .await
+        .expect("the restart finished the upgrade");
+    assert_eq!(published_workflow_state(&sessions_path).1, published.1);
+}
+
 /// Runs background schema convergence on a fresh project-sessions shard and
 /// returns its durable authority checkpoint's bounded-pass count.
 async fn converged_authority_checkpoint_passes(project_name: &str, pending: bool) -> i64 {

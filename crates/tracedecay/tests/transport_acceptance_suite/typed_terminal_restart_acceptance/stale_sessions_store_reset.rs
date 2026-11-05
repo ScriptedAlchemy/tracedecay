@@ -733,9 +733,12 @@ fn project_session_store_with_another_workflow_schema_identity_refuses_sessions_
         authority: "workflow",
         found_version: Value::Null,
         required_version: Value::Null,
-        reason: "workflow persisted shape requires reset: workflow schema identity does not \
-                 match the final contract"
-            .to_owned(),
+        reason: format!(
+            "workflow persisted shape requires reset: workflow schema identity does not match the \
+             final contract: digest is \
+             sha256:0000000000000000000000000000000000000000000000000000000000000000, not {}",
+            tracedecay_rusqlite_runtime::workflow::WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1
+        ),
         session_tool: "tracedecay_workflow_list_definitions",
         session_tool_args: || json!({}),
     });
@@ -778,6 +781,140 @@ pub(super) fn run_doctor_json(home: &Path, project: &Path) -> (Option<i32>, Valu
 /// A restarted daemon has no project open until something asks for one. A
 /// lone `doctor` must open the registered project itself and report the
 /// canonical findings, not a mount that never starts.
+/// A store a published release left behind is not a reset: over one in the
+/// project and profile session stores, a real daemon serves code reads and
+/// session reads, reports no refused store, and upgrades both in the background
+/// with every artifact row intact and no copy of the old table left behind.
+#[test]
+fn published_workflow_shape_upgrades_in_the_background_while_the_daemon_serves() {
+    const PUBLISHED_TABLE_SQL: &str = "CREATE TABLE workflow_artifact_payloads (
+    payload_digest TEXT NOT NULL PRIMARY KEY,
+    byte_length INTEGER NOT NULL CHECK (
+        byte_length = length(payload) AND byte_length <= 4194304
+    ),
+    payload BLOB NOT NULL
+) STRICT";
+    const PUBLISHED_DIGEST: &str =
+        "sha256:a292df6bc47e763f0d20bdb44a4032c0b1d7ac8e4cb83173b66ae7d1ff0d03be";
+    /// Payload rows that take the copy past one batch at real payload sizes.
+    const ARTIFACT_ROWS: i64 = 80;
+
+    fn artifact_rows(connection: &rusqlite::Connection) -> Vec<(String, i64, i64)> {
+        connection
+            .prepare(
+                "SELECT payload_digest, byte_length, rowid
+                 FROM workflow_artifact_payloads ORDER BY rowid",
+            )
+            .expect("prepare the artifact read")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("read the artifact rows")
+            .collect::<rusqlite::Result<_>>()
+            .expect("decode the artifact rows")
+    }
+
+    let home = tempfile::TempDir::new().expect("isolated home");
+    let home_path = canonical_existing_path(home.path());
+    let project = tempfile::TempDir::new().expect("project");
+    let project_path = canonical_existing_path(project.path());
+    let profile_root = home_path.join(".tracedecay");
+    let project_id = tracedecay_runtime_core::storage::default_profile_project_id(&project_path);
+    let stores = [
+        profile_root
+            .join("projects")
+            .join(&project_id)
+            .join("sessions.db"),
+        profile_root.join("user-sessions.db"),
+    ];
+
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    super::initialize_project(&home_path, &project_path, "published-workflow-shape");
+    wait_for_code_index_hit(&home_path, &project_path, "probe");
+    for scope in ["project", "user"] {
+        session_status(&home_path, &project_path, scope);
+    }
+    daemon
+        .kill_and_wait()
+        .expect("stop the daemon that wrote the profile");
+
+    let mut published = Vec::new();
+    for store in &stores {
+        let connection = rusqlite::Connection::open(store).expect("open the session store");
+        connection
+            .execute_batch(&format!(
+                "DROP TABLE workflow_artifact_payloads;
+                 {PUBLISHED_TABLE_SQL};
+                 UPDATE workflow_schema SET definition_digest = '{PUBLISHED_DIGEST}';
+                 WITH RECURSIVE n(i) AS (
+                     SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {ARTIFACT_ROWS}
+                 )
+                 INSERT INTO workflow_artifact_payloads
+                 SELECT 'sha256:artifact-' || i, 1048576, randomblob(1048576) FROM n;"
+            ))
+            .expect("give the store the published workflow shape");
+        published.push(artifact_rows(&connection));
+    }
+
+    let mut daemon = spawn_tracedecay_daemon_with(&home_path, |_| {});
+    wait_for_code_index_hit(&home_path, &project_path, "probe");
+    let probe_id = probe_symbol_id(&home_path, &project_path);
+    assert_eq!(
+        code_read_outcome(
+            &home_path,
+            &project_path,
+            "tracedecay_callers",
+            &json!({ "node_id": probe_id, "format": "json" }),
+        ),
+        json!("evidence"),
+        "callers serve whatever state the upgrade is in"
+    );
+    for scope in ["project", "user"] {
+        let served = session_status(&home_path, &project_path, scope);
+        assert!(
+            find_key(&served, "problem").is_none_or(|problem| problem.is_null()),
+            "{scope} session reads serve whatever state the upgrade is in: {served}"
+        );
+    }
+    assert_eq!(
+        reset_required_stores(&home_path, &project_path),
+        Vec::<Value>::new(),
+        "a published workflow shape is not a reset"
+    );
+
+    let started = Instant::now();
+    for (store, rows) in stores.iter().zip(&published) {
+        loop {
+            let connection = rusqlite::Connection::open(store).expect("open the session store");
+            let digest: String = connection
+                .query_row("SELECT definition_digest FROM workflow_schema", [], |row| {
+                    row.get(0)
+                })
+                .expect("read the workflow identity");
+            if digest != PUBLISHED_DIGEST {
+                assert_eq!(&artifact_rows(&connection), rows, "{}", store.display());
+                let displaced: i64 = connection
+                    .query_row(
+                        "SELECT count(*) FROM sqlite_master
+                         WHERE name = 'workflow_artifact_payloads_published'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .expect("inspect the catalog");
+                assert_eq!(displaced, 0, "the old table outlived the upgrade");
+                break;
+            }
+            assert!(
+                started.elapsed() < RESET_CENSUS_TIMEOUT,
+                "the background upgrade of {} never committed",
+                store.display()
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    daemon
+        .kill_and_wait()
+        .expect("stop the daemon that upgraded the stores");
+}
+
 #[test]
 fn doctor_alone_on_a_fresh_daemon_opens_the_project_and_reports_findings() {
     let home = tempfile::TempDir::new().expect("isolated home");

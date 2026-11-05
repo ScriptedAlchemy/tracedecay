@@ -223,8 +223,9 @@ async fn extra_workflow_schema_identity_requires_reset_without_mutation() {
 }
 
 mod published_artifact_ceiling {
-    use std::future::Future as _;
+    use std::future::Future;
     use std::path::{Path, PathBuf};
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Poll;
 
@@ -807,53 +808,167 @@ mod published_artifact_ceiling {
         assert_eq!(store.state(), before);
     }
 
-    /// Daemon admission observes shutdown at every statement. At each sampled
-    /// cancellation point the store is either wholly published or wholly final.
+    /// Daemon admission of a published store, with the store's convergence plan
+    /// and the runtime parts that keep the store open until they drop.
+    async fn admit_for_daemon(
+        path: &Path,
+    ) -> (
+        RegisteredGlobalDbOwnerV1,
+        crate::schema_stages::RegisteredSchemaConvergence,
+        impl Sized,
+    ) {
+        let (database, runtime, retirement) = publish_daemon_runtime(path).await.into_parts();
+        let (owner, convergence) = RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
+            database,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        (
+            owner,
+            convergence.expect("an admitted store has a plan"),
+            (runtime, retirement),
+        )
+    }
+
+    async fn assert_workflow_recovering(lease: &crate::RegisteredGlobalDbLeaseV1) {
+        let error = lease.workflow_storage().await.err().expect("recovering");
+        assert!(error.is_workflow_authority_recovering(), "{error}");
+        assert_eq!(
+            error
+                .project_route_context()
+                .map(|(_, retryable, _)| retryable),
+            Some(true),
+            "a store that is upgrading asks the client to retry"
+        );
+        assert!(!error.is_store_reset_required(), "{error}");
+    }
+
+    /// Daemon admission only decides. It copies nothing however large the
+    /// store, answers typed recovering from workflow storage, and keeps every
+    /// other authority serving; convergence then completes the move for clients
+    /// issued before it committed, and the old table's pages leave the file.
     #[asupersync::test(flavor = "multi_thread")]
-    async fn daemon_admission_is_atomic_at_every_cancellation_point() {
-        async fn admit_cancelled_at(
+    async fn daemon_admission_defers_the_copy_to_convergence() {
+        let daemon_store = DaemonPublishedStore::create().await;
+        let store = &daemon_store.store;
+        store.run(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 64)
+             INSERT INTO workflow_artifact_payloads
+             SELECT 'sha256:large-' || i, 1048576, randomblob(1048576) FROM n;",
+        );
+        let before = store.state();
+        let wal_path = format!("{}-wal", store.path.display());
+        let wal_bytes = || fs::metadata(&wal_path).map_or(0, |metadata| metadata.len());
+
+        let (owner, convergence, _held) = admit_for_daemon(&store.path).await;
+        assert!(
+            wal_bytes() < 1024 * 1024,
+            "daemon admission wrote {} WAL bytes, so it copied payloads",
+            wal_bytes()
+        );
+        assert_eq!(
+            store.state(),
+            before,
+            "admission changed the published shape"
+        );
+        assert!(owner.reset_required().is_none());
+        let lease = owner.issue_lease().unwrap();
+        let issuer = owner.weak_lease_issuer();
+        assert_workflow_recovering(&lease).await;
+        assert_workflow_recovering(&issuer.issue_lease().unwrap()).await;
+        lease
+            .runtime_database()
+            .execute_write_batch(
+                "another authority keeps writing",
+                "INSERT INTO parse_offsets VALUES ('during-recovery', 1, 1, 1)",
+            )
+            .await
+            .unwrap();
+
+        lease
+            .converge_schema(convergence, &CancellationToken::new())
+            .await
+            .unwrap();
+
+        lease.workflow_storage().await.unwrap();
+        owner
+            .issue_lease()
+            .unwrap()
+            .workflow_storage()
+            .await
+            .unwrap();
+        issuer
+            .issue_lease()
+            .unwrap()
+            .workflow_storage()
+            .await
+            .unwrap();
+        let after = store.state();
+        assert_eq!(after.table_sql, final_table_sql());
+        assert_eq!(after.digest, WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1);
+        assert_eq!(after.artifacts, before.artifacts);
+        assert_eq!(after.other_rows, before.other_rows);
+        assert_eq!(
+            after.objects_named_after_the_table,
+            vec![
+                "sqlite_autoindex_workflow_artifact_payloads_1",
+                "workflow_artifact_payloads"
+            ],
+            "no copy of the old table survives success"
+        );
+        let (_, _, free_pages) = lease.storage_page_counts().await.unwrap();
+        assert_eq!(free_pages, 0, "the dropped table's pages were kept");
+    }
+
+    /// Convergence observes shutdown at every statement. At each sampled point
+    /// the store is either wholly published or wholly final, a cancelled store
+    /// stays typed recovering, and the next open finishes the job.
+    #[asupersync::test(flavor = "multi_thread")]
+    async fn background_upgrade_is_atomic_at_every_cancellation_point() {
+        async fn converge_cancelled_at(
             path: &Path,
             cancel_at: usize,
         ) -> (Result<(), TraceDecayError>, usize) {
-            let (database, _runtime, _retirement) = publish_daemon_runtime(path).await.into_parts();
+            let (owner, convergence, _held) = admit_for_daemon(path).await;
+            let lease = owner.issue_lease().unwrap();
             let cancellation = CancellationToken::new();
-            let mut admission = Box::pin(RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
-                database,
-                &cancellation,
-            ));
+            let mut recovery = Box::pin(lease.converge_schema(convergence, &cancellation));
             let mut polls = 0;
             let outcome = std::future::poll_fn(|context| {
                 polls += 1;
                 if polls == cancel_at {
                     cancellation.cancel();
                 }
-                match admission.as_mut().poll(context) {
-                    Poll::Ready(result) => Poll::Ready(result.map(|(owner, _)| {
-                        assert!(owner.reset_required().is_none());
-                    })),
-                    Poll::Pending => Poll::Pending,
-                }
+                recovery.as_mut().poll(context)
             })
             .await;
+            drop(recovery);
+            if let Err(error) = &outcome
+                && error.is_store_open_cancelled()
+                && WorkflowState::read(path).digest == PUBLISHED_DIGEST
+            {
+                assert_workflow_recovering(&lease).await;
+            }
             (outcome, polls)
         }
 
         let reference = DaemonPublishedStore::create().await;
         reference.store.run(BULK_ROWS);
         let before = reference.store.state();
-        let (outcome, total_polls) = admit_cancelled_at(&reference.store.path, usize::MAX).await;
+        let (outcome, total_polls) = converge_cancelled_at(&reference.store.path, usize::MAX).await;
         outcome.unwrap();
         let completed = reference.store.state();
         assert_eq!(completed.digest, WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1);
         assert_eq!(completed.artifacts, before.artifacts);
 
         let stride = (total_polls / 12).max(1);
-        let mut cancelled = 0;
+        let mut cancelled_published = 0;
         for cancel_at in (1..total_polls).step_by(stride) {
             let daemon_store = DaemonPublishedStore::create().await;
             let store = &daemon_store.store;
             store.run(BULK_ROWS);
-            let (outcome, _) = admit_cancelled_at(&store.path, cancel_at).await;
+            let (outcome, _) = converge_cancelled_at(&store.path, cancel_at).await;
             let state = store.state();
             match outcome {
                 Ok(()) => assert_eq!(state, completed, "completed at poll {cancel_at}"),
@@ -863,14 +978,182 @@ mod published_artifact_ceiling {
                         state == before || state == completed,
                         "poll {cancel_at} left a partial upgrade"
                     );
-                    cancelled += 1;
-                    let (reopened, _) = admit_cancelled_at(&store.path, usize::MAX).await;
+                    if state == before {
+                        cancelled_published += 1;
+                    }
+                    let (reopened, _) = converge_cancelled_at(&store.path, usize::MAX).await;
                     reopened.unwrap();
                     assert_eq!(store.state(), completed, "reopen after poll {cancel_at}");
                 }
             }
         }
-        assert!(cancelled > 0, "the sweep never observed a cancellation");
+        assert!(
+            cancelled_published > 0,
+            "the sweep never cancelled before the commit"
+        );
+    }
+
+    /// Retirement aborts the worker, which drops the upgrade wherever it is
+    /// parked. Nothing of it may survive, and the next open starts over.
+    #[asupersync::test(flavor = "multi_thread")]
+    async fn dropping_the_background_upgrade_mid_copy_rolls_it_back() {
+        let daemon_store = DaemonPublishedStore::create().await;
+        let store = &daemon_store.store;
+        store.run(BULK_ROWS);
+        let before = store.state();
+
+        let (owner, _, held) = admit_for_daemon(&store.path).await;
+        let lease = owner.issue_lease().unwrap();
+        let transaction = lease
+            .runtime_database()
+            .begin_bulk_write_transaction("abort")
+            .await
+            .unwrap();
+        let copying = StatementCounter::new(&transaction, "INSERT INTO workflow_artifact_payloads");
+        let mut upgrade = Box::pin(upgrade_published_artifact_ceiling(&copying));
+        drive_until(&mut upgrade, || copying.seen() >= 2).await;
+        drop(upgrade);
+        drop(copying);
+        drop(transaction);
+
+        assert_eq!(store.state(), before, "a dropped upgrade left a trace");
+        assert_workflow_recovering(&lease).await;
+        drop((lease, owner, held));
+
+        let (owner, convergence, _held) = admit_for_daemon(&store.path).await;
+        let lease = owner.issue_lease().unwrap();
+        assert_workflow_recovering(&lease).await;
+        lease
+            .converge_schema(convergence, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(store.state().artifacts, before.artifacts);
+        assert_eq!(store.state().digest, WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1);
+    }
+
+    /// WAL readers see the store as it was for as long as the copy runs. Readers
+    /// are what the upgrade must never hold up, so this parks it between two
+    /// batches with the writer lane held.
+    #[asupersync::test(flavor = "multi_thread")]
+    async fn reads_serve_while_the_upgrade_holds_the_writer() {
+        let daemon_store = DaemonPublishedStore::create().await;
+        let store = &daemon_store.store;
+        store.run(BULK_ROWS);
+        store.run("INSERT INTO parse_offsets VALUES ('readable', 7, 1, 1);");
+        let before = store.state();
+
+        let (owner, convergence, _held) = admit_for_daemon(&store.path).await;
+        let lease = owner.issue_lease().unwrap();
+        let reader = owner.issue_read_only_lease().unwrap();
+        let transaction = lease
+            .runtime_database()
+            .begin_bulk_write_transaction("hold")
+            .await
+            .unwrap();
+        let copying = StatementCounter::new(&transaction, "INSERT INTO workflow_artifact_payloads");
+        let mut upgrade = Box::pin(upgrade_published_artifact_ceiling(&copying));
+        drive_until(&mut upgrade, || copying.seen() >= 2).await;
+
+        let mut rows = reader
+            .read_connection()
+            .query(
+                "SELECT byte_offset FROM parse_offsets WHERE file_path = 'readable'",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<i64>(0).unwrap(), 7);
+        let mut artifacts = reader
+            .read_connection()
+            .query("SELECT count(*) FROM workflow_artifact_payloads", ())
+            .await
+            .unwrap();
+        let count = artifacts.next().await.unwrap().unwrap();
+        assert_eq!(
+            usize::try_from(count.get::<i64>(0).unwrap()).unwrap(),
+            before.artifacts.len(),
+            "a reader saw the transaction's half-copied table"
+        );
+        assert_workflow_recovering(&reader).await;
+        assert_eq!(store.state(), before, "an outside reader saw the copy");
+
+        assert!(upgrade.as_mut().await.unwrap().is_none());
+        drop(upgrade);
+        drop(copying);
+        transaction.commit().await.unwrap();
+        assert_eq!(store.state().digest, WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1);
+
+        // A peer already finished, so this recovery proves completion under the
+        // write lock and opens workflow storage for its own clients.
+        assert_workflow_recovering(&lease).await;
+        lease
+            .converge_schema(convergence, &CancellationToken::new())
+            .await
+            .unwrap();
+        lease.workflow_storage().await.unwrap();
+    }
+
+    /// A store changed between admission and convergence is proven again under
+    /// the write lock: it is held in its typed reset state, untouched, and
+    /// clients issued before the verdict see it too.
+    #[asupersync::test(flavor = "multi_thread")]
+    async fn background_refusal_holds_the_store_in_its_reset_state() {
+        let daemon_store = DaemonPublishedStore::create().await;
+        let store = &daemon_store.store;
+        let (owner, convergence, _held) = admit_for_daemon(&store.path).await;
+        let lease = owner.issue_lease().unwrap();
+        store.run(
+            "CREATE TRIGGER peer_audit AFTER DELETE ON workflow_artifact_payloads
+             BEGIN SELECT 1; END;",
+        );
+        let before = store.state();
+
+        let refused = lease
+            .converge_schema(convergence, &CancellationToken::new())
+            .await
+            .err()
+            .expect("the store changed under its plan");
+        assert!(refused.is_store_reset_required(), "{refused}");
+        assert!(assert_workflow_refusal(lease.reset_required()).contains("1 other schema object"));
+        assert!(assert_workflow_refusal(owner.reset_required()).contains("1 other schema object"));
+        assert!(lease.workflow_storage().await.is_err());
+        assert_eq!(store.state(), before);
+    }
+
+    /// A failure that can clear says nothing about the store: workflow storage
+    /// stays recovering, nothing changed, and the next open finishes.
+    #[asupersync::test(flavor = "multi_thread")]
+    async fn held_lock_at_convergence_keeps_the_store_recovering() {
+        let daemon_store = DaemonPublishedStore::create().await;
+        let store = &daemon_store.store;
+        let before = store.state();
+        let (owner, convergence, held) = admit_for_daemon(&store.path).await;
+        let lease = owner.issue_lease().unwrap();
+        let peer = Connection::open(&store.path).unwrap();
+        peer.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let error = lease
+            .converge_schema(convergence, &CancellationToken::new())
+            .await
+            .err()
+            .expect("the write lock is held");
+        assert!(!error.is_store_reset_required(), "{error}");
+        assert!(lease.reset_required().is_none());
+        assert_workflow_recovering(&lease).await;
+        peer.execute_batch("ROLLBACK").unwrap();
+        drop(peer);
+        assert_eq!(store.state(), before);
+        drop((lease, owner, held));
+
+        let (owner, convergence, _held) = admit_for_daemon(&store.path).await;
+        owner
+            .issue_lease()
+            .unwrap()
+            .converge_schema(convergence, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(store.state().digest, WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1);
     }
 
     /// Rows spread over several copy batches, with rowid gaps and a negative
@@ -881,6 +1164,73 @@ mod published_artifact_ceiling {
         SELECT i * 3 + 100, 'sha256:bulk-' || i, 8, CAST(printf('%08d', i) AS BLOB) FROM n;
         INSERT INTO workflow_artifact_payloads (rowid, payload_digest, byte_length, payload)
         VALUES (-5, 'sha256:negative-rowid', 1, x'07');";
+
+    /// Counts one kind of statement so a test can park an upgrade mid-copy.
+    struct StatementCounter<'a, T> {
+        inner: &'a T,
+        needle: &'static str,
+        seen: AtomicUsize,
+    }
+
+    impl<'a, T> StatementCounter<'a, T> {
+        fn new(inner: &'a T, needle: &'static str) -> Self {
+            Self {
+                inner,
+                needle,
+                seen: AtomicUsize::new(0),
+            }
+        }
+
+        fn seen(&self) -> usize {
+            self.seen.load(Ordering::Relaxed)
+        }
+
+        fn note(&self, sql: &str) {
+            if sql.contains(self.needle) {
+                self.seen.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    impl<T: engine::QueryExecutor + Sync> engine::QueryExecutor for StatementCounter<'_, T> {
+        async fn query<P>(&self, sql: &str, params: P) -> engine::Result<engine::Rows>
+        where
+            P: engine::IntoParams,
+        {
+            self.note(sql);
+            self.inner.query(sql, params).await
+        }
+    }
+
+    impl<T: engine::Executor + Sync> engine::Executor for StatementCounter<'_, T> {
+        async fn execute<P>(&self, sql: &str, params: P) -> engine::Result<u64>
+        where
+            P: engine::IntoParams,
+        {
+            self.note(sql);
+            self.inner.execute(sql, params).await
+        }
+
+        async fn execute_batch(&self, sql: &str) -> engine::Result<()> {
+            self.note(sql);
+            self.inner.execute_batch(sql).await
+        }
+    }
+
+    /// Polls `future` until `reached`, then leaves it parked where it is.
+    async fn drive_until<F: Future + Unpin>(future: &mut F, reached: impl Fn() -> bool) {
+        std::future::poll_fn(|context| {
+            if reached() {
+                return Poll::Ready(());
+            }
+            match Pin::new(&mut *future).poll(context) {
+                Poll::Ready(_) => panic!("the upgrade finished before it was parked"),
+                Poll::Pending if reached() => Poll::Ready(()),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await;
+    }
 
     /// An attached runtime whose statements fail at one chosen occurrence, for
     /// the faults a healthy store never produces.
@@ -1066,10 +1416,10 @@ mod published_artifact_ceiling {
         assert_eq!(after.artifacts, before.artifacts);
     }
 
-    /// A peer holding the write lock delays the upgrade and says nothing about
-    /// the store: the attach fails retryably, and the next one upgrades.
+    /// A peer holding the write lock delays admission and says nothing about
+    /// the store: the attach fails retryably, and the next one admits.
     #[asupersync::test(flavor = "multi_thread")]
-    async fn held_write_lock_delays_the_upgrade_without_a_reset() {
+    async fn held_write_lock_delays_admission_without_a_reset() {
         let daemon_store = DaemonPublishedStore::create().await;
         let store = &daemon_store.store;
         let before = store.state();
@@ -1090,16 +1440,15 @@ mod published_artifact_ceiling {
         drop(peer);
         assert_eq!(store.state(), before);
 
-        let (database, _runtime, _retirement) =
-            publish_daemon_runtime(&store.path).await.into_parts();
-        let (owner, _) = RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
-            database,
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
+        let (owner, convergence, held) = admit_for_daemon(&store.path).await;
         assert!(owner.reset_required().is_none());
-        drop(owner);
+        owner
+            .issue_lease()
+            .unwrap()
+            .converge_schema(convergence, &CancellationToken::new())
+            .await
+            .unwrap();
+        drop((owner, held));
         assert_eq!(store.state().digest, WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1);
     }
 
@@ -1135,7 +1484,7 @@ mod published_artifact_ceiling {
 
     /// Asking whether a store can upgrade costs no payload IO: the census
     /// leaves the WAL at its prior size however much the store holds, while the
-    /// same store's real attach still moves every row.
+    /// same store's convergence still moves every row.
     #[asupersync::test(flavor = "multi_thread")]
     async fn census_writes_no_payload_bytes() {
         let daemon_store = DaemonPublishedStore::create().await;
@@ -1161,13 +1510,22 @@ mod published_artifact_ceiling {
         assert_eq!(wal_bytes(), wal_before, "the census rewrote the table");
         assert_eq!(store.state(), before);
 
-        let (owner, _) = RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
+        let (owner, convergence) = RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
             database,
             &CancellationToken::new(),
         )
         .await
         .unwrap();
         assert!(owner.reset_required().is_none());
+        owner
+            .issue_lease()
+            .unwrap()
+            .converge_schema(
+                convergence.expect("an admitted store has a plan"),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
         drop(owner);
         assert_eq!(store.state().artifacts, before.artifacts);
     }

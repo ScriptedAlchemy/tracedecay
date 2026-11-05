@@ -6,10 +6,14 @@ use std::time::{Duration, Instant};
 use tracedecay_domain::errors::ProjectOpenFailureKind;
 
 mod workflow_artifact_ceiling_upgrade;
+#[cfg(test)]
 pub(crate) use workflow_artifact_ceiling_upgrade::upgrade_published_artifact_ceiling;
 use workflow_artifact_ceiling_upgrade::{
     PublishedArtifactCeilingShape, classify_published_artifact_ceiling,
     rehearse_published_artifact_ceiling_upgrade,
+};
+pub(crate) use workflow_artifact_ceiling_upgrade::{
+    reclaim_freed_artifact_pages, recover_published_artifact_ceiling,
 };
 
 use super::schema_contract::{
@@ -396,6 +400,15 @@ pub async fn ensure_registered_schema(
 pub struct RegisteredSchemaConvergence {
     force_exhaustive: bool,
     is_fresh: bool,
+    recovers_published_workflow_shape: bool,
+}
+
+impl RegisteredSchemaConvergence {
+    /// Whether this store's workflow tables still carry the one published
+    /// shape, which convergence upgrades before anything else.
+    pub(crate) fn recovers_published_workflow_shape(self) -> bool {
+        self.recovers_published_workflow_shape
+    }
 }
 
 /// Typed schema states an admissible store was classified into, carried from
@@ -858,13 +871,15 @@ pub async fn ensure_registered_schema_for_admission(
     Ok(RegisteredSchemaConvergence {
         force_exhaustive,
         is_fresh,
+        recovers_published_workflow_shape: session_features.upgrades_published_workflow_shape(),
     })
 }
 
 /// Installs (or idempotently re-ensures) every registered schema stage inside
 /// the caller's admission transaction. Callers classify admission first, so
 /// this stage runs only for stores classified fresh, exactly current, or
-/// exactly the one published workflow shape it upgrades.
+/// exactly the one published workflow shape convergence upgrades afterwards,
+/// whose artifact table no stage here touches.
 ///
 /// Heap boundary: see [`RegisteredSchemaAdmissionClassify`].
 #[tracing::instrument(name = "global_db.schema.persist.install", level = "trace", skip_all)]
@@ -909,20 +924,29 @@ where
         schema_install_checkpoint(install.cancellation, commit_operation)
             .map(|()| refused_authority)
     });
+    settle_schema_transaction(install, admission, commit_operation, rollback_operation).await
+}
+
+/// Commits the transaction when `outcome` succeeded and rolls it back when it
+/// failed, naming shutdown as the failure when it is what stopped the work.
+async fn settle_schema_transaction<T>(
+    install: CancellableSchemaTransaction<'_, T>,
+    outcome: tracedecay_domain::errors::Result<Option<RefusedAuthorityV1>>,
+    commit_operation: &'static str,
+    rollback_operation: &'static str,
+) -> tracedecay_domain::errors::Result<Option<RefusedAuthorityV1>>
+where
+    T: SchemaInstallTransaction,
+{
     let CancellableSchemaTransaction {
         transaction,
         cancellation,
     } = install;
-    match admission {
+    match outcome {
         Ok(refused_authority) => {
             transaction.commit().await.map_err(|error| {
                 global_db_operation_error(commit_operation, std::io::Error::other(error))
             })?;
-            if session_features.upgrades_published_workflow_shape() && refused_authority.is_none() {
-                tracing::info!(
-                    "the published workflow artifact table now carries the final contract"
-                );
-            }
             Ok(refused_authority)
         }
         Err(error) => match transaction.rollback().await {
@@ -1223,10 +1247,6 @@ async fn install_registered_schema_stage_sequence(
                 global_db_operation_error("initialize workflow index schema", error)
             })?;
     }
-    // Last, so a store any earlier stage refuses keeps its published shape.
-    if session_features.upgrades_published_workflow_shape() && refused_authority.is_none() {
-        return upgrade_published_artifact_ceiling(transaction).await;
-    }
     Ok(refused_authority)
 }
 
@@ -1314,6 +1334,7 @@ pub async fn converge_attached_registered_schema(
         RegisteredSchemaConvergence {
             force_exhaustive,
             is_fresh: false,
+            recovers_published_workflow_shape: false,
         },
     )
     .await
@@ -1331,8 +1352,8 @@ pub async fn converge_attached_registered_schema(
 /// schema stage. An admissibly-fresh store, an existing database file with no
 /// schema objects, receives the same admission-critical install as
 /// initialization. The returned convergence plan carries the LCM status-index
-/// work for lifecycle-owned daemon maintenance; short-lived callers run that
-/// same work synchronously through [`converge_attached_registered_schema`].
+/// work and any published workflow upgrade for lifecycle-owned daemon
+/// maintenance; short-lived callers run that same work synchronously.
 /// A store whose LCM, workflow, or git correlation shape this binary refuses
 /// is admitted untouched for its other authorities; one whose observation
 /// rows it refuses is installed without them. Either returns the refused
@@ -1391,7 +1412,22 @@ pub(crate) async fn ensure_attached_registered_schema(
         "commit attached registered global schema",
         "roll back attached registered global schema",
     ));
-    let refused_authority = committed.await?;
+    let mut refused_authority = committed.await?;
+    let recovers_published_workflow_shape = session_features.upgrades_published_workflow_shape();
+    // The verdict that no read-only query predicts belongs to admission, so a
+    // schema that refuses the move is refused here instead of after a store has
+    // been served as recovering. The later steps cannot refuse what
+    // classification proved, and they run in background convergence.
+    if recovers_published_workflow_shape && refused_authority.is_none() {
+        schema_install_checkpoint(cancellation, OPERATION)?;
+        let rehearsal = database.begin_bulk_write_transaction(OPERATION).await?;
+        let rehearsed = rehearse_published_artifact_ceiling_upgrade(&rehearsal).await;
+        rehearsal
+            .rollback()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        refused_authority = rehearsed?;
+    }
     // Mirror initialization's independently durable index builds: each
     // historical-data index commits on its own so an interrupted later build
     // never rolls back an earlier completed one.
@@ -1424,6 +1460,7 @@ pub(crate) async fn ensure_attached_registered_schema(
         None => RegisteredSchemaAttachmentV1::Admitted(RegisteredSchemaConvergence {
             force_exhaustive,
             is_fresh: configuration_fresh.is_some(),
+            recovers_published_workflow_shape,
         }),
     })
 }
@@ -1434,10 +1471,10 @@ pub(crate) async fn ensure_attached_registered_schema(
 /// store keeps exactly its prior schema. The post-commit index builds and the
 /// composed authority-schema validation are left to the store's own attach:
 /// an older admissible store would otherwise build its historical indexes
-/// only to discard them. The published workflow upgrade is left to it for the
-/// same reason: classification proved its rows and dependents without a write,
-/// and only its catalog-only rename runs here, so a census never copies a
-/// payload.
+/// only to discard them. The published workflow upgrade is left to convergence
+/// for the same reason: classification proved its rows and dependents without
+/// a write, and only its catalog-only rename runs here, so a census never
+/// copies a payload.
 #[tracing::instrument(name = "global_db.schema.persist.census", level = "trace", skip_all)]
 pub(crate) async fn attached_registered_schema_reset_refusal(
     database: &Database,
@@ -1478,13 +1515,6 @@ pub(crate) async fn attached_registered_schema_reset_refusal(
     > = Box::pin(authority_invariant_triggers_intact(&read_connection));
     let force_exhaustive = !triggers_intact.await?;
     let upgrades_workflow = session_features.upgrades_published_workflow_shape();
-    let staged_features = if upgrades_workflow {
-        SessionFeatureSchema::Hosted {
-            workflow: WorkflowSchemaAdmission::Complete,
-        }
-    } else {
-        session_features
-    };
     let transaction = database.begin_bulk_write_transaction(OPERATION).await?;
     let staged: Pin<
         Box<
@@ -1496,7 +1526,7 @@ pub(crate) async fn attached_registered_schema_reset_refusal(
         &transaction,
         configuration_fresh.as_ref(),
         temporal_admission,
-        staged_features,
+        session_features,
         force_exhaustive,
     ));
     let admission = match staged.await {
@@ -1529,8 +1559,8 @@ pub(crate) enum RegisteredSchemaAttachmentV1 {
 enum WorkflowSchemaAdmission {
     Create,
     Complete,
-    /// The one published shape admission steps forward, inside its own
-    /// transaction. See [`workflow_artifact_ceiling_upgrade`].
+    /// The one published shape convergence steps forward, in one transaction
+    /// of its own. See [`workflow_artifact_ceiling_upgrade`].
     UpgradePublishedArtifactCeiling,
 }
 

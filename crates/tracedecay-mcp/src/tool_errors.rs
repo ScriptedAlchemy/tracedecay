@@ -112,7 +112,8 @@ pub fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
         "tool_dispatch_effect_unknown" => Some("effect_unknown"),
         "tool_dispatch_shutdown"
         | "mcp_dispatch_effect_journey_unverified"
-        | "application_surface_unavailable" => Some("unavailable"),
+        | "application_surface_unavailable"
+        | "workflow_authority_recovering" => Some("unavailable"),
         "application_surface_invalid_request"
         | TOOL_ARGUMENTS_INVALID
         | "project_required"
