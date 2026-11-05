@@ -4,11 +4,27 @@ Empty slices have unknown rates, not zero accuracy. Macro AUC averages only
 categories with both label classes and reports its category coverage. Nonempty
 macro F1 retains the historical fixed-CATS, zero-for-undefined convention.
 """
-import json, glob, os, statistics, sys
+import json, glob, os, statistics, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import CATS
 
 TH = [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+
+def publish_summary(path, summary):
+    # Publish a complete scored snapshot without truncating the last good one.
+    directory = os.path.dirname(os.path.abspath(path))
+    descriptor, staged = tempfile.mkstemp(prefix=".intent-summary-", suffix=".json", dir=directory)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(summary, output, indent=1, allow_nan=False)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(staged, path)
+    finally:
+        if os.path.lexists(staged):
+            os.unlink(staged)
+
 
 def auc(pos, neg):
     if not pos or not neg: return None
@@ -153,19 +169,15 @@ if __name__ == "__main__":
     fixed = json.load(open(os.path.join(here, "fixed_thresholds.json"))) if os.path.exists(os.path.join(here, "fixed_thresholds.json")) else None
     summary = {}; allres = {}
     for f in sorted(glob.glob(os.path.join(here, "results", "*.json"))):
-        res = json.load(open(f)); allres[res["config"]] = res
-    if "B_noul_text" in allres and "C_choice_text" in allres:
-        # derived: noul probs for session_recall/memory_store, choice probs for the rest (two calls: 2 noul rows + 1 choice row)
-        b = {r["id"]: r for r in allres["B_noul_text"]["rows"]}
-        rows = []
-        for r in allres["C_choice_text"]["rows"]:
-            p = dict(r["probs"]); p["session_recall"] = b[r["id"]]["probs"]["session_recall"]; p["memory_store"] = b[r["id"]]["probs"]["memory_store"]
-            rows.append({**r, "probs": p, "ms": r["ms"] + 2 * 340})
-            rows[-1].pop("choice")
-        allres["H_hybrid_text"] = {"config": "H_hybrid_text", "rows": rows}
+        res = json.load(open(f))
+        if res["config"] in allres:
+            raise ValueError("duplicate configuration %r in result files" % res["config"])
+        allres[res["config"]] = res
+    # Score recorded runs only. Combining independently measured arms cannot
+    # establish hybrid latency or usage, and must never replace an actual run.
     for k, res in allres.items():
         summary[k] = score_config(res, fixed)
-    json.dump(summary, open(os.path.join(here, "summary.json"), "w"), indent=1)
+    publish_summary(os.path.join(here, "summary.json"), summary)
     f2 = lambda x: "  -  " if x is None else "%.2f" % x
     print("config                     macroAUC ctxAUC | t0.5: mF1 top1 top1ctx noneFH | t0.6: mF1 top1 top1ctx noneFH | best: mF1 top1 top1ctx noneFH | ECE  | med/p90 ms")
     for k, s in summary.items():
