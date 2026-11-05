@@ -905,7 +905,7 @@ mod admission_gate_tests {
         assert!(Arc::ptr_eq(&first, &registry.gate_for(key.clone())));
 
         // Once the final holder releases the gate, the next same-source
-        // admission must receive a new one rather than resurrecting a stale lock.
+        // admission must receive a new one rather than reuse a stale lock.
         let retired = Arc::downgrade(&first);
         drop(first);
         drop(concurrent);

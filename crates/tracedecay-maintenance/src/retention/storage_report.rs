@@ -1335,9 +1335,9 @@ fn append_project_report(
         (true, Err(_)) => {}
     }
     let total_bytes = kinds.total();
-    // File::open + close on Unix may release an unrelated SQLite connection's
-    // process-wide record locks. In-process daemon reports do not inspect
-    // these header bytes; unknown is safer than a fabricated zero.
+    // Opening and closing this file on Unix may release an unrelated SQLite
+    // connection's process-wide record locks. In-process daemon reports skip
+    // these header bytes and report `None` instead of a fabricated zero.
     let (free_bytes, free_page_ratio) = if project_chain_is_nofollow && sample_free_page_header {
         sample_free_pages(&data_root.join(tracedecay_runtime_core::config::DB_FILENAME))
             .map_or((None, None), |(free_bytes, ratio)| {
@@ -1985,7 +1985,8 @@ mod tests {
         assert_eq!(page.stores[0].free_page_ratio, None);
 
         // The project-scoped admin route shares this builder with the offline
-        // CLI. It must use the daemon policy, not open and close a second FD.
+        // CLI. It must follow the daemon policy and must not open and close a
+        // second file descriptor.
         let project_report = build_project_storage_report_from_daemon(
             profile_root,
             &project.project_id,

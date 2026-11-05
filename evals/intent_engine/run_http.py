@@ -100,9 +100,9 @@ def require_exclusive_publication(directory):
 def publish_final_result(path, document):
     """Expose a completed JSON result only after its bytes are fully written.
 
-    The same-directory hard link is an exclusive publication: a competing
-    writer's result cannot be replaced, and a failed staged write cannot leave
-    an apparently completed but truncated JSON file.
+    The hard link fails if the output path exists, so it cannot replace a
+    competing writer's result. A failed staged write leaves nothing at the
+    output path, so no truncated JSON can look complete.
     """
     serialized = json.dumps(document, indent=1, allow_nan=False)
     directory = os.path.dirname(os.path.abspath(path))
@@ -355,9 +355,9 @@ def main(argv=None):
                 partial.flush()
                 done[case["id"]] = row
                 print(cfg, index, case["id"], "%.0f ms" % ms, flush=True)
-        # Exclusive publication must never expose a truncated final result:
-        # an interrupted or failed write leaves the complete partial log
-        # available for an exact-identity retry without new model calls.
+        # An interrupted or failed write leaves no truncated result at the
+        # output path. The complete partial log stays in place, so a retry with
+        # the same identity makes no new model calls.
         publish_final_result(path, {
             "config": name, "dataset_sha256": dataset_sha,
             "noul_temperature": args.noul_temperature,

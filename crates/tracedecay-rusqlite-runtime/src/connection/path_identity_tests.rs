@@ -281,8 +281,8 @@ fn dropping_secondary_identity_pins_never_releases_rollback_writer_locks() {
         .expect("hold writer transaction");
     probe_external_connection(&path, "write", true);
 
-    // In the old implementation these were independent dup(2) descriptors.
-    // Dropping either one discarded SQLite's unrelated process-wide lock.
+    // If these pins were independent dup(2) descriptors, dropping either one
+    // would discard SQLite's unrelated process-wide lock.
     drop(reader_pin);
     probe_external_connection(&path, "write", true);
     drop(writer_pin);

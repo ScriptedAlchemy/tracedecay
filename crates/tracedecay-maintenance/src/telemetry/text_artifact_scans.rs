@@ -1,4 +1,4 @@
-//! Text-artifact scan positions owned by the existing maintenance registry.
+//! Text-artifact scan positions owned by the maintenance registry.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};

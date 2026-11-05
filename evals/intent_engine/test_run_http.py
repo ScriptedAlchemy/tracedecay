@@ -361,8 +361,8 @@ class RunHttpTest(unittest.TestCase):
         foreign = self.output.parent / ".noul-link-probe-collision.linked"
         content = b"another publication owns this file\n"
         foreign.write_bytes(content)
-        # Force a collision with a real existing file; os.link itself must
-        # refuse it. Cleanup is not authorized to remove the winning file.
+        # Force a collision with a real existing file. os.link itself must
+        # refuse it, and cleanup must not remove the existing file.
         with patch.object(run_http.secrets, "token_hex", return_value="collision"):
             with patch.object(run_http, "post") as post:
                 with self.assertRaises(OSError):

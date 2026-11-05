@@ -1,8 +1,8 @@
 //! Process-retained directory progress for the maintenance owner.
 //!
-//! Entries are hints, never liveness or unlink authority. Each preparation
-//! re-reads current publication pointers and verifies the selected bytes; apply
-//! still revalidates under the existing store and project locks.
+//! Listed entries are only candidates. They do not decide liveness or permit an
+//! unlink. Each preparation re-reads current publication pointers and verifies
+//! the selected bytes, and apply revalidates under the store and project locks.
 
 use std::collections::BTreeSet;
 use std::fs::ReadDir;
@@ -32,10 +32,11 @@ pub(super) struct TextArtifactPageProgressV1 {
 
 /// A maintenance owner's unfinished text-artifact enumeration for one scope.
 ///
-/// Two directory streams and at most one bounded page survive between ticks.
-/// Restart discards only scan position, never a safety proof. Completed scans
-/// close both streams; the next ordinary tick opens a fresh inventory. No
-/// process-global cache or additional durable state is introduced.
+/// The scan keeps two directory streams and at most one bounded page between
+/// ticks. A restart loses only the scan position, because each preparation
+/// repeats the safety checks. A completed scan closes both streams, and the
+/// next tick opens a new inventory. The scan keeps no process-global cache or
+/// durable state.
 #[derive(Debug, Default)]
 pub struct CodeGenerationRetentionScanV1 {
     root: Option<PathBuf>,
@@ -328,8 +329,8 @@ mod tests {
             .prepare(store.path(), &BTreeSet::new(), &|| false, None)
             .unwrap();
         let page = Arc::clone(&plan.text_artifact_page_progress.as_ref().unwrap().page);
-        // No acknowledgement: the next preparation must revalidate the same
-        // page, as after an apply conflict or cancellation.
+        // Without an acknowledgement, the next preparation must revalidate the
+        // same page, as it does after an apply conflict or cancellation.
         let retry = scan
             .prepare(store.path(), &BTreeSet::new(), &|| false, None)
             .unwrap();

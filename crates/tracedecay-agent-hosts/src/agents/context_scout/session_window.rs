@@ -222,8 +222,8 @@ async fn window_message(
     let role = role_of(&loaded.role);
     let mut text = loaded.content.trim().to_owned();
     // Metadata on a user, tool-result, or system row is not an assistant
-    // invocation. Only the assistant role may grant recorded tool-action
-    // evidence; otherwise a tool result could fabricate a tool_calls key.
+    // invocation. Only assistant rows count as recorded tool-action evidence;
+    // otherwise a tool result could forge a `tool_calls` key.
     let mut tool_calls = if role == SessionWindowRoleV1::Assistant {
         loaded
             .metadata_json

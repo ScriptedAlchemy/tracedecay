@@ -444,8 +444,8 @@ fn parse_answer(
     answer: &Map<String, Value>,
     kind: &DecisionQuestionKindV1,
 ) -> Option<DecisionAnswerV1> {
-    // An omitted tag is supported, but a malformed explicit tag must not
-    // disappear into the same optional state and bypass kind validation.
+    // An omitted tag is valid, but a non-string tag must not also become
+    // `None` and skip kind validation.
     let declared = match answer.get("type") {
         None => None,
         Some(declared) => Some(declared.as_str()?),
@@ -527,7 +527,7 @@ fn choice_probabilities(
     // not a valid two-way choice.
     // A three-decimal response can deviate by up to 0.0005 per option.
     // Scale the sum tolerance with cardinality, but cap it at one percent
-    // so a large choice set cannot excuse a genuinely unnormalized answer.
+    // so a large choice set cannot excuse an unnormalized answer.
     let rounding_tolerance = (CHOICE_EPSILON * probabilities.len() as f64 / 2.0).min(0.01);
     if (probabilities.values().sum::<f64>() - 1.0).abs() > rounding_tolerance {
         return None;
@@ -1201,7 +1201,7 @@ mod tests {
             ),
             (score("q", &["low", "high"]), json!({"score": 0.5})),
         ] {
-            // A genuinely omitted tag remains compatible for every kind.
+            // An omitted tag is valid for every kind.
             let body = json!({"answers": {"q": &answer}}).to_string();
             let server = fake_decision_engine(200, &body, Duration::ZERO);
             let result = answered(
