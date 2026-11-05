@@ -676,7 +676,9 @@ impl CodexAdmissionGates {
         // this process-global mutex for every new source. Sweep only after a
         // number of new gates proportional to the last retained live set.
         if self.new_gates_since_sweep
-            >= self.sweep_after.max(MIN_CODEX_ADMISSION_GATE_SWEEP_INTERVAL)
+            >= self
+                .sweep_after
+                .max(MIN_CODEX_ADMISSION_GATE_SWEEP_INTERVAL)
         {
             self.by_source.retain(|_, gate| gate.strong_count() > 0);
             self.sweep_after = self.by_source.len();
