@@ -274,10 +274,13 @@ impl SealedStoreReceiptV1 {
 // A future sealed representation must not acquire live-generation ownership
 // merely by putting a parseable receipt at a familiar generation path.
 fn recognized_sealed_form(receipt: &SealedStoreReceiptV1) -> bool {
-    matches!(
-        (&receipt.base, receipt.form.as_str()),
-        (None, SEALED_STORE_FORM_COMPACT) | (Some(_), SEALED_STORE_FORM_LAYERED)
-    )
+    // Unknown graph formats cannot authorize ownership or deletion, even if
+    // the receipt otherwise resembles a current compact or layered store.
+    (1..=GraphFormatVersion::current().get()).contains(&receipt.graph_format)
+        && matches!(
+            (&receipt.base, receipt.form.as_str()),
+            (None, SEALED_STORE_FORM_COMPACT) | (Some(_), SEALED_STORE_FORM_LAYERED)
+        )
 }
 
 /// Digest and row counts that authorize a staging-row release without opening
@@ -710,6 +713,8 @@ mod sealed_census_tests {
         let foreign_projection = "e".repeat(64);
         let unknown_form = "0".repeat(64);
         let missing_layer_base = "1".repeat(64);
+        let future_graph_format = "2".repeat(64);
+        let zero_graph_format = "3".repeat(64);
         for name in [
             "unrecognized",
             ".staging-pending",
@@ -720,6 +725,8 @@ mod sealed_census_tests {
             foreign_projection.as_str(),
             unknown_form.as_str(),
             missing_layer_base.as_str(),
+            future_graph_format.as_str(),
+            zero_graph_format.as_str(),
         ] {
             fs::create_dir(root.join(name)).unwrap();
         }
@@ -822,6 +829,28 @@ mod sealed_census_tests {
             )
             .unwrap();
         }
+        // A current receipt version with an unsupported graph format is not
+        // proof of a readable store, even when its generation identity matches.
+        for (directory, graph_format) in [
+            (
+                future_graph_format.as_str(),
+                super::GraphFormatVersion::current().get() + 1,
+            ),
+            (zero_graph_format.as_str(), 0),
+        ] {
+            let mut value: serde_json::Value = serde_json::from_slice(&receipt(
+                "live",
+                &format!("generation:{directory}"),
+                SEALED_STORE_RECEIPT_VERSION,
+            ))
+            .unwrap();
+            value["graph_format"] = serde_json::json!(graph_format);
+            fs::write(
+                root.join(directory).join(SEALED_STORE_RECEIPT_FILE),
+                serde_json::to_vec(&value).unwrap(),
+            )
+            .unwrap();
+        }
         fs::write(root.join(&unknown_form).join("foreign"), vec![0_u8; 4096]).unwrap();
         let shared = root.join(&head).join("shared");
         fs::write(&shared, vec![0_u8; 8192]).unwrap();
@@ -831,6 +860,8 @@ mod sealed_census_tests {
             "unrecognized",
             unknown_form.as_str(),
             missing_layer_base.as_str(),
+            future_graph_format.as_str(),
+            zero_graph_format.as_str(),
         ] {
             fs::hard_link(&shared, root.join(directory).join("shared")).unwrap();
         }
@@ -856,6 +887,8 @@ mod sealed_census_tests {
                     || name == foreign_projection
                     || name == unknown_form
                     || name == missing_layer_base
+                    || name == future_graph_format
+                    || name == zero_graph_format
                 {
                     3
                 } else if name == head {
@@ -874,7 +907,7 @@ mod sealed_census_tests {
         assert_eq!((census.head_count, census.superseded_count), (1, 2));
         assert_eq!(
             (census.abandoned_staging_count, census.unrecognized_count),
-            (1, 5)
+            (1, 7)
         );
         assert_eq!(census.head_bytes, 8192 + head_receipt.len() as u64);
         assert_eq!(
