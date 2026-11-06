@@ -210,7 +210,10 @@ def lat(rows):
     observed_truncated = sum(value > 0 for value in dropped)
     result = {
         "median_ms": round(statistics.median(ms)),
-        "p90_ms": round(ms[int(0.9 * (len(ms) - 1))]),
+        # Nearest-rank tails cannot understate short runs by taking the
+        # first value of a two-sample run.
+        "p90_ms": round(ms[math.ceil(0.90 * len(ms)) - 1]),
+        "p95_ms": round(ms[math.ceil(0.95 * len(ms)) - 1]),
         "total_cases": len(rows),
         "cases_truncated": observed_truncated if len(dropped) == len(rows) else None,
         "observed_cases_truncated": observed_truncated,
@@ -322,12 +325,12 @@ if __name__ == "__main__":
         summary[k] = score_config(res, fixed)
     publish_summary(os.path.join(here, "summary.json"), summary)
     f2 = lambda x: "  -  " if x is None else "%.2f" % x
-    print("config                     macroAUC ctxAUC | t0.5: mF1 top1 top1ctx noneFH | t0.6: mF1 top1 top1ctx noneFH | best: mF1 top1 top1ctx noneFH | ECE  | med/p90 ms")
+    print("config                     macroAUC ctxAUC | t0.5: mF1 top1 top1ctx noneFH | t0.6: mF1 top1 top1ctx noneFH | best: mF1 top1 top1ctx noneFH | ECE  | med/p90/p95 ms")
     for k, s in summary.items():
         line = "%-26s %s    %s  |" % (k, f2(s["macro_auc"]), f2(s["macro_auc_ctx"]))
         for nm in ("t0.5", "t0.6", "best_t_in_sample"):
             m = s[nm]; line += " %s %s %s %s |" % (f2(m["macro_f1"]), f2(m["all"]["top1_acc"]), f2(m["ctx"]["top1_acc"]), f2(m["all"]["none_false_hint_rate"]))
-        line += " LOOmF1 %s | %.3f | %d/%d" % (f2(s["macro_loo_f1"]), s["reliability"]["ece"], s["latency"]["median_ms"], s["latency"]["p90_ms"])
+        line += " LOOmF1 %s | %.3f | %d/%d/%d" % (f2(s["macro_loo_f1"]), s["reliability"]["ece"], s["latency"]["median_ms"], s["latency"]["p90_ms"], s["latency"]["p95_ms"])
         line += " AUC categories %d/%d ctx %d/%d" % (s["macro_auc_n_categories"], len(CATS), s["macro_auc_ctx_n_categories"], len(CATS))
         if "choice_top1_acc" in s:
             line += "  argmax top1 all/ctx %s/%s noneFH %s" % (f2(s["choice_top1_acc"]["all"]), f2(s["choice_top1_acc"]["ctx"]), f2(s["choice_none_false_hint_rate"]))

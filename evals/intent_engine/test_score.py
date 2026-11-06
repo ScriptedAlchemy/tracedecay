@@ -121,6 +121,22 @@ class ScoringTests(unittest.TestCase):
                 self.assertIsNone(result["per_cat"][category][metric])
         self.assertEqual(result["t0.5"]["all"]["top1_acc"], 1.0)
 
+    def test_tail_latency_reports_nearest_rank_for_small_and_full_cohorts(self):
+        # Old floor((n - 1) * p) selected the fastest of two requests.
+        # Tail percentiles must come from observed samples.
+        for samples, expected in (
+            ([10], (10, 10, 10)),
+            ([10, 20], (15, 20, 20)),
+            (list(range(1, 21)), (10, 18, 19)),
+        ):
+            with self.subTest(samples=samples):
+                rows = [{**row(str(i)), "ms": elapsed}
+                        for i, elapsed in enumerate(samples)]
+                timing = score.score_config({"config": "tails", "rows": rows})["latency"]
+                actual = (timing["median_ms"], timing["p90_ms"], timing["p95_ms"])
+                self.assertEqual(actual, expected)
+                self.assertEqual(timing["total_cases"], len(samples))
+
     def test_empty_results_and_partial_choice_coverage_are_refused(self):
         with self.assertRaisesRegex(ValueError, "empty.*no rows to score"):
             score.score_config({"config": "empty", "rows": []})
@@ -218,6 +234,8 @@ class ScoringTests(unittest.TestCase):
             self.assertEqual(scored.returncode, 0, scored.stderr)
             summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
             self.assertIsNone(summary["sample"]["choice_top1_acc"]["no_ctx"])
+            self.assertEqual(summary["sample"]["latency"]["p95_ms"], 100)
+            self.assertIn("med/p90/p95 ms", scored.stdout)
             self.assertIn(
                 f"AUC categories 1/{len(score.CATS)} ctx 1/{len(score.CATS)}", scored.stdout,
             )
