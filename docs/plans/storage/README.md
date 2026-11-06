@@ -622,7 +622,8 @@ changes a file that holds memory.
 
 - Plan 02's "No asynchronous database API" and its interactive repository
   transactions: every storage API is async and every transaction is one job.
-- Store soft budgets have defaults and are enforced by `Storage::maintain`.
+- Store soft budgets: enforcement through `Storage::maintain` is a target that
+  does not exist yet. Today an over-budget store only produces a Doctor finding.
 - Plan 39's move of graph-shaped data off SQLite: mutable graph data (memory and
   session relations) lives in SQLite; Grafeo remains an immutable sealed format.
 - Plan 40's monolithic per-worktree generation segments: segments are
