@@ -894,7 +894,9 @@ fn open_verified_reader(
         let before = live_path_identity(&canonical_path).map_err(VerifiedReaderError::Identity)?;
         let moved = sqlite_connection_has_moved(&connection)
             .map_err(VerifiedReaderError::Identity)?
-            .ok_or(VerifiedReaderError::Identity(OpenedDatabaseFileError::Inspect))?;
+            .ok_or(VerifiedReaderError::Identity(
+                OpenedDatabaseFileError::Inspect,
+            ))?;
         let after = live_path_identity(&canonical_path).map_err(VerifiedReaderError::Identity)?;
         if before != file_identity || moved || after != file_identity {
             return Err(VerifiedReaderError::Identity(

@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
-/// A plain SQLite read or a verified foreign read. The verified case retains
-/// its inode pin for the whole connection lifetime instead of unpacking and
-/// dropping it immediately after admission.
+/// A plain SQLite read or a verified foreign read. The verified case keeps
+/// the SQLite connection alive through the last cloned handle. Unix must not
+/// retain an additional raw inode pin: closing it releases unrelated locks.
 enum SqliteReadHandle {
     Plain(rusqlite::Connection),
     Verified(tracedecay_rusqlite_runtime::VerifiedReader),
@@ -72,7 +72,7 @@ mod tests {
     }
 
     #[test]
-    fn verified_foreign_reader_retains_its_pin_until_the_last_handle_closes() {
+    fn verified_foreign_reader_keeps_its_sqlite_handle_until_last_clone_closes() {
         let dir = tempfile::tempdir().expect("test directory");
         let path = dir.path().join("foreign.sqlite3");
         {
@@ -87,9 +87,10 @@ mod tests {
         let verified = tracedecay_rusqlite_runtime::open_verified_immutable_reader(&path)
             .expect("open verified foreign database");
         let pinned_descriptors = descriptors_for(&path);
-        assert!(
-            pinned_descriptors >= 2,
-            "SQLite and its verified identity pin each retain an inode handle"
+        assert_eq!(
+            pinned_descriptors,
+            1,
+            "verified Unix reads must not open a second raw descriptor to the SQLite inode"
         );
 
         let reader = SqliteReadConn::new_verified(verified);
