@@ -271,6 +271,15 @@ impl SealedStoreReceiptV1 {
     }
 }
 
+// A future sealed representation must not acquire live-generation ownership
+// merely by putting a parseable receipt at a familiar generation path.
+fn recognized_sealed_form(receipt: &SealedStoreReceiptV1) -> bool {
+    matches!(
+        (&receipt.base, receipt.form.as_str()),
+        (None, SEALED_STORE_FORM_COMPACT) | (Some(_), SEALED_STORE_FORM_LAYERED)
+    )
+}
+
 /// Digest and row counts that authorize a staging-row release without opening
 /// the sealed engine.
 pub(crate) struct SealedReleaseEvidence {
@@ -608,6 +617,7 @@ fn census_sealed_store_entries(
             || !name.bytes().all(|byte| byte.is_ascii_hexdigit())
             || receipt.version != SEALED_STORE_RECEIPT_VERSION
             || receipt.physical_namespace != format!("generation:{name}")
+            || !recognized_sealed_form(&receipt)
         {
             census.unrecognized_count += 1;
             continue;
@@ -698,6 +708,8 @@ mod sealed_census_tests {
         let wrong_namespace = "c".repeat(64);
         let future_version = "d".repeat(64);
         let foreign_projection = "e".repeat(64);
+        let unknown_form = "0".repeat(64);
+        let missing_layer_base = "1".repeat(64);
         for name in [
             "unrecognized",
             ".staging-pending",
@@ -706,6 +718,8 @@ mod sealed_census_tests {
             wrong_namespace.as_str(),
             future_version.as_str(),
             foreign_projection.as_str(),
+            unknown_form.as_str(),
+            missing_layer_base.as_str(),
         ] {
             fs::create_dir(root.join(name)).unwrap();
         }
@@ -789,9 +803,35 @@ mod sealed_census_tests {
             &foreign_receipt,
         )
         .unwrap();
+        // Parseable, identity-bound receipts with unknown or inconsistent forms
+        // must not borrow a verified head's count or claim its physical bytes.
+        for (directory, form) in [
+            (unknown_form.as_str(), "future-container"),
+            (missing_layer_base.as_str(), "layered"),
+        ] {
+            let mut value: serde_json::Value = serde_json::from_slice(&receipt(
+                "live",
+                &format!("generation:{directory}"),
+                SEALED_STORE_RECEIPT_VERSION,
+            ))
+            .unwrap();
+            value["form"] = serde_json::json!(form);
+            fs::write(
+                root.join(directory).join(SEALED_STORE_RECEIPT_FILE),
+                serde_json::to_vec(&value).unwrap(),
+            )
+            .unwrap();
+        }
+        fs::write(root.join(&unknown_form).join("foreign"), vec![0_u8; 4096]).unwrap();
         let shared = root.join(&head).join("shared");
         fs::write(&shared, vec![0_u8; 8192]).unwrap();
-        for directory in [old.as_str(), ".staging-pending", "unrecognized"] {
+        for directory in [
+            old.as_str(),
+            ".staging-pending",
+            "unrecognized",
+            unknown_form.as_str(),
+            missing_layer_base.as_str(),
+        ] {
             fs::hard_link(&shared, root.join(directory).join("shared")).unwrap();
         }
 
@@ -814,6 +854,8 @@ mod sealed_census_tests {
                 } else if name == wrong_namespace
                     || name == future_version
                     || name == foreign_projection
+                    || name == unknown_form
+                    || name == missing_layer_base
                 {
                     3
                 } else if name == head {
@@ -832,7 +874,7 @@ mod sealed_census_tests {
         assert_eq!((census.head_count, census.superseded_count), (1, 2));
         assert_eq!(
             (census.abandoned_staging_count, census.unrecognized_count),
-            (1, 3)
+            (1, 5)
         );
         assert_eq!(census.head_bytes, 8192 + head_receipt.len() as u64);
         assert_eq!(
@@ -888,14 +930,10 @@ pub(crate) fn discard_superseded_sealed_generations(
         };
         // The old graph format alone is not proof that this build owns the
         // artifact: a newer or malformed sealed form must survive a downgrade.
-        let known_form = matches!(
-            (&receipt.base, receipt.form.as_str()),
-            (None, SEALED_STORE_FORM_COMPACT) | (Some(_), SEALED_STORE_FORM_LAYERED)
-        );
         if receipt.version != SEALED_STORE_RECEIPT_VERSION
             || receipt.physical_namespace != format!("generation:{name}")
             || receipt.graph_format >= GraphFormatVersion::current().get()
-            || !known_form
+            || !recognized_sealed_form(&receipt)
         {
             continue;
         }
