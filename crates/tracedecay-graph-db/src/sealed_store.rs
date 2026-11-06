@@ -902,7 +902,11 @@ mod superseded_sealed_cleanup_tests {
         };
         receipt(&obsolete, current - 1, format!("generation:{obsolete}"));
         receipt(&future, current + 1, format!("generation:{future}"));
-        receipt(&wrong_identity, current - 1, "generation:foreign".to_owned());
+        receipt(
+            &wrong_identity,
+            current - 1,
+            "generation:foreign".to_owned(),
+        );
         receipt(&current_name, current, format!("generation:{current_name}"));
         receipt(unrelated, current - 1, format!("generation:{unrelated}"));
         std::fs::create_dir(root.join(&unreadable)).unwrap();
@@ -916,7 +920,10 @@ mod superseded_sealed_cleanup_tests {
 
         discard_superseded_sealed_generations(&database).unwrap();
 
-        assert!(!root.join(&obsolete).exists(), "old verified format is retired");
+        assert!(
+            !root.join(&obsolete).exists(),
+            "old verified format is retired"
+        );
         for name in [
             future.as_str(),
             wrong_identity.as_str(),
