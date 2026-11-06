@@ -464,7 +464,10 @@ def main(argv=None):
     case_ids = validate_dataset(dataset, questions)
     if args.subset:
         with open(args.subset, encoding="utf-8") as source:
-            ids = strict_json_loads(source.read())["ids"]
+            subset = strict_json_loads(source.read())
+        if not isinstance(subset, dict):
+            raise ValueError("subset must be a JSON object with ids")
+        ids = subset.get("ids")
         if (not isinstance(ids, list) or not ids
                 or any(not isinstance(case_id, str) for case_id in ids)
                 or len(set(ids)) != len(ids) or not set(ids).issubset(case_ids)):
@@ -546,7 +549,10 @@ def main(argv=None):
                 probs = noul_probabilities(response, questions)
                 server_ms = response.get("latency_ms")
                 if server_ms is None:
-                    server_ms = (response.get("timing") or {}).get("inference_ms")
+                    timing = response.get("timing")
+                    if timing is not None and not isinstance(timing, dict):
+                        raise ValueError("response timing must be an object or null")
+                    server_ms = (timing or {}).get("inference_ms")
                 usage = response.get("usage")
                 if usage is None:
                     usage = {}

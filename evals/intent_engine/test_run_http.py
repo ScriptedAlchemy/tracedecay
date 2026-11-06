@@ -648,6 +648,18 @@ class RunHttpTest(unittest.TestCase):
                     self.run_main()
                 post.assert_not_called()
 
+    def test_malformed_subset_document_refuses_before_network_or_evidence(self):
+        subset_path = self.root / "subset.json"
+        for malformed in ([], None, "first", False, {"case_ids": ["first"]}):
+            with self.subTest(subset=malformed):
+                self.write("subset.json", malformed)
+                with patch.object(run_http, "post") as post:
+                    with self.assertRaisesRegex(ValueError, "subset must"):
+                        self.run_main(["--subset", str(subset_path)])
+                    post.assert_not_called()
+                self.assertFalse(self.partial.exists())
+                self.assertFalse(self.output.exists())
+
     def test_invalid_subsets_cannot_silently_change_the_cohort(self):
         for ids in ([], ["absent"], ["first", "first"], "first"):
             with self.subTest(ids=ids), patch.object(run_http, "post") as post:
@@ -917,6 +929,27 @@ class RunHttpTest(unittest.TestCase):
         rows = json.loads(self.output.read_text())["rows"]
         self.assertEqual(len(rows), len(self.dataset))
         self.assertTrue(all(row["probs"]["impact"] == 0.25 for row in rows))
+
+    def test_malformed_server_timing_refuses_without_publishing_evidence(self):
+        sample = self.root / "first-response.json"
+        response, elapsed = self.response("", {"questions": run_http.noul_questions()})
+        response.pop("latency_ms")
+        for malformed in ([], "unknown", True, 23):
+            with self.subTest(timing=malformed):
+                with patch.object(run_http, "post",
+                                  return_value=({**response, "timing": malformed}, elapsed)):
+                    with self.assertRaisesRegex(ValueError, "response timing must be an object"):
+                        self.run_main(["--sample-out", str(sample)])
+                self.assertEqual(len(self.partial.read_text().splitlines()), 1)
+                self.assertFalse(sample.exists())
+                self.assertFalse(self.output.exists())
+
+        # Refusal must not poison a later valid run or publish misleading samples.
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main(["--sample-out", str(sample)])
+        self.assertEqual(post.call_count, len(self.dataset))
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), len(self.dataset))
+        self.assertTrue(sample.exists())
 
     def test_malformed_response_does_not_poison_first_sample_on_resume(self):
         sample = self.root / "first-response.json"
