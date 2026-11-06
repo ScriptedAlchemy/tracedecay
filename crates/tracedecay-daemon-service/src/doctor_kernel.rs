@@ -825,11 +825,11 @@ pub async fn collect_code_generation_retention_findings(
 /// absent table on a store that never published, a lock, a corrupt row).
 async fn live_sealed_generations(
     graph: &tracedecay_runtime_core::db::Database,
-) -> Option<BTreeSet<String>> {
+) -> Option<BTreeSet<(String, String, String)>> {
     let mut rows = graph
         .read_connection()
         .query(
-            "SELECT replay.generation
+            "SELECT replay.namespace, replay.projection, replay.generation
              FROM graph_publication_replay_v1 AS replay
              LEFT JOIN graph_verified_heads_v1 AS head
                ON head.shard_id = replay.shard_id
@@ -838,14 +838,19 @@ async fn live_sealed_generations(
              WHERE head.replay_sequence IS NULL
                 OR replay.sequence >= head.replay_sequence
              UNION
-             SELECT generation FROM graph_publication_replay_dependencies_v1",
+             SELECT namespace, projection, generation
+             FROM graph_publication_replay_dependencies_v1",
             (),
         )
         .await
         .ok()?;
     let mut heads = BTreeSet::new();
     while let Some(row) = rows.next().await.ok()? {
-        heads.insert(row.get::<String>(0).ok()?);
+        heads.insert((
+            row.get::<String>(0).ok()?,
+            row.get::<String>(1).ok()?,
+            row.get::<String>(2).ok()?,
+        ));
     }
     Some(heads)
 }

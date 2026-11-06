@@ -1354,7 +1354,11 @@ fn sealed_census_separates_heads_from_superseded_and_abandoned_bytes() {
     std::fs::create_dir_all(&unreadable).unwrap();
     std::fs::write(unreadable.join("generation.grafeo"), b"no receipt").unwrap();
 
-    let heads = std::collections::BTreeSet::from(["census-g2".to_owned()]);
+    let heads = std::collections::BTreeSet::from([(
+        identity.namespace.as_str().to_owned(),
+        identity.projection.as_str().to_owned(),
+        "census-g2".to_owned(),
+    )]);
     let census =
         tracedecay_graph_db::census_sealed_store(&support::graph_path(temp.path()), &heads)
             .unwrap();

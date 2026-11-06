@@ -551,15 +551,15 @@ fn sealed_root_entries(root: &Path) -> std::io::Result<Option<std::fs::ReadDir>>
     }
 }
 
-/// Measure the sealed root beside `database_path` against the generation ids
-/// of the store's current verified heads (as journaled: `<projection>:<digest>`).
+/// Measure the sealed root beside `database_path` against the full
+/// namespace, projection, and generation identities of verified heads.
 ///
 /// Metadata only: every entry is one receipt read plus a directory size walk,
 /// never a container open. An unreadable receipt counts as unrecognized so the
 /// census stays truthful when a receipt is mid-write or corrupt.
 pub fn census_sealed_store(
     database_path: &Path,
-    head_generations: &std::collections::BTreeSet<String>,
+    head_generations: &std::collections::BTreeSet<(String, String, String)>,
 ) -> std::io::Result<SealedStoreCensusV1> {
     let root = sealed_store_root(database_path);
     let Some(entries) = sealed_root_entries(&root)? else {
@@ -570,7 +570,7 @@ pub fn census_sealed_store(
 
 fn census_sealed_store_entries(
     entries: impl IntoIterator<Item = std::io::Result<std::fs::DirEntry>>,
-    head_generations: &std::collections::BTreeSet<String>,
+    head_generations: &std::collections::BTreeSet<(String, String, String)>,
 ) -> std::io::Result<SealedStoreCensusV1> {
     let mut census = SealedStoreCensusV1::default();
     let mut heads = Vec::new();
@@ -612,7 +612,11 @@ fn census_sealed_store_entries(
             census.unrecognized_count += 1;
             continue;
         }
-        if head_generations.contains(&receipt.generation) {
+        if head_generations.contains(&(
+            receipt.namespace.clone(),
+            receipt.projection.clone(),
+            receipt.generation.clone(),
+        )) {
             census.head_count += 1;
             heads.push(path);
         } else {
@@ -693,6 +697,7 @@ mod sealed_census_tests {
         let head = "b".repeat(64);
         let wrong_namespace = "c".repeat(64);
         let future_version = "d".repeat(64);
+        let foreign_projection = "e".repeat(64);
         for name in [
             "unrecognized",
             ".staging-pending",
@@ -700,6 +705,7 @@ mod sealed_census_tests {
             head.as_str(),
             wrong_namespace.as_str(),
             future_version.as_str(),
+            foreign_projection.as_str(),
         ] {
             fs::create_dir(root.join(name)).unwrap();
         }
@@ -767,6 +773,21 @@ mod sealed_census_tests {
             )
             .unwrap();
         }
+        // A different projection may legitimately reuse the same generation
+        // ID; its sealed artifact must not borrow the verified head's status.
+        let mut foreign_receipt: serde_json::Value = serde_json::from_slice(&receipt(
+            "live",
+            &format!("generation:{foreign_projection}"),
+            SEALED_STORE_RECEIPT_VERSION,
+        ))
+        .unwrap();
+        foreign_receipt["projection"] = serde_json::json!("other-projection");
+        let foreign_receipt = serde_json::to_vec(&foreign_receipt).unwrap();
+        fs::write(
+            root.join(&foreign_projection).join(SEALED_STORE_RECEIPT_FILE),
+            &foreign_receipt,
+        )
+        .unwrap();
         let shared = root.join(&head).join("shared");
         fs::write(&shared, vec![0_u8; 8192]).unwrap();
         for directory in [old.as_str(), ".staging-pending", "unrecognized"] {
@@ -789,7 +810,7 @@ mod sealed_census_tests {
                     1
                 } else if name == old {
                     2
-                } else if name == wrong_namespace || name == future_version {
+                } else if name == wrong_namespace || name == future_version || name == foreign_projection {
                     3
                 } else if name == head {
                     4
@@ -800,21 +821,32 @@ mod sealed_census_tests {
             entries.into_iter().map(Ok).collect::<Vec<_>>()
         };
         let census =
-            census_sealed_store_entries(ordered(), &BTreeSet::from(["live".to_owned()])).unwrap();
-        assert_eq!((census.head_count, census.superseded_count), (1, 1));
+            census_sealed_store_entries(
+                ordered(),
+                &BTreeSet::from([(
+                    "code".to_owned(),
+                    "index".to_owned(),
+                    "live".to_owned(),
+                )]),
+            )
+            .unwrap();
+        assert_eq!((census.head_count, census.superseded_count), (1, 2));
         assert_eq!(
             (census.abandoned_staging_count, census.unrecognized_count),
             (1, 3)
         );
         assert_eq!(census.head_bytes, 8192 + head_receipt.len() as u64);
-        assert_eq!(census.superseded_bytes, old_receipt.len() as u64);
+        assert_eq!(
+            census.superseded_bytes,
+            (old_receipt.len() + foreign_receipt.len()) as u64
+        );
         assert_eq!(census.abandoned_staging_bytes, 0);
 
         let no_head = census_sealed_store_entries(ordered(), &BTreeSet::new()).unwrap();
         assert_eq!(no_head.head_bytes, 0);
         assert_eq!(
             no_head.superseded_bytes,
-            8192 + head_receipt.len() as u64 + old_receipt.len() as u64
+            8192 + head_receipt.len() as u64 + old_receipt.len() as u64 + foreign_receipt.len() as u64
         );
     }
 }
