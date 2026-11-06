@@ -228,6 +228,41 @@ class ScoringTests(unittest.TestCase):
             self.assertIn("AUC eligible categories", compared.stdout)
             self.assertFalse((root / "dataset.json").exists())
 
+    def test_ambiguous_completed_result_refuses_to_replace_valid_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.stage_scripts(root)
+            results = root / "results"
+            results.mkdir()
+            original = json.dumps({"config": "sample", "rows": [row("a")]})
+            variants = [
+                (original.replace(
+                    '"config": "sample"', '"config": "other", "config": "sample"', 1
+                ), "duplicate JSON field"),
+                (original.replace(
+                    '"labels": []', '"labels": ["impact"], "labels": []', 1
+                ), "duplicate JSON field"),
+                (original.replace(
+                    '"ms": 100', '"ignored": NaN, "ms": 100', 1
+                ), "invalid JSON numeric constant"),
+            ]
+            summary = root / "summary.json"
+            for contents, diagnostic in variants:
+                self.assertNotEqual(contents, original)
+                (results / "sample.json").write_text(contents, encoding="utf-8")
+                summary.write_bytes(b"last verified summary\\n")
+                with self.subTest(diagnostic=diagnostic):
+                    attempt = self.run_script(root, "score.py")
+                    self.assertNotEqual(attempt.returncode, 0)
+                    self.assertIn(diagnostic, attempt.stderr)
+                    self.assertEqual(summary.read_bytes(), b"last verified summary\\n")
+            (results / "sample.json").write_text(original, encoding="utf-8")
+            scored = self.run_script(root, "score.py")
+            self.assertEqual(scored.returncode, 0, scored.stderr)
+            self.assertEqual(
+                json.loads(summary.read_text())["sample"]["latency"]["total_cases"], 1
+            )
+
     def test_empty_cli_result_does_not_overwrite_an_existing_summary(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

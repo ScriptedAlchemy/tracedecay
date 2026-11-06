@@ -111,6 +111,74 @@ class RunHttpTest(unittest.TestCase):
         finally:
             self.write("dataset.json", self.dataset)
 
+    def test_ambiguous_json_inputs_refuse_before_inference(self):
+        dataset_path = self.root / "dataset.json"
+        server_path = self.root / "server.json"
+        subset_path = self.root / "subset.json"
+        original_dataset = dataset_path.read_text(encoding="utf-8")
+        original_server = server_path.read_text(encoding="utf-8")
+        variants = [
+            (dataset_path, original_dataset.replace(
+                '"labels": ["impact"]', '"labels": [], "labels": ["impact"]', 1
+            ), (), "duplicate JSON field"),
+            (server_path, original_server.replace(
+                '"checkpoint": "weights@immutable-revision"',
+                '"checkpoint": "other", "checkpoint": "weights@immutable-revision"', 1
+            ), (), "duplicate JSON field"),
+            (subset_path, '{"ids":["first"],"ids":["second"]}',
+             ("--subset", str(subset_path)), "duplicate JSON field"),
+            (dataset_path, original_dataset.replace(
+                '"current_prompt": "What breaks?"',
+                '"current_prompt": "What breaks?", "debug": NaN', 1
+            ), (), "invalid JSON numeric constant"),
+        ]
+        for path, contents, extra, diagnostic in variants:
+            original = path.read_bytes() if path.exists() else None
+            try:
+                if original is not None:
+                    self.assertNotEqual(contents, original.decode("utf-8"))
+                path.write_text(contents, encoding="utf-8")
+                with self.subTest(path=path.name, diagnostic=diagnostic):
+                    with patch.object(run_http, "post") as post:
+                        with self.assertRaisesRegex(ValueError, diagnostic):
+                            self.run_main(extra)
+                        post.assert_not_called()
+                    self.assertFalse(self.partial.exists())
+                    self.assertFalse(self.output.exists())
+            finally:
+                if original is None:
+                    path.unlink()
+                else:
+                    path.write_bytes(original)
+
+    def test_ambiguous_partial_json_refuses_without_mutating_resume(self):
+        self.interrupt()
+        original = self.partial.read_text(encoding="utf-8")
+        header, row = original.splitlines()
+        variants = [
+            header.replace(
+                '"experiment_sha256":', '"experiment_sha256": "fake", "experiment_sha256":', 1
+            ) + "\n" + row + "\n",
+            header + "\n" + row.replace(
+                '"labels":', '"labels": [], "labels":', 1
+            ) + "\n",
+            header + "\n" + row.replace(
+                '"ms":', '"unrelated": Infinity, "ms":', 1
+            ) + "\n",
+        ]
+        try:
+            for ambiguous in variants:
+                with self.subTest(evidence=ambiguous[-120:]):
+                    self.assertNotEqual(ambiguous, original)
+                    self.partial.write_text(ambiguous, encoding="utf-8")
+                    self.assert_refused_unchanged()
+        finally:
+            self.partial.write_text(original, encoding="utf-8")
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main()
+        post.assert_called_once()
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+
     def test_exact_resume_only_requests_the_missing_case(self):
         self.interrupt()
         with patch.object(run_http, "post", side_effect=self.response) as post:

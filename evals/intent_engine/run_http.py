@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from common import calibrated, noul_questions, prompt_only, text_window
+from common import calibrated, noul_questions, prompt_only, strict_json_loads, text_window
 
 STATES = {
     "A_noul_prompt": prompt_only,
@@ -161,16 +161,6 @@ def load_bearer_token(name, url):
     return token
 
 
-def reject_duplicate_json_fields(pairs):
-    """Reject ambiguous nested JSON objects before recording model evidence."""
-    obj = {}
-    for key, value in pairs:
-        if key in obj:
-            raise ValueError(f"decision response contains duplicate JSON field: {key}")
-        obj[key] = value
-    return obj
-
-
 def post(url, body, timeout=1800, bearer_token=None):
     require_http_endpoint(url)
     headers = {"content-type": "application/json"}
@@ -195,13 +185,13 @@ def post(url, body, timeout=1800, bearer_token=None):
         payload = response.read(MAX_DECISION_RESPONSE_BYTES + 1)
         if len(payload) > MAX_DECISION_RESPONSE_BYTES:
             raise ValueError("decision response exceeds the 1 MiB size limit")
-        out = json.loads(payload, object_pairs_hook=reject_duplicate_json_fields)
+        out = strict_json_loads(payload)
     return out, (time.perf_counter() - started) * 1000
 
 
 def load_server_config(path):
     with open(path, encoding="utf-8") as source:
-        config = json.load(source)
+        config = strict_json_loads(source.read())
     if not isinstance(config, dict):
         raise ValueError("--server-config must contain a JSON object")
     for field in ("checkpoint", "server_revision", "backend", "dtype"):
@@ -331,13 +321,13 @@ def open_partial_for_resume(path):
 def resume_rows(partial, header, cases, requests, questions, temperature):
     """Validate the whole existing log before appending or issuing HTTP work."""
     first = partial.readline()
-    if not first.endswith("\n") or json.loads(first) != header:
+    if not first.endswith("\n") or strict_json_loads(first) != header:
         raise ValueError("partial output belongs to another or unrecorded experiment; use a new tag")
     done = {}
     for line_number, line in enumerate(partial, 2):
         if not line.endswith("\n"):
             raise ValueError(f"partial output has an incomplete row at line {line_number}")
-        row = json.loads(line)
+        row = strict_json_loads(line)
         case_id = row.get("id") if isinstance(row, dict) else None
         if not isinstance(case_id, str) or case_id not in cases or case_id in done:
             raise ValueError(f"partial output has an unknown or duplicate case at line {line_number}")
@@ -410,13 +400,13 @@ def main(argv=None):
         raise ValueError(f"sample path exists but is not a regular file: {args.sample_out}")
     with open(os.path.join(HERE, "dataset.json"), "rb") as source:
         dataset_bytes = source.read()
-    dataset = json.loads(dataset_bytes)
+    dataset = strict_json_loads(dataset_bytes)
     dataset_sha = hashlib.sha256(dataset_bytes).hexdigest()
     questions = noul_questions()
     case_ids = validate_dataset(dataset, questions)
     if args.subset:
         with open(args.subset, encoding="utf-8") as source:
-            ids = json.load(source)["ids"]
+            ids = strict_json_loads(source.read())["ids"]
         if (not isinstance(ids, list) or not ids
                 or any(not isinstance(case_id, str) for case_id in ids)
                 or len(set(ids)) != len(ids) or not set(ids).issubset(case_ids)):

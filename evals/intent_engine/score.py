@@ -6,7 +6,7 @@ macro F1 retains the historical fixed-CATS, zero-for-undefined convention.
 """
 import bisect, hashlib, json, glob, math, os, re, statistics, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import CATS, calibrated
+from common import CATS, calibrated, strict_json_loads
 
 TH = [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
@@ -304,10 +304,15 @@ def score_config(res, fixed_t=None):
 
 if __name__ == "__main__":
     here = os.path.dirname(os.path.abspath(__file__))
-    fixed = json.load(open(os.path.join(here, "fixed_thresholds.json"))) if os.path.exists(os.path.join(here, "fixed_thresholds.json")) else None
+    fixed = None
+    thresholds_path = os.path.join(here, "fixed_thresholds.json")
+    if os.path.exists(thresholds_path):
+        with open(thresholds_path, encoding="utf-8") as source:
+            fixed = strict_json_loads(source.read())
     summary = {}; allres = {}
     for f in sorted(glob.glob(os.path.join(here, "results", "*.json"))):
-        res = json.load(open(f))
+        with open(f, encoding="utf-8") as source:
+            res = strict_json_loads(source.read())
         if res["config"] in allres:
             raise ValueError("duplicate configuration %r in result files" % res["config"])
         allres[res["config"]] = res
