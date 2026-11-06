@@ -889,9 +889,16 @@ pub(crate) fn discard_superseded_sealed_generations(
         let Some(receipt) = load_sealed_store_receipt(&path).ok().flatten() else {
             continue;
         };
+        // The old graph format alone is not proof that this build owns the
+        // artifact: a newer or malformed sealed form must survive a downgrade.
+        let known_form = matches!(
+            (&receipt.base, receipt.form.as_str()),
+            (None, SEALED_STORE_FORM_COMPACT) | (Some(_), SEALED_STORE_FORM_LAYERED)
+        );
         if receipt.version != SEALED_STORE_RECEIPT_VERSION
             || receipt.physical_namespace != format!("generation:{name}")
             || receipt.graph_format >= GraphFormatVersion::current().get()
+            || !known_form
         {
             continue;
         }
@@ -981,6 +988,8 @@ mod superseded_sealed_cleanup_tests {
         let unreadable = "d".repeat(64);
         let ordinary_file = "e".repeat(64);
         let current_name = "f".repeat(64);
+        let unknown_form = "0".repeat(64);
+        let inconsistent_form = "1".repeat(64);
         let unrelated = "operator-data";
 
         let receipt = |name: &str, format: u32, physical_namespace: String| {
@@ -1016,6 +1025,20 @@ mod superseded_sealed_cleanup_tests {
             "generation:foreign".to_owned(),
         );
         receipt(&current_name, current, format!("generation:{current_name}"));
+        // A parseable receipt with an older graph-format number can belong to
+        // a newer sealed representation, or be inconsistent with its base.
+        // Neither is a proven artifact that this build is allowed to remove.
+        for (name, form) in [
+            (&unknown_form, "future-container"),
+            (&inconsistent_form, "layered"),
+        ] {
+            receipt(name, current - 1, format!("generation:{name}"));
+            let receipt_path = root.join(name).join(SEALED_STORE_RECEIPT_FILE);
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+            value["form"] = form.into();
+            std::fs::write(&receipt_path, serde_json::to_vec(&value).unwrap()).unwrap();
+        }
         receipt(unrelated, current - 1, format!("generation:{unrelated}"));
         std::fs::create_dir(root.join(&unreadable)).unwrap();
         std::fs::write(
@@ -1038,6 +1061,8 @@ mod superseded_sealed_cleanup_tests {
             unreadable.as_str(),
             ordinary_file.as_str(),
             current_name.as_str(),
+            unknown_form.as_str(),
+            inconsistent_form.as_str(),
             unrelated,
             ".staging-active",
         ] {
