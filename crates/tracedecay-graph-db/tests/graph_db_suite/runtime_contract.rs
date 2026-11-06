@@ -1064,7 +1064,10 @@ fn superseded_format_store_rebuild_removes_proven_old_seals_but_keeps_unproven()
         .unwrap();
     raw.close().unwrap();
     let sealed_generation_name = "0".repeat(64);
-    let sealed_generation = temp.path().join("graph.sealed").join(&sealed_generation_name);
+    let sealed_generation = temp
+        .path()
+        .join("graph.sealed")
+        .join(&sealed_generation_name);
     std::fs::create_dir_all(&sealed_generation).unwrap();
     std::fs::write(
         sealed_generation.join("generation.grafeo"),

@@ -960,7 +960,10 @@ mod superseded_sealed_cleanup_tests {
         assert!(remove_sealed_directory_checked(&root.join(&obsolete)).is_err());
 
         for name in [obsolete.as_str(), ".staging-abandoned", ".rows-0-foreign"] {
-            assert!(foreign.join(name).is_dir(), "foreign artifact {name} was removed");
+            assert!(
+                foreign.join(name).is_dir(),
+                "foreign artifact {name} was removed"
+            );
         }
     }
 
