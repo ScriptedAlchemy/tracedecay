@@ -158,14 +158,10 @@ this redesign does not need to settle; the last cutover step measures it.
   initialized subdirectory of a worktree (a monorepo subproject, which today's
   `discover_project_root` supports), the pair of root commit and relative path.
   On this host 7 of the 14 tracedecay clones have a local-path origin, 5 https and
-  2 ssh, so only the root commit converges all of them; the 14 clones and 32 linked
-  worktrees resolve to one project.
+  2 ssh; the 14 clones and 32 linked worktrees resolve to one project.
 - A project never re-keys. An unshallowed clone, a first commit in an unborn
   repository, or a new root after a fetch adds an alias to the existing project.
   So durable memory is never stranded under an old id.
-- `tracedecay project link <project_id>` and `tracedecay project split` record an
-  explicit alias or refusal in `catalog.db`, scoped to this profile, for forks that
-  should not share and unrelated repositories that should.
 - A cwd outside any repository and not explicitly initialized belongs to
   `projects/_profile/`. It never mints a project of its own.
 - Code indexes stay per worktree in `worktrees/<worktree_id>/`. Segments are
@@ -275,9 +271,9 @@ in.
   reconnect. Batched writes take one savepoint per job, so a job's ordinary error
   rolls back only that job. A suspect-connection error rolls back the whole batch;
   each job of the batch then runs alone on a fresh connection.
-- One fixed pool, `tracedecay-store-N` (default 6, clamp 2 to 16), serves every
-  file. A lane is per-file state: a write queue (the existing deficit-round-robin
-  `FairQueue`), a read queue, one write connection, at most two read connections,
+- One fixed pool, `tracedecay-store-N`, serves every file. A lane is per-file
+  state: a write queue (the existing deficit-round-robin `FairQueue`), a read
+  queue, one write connection, at most two read connections,
   and fence state. Any pool thread can run any lane; at most one thread holds a
   lane's write connection at a time. One thread is reserved for foreground classes
   (catalog, journal, memory) so bulk derivation cannot starve Work. Open lanes are
@@ -368,23 +364,9 @@ Each growth source from #4099:
 Each file carries `user_version` and a schema digest. The rule follows the class:
 
 - authoritative and durable classes (catalog, journal, memory, evidence):
-  forward-only, additive migrations in the crate, applied by the executor at open.
-  A non-additive change copies into `<class>.next` and renames over the file; no
-  copy is kept. No user-authored state is reset by a schema change.
+  admit only the exact final shape. Any other shape returns typed
+  `ResetRequired`; there is no migration.
 - rebuildable classes (derived, code): a mismatch means unlink and rebuild.
-
-Upgrade path for beta installs: `tracedecay wipe --stale` plus `tracedecay init`
-remains the reset for anything this design does not carry. Durable classes are
-carried, not reset. Because the store key stays `ProjectId` and the directory stays
-`projects/<project_id>/`, each project converts in place the first time the new
-binary opens it: `memory_v2_*` rows and the anchors they cite move from
-`tracedecay.db` to `memory.db`, workflow definitions and native-integration
-approvals move from `sessions.db` to `journal.db`, configuration revisions move from
-`global.db` to `catalog.db`, and the old files are deleted after the copy commits.
-Evidence is re-ingested from host files rather than copied. The conversion runs once
-per file, is deleted two releases later, and is not a compatibility reader: no code
-reads the old files after the conversion. The operator host was wiped on 2026-10-16
-and needs none of it.
 
 ### 8. Public port surface
 
@@ -512,7 +494,8 @@ Act on, and the change made:
   `forget` deletes durable data.
 - Evidence and journal were reset or unlinked on a schema change, destroying LLM
   summaries, history past host retention, workflow definitions and approvals (A, B,
-  C). All authoritative and durable classes now migrate forward; corruption salvages.
+  C). Authoritative and durable classes now admit only the exact final shape, and
+  corruption salvages.
 - Facts cite retrieval anchors through a foreign key, so anchors could not live in
   evictable evidence (B). Cited anchors live in `memory.db`.
 - `FnOnce` jobs made the reconnect-and-rerun ladder and fence reruns impossible,
@@ -549,15 +532,11 @@ blocking pool; that hop is intentional and the executor step removes it.
   byte on disk.
 - We accept losing cross-page snapshot consistency, because every read is a short
   job, in exchange for a total checkpoint fence. Pagination uses keyset cursors.
-- We accept that forks sharing a root commit share a project until `project
-  split`, in exchange for clones converging with no configuration.
 - We accept partial derived search during a derived rebuild, in exchange for
   corruption and schema changes that heal without an operator.
 - We accept a 30 s ceiling per write job; bulk work pages.
 - We accept Grafeo as an immutable file format. This is not a second engine: it has
   no WAL and no mutation, like the code-index generation files.
-- We accept a one-shot in-place conversion of durable rows for two releases,
-  because "durable memory survives" forbids a reset of that class.
 
 ## Alternatives considered
 
@@ -588,10 +567,8 @@ changes a file that holds memory.
    it, and no read parks a native worker. Proof: a native task awaiting a typed read
    leaves the native reader-wait counter unchanged (a mutation that reads inline
    fails the test).
-2. Memory durability. The stores that hold memory run at FULL; the memory tables
-   get additive migrations instead of `ResetRequired` with their first schema
-   change. Proof: those stores' writers report `synchronous=FULL` and the others
-   `NORMAL`.
+2. Memory durability. The stores that hold memory run at FULL. Proof: those
+   stores' writers report `synchronous=FULL` and the others `NORMAL`.
 3. Growth stops now. Worktree liveness by root instead of the shared `.git`, a
    collector for unregistered directories that never deletes durable data,
    response-handle sweeps every tick, `hook_analytics.jsonl` rotation, age-pruned
@@ -618,14 +595,12 @@ changes a file that holds memory.
    `ProfileLost` within one tick with the descriptors closed.
 8. Partition the sessions file and identity by repository. Split each project into
    journal, memory, evidence and derived; telemetry leaves the catalog; identity
-   adopts through aliases. The in-place conversion of durable rows ships here.
-   Per-stream cursors and dead letters replace the global queue: row poison
-   dead-letters per stream, and corrupt derived authority (ghost or divergent
-   provenance) rebuilds `derived.db` instead of being skipped. Delete
+   adopts through aliases. Per-stream cursors and dead letters replace the global
+   queue: row poison dead-letters per stream, and corrupt derived authority (ghost
+   or divergent provenance) rebuilds `derived.db` instead of being skipped. Delete
    `projection_queue`, `lcm-payloads/`, the string classifier, the store locator
    resolver and standalone registries. Proof: two full clones and a linked worktree
-   resolve to one project with three worktree directories; converted facts,
-   workflow definitions and approvals read back identically; a poisoned row
+   resolve to one project with three worktree directories; a poisoned row
    dead-letters while other streams project; corrupt provenance triggers a derived
    rebuild and the stream resumes.
 9. Graph narrowing. The memory graph and session-relation graphs move to SQLite
@@ -647,14 +622,11 @@ changes a file that holds memory.
 
 - Plan 02's "No asynchronous database API" and its interactive repository
   transactions: every storage API is async and every transaction is one job.
-- Plan 38's "Store soft budgets are owner-configured and inert by default": budgets
-  have defaults and are enforced by `Storage::maintain`.
+- Store soft budgets have defaults and are enforced by `Storage::maintain`.
 - Plan 39's move of graph-shaped data off SQLite: mutable graph data (memory and
   session relations) lives in SQLite; Grafeo remains an immutable sealed format.
 - Plan 40's monolithic per-worktree generation segments: segments are
   content-addressed per project.
-- The roadmap's reset-only rule for released stores, for the durable and
-  authoritative classes: they migrate forward; derived and code still rebuild.
 - The 2026-07-15 fold of sessions into the project-wide store, which had no
   recorded reason: ADR-003's failure-domain split is restored by class.
 
@@ -675,9 +647,7 @@ changes a file that holds memory.
   profile memory store (`user-memory.db`), commit at `synchronous=FULL`; every other
   store keeps `NORMAL`. `global.db` stays `NORMAL` although the catalog class is
   FULL, because it still takes per-hook analytics writes until telemetry splits out
-  in step 8. The additive-migration rule for memory ships with the first change to a
-  memory table (the conversion in step 8), not as machinery with no migration to
-  run. The class contract is unchanged.
+  in step 8. The class contract is unchanged.
 - Step 3 (2026-10-16, done). Four PRs stopped the growth this step names:
   - #4120. Orphan-store liveness no longer counts the shared git common
     directory, so a deleted worktree's store becomes collectable while its
@@ -1021,11 +991,3 @@ changes a file that holds memory.
   get it; it is deferred until a silent-corruption incident is on record.
 - Are 64 GiB per profile and 8 GiB of evidence per project the right defaults?
   Step 10 calibrates them from the first weeks of persisted usage.
-
-## Next implementation step
-
-The rest of step 5: the native writer-wait counter becomes a refusal of any
-synchronous writer wait on a native thread and both counters are deleted; then
-the interactive exact-SQL transactions (56 direct sites and about 190 behind the
-runtime-core async `Transaction`) become jobs. Step 7's first slice, writers and
-readers as tasks on one fixed pool, is in progress in parallel.

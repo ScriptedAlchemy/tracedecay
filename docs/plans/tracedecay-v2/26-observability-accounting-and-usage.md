@@ -145,7 +145,7 @@ vocabulary as current ownership.
   cancellation; analyzer startup, restart, and indexing/degraded state; cache
   reuse and overlay freshness; diagnostic add and clear; provider conflicts;
   host delivery path; partial coverage and drops; and bridge reconnect.
-- Plans 25/31 emit bounded incremental-index observations for exact worktree
+- Plan 25 emits bounded incremental-index observations for exact worktree
   identity classes without paths: event-to-reconcile and event-to-ready
   latency; debounced/raw event counts; overflow/rescan reason; candidate,
   hashed, parsed, and no-op file counts; Tree-sitter changed-range bytes;

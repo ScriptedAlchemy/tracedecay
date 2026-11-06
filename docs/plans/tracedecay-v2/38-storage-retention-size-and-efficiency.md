@@ -147,14 +147,9 @@ measurements, not inferred table sizes.
 
 ## Product contract
 
-1. **Branch store lifecycle.** Deleting a branch (or a worktree whose branch
-   is gone) schedules its branch-DB removal through the daemon. A periodic
-   daemon sweep reconciles `branches/` against live git refs. `branch gc`
-   remains the manual verb; the automatic path is the default.
-
-   **Dated amendment (2026-08-07, recorded decision, supersedes the
-   per-branch-DB model above).** Per-branch SQLite copies are retired as the
-   write-side mechanism. Non-default-branch writes now land in the single
+1. **Branch store lifecycle.** Per-branch SQLite copies are retired as the
+   write-side mechanism (dated amendment, 2026-08-07). Non-default-branch
+   writes now land in the single
    project store's next branch-graph publication epoch, fenced by the sync
    lease and sealed through the branch-meta `graph_source` CAS
    (`feat(graph): fence branch graph publication and mutation epochs`,

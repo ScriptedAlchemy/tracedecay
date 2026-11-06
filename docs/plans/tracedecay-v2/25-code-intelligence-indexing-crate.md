@@ -75,7 +75,7 @@ regresses.)
 Plan 25 owns code-generation, chunking, graph, and generation-bound evidence
 semantics, including source-bound shared-code facts sealed into each
 generation. Plan 15 owns quality evaluation. Application, transport, and
-dashboard plans consume the tested operations later. Plan 31 is archival.
+dashboard plans consume the tested operations later.
 
 ## Outcome
 
