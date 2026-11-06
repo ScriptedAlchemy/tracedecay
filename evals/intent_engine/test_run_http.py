@@ -930,9 +930,10 @@ class RunHttpTest(unittest.TestCase):
                 self.assertEqual(self.partial.read_bytes(), before)
 
     def test_invalid_answer_kinds_and_shapes_preserve_resumable_rows(self):
-        self.interrupt()
-        before = self.partial.read_bytes()
         sample = self.root / "rejected-response.json"
+        self.interrupt(["--sample-out", str(sample)])
+        before = self.partial.read_bytes()
+        original_sample = sample.read_bytes()
         response, elapsed = self.response("", {"questions": run_http.noul_questions()})
         invalid = []
         untyped = copy.deepcopy(response)
@@ -959,7 +960,7 @@ class RunHttpTest(unittest.TestCase):
                         self.run_main(["--sample-out", str(sample)])
                 self.assertEqual(self.partial.read_bytes(), before)
                 self.assertFalse(self.output.exists())
-                self.assertFalse(sample.exists())
+                self.assertEqual(sample.read_bytes(), original_sample)
 
         # The rejected response did not poison the partial log; valid
         # inference can continue from the already-settled first case.
@@ -1133,7 +1134,7 @@ class RunHttpTest(unittest.TestCase):
                 sample.unlink()
             return self.response(url, body)
 
-        with patch.object(run_http, "post", side_effect=lose_capture_during_second):
+        with patch.object(run_http, "post", side_effect=lose_capture_during_second_request):
             with self.assertRaisesRegex(ValueError, "sample disappeared"):
                 self.run_main(["--sample-out", str(sample)])
         self.assertEqual(calls, 2)
@@ -1228,6 +1229,7 @@ class RunHttpTest(unittest.TestCase):
 
     def test_transmitted_bytes_match_the_recorded_request_fingerprint(self):
         response = io.BytesIO(json.dumps({"answers": {}}).encode())
+        response.headers = {"Content-Length": str(len(response.getbuffer()))}
         body = {"state": "Unicode λ", "questions": {"a": {}, "b": {}}}
         with patch("urllib.request.build_opener") as build_opener:
             build_opener.return_value.open.return_value = response
