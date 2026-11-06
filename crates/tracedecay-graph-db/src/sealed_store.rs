@@ -535,17 +535,35 @@ pub struct SealedStoreCensusV1 {
 /// Metadata only: every entry is one receipt read plus a directory size walk,
 /// never a container open. An unreadable receipt counts as unrecognized so the
 /// census stays truthful when a receipt is mid-write or corrupt.
+// A symlinked sealed root must not redirect cleanup or accounting into
+// unrelated data. A missing root is normal before the first seal.
+fn sealed_root_is_real_directory(root: &Path) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(root) {
+        Ok(metadata) if metadata.is_dir() => Ok(true),
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "sealed store root is not a real directory",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn sealed_root_entries(root: &Path) -> std::io::Result<Option<std::fs::ReadDir>> {
+    if sealed_root_is_real_directory(root)? {
+        std::fs::read_dir(root).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
 pub fn census_sealed_store(
     database_path: &Path,
     head_generations: &std::collections::BTreeSet<String>,
 ) -> std::io::Result<SealedStoreCensusV1> {
     let root = sealed_store_root(database_path);
-    let entries = match std::fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(SealedStoreCensusV1::default());
-        }
-        Err(error) => return Err(error),
+    let Some(entries) = sealed_root_entries(&root)? else {
+        return Ok(SealedStoreCensusV1::default());
     };
     census_sealed_store_entries(entries, head_generations)
 }
@@ -740,9 +758,9 @@ pub(crate) fn discard_superseded_sealed_generations(
     database_path: &Path,
 ) -> Result<(), GraphDbError> {
     let root = sealed_store_root(database_path);
-    let entries = match std::fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+    let entries = match sealed_root_entries(&root) {
+        Ok(Some(entries)) => entries,
+        Ok(None) => return Ok(()),
         Err(error) => return Err(sealed_store_io_failure("sealed root read failed", error)),
     };
     for entry in entries {
@@ -789,6 +807,57 @@ pub(crate) fn discard_superseded_sealed_generations(
 #[cfg(test)]
 mod superseded_sealed_cleanup_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn foreign_directory_behind_a_symlinked_sealed_root_is_never_cleaned() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("graph.grafeo");
+        let root = sealed_store_root(&database);
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir(&foreign).unwrap();
+
+        let current = GraphFormatVersion::current().get();
+        assert!(current > 0);
+        let obsolete = "a".repeat(64);
+        let obsolete_path = foreign.join(&obsolete);
+        std::fs::create_dir(&obsolete_path).unwrap();
+        std::fs::write(
+            obsolete_path.join(SEALED_STORE_RECEIPT_FILE),
+            serde_json::to_vec(&serde_json::json!({
+                "version": SEALED_STORE_RECEIPT_VERSION,
+                "form": "compact",
+                "namespace": "code",
+                "projection": "index",
+                "generation": "foreign",
+                "physical_namespace": format!("generation:{obsolete}"),
+                "recovered_digest": "digest",
+                "entities": 0,
+                "relations": 0,
+                "graph_format": current - 1,
+                "row_sum": null,
+                "base": null,
+                "source_generation": null,
+                "watermark": null
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        for name in [".staging-abandoned", ".rows-0-foreign"] {
+            std::fs::create_dir(foreign.join(name)).unwrap();
+        }
+        std::os::unix::fs::symlink(&foreign, &root).unwrap();
+
+        assert!(census_sealed_store(&database, &Default::default()).is_err());
+        assert!(discard_superseded_sealed_generations(&database).is_err());
+        sweep_abandoned_sealed_staging(&database);
+        sweep_abandoned_row_spills(&database);
+        assert!(remove_sealed_directory_checked(&root.join(&obsolete)).is_err());
+
+        for name in [obsolete.as_str(), ".staging-abandoned", ".rows-0-foreign"] {
+            assert!(foreign.join(name).is_dir(), "foreign artifact {name} was removed");
+        }
+    }
 
     #[test]
     fn only_proven_older_generation_artifacts_can_be_removed() {
@@ -874,9 +943,9 @@ mod superseded_sealed_cleanup_tests {
 /// this store is in flight.
 pub(crate) fn sweep_abandoned_sealed_staging(database_path: &Path) {
     let root = sealed_store_root(database_path);
-    let entries = match std::fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+    let entries = match sealed_root_entries(&root) {
+        Ok(Some(entries)) => entries,
+        Ok(None) => return,
         Err(error) => {
             tracing::warn!(
                 event = "sealed_staging_sweep_unreadable",
@@ -928,8 +997,18 @@ const ROW_SPILL_PREFIX: &str = ".rows-";
 /// whose spill removes itself when it drops.
 pub(crate) fn sweep_abandoned_row_spills(database_path: &Path) {
     let root = sealed_store_root(database_path);
-    let Ok(entries) = std::fs::read_dir(&root) else {
-        return;
+    let entries = match sealed_root_entries(&root) {
+        Ok(Some(entries)) => entries,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(
+                event = "graph_row_spill_sweep_unreadable",
+                root = %root.display(),
+                %error,
+                "sealed root cannot be safely enumerated"
+            );
+            return;
+        }
     };
     let own = format!("{ROW_SPILL_PREFIX}{}-", std::process::id());
     for entry in entries.flatten() {
@@ -954,6 +1033,14 @@ pub(crate) fn sweep_abandoned_row_spills(database_path: &Path) {
 }
 
 fn remove_sealed_directory_checked(directory: &Path) -> Result<(), GraphDbError> {
+    let root = directory
+        .parent()
+        .ok_or_else(|| GraphDbError::unavailable("sealed artifact has no parent directory"))?;
+    match sealed_root_is_real_directory(root) {
+        Ok(true) => {}
+        Ok(false) => return Ok(()),
+        Err(error) => return Err(sealed_store_io_failure("sealed root validation failed", error)),
+    }
     match std::fs::remove_dir_all(directory) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
