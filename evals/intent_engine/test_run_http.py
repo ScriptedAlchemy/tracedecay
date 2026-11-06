@@ -179,6 +179,50 @@ class RunHttpTest(unittest.TestCase):
         post.assert_called_once()
         self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
 
+    def test_oversized_resume_lines_refuse_before_network_without_damage(self):
+        self.interrupt()
+        original = self.partial.read_bytes()
+        header = original.splitlines(keepends=True)[0]
+        invalid = (
+            (b"x" * 200_000 + b"\n", "oversized header"),
+            (header + b"x" * 200_000 + b"\n", "oversized row"),
+        )
+        for contents, diagnostic in invalid:
+            with self.subTest(diagnostic=diagnostic):
+                self.partial.write_bytes(contents)
+                with patch.object(run_http, "post") as post:
+                    with self.assertRaisesRegex(ValueError, diagnostic):
+                        self.run_main()
+                    post.assert_not_called()
+                self.assertEqual(self.partial.read_bytes(), contents)
+                self.assertFalse(self.output.exists())
+        self.partial.write_bytes(original)
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main()
+        post.assert_called_once()
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+
+    def test_oversized_sample_capture_refuses_before_resume_inference(self):
+        sample = self.root / "first-response.json"
+        extra = ["--sample-out", str(sample)]
+        self.interrupt(extra)
+        original_sample = sample.read_bytes()
+        original_partial = self.partial.read_bytes()
+        oversized = b"x" * (9 * run_http.MAX_DECISION_RESPONSE_BYTES + 65_536)
+        sample.write_bytes(oversized)
+        with patch.object(run_http, "post") as post:
+            with self.assertRaisesRegex(ValueError, "sample capture exceeds"):
+                self.run_main(extra)
+            post.assert_not_called()
+        self.assertEqual(sample.read_bytes(), oversized)
+        self.assertEqual(self.partial.read_bytes(), original_partial)
+        self.assertFalse(self.output.exists())
+        sample.write_bytes(original_sample)
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main(extra)
+        post.assert_called_once()
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+
     def test_exact_resume_only_requests_the_missing_case(self):
         self.interrupt()
         with patch.object(run_http, "post", side_effect=self.response) as post:

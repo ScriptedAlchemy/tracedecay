@@ -46,6 +46,14 @@ def request_bytes(body):
     return json.dumps(body, allow_nan=False).encode("utf-8")
 
 
+def sample_read_limit(requests):
+    """Bound saved raw captures relative to the transmitted request and HTTP cap."""
+    largest_request = max(len(request_bytes(body)) for body, _ in requests.values())
+    # Indentation and JSON escaping can expand the parsed HTTP body. Keep
+    # a conservative allowance without accepting arbitrarily large files.
+    return 64 * 1024 + 8 * (MAX_DECISION_RESPONSE_BYTES + largest_request)
+
+
 def verify_existing_sample(path, header, requests, done, questions):
     """A resumed capture must describe a durable response from this experiment.
 
@@ -58,9 +66,15 @@ def verify_existing_sample(path, header, requests, done, questions):
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise ValueError(f"sample path is not a regular file: {path}")
+        limit = sample_read_limit(requests)
+        if os.fstat(descriptor).st_size > limit:
+            raise ValueError("sample capture exceeds bounded evidence size")
         with os.fdopen(descriptor, "rb") as source:
             descriptor = None
-            sample = strict_json_loads(source.read())
+            contents = source.read(limit + 1)
+            if len(contents) > limit:
+                raise ValueError("sample capture exceeds bounded evidence size")
+            sample = strict_json_loads(contents)
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -353,11 +367,21 @@ def open_partial_for_resume(path):
 
 def resume_rows(partial, header, cases, requests, questions, temperature):
     """Validate the whole existing log before appending or issuing HTTP work."""
-    first = partial.readline()
+    header_limit = len(json.dumps(header, allow_nan=False)) + 1
+    first = partial.readline(header_limit + 1)
+    if len(first) > header_limit:
+        raise ValueError("partial output has an oversized header")
     if not first.endswith("\n") or strict_json_loads(first) != header:
         raise ValueError("partial output belongs to another or unrecorded experiment; use a new tag")
+    # Fresh rows contain only bounded probabilities and telemetry plus the
+    # known case ID. Do not load an arbitrary-sized untrusted log line.
+    row_limit = 64 * 1024 + max(len(json.dumps(case_id)) for case_id in cases)
     done = {}
-    for line_number, line in enumerate(partial, 2):
+    line_number = 1
+    while line := partial.readline(row_limit + 1):
+        line_number += 1
+        if len(line) > row_limit:
+            raise ValueError(f"partial output has an oversized row at line {line_number}")
         if not line.endswith("\n"):
             raise ValueError(f"partial output has an incomplete row at line {line_number}")
         row = strict_json_loads(line)
@@ -551,6 +575,8 @@ def main(argv=None):
                         "request_sha256": request_sha,
                         "request": body, "response": response,
                     }, indent=1, allow_nan=False)
+                    if len(serialized_sample.encode("utf-8")) > sample_read_limit(requests):
+                        raise ValueError("sample capture exceeds bounded evidence size")
                     publish_sample(sample_path, serialized_sample)
                 partial.write(serialized_row + "\n")
                 partial.flush()
