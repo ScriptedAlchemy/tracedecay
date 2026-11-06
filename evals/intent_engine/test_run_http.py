@@ -1069,6 +1069,51 @@ class RunHttpTest(unittest.TestCase):
         self.assertFalse(self.partial.exists())
         self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
 
+    def test_resumed_sample_cannot_impersonate_a_later_durable_case(self):
+        sample = self.root / "first-response.json"
+        extra = ["--sample-out", str(sample)]
+        self.interrupt(extra)
+        # Leave both rows durable but simulate a failure to publish the result.
+        with patch.object(run_http, "post", side_effect=self.response):
+            with patch.object(run_http, "publish_final_result",
+                              side_effect=OSError("publication interrupted")):
+                with self.assertRaisesRegex(OSError, "publication interrupted"):
+                    self.run_main(extra)
+        self.assertEqual(len(self.partial.read_text().splitlines()), 3)
+        self.assertFalse(self.output.exists())
+
+        genuine = sample.read_bytes()
+        forged = json.loads(genuine)
+        second_request = {
+            "state": run_http.STATES[self.config](self.dataset[1]),
+            "questions": run_http.noul_questions(),
+        }
+        forged["case_id"] = "second"
+        forged["request"] = second_request
+        forged["request_sha256"] = hashlib.sha256(
+            run_http.request_bytes(second_request)
+        ).hexdigest()
+        second_row = json.loads(self.partial.read_text().splitlines()[2])
+        self.assertEqual(forged["request_sha256"], second_row["request_sha256"])
+        self.assertEqual(run_http.digest(forged["response"]),
+                         second_row["response_sha256"])
+        sample.write_text(json.dumps(forged), encoding="utf-8")
+        before = self.partial.read_bytes()
+        with patch.object(run_http, "post") as post:
+            with self.assertRaisesRegex(ValueError, "first case"):
+                self.run_main(extra)
+            post.assert_not_called()
+        self.assertEqual(self.partial.read_bytes(), before)
+        self.assertFalse(self.output.exists())
+
+        # The genuine first-case capture still allows exact completion.
+        sample.write_bytes(genuine)
+        with patch.object(run_http, "post") as post:
+            self.run_main(extra)
+            post.assert_not_called()
+        self.assertFalse(self.partial.exists())
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+
     def test_multiple_configs_capture_only_first_configuration(self):
         sample = self.root / "first-response.json"
         first_config = "A_noul_prompt"

@@ -84,6 +84,10 @@ def verify_existing_sample(path, header, requests, done, questions):
             or sample.get("request_sha256") != requests[case_id][1]
             or sample.get("request") != requests[case_id][0]):
         raise ValueError("sample capture does not belong to this experiment")
+    # --sample-out records the first response, not merely any completed row.
+    # A later response with matching request/digest is still mislabelled evidence.
+    if case_id != next(iter(requests)):
+        raise ValueError("sample capture must correspond to the first case")
     if case_id not in done:
         raise ValueError("sample capture has no durable matching response row")
     response = sample.get("response")
