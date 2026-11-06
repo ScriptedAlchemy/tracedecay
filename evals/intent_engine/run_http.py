@@ -538,6 +538,13 @@ def main(argv=None):
                 if created:
                     raise ValueError(f"sample capture already exists for a new run: {sample_path}")
                 verify_existing_sample(sample_path, header, requests, done, questions)
+            elif sample_path and done:
+                # A new capture would be the next response, not the first
+                # response of this experiment. Never mislabel it as raw evidence.
+                raise ValueError(
+                    "cannot capture the first response after rows were recorded; "
+                    "resume without --sample-out or use a new --tag"
+                )
             for index, case in enumerate(dataset):
                 if case["id"] in done:
                     continue

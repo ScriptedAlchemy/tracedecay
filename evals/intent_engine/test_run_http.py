@@ -240,6 +240,23 @@ class RunHttpTest(unittest.TestCase):
         self.assertEqual(result["rows"][0]["server_ms"], 0)
         self.assertFalse(self.partial.exists())
 
+    def test_late_first_response_capture_refuses_without_changing_resume(self):
+        self.interrupt()
+        before = self.partial.read_bytes()
+        sample = self.root / "late-first-response.json"
+        with patch.object(run_http, "post") as post:
+            with self.assertRaisesRegex(ValueError, "cannot capture the first response"):
+                self.run_main(["--sample-out", str(sample)])
+            post.assert_not_called()
+        self.assertEqual(self.partial.read_bytes(), before)
+        self.assertFalse(sample.exists())
+        self.assertFalse(self.output.exists())
+
+        # Omitting the unavailable raw capture still permits an exact resume.
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main()
+        post.assert_called_once()
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
 
     def test_completed_rows_cannot_be_relabelled_for_scoring(self):
         with patch.object(run_http, "post", side_effect=self.response):
