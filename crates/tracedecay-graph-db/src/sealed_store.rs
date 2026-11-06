@@ -599,6 +599,19 @@ fn census_sealed_store_entries(
             census.unrecognized_count += 1;
             continue;
         };
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            census.unrecognized_count += 1;
+            continue;
+        };
+        if name.len() != 64
+            || !name.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || receipt.version != SEALED_STORE_RECEIPT_VERSION
+            || receipt.physical_namespace != format!("generation:{name}")
+        {
+            census.unrecognized_count += 1;
+            continue;
+        }
         if head_generations.contains(&receipt.generation) {
             census.head_count += 1;
             heads.push(path);
@@ -668,23 +681,36 @@ mod sealed_census_tests {
     use std::collections::BTreeSet;
     use std::fs;
 
-    use super::{SEALED_STORE_RECEIPT_FILE, census_sealed_store_entries};
+    use super::{
+        SEALED_STORE_RECEIPT_FILE, SEALED_STORE_RECEIPT_VERSION, census_sealed_store_entries,
+    };
 
     #[test]
     fn shared_sealed_bytes_belong_to_live_head_regardless_of_directory_order() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        for name in ["unrecognized", ".staging-pending", "old", "head"] {
+        let old = "a".repeat(64);
+        let head = "b".repeat(64);
+        let wrong_namespace = "c".repeat(64);
+        let future_version = "d".repeat(64);
+        for name in [
+            "unrecognized",
+            ".staging-pending",
+            old.as_str(),
+            head.as_str(),
+            wrong_namespace.as_str(),
+            future_version.as_str(),
+        ] {
             fs::create_dir(root.join(name)).unwrap();
         }
-        let receipt = |generation: &str| {
+        let receipt = |generation: &str, namespace: &str, version: u32| {
             serde_json::to_vec(&serde_json::json!({
-                "version": 1,
+                "version": version,
                 "form": "compact",
                 "namespace": "code",
                 "projection": "index",
                 "generation": generation,
-                "physical_namespace": "generation:unused",
+                "physical_namespace": namespace,
                 "recovered_digest": "unused",
                 "entities": 0,
                 "relations": 0,
@@ -696,21 +722,54 @@ mod sealed_census_tests {
             }))
             .unwrap()
         };
-        let head_receipt = receipt("live");
-        let old_receipt = receipt("retired");
+        let head_receipt = receipt(
+            "live",
+            &format!("generation:{head}"),
+            SEALED_STORE_RECEIPT_VERSION,
+        );
+        let old_receipt = receipt(
+            "retired",
+            &format!("generation:{old}"),
+            SEALED_STORE_RECEIPT_VERSION,
+        );
         fs::write(
-            root.join("head").join(SEALED_STORE_RECEIPT_FILE),
+            root.join(&head).join(SEALED_STORE_RECEIPT_FILE),
             &head_receipt,
         )
         .unwrap();
         fs::write(
-            root.join("old").join(SEALED_STORE_RECEIPT_FILE),
+            root.join(&old).join(SEALED_STORE_RECEIPT_FILE),
             &old_receipt,
         )
         .unwrap();
-        let shared = root.join("head/shared");
+        // A parseable receipt cannot claim live bytes without matching the
+        // generation directory, physical namespace and receipt version.
+        for (directory, namespace, version) in [
+            (
+                "unrecognized",
+                "generation:unrecognized".to_owned(),
+                SEALED_STORE_RECEIPT_VERSION,
+            ),
+            (
+                wrong_namespace.as_str(),
+                "generation:wrong".to_owned(),
+                SEALED_STORE_RECEIPT_VERSION,
+            ),
+            (
+                future_version.as_str(),
+                format!("generation:{future_version}"),
+                SEALED_STORE_RECEIPT_VERSION + 1,
+            ),
+        ] {
+            fs::write(
+                root.join(directory).join(SEALED_STORE_RECEIPT_FILE),
+                receipt("live", &namespace, version),
+            )
+            .unwrap();
+        }
+        let shared = root.join(&head).join("shared");
         fs::write(&shared, vec![0_u8; 8192]).unwrap();
-        for directory in ["old", ".staging-pending", "unrecognized"] {
+        for directory in [old.as_str(), ".staging-pending", "unrecognized"] {
             fs::hard_link(&shared, root.join(directory).join("shared")).unwrap();
         }
 
@@ -721,12 +780,22 @@ mod sealed_census_tests {
                 .unwrap()
                 .collect::<std::io::Result<Vec<_>>>()
                 .unwrap();
-            entries.sort_by_key(|entry| match entry.file_name().to_str().unwrap() {
-                "unrecognized" => 0,
-                ".staging-pending" => 1,
-                "old" => 2,
-                "head" => 3,
-                _ => unreachable!(),
+            entries.sort_by_key(|entry| {
+                let name = entry.file_name();
+                let name = name.to_str().unwrap();
+                if name == "unrecognized" {
+                    0
+                } else if name == ".staging-pending" {
+                    1
+                } else if name == old {
+                    2
+                } else if name == wrong_namespace || name == future_version {
+                    3
+                } else if name == head {
+                    4
+                } else {
+                    unreachable!()
+                }
             });
             entries.into_iter().map(Ok).collect::<Vec<_>>()
         };
@@ -735,7 +804,7 @@ mod sealed_census_tests {
         assert_eq!((census.head_count, census.superseded_count), (1, 1));
         assert_eq!(
             (census.abandoned_staging_count, census.unrecognized_count),
-            (1, 1)
+            (1, 3)
         );
         assert_eq!(census.head_bytes, 8192 + head_receipt.len() as u64);
         assert_eq!(census.superseded_bytes, old_receipt.len() as u64);
@@ -1046,7 +1115,12 @@ fn remove_sealed_directory_checked(directory: &Path) -> Result<(), GraphDbError>
     match sealed_root_is_real_directory(root) {
         Ok(true) => {}
         Ok(false) => return Ok(()),
-        Err(error) => return Err(sealed_store_io_failure("sealed root validation failed", error)),
+        Err(error) => {
+            return Err(sealed_store_io_failure(
+                "sealed root validation failed",
+                error,
+            ));
+        }
     }
     match std::fs::remove_dir_all(directory) {
         Ok(()) => Ok(()),
