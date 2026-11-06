@@ -1121,6 +1121,38 @@ class RunHttpTest(unittest.TestCase):
         self.assertFalse(self.partial.exists())
         self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
 
+    def test_missing_first_sample_is_not_replaced_with_later_response(self):
+        sample = self.root / "first-response.json"
+        calls = 0
+
+        def lose_capture_during_second_request(url, body):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                self.assertTrue(sample.exists())
+                sample.unlink()
+            return self.response(url, body)
+
+        with patch.object(run_http, "post", side_effect=lose_capture_during_second):
+            with self.assertRaisesRegex(ValueError, "sample disappeared"):
+                self.run_main(["--sample-out", str(sample)])
+        self.assertEqual(calls, 2)
+        self.assertFalse(sample.exists())
+        self.assertFalse(self.output.exists())
+        saved = [json.loads(line) for line in self.partial.read_text().splitlines()]
+        self.assertEqual([row["id"] for row in saved[1:]], ["first"])
+
+        # Recovery without a sample still reuses the first measured row
+        # instead of claiming the second response was the first capture.
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main()
+        post.assert_called_once()
+        self.assertFalse(self.partial.exists())
+        self.assertEqual(
+            [row["id"] for row in json.loads(self.output.read_text())["rows"]],
+            ["first", "second"],
+        )
+
     def test_multiple_configs_capture_only_first_configuration(self):
         sample = self.root / "first-response.json"
         first_config = "A_noul_prompt"

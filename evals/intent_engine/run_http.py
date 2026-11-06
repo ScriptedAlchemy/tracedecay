@@ -598,6 +598,10 @@ def main(argv=None):
                 # that a later valid retry mistakes for a completed capture.
                 serialized_row = serialize_result(row, questions, args.noul_temperature)
                 if sample_path and not os.path.lexists(sample_path):
+                    # The first raw response cannot be recaptured from a later
+                    # case if its published sample disappeared during inference.
+                    if index != 0:
+                        raise ValueError("first-response sample disappeared; cannot capture a later case")
                     serialized_sample = json.dumps({
                         "case_id": case["id"],
                         "experiment_sha256": header["experiment_sha256"],
