@@ -1041,6 +1041,33 @@ class RunHttpTest(unittest.TestCase):
         self.assertFalse(self.partial.exists())
         self.assertFalse(self.output.exists())
 
+    def test_missing_response_digest_refuses_resume_before_inference(self):
+        self.interrupt()
+        original = self.partial.read_bytes()
+        lines = original.splitlines()
+        self.assertEqual(len(lines), 2)
+        for invalid in ("missing", "malformed"):
+            with self.subTest(invalid=invalid):
+                saved = json.loads(lines[1])
+                if invalid == "missing":
+                    del saved["response_sha256"]
+                else:
+                    saved["response_sha256"] = "not-a-sha256"
+                altered = lines[0] + b"\n" + json.dumps(saved).encode("utf-8") + b"\n"
+                self.partial.write_bytes(altered)
+                with patch.object(run_http, "post") as post:
+                    with self.assertRaisesRegex(ValueError, "response digest"):
+                        self.run_main()
+                    post.assert_not_called()
+                self.assertEqual(self.partial.read_bytes(), altered)
+                self.assertFalse(self.output.exists())
+        self.partial.write_bytes(original)
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main()
+        post.assert_called_once()
+        self.assertFalse(self.partial.exists())
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+
     def test_sample_identity_and_raw_response_must_match_durable_resume(self):
         sample = self.root / "first-response.json"
         extra = ["--sample-out", str(sample)]

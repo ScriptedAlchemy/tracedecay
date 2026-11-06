@@ -100,6 +100,9 @@ def validate_http_provenance(result, rows):
         request_sha = row.get("request_sha256")
         if not isinstance(request_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", request_sha):
             raise ValueError(f"HTTP case {row['id']} has an invalid request fingerprint")
+        response_sha = row.get("response_sha256")
+        if not isinstance(response_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", response_sha):
+            raise ValueError(f"HTTP case {row['id']} is missing a valid response digest")
         requests.append([row["id"], request_sha])
     if experiment.get("requests_sha256") != evidence_digest(requests):
         raise ValueError("HTTP request fingerprints disagree with experiment identity")

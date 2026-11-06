@@ -30,7 +30,8 @@ def row(case_id, labels=(), context=False, choice=None):
 def signed_http_result(config, rows, temperature=None):
     # Fixture independently reproduces the fingerprint scheme in run_http.py.
     rows = [
-        {**item, "request_sha256": hashlib.sha256(item["id"].encode()).hexdigest()}
+        {**item, "request_sha256": hashlib.sha256(item["id"].encode()).hexdigest(),
+         "response_sha256": hashlib.sha256((item["id"] + ":response").encode()).hexdigest()}
         for item in rows
     ]
 
@@ -458,6 +459,35 @@ class ScoringTests(unittest.TestCase):
             attempt = self.run_script(root, "score.py")
             self.assertNotEqual(attempt.returncode, 0)
             self.assertIn("missing its experiment identity", attempt.stderr)
+            self.assertEqual(summary.read_bytes(), b"last verified summary\n")
+
+    def test_http_response_digest_required_before_scoring_or_publishing(self):
+        original = signed_http_result("B_noul_text", [row("first"), row("second")])
+        self.assertEqual(score.score_config(original)["latency"]["total_cases"], 2)
+        for bad_digest in (None, "", "not-a-sha256", "G" * 64, 1):
+            changed = json.loads(json.dumps(original))
+            if bad_digest is None:
+                del changed["rows"][0]["response_sha256"]
+            else:
+                changed["rows"][0]["response_sha256"] = bad_digest
+            with self.subTest(bad_digest=bad_digest):
+                with self.assertRaisesRegex(ValueError, "response digest"):
+                    score.score_config(changed)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.stage_scripts(root)
+            (root / "results").mkdir()
+            damaged = json.loads(json.dumps(original))
+            del damaged["rows"][0]["response_sha256"]
+            (root / "results" / "damaged.json").write_text(
+                json.dumps(damaged), encoding="utf-8"
+            )
+            summary = root / "summary.json"
+            summary.write_bytes(b"last verified summary\n")
+            attempt = self.run_script(root, "score.py")
+            self.assertNotEqual(attempt.returncode, 0)
+            self.assertIn("response digest", attempt.stderr)
             self.assertEqual(summary.read_bytes(), b"last verified summary\n")
 
     def test_http_result_fingerprints_bind_case_order_and_experiment(self):

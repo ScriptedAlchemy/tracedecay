@@ -292,6 +292,10 @@ def noul_probabilities(response, questions):
 def serialize_result(row, questions, temperature):
     """Admit fresh and resumed rows before any durable output is changed."""
     probabilities(row.get("probs"), questions)
+    # Every durable HTTP row must retain its raw response fingerprint.
+    response_sha = row.get("response_sha256")
+    if not isinstance(response_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", response_sha):
+        raise ValueError("result row is missing a valid response digest")
     for field in ("ms", "server_ms", "input_tokens", "state_tokens", "dropped"):
         if field not in row:
             raise ValueError(f"result row is missing {field} for {row.get('id')}")
