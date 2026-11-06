@@ -131,6 +131,10 @@ class RunHttpTest(unittest.TestCase):
                 '"current_prompt": "What breaks?"',
                 '"current_prompt": "What breaks?", "debug": NaN', 1
             ), (), "invalid JSON numeric constant"),
+            (dataset_path, original_dataset.replace(
+                '"current_prompt": "What breaks?"',
+                '"current_prompt": "What breaks?", "debug": 1e999', 1
+            ), (), "nonfinite JSON number"),
         ]
         for path, contents, extra, diagnostic in variants:
             original = path.read_bytes() if path.exists() else None
@@ -164,6 +168,9 @@ class RunHttpTest(unittest.TestCase):
             ) + "\n",
             header + "\n" + row.replace(
                 '"ms":', '"unrelated": Infinity, "ms":', 1
+            ) + "\n",
+            header + "\n" + row.replace(
+                '"ms":', '"unrelated": 1e999, "ms":', 1
             ) + "\n",
         ]
         try:

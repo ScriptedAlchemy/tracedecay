@@ -263,6 +263,9 @@ class ScoringTests(unittest.TestCase):
                 (original.replace(
                     '"ms": 100', '"ignored": NaN, "ms": 100', 1
                 ), "invalid JSON numeric constant"),
+                (original.replace(
+                    '"ms": 100', '"ignored": -1e999, "ms": 100', 1
+                ), "nonfinite JSON number"),
             ]
             summary = root / "summary.json"
             for contents, diagnostic in variants:

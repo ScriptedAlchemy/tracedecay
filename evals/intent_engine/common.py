@@ -16,7 +16,16 @@ def strict_json_loads(data):
     def refuse_constant(value):
         raise ValueError(f"invalid JSON numeric constant: {value}")
 
-    return json.loads(data, object_pairs_hook=unique_fields, parse_constant=refuse_constant)
+    def finite_float(token):
+        value = float(token)
+        if not math.isfinite(value):
+            raise ValueError(f"nonfinite JSON number: {token}")
+        return value
+
+    return json.loads(
+        data, object_pairs_hook=unique_fields,
+        parse_constant=refuse_constant, parse_float=finite_float,
+    )
 
 CATS = ["session_recall", "memory_store", "call_graph", "impact", "refactor_edit",
         "review_changes", "type_orientation", "project_context", "unexpected_changes"]
