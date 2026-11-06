@@ -456,6 +456,18 @@ def main(argv=None):
     if (args.sample_out and os.path.lexists(args.sample_out)
             and (os.path.islink(args.sample_out) or not os.path.isfile(args.sample_out))):
         raise ValueError(f"sample path exists but is not a regular file: {args.sample_out}")
+    if args.sample_out:
+        # The scorer treats results/*.json as completed experiments. Publishing
+        # a raw sample under that tree can masquerade as a result, or occupy
+        # the final result path and permanently prevent exact resume.
+        result_root = os.path.normcase(os.path.realpath(os.path.join(HERE, "results")))
+        sample_target = os.path.normcase(os.path.realpath(args.sample_out))
+        try:
+            inside_results = os.path.commonpath([result_root, sample_target]) == result_root
+        except ValueError:
+            inside_results = False  # Paths on different Windows drives.
+        if inside_results:
+            raise ValueError("--sample-out must be outside the results directory")
     with open(os.path.join(HERE, "dataset.json"), "rb") as source:
         dataset_bytes = source.read()
     dataset = strict_json_loads(dataset_bytes)

@@ -202,6 +202,31 @@ class RunHttpTest(unittest.TestCase):
         post.assert_called_once()
         self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
 
+    def test_sample_capture_cannot_impersonate_scored_results(self):
+        result_root = self.output.parent
+        for sample in (
+            self.output,
+            result_root / "foreign.json",
+            result_root / "nested" / "another.json",
+            result_root / ".." / "results" / "alias.json",
+        ):
+            with self.subTest(sample=str(sample)):
+                with patch.object(run_http, "post") as post:
+                    with self.assertRaisesRegex(ValueError, "--sample-out must be outside"):
+                        self.run_main(["--sample-out", str(sample)])
+                    post.assert_not_called()
+                self.assertFalse(self.partial.exists())
+                self.assertFalse(self.output.exists())
+                self.assertFalse(result_root.exists())
+
+        # Capturing raw evidence elsewhere still publishes a valid result.
+        sample = self.root / "first-response.json"
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main(["--sample-out", str(sample)])
+        self.assertEqual(post.call_count, len(self.dataset))
+        self.assertEqual(json.loads(sample.read_text())["case_id"], "first")
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+
     def test_oversized_sample_capture_refuses_before_resume_inference(self):
         sample = self.root / "first-response.json"
         extra = ["--sample-out", str(sample)]
