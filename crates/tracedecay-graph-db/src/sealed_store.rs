@@ -596,7 +596,8 @@ fn directory_bytes(
     while let Some(directory) = pending.pop() {
         for entry in std::fs::read_dir(&directory)? {
             let entry = entry?;
-            let metadata = entry.metadata()?;
+            // Sealed census must never follow a nested link outside its root.
+            let metadata = std::fs::symlink_metadata(entry.path())?;
             if metadata.is_dir() {
                 pending.push(entry.path());
                 continue;
