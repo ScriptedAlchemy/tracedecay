@@ -784,7 +784,8 @@ mod sealed_census_tests {
         foreign_receipt["projection"] = serde_json::json!("other-projection");
         let foreign_receipt = serde_json::to_vec(&foreign_receipt).unwrap();
         fs::write(
-            root.join(&foreign_projection).join(SEALED_STORE_RECEIPT_FILE),
+            root.join(&foreign_projection)
+                .join(SEALED_STORE_RECEIPT_FILE),
             &foreign_receipt,
         )
         .unwrap();
@@ -825,11 +826,7 @@ mod sealed_census_tests {
         };
         let census = census_sealed_store_entries(
             ordered(),
-            &BTreeSet::from([(
-                "code".to_owned(),
-                "index".to_owned(),
-                "live".to_owned(),
-            )]),
+            &BTreeSet::from([("code".to_owned(), "index".to_owned(), "live".to_owned())]),
         )
         .unwrap();
         assert_eq!((census.head_count, census.superseded_count), (1, 2));
