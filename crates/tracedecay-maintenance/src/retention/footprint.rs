@@ -437,7 +437,7 @@ pub fn census_sqlite_temp_spill(
             .is_some_and(|name| name.starts_with("etilqs_") && name.ends_with(" (deleted)"));
         if unlinked_temp {
             match std::fs::metadata(fd.path()) {
-                Ok(metadata) => {
+                Ok(metadata) if metadata.is_file() => {
                     #[cfg(unix)]
                     let unique = seen_inodes.insert((metadata.dev(), metadata.ino()));
                     #[cfg(not(unix))]
@@ -446,6 +446,9 @@ pub fn census_sqlite_temp_spill(
                         bytes = bytes.saturating_add(metadata.len());
                     }
                 }
+                // The fd can be reused between read_link and metadata; a
+                // directory or other non-file target is not an SQLite spill.
+                Ok(_) => {}
                 // A closed descriptor no longer consumes space.
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(_) => unavailable_entry_count = unavailable_entry_count.saturating_add(1),
@@ -730,6 +733,11 @@ mod tests {
             sized(&target, bytes);
             std::os::unix::fs::symlink(&target, fd_directory.join(fd)).expect("fd link");
         }
+        // A reused descriptor with a matching name but a non-file target
+        // must not inflate the spill total or fabricate an over-budget state.
+        let non_file = temporary.path().join("etilqs_directory (deleted)");
+        std::fs::create_dir(&non_file).expect("non-file target");
+        std::os::unix::fs::symlink(&non_file, fd_directory.join("7")).expect("non-file fd link");
 
         let entry = census_sqlite_temp_spill(&fd_directory, &BTreeMap::new())
             .expect("a readable fd directory");
