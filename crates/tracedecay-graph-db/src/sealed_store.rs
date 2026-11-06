@@ -547,8 +547,17 @@ pub fn census_sealed_store(
         }
         Err(error) => return Err(error),
     };
+    census_sealed_store_entries(entries, head_generations)
+}
+
+fn census_sealed_store_entries(
+    entries: impl IntoIterator<Item = std::io::Result<std::fs::DirEntry>>,
+    head_generations: &std::collections::BTreeSet<String>,
+) -> std::io::Result<SealedStoreCensusV1> {
     let mut census = SealedStoreCensusV1::default();
-    let mut counted = std::collections::HashSet::new();
+    let mut heads = Vec::new();
+    let mut superseded = Vec::new();
+    let mut abandoned = Vec::new();
     for entry in entries {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
@@ -556,14 +565,13 @@ pub fn census_sealed_store(
             continue;
         }
         let path = entry.path();
-        let bytes = directory_bytes(&path, &mut counted)?;
-        let name = entry.file_name();
-        if name
+        if entry
+            .file_name()
             .to_str()
             .is_some_and(|name| name.starts_with(".staging-"))
         {
             census.abandoned_staging_count += 1;
-            census.abandoned_staging_bytes += bytes;
+            abandoned.push(path);
             continue;
         }
         let receipt = std::fs::read(path.join(SEALED_STORE_RECEIPT_FILE))
@@ -575,11 +583,31 @@ pub fn census_sealed_store(
         };
         if head_generations.contains(&receipt.generation) {
             census.head_count += 1;
-            census.head_bytes += bytes;
+            heads.push(path);
         } else {
             census.superseded_count += 1;
-            census.superseded_bytes += bytes;
+            superseded.push(path);
         }
+    }
+
+    // A layered generation can hard-link its base across directories. Charge
+    // that inode to its live head before any superseded or abandoned alias,
+    // regardless of read_dir order. Unknown receipts have no charging authority.
+    let mut counted = std::collections::HashSet::new();
+    for path in heads {
+        census.head_bytes = census
+            .head_bytes
+            .saturating_add(directory_bytes(&path, &mut counted)?);
+    }
+    for path in superseded {
+        census.superseded_bytes = census
+            .superseded_bytes
+            .saturating_add(directory_bytes(&path, &mut counted)?);
+    }
+    for path in abandoned {
+        census.abandoned_staging_bytes = census
+            .abandoned_staging_bytes
+            .saturating_add(directory_bytes(&path, &mut counted)?);
     }
     Ok(census)
 }
@@ -615,6 +643,85 @@ fn directory_bytes(
         }
     }
     Ok(total)
+}
+
+#[cfg(all(test, unix))]
+mod sealed_census_tests {
+    use std::collections::BTreeSet;
+    use std::fs;
+
+    use super::{SEALED_STORE_RECEIPT_FILE, census_sealed_store_entries};
+
+    #[test]
+    fn shared_sealed_bytes_belong_to_live_head_regardless_of_directory_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        for name in ["unrecognized", ".staging-pending", "old", "head"] {
+            fs::create_dir(root.join(name)).unwrap();
+        }
+        let receipt = |generation: &str| {
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "form": "compact",
+                "namespace": "code",
+                "projection": "index",
+                "generation": generation,
+                "physical_namespace": "generation:unused",
+                "recovered_digest": "unused",
+                "entities": 0,
+                "relations": 0,
+                "graph_format": 1,
+                "row_sum": null,
+                "base": null,
+                "source_generation": null,
+                "watermark": null
+            }))
+            .unwrap()
+        };
+        let head_receipt = receipt("live");
+        let old_receipt = receipt("retired");
+        fs::write(root.join("head").join(SEALED_STORE_RECEIPT_FILE), &head_receipt).unwrap();
+        fs::write(root.join("old").join(SEALED_STORE_RECEIPT_FILE), &old_receipt).unwrap();
+        let shared = root.join("head/shared");
+        fs::write(&shared, vec![0_u8; 8192]).unwrap();
+        for directory in ["old", ".staging-pending", "unrecognized"] {
+            fs::hard_link(&shared, root.join(directory).join("shared")).unwrap();
+        }
+
+        // Put unknown, staging and retired paths first, reproducing the order
+        // that previously consumed the live inode before its head was visited.
+        let ordered = || {
+            let mut entries = fs::read_dir(root)
+                .unwrap()
+                .collect::<std::io::Result<Vec<_>>>()
+                .unwrap();
+            entries.sort_by_key(|entry| match entry.file_name().to_str().unwrap() {
+                "unrecognized" => 0,
+                ".staging-pending" => 1,
+                "old" => 2,
+                "head" => 3,
+                _ => unreachable!(),
+            });
+            entries.into_iter().map(Ok).collect::<Vec<_>>()
+        };
+        let census = census_sealed_store_entries(ordered(), &BTreeSet::from(["live".to_owned()]))
+            .unwrap();
+        assert_eq!((census.head_count, census.superseded_count), (1, 1));
+        assert_eq!(
+            (census.abandoned_staging_count, census.unrecognized_count),
+            (1, 1)
+        );
+        assert_eq!(census.head_bytes, 8192 + head_receipt.len() as u64);
+        assert_eq!(census.superseded_bytes, old_receipt.len() as u64);
+        assert_eq!(census.abandoned_staging_bytes, 0);
+
+        let no_head = census_sealed_store_entries(ordered(), &BTreeSet::new()).unwrap();
+        assert_eq!(no_head.head_bytes, 0);
+        assert_eq!(
+            no_head.superseded_bytes,
+            8192 + head_receipt.len() as u64 + old_receipt.len() as u64
+        );
+    }
 }
 
 /// Removes every sealed generation beside `database_path` whose receipt does
