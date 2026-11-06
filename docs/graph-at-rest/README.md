@@ -1,9 +1,5 @@
 # An at-rest form for the graph: measurement and verdict
 
-Bench-lane investigation. Nothing here is wired into production; the two
-harnesses are `#[ignore]`d and the one new crate method is gated on
-`test-helpers` so it cannot compile into a shipped binary.
-
 ## The question
 
 Activating a sealed generation replays every node and edge into grafeo's in-RAM
@@ -31,17 +27,8 @@ This investigation measured what calling it would buy.
 > and served read-only. That dissolves blocker 2 (nothing ever writes to a
 > sealed artifact), the pinned fork's compact-store property hash index
 > dissolves blocker 1 (sealed reopens register `INDEXED_PROPERTIES` exactly
-> like staging opens), and vector search deliberately never routes to sealed
-> stores. Bytes round-trip the pinned dictionary codec losslessly now, but
-> `COMPACT_ROUND_TRIPS_BYTES` stays **off**: a real 431-file code generation
-> (~45k entities carrying serialized-record Bytes payloads) fails its
-> post-reopen recovered-digest proof in compact form with "relation scalar
-> endpoints do not match native topology" and stays permanently unseated
-> behind activation retries, while the same corpus seals and serves in replay
-> form; the toy-scale sealed-store contract compacts and reads exactly, so
-> the defect only shows at generation scale. This document remains the
-> measurement record for the whole-database compaction that was measured and
-> rejected.
+> like staging opens). This document remains the measurement record for the
+> whole-database compaction that was measured and rejected.
 >
 > **Refreshes seal as layers (graph format 7):** a small refresh no longer
 > re-encodes its whole generation. Its sealed store is a delta container
@@ -55,18 +42,6 @@ This investigation measured what calling it would buy.
 > refresh that changes more than an eighth of the files seals cold and
 > becomes the next base. Stores sealed under format 6 are superseded and
 > rebuild cold; no migration exists.
-
-## Verdict
-
-**`compact()` cannot be applied to TraceDecay's graph as it is currently
-shaped.** Not "does not pay off", it returns an error.
-
-The blocker is TraceDecay's own schema, not grafeo. And under a schema that
-does not trip it, the columnar form is a large, real win: **10.9x faster
-activation at 1M rows, 2.4x lower resident memory, 185x faster adjacency.**
-
-So the at-rest work is worth doing, but the first ticket is a schema change,
-not a storage change.
 
 ## Numbers
 
@@ -308,11 +283,6 @@ close/reopen verification. Small: the crate already holds
 `compact_snapshot_for_bench` does today. Everything downstream (section write,
 section reload, layered rewiring) is already implemented in grafeo.
 
-**Phase 3, restore vector-index planning.** Either override
-`has_vector_index` on the layered store so it consults the overlay and the
-vector section, or hoist the check in `src/runtime.rs` off `graph_store()`.
-Small, but do not skip it: gap 3 fails silently.
-
 **Phase 4, optional fork work.** Streaming section serialize (gap 5) and
 mmap-backed container open (gap 6). Both are pure wins on top of a working
 path, and neither is needed for the activation number.
@@ -424,104 +394,6 @@ contract failures, a sealed generation reopened twice came back with its
 format marker gone, which is the same defect reached through TraceDecay's own
 lifecycle rather than the minimal probe.
 
-### The vector index is durable now, fork branch ready, pin not moved
-
-The claim above that the HNSW index "was never durable across a reopen
-anyway" was true, and it turned out to be a wiring gap rather than a
-missing format.
-
-**Where durability was lost.** grafeo has always *written* the index.
-`build_sections` emits a `SectionType::VectorStore` carrying each index's
-full HNSW topology, entry point, max level, per-node per-level neighbour
-lists, and `CatalogSection::collect_indexes` records every index's
-label, property, dimensions, metric, M and ef_construction beside it. The
-restore side dropped both:
-
-- `CatalogSection::deserialize` handed the loader its `property_indexes`
-  and nothing else. The `vector_indexes` it had just decoded were
-  discarded (`catalog_section.rs`).
-- `load_from_sections` guarded the topology restore on
-  `store.vector_index_entries()` being non-empty
-  (`database/mod.rs`, the `SectionType::VectorStore` block). A cold open
-  builds its `LpgStore` from nothing, so that map is empty at exactly the
-  moment the guard runs. The section bytes were read off disk and
-  dropped on the floor.
-
-So the index was durable on disk and absent in memory, and every reopen
-re-indexed the whole corpus.
-
-**Fork, not sidecar.** The section format round-trips HNSW faithfully
-already: topology is all it needs to carry, because the vectors live in
-LPG node properties (persisted anyway) and are read through a
-`VectorAccessor` at query time. Nothing was missing from the format, only
-the restore wiring, a tracedecay-side sidecar would have duplicated a
-working serializer to re-derive an artifact grafeo already had on disk,
-and left every other consumer broken.
-
-**Branch:** `tracedecay/0.5.42-vector-index-durable`, stacked on
-`tracedecay/0.5.42-close-and-overlay`, at
-`f38218653dfc69fda67f9c669371036fde1ed5fe`. Three commits:
-
-1. re-register catalog definitions as empty indexes and let the section
-   fill their topology. Two incomplete-restore cases are deliberately
-   left absent for rebuild rather than half-restored, a definition with
-   no section, and a definition the section carried no topology for,
-   because an index that exists and covers nothing reports
-   `has_vector_index() == true` and answers every search with nothing.
-   Quantized indexes are left to a rebuild too: their codebook lives
-   inside the index and the section carries only topology, so restoring
-   one would silently downgrade it to full precision. The catalog
-   snapshot is v2 to record the mode; v1 files still load.
-2. mark index creation, removal, and binding changes as unlogged state.
-   `close` may skip its flush when the WAL has not moved, and nothing
-   about an index reaches the WAL, so an index built after open never
-   reached the file, and the next open rebuilt it, and the next. Harmless
-   while indexes were always rebuilt; load-bearing the moment they are
-   restored.
-3. price it: 5,000 x 64-dim vectors, release profile, **8.7ms** to
-   restore the index as part of opening the whole database against
-   **359.6ms** to rebuild the index alone on a database already open.
-   ~41x, and identical neighbour sets across 24 probes.
-
-The branch also adds an opaque per-index **binding token** that rides the
-catalog section, so a caller can stamp the generation digest its index
-was built over and compare after a reopen instead of trusting that a
-restored topology still describes the rows.
-
-**The pin has moved.** The vector-durability commits were reintegrated
-onto the fork's `fix/catalog-version-guard` branch (ported over the
-out-of-place checkpoint and close-skip storage rewrite that landed in
-the meantime) and the five `grafeo-*` revs in `[patch.crates-io]` now
-point at that lineage. The reopen tests in `tests/graph_db_suite/runtime_contract.rs`
-assert `Available`, restored, within the same admission bound that
-proves no rebuild ran, and the fork gates the semantics with
-`vector_index_reopen`, `vector_index_restore_cost`, and
-`torn_vector_checkpoint` (a checkpoint killed at every injection point
-over a populated HNSW index must reopen and serve search).
-
-### `has_vector_index`, resolved, and worse than gap 3 described
-
-Gap 3 said `CompactStore` inherits the trait default `false`. The layered store
-is more specific than that: `LayeredStore::has_vector_index` delegates to the
-*overlay* (`compact/layered.rs:1081`), which `compact()` leaves empty, so it
-answers `false` for indexes the store had a moment earlier. That part is at
-least truthful, the HNSW index really is gone, and it was never durable across
-a reopen anyway.
-
-The silent failure is one layer along. `create_vector_index` builds by scanning
-`nodes_by_label(label)`, and TraceDecay's vector label is
-`entity_projection_label`, one of several labels on an entity node. On a
-compacted base that scan matches nothing, so the build succeeds over zero
-vectors, `has_vector_index` then answers `true`, and every vector search
-returns empty while reporting an index exists.
-
-The resolution, when phase 2 becomes unblocked, is the routed one: refuse to
-build an HNSW index over a store serving from a columnar base, with a typed
-error rather than an empty index, and keep a generation that carries vector
-indexes in its replay form. Both halves were implemented against the seal-time
-compaction and reverted with it; neither is reachable while nothing calls
-`compact()` outside the bench lane.
-
 ### Why "never write after compact" is not a guarantee TraceDecay can make
 
 The obvious containment for blocker 2 is to promise the store is never mutated
@@ -563,19 +435,10 @@ the heap-copy path and are a floor, not a ceiling.
   every reopened store ran without them. That was invisible while identity
   resolved through the intrinsic label index, and cost 23.7s for 64 point reads
   at 500k once it did not.
-- **Phase 2, seal implies compact. Landed as per-generation stores; compact
-  form still gated.** The whole-database `compact()` this plan scoped stays
-  rejected; the sealed-store lane (`src/sealed_store.rs`) seals each
-  generation into its own single-generation database, exactly the
-  "per-generation stores" design blocker 2 demanded, and compacts it when
-  the rows carry no Bytes or Vector properties. The fork's compact property
-  index settles blocker 1's economics and the pinned dictionary codec
-  round-trips Bytes losslessly, but Bytes-carrying generations stay in replay
-  form behind `COMPACT_ROUND_TRIPS_BYTES` until a generation-scale compact
-  seal passes its post-reopen proof (see the constant's doc for the measured
-  scale failure).
-- **Phase 3, vector planning. Not applicable to sealed stores:** vector
-  search never routes to a sealed artifact; HNSW indexes are rebuilt against
-  the staging database (`apply_sealed_copy_batch` doc).
+- **Phase 2, seal implies compact. Landed as per-generation stores.** The
+  whole-database `compact()` this plan scoped stays rejected; the sealed-store
+  lane (`src/sealed_store.rs`) seals each generation into its own
+  single-generation database, exactly the "per-generation stores" design
+  blocker 2 demanded.
 - **Phase 4, streaming section writer, mmap container open.** Unchanged, and
   now clearly behind a property index for the columnar base in priority.

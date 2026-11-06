@@ -106,13 +106,9 @@ invariants and do not by themselves keep a journey open.
   receipt-owned paths and a drift-converges acceptance test. Operational
   closure still requires the measured doctor journey and a clean Cursor
   install/upgrade/doctor pass on an operator machine.)
-- Semantic search is disabled by an invalid configuration snapshot. Plan 20
-  owns final-snapshot validity and explicit reset/recreation; Plan 31 owns
-  semantic activation.
-  Exact, lexical, and graph retrieval remain the required available fallback.
-  This snapshot does not mean semantic search is product-disabled.
-  (Superseded 2026-09-13: dense semantic retrieval is retired by rejected
-  decision 11; there is no activation to repair.)
+- Dense semantic retrieval is retired by rejected decision 11. Exact, lexical,
+  and graph retrieval remain the required available authorities; there is no
+  semantic activation to repair.
 - A live profile was observed 237 minutes stale (the index later reported
   285 minutes stale while this reconciliation was being checked). Plan 25 and
   the active incremental-indexing slice own cadence/freshness diagnosis; the
@@ -275,8 +271,8 @@ records the rejected mechanism, the reason, and the retained replacement:
     installation downloads no model, loads no inference runtime, builds no
     vectors, and exposes no activation workflow. Released relational stores
     retain their data under the admission exception above; dense retrieval
-    is never reactivated. Plan 31 is retired as an authority; its lexical-fallback
-    and exact-tier obligations already belong to Plans 05, 15, and 25. The
+    is never reactivated. The lexical-fallback and exact-tier obligations
+    already belong to Plans 05, 15, and 25. The
     retained replacement is exactly three code-intelligence authorities and no
     fourth "semantic" one: lexical search (exact, fielded, phrase, proximity,
     bounded identifier/path splitting, and named query-time aliases that stay
@@ -932,8 +928,7 @@ Unmeasured speculative optimizations and placeholder benchmarks do not ship.
   [15](15-search-quality-evaluation-and-retrieval-research.md),
   [23](23-session-lcm-temporal-retrieval-and-evaluation.md), and
   [25](25-code-intelligence-indexing-crate.md).
-  [Plan 31](31-native-fastembed-semantic-code-search.md) is retired by
-  rejected decision 11 and is archival.
+  Dense retrieval is retired by rejected decision 11.
   Indexing runtime is `tracedecay-code-index-runtime`; generation retention is
   `tracedecay-code-index-retention`.
 - Policy and delivery surfaces: [Plans 06](06-policy-crate.md), [08](08-tool-catalog-crate.md),
@@ -999,8 +994,7 @@ Unmeasured speculative optimizations and placeholder benchmarks do not ship.
   [Plan 39](39-embedded-grafeo-graph-database.md)'s embedded graph
   storage cutover and
   [Plan 40](40-partitioned-generation-storage-and-zero-copy-replay.md)'s
-  partitioned generation storage, which supersedes the monolithic sealed
-  generation envelope as the long-term storage design.
+  partitioned generation storage.
 
 Embedded graph storage
 ([Plan 39](39-embedded-grafeo-graph-database.md)) threads through the active
@@ -1031,10 +1025,9 @@ debris quarantine, and one-content-copy enforcement. Session retention keeps
 raw and projected evidence deduplicated while LCM summary nodes retain
 losslessly expandable source references. Plan 09 exposes the corresponding
 storage findings through read-only Doctor composition over Plan 26 telemetry;
-Doctor never invokes cleanup, GC, retention, relink, or recovery. Store soft
-budgets are owner-configured and inert by default. Direct validation uses an
-isolated profile and proves size reduction without reading or mutating the
-operator profile.
+Doctor never invokes cleanup, GC, retention, relink, or recovery. Direct
+validation uses an isolated profile and proves size reduction without reading
+or mutating the operator profile.
 
 The remaining delivery proceeds by complete product journeys under this index.
 Branch, pull-request, merge, worktree, and SHA choreography is not roadmap

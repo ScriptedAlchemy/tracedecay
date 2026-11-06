@@ -25,8 +25,8 @@ repository and generation provenance, coverage, and receipts. Warming, partial,
 unavailable, denied, cancelled, retained, and recreation-required outcomes are
 distinct UI states, never a blank successful panel.
 
-Structure views present Grafeo-backed graph and vector results supplied by the
-daemon. Conversation and memory views hydrate authorized content from its owning
+Structure views present Grafeo-backed graph results supplied by the daemon.
+Conversation and memory views hydrate authorized content from its owning
 authority. Work controls separate proposal, authorization, execution, and
 repository effects. Diagnostics are read-only; maintenance actions are explicit
 daemon operations with authorization and receipts.
