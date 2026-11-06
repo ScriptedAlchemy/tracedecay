@@ -903,13 +903,89 @@ class RunHttpTest(unittest.TestCase):
         self.assertFalse(sample.exists())
         self.assertEqual(len(self.partial.read_text().splitlines()), 1)
 
-    def test_existing_sample_is_never_replaced(self):
+    def test_existing_sample_from_other_run_refuses_without_inference(self):
         sample = self.root / "first-response.json"
         sample.write_text('{"previous": true}')
-        with patch.object(run_http, "post", side_effect=self.response):
-            self.run_main(["--sample-out", str(sample)])
+        with patch.object(run_http, "post") as post:
+            with self.assertRaisesRegex(ValueError, "sample capture already exists"):
+                self.run_main(["--sample-out", str(sample)])
+            post.assert_not_called()
         self.assertEqual(sample.read_text(), '{"previous": true}')
+        self.assertFalse(self.partial.exists())
+        self.assertFalse(self.output.exists())
+
+    def test_sample_identity_and_raw_response_must_match_durable_resume(self):
+        sample = self.root / "first-response.json"
+        extra = ["--sample-out", str(sample)]
+        self.interrupt(extra)
+        original = json.loads(sample.read_text())
+        header = json.loads(self.partial.read_text().splitlines()[0])
+        first_row = json.loads(self.partial.read_text().splitlines()[1])
+        self.assertEqual(original["case_id"], "first")
+        self.assertEqual(original["experiment_sha256"], header["experiment_sha256"])
+        self.assertEqual(run_http.digest(original["response"]),
+                         first_row["response_sha256"])
+        before = self.partial.read_bytes()
+        changes = (
+            ("experiment", lambda capture: capture.__setitem__("experiment_sha256", "0" * 64)),
+            ("request", lambda capture: capture["request"].__setitem__("state", "unrelated")),
+            ("response", lambda capture: capture["response"]["answers"]["impact"].__setitem__(
+                "noul", 0.9)),
+        )
+        for reason, change in changes:
+            with self.subTest(reason=reason):
+                altered = copy.deepcopy(original)
+                change(altered)
+                sample.write_text(json.dumps(altered))
+                with patch.object(run_http, "post") as post:
+                    with self.assertRaisesRegex(ValueError, "sample capture"):
+                        self.run_main(extra)
+                    post.assert_not_called()
+                self.assertEqual(self.partial.read_bytes(), before)
+                self.assertFalse(self.output.exists())
+        sample.write_text(json.dumps(original))
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main(extra)
+        post.assert_called_once()
+        self.assertFalse(self.partial.exists())
         self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+
+    def test_multiple_configs_capture_only_first_configuration(self):
+        sample = self.root / "first-response.json"
+        first_config = "A_noul_prompt"
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            with contextlib.redirect_stdout(io.StringIO()):
+                run_http.main(self.base + [
+                    "--sample-out", str(sample), first_config, self.config,
+                ])
+        self.assertEqual(post.call_count, len(self.dataset) * 2)
+        captured = json.loads(sample.read_text())
+        first = json.loads((self.root / "results" /
+                           f"probe_{first_config}.json").read_text())
+        second = json.loads(self.output.read_text())
+        self.assertEqual(captured["experiment_sha256"], first["experiment_sha256"])
+        self.assertNotEqual(captured["experiment_sha256"], second["experiment_sha256"])
+        self.assertEqual(run_http.digest(captured["response"]),
+                         first["rows"][0]["response_sha256"])
+
+    def test_sample_link_race_cannot_adopt_foreign_capture(self):
+        sample = self.root / "first-response.json"
+        original_link = run_http.os.link
+
+        def competing_sample(source, destination):
+            if destination == str(sample):
+                sample.write_text('{"foreign": true}')
+                raise FileExistsError(destination)
+            return original_link(source, destination)
+
+        with patch.object(run_http, "post", side_effect=self.response):
+            with patch.object(run_http.os, "link", side_effect=competing_sample):
+                with self.assertRaisesRegex(ValueError, "concurrently published"):
+                    self.run_main(["--sample-out", str(sample)])
+        self.assertEqual(sample.read_text(), '{"foreign": true}')
+        self.assertFalse(self.output.exists())
+        self.assertEqual(len(self.partial.read_text().splitlines()), 1)
+        self.assertEqual(list(self.root.glob(".noul-sample-*")), [])
 
     @unittest.skipUnless(os.name == "posix", "dangling links require portable POSIX support")
     def test_dangling_sample_link_refuses_without_inference_or_partial_output(self):

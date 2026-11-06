@@ -46,6 +46,38 @@ def request_bytes(body):
     return json.dumps(body, allow_nan=False).encode("utf-8")
 
 
+def verify_existing_sample(path, header, requests, done, questions):
+    """A resumed capture must describe a durable response from this experiment.
+
+    Never silently reuse an unrelated file as the model's first raw answer.
+    Opening a regular file without following links also avoids blocking on
+    hostile sample paths such as named pipes.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError(f"sample path is not a regular file: {path}")
+        with os.fdopen(descriptor, "rb") as source:
+            descriptor = None
+            sample = strict_json_loads(source.read())
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    case_id = sample.get("case_id") if isinstance(sample, dict) else None
+    if (not isinstance(case_id, str) or case_id not in requests
+            or sample.get("experiment_sha256") != header["experiment_sha256"]
+            or sample.get("request_sha256") != requests[case_id][1]
+            or sample.get("request") != requests[case_id][0]):
+        raise ValueError("sample capture does not belong to this experiment")
+    if case_id not in done:
+        raise ValueError("sample capture has no durable matching response row")
+    response = sample.get("response")
+    noul_probabilities(response, questions)
+    if done[case_id].get("response_sha256") != digest(response):
+        raise ValueError("sample capture disagrees with durable response evidence")
+
+
 def publish_sample(path, serialized):
     """Publish a completely rendered sample without clobbering an existing one.
 
@@ -62,11 +94,12 @@ def publish_sample(path, serialized):
             output.write(serialized)
         try:
             os.link(staged, path)
-        except FileExistsError:
-            # A dangling symlink occupies the pathname but exists() says
-            # false. Do not treat that unusable capture as already published.
-            if not os.path.isfile(path):
-                raise ValueError(f"sample path exists but is not a regular file: {path}")
+        except FileExistsError as error:
+            # Another run may have published a different capture after
+            # preflight. Never silently use it as evidence for this experiment.
+            if not os.path.isfile(path) or os.path.islink(path):
+                raise ValueError(f"sample path exists but is not a regular file: {path}") from error
+            raise ValueError(f"sample capture was concurrently published: {path}") from error
     finally:
         os.unlink(staged)
 
@@ -396,7 +429,8 @@ def main(argv=None):
     server_config = load_server_config(args.server_config)
     bearer_token = (load_bearer_token(args.bearer_token_env, args.url)
                     if args.bearer_token_env is not None else None)
-    if args.sample_out and os.path.lexists(args.sample_out) and not os.path.isfile(args.sample_out):
+    if (args.sample_out and os.path.lexists(args.sample_out)
+            and (os.path.islink(args.sample_out) or not os.path.isfile(args.sample_out))):
         raise ValueError(f"sample path exists but is not a regular file: {args.sample_out}")
     with open(os.path.join(HERE, "dataset.json"), "rb") as source:
         dataset_bytes = source.read()
@@ -418,13 +452,19 @@ def main(argv=None):
     cases = {case["id"]: case for case in dataset}
     os.makedirs(os.path.join(HERE, "results"), exist_ok=True)
     for cfg in args.configs:
+        # One --sample-out captures one response from the first configuration.
+        # Later configurations must not misattribute that capture to themselves.
+        sample_path = args.sample_out if cfg == args.configs[0] else None
         name = f"{args.tag}_{cfg}"
         path = os.path.join(HERE, "results", name + ".json")
         if os.path.lexists(path):
             raise ValueError(f"completed output already exists: {path}; use a new tag")
+        if (sample_path and os.path.lexists(sample_path)
+                and not os.path.lexists(path + ".partial")):
+            raise ValueError(f"sample capture already exists for a new run: {sample_path}")
         require_exclusive_publication(os.path.dirname(os.path.abspath(path)))
-        if args.sample_out and not os.path.isfile(args.sample_out):
-            require_exclusive_publication(os.path.dirname(os.path.abspath(args.sample_out)))
+        if sample_path and not os.path.lexists(sample_path):
+            require_exclusive_publication(os.path.dirname(os.path.abspath(sample_path)))
         requests = {}
         for case in dataset:
             body = {"state": STATES[cfg](case), "questions": questions}
@@ -467,6 +507,10 @@ def main(argv=None):
                 done = {}
             else:
                 done = resume_rows(partial, header, cases, requests, questions, args.noul_temperature)
+            if sample_path and os.path.lexists(sample_path):
+                if created:
+                    raise ValueError(f"sample capture already exists for a new run: {sample_path}")
+                verify_existing_sample(sample_path, header, requests, done, questions)
             for index, case in enumerate(dataset):
                 if case["id"] in done:
                     continue
@@ -491,6 +535,7 @@ def main(argv=None):
                     "input_tokens": usage.get("input_tokens"),
                     "state_tokens": usage.get("state_tokens"),
                     "dropped": usage.get("state_tokens_dropped"), "probs": probs,
+                    "response_sha256": digest(response),
                 }
                 if args.noul_temperature is not None:
                     row["probs_raw"] = probs
@@ -499,11 +544,14 @@ def main(argv=None):
                 # either. A non-finite response must not leave a sample file
                 # that a later valid retry mistakes for a completed capture.
                 serialized_row = serialize_result(row, questions, args.noul_temperature)
-                if args.sample_out and not os.path.exists(args.sample_out):
-                    serialized_sample = json.dumps(
-                        {"request": body, "response": response}, indent=1, allow_nan=False
-                    )
-                    publish_sample(args.sample_out, serialized_sample)
+                if sample_path and not os.path.lexists(sample_path):
+                    serialized_sample = json.dumps({
+                        "case_id": case["id"],
+                        "experiment_sha256": header["experiment_sha256"],
+                        "request_sha256": request_sha,
+                        "request": body, "response": response,
+                    }, indent=1, allow_nan=False)
+                    publish_sample(sample_path, serialized_sample)
                 partial.write(serialized_row + "\n")
                 partial.flush()
                 done[case["id"]] = row
