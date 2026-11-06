@@ -680,8 +680,16 @@ mod sealed_census_tests {
         };
         let head_receipt = receipt("live");
         let old_receipt = receipt("retired");
-        fs::write(root.join("head").join(SEALED_STORE_RECEIPT_FILE), &head_receipt).unwrap();
-        fs::write(root.join("old").join(SEALED_STORE_RECEIPT_FILE), &old_receipt).unwrap();
+        fs::write(
+            root.join("head").join(SEALED_STORE_RECEIPT_FILE),
+            &head_receipt,
+        )
+        .unwrap();
+        fs::write(
+            root.join("old").join(SEALED_STORE_RECEIPT_FILE),
+            &old_receipt,
+        )
+        .unwrap();
         let shared = root.join("head/shared");
         fs::write(&shared, vec![0_u8; 8192]).unwrap();
         for directory in ["old", ".staging-pending", "unrecognized"] {
@@ -704,8 +712,8 @@ mod sealed_census_tests {
             });
             entries.into_iter().map(Ok).collect::<Vec<_>>()
         };
-        let census = census_sealed_store_entries(ordered(), &BTreeSet::from(["live".to_owned()]))
-            .unwrap();
+        let census =
+            census_sealed_store_entries(ordered(), &BTreeSet::from(["live".to_owned()])).unwrap();
         assert_eq!((census.head_count, census.superseded_count), (1, 1));
         assert_eq!(
             (census.abandoned_staging_count, census.unrecognized_count),
