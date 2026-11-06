@@ -1227,22 +1227,103 @@ fn text_artifact_retention_refuses_tamper_and_publish_cas_movement() {
 
 #[cfg(unix)]
 #[test]
-fn text_artifact_retention_refuses_symlinked_inventory_entries() {
-    let (store, _generations) = fixture_store(1);
+fn unreferenced_nonregular_text_artifacts_do_not_block_verified_retirement() {
+    let (store, generations) = fixture_store(5);
+    let active = generations.last().expect("active generation");
+    let referenced = attach_fixture_text_artifact(&store, active, b"durably referenced");
+    let referenced_path =
+        code_text_artifact_path(store.path(), &referenced).expect("referenced artifact path");
+    let valid = text_artifact_for_bytes(&active.id, b"verified orphan beside unsafe entries");
+    let valid_path = write_text_artifact(&store, &valid, b"verified orphan beside unsafe entries");
+
     let artifacts_root = code_text_artifacts_root(store.path());
-    std::fs::create_dir_all(&artifacts_root).expect("create artifact root");
-    let outside = tempfile::NamedTempFile::new().expect("outside artifact");
-    let symlink = artifacts_root.join(format!("text-artifact-{}.bin", "d".repeat(64)));
-    std::os::unix::fs::symlink(outside.path(), &symlink).expect("create symlink");
+    let outside = tempfile::NamedTempFile::new().expect("foreign artifact");
+    std::fs::write(outside.path(), b"unrelated operator data").expect("write foreign data");
+    let link_name = format!("text-artifact-{}.bin", "d".repeat(64));
+    let link = artifacts_root.join(&link_name);
+    std::os::unix::fs::symlink(outside.path(), &link).expect("create foreign link");
+    let directory_name = format!("text-artifact-{}.bin", "e".repeat(64));
+    let directory = artifacts_root.join(&directory_name);
+    std::fs::create_dir(&directory).expect("create foreign directory");
+    std::fs::write(directory.join("keep"), b"unrelated directory data").unwrap();
+
+    let plan = prepare_next_code_generation_retention_cancellable(
+        store.path(),
+        &BTreeSet::new(),
+        &|| false,
+        None,
+    )
+    .expect("unsafe unreferenced entries cannot veto valid retirement");
+    assert_eq!(plan.collectable_generations.len(), 4);
+    assert!(
+        plan.collectable_text_artifacts
+            .iter()
+            .any(|entry| entry.artifact_file == valid.artifact_file)
+    );
+    for name in [&link_name, &directory_name] {
+        assert!(
+            plan.collectable_text_artifacts
+                .iter()
+                .all(|entry| &entry.artifact_file != name),
+            "an untrusted entry must never become a deletion candidate"
+        );
+    }
+
+    let report = execute_code_generation_retention(
+        store.path(),
+        plan,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(52),
+        None,
+    )
+    .expect("collect independent verified generations and orphan");
+    assert_eq!(report.deleted_generations.len(), 4);
+    assert!(!valid_path.exists(), "verified orphan was reclaimed");
+    assert!(referenced_path.is_file(), "durable referenced target remains");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "untrusted symlink remains untouched"
+    );
+    assert_eq!(
+        std::fs::read(outside.path()).unwrap(),
+        b"unrelated operator data"
+    );
+    assert_eq!(
+        std::fs::read(directory.join("keep")).unwrap(),
+        b"unrelated directory data"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn referenced_text_artifact_symlink_still_refuses_retention() {
+    let (store, generations) = fixture_store(1);
+    let active = generations.last().expect("active generation");
+    let referenced = attach_fixture_text_artifact(&store, active, b"durably referenced");
+    let target = code_text_artifact_path(store.path(), &referenced).unwrap();
+    let outside = tempfile::NamedTempFile::new().expect("foreign artifact");
+    std::fs::write(outside.path(), b"unrelated operator data").unwrap();
+    std::fs::remove_file(&target).unwrap();
+    std::os::unix::fs::symlink(outside.path(), &target).unwrap();
+
     let error = plan_code_generation_retention(store.path(), &BTreeSet::new())
-        .expect_err("symlinked artifact entry must fail closed");
+        .expect_err("a referenced descriptor cannot be replaced by a symlink");
     assert!(matches!(
         error,
         CodeGenerationRetentionErrorV1::UnsafeState(_)
     ));
     assert!(
-        symlink.exists(),
-        "refusal must preserve foreign link evidence"
+        std::fs::symlink_metadata(&target)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        std::fs::read(outside.path()).unwrap(),
+        b"unrelated operator data"
     );
 }
 
