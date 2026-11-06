@@ -810,7 +810,10 @@ mod sealed_census_tests {
                     1
                 } else if name == old {
                     2
-                } else if name == wrong_namespace || name == future_version || name == foreign_projection {
+                } else if name == wrong_namespace
+                    || name == future_version
+                    || name == foreign_projection
+                {
                     3
                 } else if name == head {
                     4
@@ -820,16 +823,15 @@ mod sealed_census_tests {
             });
             entries.into_iter().map(Ok).collect::<Vec<_>>()
         };
-        let census =
-            census_sealed_store_entries(
-                ordered(),
-                &BTreeSet::from([(
-                    "code".to_owned(),
-                    "index".to_owned(),
-                    "live".to_owned(),
-                )]),
-            )
-            .unwrap();
+        let census = census_sealed_store_entries(
+            ordered(),
+            &BTreeSet::from([(
+                "code".to_owned(),
+                "index".to_owned(),
+                "live".to_owned(),
+            )]),
+        )
+        .unwrap();
         assert_eq!((census.head_count, census.superseded_count), (1, 2));
         assert_eq!(
             (census.abandoned_staging_count, census.unrecognized_count),
@@ -846,7 +848,9 @@ mod sealed_census_tests {
         assert_eq!(no_head.head_bytes, 0);
         assert_eq!(
             no_head.superseded_bytes,
-            8192 + head_receipt.len() as u64 + old_receipt.len() as u64 + foreign_receipt.len() as u64
+            8192 + head_receipt.len() as u64
+                + old_receipt.len() as u64
+                + foreign_receipt.len() as u64
         );
     }
 }
