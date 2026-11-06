@@ -529,12 +529,6 @@ pub struct SealedStoreCensusV1 {
     pub unrecognized_count: u64,
 }
 
-/// Measure the sealed root beside `database_path` against the generation ids
-/// of the store's current verified heads (as journaled: `<projection>:<digest>`).
-///
-/// Metadata only: every entry is one receipt read plus a directory size walk,
-/// never a container open. An unreadable receipt counts as unrecognized so the
-/// census stays truthful when a receipt is mid-write or corrupt.
 // A symlinked sealed root must not redirect cleanup or accounting into
 // unrelated data. A missing root is normal before the first seal.
 fn sealed_root_is_real_directory(root: &Path) -> std::io::Result<bool> {
@@ -557,6 +551,12 @@ fn sealed_root_entries(root: &Path) -> std::io::Result<Option<std::fs::ReadDir>>
     }
 }
 
+/// Measure the sealed root beside `database_path` against the generation ids
+/// of the store's current verified heads (as journaled: `<projection>:<digest>`).
+///
+/// Metadata only: every entry is one receipt read plus a directory size walk,
+/// never a container open. An unreadable receipt counts as unrecognized so the
+/// census stays truthful when a receipt is mid-write or corrupt.
 pub fn census_sealed_store(
     database_path: &Path,
     head_generations: &std::collections::BTreeSet<String>,
