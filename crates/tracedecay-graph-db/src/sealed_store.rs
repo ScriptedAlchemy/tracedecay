@@ -724,10 +724,10 @@ mod sealed_census_tests {
     }
 }
 
-/// Removes every sealed generation beside `database_path` whose receipt does
-/// not name the current graph format: after a superseded-format rebuild those
-/// containers can never serve, while a generation this build already sealed
-/// keeps serving. In-flight `.staging-*` seals are left to their builder.
+/// Removes sealed generations with a proven older graph format. A receipt
+/// written by a newer build, an unrecognized artifact, or a non-generation
+/// entry is not safe to delete after a downgrade. In-flight `.staging-*`
+/// directories remain owned by their builder.
 pub(crate) fn discard_superseded_sealed_generations(
     database_path: &Path,
 ) -> Result<(), GraphDbError> {
@@ -740,32 +740,118 @@ pub(crate) fn discard_superseded_sealed_generations(
     for entry in entries {
         let entry =
             entry.map_err(|error| sealed_store_io_failure("sealed root read failed", error))?;
-        let path = entry.path();
-        if entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.starts_with(".staging-"))
+        if !entry
+            .file_type()
+            .map_err(|error| sealed_store_io_failure("sealed entry type failed", error))?
+            .is_dir()
         {
             continue;
         }
-        let current = load_sealed_store_receipt(&path)
-            .ok()
-            .flatten()
-            .is_some_and(|receipt| receipt.graph_format == GraphFormatVersion::current().get());
-        if !current {
-            match std::fs::remove_dir_all(&path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(sealed_store_io_failure(
-                        "superseded sealed generation removal failed",
-                        error,
-                    ));
-                }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.len() != 64 || !name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            continue;
+        }
+        let path = entry.path();
+        let Some(receipt) = load_sealed_store_receipt(&path).ok().flatten() else {
+            continue;
+        };
+        if receipt.version != SEALED_STORE_RECEIPT_VERSION
+            || receipt.physical_namespace != format!("generation:{name}")
+            || receipt.graph_format >= GraphFormatVersion::current().get()
+        {
+            continue;
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(sealed_store_io_failure(
+                    "superseded sealed generation removal failed",
+                    error,
+                ));
             }
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod superseded_sealed_cleanup_tests {
+    use super::*;
+
+    #[test]
+    fn only_proven_older_generation_artifacts_can_be_removed() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("graph.grafeo");
+        let root = sealed_store_root(&database);
+        std::fs::create_dir(&root).unwrap();
+        let current = GraphFormatVersion::current().get();
+        assert!(current > 0);
+        let obsolete = "a".repeat(64);
+        let future = "b".repeat(64);
+        let wrong_identity = "c".repeat(64);
+        let unreadable = "d".repeat(64);
+        let ordinary_file = "e".repeat(64);
+        let current_name = "f".repeat(64);
+        let unrelated = "operator-data";
+
+        let receipt = |name: &str, format: u32, physical_namespace: String| {
+            let directory = root.join(name);
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::write(
+                directory.join(SEALED_STORE_RECEIPT_FILE),
+                serde_json::to_vec(&serde_json::json!({
+                    "version": SEALED_STORE_RECEIPT_VERSION,
+                    "form": "compact",
+                    "namespace": "code",
+                    "projection": "index",
+                    "generation": "g",
+                    "physical_namespace": physical_namespace,
+                    "recovered_digest": "digest",
+                    "entities": 0,
+                    "relations": 0,
+                    "graph_format": format,
+                    "row_sum": null,
+                    "base": null,
+                    "source_generation": null,
+                    "watermark": null
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        };
+        receipt(&obsolete, current - 1, format!("generation:{obsolete}"));
+        receipt(&future, current + 1, format!("generation:{future}"));
+        receipt(&wrong_identity, current - 1, "generation:foreign".to_owned());
+        receipt(&current_name, current, format!("generation:{current_name}"));
+        receipt(unrelated, current - 1, format!("generation:{unrelated}"));
+        std::fs::create_dir(root.join(&unreadable)).unwrap();
+        std::fs::write(
+            root.join(&unreadable).join(SEALED_STORE_RECEIPT_FILE),
+            b"not json",
+        )
+        .unwrap();
+        std::fs::write(root.join(&ordinary_file), b"operator file").unwrap();
+        std::fs::create_dir(root.join(".staging-active")).unwrap();
+
+        discard_superseded_sealed_generations(&database).unwrap();
+
+        assert!(!root.join(&obsolete).exists(), "old verified format is retired");
+        for name in [
+            future.as_str(),
+            wrong_identity.as_str(),
+            unreadable.as_str(),
+            ordinary_file.as_str(),
+            current_name.as_str(),
+            unrelated,
+            ".staging-active",
+        ] {
+            assert!(root.join(name).exists(), "must preserve {name}");
+        }
+    }
 }
 
 /// Removes every `.staging-*` directory a seal left behind under the store's
