@@ -88,8 +88,7 @@ mod tests {
             .expect("open verified foreign database");
         let pinned_descriptors = descriptors_for(&path);
         assert_eq!(
-            pinned_descriptors,
-            1,
+            pinned_descriptors, 1,
             "verified Unix reads must not open a second raw descriptor to the SQLite inode"
         );
 
