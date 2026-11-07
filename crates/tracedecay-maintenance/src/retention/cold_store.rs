@@ -11,9 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
-use cap_std::fs::{Dir, OpenOptions};
 #[cfg(unix)]
 use cap_std::fs::OpenOptionsExt;
+use cap_std::fs::{Dir, OpenOptions};
 use serde::{Deserialize, Serialize};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_private_fs::capability_dir::{replace_file, sync_directory};
@@ -356,12 +356,12 @@ fn persist_cursor_in_dir(directory: &Dir, cursor: &ColdStoreCursorV1) -> io::Res
     // even a collided or attacker-prepared staging name cannot be truncated.
     for _ in 0..16 {
         let nonce = CURSOR_TEMP_NONCE.fetch_add(1, Ordering::Relaxed);
-        let temporary_name = format!(
-            ".retention-cold-store-{}-{nonce}.tmp",
-            std::process::id()
-        );
+        let temporary_name = format!(".retention-cold-store-{}-{nonce}.tmp", std::process::id());
         let mut options = OpenOptions::new();
-        options.write(true).create_new(true).follow(FollowSymlinks::No);
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
         #[cfg(unix)]
         options.mode(0o600);
         let mut temporary = match directory.open_with(&temporary_name, &options) {
@@ -540,11 +540,7 @@ mod tests {
             after_unregistered_directory: None,
         };
         persist_cursor_in_dir(&directory, &expected).unwrap();
-        std::fs::rename(
-            profile.join(CHECKPOINT_DIRECTORY),
-            profile.join("detached"),
-        )
-        .unwrap();
+        std::fs::rename(profile.join(CHECKPOINT_DIRECTORY), profile.join("detached")).unwrap();
         let foreign_cursor = foreign.join(CHECKPOINT_FILE);
         std::fs::write(&foreign_cursor, br#"{"after_project_id":"foreign"}"#).unwrap();
         symlink(&foreign, profile.join(CHECKPOINT_DIRECTORY)).unwrap();
