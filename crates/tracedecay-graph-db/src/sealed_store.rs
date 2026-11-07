@@ -44,7 +44,7 @@
 //! digest before the store serves a read.
 
 use std::collections::{BTreeMap, HashMap};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -2940,47 +2940,12 @@ fn open_sealed_store(
     open_sealed_store_checked(directory, identity, expected, &|| Ok(()), None)
 }
 
-/// Read only a regular sealed receipt, never an arbitrary-length on-disk
-/// payload. Check both the path and opened descriptor, since identity can
-/// change between metadata sampling and opening the file. The capped read
-/// protects against growth after both checks.
+/// Use the shared no-follow, handle-validated bounded file reader. A pathname
+/// can be swapped after a metadata check, so opening a symlink must fail at
+/// the actual open operation, not only at an earlier path inspection.
 fn read_sealed_receipt_bytes(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    if !metadata.file_type().is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "sealed receipt must be a regular file",
-        ));
-    }
-    if metadata.len() > MAX_SEALED_STORE_RECEIPT_BYTES {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "sealed receipt exceeds its byte limit",
-        ));
-    }
-    let file = std::fs::File::open(path)?;
-    if !file.metadata()?.is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "sealed receipt descriptor is not a regular file",
-        ));
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_SEALED_STORE_RECEIPT_BYTES + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_SEALED_STORE_RECEIPT_BYTES {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "sealed receipt grew past its byte limit",
-        ));
-    }
-    Ok(Some(bytes))
+    tracedecay_private_fs::framed_log::read_bounded(path, MAX_SEALED_STORE_RECEIPT_BYTES as usize)
 }
-
 fn load_sealed_store_receipt(
     directory: &Path,
 ) -> Result<Option<SealedStoreReceiptV1>, GraphDbError> {
@@ -2995,44 +2960,31 @@ fn load_sealed_store_receipt(
         .map_err(|error| GraphDbError::unavailable(format!("sealed receipt decode: {error}")))
 }
 
-/// A proof marker is only a digest, not a trusted size-unbounded payload.
-/// Never follow a symlink as marker authority; cap the read even when the
-/// file changes between the path and opened-descriptor checks.
+/// A proof marker is only a digest, not a trusted file. Reuse the same
+/// no-follow reader as receipts; a symlink swapped in during open must never
+/// supply proof bytes, and oversized or nonregular markers do not match.
 fn sealed_store_check_matches(
     directory: &Path,
     expected_digest: &str,
 ) -> Result<bool, GraphDbError> {
     let path = directory.join(SEALED_STORE_CHECKED_FILE);
-    let metadata = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(sealed_store_io_failure("sealed check inspect failed", error)),
-    };
-    let expected_len = expected_digest.len() as u64;
-    if expected_len > MAX_SEALED_STORE_RECEIPT_BYTES
-        || !metadata.file_type().is_file()
-        || metadata.len() != expected_len
-    {
-        return Ok(false);
+    let limit = expected_digest
+        .len()
+        .min(MAX_SEALED_STORE_RECEIPT_BYTES as usize);
+    match tracedecay_private_fs::framed_log::read_bounded(&path, limit) {
+        Ok(Some(bytes)) => Ok(bytes == expected_digest.as_bytes()),
+        Ok(None) => Ok(false),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(sealed_store_io_failure("sealed check read failed", error)),
     }
-    let file = match std::fs::File::open(&path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(sealed_store_io_failure("sealed check open failed", error)),
-    };
-    let opened = file
-        .metadata()
-        .map_err(|error| sealed_store_io_failure("sealed check inspect failed", error))?;
-    if !opened.is_file() || opened.len() != expected_len {
-        return Ok(false);
-    }
-    let mut bytes = Vec::new();
-    file.take(expected_len + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| sealed_store_io_failure("sealed check read failed", error))?;
-    Ok(bytes == expected_digest.as_bytes())
 }
-
 fn persist_sealed_store_check(directory: &Path, expected_digest: &str) -> Result<(), GraphDbError> {
     if sealed_store_check_matches(directory, expected_digest)? {
         return Ok(());
