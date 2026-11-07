@@ -44,7 +44,6 @@
 //! digest before the store serves a read.
 
 use std::collections::{BTreeMap, HashMap};
-use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -628,20 +627,6 @@ pub struct SealedStoreCensusV1 {
     /// Entries that are neither a readable sealed receipt nor staging: an
     /// unrecognized layout is reported, never silently classed as dead.
     pub unrecognized_count: u64,
-}
-
-// A symlinked sealed root must not redirect cleanup or accounting into
-// unrelated data. A missing root is normal before the first seal.
-fn sealed_root_is_real_directory(root: &Path) -> std::io::Result<bool> {
-    match std::fs::symlink_metadata(root) {
-        Ok(metadata) if metadata.is_dir() => Ok(true),
-        Ok(_) => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "sealed store root is not a real directory",
-        )),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
-    }
 }
 
 /// Keep census enumeration, receipt identity and byte measurement beneath one
