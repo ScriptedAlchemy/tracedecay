@@ -25,6 +25,9 @@ const MAX_BATCH_BYTES: u64 = 4 * 1024 * 1024;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayMetadataCompactionReport {
     pub rows_scanned: u64,
+    /// Transactional store-id frontier consumed by this page, absent on idle reads.
+    pub frontier_before: Option<i64>,
+    pub frontier_after: Option<i64>,
     pub rows_compacted: u64,
     /// Eligible rows retained because their representation, sanitizer result,
     /// or byte bound could not prove this narrow lossless transformation.
@@ -150,6 +153,7 @@ async fn step(
     max_rows: usize,
 ) -> Result<ReplayMetadataCompactionReport, LcmError> {
     let mut after = frontier(conn).await?;
+    let before = after;
     let candidates = candidates(conn, after, max_rows).await?;
     let mut report = ReplayMetadataCompactionReport::default();
     let mut remaining = MAX_BATCH_BYTES;
@@ -198,6 +202,13 @@ async fn step(
     }
     if guard_suspended {
         summary_convergence::restore_raw_update_guard(conn).await?;
+    }
+    if report.rows_scanned > 0 {
+        if after <= before {
+            return Err(db_error("replay metadata page did not advance its frontier"));
+        }
+        report.frontier_before = Some(before);
+        report.frontier_after = Some(after);
     }
     schema::set_gc_meta(conn, FRONTIER_KEY, &after.to_string()).await?;
     report.has_more = has_work(conn, after).await?;

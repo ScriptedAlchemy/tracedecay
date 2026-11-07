@@ -369,3 +369,37 @@ async fn row_and_byte_budgets_advance_a_durable_frontier_and_finished_pages_are_
     let idle = store.tick(48).await;
     assert_eq!(idle, ReplayMetadataCompactionReport::default());
 }
+
+#[asupersync::test]
+async fn zero_compaction_pages_advance_distinct_durable_frontiers() {
+    let store = Store::open().await;
+    for ordinal in 1..=52 {
+        store
+            .insert(
+                ordinal,
+                "canonical source",
+                Value::String("different replay".to_owned()),
+                false,
+            )
+            .await;
+    }
+    let first = store.tick(48).await;
+    assert_eq!(first.rows_scanned, 48);
+    assert_eq!(first.rows_compacted, 0);
+    assert_eq!(first.frontier_before, Some(0));
+    assert_eq!(first.frontier_after, Some(48));
+    assert!(first.has_more);
+
+    let second = store.tick(48).await;
+    assert_eq!(second.rows_scanned, 4);
+    assert_eq!(second.rows_compacted, 0);
+    assert_eq!(second.frontier_before, Some(48));
+    assert_eq!(second.frontier_after, Some(52));
+    assert!(!second.has_more);
+    assert_eq!(frontier(&store.conn).await.unwrap(), 52);
+
+    assert_eq!(
+        store.tick(48).await,
+        ReplayMetadataCompactionReport::default()
+    );
+}
