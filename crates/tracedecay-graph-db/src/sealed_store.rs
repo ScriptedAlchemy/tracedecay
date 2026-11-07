@@ -2969,7 +2969,9 @@ fn sealed_store_check_matches(
     expected_digest: &str,
 ) -> Result<bool, GraphDbError> {
     let path = directory.join(SEALED_STORE_CHECKED_FILE);
-    let limit = expected_digest.len().min(MAX_SEALED_STORE_RECEIPT_BYTES as usize);
+    let limit = expected_digest
+        .len()
+        .min(MAX_SEALED_STORE_RECEIPT_BYTES as usize);
     match tracedecay_private_fs::framed_log::read_bounded(&path, limit) {
         Ok(Some(bytes)) => Ok(bytes == expected_digest.as_bytes()),
         Ok(None) => Ok(false),
@@ -2998,7 +3000,9 @@ fn persist_sealed_store_check(directory: &Path, expected_digest: &str) -> Result
         .map_err(|error| sealed_store_io_failure("sealed marker root inspect failed", error))?;
     let directory_is_real = std::fs::symlink_metadata(directory)
         .map(|metadata| metadata.file_type().is_dir())
-        .map_err(|error| sealed_store_io_failure("sealed marker directory inspect failed", error))?;
+        .map_err(|error| {
+            sealed_store_io_failure("sealed marker directory inspect failed", error)
+        })?;
     if !root_is_real || !directory_is_real {
         return Err(GraphDbError::unavailable(
             "sealed marker directory is not a real directory",
@@ -3021,7 +3025,9 @@ fn persist_sealed_store_check(directory: &Path, expected_digest: &str) -> Result
 
 #[cfg(test)]
 mod sealed_marker_tests {
-    use super::{SEALED_STORE_CHECKED_FILE, persist_sealed_store_check, sealed_store_check_matches};
+    use super::{
+        SEALED_STORE_CHECKED_FILE, persist_sealed_store_check, sealed_store_check_matches,
+    };
 
     #[test]
     fn proof_marker_requires_exact_bounded_digest_and_replaces_stale_bytes() {

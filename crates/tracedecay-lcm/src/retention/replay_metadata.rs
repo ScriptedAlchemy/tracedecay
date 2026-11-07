@@ -205,7 +205,9 @@ async fn step(
     }
     if report.rows_scanned > 0 {
         if after <= before {
-            return Err(db_error("replay metadata page did not advance its frontier"));
+            return Err(db_error(
+                "replay metadata page did not advance its frontier",
+            ));
         }
         report.frontier_before = Some(before);
         report.frontier_after = Some(after);
