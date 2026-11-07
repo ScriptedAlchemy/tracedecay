@@ -1020,52 +1020,28 @@ pub(crate) fn discard_superseded_sealed_generations(
     database_path: &Path,
 ) -> Result<(), GraphDbError> {
     let root = sealed_store_root(database_path);
-    let entries = match sealed_root_entries(&root) {
-        Ok(Some(entries)) => entries,
-        Ok(None) => return Ok(()),
-        Err(error) => return Err(sealed_store_io_failure("sealed root read failed", error)),
-    };
-    for entry in entries {
-        let entry =
-            entry.map_err(|error| sealed_store_io_failure("sealed root read failed", error))?;
-        if !entry
-            .file_type()
-            .map_err(|error| sealed_store_io_failure("sealed entry type failed", error))?
-            .is_dir()
-        {
-            continue;
-        }
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if name.len() != 64 || !name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            continue;
-        }
-        let path = entry.path();
-        let Some(receipt) = load_sealed_store_receipt(&path).ok().flatten() else {
-            continue;
-        };
-        // The old graph format alone is not proof that this build owns the
-        // artifact: a newer or malformed sealed form must survive a downgrade.
-        if receipt.version != SEALED_STORE_RECEIPT_VERSION
-            || receipt.physical_namespace != format!("generation:{name}")
-            || receipt.graph_format >= GraphFormatVersion::current().get()
-            || !recognized_sealed_form(&receipt)
-        {
-            continue;
-        }
-        match std::fs::remove_dir_all(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(sealed_store_io_failure(
-                    "superseded sealed generation removal failed",
-                    error,
-                ));
+    tracedecay_private_fs::capability_dir::remove_selected_child_directories_nofollow(
+        &root,
+        Some((SEALED_STORE_RECEIPT_FILE, MAX_SEALED_STORE_RECEIPT_BYTES as usize)),
+        |name, receipt_bytes| {
+            let Some(name) = name.to_str() else {
+                return false;
+            };
+            if name.len() != 64 || !name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return false;
             }
-        }
-    }
+            let Some(receipt) = receipt_bytes
+                .and_then(|bytes| serde_json::from_slice::<SealedStoreReceiptV1>(bytes).ok())
+            else {
+                return false;
+            };
+            receipt.version == SEALED_STORE_RECEIPT_VERSION
+                && receipt.physical_namespace == format!("generation:{name}")
+                && receipt.graph_format < GraphFormatVersion::current().get()
+                && recognized_sealed_form(&receipt)
+        },
+    )
+    .map_err(|error| sealed_store_io_failure("superseded sealed generation removal failed", error))?;
     Ok(())
 }
 
@@ -1248,47 +1224,24 @@ mod superseded_sealed_cleanup_tests {
 /// this store is in flight.
 pub(crate) fn sweep_abandoned_sealed_staging(database_path: &Path) {
     let root = sealed_store_root(database_path);
-    let entries = match sealed_root_entries(&root) {
-        Ok(Some(entries)) => entries,
-        Ok(None) => return,
-        Err(error) => {
-            tracing::warn!(
-                event = "sealed_staging_sweep_unreadable",
-                root = %root.display(),
-                error = %error,
-                "sealed store root could not be enumerated; abandoned staging stays"
-            );
-            return;
-        }
-    };
-    let mut removed = 0usize;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if !sealed_staging_name(name) || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            continue;
-        }
-        let path = entry.path();
-        match std::fs::remove_dir_all(&path) {
-            Ok(()) => removed += 1,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => tracing::warn!(
-                event = "sealed_staging_sweep_failed",
-                path = %path.display(),
-                error = %error,
-                "abandoned sealed staging directory could not be removed"
-            ),
-        }
-    }
-    if removed > 0 {
-        tracing::info!(
+    match tracedecay_private_fs::capability_dir::remove_selected_child_directories_nofollow(
+        &root,
+        None,
+        |name, _| name.to_str().is_some_and(sealed_staging_name),
+    ) {
+        Ok(Some(removed)) if removed > 0 => tracing::info!(
             event = "sealed_staging_swept",
             root = %root.display(),
             removed,
             "removed abandoned sealed staging directories left by interrupted seals"
-        );
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::warn!(
+            event = "sealed_staging_sweep_unreadable",
+            root = %root.display(),
+            %error,
+            "sealed store root could not be safely swept; remaining staging stays"
+        ),
     }
 }
 
@@ -1315,39 +1268,23 @@ fn row_spill_name(name: &str) -> bool {
 /// whose spill removes itself when it drops.
 pub(crate) fn sweep_abandoned_row_spills(database_path: &Path) {
     let root = sealed_store_root(database_path);
-    let entries = match sealed_root_entries(&root) {
-        Ok(Some(entries)) => entries,
-        Ok(None) => return,
-        Err(error) => {
-            tracing::warn!(
-                event = "graph_row_spill_sweep_unreadable",
-                root = %root.display(),
-                %error,
-                "sealed root cannot be safely enumerated"
-            );
-            return;
-        }
-    };
     let own = format!("{ROW_SPILL_PREFIX}{}-", std::process::id());
-    for entry in entries.flatten() {
-        if entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| row_spill_name(name) && !name.starts_with(&own))
-            && entry.file_type().is_ok_and(|kind| kind.is_dir())
-        {
-            let path = entry.path();
-            if let Err(error) = std::fs::remove_dir_all(&path)
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                tracing::warn!(
-                    event = "graph_row_spill_sweep_failed",
-                    path = %path.display(),
-                    error = %error,
-                    "abandoned graph row spill could not be removed"
-                );
-            }
-        }
+    if let Err(error) =
+        tracedecay_private_fs::capability_dir::remove_selected_child_directories_nofollow(
+            &root,
+            None,
+            |name, _| {
+                name.to_str()
+                    .is_some_and(|name| row_spill_name(name) && !name.starts_with(&own))
+            },
+        )
+    {
+        tracing::warn!(
+            event = "graph_row_spill_sweep_failed",
+            root = %root.display(),
+            %error,
+            "sealed row spills could not be safely swept"
+        );
     }
 }
 
@@ -1430,24 +1367,11 @@ fn remove_sealed_directory_checked(directory: &Path) -> Result<(), GraphDbError>
     let root = directory
         .parent()
         .ok_or_else(|| GraphDbError::unavailable("sealed artifact has no parent directory"))?;
-    match sealed_root_is_real_directory(root) {
-        Ok(true) => {}
-        Ok(false) => return Ok(()),
-        Err(error) => {
-            return Err(sealed_store_io_failure(
-                "sealed root validation failed",
-                error,
-            ));
-        }
-    }
-    match std::fs::remove_dir_all(directory) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(sealed_store_io_failure(
-            "sealed directory removal failed",
-            error,
-        )),
-    }
+    let name = directory
+        .file_name()
+        .ok_or_else(|| GraphDbError::unavailable("sealed artifact has no directory name"))?;
+    tracedecay_private_fs::capability_dir::remove_named_child_directory_nofollow(root, name)
+        .map_err(|error| sealed_store_io_failure("sealed directory removal failed", error))
 }
 
 /// Staging and invalid-artifact cleanup are best effort. Retiring an accepted
