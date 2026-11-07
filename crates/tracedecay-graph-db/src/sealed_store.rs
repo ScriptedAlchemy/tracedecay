@@ -215,6 +215,15 @@ const SEALED_STORE_RECEIPT_FILE: &str = "sealed.json";
 /// Digest recorded only after a successful post-reopen proof. A `sealed.json`
 /// written before that proof is not release authority.
 const SEALED_STORE_CHECKED_FILE: &str = "sealed.checked";
+const SEALED_STAGING_PREFIX: &str = ".staging-";
+
+/// A seal only creates staging directories for a 64-hex physical generation.
+/// Prefix matches alone cannot authorize deleting an unrelated directory.
+fn sealed_staging_name(name: &str) -> bool {
+    name.strip_prefix(SEALED_STAGING_PREFIX).is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
 const SEALED_STORE_DISABLE_ENV: &str = "TRACEDECAY_GRAPH_SEALED_STORE";
 
 /// The one form a sealed store is built in. Every value TraceDecay persists
@@ -601,7 +610,7 @@ fn census_sealed_store_entries(
         if entry
             .file_name()
             .to_str()
-            .is_some_and(|name| name.starts_with(".staging-"))
+            .is_some_and(sealed_staging_name)
         {
             census.abandoned_staging_count += 1;
             abandoned.push(path);
@@ -911,7 +920,7 @@ mod sealed_census_tests {
         assert_eq!((census.head_count, census.superseded_count), (1, 2));
         assert_eq!(
             (census.abandoned_staging_count, census.unrecognized_count),
-            (1, 7)
+            (0, 8)
         );
         assert_eq!(census.head_bytes, 8192 + head_receipt.len() as u64);
         assert_eq!(
@@ -1186,7 +1195,7 @@ pub(crate) fn sweep_abandoned_sealed_staging(database_path: &Path) {
         let Some(name) = name.to_str() else {
             continue;
         };
-        if !name.starts_with(".staging-") {
+        if !sealed_staging_name(name) || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
             continue;
         }
         let path = entry.path();
@@ -1214,6 +1223,19 @@ pub(crate) fn sweep_abandoned_sealed_staging(database_path: &Path) {
 /// Prefix of a batch producer's row spill under the sealed root.
 const ROW_SPILL_PREFIX: &str = ".rows-";
 
+/// A row-spill owner writes exactly `.rows-<pid>-<nonce>`. Unknown entries
+/// sharing this prefix do not belong to the spill collector.
+fn row_spill_name(name: &str) -> bool {
+    name.strip_prefix(ROW_SPILL_PREFIX)
+        .and_then(|suffix| suffix.split_once('-'))
+        .is_some_and(|(pid, nonce)| {
+            !pid.is_empty()
+                && !nonce.is_empty()
+                && pid.bytes().all(|byte| byte.is_ascii_digit())
+                && nonce.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
 /// Removes every row spill another process left under the store's sealed
 /// root. Run at the eager open, whose exclusive store lock means no other
 /// process is producing rows for this store. Spills named for this process
@@ -1239,7 +1261,8 @@ pub(crate) fn sweep_abandoned_row_spills(database_path: &Path) {
         if entry
             .file_name()
             .to_str()
-            .is_some_and(|name| name.starts_with(ROW_SPILL_PREFIX) && !name.starts_with(&own))
+            .is_some_and(|name| row_spill_name(name) && !name.starts_with(&own))
+            && entry.file_type().is_ok_and(|kind| kind.is_dir())
         {
             let path = entry.path();
             if let Err(error) = std::fs::remove_dir_all(&path)
@@ -1253,6 +1276,70 @@ pub(crate) fn sweep_abandoned_row_spills(database_path: &Path) {
                 );
             }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod abandoned_sealed_cleanup_tests {
+    use super::*;
+
+    #[test]
+    fn recovery_collects_only_owned_generation_staging_and_numeric_row_spills() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("graph.grafeo");
+        let root = sealed_store_root(&database);
+        std::fs::create_dir(&root).unwrap();
+
+        let owned_staging = format!("{SEALED_STAGING_PREFIX}{}", "a".repeat(64));
+        let foreign_pid = u64::from(std::process::id()) + 1;
+        let owned_spill = format!("{ROW_SPILL_PREFIX}{foreign_pid}-0");
+        let live_spill = format!("{ROW_SPILL_PREFIX}{}-0", std::process::id());
+        for name in [&owned_staging, &owned_spill, &live_spill] {
+            std::fs::create_dir(root.join(name)).unwrap();
+            std::fs::write(root.join(name).join("payload"), b"owned").unwrap();
+        }
+
+        let unknown = [
+            ".staging-pending".to_owned(),
+            format!("{SEALED_STAGING_PREFIX}{}-extra", "b".repeat(64)),
+            ".rows-foreign".to_owned(),
+            ".rows-123-extra".to_owned(),
+            ".rows-123-0-extra".to_owned(),
+        ];
+        for name in &unknown {
+            std::fs::create_dir(root.join(name)).unwrap();
+            std::fs::write(root.join(name).join("foreign"), b"keep").unwrap();
+        }
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("foreign"), b"external").unwrap();
+        let linked_staging = format!("{SEALED_STAGING_PREFIX}{}", "c".repeat(64));
+        symlink(&outside, root.join(&linked_staging)).unwrap();
+        let linked_spill = format!("{ROW_SPILL_PREFIX}{foreign_pid}-1");
+        symlink(&outside, root.join(&linked_spill)).unwrap();
+
+        let before = census_sealed_store(&database, &Default::default()).unwrap();
+        assert_eq!(before.abandoned_staging_count, 1);
+        assert!(before.unrecognized_count >= unknown.len() as u64 + 3);
+
+        sweep_abandoned_sealed_staging(&database);
+        sweep_abandoned_row_spills(&database);
+
+        assert!(!root.join(&owned_staging).exists());
+        assert!(!root.join(&owned_spill).exists());
+        assert!(root.join(&live_spill).is_dir());
+        for name in &unknown {
+            assert_eq!(std::fs::read(root.join(name).join("foreign")).unwrap(), b"keep");
+        }
+        assert!(std::fs::symlink_metadata(root.join(&linked_staging))
+            .unwrap().file_type().is_symlink());
+        assert!(std::fs::symlink_metadata(root.join(&linked_spill))
+            .unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(outside.join("foreign")).unwrap(), b"external");
+        let after = census_sealed_store(&database, &Default::default()).unwrap();
+        assert_eq!(after.abandoned_staging_count, 0);
     }
 }
 
