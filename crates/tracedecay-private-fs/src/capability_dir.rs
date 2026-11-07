@@ -252,6 +252,95 @@ fn read_child_receipt(child: &Dir, receipt: &str, limit: usize) -> io::Result<Op
     Ok(Some(bytes))
 }
 
+/// Capability-relative census classes. The caller decides which
+/// bounded receipt identities are recognizable, while private-fs owns all
+/// directory traversal, metadata and hardlink accounting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DirectoryCensus<const N: usize> {
+    pub counts: [u64; N],
+    pub bytes: [u64; N],
+    pub unrecognized: u64,
+}
+
+/// Classify direct children under one held, no-follow root, then charge live
+/// classes in caller-specified priority order. A root swap cannot redirect
+/// receipt reads or recursive size walks; an unreadable/oversized receipt
+/// grants no classification. Substituted unsafe children fail closed.
+pub fn census_child_directories_nofollow<const N: usize>(
+    root: &Path,
+    receipt: Option<(&str, usize)>,
+    mut classify: impl FnMut(&OsStr, Option<&[u8]>) -> Option<usize>,
+) -> io::Result<Option<DirectoryCensus<N>>> {
+    let Some(directory) = open_owned_directory_nofollow(root)? else {
+        return Ok(None);
+    };
+    let mut classes: [Vec<Dir>; N] = std::array::from_fn(|_| Vec::new());
+    let mut result = DirectoryCensus {
+        counts: [0; N],
+        bytes: [0; N],
+        unrecognized: 0,
+    };
+    for entry in directory.read_dir(".")? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            result.unrecognized = result.unrecognized.saturating_add(1);
+            continue;
+        }
+        let name = entry.file_name();
+        let child = directory.open_dir_nofollow(&name)?;
+        let receipt_bytes = receipt
+            .and_then(|(file, limit)| read_child_receipt(&child, file, limit).ok().flatten());
+        match classify(&name, receipt_bytes.as_deref()) {
+            Some(index) if index < N => {
+                result.counts[index] = result.counts[index].saturating_add(1);
+                classes[index].push(child);
+            }
+            _ => result.unrecognized = result.unrecognized.saturating_add(1),
+        }
+    }
+
+    // A live layered generation may hard-link files from a superseded base.
+    // The first class to charge a multiply linked inode owns those bytes.
+    let mut counted = std::collections::HashSet::new();
+    for (index, children) in classes.into_iter().enumerate() {
+        for child in children {
+            result.bytes[index] = result.bytes[index]
+                .saturating_add(directory_bytes_nofollow(child, &mut counted)?);
+        }
+    }
+    Ok(Some(result))
+}
+
+fn directory_bytes_nofollow(
+    root: Dir,
+    counted: &mut std::collections::HashSet<(u64, u64)>,
+) -> io::Result<u64> {
+    let mut total = 0_u64;
+    let mut pending = vec![root];
+    while let Some(directory) = pending.pop() {
+        for entry in directory.read_dir(".")? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if entry.file_type()?.is_dir() {
+                pending.push(directory.open_dir_nofollow(&name)?);
+                continue;
+            }
+            let metadata = directory.symlink_metadata(&name)?;
+            #[cfg(unix)]
+            {
+                use cap_fs_ext::MetadataExt;
+                if metadata.nlink() > 1 && !counted.insert((metadata.dev(), metadata.ino())) {
+                    continue;
+                }
+            }
+            #[cfg(not(unix))]
+            let _ = &counted;
+            total = total.saturating_add(metadata.len());
+        }
+    }
+    Ok(total)
+}
+
 /// Enumerate and reclaim only selected real child directories under one held
 /// no-follow root. Selection (including optional receipt evidence) and removal
 /// refer to the *same opened child*: a root or child swap cannot redirect the
@@ -346,6 +435,70 @@ mod replacement_tests {
     use std::io::Read;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn census_uses_held_root_after_foreign_symlink_swap() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let owned = temp.path().join("owned");
+        let moved = temp.path().join("moved");
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir_all(owned.join("generation")).unwrap();
+        std::fs::create_dir_all(foreign.join("generation")).unwrap();
+        std::fs::write(owned.join("generation").join("payload"), vec![1_u8; 41]).unwrap();
+        std::fs::write(foreign.join("generation").join("payload"), vec![2_u8; 100_041])
+            .unwrap();
+
+        let mut swapped = false;
+        let measured = census_child_directories_nofollow::<1>(&owned, None, |name, _| {
+            assert_eq!(name, OsStr::new("generation"));
+            assert!(!swapped);
+            std::fs::rename(&owned, &moved).unwrap();
+            symlink(&foreign, &owned).unwrap();
+            swapped = true;
+            Some(0)
+        })
+        .unwrap()
+        .unwrap();
+        assert!(swapped);
+        assert_eq!(measured.counts, [1]);
+        assert_eq!(measured.bytes, [41]);
+        assert_eq!(
+            std::fs::metadata(foreign.join("generation").join("payload"))
+                .unwrap()
+                .len(),
+            100_041
+        );
+        assert_eq!(
+            std::fs::metadata(moved.join("generation").join("payload"))
+                .unwrap()
+                .len(),
+            41
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn census_never_descends_foreign_symlink_children() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let owned = temp.path().join("owned");
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir_all(owned.join("generation")).unwrap();
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(foreign.join("payload"), vec![0_u8; 100_041]).unwrap();
+        std::fs::write(owned.join("generation").join("local"), vec![0_u8; 41]).unwrap();
+        symlink(&foreign, owned.join("generation").join("linked")).unwrap();
+        let measured = census_child_directories_nofollow::<1>(&owned, None, |_, _| Some(0))
+            .unwrap()
+            .unwrap();
+        assert_eq!(measured.counts, [1]);
+        assert!(measured.bytes[0] >= 41);
+        assert!(measured.bytes[0] < 100_041);
+    }
 
     #[test]
     fn replacement_publishes_complete_bytes_and_refuses_parent_traversal() {

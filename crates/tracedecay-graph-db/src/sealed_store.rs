@@ -55,6 +55,7 @@ use grafeo_core::graph::compact::IncrementalCompactStoreBuilder;
 use grafeo_engine::GrafeoDB;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use tracedecay_private_fs::capability_dir::census_child_directories_nofollow;
 use tracedecay_store::runtime::GraphRecoveredGenerationDigestV1;
 
 use crate::generation::{
@@ -643,139 +644,68 @@ fn sealed_root_is_real_directory(root: &Path) -> std::io::Result<bool> {
     }
 }
 
-fn sealed_root_entries(root: &Path) -> std::io::Result<Option<std::fs::ReadDir>> {
-    if sealed_root_is_real_directory(root)? {
-        std::fs::read_dir(root).map(Some)
-    } else {
-        Ok(None)
-    }
-}
-
-/// Measure the sealed root beside `database_path` against the full
-/// namespace, projection, and generation identities of verified heads.
-///
-/// Metadata only: every entry is one receipt read plus a directory size walk,
-/// never a container open. An unreadable receipt counts as unrecognized so the
-/// census stays truthful when a receipt is mid-write or corrupt.
+/// Keep census enumeration, receipt identity and byte measurement beneath one
+/// already-open, no-follow sealed root. A path rename or symlink replacement
+/// cannot substitute a foreign generation after the census begins.
 pub fn census_sealed_store(
     database_path: &Path,
     head_generations: &std::collections::BTreeSet<(String, String, String)>,
 ) -> std::io::Result<SealedStoreCensusV1> {
-    let root = sealed_store_root(database_path);
-    let Some(entries) = sealed_root_entries(&root)? else {
-        return Ok(SealedStoreCensusV1::default());
-    };
-    census_sealed_store_entries(entries, head_generations)
+    census_sealed_store_root(&sealed_store_root(database_path), head_generations)
 }
 
-fn census_sealed_store_entries(
-    entries: impl IntoIterator<Item = std::io::Result<std::fs::DirEntry>>,
+fn census_sealed_store_root(
+    root: &Path,
     head_generations: &std::collections::BTreeSet<(String, String, String)>,
 ) -> std::io::Result<SealedStoreCensusV1> {
-    let mut census = SealedStoreCensusV1::default();
-    let mut heads = Vec::new();
-    let mut superseded = Vec::new();
-    let mut abandoned = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            census.unrecognized_count += 1;
-            continue;
-        }
-        let path = entry.path();
-        if entry.file_name().to_str().is_some_and(sealed_staging_name) {
-            census.abandoned_staging_count += 1;
-            abandoned.push(path);
-            continue;
-        }
-        let receipt = read_sealed_receipt_bytes(&path.join(SEALED_STORE_RECEIPT_FILE))
-            .ok()
-            .flatten()
-            .and_then(|bytes| serde_json::from_slice::<SealedStoreReceiptV1>(&bytes).ok());
-        let Some(receipt) = receipt else {
-            census.unrecognized_count += 1;
-            continue;
-        };
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            census.unrecognized_count += 1;
-            continue;
-        };
-        if name.len() != 64
-            || !name.bytes().all(|byte| byte.is_ascii_hexdigit())
-            || receipt.version != SEALED_STORE_RECEIPT_VERSION
-            || receipt.physical_namespace != format!("generation:{name}")
-            || !recognized_sealed_form(&receipt)
-        {
-            census.unrecognized_count += 1;
-            continue;
-        }
-        if head_generations.contains(&(
-            receipt.namespace.clone(),
-            receipt.projection.clone(),
-            receipt.generation.clone(),
-        )) {
-            census.head_count += 1;
-            heads.push(path);
-        } else {
-            census.superseded_count += 1;
-            superseded.push(path);
-        }
-    }
+    const HEAD: usize = 0;
+    const SUPERSEDED: usize = 1;
+    const ABANDONED: usize = 2;
 
-    // A layered generation can hard-link its base across directories. Charge
-    // that inode to its live head before any superseded or abandoned alias,
-    // regardless of read_dir order. Unknown receipts have no charging authority.
-    let mut counted = std::collections::HashSet::new();
-    for path in heads {
-        census.head_bytes = census
-            .head_bytes
-            .saturating_add(directory_bytes(&path, &mut counted)?);
-    }
-    for path in superseded {
-        census.superseded_bytes = census
-            .superseded_bytes
-            .saturating_add(directory_bytes(&path, &mut counted)?);
-    }
-    for path in abandoned {
-        census.abandoned_staging_bytes = census
-            .abandoned_staging_bytes
-            .saturating_add(directory_bytes(&path, &mut counted)?);
-    }
-    Ok(census)
-}
-
-/// Bytes under `directory` not already counted in `counted`: a layered
-/// generation's base container is a hard link to bytes another directory
-/// already holds, so each file is charged once per census.
-fn directory_bytes(
-    directory: &Path,
-    counted: &mut std::collections::HashSet<(u64, u64)>,
-) -> std::io::Result<u64> {
-    let mut total = 0u64;
-    let mut pending = vec![directory.to_path_buf()];
-    while let Some(directory) = pending.pop() {
-        for entry in std::fs::read_dir(&directory)? {
-            let entry = entry?;
-            // Sealed census must never follow a nested link outside its root.
-            let metadata = std::fs::symlink_metadata(entry.path())?;
-            if metadata.is_dir() {
-                pending.push(entry.path());
-                continue;
+    let Some(measured) = census_child_directories_nofollow::<3>(
+        root,
+        Some((
+            SEALED_STORE_RECEIPT_FILE,
+            MAX_SEALED_STORE_RECEIPT_BYTES as usize,
+        )),
+        |name, receipt_bytes| {
+            if name.to_str().is_some_and(sealed_staging_name) {
+                return Some(ABANDONED);
             }
-            #[cfg(unix)]
+            let name = name.to_str()?;
+            let receipt = receipt_bytes
+                .and_then(|bytes| serde_json::from_slice::<SealedStoreReceiptV1>(bytes).ok())?;
+            if name.len() != 64
+                || !name.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || receipt.version != SEALED_STORE_RECEIPT_VERSION
+                || receipt.physical_namespace != format!("generation:{name}")
+                || !recognized_sealed_form(&receipt)
             {
-                use std::os::unix::fs::MetadataExt;
-                if metadata.nlink() > 1 && !counted.insert((metadata.dev(), metadata.ino())) {
-                    continue;
-                }
+                return None;
             }
-            #[cfg(not(unix))]
-            let _ = &counted;
-            total = total.saturating_add(metadata.len());
-        }
-    }
-    Ok(total)
+            if head_generations.contains(&(
+                receipt.namespace,
+                receipt.projection,
+                receipt.generation,
+            )) {
+                Some(HEAD)
+            } else {
+                Some(SUPERSEDED)
+            }
+        },
+    )? else {
+        return Ok(SealedStoreCensusV1::default());
+    };
+
+    Ok(SealedStoreCensusV1 {
+        head_count: measured.counts[HEAD],
+        head_bytes: measured.bytes[HEAD],
+        superseded_count: measured.counts[SUPERSEDED],
+        superseded_bytes: measured.bytes[SUPERSEDED],
+        abandoned_staging_count: measured.counts[ABANDONED],
+        abandoned_staging_bytes: measured.bytes[ABANDONED],
+        unrecognized_count: measured.unrecognized,
+    })
 }
 
 #[cfg(all(test, unix))]
@@ -784,7 +714,7 @@ mod sealed_census_tests {
     use std::fs;
 
     use super::{
-        SEALED_STORE_RECEIPT_FILE, SEALED_STORE_RECEIPT_VERSION, census_sealed_store_entries,
+        SEALED_STORE_RECEIPT_FILE, SEALED_STORE_RECEIPT_VERSION, census_sealed_store_root,
     };
 
     #[test]
@@ -951,41 +881,9 @@ mod sealed_census_tests {
             fs::hard_link(&shared, root.join(directory).join("shared")).unwrap();
         }
 
-        // Put unknown, staging and retired paths first, reproducing the order
-        // that previously consumed the live inode before its head was visited.
-        let ordered = || {
-            let mut entries = fs::read_dir(root)
-                .unwrap()
-                .collect::<std::io::Result<Vec<_>>>()
-                .unwrap();
-            entries.sort_by_key(|entry| {
-                let name = entry.file_name();
-                let name = name.to_str().unwrap();
-                if name == "unrecognized" {
-                    0
-                } else if name == ".staging-pending" {
-                    1
-                } else if name == old {
-                    2
-                } else if name == wrong_namespace
-                    || name == future_version
-                    || name == foreign_projection
-                    || name == unknown_form
-                    || name == missing_layer_base
-                    || name == future_graph_format
-                    || name == zero_graph_format
-                {
-                    3
-                } else if name == head {
-                    4
-                } else {
-                    unreachable!()
-                }
-            });
-            entries.into_iter().map(Ok).collect::<Vec<_>>()
-        };
-        let census = census_sealed_store_entries(
-            ordered(),
+        // Head-first class charging must be independent of readdir ordering.
+        let census = census_sealed_store_root(
+            root,
             &BTreeSet::from([("code".to_owned(), "index".to_owned(), "live".to_owned())]),
         )
         .unwrap();
@@ -1001,7 +899,7 @@ mod sealed_census_tests {
         );
         assert_eq!(census.abandoned_staging_bytes, 0);
 
-        let no_head = census_sealed_store_entries(ordered(), &BTreeSet::new()).unwrap();
+        let no_head = census_sealed_store_root(root, &BTreeSet::new()).unwrap();
         assert_eq!(no_head.head_bytes, 0);
         assert_eq!(
             no_head.superseded_bytes,
