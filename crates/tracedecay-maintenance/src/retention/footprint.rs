@@ -235,6 +235,15 @@ pub fn walk_regular_files_with_budget(
                 WalkInterruptionV1::DeadlineExceeded => WalkTerminationV1::DeadlineExceeded,
             };
         }
+        // The caller's root can itself be a symlink; DirEntry::file_type
+        // below only protects children. Never attribute a foreign tree's
+        // bytes to the requested store.
+        if !std::fs::symlink_metadata(&directory)
+            .is_ok_and(|metadata| metadata.file_type().is_dir())
+        {
+            visit(&directory, WalkedEntryV1::Unavailable);
+            continue;
+        }
         let Ok(entries) = std::fs::read_dir(&directory) else {
             visit(&directory, WalkedEntryV1::Unavailable);
             continue;
@@ -1126,6 +1135,40 @@ mod tests {
         assert_eq!(bytes, 12, "the outside store is not followed");
         assert_eq!(unavailable, 1, "the symlink is explicit unavailable data");
         assert_eq!(remaining, 100 - 1 - 64 - 1 - 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_walk_root_is_partial_without_traversing_foreign_files() {
+        let temporary = tempfile::tempdir().expect("walk fixture");
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir(&outside).expect("outside directory");
+        sized(&outside.join("private-a"), 900);
+        sized(&outside.join("private-b"), 900);
+        let linked_root = temporary.path().join("linked-profile");
+        std::os::unix::fs::symlink(&outside, &linked_root).expect("linked root");
+
+        let mut remaining = 1;
+        let mut visited = Vec::new();
+        let termination = walk_regular_files_with_budget(
+            &linked_root,
+            &mut remaining,
+            &|| None,
+            &mut |path, entry| visited.push((path.to_path_buf(), entry)),
+        );
+        assert_eq!(termination, WalkTerminationV1::Complete);
+        assert_eq!(visited, vec![(linked_root.clone(), WalkedEntryV1::Unavailable)]);
+        assert_eq!(remaining, 1, "foreign children must not spend the entry budget");
+
+        let footprint = census_profile_footprint(&linked_root, &BTreeMap::new(), &BTreeMap::new());
+        assert_eq!(footprint.total_bytes, 0);
+        assert_eq!(footprint.unavailable_entry_count, 1);
+        assert_eq!(
+            footprint.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Partial,
+            "unreadable store roots cannot report healthy complete coverage"
+        );
+        assert_eq!(std::fs::metadata(outside.join("private-a")).unwrap().len(), 900);
     }
 
     #[test]
