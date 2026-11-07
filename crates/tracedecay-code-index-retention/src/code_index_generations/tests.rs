@@ -1279,7 +1279,10 @@ fn unreferenced_nonregular_text_artifacts_do_not_block_verified_retirement() {
     .expect("collect independent verified generations and orphan");
     assert_eq!(report.deleted_generations.len(), 4);
     assert!(!valid_path.exists(), "verified orphan was reclaimed");
-    assert!(referenced_path.is_file(), "durable referenced target remains");
+    assert!(
+        referenced_path.is_file(),
+        "durable referenced target remains"
+    );
     assert!(
         std::fs::symlink_metadata(&link)
             .unwrap()
