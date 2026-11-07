@@ -213,9 +213,10 @@ const SEALED_STAGING_PREFIX: &str = ".staging-";
 /// A seal only creates staging directories for a 64-hex physical generation.
 /// Prefix matches alone cannot authorize deleting an unrelated directory.
 fn sealed_staging_name(name: &str) -> bool {
-    name.strip_prefix(SEALED_STAGING_PREFIX).is_some_and(|digest| {
-        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-    })
+    name.strip_prefix(SEALED_STAGING_PREFIX)
+        .is_some_and(|digest| {
+            digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
 }
 const SEALED_STORE_DISABLE_ENV: &str = "TRACEDECAY_GRAPH_SEALED_STORE";
 
@@ -334,11 +335,17 @@ mod sealed_receipt_binding_tests {
                 .binds(&locator, physical_namespace.as_str(), "verified-digest")
         };
 
-        assert!(binds_on_disk(&receipt), "verified compact receipt is accepted");
+        assert!(
+            binds_on_disk(&receipt),
+            "verified compact receipt is accepted"
+        );
         receipt.form = "future-container".to_owned();
         assert!(!binds_on_disk(&receipt), "future form must never bind");
         receipt.form = SEALED_STORE_FORM_LAYERED.to_owned();
-        assert!(!binds_on_disk(&receipt), "layered form without base must refuse");
+        assert!(
+            !binds_on_disk(&receipt),
+            "layered form without base must refuse"
+        );
 
         receipt.base = Some(SealedBaseReceiptV1 {
             generation: "generation:base".to_owned(),
@@ -352,9 +359,15 @@ mod sealed_receipt_binding_tests {
             hidden_row_sum: "hidden-sum".to_owned(),
         });
         receipt.form = SEALED_STORE_FORM_COMPACT.to_owned();
-        assert!(!binds_on_disk(&receipt), "compact form with base must refuse");
+        assert!(
+            !binds_on_disk(&receipt),
+            "compact form with base must refuse"
+        );
         receipt.form = SEALED_STORE_FORM_LAYERED.to_owned();
-        assert!(binds_on_disk(&receipt), "recognized layered form remains eligible");
+        assert!(
+            binds_on_disk(&receipt),
+            "recognized layered form remains eligible"
+        );
     }
 }
 
@@ -670,11 +683,7 @@ fn census_sealed_store_entries(
             continue;
         }
         let path = entry.path();
-        if entry
-            .file_name()
-            .to_str()
-            .is_some_and(sealed_staging_name)
-        {
+        if entry.file_name().to_str().is_some_and(sealed_staging_name) {
             census.abandoned_staging_count += 1;
             abandoned.push(path);
             continue;
@@ -1394,12 +1403,23 @@ mod abandoned_sealed_cleanup_tests {
         assert!(!root.join(&owned_spill).exists());
         assert!(root.join(&live_spill).is_dir());
         for name in &unknown {
-            assert_eq!(std::fs::read(root.join(name).join("foreign")).unwrap(), b"keep");
+            assert_eq!(
+                std::fs::read(root.join(name).join("foreign")).unwrap(),
+                b"keep"
+            );
         }
-        assert!(std::fs::symlink_metadata(root.join(&linked_staging))
-            .unwrap().file_type().is_symlink());
-        assert!(std::fs::symlink_metadata(root.join(&linked_spill))
-            .unwrap().file_type().is_symlink());
+        assert!(
+            std::fs::symlink_metadata(root.join(&linked_staging))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            std::fs::symlink_metadata(root.join(&linked_spill))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(std::fs::read(outside.join("foreign")).unwrap(), b"external");
         let after = census_sealed_store(&database, &Default::default()).unwrap();
         assert_eq!(after.abandoned_staging_count, 0);
