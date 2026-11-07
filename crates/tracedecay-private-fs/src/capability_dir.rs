@@ -231,11 +231,7 @@ fn open_owned_directory_nofollow(root: &Path) -> io::Result<Option<Dir>> {
 
 /// Read an optional bounded regular receipt from an already-open child.
 /// A replaced symlink or unreadable receipt never authorizes reclamation.
-fn read_child_receipt(
-    child: &Dir,
-    receipt: &str,
-    limit: usize,
-) -> io::Result<Option<Vec<u8>>> {
+fn read_child_receipt(child: &Dir, receipt: &str, limit: usize) -> io::Result<Option<Vec<u8>>> {
     let mut options = OpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
     let mut file = match child.open_with(receipt, &options) {
