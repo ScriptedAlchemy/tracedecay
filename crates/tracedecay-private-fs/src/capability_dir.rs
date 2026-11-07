@@ -8,6 +8,10 @@
 use std::ffi::OsStr;
 use std::io::{self, Read};
 use std::path::{Component, Path};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(unix)]
+use cap_std::fs::OpenOptionsExt;
 
 #[cfg(not(windows))]
 use cap_fs_ext::OpenOptionsMaybeDirExt;
@@ -250,6 +254,103 @@ fn read_child_receipt(child: &Dir, receipt: &str, limit: usize) -> io::Result<Op
         return Ok(None);
     }
     Ok(Some(bytes))
+}
+
+/// Open a generation beneath a held, no-follow sealed root. Both the root
+/// and the generation leaf must be real directories.
+fn open_nested_directory_nofollow(directory: &Path) -> io::Result<Dir> {
+    let root = directory
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "directory has no root"))?;
+    let name = directory
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "directory has no name"))?;
+    let root = open_owned_directory_nofollow(root)?
+        .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+    root.open_dir_nofollow(name)
+}
+
+fn checked_leaf_name(name: &str) -> io::Result<&OsStr> {
+    let mut components = Path::new(name).components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "proof file name must be one leaf",
+        ));
+    }
+    Ok(OsStr::new(name))
+}
+
+/// Read bounded regular proof bytes beneath a held root and generation.
+/// Missing files and static symlinks never provide reusable proof.
+pub fn read_nested_bounded_file_nofollow(
+    directory: &Path,
+    name: &str,
+    limit: usize,
+) -> io::Result<Option<Vec<u8>>> {
+    checked_leaf_name(name)?;
+    let child = match open_nested_directory_nofollow(directory) {
+        Ok(child) => child,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    match child.symlink_metadata(name) {
+        Ok(metadata) if !metadata.is_file() => return Ok(None),
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    read_child_receipt(&child, name, limit)
+}
+
+static PROOF_TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
+
+/// Publish a proof atomically relative to the same held generation used for
+/// staging. A substituted root/child link cannot redirect or truncate bytes.
+pub fn replace_nested_file_nofollow(
+    directory: &Path,
+    name: &str,
+    bytes: &[u8],
+) -> io::Result<()> {
+    let leaf = checked_leaf_name(name)?;
+    let child = open_nested_directory_nofollow(directory)?;
+    replace_file_in_open_directory(&child, leaf, bytes)
+}
+
+fn replace_file_in_open_directory(directory: &Dir, leaf: &OsStr, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+
+    for _ in 0..16 {
+        let nonce = PROOF_TEMP_NONCE.fetch_add(1, Ordering::Relaxed);
+        let temporary_name = format!(".sealed-proof-{}-{nonce}.tmp", std::process::id());
+        let mut options = OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut temporary = match directory.open_with(&temporary_name, &options) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let result = (|| {
+            temporary.write_all(bytes)?;
+            temporary.sync_all()?;
+            drop(temporary);
+            replace_file(directory, OsStr::new(&temporary_name), leaf)?;
+            sync_directory(directory)
+        })();
+        if result.is_err() {
+            let _ = directory.remove_file(&temporary_name);
+        }
+        return result;
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "sealed proof staging names are occupied",
+    ))
 }
 
 /// Capability-relative census classes. The caller decides which
@@ -498,6 +599,48 @@ mod replacement_tests {
         assert_eq!(measured.counts, [1]);
         assert!(measured.bytes[0] >= 41);
         assert!(measured.bytes[0] < 100_041);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_proof_stays_with_open_generation_when_root_is_swapped() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("graph.sealed");
+        let moved = temp.path().join("former-sealed");
+        let foreign = temp.path().join("foreign");
+        let generation = root.join("generation");
+        std::fs::create_dir_all(&generation).unwrap();
+        std::fs::create_dir_all(foreign.join("generation")).unwrap();
+        std::fs::write(foreign.join("generation/sealed.checked"), b"foreign").unwrap();
+
+        let held = open_nested_directory_nofollow(&generation).unwrap();
+        std::fs::rename(&root, &moved).unwrap();
+        symlink(&foreign, &root).unwrap();
+        replace_file_in_open_directory(&held, OsStr::new("sealed.checked"), b"verified").unwrap();
+        assert_eq!(
+            std::fs::read(moved.join("generation/sealed.checked")).unwrap(),
+            b"verified"
+        );
+        assert_eq!(
+            std::fs::read(foreign.join("generation/sealed.checked")).unwrap(),
+            b"foreign"
+        );
+        assert!(replace_nested_file_nofollow(&generation, "sealed.checked", b"unsafe").is_err());
+        assert!(read_nested_bounded_file_nofollow(&generation, "sealed.checked", 64).is_err());
+
+        std::fs::remove_file(&root).unwrap();
+        std::fs::rename(&moved, &root).unwrap();
+        replace_nested_file_nofollow(&generation, "sealed.checked", b"fresh").unwrap();
+        assert_eq!(
+            read_nested_bounded_file_nofollow(&generation, "sealed.checked", 64).unwrap(),
+            Some(b"fresh".to_vec())
+        );
+        assert_eq!(
+            std::fs::read(foreign.join("generation/sealed.checked")).unwrap(),
+            b"foreign"
+        );
     }
 
     #[test]

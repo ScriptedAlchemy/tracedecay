@@ -2965,11 +2965,14 @@ fn sealed_store_check_matches(
     directory: &Path,
     expected_digest: &str,
 ) -> Result<bool, GraphDbError> {
-    let path = directory.join(SEALED_STORE_CHECKED_FILE);
     let limit = expected_digest
         .len()
         .min(MAX_SEALED_STORE_RECEIPT_BYTES as usize);
-    match tracedecay_private_fs::framed_log::read_bounded(&path, limit) {
+    match tracedecay_private_fs::capability_dir::read_nested_bounded_file_nofollow(
+        directory,
+        SEALED_STORE_CHECKED_FILE,
+        limit,
+    ) {
         Ok(Some(bytes)) => Ok(bytes == expected_digest.as_bytes()),
         Ok(None) => Ok(false),
         Err(error)
@@ -2988,36 +2991,12 @@ fn persist_sealed_store_check(directory: &Path, expected_digest: &str) -> Result
     if sealed_store_check_matches(directory, expected_digest)? {
         return Ok(());
     }
-    // The marker is a re-verification optimization, never authority to write
-    // through a caller-controlled symlink to data outside the sealed store.
-    let root = directory
-        .parent()
-        .ok_or_else(|| GraphDbError::unavailable("sealed marker has no parent root"))?;
-    let root_is_real = sealed_root_is_real_directory(root)
-        .map_err(|error| sealed_store_io_failure("sealed marker root inspect failed", error))?;
-    let directory_is_real = std::fs::symlink_metadata(directory)
-        .map(|metadata| metadata.file_type().is_dir())
-        .map_err(|error| {
-            sealed_store_io_failure("sealed marker directory inspect failed", error)
-        })?;
-    if !root_is_real || !directory_is_real {
-        return Err(GraphDbError::unavailable(
-            "sealed marker directory is not a real directory",
-        ));
-    }
-    let mut staged = tempfile::NamedTempFile::new_in(directory)
-        .map_err(|error| sealed_store_io_failure("sealed check stage failed", error))?;
-    staged
-        .write_all(expected_digest.as_bytes())
-        .map_err(|error| sealed_store_io_failure("sealed check write failed", error))?;
-    staged
-        .as_file()
-        .sync_all()
-        .map_err(|error| sealed_store_io_failure("sealed check sync failed", error))?;
-    staged
-        .persist(directory.join(SEALED_STORE_CHECKED_FILE))
-        .map_err(|error| sealed_store_io_failure("sealed check persist failed", error.error))?;
-    Ok(())
+    tracedecay_private_fs::capability_dir::replace_nested_file_nofollow(
+        directory,
+        SEALED_STORE_CHECKED_FILE,
+        expected_digest.as_bytes(),
+    )
+    .map_err(|error| sealed_store_io_failure("sealed check persist failed", error))
 }
 
 #[cfg(test)]
