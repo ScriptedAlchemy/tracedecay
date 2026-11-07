@@ -9,10 +9,7 @@ use std::ffi::OsStr;
 use std::io::{self, Read};
 use std::path::{Component, Path};
 
-use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
-
-#[cfg(windows)]
-use cap_fs_ext::DirExt;
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 #[cfg(not(windows))]
 use cap_fs_ext::OpenOptionsMaybeDirExt;
 use cap_std::fs::{Dir, File, OpenOptions};
@@ -412,7 +409,9 @@ mod replacement_tests {
             std::fs::read(foreign.join(".staging-owned/keep")).unwrap(),
             b"sentinel"
         );
-        assert!(remove_named_child_directory_nofollow(&root, OsStr::new(".staging-owned")).is_err());
+        assert!(
+            remove_named_child_directory_nofollow(&root, OsStr::new(".staging-owned")).is_err()
+        );
         assert_eq!(
             std::fs::read(foreign.join(".staging-owned/keep")).unwrap(),
             b"sentinel"

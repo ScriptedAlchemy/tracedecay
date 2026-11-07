@@ -1022,7 +1022,10 @@ pub(crate) fn discard_superseded_sealed_generations(
     let root = sealed_store_root(database_path);
     tracedecay_private_fs::capability_dir::remove_selected_child_directories_nofollow(
         &root,
-        Some((SEALED_STORE_RECEIPT_FILE, MAX_SEALED_STORE_RECEIPT_BYTES as usize)),
+        Some((
+            SEALED_STORE_RECEIPT_FILE,
+            MAX_SEALED_STORE_RECEIPT_BYTES as usize,
+        )),
         |name, receipt_bytes| {
             let Some(name) = name.to_str() else {
                 return false;
