@@ -1157,8 +1157,14 @@ mod tests {
             &mut |path, entry| visited.push((path.to_path_buf(), entry)),
         );
         assert_eq!(termination, WalkTerminationV1::Complete);
-        assert_eq!(visited, vec![(linked_root.clone(), WalkedEntryV1::Unavailable)]);
-        assert_eq!(remaining, 1, "foreign children must not spend the entry budget");
+        assert_eq!(
+            visited,
+            vec![(linked_root.clone(), WalkedEntryV1::Unavailable)]
+        );
+        assert_eq!(
+            remaining, 1,
+            "foreign children must not spend the entry budget"
+        );
 
         let footprint = census_profile_footprint(&linked_root, &BTreeMap::new(), &BTreeMap::new());
         assert_eq!(footprint.total_bytes, 0);
@@ -1168,7 +1174,10 @@ mod tests {
             ProfileTotalCoverageStateV1::Partial,
             "unreadable store roots cannot report healthy complete coverage"
         );
-        assert_eq!(std::fs::metadata(outside.join("private-a")).unwrap().len(), 900);
+        assert_eq!(
+            std::fs::metadata(outside.join("private-a")).unwrap().len(),
+            900
+        );
     }
 
     #[test]
