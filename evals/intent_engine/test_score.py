@@ -30,7 +30,8 @@ def row(case_id, labels=(), context=False, choice=None):
 def signed_http_result(config, rows, temperature=None):
     # Fixture independently reproduces the fingerprint scheme in run_http.py.
     rows = [
-        {**item, "request_sha256": hashlib.sha256(item["id"].encode()).hexdigest()}
+        {**item, "request_sha256": hashlib.sha256(item["id"].encode()).hexdigest(),
+         "response_sha256": hashlib.sha256((item["id"] + ":response").encode()).hexdigest()}
         for item in rows
     ]
 
@@ -120,6 +121,22 @@ class ScoringTests(unittest.TestCase):
             for metric in ("loo_f1", "loo_p", "loo_r"):
                 self.assertIsNone(result["per_cat"][category][metric])
         self.assertEqual(result["t0.5"]["all"]["top1_acc"], 1.0)
+
+    def test_tail_latency_reports_nearest_rank_for_small_and_full_cohorts(self):
+        # Old floor((n - 1) * p) selected the fastest of two requests.
+        # Tail percentiles must come from observed samples.
+        for samples, expected in (
+            ([10], (10, 10, 10)),
+            ([10, 20], (15, 20, 20)),
+            (list(range(1, 21)), (10, 18, 19)),
+        ):
+            with self.subTest(samples=samples):
+                rows = [{**row(str(i)), "ms": elapsed}
+                        for i, elapsed in enumerate(samples)]
+                timing = score.score_config({"config": "tails", "rows": rows})["latency"]
+                actual = (timing["median_ms"], timing["p90_ms"], timing["p95_ms"])
+                self.assertEqual(actual, expected)
+                self.assertEqual(timing["total_cases"], len(samples))
 
     def test_empty_results_and_partial_choice_coverage_are_refused(self):
         with self.assertRaisesRegex(ValueError, "empty.*no rows to score"):
@@ -218,6 +235,8 @@ class ScoringTests(unittest.TestCase):
             self.assertEqual(scored.returncode, 0, scored.stderr)
             summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
             self.assertIsNone(summary["sample"]["choice_top1_acc"]["no_ctx"])
+            self.assertEqual(summary["sample"]["latency"]["p95_ms"], 100)
+            self.assertIn("med/p90/p95 ms", scored.stdout)
             self.assertIn(
                 f"AUC categories 1/{len(score.CATS)} ctx 1/{len(score.CATS)}", scored.stdout,
             )
@@ -227,6 +246,44 @@ class ScoringTests(unittest.TestCase):
             self.assertIn(f"| {score.CATS[0]} | n=1;", compared.stdout)
             self.assertIn("AUC eligible categories", compared.stdout)
             self.assertFalse((root / "dataset.json").exists())
+
+    def test_ambiguous_completed_result_refuses_to_replace_valid_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.stage_scripts(root)
+            results = root / "results"
+            results.mkdir()
+            original = json.dumps({"config": "sample", "rows": [row("a")]})
+            variants = [
+                (original.replace(
+                    '"config": "sample"', '"config": "other", "config": "sample"', 1
+                ), "duplicate JSON field"),
+                (original.replace(
+                    '"labels": []', '"labels": ["impact"], "labels": []', 1
+                ), "duplicate JSON field"),
+                (original.replace(
+                    '"ms": 100', '"ignored": NaN, "ms": 100', 1
+                ), "invalid JSON numeric constant"),
+                (original.replace(
+                    '"ms": 100', '"ignored": -1e999, "ms": 100', 1
+                ), "nonfinite JSON number"),
+            ]
+            summary = root / "summary.json"
+            for contents, diagnostic in variants:
+                self.assertNotEqual(contents, original)
+                (results / "sample.json").write_text(contents, encoding="utf-8")
+                summary.write_bytes(b"last verified summary\\n")
+                with self.subTest(diagnostic=diagnostic):
+                    attempt = self.run_script(root, "score.py")
+                    self.assertNotEqual(attempt.returncode, 0)
+                    self.assertIn(diagnostic, attempt.stderr)
+                    self.assertEqual(summary.read_bytes(), b"last verified summary\\n")
+            (results / "sample.json").write_text(original, encoding="utf-8")
+            scored = self.run_script(root, "score.py")
+            self.assertEqual(scored.returncode, 0, scored.stderr)
+            self.assertEqual(
+                json.loads(summary.read_text())["sample"]["latency"]["total_cases"], 1
+            )
 
     def test_empty_cli_result_does_not_overwrite_an_existing_summary(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -402,6 +459,35 @@ class ScoringTests(unittest.TestCase):
             attempt = self.run_script(root, "score.py")
             self.assertNotEqual(attempt.returncode, 0)
             self.assertIn("missing its experiment identity", attempt.stderr)
+            self.assertEqual(summary.read_bytes(), b"last verified summary\n")
+
+    def test_http_response_digest_required_before_scoring_or_publishing(self):
+        original = signed_http_result("B_noul_text", [row("first"), row("second")])
+        self.assertEqual(score.score_config(original)["latency"]["total_cases"], 2)
+        for bad_digest in (None, "", "not-a-sha256", "G" * 64, 1):
+            changed = json.loads(json.dumps(original))
+            if bad_digest is None:
+                del changed["rows"][0]["response_sha256"]
+            else:
+                changed["rows"][0]["response_sha256"] = bad_digest
+            with self.subTest(bad_digest=bad_digest):
+                with self.assertRaisesRegex(ValueError, "response digest"):
+                    score.score_config(changed)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.stage_scripts(root)
+            (root / "results").mkdir()
+            damaged = json.loads(json.dumps(original))
+            del damaged["rows"][0]["response_sha256"]
+            (root / "results" / "damaged.json").write_text(
+                json.dumps(damaged), encoding="utf-8"
+            )
+            summary = root / "summary.json"
+            summary.write_bytes(b"last verified summary\n")
+            attempt = self.run_script(root, "score.py")
+            self.assertNotEqual(attempt.returncode, 0)
+            self.assertIn("response digest", attempt.stderr)
             self.assertEqual(summary.read_bytes(), b"last verified summary\n")
 
     def test_http_result_fingerprints_bind_case_order_and_experiment(self):

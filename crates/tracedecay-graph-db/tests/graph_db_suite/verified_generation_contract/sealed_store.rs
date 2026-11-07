@@ -1354,7 +1354,11 @@ fn sealed_census_separates_heads_from_superseded_and_abandoned_bytes() {
     std::fs::create_dir_all(&unreadable).unwrap();
     std::fs::write(unreadable.join("generation.grafeo"), b"no receipt").unwrap();
 
-    let heads = std::collections::BTreeSet::from(["census-g2".to_owned()]);
+    let heads = std::collections::BTreeSet::from([(
+        identity.namespace.as_str().to_owned(),
+        identity.projection.as_str().to_owned(),
+        "census-g2".to_owned(),
+    )]);
     let census =
         tracedecay_graph_db::census_sealed_store(&support::graph_path(temp.path()), &heads)
             .unwrap();
@@ -1367,6 +1371,38 @@ fn sealed_census_separates_heads_from_superseded_and_abandoned_bytes() {
     assert_eq!(census.abandoned_staging_bytes, 4096);
     assert_eq!(census.unrecognized_count, 1);
     assert!(census.head_bytes > 0 && census.superseded_bytes > 0);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        // A foreign directory link inside a seal must not charge its target
+        // to the live generation (or recursively escape the census root).
+        let head = std::fs::read_dir(&root)
+            .unwrap()
+            .map(Result::unwrap)
+            .find(|entry| {
+                std::fs::read_to_string(entry.path().join("sealed.json"))
+                    .is_ok_and(|receipt| receipt.contains("\"generation\": \"census-g2\""))
+            })
+            .unwrap()
+            .path();
+        let outside = temp.path().join("unrelated");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("foreign.data"), vec![0_u8; 1024 * 1024]).unwrap();
+        let alias = head.join("foreign-directory-link");
+        symlink(&outside, &alias).unwrap();
+
+        let after =
+            tracedecay_graph_db::census_sealed_store(&support::graph_path(temp.path()), &heads)
+                .unwrap();
+        assert_eq!(
+            after.head_bytes,
+            census.head_bytes + std::fs::symlink_metadata(&alias).unwrap().len(),
+            "sealed census must charge only the link, not external target bytes"
+        );
+        assert_eq!(after.superseded_bytes, census.superseded_bytes);
+    }
 
     // With no heads journaled every sealed artifact reads as superseded, and
     // a store with no sealed root at all is an empty census, not an error.

@@ -25,6 +25,8 @@ pub const MAX_CANONICAL_BODY_GC_ROWS: usize = 48;
 pub struct CanonicalBodyGcReport {
     pub roots_scanned: u64,
     pub bodies_scanned: u64,
+    /// Candidates discharged in the committed page, even if their body stays live.
+    pub candidates_discharged: u64,
     pub bodies_deleted: u64,
     /// Stored BLOB bytes deleted, including the effect of their existing
     /// compression. This is not database-file or filesystem space reclaimed.
@@ -323,13 +325,25 @@ async fn collect_candidates(
     drop(deleted);
     // Referenced candidates are discharged too. The final owner removal
     // records them again; idle ticks never revisit every retained body.
-    conn.execute(
-        "DELETE FROM canonical_body_gc_candidates
-         WHERE content_hash IN (SELECT value FROM json_each(?1))",
-        params![hashes],
-    )
-    .await
-    .map_err(db_error)?;
+    // Deleting an unreferenced body cascades to its candidate row. The
+    // remaining explicit removals discharge referenced bodies that stay live.
+    let explicitly_discharged = conn
+        .execute(
+            "DELETE FROM canonical_body_gc_candidates
+             WHERE content_hash IN (SELECT value FROM json_each(?1))",
+            params![hashes],
+        )
+        .await
+        .map_err(db_error)?;
+    let discharged = explicitly_discharged
+        .checked_add(report.bodies_deleted)
+        .ok_or_else(|| integrity_error("canonical body candidate discharge overflow"))?;
+    if discharged != report.bodies_scanned {
+        return Err(integrity_error(
+            "canonical body candidate page was not fully discharged",
+        ));
+    }
+    report.candidates_discharged = discharged;
     Ok(())
 }
 

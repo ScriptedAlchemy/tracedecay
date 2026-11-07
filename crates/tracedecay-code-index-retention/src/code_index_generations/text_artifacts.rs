@@ -451,10 +451,16 @@ pub(super) fn plan_collectable_text_artifacts_budgeted_page_cancellable(
             Err(error) => return Err(storage(error)),
         };
         if !metadata.file_type().is_file() {
-            return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                "code text artifact inventory path '{}' is not a regular file",
-                path.display()
-            )));
+            // Referenced descriptors were verified above and remain fail-closed.
+            // Unreferenced symlinks/directories have no deletion authority,
+            // but must not veto a separate verified artifact or generation.
+            tracing::warn!(
+                event = "code_text_artifact_retention_candidate_preserved",
+                artifact = %path.display(),
+                reason = "non_regular_inventory_entry",
+                "unreferenced non-regular artifact preserved during retention"
+            );
+            continue;
         }
         let staging_source = staging_text_artifact_source_digest(&file_name)
             .or_else(|| staging_sidecar_text_artifact_source_digest(&file_name));

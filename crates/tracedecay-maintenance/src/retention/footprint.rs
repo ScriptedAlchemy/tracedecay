@@ -7,6 +7,10 @@
 //! cheap is smaller than one real graph container.
 
 use std::collections::BTreeMap;
+#[cfg(unix)]
+use std::collections::HashSet;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -231,6 +235,15 @@ pub fn walk_regular_files_with_budget(
                 WalkInterruptionV1::DeadlineExceeded => WalkTerminationV1::DeadlineExceeded,
             };
         }
+        // The caller's root can itself be a symlink; DirEntry::file_type
+        // below only protects children. Never attribute a foreign tree's
+        // bytes to the requested store.
+        if !std::fs::symlink_metadata(&directory)
+            .is_ok_and(|metadata| metadata.file_type().is_dir())
+        {
+            visit(&directory, WalkedEntryV1::Unavailable);
+            continue;
+        }
         let Ok(entries) = std::fs::read_dir(&directory) else {
             visit(&directory, WalkedEntryV1::Unavailable);
             continue;
@@ -408,6 +421,8 @@ pub fn census_sqlite_temp_spill(
 ) -> Option<ProfileFootprintEntryV1> {
     let mut bytes = 0u64;
     let mut unavailable_entry_count = 0usize;
+    #[cfg(unix)]
+    let mut seen_inodes = HashSet::new();
     for entry in std::fs::read_dir(fd_directory).ok()? {
         let fd = match entry {
             Ok(fd) => fd,
@@ -431,7 +446,18 @@ pub fn census_sqlite_temp_spill(
             .is_some_and(|name| name.starts_with("etilqs_") && name.ends_with(" (deleted)"));
         if unlinked_temp {
             match std::fs::metadata(fd.path()) {
-                Ok(metadata) => bytes = bytes.saturating_add(metadata.len()),
+                Ok(metadata) if metadata.is_file() => {
+                    #[cfg(unix)]
+                    let unique = seen_inodes.insert((metadata.dev(), metadata.ino()));
+                    #[cfg(not(unix))]
+                    let unique = true;
+                    if unique {
+                        bytes = bytes.saturating_add(metadata.len());
+                    }
+                }
+                // The fd can be reused between read_link and metadata; a
+                // directory or other non-file target is not an SQLite spill.
+                Ok(_) => {}
                 // A closed descriptor no longer consumes space.
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(_) => unavailable_entry_count = unavailable_entry_count.saturating_add(1),
@@ -716,6 +742,11 @@ mod tests {
             sized(&target, bytes);
             std::os::unix::fs::symlink(&target, fd_directory.join(fd)).expect("fd link");
         }
+        // A reused descriptor with a matching name but a non-file target
+        // must not inflate the spill total or fabricate an over-budget state.
+        let non_file = temporary.path().join("etilqs_directory (deleted)");
+        std::fs::create_dir(&non_file).expect("non-file target");
+        std::os::unix::fs::symlink(&non_file, fd_directory.join("7")).expect("non-file fd link");
 
         let entry = census_sqlite_temp_spill(&fd_directory, &BTreeMap::new())
             .expect("a readable fd directory");
@@ -738,6 +769,42 @@ mod tests {
         );
         assert!(
             census_sqlite_temp_spill(&temporary.path().join("absent"), &BTreeMap::new()).is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temp_spill_census_counts_physical_files_not_fd_aliases() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let fd_directory = temporary.path().join("fd");
+        std::fs::create_dir(&fd_directory).expect("fd directory");
+        let first = temporary.path().join("etilqs_primary (deleted)");
+        let alias = temporary.path().join("etilqs_alias (deleted)");
+        let second = temporary.path().join("etilqs_distinct (deleted)");
+        sized(&first, 650 * MIB);
+        std::fs::hard_link(&first, &alias).expect("second name for same inode");
+        sized(&second, 200 * MIB);
+        for (fd, target) in [("3", &first), ("4", &alias), ("5", &second)] {
+            std::os::unix::fs::symlink(target, fd_directory.join(fd)).expect("fd link");
+        }
+
+        let entry = census_sqlite_temp_spill(&fd_directory, &BTreeMap::new())
+            .expect("readable fd directory");
+        assert_eq!(entry.bytes, 850 * MIB);
+        assert_eq!(entry.unavailable_entry_count, 0);
+        let footprint = ProfileFootprintV1 {
+            entries: vec![entry],
+            total_bytes: 0,
+            unavailable_entry_count: 0,
+            truncated: false,
+            total_bound_bytes: PROFILE_TOTAL_BOUND_BYTES,
+        };
+        assert_eq!(
+            findings(&footprint)[SQLITE_TEMP_SPILL_KEY]
+                .finding()
+                .state(),
+            DoctorEvidenceStateV1::HealthyCompleteCoverage,
+            "duplicated descriptors must not create a false over-budget finding",
         );
     }
 
@@ -1068,6 +1135,49 @@ mod tests {
         assert_eq!(bytes, 12, "the outside store is not followed");
         assert_eq!(unavailable, 1, "the symlink is explicit unavailable data");
         assert_eq!(remaining, 100 - 1 - 64 - 1 - 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_walk_root_is_partial_without_traversing_foreign_files() {
+        let temporary = tempfile::tempdir().expect("walk fixture");
+        let outside = temporary.path().join("outside");
+        std::fs::create_dir(&outside).expect("outside directory");
+        sized(&outside.join("private-a"), 900);
+        sized(&outside.join("private-b"), 900);
+        let linked_root = temporary.path().join("linked-profile");
+        std::os::unix::fs::symlink(&outside, &linked_root).expect("linked root");
+
+        let mut remaining = 1;
+        let mut visited = Vec::new();
+        let termination = walk_regular_files_with_budget(
+            &linked_root,
+            &mut remaining,
+            &|| None,
+            &mut |path, entry| visited.push((path.to_path_buf(), entry)),
+        );
+        assert_eq!(termination, WalkTerminationV1::Complete);
+        assert_eq!(
+            visited,
+            vec![(linked_root.clone(), WalkedEntryV1::Unavailable)]
+        );
+        assert_eq!(
+            remaining, 1,
+            "foreign children must not spend the entry budget"
+        );
+
+        let footprint = census_profile_footprint(&linked_root, &BTreeMap::new(), &BTreeMap::new());
+        assert_eq!(footprint.total_bytes, 0);
+        assert_eq!(footprint.unavailable_entry_count, 1);
+        assert_eq!(
+            footprint.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Partial,
+            "unreadable store roots cannot report healthy complete coverage"
+        );
+        assert_eq!(
+            std::fs::metadata(outside.join("private-a")).unwrap().len(),
+            900
+        );
     }
 
     #[test]

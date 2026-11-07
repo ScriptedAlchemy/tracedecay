@@ -4,11 +4,19 @@
 //! (`store_maintenance::run_registered_code_generation_retention`).
 
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+#[cfg(unix)]
+use cap_std::fs::OpenOptionsExt;
+use cap_std::fs::{Dir, OpenOptions};
 use serde::{Deserialize, Serialize};
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_private_fs::capability_dir::{replace_file, sync_directory};
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
 use super::{incident_debris, orphan_stores};
@@ -17,6 +25,8 @@ use crate::clock::now_secs_i64;
 const COLD_STORE_PAGE_LIMIT: usize = 8;
 const CHECKPOINT_DIRECTORY: &str = "maintenance";
 const CHECKPOINT_FILE: &str = "retention-cold-store-cursor-v1.json";
+const MAX_CHECKPOINT_BYTES: u64 = 64 * 1024;
+static CURSOR_TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 struct ColdStoreCursorV1 {
@@ -245,10 +255,89 @@ fn checkpoint_path(profile_root: &Path) -> PathBuf {
         .join(CHECKPOINT_FILE)
 }
 
+// Keep the maintenance directory capability open for the whole cursor read or
+// publish. A path check followed by a path-based open or rename can be raced
+// with a symlink substitution of "maintenance".
+fn checkpoint_directory(path: &Path, create: bool) -> io::Result<Dir> {
+    let profile = path
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| io::Error::other("maintenance cursor has no profile root"))?;
+    let root = Dir::open_ambient_dir(profile, cap_std::ambient_authority())?;
+    if create {
+        match root.create_dir(CHECKPOINT_DIRECTORY) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    root.open_dir_nofollow(CHECKPOINT_DIRECTORY)
+}
+
 #[tracing::instrument(name = "maintenance.cold_store.load_cursor", level = "trace", skip_all)]
 fn load_cursor(path: &Path) -> Option<ColdStoreCursorV1> {
-    let bytes = std::fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    let directory = match checkpoint_directory(path, false) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            tracing::warn!(
+                event = "retention_cold_store_cursor_invalid",
+                reason = "untrusted_directory",
+                %error,
+                "maintenance cursor directory is unsafe; restarting its bounded census"
+            );
+            return None;
+        }
+    };
+    load_cursor_in_dir(&directory)
+}
+
+fn load_cursor_in_dir(directory: &Dir) -> Option<ColdStoreCursorV1> {
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let file = match directory.open_with(CHECKPOINT_FILE, &options) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            tracing::warn!(
+                event = "retention_cold_store_cursor_invalid",
+                %error,
+                "cannot safely open the saved maintenance cursor"
+            );
+            return None;
+        }
+    };
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_CHECKPOINT_BYTES {
+        tracing::warn!(
+            event = "retention_cold_store_cursor_invalid",
+            reason = "nonregular_or_oversized",
+            "saved maintenance cursor is unsafe; restarting its bounded census"
+        );
+        return None;
+    }
+    let mut limited = file.take(MAX_CHECKPOINT_BYTES + 1);
+    let mut bytes = Vec::new();
+    limited.read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > MAX_CHECKPOINT_BYTES {
+        tracing::warn!(
+            event = "retention_cold_store_cursor_invalid",
+            reason = "oversized_after_open",
+            "saved maintenance cursor grew during its read; restarting its bounded census"
+        );
+        return None;
+    }
+    match serde_json::from_slice(&bytes) {
+        Ok(cursor) => Some(cursor),
+        Err(error) => {
+            tracing::warn!(
+                event = "retention_cold_store_cursor_invalid",
+                %error,
+                "saved maintenance cursor is invalid; restarting its bounded census"
+            );
+            None
+        }
+    }
 }
 
 #[tracing::instrument(
@@ -256,17 +345,50 @@ fn load_cursor(path: &Path) -> Option<ColdStoreCursorV1> {
     level = "trace",
     skip_all
 )]
-fn persist_cursor(path: &Path, cursor: &ColdStoreCursorV1) -> std::io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("maintenance cursor has no parent"))?;
-    std::fs::create_dir_all(parent)?;
-    let temporary = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec(cursor).map_err(std::io::Error::other)?;
-    let mut file = std::fs::File::create(&temporary)?;
-    std::io::Write::write_all(&mut file, &bytes)?;
-    file.sync_all()?;
-    std::fs::rename(temporary, path)
+fn persist_cursor(path: &Path, cursor: &ColdStoreCursorV1) -> io::Result<()> {
+    let directory = checkpoint_directory(path, true)?;
+    persist_cursor_in_dir(&directory, cursor)
+}
+
+fn persist_cursor_in_dir(directory: &Dir, cursor: &ColdStoreCursorV1) -> io::Result<()> {
+    let bytes = serde_json::to_vec(cursor).map_err(io::Error::other)?;
+    // The name supplies no authority. create_new + no-follow guarantees that
+    // even a collided or attacker-prepared staging name cannot be truncated.
+    for _ in 0..16 {
+        let nonce = CURSOR_TEMP_NONCE.fetch_add(1, Ordering::Relaxed);
+        let temporary_name = format!(".retention-cold-store-{}-{nonce}.tmp", std::process::id());
+        let mut options = OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut temporary = match directory.open_with(&temporary_name, &options) {
+            Ok(temporary) => temporary,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let result = (|| {
+            temporary.write_all(&bytes)?;
+            temporary.sync_all()?;
+            drop(temporary);
+            replace_file(
+                directory,
+                OsStr::new(&temporary_name),
+                OsStr::new(CHECKPOINT_FILE),
+            )?;
+            sync_directory(directory)
+        })();
+        if result.is_err() {
+            let _ = directory.remove_file(&temporary_name);
+        }
+        return result;
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "maintenance cursor staging names are occupied",
+    ))
 }
 
 fn retention_window_secs(days: u64) -> i64 {
@@ -306,8 +428,158 @@ mod tests {
 
         persist_cursor(&path, &expected).expect("persist cursor");
 
-        assert_eq!(load_cursor(&path), Some(expected));
+        assert_eq!(load_cursor(&path), Some(expected.clone()));
+        let updated = ColdStoreCursorV1 {
+            after_project_id: Some("project-c".to_owned()),
+            after_unregistered_directory: None,
+        };
+        persist_cursor(&path, &updated).expect("replace existing checkpoint");
+        assert_eq!(load_cursor(&path), Some(updated));
         assert!(!path.with_extension("json.tmp").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkpoint_publication_does_not_follow_foreign_file_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("checkpoint root");
+        let path = checkpoint_path(root.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let foreign = root.path().join("foreign-data");
+        std::fs::write(&foreign, b"unrelated durable bytes").unwrap();
+        // Both a leftover fixed temporary name and the destination may be
+        // replaced by a link. Neither may grant write authority to its target.
+        let legacy_temporary = path.with_extension("json.tmp");
+        symlink(&foreign, &legacy_temporary).unwrap();
+        symlink(&foreign, &path).unwrap();
+        assert!(
+            load_cursor(&path).is_none(),
+            "foreign checkpoint links cannot be adopted as cursors"
+        );
+
+        let expected = ColdStoreCursorV1 {
+            after_project_id: Some("project-c".to_owned()),
+            after_unregistered_directory: None,
+        };
+        persist_cursor(&path, &expected).expect("replace checkpoint safely");
+        assert_eq!(std::fs::read(&foreign).unwrap(), b"unrelated durable bytes");
+        assert!(
+            std::fs::symlink_metadata(&legacy_temporary)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "foreign legacy temporary entries must not be overwritten"
+        );
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_file(),
+            "a checkpoint symlink is replaced by an ordinary file"
+        );
+        assert_eq!(load_cursor(&path), Some(expected));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_maintenance_directory_never_claims_foreign_cursors() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("profile root");
+        let profile = root.path().join("profile");
+        let foreign = root.path().join("foreign");
+        std::fs::create_dir(&profile).unwrap();
+        std::fs::create_dir(&foreign).unwrap();
+        let path = checkpoint_path(&profile);
+        let foreign_cursor = foreign.join(CHECKPOINT_FILE);
+        let foreign_bytes = br#"{"after_project_id":"foreign"}"#;
+        std::fs::write(&foreign_cursor, foreign_bytes).unwrap();
+        symlink(&foreign, profile.join(CHECKPOINT_DIRECTORY)).unwrap();
+
+        assert_eq!(
+            load_cursor(&path),
+            None,
+            "a linked checkpoint parent cannot supply a foreign resume position"
+        );
+        let expected = ColdStoreCursorV1 {
+            after_project_id: Some("project-local".to_owned()),
+            after_unregistered_directory: None,
+        };
+        assert!(
+            persist_cursor(&path, &expected).is_err(),
+            "publication must not cross a substituted maintenance directory"
+        );
+        assert_eq!(std::fs::read(&foreign_cursor).unwrap(), foreign_bytes);
+        assert_eq!(
+            std::fs::read_dir(&foreign).unwrap().count(),
+            1,
+            "no staging file may be created in the foreign directory"
+        );
+
+        std::fs::remove_file(profile.join(CHECKPOINT_DIRECTORY)).unwrap();
+        persist_cursor(&path, &expected).unwrap();
+        assert_eq!(load_cursor(&path), Some(expected));
+        assert_eq!(std::fs::read(&foreign_cursor).unwrap(), foreign_bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_parent_cannot_redirect_an_open_checkpoint_capability() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("profile");
+        let foreign = root.path().join("foreign");
+        std::fs::create_dir(&profile).unwrap();
+        std::fs::create_dir(&foreign).unwrap();
+        let path = checkpoint_path(&profile);
+        let directory = checkpoint_directory(&path, true).unwrap();
+        let expected = ColdStoreCursorV1 {
+            after_project_id: Some("local".to_owned()),
+            after_unregistered_directory: None,
+        };
+        persist_cursor_in_dir(&directory, &expected).unwrap();
+        std::fs::rename(profile.join(CHECKPOINT_DIRECTORY), profile.join("detached")).unwrap();
+        let foreign_cursor = foreign.join(CHECKPOINT_FILE);
+        std::fs::write(&foreign_cursor, br#"{"after_project_id":"foreign"}"#).unwrap();
+        symlink(&foreign, profile.join(CHECKPOINT_DIRECTORY)).unwrap();
+
+        assert_eq!(load_cursor_in_dir(&directory), Some(expected.clone()));
+        let updated = ColdStoreCursorV1 {
+            after_project_id: Some("local-next".to_owned()),
+            after_unregistered_directory: None,
+        };
+        persist_cursor_in_dir(&directory, &updated).unwrap();
+        assert_eq!(load_cursor_in_dir(&directory), Some(updated));
+        assert_eq!(
+            std::fs::read(&foreign_cursor).unwrap(),
+            br#"{"after_project_id":"foreign"}"#,
+            "a path substitution must not grant the foreign directory write authority"
+        );
+        assert_eq!(std::fs::read_dir(&foreign).unwrap().count(), 1);
+        assert!(persist_cursor(&path, &expected).is_err());
+        assert_eq!(load_cursor(&path), None);
+    }
+
+    #[test]
+    fn malformed_and_oversized_checkpoints_do_not_authorize_unbounded_reads() {
+        let root = tempfile::tempdir().expect("checkpoint root");
+        let path = checkpoint_path(root.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        std::fs::write(&path, vec![b' '; (MAX_CHECKPOINT_BYTES + 1) as usize])
+            .expect("oversized checkpoint");
+        assert_eq!(load_cursor(&path), None);
+        std::fs::write(&path, b"{invalid").expect("malformed checkpoint");
+        assert_eq!(load_cursor(&path), None);
+
+        let valid = ColdStoreCursorV1 {
+            after_project_id: None,
+            after_unregistered_directory: None,
+        };
+        persist_cursor(&path, &valid).expect("restore valid checkpoint");
+        assert_eq!(load_cursor(&path), Some(valid));
     }
 
     #[test]

@@ -107,13 +107,13 @@ cross-references, "page history" is `git log`/pickaxe on `docs/`.
 
 9. **Stated goal: move graph-shaped data off SQLite and custom adjacency structures.**
    - "**Goal:** Replace custom adjacency structures and graph-shaped SQLite storage with one embedded Grafeo runtime boundary while retaining SQLite only for genuinely relational, transactional, and content-bearing records."
-   - Where: `docs/plans/tracedecay-v2/39-embedded-grafeo-graph-database.md` line 12, unchanged since the first version 955552d44b (ScriptedAlchemy, 2026-08-03, "docs(v2): plan embedded Grafeo graph cutover"). The code commit 0e3284dd2f ("feat(query): embed Grafeo graph projection") landed earlier the same day. All of these commit messages have empty bodies.
+   - Where: `docs/plans/tracedecay-v2/39-embedded-grafeo-graph-database.md` goal, unchanged since the first version 955552d44b (ScriptedAlchemy, 2026-08-03, "docs(v2): plan embedded Grafeo graph cutover"). The code commit 0e3284dd2f ("feat(query): embed Grafeo graph projection") landed earlier the same day. All of these commit messages have empty bodies.
    - Plan index (00, lines ~1003-1013): "graph-shaped data moves off custom adjacency structures and SQLite. Relational journals, receipts, raw content, configuration, and execution fencing remain in SQLite."
    - Relevance: the only stated "why". No doc compares Grafeo against SQLite recursive CTEs or adjacency tables on a measured workload before adoption. Task 12 ("Compare against the pre-Grafeo baseline") remained unchecked, and the 2026-08-14 audit lists "E18 POST-RC Grafeo aggregate/performance provenance ... pre-Grafeo performance comparison" as outstanding (deleted `audits/v2-implementation-audit-2026-08-14.md`).
 
 10. **Plan 40 states what the pre-V2 SQLite graph did well and what V2 adds.**
    - "Master (pre-V2) proved the opposite trade-offs work. SQLite adjacency graph, per-file incremental sync, no stored body text, open-and-serve startup, but lacked what V2 genuinely adds: immutable digest-sealed generations, verify-then-publish with a watermark, exact branch/revision identity. Doc 39 already assigns the durable graph to Grafeo; the cutover never completed, leaving the sealed JSON as both canonical authority **and** de facto serving store."
-   - Where: `docs/plans/tracedecay-v2/40-partitioned-generation-storage-and-zero-copy-replay.md` §Problem (status "ACTIVE (decided 2026-08-22)").
+   - Where: `docs/plans/tracedecay-v2/40-partitioned-generation-storage-and-zero-copy-replay.md` §Problem.
    - Measured trigger in the same doc: "One sealed code generation for this repository is a single `generation-<digest>.json` of **1.39 GB**"; "Warmup on this repository read tens of GB, pinned the 8 GiB cgroup boundary, and starved queries."
    - Relevance: the doc credits immutable generations and verify-then-publish to V2's design. It credits the earlier SQLite graph with good operational economics.
 

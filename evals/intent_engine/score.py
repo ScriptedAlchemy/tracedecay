@@ -6,7 +6,7 @@ macro F1 retains the historical fixed-CATS, zero-for-undefined convention.
 """
 import bisect, hashlib, json, glob, math, os, re, statistics, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import CATS, calibrated
+from common import CATS, calibrated, strict_json_loads
 
 TH = [0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
@@ -100,6 +100,9 @@ def validate_http_provenance(result, rows):
         request_sha = row.get("request_sha256")
         if not isinstance(request_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", request_sha):
             raise ValueError(f"HTTP case {row['id']} has an invalid request fingerprint")
+        response_sha = row.get("response_sha256")
+        if not isinstance(response_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", response_sha):
+            raise ValueError(f"HTTP case {row['id']} is missing a valid response digest")
         requests.append([row["id"], request_sha])
     if experiment.get("requests_sha256") != evidence_digest(requests):
         raise ValueError("HTTP request fingerprints disagree with experiment identity")
@@ -210,7 +213,10 @@ def lat(rows):
     observed_truncated = sum(value > 0 for value in dropped)
     result = {
         "median_ms": round(statistics.median(ms)),
-        "p90_ms": round(ms[int(0.9 * (len(ms) - 1))]),
+        # Nearest-rank tails cannot understate short runs by taking the
+        # first value of a two-sample run.
+        "p90_ms": round(ms[math.ceil(0.90 * len(ms)) - 1]),
+        "p95_ms": round(ms[math.ceil(0.95 * len(ms)) - 1]),
         "total_cases": len(rows),
         "cases_truncated": observed_truncated if len(dropped) == len(rows) else None,
         "observed_cases_truncated": observed_truncated,
@@ -304,10 +310,15 @@ def score_config(res, fixed_t=None):
 
 if __name__ == "__main__":
     here = os.path.dirname(os.path.abspath(__file__))
-    fixed = json.load(open(os.path.join(here, "fixed_thresholds.json"))) if os.path.exists(os.path.join(here, "fixed_thresholds.json")) else None
+    fixed = None
+    thresholds_path = os.path.join(here, "fixed_thresholds.json")
+    if os.path.exists(thresholds_path):
+        with open(thresholds_path, encoding="utf-8") as source:
+            fixed = strict_json_loads(source.read())
     summary = {}; allres = {}
     for f in sorted(glob.glob(os.path.join(here, "results", "*.json"))):
-        res = json.load(open(f))
+        with open(f, encoding="utf-8") as source:
+            res = strict_json_loads(source.read())
         if res["config"] in allres:
             raise ValueError("duplicate configuration %r in result files" % res["config"])
         allres[res["config"]] = res
@@ -317,12 +328,12 @@ if __name__ == "__main__":
         summary[k] = score_config(res, fixed)
     publish_summary(os.path.join(here, "summary.json"), summary)
     f2 = lambda x: "  -  " if x is None else "%.2f" % x
-    print("config                     macroAUC ctxAUC | t0.5: mF1 top1 top1ctx noneFH | t0.6: mF1 top1 top1ctx noneFH | best: mF1 top1 top1ctx noneFH | ECE  | med/p90 ms")
+    print("config                     macroAUC ctxAUC | t0.5: mF1 top1 top1ctx noneFH | t0.6: mF1 top1 top1ctx noneFH | best: mF1 top1 top1ctx noneFH | ECE  | med/p90/p95 ms")
     for k, s in summary.items():
         line = "%-26s %s    %s  |" % (k, f2(s["macro_auc"]), f2(s["macro_auc_ctx"]))
         for nm in ("t0.5", "t0.6", "best_t_in_sample"):
             m = s[nm]; line += " %s %s %s %s |" % (f2(m["macro_f1"]), f2(m["all"]["top1_acc"]), f2(m["ctx"]["top1_acc"]), f2(m["all"]["none_false_hint_rate"]))
-        line += " LOOmF1 %s | %.3f | %d/%d" % (f2(s["macro_loo_f1"]), s["reliability"]["ece"], s["latency"]["median_ms"], s["latency"]["p90_ms"])
+        line += " LOOmF1 %s | %.3f | %d/%d/%d" % (f2(s["macro_loo_f1"]), s["reliability"]["ece"], s["latency"]["median_ms"], s["latency"]["p90_ms"], s["latency"]["p95_ms"])
         line += " AUC categories %d/%d ctx %d/%d" % (s["macro_auc_n_categories"], len(CATS), s["macro_auc_ctx_n_categories"], len(CATS))
         if "choice_top1_acc" in s:
             line += "  argmax top1 all/ctx %s/%s noneFH %s" % (f2(s["choice_top1_acc"]["all"]), f2(s["choice_top1_acc"]["ctx"]), f2(s["choice_none_false_hint_rate"]))

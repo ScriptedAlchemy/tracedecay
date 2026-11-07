@@ -48,7 +48,7 @@ class RunHttpTest(unittest.TestCase):
         (self.root / name).write_text(json.dumps(value), encoding="utf-8")
 
     def response(self, url, body):
-        return {"answers": {key: {"noul": 0.25} for key in body["questions"]},
+        return {"answers": {key: {"type": "noul", "noul": 0.25} for key in body["questions"]},
                 "usage": {"input_tokens": 12}, "latency_ms": 0}, 5.0
 
     def run_main(self, extra=()):
@@ -111,6 +111,150 @@ class RunHttpTest(unittest.TestCase):
         finally:
             self.write("dataset.json", self.dataset)
 
+    def test_ambiguous_json_inputs_refuse_before_inference(self):
+        dataset_path = self.root / "dataset.json"
+        server_path = self.root / "server.json"
+        subset_path = self.root / "subset.json"
+        original_dataset = dataset_path.read_text(encoding="utf-8")
+        original_server = server_path.read_text(encoding="utf-8")
+        variants = [
+            (dataset_path, original_dataset.replace(
+                '"labels": ["impact"]', '"labels": [], "labels": ["impact"]', 1
+            ), (), "duplicate JSON field"),
+            (server_path, original_server.replace(
+                '"checkpoint": "weights@immutable-revision"',
+                '"checkpoint": "other", "checkpoint": "weights@immutable-revision"', 1
+            ), (), "duplicate JSON field"),
+            (subset_path, '{"ids":["first"],"ids":["second"]}',
+             ("--subset", str(subset_path)), "duplicate JSON field"),
+            (dataset_path, original_dataset.replace(
+                '"current_prompt": "What breaks?"',
+                '"current_prompt": "What breaks?", "debug": NaN', 1
+            ), (), "invalid JSON numeric constant"),
+            (dataset_path, original_dataset.replace(
+                '"current_prompt": "What breaks?"',
+                '"current_prompt": "What breaks?", "debug": 1e999', 1
+            ), (), "nonfinite JSON number"),
+        ]
+        for path, contents, extra, diagnostic in variants:
+            original = path.read_bytes() if path.exists() else None
+            try:
+                if original is not None:
+                    self.assertNotEqual(contents, original.decode("utf-8"))
+                path.write_text(contents, encoding="utf-8")
+                with self.subTest(path=path.name, diagnostic=diagnostic):
+                    with patch.object(run_http, "post") as post:
+                        with self.assertRaisesRegex(ValueError, diagnostic):
+                            self.run_main(extra)
+                        post.assert_not_called()
+                    self.assertFalse(self.partial.exists())
+                    self.assertFalse(self.output.exists())
+            finally:
+                if original is None:
+                    path.unlink()
+                else:
+                    path.write_bytes(original)
+
+    def test_ambiguous_partial_json_refuses_without_mutating_resume(self):
+        self.interrupt()
+        original = self.partial.read_text(encoding="utf-8")
+        header, row = original.splitlines()
+        variants = [
+            header.replace(
+                '"experiment_sha256":', '"experiment_sha256": "fake", "experiment_sha256":', 1
+            ) + "\n" + row + "\n",
+            header + "\n" + row.replace(
+                '"labels":', '"labels": [], "labels":', 1
+            ) + "\n",
+            header + "\n" + row.replace(
+                '"ms":', '"unrelated": Infinity, "ms":', 1
+            ) + "\n",
+            header + "\n" + row.replace(
+                '"ms":', '"unrelated": 1e999, "ms":', 1
+            ) + "\n",
+        ]
+        try:
+            for ambiguous in variants:
+                with self.subTest(evidence=ambiguous[-120:]):
+                    self.assertNotEqual(ambiguous, original)
+                    self.partial.write_text(ambiguous, encoding="utf-8")
+                    self.assert_refused_unchanged()
+        finally:
+            self.partial.write_text(original, encoding="utf-8")
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main()
+        post.assert_called_once()
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+
+    def test_oversized_resume_lines_refuse_before_network_without_damage(self):
+        self.interrupt()
+        original = self.partial.read_bytes()
+        header = original.splitlines(keepends=True)[0]
+        invalid = (
+            (b"x" * 200_000 + b"\n", "oversized header"),
+            (header + b"x" * 200_000 + b"\n", "oversized row"),
+        )
+        for contents, diagnostic in invalid:
+            with self.subTest(diagnostic=diagnostic):
+                self.partial.write_bytes(contents)
+                with patch.object(run_http, "post") as post:
+                    with self.assertRaisesRegex(ValueError, diagnostic):
+                        self.run_main()
+                    post.assert_not_called()
+                self.assertEqual(self.partial.read_bytes(), contents)
+                self.assertFalse(self.output.exists())
+        self.partial.write_bytes(original)
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main()
+        post.assert_called_once()
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+
+    def test_sample_capture_cannot_impersonate_scored_results(self):
+        result_root = self.output.parent
+        for sample in (
+            self.output,
+            result_root / "foreign.json",
+            result_root / "nested" / "another.json",
+            result_root / ".." / "results" / "alias.json",
+        ):
+            with self.subTest(sample=str(sample)):
+                with patch.object(run_http, "post") as post:
+                    with self.assertRaisesRegex(ValueError, "--sample-out must be outside"):
+                        self.run_main(["--sample-out", str(sample)])
+                    post.assert_not_called()
+                self.assertFalse(self.partial.exists())
+                self.assertFalse(self.output.exists())
+                self.assertFalse(result_root.exists())
+
+        # Capturing raw evidence elsewhere still publishes a valid result.
+        sample = self.root / "first-response.json"
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main(["--sample-out", str(sample)])
+        self.assertEqual(post.call_count, len(self.dataset))
+        self.assertEqual(json.loads(sample.read_text())["case_id"], "first")
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+
+    def test_oversized_sample_capture_refuses_before_resume_inference(self):
+        sample = self.root / "first-response.json"
+        extra = ["--sample-out", str(sample)]
+        self.interrupt(extra)
+        original_sample = sample.read_bytes()
+        original_partial = self.partial.read_bytes()
+        oversized = b"x" * (9 * run_http.MAX_DECISION_RESPONSE_BYTES + 65_536)
+        sample.write_bytes(oversized)
+        with patch.object(run_http, "post") as post:
+            with self.assertRaisesRegex(ValueError, "sample capture exceeds"):
+                self.run_main(extra)
+            post.assert_not_called()
+        self.assertEqual(sample.read_bytes(), oversized)
+        self.assertEqual(self.partial.read_bytes(), original_partial)
+        self.assertFalse(self.output.exists())
+        sample.write_bytes(original_sample)
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main(extra)
+        post.assert_called_once()
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+
     def test_exact_resume_only_requests_the_missing_case(self):
         self.interrupt()
         with patch.object(run_http, "post", side_effect=self.response) as post:
@@ -128,6 +272,23 @@ class RunHttpTest(unittest.TestCase):
         self.assertEqual(result["rows"][0]["server_ms"], 0)
         self.assertFalse(self.partial.exists())
 
+    def test_late_first_response_capture_refuses_without_changing_resume(self):
+        self.interrupt()
+        before = self.partial.read_bytes()
+        sample = self.root / "late-first-response.json"
+        with patch.object(run_http, "post") as post:
+            with self.assertRaisesRegex(ValueError, "cannot capture the first response"):
+                self.run_main(["--sample-out", str(sample)])
+            post.assert_not_called()
+        self.assertEqual(self.partial.read_bytes(), before)
+        self.assertFalse(sample.exists())
+        self.assertFalse(self.output.exists())
+
+        # Omitting the unavailable raw capture still permits an exact resume.
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main()
+        post.assert_called_once()
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
 
     def test_completed_rows_cannot_be_relabelled_for_scoring(self):
         with patch.object(run_http, "post", side_effect=self.response):
@@ -536,6 +697,18 @@ class RunHttpTest(unittest.TestCase):
                     self.run_main()
                 post.assert_not_called()
 
+    def test_malformed_subset_document_refuses_before_network_or_evidence(self):
+        subset_path = self.root / "subset.json"
+        for malformed in ([], None, "first", False, {"case_ids": ["first"]}):
+            with self.subTest(subset=malformed):
+                self.write("subset.json", malformed)
+                with patch.object(run_http, "post") as post:
+                    with self.assertRaisesRegex(ValueError, "subset must"):
+                        self.run_main(["--subset", str(subset_path)])
+                    post.assert_not_called()
+                self.assertFalse(self.partial.exists())
+                self.assertFalse(self.output.exists())
+
     def test_invalid_subsets_cannot_silently_change_the_cohort(self):
         for ids in ([], ["absent"], ["first", "first"], "first"):
             with self.subTest(ids=ids), patch.object(run_http, "post") as post:
@@ -757,11 +930,15 @@ class RunHttpTest(unittest.TestCase):
                 self.assertEqual(self.partial.read_bytes(), before)
 
     def test_invalid_answer_kinds_and_shapes_preserve_resumable_rows(self):
-        self.interrupt()
-        before = self.partial.read_bytes()
         sample = self.root / "rejected-response.json"
+        self.interrupt(["--sample-out", str(sample)])
+        before = self.partial.read_bytes()
+        original_sample = sample.read_bytes()
         response, elapsed = self.response("", {"questions": run_http.noul_questions()})
         invalid = []
+        untyped = copy.deepcopy(response)
+        del untyped["answers"]["impact"]["type"]
+        invalid.append(untyped)
         for declared_type in ("score", None, False, [], {"kind": "noul"}):
             malformed = copy.deepcopy(response)
             malformed["answers"]["impact"]["type"] = declared_type
@@ -783,7 +960,7 @@ class RunHttpTest(unittest.TestCase):
                         self.run_main(["--sample-out", str(sample)])
                 self.assertEqual(self.partial.read_bytes(), before)
                 self.assertFalse(self.output.exists())
-                self.assertFalse(sample.exists())
+                self.assertEqual(sample.read_bytes(), original_sample)
 
         # The rejected response did not poison the partial log; valid
         # inference can continue from the already-settled first case.
@@ -802,6 +979,27 @@ class RunHttpTest(unittest.TestCase):
         rows = json.loads(self.output.read_text())["rows"]
         self.assertEqual(len(rows), len(self.dataset))
         self.assertTrue(all(row["probs"]["impact"] == 0.25 for row in rows))
+
+    def test_malformed_server_timing_refuses_without_publishing_evidence(self):
+        sample = self.root / "first-response.json"
+        response, elapsed = self.response("", {"questions": run_http.noul_questions()})
+        response.pop("latency_ms")
+        for malformed in ([], "unknown", True, 23):
+            with self.subTest(timing=malformed):
+                with patch.object(run_http, "post",
+                                  return_value=({**response, "timing": malformed}, elapsed)):
+                    with self.assertRaisesRegex(ValueError, "response timing must be an object"):
+                        self.run_main(["--sample-out", str(sample)])
+                self.assertEqual(len(self.partial.read_text().splitlines()), 1)
+                self.assertFalse(sample.exists())
+                self.assertFalse(self.output.exists())
+
+        # Refusal must not poison a later valid run or publish misleading samples.
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main(["--sample-out", str(sample)])
+        self.assertEqual(post.call_count, len(self.dataset))
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), len(self.dataset))
+        self.assertTrue(sample.exists())
 
     def test_malformed_response_does_not_poison_first_sample_on_resume(self):
         sample = self.root / "first-response.json"
@@ -832,13 +1030,193 @@ class RunHttpTest(unittest.TestCase):
         self.assertFalse(sample.exists())
         self.assertEqual(len(self.partial.read_text().splitlines()), 1)
 
-    def test_existing_sample_is_never_replaced(self):
+    def test_existing_sample_from_other_run_refuses_without_inference(self):
         sample = self.root / "first-response.json"
         sample.write_text('{"previous": true}')
-        with patch.object(run_http, "post", side_effect=self.response):
-            self.run_main(["--sample-out", str(sample)])
+        with patch.object(run_http, "post") as post:
+            with self.assertRaisesRegex(ValueError, "sample capture already exists"):
+                self.run_main(["--sample-out", str(sample)])
+            post.assert_not_called()
         self.assertEqual(sample.read_text(), '{"previous": true}')
+        self.assertFalse(self.partial.exists())
+        self.assertFalse(self.output.exists())
+
+    def test_missing_response_digest_refuses_resume_before_inference(self):
+        self.interrupt()
+        original = self.partial.read_bytes()
+        lines = original.splitlines()
+        self.assertEqual(len(lines), 2)
+        for invalid in ("missing", "malformed"):
+            with self.subTest(invalid=invalid):
+                saved = json.loads(lines[1])
+                if invalid == "missing":
+                    del saved["response_sha256"]
+                else:
+                    saved["response_sha256"] = "not-a-sha256"
+                altered = lines[0] + b"\n" + json.dumps(saved).encode("utf-8") + b"\n"
+                self.partial.write_bytes(altered)
+                with patch.object(run_http, "post") as post:
+                    with self.assertRaisesRegex(ValueError, "response digest"):
+                        self.run_main()
+                    post.assert_not_called()
+                self.assertEqual(self.partial.read_bytes(), altered)
+                self.assertFalse(self.output.exists())
+        self.partial.write_bytes(original)
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main()
+        post.assert_called_once()
+        self.assertFalse(self.partial.exists())
         self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+
+    def test_sample_identity_and_raw_response_must_match_durable_resume(self):
+        sample = self.root / "first-response.json"
+        extra = ["--sample-out", str(sample)]
+        self.interrupt(extra)
+        original = json.loads(sample.read_text())
+        header = json.loads(self.partial.read_text().splitlines()[0])
+        first_row = json.loads(self.partial.read_text().splitlines()[1])
+        self.assertEqual(original["case_id"], "first")
+        self.assertEqual(original["experiment_sha256"], header["experiment_sha256"])
+        self.assertEqual(run_http.digest(original["response"]),
+                         first_row["response_sha256"])
+        before = self.partial.read_bytes()
+        changes = (
+            ("experiment", lambda capture: capture.__setitem__("experiment_sha256", "0" * 64)),
+            ("request", lambda capture: capture["request"].__setitem__("state", "unrelated")),
+            ("response", lambda capture: capture["response"]["answers"]["impact"].__setitem__(
+                "noul", 0.9)),
+        )
+        for reason, change in changes:
+            with self.subTest(reason=reason):
+                altered = copy.deepcopy(original)
+                change(altered)
+                sample.write_text(json.dumps(altered))
+                with patch.object(run_http, "post") as post:
+                    with self.assertRaisesRegex(ValueError, "sample capture"):
+                        self.run_main(extra)
+                    post.assert_not_called()
+                self.assertEqual(self.partial.read_bytes(), before)
+                self.assertFalse(self.output.exists())
+        sample.write_text(json.dumps(original))
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main(extra)
+        post.assert_called_once()
+        self.assertFalse(self.partial.exists())
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+
+    def test_resumed_sample_cannot_impersonate_a_later_durable_case(self):
+        sample = self.root / "first-response.json"
+        extra = ["--sample-out", str(sample)]
+        self.interrupt(extra)
+        # Leave both rows durable but simulate a failure to publish the result.
+        with patch.object(run_http, "post", side_effect=self.response):
+            with patch.object(run_http, "publish_final_result",
+                              side_effect=OSError("publication interrupted")):
+                with self.assertRaisesRegex(OSError, "publication interrupted"):
+                    self.run_main(extra)
+        self.assertEqual(len(self.partial.read_text().splitlines()), 3)
+        self.assertFalse(self.output.exists())
+
+        genuine = sample.read_bytes()
+        forged = json.loads(genuine)
+        second_request = {
+            "state": run_http.STATES[self.config](self.dataset[1]),
+            "questions": run_http.noul_questions(),
+        }
+        forged["case_id"] = "second"
+        forged["request"] = second_request
+        forged["request_sha256"] = hashlib.sha256(
+            run_http.request_bytes(second_request)
+        ).hexdigest()
+        second_row = json.loads(self.partial.read_text().splitlines()[2])
+        self.assertEqual(forged["request_sha256"], second_row["request_sha256"])
+        self.assertEqual(run_http.digest(forged["response"]),
+                         second_row["response_sha256"])
+        sample.write_text(json.dumps(forged), encoding="utf-8")
+        before = self.partial.read_bytes()
+        with patch.object(run_http, "post") as post:
+            with self.assertRaisesRegex(ValueError, "first case"):
+                self.run_main(extra)
+            post.assert_not_called()
+        self.assertEqual(self.partial.read_bytes(), before)
+        self.assertFalse(self.output.exists())
+
+        # The genuine first-case capture still allows exact completion.
+        sample.write_bytes(genuine)
+        with patch.object(run_http, "post") as post:
+            self.run_main(extra)
+            post.assert_not_called()
+        self.assertFalse(self.partial.exists())
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+
+    def test_missing_first_sample_is_not_replaced_with_later_response(self):
+        sample = self.root / "first-response.json"
+        calls = 0
+
+        def lose_capture_during_second_request(url, body):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                self.assertTrue(sample.exists())
+                sample.unlink()
+            return self.response(url, body)
+
+        with patch.object(run_http, "post", side_effect=lose_capture_during_second_request):
+            with self.assertRaisesRegex(ValueError, "sample disappeared"):
+                self.run_main(["--sample-out", str(sample)])
+        self.assertEqual(calls, 2)
+        self.assertFalse(sample.exists())
+        self.assertFalse(self.output.exists())
+        saved = [json.loads(line) for line in self.partial.read_text().splitlines()]
+        self.assertEqual([row["id"] for row in saved[1:]], ["first"])
+
+        # Recovery without a sample still reuses the first measured row
+        # instead of claiming the second response was the first capture.
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main()
+        post.assert_called_once()
+        self.assertFalse(self.partial.exists())
+        self.assertEqual(
+            [row["id"] for row in json.loads(self.output.read_text())["rows"]],
+            ["first", "second"],
+        )
+
+    def test_multiple_configs_capture_only_first_configuration(self):
+        sample = self.root / "first-response.json"
+        first_config = "A_noul_prompt"
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            with contextlib.redirect_stdout(io.StringIO()):
+                run_http.main(self.base + [
+                    "--sample-out", str(sample), first_config, self.config,
+                ])
+        self.assertEqual(post.call_count, len(self.dataset) * 2)
+        captured = json.loads(sample.read_text())
+        first = json.loads((self.root / "results" /
+                           f"probe_{first_config}.json").read_text())
+        second = json.loads(self.output.read_text())
+        self.assertEqual(captured["experiment_sha256"], first["experiment_sha256"])
+        self.assertNotEqual(captured["experiment_sha256"], second["experiment_sha256"])
+        self.assertEqual(run_http.digest(captured["response"]),
+                         first["rows"][0]["response_sha256"])
+
+    def test_sample_link_race_cannot_adopt_foreign_capture(self):
+        sample = self.root / "first-response.json"
+        original_link = run_http.os.link
+
+        def competing_sample(source, destination):
+            if destination == str(sample):
+                sample.write_text('{"foreign": true}')
+                raise FileExistsError(destination)
+            return original_link(source, destination)
+
+        with patch.object(run_http, "post", side_effect=self.response):
+            with patch.object(run_http.os, "link", side_effect=competing_sample):
+                with self.assertRaisesRegex(ValueError, "concurrently published"):
+                    self.run_main(["--sample-out", str(sample)])
+        self.assertEqual(sample.read_text(), '{"foreign": true}')
+        self.assertFalse(self.output.exists())
+        self.assertEqual(len(self.partial.read_text().splitlines()), 1)
+        self.assertEqual(list(self.root.glob(".noul-sample-*")), [])
 
     @unittest.skipUnless(os.name == "posix", "dangling links require portable POSIX support")
     def test_dangling_sample_link_refuses_without_inference_or_partial_output(self):
@@ -878,6 +1256,7 @@ class RunHttpTest(unittest.TestCase):
 
     def test_transmitted_bytes_match_the_recorded_request_fingerprint(self):
         response = io.BytesIO(json.dumps({"answers": {}}).encode())
+        response.headers = {"Content-Length": str(len(response.getbuffer()))}
         body = {"state": "Unicode λ", "questions": {"a": {}, "b": {}}}
         with patch("urllib.request.build_opener") as build_opener:
             build_opener.return_value.open.return_value = response
@@ -1044,6 +1423,110 @@ class RunHttpTest(unittest.TestCase):
             # Preserve the original 302 instead of following it to an
             # unapproved model endpoint and observing a downstream failure.
             self.assertEqual(refused.exception.code, 302)
+        finally:
+            server.shutdown()
+            worker.join(timeout=2)
+            server.server_close()
+
+
+    def test_duplicate_json_response_fields_cannot_publish_evaluation_evidence(self):
+        response, _ = self.response("", {"questions": run_http.noul_questions()})
+        valid = json.dumps(response).encode("utf-8")
+        duplicate_answers = (
+            b'{"answers":{},"answers":'
+            + json.dumps(response["answers"]).encode("utf-8") + b'}'
+        )
+        duplicate_noul = valid.replace(
+            b'"noul": 0.25', b'"noul": 0.1, "noul": 0.25', 1
+        )
+        self.assertNotEqual(duplicate_noul, valid)
+
+        class Answer(BaseHTTPRequestHandler):
+            payload = valid
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                payload = type(self).payload
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *_):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Answer)
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        sample = self.root / "first-response.json"
+        extra = [
+            "--url", f"http://127.0.0.1:{server.server_port}/v1/systemone",
+            "--sample-out", str(sample),
+        ]
+        try:
+            for ambiguous in (duplicate_answers, duplicate_noul):
+                Answer.payload = ambiguous
+                with self.subTest(payload=ambiguous[:100]):
+                    with self.assertRaisesRegex(ValueError, "duplicate JSON field"):
+                        self.run_main(extra)
+                    self.assertEqual(len(self.partial.read_text().splitlines()), 1)
+                    self.assertFalse(sample.exists())
+                    self.assertFalse(self.output.exists())
+            Answer.payload = valid
+            self.run_main(extra)
+            result = json.loads(self.output.read_text(encoding="utf-8"))
+            self.assertEqual([row["id"] for row in result["rows"]], ["first", "second"])
+            self.assertTrue(sample.exists())
+            self.assertFalse(self.partial.exists())
+        finally:
+            server.shutdown()
+            worker.join(timeout=2)
+            server.server_close()
+
+
+    def test_decision_response_rejects_oversized_or_invalid_http_bodies(self):
+        class Answer(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                valid = b'{"answers":{}}'
+                self.send_response(200)
+                if self.path == "/declared":
+                    # The server claims a huge body but sends valid, small JSON.
+                    # A check after an unrestricted read would accept this.
+                    self.send_header("Content-Length", str(run_http.MAX_DECISION_RESPONSE_BYTES + 1))
+                    self.end_headers()
+                    self.wfile.write(valid)
+                elif self.path == "/invalid":
+                    self.send_header("Content-Length", "not-a-number")
+                    self.end_headers()
+                    self.wfile.write(valid)
+                else:
+                    # No Content-Length: a streaming server must also be bounded.
+                    payload = (b'{"answers":{},"padding":"' +
+                               b"x" * run_http.MAX_DECISION_RESPONSE_BYTES + b'"}')
+                    self.end_headers()
+                    try:
+                        self.wfile.write(payload)
+                    except BrokenPipeError:
+                        pass
+
+            def log_message(self, *_):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Answer)
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            base = f"http://127.0.0.1:{server.server_port}"
+            body = {"state": "private transcript", "questions": {}}
+            for path, message in (
+                ("/declared", "size limit"),
+                ("/streamed", "size limit"),
+                ("/invalid", "invalid Content-Length"),
+            ):
+                with self.subTest(path=path):
+                    with self.assertRaisesRegex(ValueError, message):
+                        run_http.post(base + path, body, timeout=2)
         finally:
             server.shutdown()
             worker.join(timeout=2)

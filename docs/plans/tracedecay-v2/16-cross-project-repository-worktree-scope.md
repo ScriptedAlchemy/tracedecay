@@ -49,8 +49,8 @@ right data.
 
 ## Worktree index identity and reuse
 
-Plan 16 composes the incremental index delivered by Plans 25/31; it does not
-create a second watcher, parser, chunker, vector store, or scheduler.
+Plan 16 composes the incremental index delivered by Plan 25; it does not
+create a second watcher, parser, chunker, or scheduler.
 
 - Every linked worktree has an exact typed identity, fenced snapshot frontier,
   immutable code generation, freshness, and coverage. A shared Git common

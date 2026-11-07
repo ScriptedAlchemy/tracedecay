@@ -1,14 +1,5 @@
 # Embedded Grafeo Graph Database Implementation Plan
 
-> **SUPERSEDED BY LANDING (2026-08-13).** The checklist below predates the
-> cutover and was never ticked; the work shipped regardless. Evidence:
-> `crates/tracedecay-graph-db` is a workspace member pinned to Grafeo
-> `=0.5.42` with `generation_runtime.rs` and the sealed-graph state digest;
-> the daemon consumes it through
-> `src/daemon/code_index_scheduler/graph_activation.rs`; and the SQLite graph
-> authority was deleted in `79683eb527`. Treat the unchecked boxes as
-> historical planning, not open work.
-
 **Goal:** Replace custom adjacency structures and graph-shaped SQLite storage with one embedded Grafeo runtime boundary while retaining SQLite only for genuinely relational, transactional, and content-bearing records.
 
 **Architecture:** `tracedecay-graph-db` is the only workspace crate allowed
@@ -20,9 +11,8 @@ content, and source manifests remain in their domain stores; Grafeo is the
 sole persisted and queried graph/vector projection over those sources. SQLite
 does not store shadow adjacency, graph indexes, or vector indexes.
 
-**Tech Stack:** Rust 2024, the published Grafeo `=0.5.42` crates from
-crates.io, TraceDecay domain/store ports, Tokio cancellation, Criterion, and
-cargo-nextest.
+**Tech Stack:** Rust 2024, the Grafeo crates, TraceDecay domain/store ports,
+Tokio cancellation, Criterion, and cargo-nextest.
 
 ## Global Constraints
 
@@ -35,9 +25,6 @@ cargo-nextest.
   `.grafeo.wal` sidecar while the file is open and checkpoints it into the
   database file on close. Do not inject an already-open file, replace Grafeo's
   storage engine, or add a private/secure filesystem adapter.
-- Depend on the exact published `=0.5.42` release. Do not pin an unpublished Git
-  revision, maintain a TraceDecay fork, vendor Grafeo, or reimplement its
-  storage, WAL, checkpoint, or recovery machinery.
 - `tracedecay-graph-db` is the sole production direct `grafeo-*` dependency.
 - Do not introduce another persisted/query graph or vector database. A bounded
   in-memory algorithm is not a storage authority, but should use the standard
@@ -79,8 +66,6 @@ Official implementation references:
 
 - [Grafeo repository and crate layout](https://github.com/GrafeoDB/grafeo)
 - [Embedded Rust API](https://grafeo.dev/user-guide/rust/)
-- [Vector and hybrid search](https://grafeo.dev/user-guide/vector-search/)
-- [Published Rust API for `0.5.42`](https://docs.rs/grafeo/0.5.42/grafeo/)
 - [Persistent storage and WAL](https://grafeo.dev/user-guide/persistence/persistent/)
 
 ---
@@ -250,11 +235,10 @@ Expected: fail because the crate and interfaces do not exist.
 
 - [ ] **Step 2: Add the workspace crate and centralize Grafeo dependencies**
 
-Use the exact published Grafeo `=0.5.42` crates in the new crate. Add
-`tracedecay-graph-db` to `[workspace].members` and centralize those exact
-versions in `[workspace.dependencies]`. Enable Grafeo's public `grafeo-file`
-feature together with `wal`. No other workspace crate directly depends on
-Grafeo, and no Grafeo dependency uses a Git source.
+Use the workspace Grafeo crates in the new crate. Add `tracedecay-graph-db`
+to `[workspace].members` and centralize those dependencies in
+`[workspace.dependencies]`. Enable Grafeo's public `grafeo-file` feature
+together with `wal`. No other workspace crate directly depends on Grafeo.
 
 - [ ] **Step 3: Implement typed open, snapshot, batch, traversal, and vector adapters**
 
@@ -393,67 +377,6 @@ After production registry and read/write callers use graph-db, delete the comple
 cargo nextest run -p tracedecay-graph-db -p tracedecay-code-index -p tracedecay-query --no-fail-fast
 cargo clippy -p tracedecay-graph-db -p tracedecay-code-index -p tracedecay-query --all-targets --all-features -- -D warnings
 git commit -am "refactor(code-graph): route Grafeo through graph-db"
-```
-
-## Task 4: Move semantic vectors and hybrid retrieval
-
-**Files:**
-- Modify: `crates/tracedecay-semantic/src/projector.rs`
-- Modify: `crates/tracedecay-semantic/src/runtime_query.rs`
-- Modify: `crates/tracedecay-application/src/store/vector_generations.rs`
-- Modify: `src/store/vector_generations.rs`
-- Modify: `crates/tracedecay-query/src/retrieval/semantic/execution_authority.rs`
-- Delete: SQLite code-semantic vector payload/state tables superseded by graph-db
-
-**Interfaces:**
-- Consumes: `EmbeddingProjectionKey`, verified `EmbeddingVector`, source
-  generation, model/artifact digest, metric, dimensions, and normalization.
-- Produces: recovered-state-verified vector publication and bounded Grafeo
-  vector similarity; TraceDecay composes hybrid retrieval above it.
-
-```rust
-pub trait SemanticVectorStore {
-    fn publish_generation(
-        &self,
-        generation: &VectorGenerationId,
-        vectors: Vec<AdmittedSemanticVector>,
-        cancellation: &CancellationToken,
-    ) -> Result<VerifiedGraphCommit, SemanticStoreError>;
-
-    fn search(
-        &self,
-        request: &SemanticVectorSearchRequest,
-    ) -> Result<SemanticVectorSearchPage, SemanticStoreError>;
-}
-```
-
-- [ ] **Step 1: Add failing vector behavior tests**
-
-Cover cosine/dot/euclidean behavior as declared by the manifest, dimension mismatch, non-finite values, stale generation, cancelled query, filtered namespace, deterministic ties, reopen, and serving the previous generation during rebuild.
-
-- [ ] **Step 2: Move vector payloads and indexes to graph-db**
-
-Store the vector on the corresponding projected entity or a typed vector
-entity linked to it. Keep model lifecycle/install metadata and publication
-receipts relational. Publish vector and code graph generations in one graph-db
-batch when they share a generation.
-
-- [ ] **Step 3: Implement hybrid retrieval above the storage primitive**
-
-Grafeo returns bounded vector candidates. `tracedecay-query` retains
-BM25/lexical retrieval and performs authorization, fusion, normalization,
-hydration, explanations, and stable cursors.
-
-- [ ] **Step 4: Delete SQLite vector payload duplication**
-
-Remove `semantic_vector_payload_v1`, `semantic_vector_state_slice_v1`, evaluation duplicates, and legacy vector blobs after every production reader moves. Retain only relational generation/model lifecycle records that are not duplicate vector authority.
-
-- [ ] **Step 5: Verify and commit**
-
-```bash
-cargo nextest run -p tracedecay-semantic -p tracedecay-query -p tracedecay-application --no-fail-fast
-cargo bench --bench code_search --no-run
-git commit -am "refactor(semantic): move vector search to graph-db"
 ```
 
 ## Task 5: Move Git topology and evidence relations
@@ -958,30 +881,6 @@ recovered-digest proof in compact form with "relation scalar endpoints do not
 match native topology" while the same rows seal and serve in replay form.
 Toy-scale contracts pass, so the defect is scale- or ordering-dependent.
 
-**Decision.** Live-container reclaim is `compact()` under the maintenance
-lease, not a bespoke re-seal or a quarantine-and-rebuild:
-
-1. Reproduce the endpoint mismatch in the fork with a generation-scale
-   fixture (the sealed-store contract's `rich_manifest` grown to the failing
-   size), fix it there, and gate `COMPACT_ROUND_TRIPS_BYTES` on the recovered
-   digest proving equal in compact and replay form for that fixture.
-2. Add a maintenance-cadence step beside `run_branch_compaction`: when a
-   project's live container exceeds twice the summed bytes of its verified
-   heads' sealed artifacts (both figures are already censused, see the
-   `RetentionBacklog` finding's sealed evidence), take the project store
-   maintenance lease, quiesce the graph owner, `compact()`, close, and reopen.
-   The reopen reconstructs the layered store from the `CompactStore` section;
-   later writes land in the overlay, so the store stays mutable.
-3. Prove the swap with the existing recovered-digest verification before the
-   compacted container replaces the live file; a mismatch keeps the original
-   and reports a typed degradation. Vector generations, whose only durable
-   home is the live container, are covered by the same proof and never
-   re-embedded.
-
-**Non-goals.** No re-projection from canonical replay authorities as a
-compaction path (that is corruption recovery and would re-embed vectors), and
-no quarantine of a healthy container.
-
 ### Correction (2026-09-12, later the same day, measured)
 
 The decision above rests on a wrong premise. Read against the pinned fork:
@@ -1039,14 +938,10 @@ The decision above rests on a wrong premise. Read against the pinned fork:
       base rather than a replay into RAM, deletes land in the overlay's
       deletions section, and `recompact()` merges on the maintenance
       cadence. Blocked on validating TraceDecay's staging writes against a
-      `LayeredStore` (README gaps 3 and 4: `has_vector_index` planning and
-      the MVCC-free base).
+      `LayeredStore` (README gap 4, the MVCC-free base).
    b. Rebuild a fresh container by streaming the retained authorities,
       sealed heads and their dependency closure from their compact stores,
-      pending replays from `canonical_replay_source`, vector generations
-      from their sealed stores, then prove every generation's recovered
-      digest against the journal before swapping files under the
-      maintenance lease. Memory is bounded by the largest generation, not
-      the container. Blocked on vector generations: the sealed lane never
-      routes vector search to sealed stores, so a rebuilt live container
-      must re-stage the vector rows and rebuild the HNSW index on open.
+      and pending replays from `canonical_replay_source`, then prove every
+      generation's recovered digest against the journal before swapping
+      files under the maintenance lease. Memory is bounded by the largest
+      generation, not the container.

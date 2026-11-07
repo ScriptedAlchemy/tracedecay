@@ -6,12 +6,16 @@
 //! swapped for a symlink cannot redirect the operation.
 
 use std::ffi::OsStr;
-use std::io;
+use std::io::{self, Read};
+use std::path::{Component, Path};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(windows)]
-use cap_fs_ext::DirExt;
+#[cfg(unix)]
+use cap_std::fs::OpenOptionsExt;
+
 #[cfg(not(windows))]
 use cap_fs_ext::OpenOptionsMaybeDirExt;
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, File, OpenOptions};
 
 /// How many times a create-or-open that reports the entry missing is asked
@@ -212,6 +216,298 @@ pub fn sync_directory(directory: &Dir) -> io::Result<()> {
     }
 }
 
+/// Open an owned leaf through a held parent, never following a replaced root
+/// symlink. Missing roots are normal before the first artifact is sealed.
+fn open_owned_directory_nofollow(root: &Path) -> io::Result<Option<Dir>> {
+    let name = root
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "root has no leaf name"))?;
+    let parent_path = root
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "root has no parent"))?;
+    let parent = match Dir::open_ambient_dir(parent_path, cap_std::ambient_authority()) {
+        Ok(parent) => parent,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    match parent.open_dir_nofollow(name) {
+        Ok(opened) => Ok(Some(opened)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Read an optional bounded regular receipt from an already-open child.
+/// A replaced symlink or unreadable receipt never authorizes reclamation.
+fn read_child_receipt(child: &Dir, receipt: &str, limit: usize) -> io::Result<Option<Vec<u8>>> {
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let mut file = match child.open_with(receipt, &options) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !file.metadata()?.is_file() {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take((limit as u64).saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Ok(None);
+    }
+    Ok(Some(bytes))
+}
+
+/// Open a generation beneath a held, no-follow sealed root. Both the root
+/// and the generation leaf must be real directories.
+fn open_nested_directory_nofollow(directory: &Path) -> io::Result<Dir> {
+    let root = directory
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "directory has no root"))?;
+    let name = directory
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "directory has no name"))?;
+    let root = open_owned_directory_nofollow(root)?
+        .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+    root.open_dir_nofollow(name)
+}
+
+fn checked_leaf_name(name: &str) -> io::Result<&OsStr> {
+    let mut components = Path::new(name).components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "proof file name must be one leaf",
+        ));
+    }
+    Ok(OsStr::new(name))
+}
+
+/// Read bounded regular proof bytes beneath a held root and generation.
+/// Missing files and static symlinks never provide reusable proof.
+pub fn read_nested_bounded_file_nofollow(
+    directory: &Path,
+    name: &str,
+    limit: usize,
+) -> io::Result<Option<Vec<u8>>> {
+    checked_leaf_name(name)?;
+    let child = match open_nested_directory_nofollow(directory) {
+        Ok(child) => child,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    match child.symlink_metadata(name) {
+        Ok(metadata) if !metadata.is_file() => return Ok(None),
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    read_child_receipt(&child, name, limit)
+}
+
+static PROOF_TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
+
+/// Publish a proof atomically relative to the same held generation used for
+/// staging. A substituted root/child link cannot redirect or truncate bytes.
+pub fn replace_nested_file_nofollow(directory: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+    let leaf = checked_leaf_name(name)?;
+    let child = open_nested_directory_nofollow(directory)?;
+    replace_file_in_open_directory(&child, leaf, bytes)
+}
+
+fn replace_file_in_open_directory(directory: &Dir, leaf: &OsStr, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+
+    for _ in 0..16 {
+        let nonce = PROOF_TEMP_NONCE.fetch_add(1, Ordering::Relaxed);
+        let temporary_name = format!(".sealed-proof-{}-{nonce}.tmp", std::process::id());
+        let mut options = OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut temporary = match directory.open_with(&temporary_name, &options) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let result = (|| {
+            temporary.write_all(bytes)?;
+            temporary.sync_all()?;
+            drop(temporary);
+            replace_file(directory, OsStr::new(&temporary_name), leaf)?;
+            sync_directory(directory)
+        })();
+        if result.is_err() {
+            let _ = directory.remove_file(&temporary_name);
+        }
+        return result;
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "sealed proof staging names are occupied",
+    ))
+}
+
+/// Capability-relative census classes. The caller decides which
+/// bounded receipt identities are recognizable, while private-fs owns all
+/// directory traversal, metadata and hardlink accounting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DirectoryCensus<const N: usize> {
+    pub counts: [u64; N],
+    pub bytes: [u64; N],
+    pub unrecognized: u64,
+}
+
+/// Classify direct children under one held, no-follow root, then charge live
+/// classes in caller-specified priority order. A root swap cannot redirect
+/// receipt reads or recursive size walks; an unreadable/oversized receipt
+/// grants no classification. Substituted unsafe children fail closed.
+pub fn census_child_directories_nofollow<const N: usize>(
+    root: &Path,
+    receipt: Option<(&str, usize)>,
+    mut classify: impl FnMut(&OsStr, Option<&[u8]>) -> Option<usize>,
+) -> io::Result<Option<DirectoryCensus<N>>> {
+    let Some(directory) = open_owned_directory_nofollow(root)? else {
+        return Ok(None);
+    };
+    let mut classes: [Vec<Dir>; N] = std::array::from_fn(|_| Vec::new());
+    let mut result = DirectoryCensus {
+        counts: [0; N],
+        bytes: [0; N],
+        unrecognized: 0,
+    };
+    for entry in directory.read_dir(".")? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            result.unrecognized = result.unrecognized.saturating_add(1);
+            continue;
+        }
+        let name = entry.file_name();
+        let child = directory.open_dir_nofollow(&name)?;
+        let receipt_bytes = receipt
+            .and_then(|(file, limit)| read_child_receipt(&child, file, limit).ok().flatten());
+        match classify(&name, receipt_bytes.as_deref()) {
+            Some(index) if index < N => {
+                result.counts[index] = result.counts[index].saturating_add(1);
+                classes[index].push(child);
+            }
+            _ => result.unrecognized = result.unrecognized.saturating_add(1),
+        }
+    }
+
+    // A live layered generation may hard-link files from a superseded base.
+    // The first class to charge a multiply linked inode owns those bytes.
+    let mut counted = std::collections::HashSet::new();
+    for (index, children) in classes.into_iter().enumerate() {
+        for child in children {
+            result.bytes[index] =
+                result.bytes[index].saturating_add(directory_bytes_nofollow(child, &mut counted)?);
+        }
+    }
+    Ok(Some(result))
+}
+
+fn directory_bytes_nofollow(
+    root: Dir,
+    counted: &mut std::collections::HashSet<(u64, u64)>,
+) -> io::Result<u64> {
+    let mut total = 0_u64;
+    let mut pending = vec![root];
+    while let Some(directory) = pending.pop() {
+        for entry in directory.read_dir(".")? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if entry.file_type()?.is_dir() {
+                pending.push(directory.open_dir_nofollow(&name)?);
+                continue;
+            }
+            let metadata = directory.symlink_metadata(&name)?;
+            #[cfg(unix)]
+            {
+                use cap_fs_ext::MetadataExt;
+                if metadata.nlink() > 1 && !counted.insert((metadata.dev(), metadata.ino())) {
+                    continue;
+                }
+            }
+            #[cfg(not(unix))]
+            let _ = &counted;
+            total = total.saturating_add(metadata.len());
+        }
+    }
+    Ok(total)
+}
+
+/// Enumerate and reclaim only selected real child directories under one held
+/// no-follow root. Selection (including optional receipt evidence) and removal
+/// refer to the *same opened child*: a root or child swap cannot redirect the
+/// deletion into a foreign pathname. An unsafe entry is preserved.
+pub fn remove_selected_child_directories_nofollow(
+    root: &Path,
+    receipt: Option<(&str, usize)>,
+    mut eligible: impl FnMut(&OsStr, Option<&[u8]>) -> bool,
+) -> io::Result<Option<usize>> {
+    let Some(directory) = open_owned_directory_nofollow(root)? else {
+        return Ok(None);
+    };
+    let mut removed = 0usize;
+    for entry in directory.read_dir(".")? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let child = match directory.open_dir_nofollow(&name) {
+            Ok(child) => child,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                tracing::warn!(
+                    event = "private_fs.cleanup_unsafe_child",
+                    root = %root.display(),
+                    child = ?name,
+                    %error,
+                    "unverifiable cleanup child preserved"
+                );
+                continue;
+            }
+        };
+        let receipt_bytes = match receipt {
+            Some((file, limit)) => read_child_receipt(&child, file, limit).ok().flatten(),
+            None => None,
+        };
+        if eligible(&name, receipt_bytes.as_deref()) {
+            remove_open_dir_all_nofollow(child)?;
+            removed += 1;
+        }
+    }
+    Ok(Some(removed))
+}
+
+/// Remove an exact child of the held root. Unlike a path-based recursive
+/// removal this never follows a replacement of the root or child symlink.
+pub fn remove_named_child_directory_nofollow(root: &Path, name: &OsStr) -> io::Result<()> {
+    let mut components = Path::new(name).components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "removal requires one child directory name",
+        ));
+    }
+    let Some(directory) = open_owned_directory_nofollow(root)? else {
+        return Ok(());
+    };
+    let child = match directory.open_dir_nofollow(name) {
+        Ok(child) => child,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    remove_open_dir_all_nofollow(child)
+}
+
 /// Removes the held directory without following child symlinks.
 pub fn remove_open_dir_all_nofollow(directory: Dir) -> io::Result<()> {
     #[cfg(not(windows))]
@@ -241,6 +537,115 @@ mod replacement_tests {
 
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn census_uses_held_root_after_foreign_symlink_swap() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let owned = temp.path().join("owned");
+        let moved = temp.path().join("moved");
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir_all(owned.join("generation")).unwrap();
+        std::fs::create_dir_all(foreign.join("generation")).unwrap();
+        std::fs::write(owned.join("generation").join("payload"), vec![1_u8; 41]).unwrap();
+        std::fs::write(
+            foreign.join("generation").join("payload"),
+            vec![2_u8; 100_041],
+        )
+        .unwrap();
+
+        let mut swapped = false;
+        let measured = census_child_directories_nofollow::<1>(&owned, None, |name, _| {
+            assert_eq!(name, OsStr::new("generation"));
+            assert!(!swapped);
+            std::fs::rename(&owned, &moved).unwrap();
+            symlink(&foreign, &owned).unwrap();
+            swapped = true;
+            Some(0)
+        })
+        .unwrap()
+        .unwrap();
+        assert!(swapped);
+        assert_eq!(measured.counts, [1]);
+        assert_eq!(measured.bytes, [41]);
+        assert_eq!(
+            std::fs::metadata(foreign.join("generation").join("payload"))
+                .unwrap()
+                .len(),
+            100_041
+        );
+        assert_eq!(
+            std::fs::metadata(moved.join("generation").join("payload"))
+                .unwrap()
+                .len(),
+            41
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn census_never_descends_foreign_symlink_children() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let owned = temp.path().join("owned");
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir_all(owned.join("generation")).unwrap();
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(foreign.join("payload"), vec![0_u8; 100_041]).unwrap();
+        std::fs::write(owned.join("generation").join("local"), vec![0_u8; 41]).unwrap();
+        symlink(&foreign, owned.join("generation").join("linked")).unwrap();
+        let measured = census_child_directories_nofollow::<1>(&owned, None, |_, _| Some(0))
+            .unwrap()
+            .unwrap();
+        assert_eq!(measured.counts, [1]);
+        assert!(measured.bytes[0] >= 41);
+        assert!(measured.bytes[0] < 100_041);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_proof_stays_with_open_generation_when_root_is_swapped() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("graph.sealed");
+        let moved = temp.path().join("former-sealed");
+        let foreign = temp.path().join("foreign");
+        let generation = root.join("generation");
+        std::fs::create_dir_all(&generation).unwrap();
+        std::fs::create_dir_all(foreign.join("generation")).unwrap();
+        std::fs::write(foreign.join("generation/sealed.checked"), b"foreign").unwrap();
+
+        let held = open_nested_directory_nofollow(&generation).unwrap();
+        std::fs::rename(&root, &moved).unwrap();
+        symlink(&foreign, &root).unwrap();
+        replace_file_in_open_directory(&held, OsStr::new("sealed.checked"), b"verified").unwrap();
+        assert_eq!(
+            std::fs::read(moved.join("generation/sealed.checked")).unwrap(),
+            b"verified"
+        );
+        assert_eq!(
+            std::fs::read(foreign.join("generation/sealed.checked")).unwrap(),
+            b"foreign"
+        );
+        assert!(replace_nested_file_nofollow(&generation, "sealed.checked", b"unsafe").is_err());
+        assert!(read_nested_bounded_file_nofollow(&generation, "sealed.checked", 64).is_err());
+
+        std::fs::remove_file(&root).unwrap();
+        std::fs::rename(&moved, &root).unwrap();
+        replace_nested_file_nofollow(&generation, "sealed.checked", b"fresh").unwrap();
+        assert_eq!(
+            read_nested_bounded_file_nofollow(&generation, "sealed.checked", 64).unwrap(),
+            Some(b"fresh".to_vec())
+        );
+        assert_eq!(
+            std::fs::read(foreign.join("generation/sealed.checked")).unwrap(),
+            b"foreign"
+        );
+    }
+
     #[test]
     fn replacement_publishes_complete_bytes_and_refuses_parent_traversal() {
         let root = tempfile::tempdir().unwrap();
@@ -265,6 +670,47 @@ mod replacement_tests {
         reader.read_to_end(&mut displaced).unwrap();
         assert_eq!(displaced, b"before");
         assert!(!root.path().join("staged").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn held_cleanup_does_not_follow_a_root_swap_into_foreign_data() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("graph.sealed");
+        let former = temp.path().join("former-sealed");
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&foreign).unwrap();
+        for parent in [&root, &foreign] {
+            std::fs::create_dir(parent.join(".staging-owned")).unwrap();
+            std::fs::write(parent.join(".staging-owned/keep"), b"sentinel").unwrap();
+        }
+        let mut swapped = false;
+        let removed = remove_selected_child_directories_nofollow(&root, None, |name, _| {
+            if !swapped {
+                std::fs::rename(&root, &former).unwrap();
+                symlink(&foreign, &root).unwrap();
+                swapped = true;
+            }
+            name == OsStr::new(".staging-owned")
+        })
+        .unwrap();
+        assert!(swapped);
+        assert_eq!(removed, Some(1));
+        assert!(!former.join(".staging-owned").exists());
+        assert_eq!(
+            std::fs::read(foreign.join(".staging-owned/keep")).unwrap(),
+            b"sentinel"
+        );
+        assert!(
+            remove_named_child_directory_nofollow(&root, OsStr::new(".staging-owned")).is_err()
+        );
+        assert_eq!(
+            std::fs::read(foreign.join(".staging-owned/keep")).unwrap(),
+            b"sentinel"
+        );
     }
 
     #[cfg(windows)]

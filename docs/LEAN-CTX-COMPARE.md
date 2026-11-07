@@ -12,7 +12,7 @@ through its daemon and product contract.
 | Concern | TraceDecay | lean-ctx |
 |---|---|---|
 | Code and evidence | A daemon-owned authority serves code, project-memory, and session evidence with exact provenance, generation, coverage, and receipts. | Describes a local context layer for read modes, shell output, request-context compression, and context-use visibility. |
-| Graph and durable state | Grafeo owns admitted graph/vector data; SQLite owns relational/content records. Clients do not open either store directly. | Describes a property graph and portable context packages alongside its context-management features. |
+| Graph and durable state | Grafeo owns admitted graph data; SQLite owns relational/content records. Clients do not open either store directly. | Describes a property graph and portable context packages alongside its context-management features. |
 | Session context | Lossless Context Memory retains raw-message evidence and summary nodes, with bounded replay and drill-down through daemon operations. | Describes persistent session memory and recovery across chats. |
 | Workflow and multi-agent work | The V2 product includes the daemon-owned work graph and typed workflow runtime: task evidence, ownership, authorization, execution, cancellation, recovery, collaboration, and receipts are product data, not host scripts. | Describes agent handoff and shared-context features. |
 | Operating model | Hosts submit bounded hints and typed operations; daemon convergence, freshness, and maintenance remain explicit. | Describes agent wrappers, shell hooks, and an optional request proxy that can mediate context on the read and model-request paths. |

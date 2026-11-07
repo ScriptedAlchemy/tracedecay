@@ -22,13 +22,17 @@ from urllib.parse import urlsplit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from common import calibrated, noul_questions, prompt_only, text_window
+from common import calibrated, noul_questions, prompt_only, strict_json_loads, text_window
 
 STATES = {
     "A_noul_prompt": prompt_only,
     "B_noul_text": text_window,
     "B2_noul_text_promptfirst": lambda c: text_window(c, prompt_first=True),
 }
+
+# Each server response contains only a bounded set of typed decision answers.
+# Refuse an oversized or streaming response before parsing untrusted JSON.
+MAX_DECISION_RESPONSE_BYTES = 1024 * 1024
 
 
 def digest(value):
@@ -40,6 +44,56 @@ def digest(value):
 def request_bytes(body):
     # Preserve question and request-field order in both HTTP and resume evidence.
     return json.dumps(body, allow_nan=False).encode("utf-8")
+
+
+def sample_read_limit(requests):
+    """Bound saved raw captures relative to the transmitted request and HTTP cap."""
+    largest_request = max(len(request_bytes(body)) for body, _ in requests.values())
+    # Indentation and JSON escaping can expand the parsed HTTP body. Keep
+    # a conservative allowance without accepting arbitrarily large files.
+    return 64 * 1024 + 8 * (MAX_DECISION_RESPONSE_BYTES + largest_request)
+
+
+def verify_existing_sample(path, header, requests, done, questions):
+    """A resumed capture must describe a durable response from this experiment.
+
+    Never silently reuse an unrelated file as the model's first raw answer.
+    Opening a regular file without following links also avoids blocking on
+    hostile sample paths such as named pipes.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError(f"sample path is not a regular file: {path}")
+        limit = sample_read_limit(requests)
+        if os.fstat(descriptor).st_size > limit:
+            raise ValueError("sample capture exceeds bounded evidence size")
+        with os.fdopen(descriptor, "rb") as source:
+            descriptor = None
+            contents = source.read(limit + 1)
+            if len(contents) > limit:
+                raise ValueError("sample capture exceeds bounded evidence size")
+            sample = strict_json_loads(contents)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    case_id = sample.get("case_id") if isinstance(sample, dict) else None
+    if (not isinstance(case_id, str) or case_id not in requests
+            or sample.get("experiment_sha256") != header["experiment_sha256"]
+            or sample.get("request_sha256") != requests[case_id][1]
+            or sample.get("request") != requests[case_id][0]):
+        raise ValueError("sample capture does not belong to this experiment")
+    # --sample-out records the first response, not merely any completed row.
+    # A later response with matching request/digest is still mislabelled evidence.
+    if case_id != next(iter(requests)):
+        raise ValueError("sample capture must correspond to the first case")
+    if case_id not in done:
+        raise ValueError("sample capture has no durable matching response row")
+    response = sample.get("response")
+    noul_probabilities(response, questions)
+    if done[case_id].get("response_sha256") != digest(response):
+        raise ValueError("sample capture disagrees with durable response evidence")
 
 
 def publish_sample(path, serialized):
@@ -58,11 +112,12 @@ def publish_sample(path, serialized):
             output.write(serialized)
         try:
             os.link(staged, path)
-        except FileExistsError:
-            # A dangling symlink occupies the pathname but exists() says
-            # false. Do not treat that unusable capture as already published.
-            if not os.path.isfile(path):
-                raise ValueError(f"sample path exists but is not a regular file: {path}")
+        except FileExistsError as error:
+            # Another run may have published a different capture after
+            # preflight. Never silently use it as evidence for this experiment.
+            if not os.path.isfile(path) or os.path.islink(path):
+                raise ValueError(f"sample path exists but is not a regular file: {path}") from error
+            raise ValueError(f"sample capture was concurrently published: {path}") from error
     finally:
         os.unlink(staged)
 
@@ -170,13 +225,24 @@ def post(url, body, timeout=1800, bearer_token=None):
     )
     started = time.perf_counter()
     with opener.open(req, timeout=timeout) as response:
-        out = json.loads(response.read())
+        declared = response.headers.get("Content-Length")
+        if declared is not None:
+            try:
+                declared = int(declared)
+            except ValueError as error:
+                raise ValueError("decision response has an invalid Content-Length") from error
+            if declared < 0 or declared > MAX_DECISION_RESPONSE_BYTES:
+                raise ValueError("decision response exceeds the 1 MiB size limit")
+        payload = response.read(MAX_DECISION_RESPONSE_BYTES + 1)
+        if len(payload) > MAX_DECISION_RESPONSE_BYTES:
+            raise ValueError("decision response exceeds the 1 MiB size limit")
+        out = strict_json_loads(payload)
     return out, (time.perf_counter() - started) * 1000
 
 
 def load_server_config(path):
     with open(path, encoding="utf-8") as source:
-        config = json.load(source)
+        config = strict_json_loads(source.read())
     if not isinstance(config, dict):
         raise ValueError("--server-config must contain a JSON object")
     for field in ("checkpoint", "server_revision", "backend", "dtype"):
@@ -212,11 +278,11 @@ def noul_probabilities(response, questions):
         raise ValueError("noul answers must cover exactly the requested questions")
     values = {}
     for key, answer in answers.items():
-        # Older decision servers omit the kind, but a present tag must agree
-        # with the requested question. A Score response with an incidental
-        # noul field is not evidence of a successful Noul prediction.
+        # The current decision contract tags every answer. An untyped
+        # response could be an unrelated decision with an incidental noul
+        # value, so it cannot qualify as Noul model evidence.
         if (not isinstance(answer, dict)
-                or ("type" in answer and answer["type"] != "noul")
+                or answer.get("type") != "noul"
                 or "noul" not in answer):
             raise ValueError(f"invalid noul answer for {key}")
         values[key] = answer["noul"]
@@ -226,6 +292,10 @@ def noul_probabilities(response, questions):
 def serialize_result(row, questions, temperature):
     """Admit fresh and resumed rows before any durable output is changed."""
     probabilities(row.get("probs"), questions)
+    # Every durable HTTP row must retain its raw response fingerprint.
+    response_sha = row.get("response_sha256")
+    if not isinstance(response_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", response_sha):
+        raise ValueError("result row is missing a valid response digest")
     for field in ("ms", "server_ms", "input_tokens", "state_tokens", "dropped"):
         if field not in row:
             raise ValueError(f"result row is missing {field} for {row.get('id')}")
@@ -305,14 +375,24 @@ def open_partial_for_resume(path):
 
 def resume_rows(partial, header, cases, requests, questions, temperature):
     """Validate the whole existing log before appending or issuing HTTP work."""
-    first = partial.readline()
-    if not first.endswith("\n") or json.loads(first) != header:
+    header_limit = len(json.dumps(header, allow_nan=False)) + 1
+    first = partial.readline(header_limit + 1)
+    if len(first) > header_limit:
+        raise ValueError("partial output has an oversized header")
+    if not first.endswith("\n") or strict_json_loads(first) != header:
         raise ValueError("partial output belongs to another or unrecorded experiment; use a new tag")
+    # Fresh rows contain only bounded probabilities and telemetry plus the
+    # known case ID. Do not load an arbitrary-sized untrusted log line.
+    row_limit = 64 * 1024 + max(len(json.dumps(case_id)) for case_id in cases)
     done = {}
-    for line_number, line in enumerate(partial, 2):
+    line_number = 1
+    while line := partial.readline(row_limit + 1):
+        line_number += 1
+        if len(line) > row_limit:
+            raise ValueError(f"partial output has an oversized row at line {line_number}")
         if not line.endswith("\n"):
             raise ValueError(f"partial output has an incomplete row at line {line_number}")
-        row = json.loads(line)
+        row = strict_json_loads(line)
         case_id = row.get("id") if isinstance(row, dict) else None
         if not isinstance(case_id, str) or case_id not in cases or case_id in done:
             raise ValueError(f"partial output has an unknown or duplicate case at line {line_number}")
@@ -381,17 +461,33 @@ def main(argv=None):
     server_config = load_server_config(args.server_config)
     bearer_token = (load_bearer_token(args.bearer_token_env, args.url)
                     if args.bearer_token_env is not None else None)
-    if args.sample_out and os.path.lexists(args.sample_out) and not os.path.isfile(args.sample_out):
+    if (args.sample_out and os.path.lexists(args.sample_out)
+            and (os.path.islink(args.sample_out) or not os.path.isfile(args.sample_out))):
         raise ValueError(f"sample path exists but is not a regular file: {args.sample_out}")
+    if args.sample_out:
+        # The scorer treats results/*.json as completed experiments. Publishing
+        # a raw sample under that tree can masquerade as a result, or occupy
+        # the final result path and permanently prevent exact resume.
+        result_root = os.path.normcase(os.path.realpath(os.path.join(HERE, "results")))
+        sample_target = os.path.normcase(os.path.realpath(args.sample_out))
+        try:
+            inside_results = os.path.commonpath([result_root, sample_target]) == result_root
+        except ValueError:
+            inside_results = False  # Paths on different Windows drives.
+        if inside_results:
+            raise ValueError("--sample-out must be outside the results directory")
     with open(os.path.join(HERE, "dataset.json"), "rb") as source:
         dataset_bytes = source.read()
-    dataset = json.loads(dataset_bytes)
+    dataset = strict_json_loads(dataset_bytes)
     dataset_sha = hashlib.sha256(dataset_bytes).hexdigest()
     questions = noul_questions()
     case_ids = validate_dataset(dataset, questions)
     if args.subset:
         with open(args.subset, encoding="utf-8") as source:
-            ids = json.load(source)["ids"]
+            subset = strict_json_loads(source.read())
+        if not isinstance(subset, dict):
+            raise ValueError("subset must be a JSON object with ids")
+        ids = subset.get("ids")
         if (not isinstance(ids, list) or not ids
                 or any(not isinstance(case_id, str) for case_id in ids)
                 or len(set(ids)) != len(ids) or not set(ids).issubset(case_ids)):
@@ -403,13 +499,19 @@ def main(argv=None):
     cases = {case["id"]: case for case in dataset}
     os.makedirs(os.path.join(HERE, "results"), exist_ok=True)
     for cfg in args.configs:
+        # One --sample-out captures one response from the first configuration.
+        # Later configurations must not misattribute that capture to themselves.
+        sample_path = args.sample_out if cfg == args.configs[0] else None
         name = f"{args.tag}_{cfg}"
         path = os.path.join(HERE, "results", name + ".json")
         if os.path.lexists(path):
             raise ValueError(f"completed output already exists: {path}; use a new tag")
+        if (sample_path and os.path.lexists(sample_path)
+                and not os.path.lexists(path + ".partial")):
+            raise ValueError(f"sample capture already exists for a new run: {sample_path}")
         require_exclusive_publication(os.path.dirname(os.path.abspath(path)))
-        if args.sample_out and not os.path.isfile(args.sample_out):
-            require_exclusive_publication(os.path.dirname(os.path.abspath(args.sample_out)))
+        if sample_path and not os.path.lexists(sample_path):
+            require_exclusive_publication(os.path.dirname(os.path.abspath(sample_path)))
         requests = {}
         for case in dataset:
             body = {"state": STATES[cfg](case), "questions": questions}
@@ -452,6 +554,17 @@ def main(argv=None):
                 done = {}
             else:
                 done = resume_rows(partial, header, cases, requests, questions, args.noul_temperature)
+            if sample_path and os.path.lexists(sample_path):
+                if created:
+                    raise ValueError(f"sample capture already exists for a new run: {sample_path}")
+                verify_existing_sample(sample_path, header, requests, done, questions)
+            elif sample_path and done:
+                # A new capture would be the next response, not the first
+                # response of this experiment. Never mislabel it as raw evidence.
+                raise ValueError(
+                    "cannot capture the first response after rows were recorded; "
+                    "resume without --sample-out or use a new --tag"
+                )
             for index, case in enumerate(dataset):
                 if case["id"] in done:
                     continue
@@ -463,7 +576,10 @@ def main(argv=None):
                 probs = noul_probabilities(response, questions)
                 server_ms = response.get("latency_ms")
                 if server_ms is None:
-                    server_ms = (response.get("timing") or {}).get("inference_ms")
+                    timing = response.get("timing")
+                    if timing is not None and not isinstance(timing, dict):
+                        raise ValueError("response timing must be an object or null")
+                    server_ms = (timing or {}).get("inference_ms")
                 usage = response.get("usage")
                 if usage is None:
                     usage = {}
@@ -476,6 +592,7 @@ def main(argv=None):
                     "input_tokens": usage.get("input_tokens"),
                     "state_tokens": usage.get("state_tokens"),
                     "dropped": usage.get("state_tokens_dropped"), "probs": probs,
+                    "response_sha256": digest(response),
                 }
                 if args.noul_temperature is not None:
                     row["probs_raw"] = probs
@@ -484,11 +601,20 @@ def main(argv=None):
                 # either. A non-finite response must not leave a sample file
                 # that a later valid retry mistakes for a completed capture.
                 serialized_row = serialize_result(row, questions, args.noul_temperature)
-                if args.sample_out and not os.path.exists(args.sample_out):
-                    serialized_sample = json.dumps(
-                        {"request": body, "response": response}, indent=1, allow_nan=False
-                    )
-                    publish_sample(args.sample_out, serialized_sample)
+                if sample_path and not os.path.lexists(sample_path):
+                    # The first raw response cannot be recaptured from a later
+                    # case if its published sample disappeared during inference.
+                    if index != 0:
+                        raise ValueError("first-response sample disappeared; cannot capture a later case")
+                    serialized_sample = json.dumps({
+                        "case_id": case["id"],
+                        "experiment_sha256": header["experiment_sha256"],
+                        "request_sha256": request_sha,
+                        "request": body, "response": response,
+                    }, indent=1, allow_nan=False)
+                    if len(serialized_sample.encode("utf-8")) > sample_read_limit(requests):
+                        raise ValueError("sample capture exceeds bounded evidence size")
+                    publish_sample(sample_path, serialized_sample)
                 partial.write(serialized_row + "\n")
                 partial.flush()
                 done[case["id"]] = row

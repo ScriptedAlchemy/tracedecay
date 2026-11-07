@@ -2,6 +2,31 @@
 import json
 import math
 
+
+def strict_json_loads(data):
+    """Read evaluation inputs and evidence without ambiguous JSON fields."""
+    def unique_fields(pairs):
+        fields = {}
+        for key, value in pairs:
+            if key in fields:
+                raise ValueError(f"duplicate JSON field: {key}")
+            fields[key] = value
+        return fields
+
+    def refuse_constant(value):
+        raise ValueError(f"invalid JSON numeric constant: {value}")
+
+    def finite_float(token):
+        value = float(token)
+        if not math.isfinite(value):
+            raise ValueError(f"nonfinite JSON number: {token}")
+        return value
+
+    return json.loads(
+        data, object_pairs_hook=unique_fields,
+        parse_constant=refuse_constant, parse_float=finite_float,
+    )
+
 CATS = ["session_recall", "memory_store", "call_graph", "impact", "refactor_edit",
         "review_changes", "type_orientation", "project_context", "unexpected_changes"]
 
@@ -68,4 +93,5 @@ def json_window(c, turns=None):
             "recent_tools": [t["text"] for t in turns if t["role"] == "tool"]}
 
 def load(path="dataset.json"):
-    return json.load(open(path))
+    with open(path, encoding="utf-8") as source:
+        return strict_json_loads(source.read())

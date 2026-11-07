@@ -22,15 +22,14 @@
   same-host measurement showing a smaller frequently touched compile graph.
 - The memory delivery adds facts and provenance, the temporal-kernel delivery
   adds LCM/session retrieval, the code-intelligence delivery adds
-  lexical code search, code navigation, and current diagnostics, and the
-  semantic delivery adds semantic search.
+  lexical code search, code navigation, and current diagnostics.
 - The application delivery composes query use cases in application and policy.
   The surface delivery exposes them
   through CLI, MCP, HTTP, LSP, export, and live non-dashboard adapters.
   The dashboard delivery first ships dashboard binding and dashboard parity.
 - Plan 05 owns the shared execution semantics. Plan 23 remains the current
-  owner of temporal retrieval semantics; Plans 25 and 31 own active
-  lexical/code and semantic acceptance. Plans 09/10/11/12/14 and Plan 24
+  owner of temporal retrieval semantics; Plan 25 owns active lexical/code
+  acceptance. Plans 09/10/11/12/14 and Plan 24
   consume the accepted temporal-kernel behavior, not a superseded implementation shape.
 - The task/work delivery journey reuses these shared scope, budget,
   cancellation, cursor, watermark, merge, and coverage primitives to execute

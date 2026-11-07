@@ -20,7 +20,7 @@ graph, Plan 13 diagnostic anchors, or their authorization rules.
 Plan 15 owns retrieval quality, composition, evaluation, and profile-selection
 rules. Plan 25 owns code retrieval and shared-code facts. The application,
 dashboard, task/work, and public surface plans consume tested behavior and
-evaluation results. Plan 31 is archival.
+evaluation results.
 
 ## Outcome
 

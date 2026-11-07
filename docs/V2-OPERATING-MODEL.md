@@ -10,7 +10,7 @@ capabilities are available.
 ## Authorities
 
 - `tracedecay-graph-db` is the only TraceDecay boundary for the workspace-pinned
-  embedded Grafeo `=0.5.42` runtime. It exposes typed TraceDecay identities,
+  embedded Grafeo runtime. It exposes typed TraceDecay identities,
   operations, snapshots, generations, and outcomes; Grafeo handles and types
   do not escape it.
 - Grafeo is in-process and embedded. It has no graph server, sidecar, network
