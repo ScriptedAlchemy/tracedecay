@@ -44,7 +44,7 @@
 //! digest before the store serves a read.
 
 use std::collections::{BTreeMap, HashMap};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -2995,24 +2995,127 @@ fn load_sealed_store_receipt(
         .map_err(|error| GraphDbError::unavailable(format!("sealed receipt decode: {error}")))
 }
 
+/// A proof marker is only a digest, not a trusted size-unbounded payload.
+/// Never follow a symlink as marker authority; cap the read even when the
+/// file changes between the path and opened-descriptor checks.
 fn sealed_store_check_matches(
     directory: &Path,
     expected_digest: &str,
 ) -> Result<bool, GraphDbError> {
     let path = directory.join(SEALED_STORE_CHECKED_FILE);
-    match std::fs::read_to_string(&path) {
-        Ok(digest) => Ok(digest == expected_digest),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(sealed_store_io_failure("sealed check read failed", error)),
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(sealed_store_io_failure("sealed check inspect failed", error)),
+    };
+    let expected_len = expected_digest.len() as u64;
+    if expected_len > MAX_SEALED_STORE_RECEIPT_BYTES
+        || !metadata.file_type().is_file()
+        || metadata.len() != expected_len
+    {
+        return Ok(false);
     }
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(sealed_store_io_failure("sealed check open failed", error)),
+    };
+    let opened = file
+        .metadata()
+        .map_err(|error| sealed_store_io_failure("sealed check inspect failed", error))?;
+    if !opened.is_file() || opened.len() != expected_len {
+        return Ok(false);
+    }
+    let mut bytes = Vec::new();
+    file.take(expected_len + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| sealed_store_io_failure("sealed check read failed", error))?;
+    Ok(bytes == expected_digest.as_bytes())
 }
 
 fn persist_sealed_store_check(directory: &Path, expected_digest: &str) -> Result<(), GraphDbError> {
     if sealed_store_check_matches(directory, expected_digest)? {
         return Ok(());
     }
-    std::fs::write(directory.join(SEALED_STORE_CHECKED_FILE), expected_digest)
-        .map_err(|error| sealed_store_io_failure("sealed check persist failed", error))
+    // The marker is a re-verification optimization, never authority to write
+    // through a caller-controlled symlink to data outside the sealed store.
+    let root = directory
+        .parent()
+        .ok_or_else(|| GraphDbError::unavailable("sealed marker has no parent root"))?;
+    let root_is_real = sealed_root_is_real_directory(root)
+        .map_err(|error| sealed_store_io_failure("sealed marker root inspect failed", error))?;
+    let directory_is_real = std::fs::symlink_metadata(directory)
+        .map(|metadata| metadata.file_type().is_dir())
+        .map_err(|error| sealed_store_io_failure("sealed marker directory inspect failed", error))?;
+    if !root_is_real || !directory_is_real {
+        return Err(GraphDbError::unavailable(
+            "sealed marker directory is not a real directory",
+        ));
+    }
+    let mut staged = tempfile::NamedTempFile::new_in(directory)
+        .map_err(|error| sealed_store_io_failure("sealed check stage failed", error))?;
+    staged
+        .write_all(expected_digest.as_bytes())
+        .map_err(|error| sealed_store_io_failure("sealed check write failed", error))?;
+    staged
+        .as_file()
+        .sync_all()
+        .map_err(|error| sealed_store_io_failure("sealed check sync failed", error))?;
+    staged
+        .persist(directory.join(SEALED_STORE_CHECKED_FILE))
+        .map_err(|error| sealed_store_io_failure("sealed check persist failed", error.error))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod sealed_marker_tests {
+    use super::{SEALED_STORE_CHECKED_FILE, persist_sealed_store_check, sealed_store_check_matches};
+
+    #[test]
+    fn proof_marker_requires_exact_bounded_digest_and_replaces_stale_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("generation");
+        std::fs::create_dir(&directory).unwrap();
+        let marker = directory.join(SEALED_STORE_CHECKED_FILE);
+        let digest = "a".repeat(64);
+
+        assert!(!sealed_store_check_matches(&directory, &digest).unwrap());
+        std::fs::write(&marker, vec![b'a'; 1024 * 1024]).unwrap();
+        assert!(!sealed_store_check_matches(&directory, &digest).unwrap());
+        persist_sealed_store_check(&directory, &digest).unwrap();
+        assert!(sealed_store_check_matches(&directory, &digest).unwrap());
+        assert_eq!(std::fs::read(&marker).unwrap(), digest.as_bytes());
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+
+        std::fs::write(&marker, b"stale").unwrap();
+        assert!(!sealed_store_check_matches(&directory, &digest).unwrap());
+        persist_sealed_store_check(&directory, &digest).unwrap();
+        assert!(sealed_store_check_matches(&directory, &digest).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn marker_reproof_does_not_clobber_a_foreign_symlink_target() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("generation");
+        std::fs::create_dir(&directory).unwrap();
+        let foreign = root.path().join("foreign-durable-data");
+        std::fs::write(&foreign, b"must survive intact").unwrap();
+        let marker = directory.join(SEALED_STORE_CHECKED_FILE);
+        std::os::unix::fs::symlink(&foreign, &marker).unwrap();
+        let digest = "b".repeat(64);
+
+        assert!(!sealed_store_check_matches(&directory, &digest).unwrap());
+        persist_sealed_store_check(&directory, &digest).unwrap();
+        assert_eq!(std::fs::read(&foreign).unwrap(), b"must survive intact");
+        assert!(std::fs::symlink_metadata(&marker).unwrap().is_file());
+        assert!(sealed_store_check_matches(&directory, &digest).unwrap());
+
+        let linked_directory = root.path().join("linked-generation");
+        std::os::unix::fs::symlink(&directory, &linked_directory).unwrap();
+        assert!(persist_sealed_store_check(&linked_directory, &"c".repeat(64)).is_err());
+        assert_eq!(std::fs::read(&foreign).unwrap(), b"must survive intact");
+    }
 }
 
 fn open_sealed_store_checked(
