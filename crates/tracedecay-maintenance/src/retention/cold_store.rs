@@ -401,7 +401,11 @@ mod tests {
         let transaction = database.begin_write_transaction().await.unwrap();
         for index in 0..=COLD_STORE_PAGE_LIMIT {
             let project_id = format!("project-{index:02}");
-            let root = temporary.path().join(&project_id).to_string_lossy().into_owned();
+            let root = temporary
+                .path()
+                .join(&project_id)
+                .to_string_lossy()
+                .into_owned();
             transaction
                 .execute(
                     "INSERT INTO code_projects (
