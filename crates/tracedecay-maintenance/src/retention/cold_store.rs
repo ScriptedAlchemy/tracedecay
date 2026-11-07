@@ -6,17 +6,17 @@
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::io::{self, Read, Write};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
 #[cfg(unix)]
 use cap_std::fs::OpenOptionsExt;
 use serde::{Deserialize, Serialize};
-use tracedecay_private_fs::capability_dir::{replace_file, sync_directory};
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_private_fs::capability_dir::{replace_file, sync_directory};
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
 use super::{incident_debris, orphan_stores};
@@ -522,7 +522,6 @@ mod tests {
         assert_eq!(load_cursor(&path), Some(expected));
         assert_eq!(std::fs::read(&foreign_cursor).unwrap(), foreign_bytes);
     }
-
 
     #[cfg(unix)]
     #[test]
