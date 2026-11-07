@@ -198,17 +198,11 @@ pub async fn run_cold_store_page(
             orphan_stores::UnregisteredSweepCompletionV1::DeadlineExceeded => {}
         }
     }
-    let project_ids = page
-        .entries
-        .iter()
-        .map(|entry| entry.project_id.clone())
-        .collect::<Vec<_>>();
+    // The page boundary belongs to the project registry, not the filtered
+    // profile-sharded store census. Projects with no matching stores still
+    // consume a registry page and must advance its durable resume key.
     let next_cursor = ColdStoreCursorV1 {
-        after_project_id: next_cold_store_cursor(
-            cursor.after_project_id.as_deref(),
-            &project_ids,
-            page.next_cursor.is_some(),
-        ),
+        after_project_id: page.next_cursor,
         after_unregistered_directory,
     };
     persist_cursor(&checkpoint_path, &next_cursor).map_err(|error| {
@@ -217,20 +211,6 @@ pub async fn run_cold_store_page(
         }
     })?;
     Ok(report)
-}
-
-fn next_cold_store_cursor(
-    previous: Option<&str>,
-    project_ids: &[String],
-    has_more: bool,
-) -> Option<String> {
-    if !has_more {
-        return None;
-    }
-    project_ids
-        .last()
-        .cloned()
-        .or_else(|| previous.map(str::to_owned))
 }
 
 fn classify_cold_store_state(
@@ -402,18 +382,63 @@ fn retention_window_secs(days: u64) -> i64 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn cursor_resumes_after_the_last_complete_project() {
-        let first = next_cold_store_cursor(
-            None,
-            &["project-a".to_owned(), "project-b".to_owned()],
-            true,
-        )
-        .expect("first page cursor");
-        assert_eq!(first, "project-b");
+    #[asupersync::test]
+    async fn cold_store_cursor_advances_across_projects_without_profile_stores() {
+        use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let profile = temporary.path().join("profile");
+        std::fs::create_dir(&profile).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let runtime = RegisteredGlobalDbTestRuntime::profile(&profile)
+            .await
+            .unwrap();
+        let database = runtime.profile_database_arc();
+        let transaction = database.begin_write_transaction().await.unwrap();
+        for index in 0..=COLD_STORE_PAGE_LIMIT {
+            let project_id = format!("project-{index:02}");
+            let root = temporary.path().join(&project_id).to_string_lossy().into_owned();
+            transaction
+                .execute(
+                    "INSERT INTO code_projects (
+                        project_id, canonical_root, display_root, created_at, last_seen_at
+                    ) VALUES (?1, ?2, ?2, 1, 1)",
+                    tracedecay_runtime_core::db::engine::params![project_id, root],
+                )
+                .await
+                .unwrap();
+        }
+        transaction.commit().await.unwrap();
+
+        let cancellation = CancellationToken::new();
+        let owners = BTreeSet::new();
+        let first = run_cold_store_page(&profile, database.as_ref(), None, &owners, &cancellation)
+            .await
+            .unwrap();
+        assert_eq!(first.processed_stores, 0);
         assert_eq!(
-            next_cold_store_cursor(Some(&first), &["project-c".to_owned()], false),
-            None
+            load_cursor(&checkpoint_path(&profile))
+                .unwrap()
+                .after_project_id
+                .as_deref(),
+            Some("project-07"),
+            "the registry's page boundary must persist even when its census is empty"
+        );
+
+        let second = run_cold_store_page(&profile, database.as_ref(), None, &owners, &cancellation)
+            .await
+            .unwrap();
+        assert_eq!(second.processed_stores, 0);
+        assert_eq!(
+            load_cursor(&checkpoint_path(&profile))
+                .unwrap()
+                .after_project_id,
+            None,
+            "the final registry page must finish instead of repeating its first page"
         );
     }
 
