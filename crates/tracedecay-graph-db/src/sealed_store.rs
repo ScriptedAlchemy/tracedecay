@@ -693,7 +693,8 @@ fn census_sealed_store_root(
                 Some(SUPERSEDED)
             }
         },
-    )? else {
+    )?
+    else {
         return Ok(SealedStoreCensusV1::default());
     };
 

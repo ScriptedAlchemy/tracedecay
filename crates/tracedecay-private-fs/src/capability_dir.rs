@@ -225,7 +225,11 @@ fn open_owned_directory_nofollow(root: &Path) -> io::Result<Option<Dir>> {
     let parent_path = root
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "root has no parent"))?;
-    let parent = Dir::open_ambient_dir(parent_path, cap_std::ambient_authority())?;
+    let parent = match Dir::open_ambient_dir(parent_path, cap_std::ambient_authority()) {
+        Ok(parent) => parent,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
     match parent.open_dir_nofollow(name) {
         Ok(opened) => Ok(Some(opened)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -307,11 +311,7 @@ static PROOF_TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
 
 /// Publish a proof atomically relative to the same held generation used for
 /// staging. A substituted root/child link cannot redirect or truncate bytes.
-pub fn replace_nested_file_nofollow(
-    directory: &Path,
-    name: &str,
-    bytes: &[u8],
-) -> io::Result<()> {
+pub fn replace_nested_file_nofollow(directory: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     let leaf = checked_leaf_name(name)?;
     let child = open_nested_directory_nofollow(directory)?;
     replace_file_in_open_directory(&child, leaf, bytes)
@@ -405,8 +405,8 @@ pub fn census_child_directories_nofollow<const N: usize>(
     let mut counted = std::collections::HashSet::new();
     for (index, children) in classes.into_iter().enumerate() {
         for child in children {
-            result.bytes[index] = result.bytes[index]
-                .saturating_add(directory_bytes_nofollow(child, &mut counted)?);
+            result.bytes[index] =
+                result.bytes[index].saturating_add(directory_bytes_nofollow(child, &mut counted)?);
         }
     }
     Ok(Some(result))
@@ -549,8 +549,11 @@ mod replacement_tests {
         std::fs::create_dir_all(owned.join("generation")).unwrap();
         std::fs::create_dir_all(foreign.join("generation")).unwrap();
         std::fs::write(owned.join("generation").join("payload"), vec![1_u8; 41]).unwrap();
-        std::fs::write(foreign.join("generation").join("payload"), vec![2_u8; 100_041])
-            .unwrap();
+        std::fs::write(
+            foreign.join("generation").join("payload"),
+            vec![2_u8; 100_041],
+        )
+        .unwrap();
 
         let mut swapped = false;
         let measured = census_child_directories_nofollow::<1>(&owned, None, |name, _| {
