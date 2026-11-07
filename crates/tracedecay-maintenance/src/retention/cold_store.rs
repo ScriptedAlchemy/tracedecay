@@ -247,8 +247,37 @@ fn checkpoint_path(profile_root: &Path) -> PathBuf {
         .join(CHECKPOINT_FILE)
 }
 
+// A maintenance directory substituted with a symlink must not turn a
+// checkpoint read or write into access to an unrelated store. This checks
+// the directory before use; it is not a replacement for a descriptor-relative
+// open against concurrent path substitution.
+fn verified_checkpoint_parent(path: &Path) -> std::io::Result<&Path> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("maintenance cursor has no parent"))?;
+    let metadata = std::fs::symlink_metadata(parent)?;
+    if !metadata.file_type().is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "maintenance cursor directory is not a real directory",
+        ));
+    }
+    Ok(parent)
+}
+
 #[tracing::instrument(name = "maintenance.cold_store.load_cursor", level = "trace", skip_all)]
 fn load_cursor(path: &Path) -> Option<ColdStoreCursorV1> {
+    if let Err(error) = verified_checkpoint_parent(path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(
+                event = "retention_cold_store_cursor_invalid",
+                reason = "untrusted_directory",
+                %error,
+                "maintenance cursor directory is unsafe; restarting its bounded census"
+            );
+        }
+        return None;
+    }
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
@@ -306,6 +335,7 @@ fn persist_cursor(path: &Path, cursor: &ColdStoreCursorV1) -> std::io::Result<()
         .parent()
         .ok_or_else(|| std::io::Error::other("maintenance cursor has no parent"))?;
     std::fs::create_dir_all(parent)?;
+    verified_checkpoint_parent(path)?;
     // The old fixed .json.tmp name could be replaced with a symlink and
     // File::create would truncate its foreign target. Random exclusive staging
     // keeps the write private; the final rename replaces, never follows, a
@@ -314,6 +344,7 @@ fn persist_cursor(path: &Path, cursor: &ColdStoreCursorV1) -> std::io::Result<()
     let bytes = serde_json::to_vec(cursor).map_err(std::io::Error::other)?;
     std::io::Write::write_all(temporary.as_file_mut(), &bytes)?;
     temporary.as_file_mut().sync_all()?;
+    verified_checkpoint_parent(path)?;
     temporary.persist(path).map_err(|error| error.error)?;
     Ok(())
 }
@@ -406,6 +437,48 @@ mod tests {
             "a checkpoint symlink is replaced by an ordinary file"
         );
         assert_eq!(load_cursor(&path), Some(expected));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_maintenance_directory_never_claims_foreign_cursors() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("profile root");
+        let profile = root.path().join("profile");
+        let foreign = root.path().join("foreign");
+        std::fs::create_dir(&profile).unwrap();
+        std::fs::create_dir(&foreign).unwrap();
+        let path = checkpoint_path(&profile);
+        let foreign_cursor = foreign.join(CHECKPOINT_FILE);
+        let foreign_bytes = br#"{"after_project_id":"foreign"}"#;
+        std::fs::write(&foreign_cursor, foreign_bytes).unwrap();
+        symlink(&foreign, profile.join(CHECKPOINT_DIRECTORY)).unwrap();
+
+        assert_eq!(
+            load_cursor(&path),
+            None,
+            "a linked checkpoint parent cannot supply a foreign resume position"
+        );
+        let expected = ColdStoreCursorV1 {
+            after_project_id: Some("project-local".to_owned()),
+            after_unregistered_directory: None,
+        };
+        assert!(
+            persist_cursor(&path, &expected).is_err(),
+            "publication must not cross a substituted maintenance directory"
+        );
+        assert_eq!(std::fs::read(&foreign_cursor).unwrap(), foreign_bytes);
+        assert_eq!(
+            std::fs::read_dir(&foreign).unwrap().count(),
+            1,
+            "no staging file may be created in the foreign directory"
+        );
+
+        std::fs::remove_file(profile.join(CHECKPOINT_DIRECTORY)).unwrap();
+        persist_cursor(&path, &expected).unwrap();
+        assert_eq!(load_cursor(&path), Some(expected));
+        assert_eq!(std::fs::read(&foreign_cursor).unwrap(), foreign_bytes);
     }
 
     #[test]
