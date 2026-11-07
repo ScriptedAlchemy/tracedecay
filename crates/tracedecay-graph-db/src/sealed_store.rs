@@ -44,6 +44,7 @@
 //! digest before the store serves a read.
 
 use std::collections::{BTreeMap, HashMap};
+use std::io::Read;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -112,10 +113,10 @@ pub(crate) fn open_direct_sealed_generation(
         sealed_generation_directory(&sealed_store_root(database_path), &physical_namespace);
     let receipt_path = directory.join(SEALED_STORE_RECEIPT_FILE);
     let sealed_path = directory.join(SEALED_STORE_DATABASE_FILE);
-    let receipt_bytes = match std::fs::read(&receipt_path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(sealed_store_io_failure("receipt read failed", error)),
+    let Some(receipt_bytes) = read_sealed_receipt_bytes(&receipt_path)
+        .map_err(|error| sealed_store_io_failure("receipt read failed", error))?
+    else {
+        return Ok(None);
     };
     let receipt: SealedStoreReceiptV1 = serde_json::from_slice(&receipt_bytes)
         .map_err(|error| GraphDbError::unavailable(format!("sealed receipt decode: {error}")))?;
@@ -207,6 +208,8 @@ pub(crate) fn open_direct_sealed_generation(
 const SEALED_COPY_GUARD_CHUNK_ROWS: usize = 4096;
 
 const SEALED_STORE_RECEIPT_VERSION: u32 = 1;
+/// Sealed receipts carry only bounded generation identity and row metadata.
+const MAX_SEALED_STORE_RECEIPT_BYTES: u64 = 64 * 1024;
 pub(crate) const SEALED_STORE_DATABASE_FILE: &str = "generation.grafeo";
 const SEALED_STORE_RECEIPT_FILE: &str = "sealed.json";
 /// Digest recorded only after a successful post-reopen proof. A `sealed.json`
@@ -604,8 +607,9 @@ fn census_sealed_store_entries(
             abandoned.push(path);
             continue;
         }
-        let receipt = std::fs::read(path.join(SEALED_STORE_RECEIPT_FILE))
+        let receipt = read_sealed_receipt_bytes(&path.join(SEALED_STORE_RECEIPT_FILE))
             .ok()
+            .flatten()
             .and_then(|bytes| serde_json::from_slice::<SealedStoreReceiptV1>(&bytes).ok());
         let Some(receipt) = receipt else {
             census.unrecognized_count += 1;
@@ -1107,6 +1111,17 @@ mod superseded_sealed_cleanup_tests {
             value["form"] = form.into();
             std::fs::write(&receipt_path, serde_json::to_vec(&value).unwrap()).unwrap();
         }
+        // Whitespace-padded JSON is still a parseable old-format receipt.
+        // It must not authorize deletion or a full allocation in the census.
+        let oversized = "4".repeat(64);
+        receipt(&oversized, current - 1, format!("generation:{oversized}"));
+        let oversized_directory = root.join(&oversized);
+        let oversized_receipt = oversized_directory.join(SEALED_STORE_RECEIPT_FILE);
+        let mut padded = std::fs::read(&oversized_receipt).unwrap();
+        padded.resize(MAX_SEALED_STORE_RECEIPT_BYTES as usize + 1, b' ');
+        assert!(serde_json::from_slice::<SealedStoreReceiptV1>(&padded).is_ok());
+        std::fs::write(&oversized_receipt, &padded).unwrap();
+        assert!(load_sealed_store_receipt(&oversized_directory).is_err());
         receipt(unrelated, current - 1, format!("generation:{unrelated}"));
         std::fs::create_dir(root.join(&unreadable)).unwrap();
         std::fs::write(
@@ -1131,6 +1146,7 @@ mod superseded_sealed_cleanup_tests {
             current_name.as_str(),
             unknown_form.as_str(),
             inconsistent_form.as_str(),
+            oversized.as_str(),
             unrelated,
             ".staging-active",
         ] {
@@ -2924,14 +2940,55 @@ fn open_sealed_store(
     open_sealed_store_checked(directory, identity, expected, &|| Ok(()), None)
 }
 
+/// Read only a regular sealed receipt, never an arbitrary-length on-disk
+/// payload. Check both the path and opened descriptor, since identity can
+/// change between metadata sampling and opening the file. The capped read
+/// protects against growth after both checks.
+fn read_sealed_receipt_bytes(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "sealed receipt must be a regular file",
+        ));
+    }
+    if metadata.len() > MAX_SEALED_STORE_RECEIPT_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "sealed receipt exceeds its byte limit",
+        ));
+    }
+    let file = std::fs::File::open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "sealed receipt descriptor is not a regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_SEALED_STORE_RECEIPT_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_SEALED_STORE_RECEIPT_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "sealed receipt grew past its byte limit",
+        ));
+    }
+    Ok(Some(bytes))
+}
+
 fn load_sealed_store_receipt(
     directory: &Path,
 ) -> Result<Option<SealedStoreReceiptV1>, GraphDbError> {
     let receipt_path = directory.join(SEALED_STORE_RECEIPT_FILE);
-    let receipt_bytes = match std::fs::read(&receipt_path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(sealed_store_io_failure("receipt read failed", error)),
+    let Some(receipt_bytes) = read_sealed_receipt_bytes(&receipt_path)
+        .map_err(|error| sealed_store_io_failure("receipt read failed", error))?
+    else {
+        return Ok(None);
     };
     serde_json::from_slice(&receipt_bytes)
         .map(Some)
