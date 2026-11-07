@@ -9,9 +9,9 @@ use std::ffi::OsStr;
 use std::io::{self, Read};
 use std::path::{Component, Path};
 
-use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 #[cfg(not(windows))]
 use cap_fs_ext::OpenOptionsMaybeDirExt;
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, File, OpenOptions};
 
 /// How many times a create-or-open that reports the entry missing is asked

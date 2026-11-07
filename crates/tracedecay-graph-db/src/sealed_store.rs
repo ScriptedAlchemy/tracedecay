@@ -1044,7 +1044,9 @@ pub(crate) fn discard_superseded_sealed_generations(
                 && recognized_sealed_form(&receipt)
         },
     )
-    .map_err(|error| sealed_store_io_failure("superseded sealed generation removal failed", error))?;
+    .map_err(|error| {
+        sealed_store_io_failure("superseded sealed generation removal failed", error)
+    })?;
     Ok(())
 }
 
