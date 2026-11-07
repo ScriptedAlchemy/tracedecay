@@ -2946,6 +2946,7 @@ fn open_sealed_store(
 fn read_sealed_receipt_bytes(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     tracedecay_private_fs::framed_log::read_bounded(path, MAX_SEALED_STORE_RECEIPT_BYTES as usize)
 }
+
 fn load_sealed_store_receipt(
     directory: &Path,
 ) -> Result<Option<SealedStoreReceiptV1>, GraphDbError> {
@@ -2968,9 +2969,7 @@ fn sealed_store_check_matches(
     expected_digest: &str,
 ) -> Result<bool, GraphDbError> {
     let path = directory.join(SEALED_STORE_CHECKED_FILE);
-    let limit = expected_digest
-        .len()
-        .min(MAX_SEALED_STORE_RECEIPT_BYTES as usize);
+    let limit = expected_digest.len().min(MAX_SEALED_STORE_RECEIPT_BYTES as usize);
     match tracedecay_private_fs::framed_log::read_bounded(&path, limit) {
         Ok(Some(bytes)) => Ok(bytes == expected_digest.as_bytes()),
         Ok(None) => Ok(false),
@@ -2985,6 +2984,7 @@ fn sealed_store_check_matches(
         Err(error) => Err(sealed_store_io_failure("sealed check read failed", error)),
     }
 }
+
 fn persist_sealed_store_check(directory: &Path, expected_digest: &str) -> Result<(), GraphDbError> {
     if sealed_store_check_matches(directory, expected_digest)? {
         return Ok(());
