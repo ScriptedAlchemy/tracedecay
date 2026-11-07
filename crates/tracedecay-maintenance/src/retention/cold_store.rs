@@ -4,11 +4,18 @@
 //! (`store_maintenance::run_registered_code_generation_retention`).
 
 use std::collections::BTreeSet;
-use std::io::Read;
+use std::ffi::OsStr;
+use std::io::{self, Read, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::fs::{Dir, OpenOptions};
+#[cfg(unix)]
+use cap_std::fs::OpenOptionsExt;
 use serde::{Deserialize, Serialize};
+use tracedecay_private_fs::capability_dir::{replace_file, sync_directory};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
@@ -19,6 +26,7 @@ const COLD_STORE_PAGE_LIMIT: usize = 8;
 const CHECKPOINT_DIRECTORY: &str = "maintenance";
 const CHECKPOINT_FILE: &str = "retention-cold-store-cursor-v1.json";
 const MAX_CHECKPOINT_BYTES: u64 = 64 * 1024;
+static CURSOR_TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 struct ColdStoreCursorV1 {
@@ -247,50 +255,60 @@ fn checkpoint_path(profile_root: &Path) -> PathBuf {
         .join(CHECKPOINT_FILE)
 }
 
-// A maintenance directory substituted with a symlink must not turn a
-// checkpoint read or write into access to an unrelated store. This checks
-// the directory before use; it is not a replacement for a descriptor-relative
-// open against concurrent path substitution.
-fn verified_checkpoint_parent(path: &Path) -> std::io::Result<&Path> {
-    let parent = path
+// Keep the maintenance directory capability open for the whole cursor read or
+// publish. A path check followed by a path-based open or rename can be raced
+// with a symlink substitution of "maintenance".
+fn checkpoint_directory(path: &Path, create: bool) -> io::Result<Dir> {
+    let profile = path
         .parent()
-        .ok_or_else(|| std::io::Error::other("maintenance cursor has no parent"))?;
-    let metadata = std::fs::symlink_metadata(parent)?;
-    if !metadata.file_type().is_dir() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "maintenance cursor directory is not a real directory",
-        ));
+        .and_then(Path::parent)
+        .ok_or_else(|| io::Error::other("maintenance cursor has no profile root"))?;
+    let root = Dir::open_ambient_dir(profile, cap_std::ambient_authority())?;
+    if create {
+        match root.create_dir(CHECKPOINT_DIRECTORY) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
     }
-    Ok(parent)
+    root.open_dir_nofollow(CHECKPOINT_DIRECTORY)
 }
 
 #[tracing::instrument(name = "maintenance.cold_store.load_cursor", level = "trace", skip_all)]
 fn load_cursor(path: &Path) -> Option<ColdStoreCursorV1> {
-    if let Err(error) = verified_checkpoint_parent(path) {
-        if error.kind() != std::io::ErrorKind::NotFound {
+    let directory = match checkpoint_directory(path, false) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
+        Err(error) => {
             tracing::warn!(
                 event = "retention_cold_store_cursor_invalid",
                 reason = "untrusted_directory",
                 %error,
                 "maintenance cursor directory is unsafe; restarting its bounded census"
             );
+            return None;
         }
-        return None;
-    }
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+    };
+    load_cursor_in_dir(&directory)
+}
+
+fn load_cursor_in_dir(directory: &Dir) -> Option<ColdStoreCursorV1> {
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let file = match directory.open_with(CHECKPOINT_FILE, &options) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
         Err(error) => {
             tracing::warn!(
                 event = "retention_cold_store_cursor_invalid",
                 %error,
-                "cannot inspect the saved maintenance cursor; restarting its bounded census"
+                "cannot safely open the saved maintenance cursor"
             );
             return None;
         }
     };
-    if !metadata.file_type().is_file() || metadata.len() > MAX_CHECKPOINT_BYTES {
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_CHECKPOINT_BYTES {
         tracing::warn!(
             event = "retention_cold_store_cursor_invalid",
             reason = "nonregular_or_oversized",
@@ -298,9 +316,6 @@ fn load_cursor(path: &Path) -> Option<ColdStoreCursorV1> {
         );
         return None;
     }
-    // Check the byte limit again on the open handle: the path may change after
-    // metadata inspection, and an invalid checkpoint must never load unbounded data.
-    let file = std::fs::File::open(path).ok()?;
     let mut limited = file.take(MAX_CHECKPOINT_BYTES + 1);
     let mut bytes = Vec::new();
     limited.read_to_end(&mut bytes).ok()?;
@@ -330,23 +345,50 @@ fn load_cursor(path: &Path) -> Option<ColdStoreCursorV1> {
     level = "trace",
     skip_all
 )]
-fn persist_cursor(path: &Path, cursor: &ColdStoreCursorV1) -> std::io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("maintenance cursor has no parent"))?;
-    std::fs::create_dir_all(parent)?;
-    verified_checkpoint_parent(path)?;
-    // The old fixed .json.tmp name could be replaced with a symlink and
-    // File::create would truncate its foreign target. Random exclusive staging
-    // keeps the write private; the final rename replaces, never follows, a
-    // substituted destination symlink.
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    let bytes = serde_json::to_vec(cursor).map_err(std::io::Error::other)?;
-    std::io::Write::write_all(temporary.as_file_mut(), &bytes)?;
-    temporary.as_file_mut().sync_all()?;
-    verified_checkpoint_parent(path)?;
-    temporary.persist(path).map_err(|error| error.error)?;
-    Ok(())
+fn persist_cursor(path: &Path, cursor: &ColdStoreCursorV1) -> io::Result<()> {
+    let directory = checkpoint_directory(path, true)?;
+    persist_cursor_in_dir(&directory, cursor)
+}
+
+fn persist_cursor_in_dir(directory: &Dir, cursor: &ColdStoreCursorV1) -> io::Result<()> {
+    let bytes = serde_json::to_vec(cursor).map_err(io::Error::other)?;
+    // The name supplies no authority. create_new + no-follow guarantees that
+    // even a collided or attacker-prepared staging name cannot be truncated.
+    for _ in 0..16 {
+        let nonce = CURSOR_TEMP_NONCE.fetch_add(1, Ordering::Relaxed);
+        let temporary_name = format!(
+            ".retention-cold-store-{}-{nonce}.tmp",
+            std::process::id()
+        );
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true).follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut temporary = match directory.open_with(&temporary_name, &options) {
+            Ok(temporary) => temporary,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        let result = (|| {
+            temporary.write_all(&bytes)?;
+            temporary.sync_all()?;
+            drop(temporary);
+            replace_file(
+                directory,
+                OsStr::new(&temporary_name),
+                OsStr::new(CHECKPOINT_FILE),
+            )?;
+            sync_directory(directory)
+        })();
+        if result.is_err() {
+            let _ = directory.remove_file(&temporary_name);
+        }
+        return result;
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "maintenance cursor staging names are occupied",
+    ))
 }
 
 fn retention_window_secs(days: u64) -> i64 {
@@ -479,6 +521,50 @@ mod tests {
         persist_cursor(&path, &expected).unwrap();
         assert_eq!(load_cursor(&path), Some(expected));
         assert_eq!(std::fs::read(&foreign_cursor).unwrap(), foreign_bytes);
+    }
+
+
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_parent_cannot_redirect_an_open_checkpoint_capability() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("profile");
+        let foreign = root.path().join("foreign");
+        std::fs::create_dir(&profile).unwrap();
+        std::fs::create_dir(&foreign).unwrap();
+        let path = checkpoint_path(&profile);
+        let directory = checkpoint_directory(&path, true).unwrap();
+        let expected = ColdStoreCursorV1 {
+            after_project_id: Some("local".to_owned()),
+            after_unregistered_directory: None,
+        };
+        persist_cursor_in_dir(&directory, &expected).unwrap();
+        std::fs::rename(
+            profile.join(CHECKPOINT_DIRECTORY),
+            profile.join("detached"),
+        )
+        .unwrap();
+        let foreign_cursor = foreign.join(CHECKPOINT_FILE);
+        std::fs::write(&foreign_cursor, br#"{"after_project_id":"foreign"}"#).unwrap();
+        symlink(&foreign, profile.join(CHECKPOINT_DIRECTORY)).unwrap();
+
+        assert_eq!(load_cursor_in_dir(&directory), Some(expected.clone()));
+        let updated = ColdStoreCursorV1 {
+            after_project_id: Some("local-next".to_owned()),
+            after_unregistered_directory: None,
+        };
+        persist_cursor_in_dir(&directory, &updated).unwrap();
+        assert_eq!(load_cursor_in_dir(&directory), Some(updated));
+        assert_eq!(
+            std::fs::read(&foreign_cursor).unwrap(),
+            br#"{"after_project_id":"foreign"}"#,
+            "a path substitution must not grant the foreign directory write authority"
+        );
+        assert_eq!(std::fs::read_dir(&foreign).unwrap().count(), 1);
+        assert!(persist_cursor(&path, &expected).is_err());
+        assert_eq!(load_cursor(&path), None);
     }
 
     #[test]
