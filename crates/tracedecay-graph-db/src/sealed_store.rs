@@ -120,14 +120,7 @@ pub(crate) fn open_direct_sealed_generation(
     };
     let receipt: SealedStoreReceiptV1 = serde_json::from_slice(&receipt_bytes)
         .map_err(|error| GraphDbError::unavailable(format!("sealed receipt decode: {error}")))?;
-    if receipt.version != SEALED_STORE_RECEIPT_VERSION
-        || receipt.graph_format != GraphFormatVersion::current().get()
-        || receipt.recovered_digest != expected.as_str()
-        || receipt.physical_namespace != physical_namespace.as_str()
-        || receipt.namespace != projection.namespace.as_str()
-        || receipt.projection != projection.projection.as_str()
-        || receipt.generation != generation.as_str()
-    {
+    if !receipt.binds(&locator, physical_namespace.as_str(), expected.as_str()) {
         return Err(GraphDbError::unavailable(
             "sealed generation store receipt does not bind this generation".to_owned(),
         ));
@@ -275,6 +268,7 @@ impl SealedStoreReceiptV1 {
     ) -> bool {
         self.version == SEALED_STORE_RECEIPT_VERSION
             && self.graph_format == GraphFormatVersion::current().get()
+            && recognized_sealed_form(self)
             && self.recovered_digest == expected_digest
             && self.physical_namespace == physical_namespace
             && self.namespace == locator.projection.namespace.as_str()
@@ -293,6 +287,75 @@ fn recognized_sealed_form(receipt: &SealedStoreReceiptV1) -> bool {
             (&receipt.base, receipt.form.as_str()),
             (None, SEALED_STORE_FORM_COMPACT) | (Some(_), SEALED_STORE_FORM_LAYERED)
         )
+}
+
+#[cfg(test)]
+mod sealed_receipt_binding_tests {
+    use super::*;
+    use crate::{GraphGenerationId, GraphProjectionId};
+
+    #[test]
+    fn sealed_adoption_and_staging_release_refuse_unknown_or_inconsistent_forms() {
+        let projection = GraphProjectionIdentity::new(
+            GraphNamespace::new("receipt-binding").unwrap(),
+            GraphProjectionId::new("code").unwrap(),
+        );
+        let locator = GenerationLocator::new(
+            projection.clone(),
+            GraphGenerationId::new("generation:receipt-binding").unwrap(),
+        );
+        let physical_namespace = locator.physical_namespace().unwrap();
+        let mut receipt = SealedStoreReceiptV1 {
+            version: SEALED_STORE_RECEIPT_VERSION,
+            form: SEALED_STORE_FORM_COMPACT.to_owned(),
+            namespace: projection.namespace.as_str().to_owned(),
+            projection: projection.projection.as_str().to_owned(),
+            generation: locator.generation.as_str().to_owned(),
+            physical_namespace: physical_namespace.as_str().to_owned(),
+            recovered_digest: "verified-digest".to_owned(),
+            entities: 1,
+            relations: 0,
+            graph_format: GraphFormatVersion::current().get(),
+            row_sum: None,
+            base: None,
+            source_generation: None,
+            watermark: None,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let binds_on_disk = |receipt: &SealedStoreReceiptV1| {
+            std::fs::write(
+                directory.path().join(SEALED_STORE_RECEIPT_FILE),
+                serde_json::to_vec(receipt).unwrap(),
+            )
+            .unwrap();
+            load_sealed_store_receipt(directory.path())
+                .unwrap()
+                .unwrap()
+                .binds(&locator, physical_namespace.as_str(), "verified-digest")
+        };
+
+        assert!(binds_on_disk(&receipt), "verified compact receipt is accepted");
+        receipt.form = "future-container".to_owned();
+        assert!(!binds_on_disk(&receipt), "future form must never bind");
+        receipt.form = SEALED_STORE_FORM_LAYERED.to_owned();
+        assert!(!binds_on_disk(&receipt), "layered form without base must refuse");
+
+        receipt.base = Some(SealedBaseReceiptV1 {
+            generation: "generation:base".to_owned(),
+            source_generation: "source:base".to_owned(),
+            watermark: "watermark:base".to_owned(),
+            physical_namespace: "generation:base".to_owned(),
+            recovered_digest: "base-digest".to_owned(),
+            entities: 1,
+            relations: 0,
+            row_sum: "row-sum".to_owned(),
+            hidden_row_sum: "hidden-sum".to_owned(),
+        });
+        receipt.form = SEALED_STORE_FORM_COMPACT.to_owned();
+        assert!(!binds_on_disk(&receipt), "compact form with base must refuse");
+        receipt.form = SEALED_STORE_FORM_LAYERED.to_owned();
+        assert!(binds_on_disk(&receipt), "recognized layered form remains eligible");
+    }
 }
 
 /// Digest and row counts that authorize a staging-row release without opening
