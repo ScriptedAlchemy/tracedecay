@@ -834,12 +834,22 @@ impl<'a> GraphSegmentReadPassV1<'a> {
             .iter()
             .position(|pinned| pinned.digest == digest)
         {
+            // A rejected cached read must not promote this entry and evict
+            // another valid handle on the next miss.
+            self.reads += 1;
+            let cached = self.pinned.get_mut(position).ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed graph segment cache lost its retained handle".to_owned(),
+                )
+            })?;
+            read_pinned_partitioned_segment(cached, request, buffer)?;
             let pinned = self.pinned.remove(position).ok_or_else(|| {
                 CodeIndexProductionErrorV1::Contract(
                     "sealed graph segment cache lost its retained handle".to_owned(),
                 )
             })?;
             self.pinned.push_back(pinned);
+            return Ok(());
         } else {
             // Include route lookup, pathname validation and the actual open.
             // Endpoint authorization can stall in any of these operations.
@@ -2814,6 +2824,22 @@ mod tests {
             .is_err(),
             "a cached handle must still reject an over-bound read"
         );
+        // An invalid manifest extent for the least-recent cached segment
+        // must not promote it or evict another valid descriptor later.
+        let (cached_digest, cached) = &segments[1];
+        let mut refused = b"prior page".to_vec();
+        assert!(matches!(
+            pass.read(
+                SealedGenerationSegmentReadV1::Whole {
+                    digest: cached_digest,
+                    size_bytes: cached.len() as u64 + 1,
+                },
+                &mut refused,
+            ),
+            Err(CodeIndexProductionErrorV1::Contract(_))
+        ));
+        assert!(refused.is_empty());
+        assert_eq!(pass.open_attempts, segments.len());
         let (oldest_digest, oldest) = &segments[0];
         let mut bytes = Vec::new();
         pass.read(
@@ -2827,6 +2853,20 @@ mod tests {
         assert_eq!(bytes.as_slice(), oldest.as_slice());
         assert_eq!(pass.open_attempts, segments.len() + 1);
         assert_eq!(pass.pinned.len(), super::MAX_GRAPH_SEGMENT_OPEN_HANDLES);
+        assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), segments.len() + 1);
+        // The failed hit above must not have promoted segment 1: opening
+        // segment 0 evicts it, leaving segment 2 available without reopening.
+        let (retained_digest, retained) = &segments[2];
+        pass.read(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: retained_digest,
+                size_bytes: retained.len() as u64,
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        assert_eq!(bytes.as_slice(), retained.as_slice());
+        assert_eq!(pass.open_attempts, segments.len() + 1);
         assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), segments.len() + 1);
     }
 
