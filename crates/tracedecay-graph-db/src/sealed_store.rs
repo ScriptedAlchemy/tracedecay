@@ -54,7 +54,9 @@ use grafeo_core::graph::compact::IncrementalCompactStoreBuilder;
 use grafeo_engine::GrafeoDB;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use tracedecay_store::runtime::GraphRecoveredGenerationDigestV1;
+use tracedecay_store::runtime::{
+    GraphNativeWorkKindV1, GraphNativeWorkV1, GraphRecoveredGenerationDigestV1,
+};
 
 use crate::generation::{
     GraphRowDigestSum, physical_namespace_projection_map, recovered_digest_from_row_sum,
@@ -1252,6 +1254,7 @@ impl GraphDb {
         rows: &GraphGenerationRows,
         expected: &GraphRecoveredGenerationDigestV1,
         check: &dyn Fn() -> Result<(), GraphDbError>,
+        observe: Option<&dyn Fn(GraphNativeWorkV1)>,
     ) -> Result<Option<GraphCommit>, GraphDbError> {
         if sealed_store_disabled() {
             return Ok(None);
@@ -1288,8 +1291,14 @@ impl GraphDb {
             // restage gets, not a silent rebuild underneath its readers.
             return Err(refusal);
         }
-        let (store, _) =
-            build_or_open_sealed_store(source, &identity, expected, &database_path, check)?;
+        let (store, _) = build_or_open_sealed_store_with_work(
+            source,
+            &identity,
+            expected,
+            &database_path,
+            check,
+            observe,
+        )?;
         self.install_sealed_generation_store(locator.clone(), store)?;
         // The generation normally exists only as this sealed artifact: it is
         // sealed-only from its first instant, and no lease remembered for it
@@ -1774,6 +1783,19 @@ fn build_or_open_sealed_store(
     database_path: &Path,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(Arc<SealedGenerationStore>, Option<u64>), GraphDbError> {
+    build_or_open_sealed_store_with_work(rows, identity, expected, database_path, check, None)
+}
+
+/// The caller-owned observer is bound to the exact publication operation.
+/// Reopening an existing segment emits no new completion event.
+fn build_or_open_sealed_store_with_work(
+    rows: SealedRowSource<'_>,
+    identity: &GraphGenerationManifestIdentity,
+    expected: &GraphRecoveredGenerationDigestV1,
+    database_path: &Path,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+    observe: Option<&dyn Fn(GraphNativeWorkV1)>,
+) -> Result<(Arc<SealedGenerationStore>, Option<u64>), GraphDbError> {
     let staging_sourced = matches!(rows, SealedRowSource::Staging(_));
     let physical_namespace = identity.physical_namespace()?;
     let root = sealed_store_root(database_path);
@@ -1811,7 +1833,7 @@ fn build_or_open_sealed_store(
     remove_sealed_directory(&staging);
     std::fs::create_dir_all(&staging)
         .map_err(|error| sealed_store_io_failure("staging directory create failed", error))?;
-    let receipt = stage_sealed_artifact(rows, identity, expected, &staging, check)
+    let receipt = stage_sealed_artifact(rows, identity, expected, &staging, check, observe)
         .inspect_err(|_| remove_sealed_directory(&staging))?;
     let encoded = serde_json::to_vec_pretty(&receipt)
         .map_err(|error| GraphDbError::unavailable(format!("sealed receipt encode: {error}")))?;
@@ -1852,6 +1874,13 @@ fn build_or_open_sealed_store(
                     canonical_bytes = store.canonical_bytes,
                     "installed and reopened the native graph compact segment"
                 );
+                if let Some(observer) = observe {
+                    observer(GraphNativeWorkV1::CompactSegmentVerified {
+                        entities: u64::try_from(receipt.entities).unwrap_or(u64::MAX),
+                        relations: u64::try_from(receipt.relations).unwrap_or(u64::MAX),
+                        canonical_bytes: store.canonical_bytes,
+                    });
+                }
             }
             Ok((store, staging_proof))
         }
@@ -1877,6 +1906,7 @@ fn stage_sealed_artifact(
     expected: &GraphRecoveredGenerationDigestV1,
     staging: &Path,
     check: &dyn Fn() -> Result<(), GraphDbError>,
+    observe: Option<&dyn Fn(GraphNativeWorkV1)>,
 ) -> Result<SealedStoreReceiptV1, GraphDbError> {
     let (row_sum, base_files, layered) = match rows {
         SealedRowSource::Spilled(spilled) => (
@@ -1901,7 +1931,7 @@ fn stage_sealed_artifact(
         rows => rows,
     };
     let (mut entities, mut relations) =
-        build_sealed_container(container_rows, identity, staging, check)?;
+        build_sealed_container_with_work(container_rows, identity, staging, check, observe)?;
     if let Some(layered) = layered {
         layered.install_base_files(staging)?;
         (entities, relations) = layered.row_counts();
@@ -1960,6 +1990,16 @@ fn build_sealed_container(
     staging: &Path,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(usize, usize), GraphDbError> {
+    build_sealed_container_with_work(rows, identity, staging, check, None)
+}
+
+fn build_sealed_container_with_work(
+    rows: SealedRowSource<'_>,
+    identity: &GraphGenerationManifestIdentity,
+    staging: &Path,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+    observe: Option<&dyn Fn(GraphNativeWorkV1)>,
+) -> Result<(usize, usize), GraphDbError> {
     let physical_namespace = identity.physical_namespace()?;
     let mut sealed = SealedCompactRows::new(staging)?;
     let (entity_count, relation_count, dependency_namespaces_written) = {
@@ -1990,6 +2030,22 @@ fn build_sealed_container(
                                 durable = false,
                                 "native compact builder accepted a row window"
                             );
+                            if let Some(observer) = observe {
+                                observer(GraphNativeWorkV1::CompactRowsEncoded {
+                                    kind: match boundary.kind {
+                                        NativeCompactEncodeKindV1::Entities => {
+                                            GraphNativeWorkKindV1::Entities
+                                        }
+                                        NativeCompactEncodeKindV1::Relations => {
+                                            GraphNativeWorkKindV1::Relations
+                                        }
+                                    },
+                                    completed_rows: u64::try_from(boundary.completed_rows)
+                                        .unwrap_or(u64::MAX),
+                                    total_rows: u64::try_from(boundary.total_rows)
+                                        .unwrap_or(u64::MAX),
+                                });
+                            }
                         },
                     )?;
                     Ok((counts.0, counts.1, BTreeMap::new()))
@@ -2816,16 +2872,20 @@ pub(crate) fn sealed_copy_proof(
 #[cfg(test)]
 mod build_tests {
     use std::collections::{BTreeMap, BTreeSet};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use rayon::ThreadPoolBuilder;
 
     use super::{
-        SEALED_STORE_DATABASE_FILE, SealedRowSource, build_or_open_sealed_store,
-        build_sealed_container, sealed_artifact_database_options, sealed_copy_proof,
+        NativeCompactEncodeBoundaryV1, NativeCompactEncodeKindV1, SEALED_STORE_DATABASE_FILE,
+        SealedCompactRows, SealedRowSource, build_or_open_sealed_store,
+        build_or_open_sealed_store_with_work, build_sealed_container,
+        push_manifest_rows, sealed_artifact_database_options, sealed_copy_proof,
         sealed_generation_directory, sealed_store_root,
     };
+    use tracedecay_store::runtime::{GraphNativeWorkKindV1, GraphNativeWorkV1};
+
     use crate::location::PersistentGraphStoreState;
     use crate::{
         GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDurability,
@@ -2947,13 +3007,6 @@ mod build_tests {
     /// final count equal to the input and no forged completed relation window.
     #[test]
     fn direct_compact_encoding_reports_only_accepted_row_windows() {
-        use std::sync::Mutex;
-
-        use super::{
-            NativeCompactEncodeBoundaryV1, NativeCompactEncodeKindV1, SealedCompactRows,
-            push_manifest_rows,
-        };
-
         let fixture = manifest(1_101, 1_143);
         let identity = fixture.identity();
         let namespace = identity.physical_namespace().unwrap();
@@ -3280,6 +3333,67 @@ mod build_tests {
     /// A competing writer's already installed segment is read-only evidence,
     /// not a new native write by this attempt. The loser must clean up its
     /// staging directory and can adopt only the digest-verified real segment.
+    /// Actual direct seal emits accepted row windows and one verified install,
+    /// but adopting that exact durable segment on retry emits nothing.
+    #[test]
+    fn direct_seal_native_observer_separates_encoding_and_durable_segment() {
+        let fixture = manifest(7, 9);
+        let identity = fixture.identity();
+        let expected = fixture.expected_recovered_digest(&|| Ok(())).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("native.grafeo");
+        let observed = Mutex::new(Vec::new());
+        let record = |event| observed.lock().unwrap().push(event);
+        let (first, _) = build_or_open_sealed_store_with_work(
+            SealedRowSource::Manifest(&fixture),
+            &identity,
+            &expected,
+            &database_path,
+            &|| Ok(()),
+            Some(&record),
+        )
+        .expect("install and verify real native segment");
+        assert_eq!(first.recovered_digest(), expected.as_str());
+        let events = observed.lock().unwrap().clone();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GraphNativeWorkV1::CompactRowsEncoded {
+                kind: GraphNativeWorkKindV1::Entities,
+                completed_rows: 7,
+                total_rows: 7,
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GraphNativeWorkV1::CompactRowsEncoded {
+                kind: GraphNativeWorkKindV1::Relations,
+                completed_rows: 9,
+                total_rows: 9,
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GraphNativeWorkV1::CompactSegmentVerified {
+                entities: 7,
+                relations: 9,
+                canonical_bytes: 1..,
+            }
+        )));
+        let _ = first.database().close();
+        let (adopted, _) = build_or_open_sealed_store_with_work(
+            SealedRowSource::Manifest(&fixture),
+            &identity,
+            &expected,
+            &database_path,
+            &|| Ok(()),
+            Some(&record),
+        )
+        .expect("adopt existing verified segment without new writes");
+        assert_eq!(adopted.recovered_digest(), expected.as_str());
+        assert_eq!(*observed.lock().unwrap(), events);
+        let _ = adopted.database().close();
+    }
+
     #[test]
     fn concurrent_sealed_install_candidate_does_not_count_as_new_write() {
         let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());

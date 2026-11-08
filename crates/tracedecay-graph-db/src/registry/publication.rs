@@ -1759,6 +1759,7 @@ impl GraphDbRegistry {
                                 sealed_digest,
                                 direct_seal_eligible,
                                 &check,
+                                Some(&native_work),
                             )? {
                                 drop(manifest);
                                 (commit, sealed_digest.clone())
@@ -1906,6 +1907,7 @@ impl GraphDbRegistry {
                     sealed_digest,
                     direct_seal_eligible,
                     &check,
+                    Some(&native_work),
                 );
                 match direct {
                     Ok(Some(commit)) => {
@@ -2603,11 +2605,12 @@ fn direct_seal(
     expected: &GraphRecoveredGenerationDigestV1,
     eligible: bool,
     check: &dyn Fn() -> Result<(), GraphDbError>,
+    observe: Option<&dyn Fn(tracedecay_store::runtime::GraphNativeWorkV1)>,
 ) -> Result<Option<GraphCommit>, GraphDbError> {
     if !eligible {
         return Ok(None);
     }
-    database.seal_generation_directly(rows, expected, check)
+    database.seal_generation_directly(rows, expected, check, observe)
 }
 
 /// A row spill under `database`'s own scratch root for the generation a
