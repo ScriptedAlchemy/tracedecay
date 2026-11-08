@@ -14,13 +14,15 @@ use super::TableSizeTelemetrySample;
 /// Payload bytes deliberately exclude indexes, free pages and WAL/SHM files;
 /// the separate store/profile footprint owns those physical-size measurements.
 pub(super) fn read(connection: &Connection) -> rusqlite::Result<Vec<TableSizeTelemetrySample>> {
+    // LIKE treats the underscore as a wildcard and hides ordinary tables
+    // such as `sqlitemessages`; only the literal `sqlite_` prefix is internal.
     let mut statement = connection.prepare_cached(
         "SELECT schema_entry.name, \
                 (SELECT COALESCE(SUM(payload), 0) FROM dbstat \
                  WHERE name = schema_entry.name) \
          FROM sqlite_schema AS schema_entry \
          WHERE schema_entry.type = 'table' \
-           AND schema_entry.name NOT LIKE 'sqlite_%' \
+           AND schema_entry.name NOT GLOB 'sqlite_*' \
          ORDER BY schema_entry.name",
     )?;
     statement
@@ -174,6 +176,42 @@ mod tests {
         connection.execute_batch("VACUUM").unwrap();
         assert!(page_count(&connection) < grown_pages);
         assert_eq!(read(&connection).unwrap(), reclaimed);
+    }
+
+    #[test]
+    fn payload_census_includes_sqlite_named_user_tables_and_their_growth() {
+        let (_directory, connection) = fixture();
+        connection
+            .execute_batch(
+                "CREATE TABLE sqlitemessages(body BLOB);
+                 INSERT INTO sqlitemessages VALUES (zeroblob(1048576));",
+            )
+            .unwrap();
+        let before = read(&connection).unwrap();
+        let initial = before
+            .iter()
+            .find(|sample| sample.table_name == "sqlitemessages")
+            .expect("a user table without the reserved underscore must be measured");
+        assert!(initial.bytes > 1_048_576);
+
+        connection
+            .execute("INSERT INTO sqlitemessages VALUES (zeroblob(1048576))", [])
+            .unwrap();
+        let after = read(&connection).unwrap();
+        let grown = after
+            .iter()
+            .find(|sample| sample.table_name == "sqlitemessages")
+            .unwrap();
+        let expected: i64 = connection
+            .query_row(
+                "SELECT SUM(payload) FROM dbstat WHERE name = 'sqlitemessages'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(grown.bytes, u64::try_from(expected).unwrap());
+        assert!(grown.bytes > initial.bytes);
+        assert!(after.iter().all(|sample| sample.table_name != "sqlite_sequence"));
     }
 
     #[test]
