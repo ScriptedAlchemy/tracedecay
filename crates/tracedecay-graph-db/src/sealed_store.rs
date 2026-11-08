@@ -494,7 +494,11 @@ impl SealedGenerationStore {
     /// owner to retry; a sealed-only live head never enters this path.
     fn discard(&self) -> Result<(), GraphDbError> {
         let _ = self.close();
-        remove_sealed_directory_checked(&self.directory)
+        retire_sealed_directory_checked(
+            &self.directory,
+            &self.locator,
+            Some(&self.recovered_digest),
+        )
     }
 }
 
@@ -714,9 +718,12 @@ pub(crate) fn sweep_abandoned_sealed_staging(database_path: &Path) {
             continue;
         }
         let path = entry.path();
-        match std::fs::remove_dir_all(&path) {
-            Ok(()) => removed += 1,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        match tracedecay_private_fs::capability_dir::remove_child_directory_nofollow(
+            &root,
+            &entry.file_name(),
+        ) {
+            Ok(true) => removed += 1,
+            Ok(false) => {}
             Err(error) => tracing::warn!(
                 event = "sealed_staging_sweep_failed",
                 path = %path.display(),
@@ -756,9 +763,10 @@ pub(crate) fn sweep_abandoned_row_spills(database_path: &Path) {
             .is_some_and(|name| name.starts_with(ROW_SPILL_PREFIX) && !name.starts_with(&own))
         {
             let path = entry.path();
-            if let Err(error) = std::fs::remove_dir_all(&path)
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
+            if let Err(error) = tracedecay_private_fs::capability_dir::remove_child_directory_nofollow(
+                &root,
+                &entry.file_name(),
+            ) {
                 tracing::warn!(
                     event = "graph_row_spill_sweep_failed",
                     path = %path.display(),
@@ -771,14 +779,65 @@ pub(crate) fn sweep_abandoned_row_spills(database_path: &Path) {
 }
 
 fn remove_sealed_directory_checked(directory: &Path) -> Result<(), GraphDbError> {
-    match std::fs::remove_dir_all(directory) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(sealed_store_io_failure(
-            "sealed directory removal failed",
-            error,
-        )),
+    let root = directory
+        .parent()
+        .ok_or_else(|| GraphDbError::unavailable("sealed directory has no parent"))?;
+    let name = directory
+        .file_name()
+        .ok_or_else(|| GraphDbError::unavailable("sealed directory has no entry name"))?;
+    tracedecay_private_fs::capability_dir::remove_child_directory_nofollow(root, name)
+        .map(|_| ())
+        .map_err(|error| sealed_store_io_failure("sealed directory removal failed", error))
+}
+
+/// Accepted replay retirement is not permission to recursively delete a
+/// substituted or unrecognizable artifact. Require the exact durable identity
+/// under a held child capability; preserve an unverified directory for retry.
+fn retire_sealed_directory_checked(
+    directory: &Path,
+    locator: &GenerationLocator,
+    expected_digest: Option<&str>,
+) -> Result<(), GraphDbError> {
+    let physical = locator.physical_namespace()?;
+    let root = directory
+        .parent()
+        .ok_or_else(|| GraphDbError::unavailable("sealed retirement directory has no parent"))?;
+    if sealed_generation_directory(root, &physical) != directory {
+        return Err(GraphDbError::unavailable(
+            "sealed retirement directory does not match generation identity",
+        ));
     }
+    let name = directory
+        .file_name()
+        .ok_or_else(|| GraphDbError::unavailable("sealed retirement directory has no entry name"))?;
+    let result = tracedecay_private_fs::capability_dir::remove_receipted_child_directory_nofollow(
+        root,
+        name,
+        std::ffi::OsStr::new(SEALED_STORE_RECEIPT_FILE),
+        MAX_SEALED_RECEIPT_BYTES,
+        |bytes| {
+            let Ok(receipt) = serde_json::from_slice::<SealedStoreReceiptV1>(bytes) else {
+                return false;
+            };
+            let form_valid = match receipt.form.as_str() {
+                SEALED_STORE_FORM_COMPACT => receipt.base.is_none(),
+                SEALED_STORE_FORM_LAYERED => receipt.base.is_some(),
+                _ => false,
+            };
+            form_valid
+                && receipt.version == SEALED_STORE_RECEIPT_VERSION
+                && receipt.graph_format > 0
+                && receipt.graph_format <= GraphFormatVersion::current().get()
+                && receipt.physical_namespace == physical.as_str()
+                && receipt.namespace == locator.projection.namespace.as_str()
+                && receipt.projection == locator.projection.projection.as_str()
+                && receipt.generation == locator.generation.as_str()
+                && expected_digest.is_none_or(|digest| receipt.recovered_digest == digest)
+        },
+    );
+    result
+        .map(|_| ())
+        .map_err(|error| sealed_store_io_failure("sealed generation retirement refused", error))
 }
 
 /// Staging and invalid-artifact cleanup are best effort. Retiring an accepted
@@ -1713,7 +1772,11 @@ impl GraphDb {
         };
         let physical_namespace = locator.physical_namespace()?;
         let root = sealed_store_root(database_path);
-        remove_sealed_directory_checked(&sealed_generation_directory(&root, &physical_namespace))
+        retire_sealed_directory_checked(
+            &sealed_generation_directory(&root, &physical_namespace),
+            locator,
+            None,
+        )
     }
 }
 
@@ -2949,6 +3012,56 @@ mod receipt_budget_tests {
                 std::io::ErrorKind::InvalidInput
             );
         }
+    }
+
+    #[test]
+    fn retired_sealed_generation_requires_its_exact_receipt_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("graph.grafeo");
+        let root = sealed_store_root(&database);
+        let locator = GenerationLocator::new(
+            GraphProjectionIdentity::new(
+                GraphNamespace::new("test").unwrap(),
+                GraphProjectionId::new("code").unwrap(),
+            ),
+            crate::GraphGenerationId::new("generation:retirement").unwrap(),
+        );
+        let physical = locator.physical_namespace().unwrap();
+        let directory = sealed_generation_directory(&root, &physical);
+        std::fs::create_dir_all(&directory).unwrap();
+        let name = directory.file_name().unwrap().to_str().unwrap();
+        let receipt_path = directory.join(SEALED_STORE_RECEIPT_FILE);
+        std::fs::write(
+            &receipt_path,
+            receipt(GraphFormatVersion::current().get(), name, "generation:other"),
+        )
+        .unwrap();
+        std::fs::write(directory.join("sentinel"), b"preserve").unwrap();
+        assert!(retire_sealed_directory_checked(&directory, &locator, None).is_err());
+        assert_eq!(
+            std::fs::read(directory.join("sentinel")).unwrap(),
+            b"preserve"
+        );
+        std::fs::write(
+            &receipt_path,
+            receipt(
+                GraphFormatVersion::current().get(),
+                name,
+                locator.generation.as_str(),
+            ),
+        )
+        .unwrap();
+        assert!(retire_sealed_directory_checked(&directory, &locator, Some("wrong")).is_err());
+        assert_eq!(
+            std::fs::read(directory.join("sentinel")).unwrap(),
+            b"preserve"
+        );
+        retire_sealed_directory_checked(&directory, &locator, Some("digest")).unwrap();
+        assert!(
+            !directory.exists(),
+            "verified retired generation is physically removed"
+        );
+        retire_sealed_directory_checked(&directory, &locator, Some("digest")).unwrap();
     }
 
     #[cfg(unix)]
