@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+use notify::Watcher;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_code_index::production::{
@@ -1563,7 +1564,6 @@ fn observed_pointer_opens(
 #[cfg(target_os = "linux")]
 #[test]
 fn publication_pointer_cas_reads_exact_bytes_with_one_kernel_open() {
-    use notify::Watcher;
 
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 3 }\n")]);
     let source_root = TempDir::new().expect("source store");
@@ -1627,10 +1627,72 @@ fn publication_pointer_cas_reads_exact_bytes_with_one_kernel_open() {
     );
 }
 
+#[test]
+fn cached_publication_pointer_refuses_equal_byte_symlink_and_recovers_snapshot() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let source_root = TempDir::new().expect("source store");
+    let generation = source_generation(&fixture, source_root.path());
+    let target_root = TempDir::new().expect("target store");
+    let mut publisher = target_store(target_root.path(), &fixture);
+    let mut preparation = publisher
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare real generation");
+    let publication = generation
+        .stage_publication(&mut preparation)
+        .expect("stage generation");
+    publisher
+        .commit(&mut preparation, &publication)
+        .expect("publish generation");
+    drop(preparation);
+
+    let pointer_path = publisher.active_path.clone();
+    let exact_bytes = std::fs::read(&pointer_path).expect("committed pointer bytes");
+    assert!(!exact_bytes.is_empty());
+    let expected_generation = generation.manifest().generation_id.as_str();
+    assert_eq!(
+        publisher
+            .read_publication_pointer()
+            .expect("legitimate cached pointer")
+            .expect("active generation")
+            .generation_id,
+        expected_generation
+    );
+
+    let original = target_root.path().join("original-active-pointer");
+    std::fs::rename(&pointer_path, &original).expect("move disposable pointer");
+    std::os::unix::fs::symlink(&original, &pointer_path)
+        .expect("substitute symlink to the exact same bytes");
+    assert_eq!(
+        std::fs::read(&pointer_path).expect("linked pointer data"),
+        exact_bytes,
+        "symlink replacement must preserve the same bytes and digest"
+    );
+    assert!(
+        publisher.read_publication_pointer().is_err(),
+        "the warm memo must refuse an equal-byte symlink replacement"
+    );
+    let cold = target_store(target_root.path(), &fixture);
+    assert!(
+        cold.read_publication_pointer().is_err(),
+        "cold pointer validation must also refuse a symlink"
+    );
+
+    std::fs::remove_file(&pointer_path).expect("remove test symlink");
+    std::fs::rename(&original, &pointer_path).expect("restore original pointer");
+    let loaded = cold
+        .load_active_shared()
+        .expect("load restored generation")
+        .expect("published snapshot");
+    assert_eq!(
+        loaded.snapshot().content_identity,
+        generation.snapshot().content_identity,
+        "restored exact inode must recover the original published snapshot"
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn cold_publication_pointer_validation_uses_one_kernel_open_and_recovers_snapshot() {
-    use notify::Watcher;
 
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let source_root = TempDir::new().expect("source store");
@@ -1713,7 +1775,6 @@ fn observed_named_opens(
 #[cfg(target_os = "linux")]
 #[test]
 fn initial_pointer_publication_reuses_persisted_descriptor_without_pathname_open() {
-    use notify::Watcher;
 
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n")]);
     let source_root = TempDir::new().expect("source store");

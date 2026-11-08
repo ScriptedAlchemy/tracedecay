@@ -2058,7 +2058,13 @@ impl DaemonCodeIndexPublicationStoreV1 {
         &self,
     ) -> Result<Option<(DurablePublicationPointerV1, Vec<u8>)>, CodeIndexPublicationStoreErrorV1>
     {
-        let metadata = match std::fs::metadata(&self.active_path) {
+        // The named pointer must itself be a regular file. Following a
+        // symlink would let an equal-byte replacement inherit the memo.
+        #[cfg(unix)]
+        let named = std::fs::symlink_metadata(&self.active_path);
+        #[cfg(not(unix))]
+        let named = std::fs::metadata(&self.active_path);
+        let metadata = match named {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 *self
@@ -2114,6 +2120,24 @@ impl DaemonCodeIndexPublicationStoreV1 {
             if let Some(memo) = memo.as_mut()
                 && memo.digest == digest
             {
+                // A matching digest does not authenticate a substituted
+                // pathname. Preserve the cold path's inode checks without
+                // another endpoint-scanned open.
+                #[cfg(unix)]
+                {
+                    let opened = opened_pointer.metadata().map_err(Self::map_pointer_io)?;
+                    let named = self
+                        .active_path
+                        .symlink_metadata()
+                        .map_err(Self::map_pointer_io)?;
+                    if !Self::same_unix_segment_identity(&metadata, &opened)
+                        || !Self::same_unix_segment_identity(&opened, &named)
+                    {
+                        return Err(Self::corruption(
+                            "active code-generation pointer changed during cached validation",
+                        ));
+                    }
+                }
                 memo.mtime = mtime;
                 memo.size = size;
                 return Ok(Some((memo.pointer.clone(), bytes)));
