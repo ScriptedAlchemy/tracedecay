@@ -245,11 +245,10 @@ async fn brokered_init(
 const INIT_WAIT_SLICE_MS: u64 = 30_000;
 const INIT_WAIT_SLICE: Duration = Duration::from_millis(INIT_WAIT_SLICE_MS);
 
-/// How long `init --wait` keeps waiting once the daemon stops reporting work
-/// toward the first generation. Capture, extraction, and graph publication
-/// publish no build progress for minutes on a large repository, so liveness
-/// is the scheduler's own indexing, restore, or verification claim, not a
-/// progress counter.
+/// Maximum silence for an observed capture, parse, or committed text
+/// boundary, or for an unavailable readiness owner. Graph publication has no
+/// native write authority on the freshness wire yet, so its phase alone must
+/// not become a false no-progress timeout.
 const INIT_WAIT_STALL_WINDOW: Duration = Duration::from_secs(120);
 
 fn init_queued_not_ready_receipt(project_path: &Path) -> String {
@@ -333,6 +332,7 @@ where
     Fut: std::future::Future<Output = tracedecay_domain::errors::Result<serde_json::Value>>,
 {
     let mut idle_window = FirstGenerationIdleWindow::new(stall_window);
+    let mut progress_window = FirstGenerationProgressWindow::new(stall_window);
     loop {
         let payload = read_slice().await?;
         let last_state = match first_generation_wait_outcome(&payload)? {
@@ -397,6 +397,20 @@ where
                 ),
             ));
         }
+        if progress_window.observe(
+            FirstGenerationWorkMarker::of(worktree.as_deref().ok()),
+            Instant::now(),
+        ) {
+            return Err(first_generation_wait_refusal(
+                CODE_INDEX_READINESS_WAIT_TIMED_OUT,
+                format!(
+                    "init --wait stopped waiting for the first generation: no observed \
+                     capture, parse, or committed text work for {}s; last state: \
+                     {last_state}{progress_suffix}",
+                    stall_window.as_secs(),
+                ),
+            ));
+        }
         eprintln!("first generation not ready yet: {last_state}{progress_suffix}");
     }
 }
@@ -433,6 +447,100 @@ impl FirstGenerationStall {
                 Some(CodeIndexStalenessStateV1::Restoring | CodeIndexStalenessStateV1::Verifying)
             );
         (!readiness_in_flight).then_some(Self::NoPassInFlight)
+    }
+}
+
+/// One real producer's last boundary. A polling read is never a heartbeat.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FirstGenerationWorkMarker {
+    Preseal {
+        owner: (u64, u64, u64),
+        epoch: u64,
+        last_work_micros: Option<i64>,
+    },
+    CommittedText {
+        generation: String,
+        owner: (u64, u64),
+        epoch: u64,
+        last_work_micros: i64,
+    },
+}
+
+impl FirstGenerationWorkMarker {
+    fn of(worktree: Option<&CodeIndexWorktreeFreshnessV1>) -> Option<Self> {
+        let worktree = worktree.filter(|state| state.rebuild_in_flight)?;
+        if let Some(progress) = &worktree.progress {
+            // Native writer events are not yet on the status wire. A graph
+            // publication phase cannot prove the graph writer has stalled.
+            if progress.phase == CodeIndexBuildPhaseV1::GraphPublication {
+                return None;
+            }
+            if !matches!(
+                progress.phase,
+                CodeIndexBuildPhaseV1::Ready | CodeIndexBuildPhaseV1::SourceScan
+            ) {
+                return Some(Self::CommittedText {
+                    generation: progress.generation_id.clone(),
+                    owner: (progress.daemon_incarnation, progress.producer_incarnation),
+                    epoch: progress.progress_epoch,
+                    last_work_micros: progress.last_progress_micros,
+                });
+            }
+        }
+        if let Some(attempt) = worktree.preseal_attempt.as_ref().filter(|a| a.active) {
+            return Some(Self::Preseal {
+                owner: (
+                    attempt.daemon_incarnation,
+                    attempt.producer_incarnation,
+                    attempt.attempt_sequence,
+                ),
+                epoch: attempt.progress_epoch,
+                last_work_micros: attempt.last_progress_micros,
+            });
+        }
+        worktree
+            .progress
+            .as_ref()
+            .filter(|progress| progress.phase == CodeIndexBuildPhaseV1::SourceScan)
+            .map(|progress| Self::CommittedText {
+                generation: progress.generation_id.clone(),
+                owner: (progress.daemon_incarnation, progress.producer_incarnation),
+                epoch: progress.progress_epoch,
+                last_work_micros: progress.last_progress_micros,
+            })
+    }
+}
+
+/// Compare work boundaries across status slices without renewing the clock
+/// on a read. A new owner or observed work epoch restarts the silence window.
+struct FirstGenerationProgressWindow {
+    last: Option<FirstGenerationWorkMarker>,
+    unchanged_since: Option<Instant>,
+    stall_window: Duration,
+}
+
+impl FirstGenerationProgressWindow {
+    fn new(stall_window: Duration) -> Self {
+        Self {
+            last: None,
+            unchanged_since: None,
+            stall_window,
+        }
+    }
+
+    fn observe(&mut self, marker: Option<FirstGenerationWorkMarker>, now: Instant) -> bool {
+        if marker.is_none() {
+            self.last = None;
+            self.unchanged_since = None;
+            return false;
+        }
+        if self.last != marker {
+            self.last = marker;
+            self.unchanged_since = Some(now);
+            return false;
+        }
+        let since = *self.unchanged_since.get_or_insert(now);
+        now.duration_since(since) >= self.stall_window
     }
 }
 
@@ -780,6 +888,76 @@ mod daemon_precondition_tests {
             super::preseal_progress_summary(&attempt),
             "capturing 16/unknown items, attempt=2:5:6 epoch=11 last_work_micros=123"
         );
+    }
+
+    fn attempt(phase: tracedecay_contracts::code_index_freshness::CodeIndexPresealWorkPhaseV1,
+        epoch: u64, completed: u64, sequence: u64) -> CodeIndexWorktreeFreshnessV1 {
+        let mut result = building(true);
+        result.preseal_attempt = Some(
+            tracedecay_contracts::code_index_freshness::CodeIndexPresealAttemptProgressV1 {
+                daemon_incarnation: 3, producer_incarnation: 5,
+                attempt_sequence: sequence, progress_epoch: epoch, phase,
+                completed_items: completed, total_items: Some(50),
+                last_progress_micros: (completed > 0).then_some((completed * 100) as i64),
+                active: true,
+            },
+        );
+        result
+    }
+
+    #[test]
+    fn active_capture_without_work_is_not_an_infinite_wait() {
+        use tracedecay_contracts::code_index_freshness::CodeIndexPresealWorkPhaseV1::Capture;
+        let source = attempt(Capture, 1, 0, 1);
+        let now = Instant::now();
+        let marker = super::FirstGenerationWorkMarker::of(Some(&source));
+        assert!(marker.is_some());
+        let mut window = super::FirstGenerationProgressWindow::new(Duration::from_secs(120));
+        assert!(!window.observe(marker.clone(), now));
+        assert!(!window.observe(marker.clone(), now + Duration::from_secs(119)));
+        assert!(window.observe(marker, now + Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn real_capture_parse_and_successor_attempts_reset_the_silence_window() {
+        use tracedecay_contracts::code_index_freshness::CodeIndexPresealWorkPhaseV1::{
+            Capture, ParseEvidence,
+        };
+        let now = Instant::now();
+        let mut window = super::FirstGenerationProgressWindow::new(Duration::from_secs(120));
+        let capture = attempt(Capture, 2, 3, 1);
+        let marker = super::FirstGenerationWorkMarker::of(Some(&capture));
+        assert!(!window.observe(marker.clone(), now));
+        assert!(!window.observe(marker, now + Duration::from_secs(119)));
+        let parsed = attempt(ParseEvidence, 3, 1, 1);
+        let marker = super::FirstGenerationWorkMarker::of(Some(&parsed));
+        assert!(!window.observe(marker.clone(), now + Duration::from_secs(119)));
+        assert!(!window.observe(marker.clone(), now + Duration::from_secs(238)));
+        assert!(window.observe(marker, now + Duration::from_secs(239)));
+        let retry = attempt(Capture, 4, 0, 2);
+        let marker = super::FirstGenerationWorkMarker::of(Some(&retry));
+        assert!(!window.observe(marker.clone(), now + Duration::from_secs(239)));
+        assert!(!window.observe(marker, now + Duration::from_secs(358)));
+    }
+
+    #[test]
+    fn committed_text_can_stall_but_unreported_graph_writes_cannot_fake_a_stall() {
+        let now = Instant::now();
+        let mut window = super::FirstGenerationProgressWindow::new(Duration::from_secs(120));
+        let mut source = building(true);
+        source.progress = Some(progress(10, None));
+        let marker = super::FirstGenerationWorkMarker::of(Some(&source));
+        assert!(!window.observe(marker.clone(), now));
+        assert!(!window.observe(marker, now + Duration::from_secs(119)));
+        source.progress = Some(progress(12, None));
+        let marker = super::FirstGenerationWorkMarker::of(Some(&source));
+        assert!(!window.observe(marker.clone(), now + Duration::from_secs(119)));
+        assert!(window.observe(marker, now + Duration::from_secs(239)));
+        source.progress.as_mut().unwrap().phase = CodeIndexBuildPhaseV1::GraphPublication;
+        assert_eq!(super::FirstGenerationWorkMarker::of(Some(&source)), None);
+        assert!(!window.observe(None, now + Duration::from_secs(1000)));
+        source.progress.as_mut().unwrap().phase = CodeIndexBuildPhaseV1::Ready;
+        assert_eq!(super::FirstGenerationWorkMarker::of(Some(&source)), None);
     }
 
     fn progress(
