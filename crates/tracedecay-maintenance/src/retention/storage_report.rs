@@ -607,8 +607,15 @@ async fn build_storage_report_with_walk_budget(
     // The registry rows come from an off-profile copy, so reading them first
     // leaves the profile untouched.
     // `Path::exists` hides permission errors and dangling symlinks as
-    // absence. That would misclassify every registered store as unregistered.
+    // absence. A valid symlink is also not a profile-owned registry: following
+    // it would read a foreign database the footprint walker does not charge.
     let registered_projects = match std::fs::symlink_metadata(&global_db_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(report_error(
+                "inspect profile registry for storage report",
+                "registry path is a symbolic link; its target is outside the measured registry authority",
+            ));
+        }
         Ok(_) => load_registered_project_rows(profile_root, &global_db_path).await?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(error) => {
@@ -2485,6 +2492,33 @@ mod tests {
         assert!(absent.stores.is_empty());
         assert_eq!(absent.unregistered_dir_count, 1);
         assert!(absent.unregistered_bytes >= 17);
+    }
+
+    #[cfg(unix)]
+    #[asupersync::test]
+    async fn linked_foreign_registry_is_not_misattributed_to_the_profile() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let foreign_root = temporary.path().join("foreign");
+        std::fs::create_dir_all(&foreign_root).unwrap();
+        seed_global_db(&foreign_root, &[("proj_foreign", "/repos/foreign")]).await;
+
+        let profile_root = temporary.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let registry = profile_root.join(GLOBAL_DB_FILENAME);
+        std::os::unix::fs::symlink(foreign_root.join(GLOBAL_DB_FILENAME), &registry).unwrap();
+        assert!(registry.is_file(), "the old path probe follows the foreign registry");
+
+        let error = build_storage_report(&profile_root)
+            .await
+            .expect_err("a foreign registry cannot supply project identity for this profile");
+        assert!(
+            matches!(&error, TraceDecayError::Database { .. }),
+            "the symlink must be refused as a typed storage error: {error}"
+        );
+        assert!(
+            error.to_string().contains("symbolic link"),
+            "the error must name the profile registry's disallowed link: {error}"
+        );
     }
 
     #[asupersync::test]
