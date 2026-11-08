@@ -1840,6 +1840,11 @@ impl GraphDb {
             self.retire_sealed_generation_store(locator)?;
             return Ok(GenerationContentsDeletion::RetentionPending);
         }
+        // Native row deletion may already have committed, but the generation
+        // is not collected until its independently durable sealed artifact is
+        // gone. If unlink refuses, keep the in-memory retirement state retryable
+        // instead of advertising collection while bytes still exist on disk.
+        self.retire_sealed_generation_store(locator)?;
         let mut state = self.wait_verified_generations_write()?;
         state.known.remove(locator);
         state.quarantined.remove(locator);
@@ -1858,7 +1863,6 @@ impl GraphDb {
             state.heads.remove(&locator.projection);
         }
         drop(state);
-        self.retire_sealed_generation_store(locator)?;
         Ok(GenerationContentsDeletion::Deleted)
     }
 
@@ -4006,6 +4010,14 @@ mod tests {
                 .contains("sealed directory removal failed")
         );
         assert_eq!(std::fs::read(&directory).unwrap(), b"not a directory");
+        assert!(
+            !database
+                .wait_verified_generations_write()
+                .unwrap()
+                .collected
+                .contains(&locator),
+            "a failed sealed unlink must not mark its generation collected"
+        );
 
         std::fs::remove_file(&directory).unwrap();
         std::fs::create_dir(&directory).unwrap();
@@ -4015,6 +4027,14 @@ mod tests {
             Ok(GenerationContentsDeletion::Deleted)
         ));
         assert!(!directory.exists());
+        assert!(
+            database
+                .wait_verified_generations_write()
+                .unwrap()
+                .collected
+                .contains(&locator),
+            "only successful physical retirement may mark the generation collected"
+        );
         // Idempotent replay after the directory is gone still succeeds.
         assert!(matches!(
             database.delete_generation_contents(&locator, &|| Ok(())),
