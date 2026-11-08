@@ -2578,10 +2578,15 @@ fn codex_directory_changed(
     let Some(stored) = stored else {
         return Ok(true);
     };
-    // A settled stat is sufficient to test unchanged history without
-    // rescanning every entry in its directory merely to retain a witness.
+    // A different native identity proves the directory changed, even while
+    // the filesystem change clock is unsettled. Do not enumerate and sort its
+    // entries (or miss a metadata-only change with identical entry names).
+    if current.stat != stored.stat {
+        return Ok(true);
+    }
+    // A settled, identical stat proves no directory mutation.
     if current.settled {
-        return Ok(current.stat != stored.stat);
+        return Ok(false);
     }
     // An older settled directory did not need an entry-name witness.
     // If its stat becomes unsettled, conservatively revalidate it rather

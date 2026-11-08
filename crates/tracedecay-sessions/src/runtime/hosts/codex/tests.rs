@@ -1232,7 +1232,8 @@ mod recent_first_discovery_tests {
         CodexIndexedPath, CodexReplayIndex, EXACT_HOOK_DISCOVERY_UNITS_PER_CALL,
         IDLE_FULL_VALIDATION_CYCLES, MAX_EXACT_HOOK_SESSION_REQUESTS,
         MAX_EXACT_HOOK_SOURCE_AUTHORITIES, MAX_SCAN_DEPTH, codex_directory_changed,
-        codex_directory_witness, directory_stat_witness, indexed_replay_pass,
+        codex_directory_witness, directory_entry_fingerprint, directory_stat_witness,
+        indexed_replay_pass,
         replay_index_entries_visited_for_test, reset_replay_index_entries_visited_for_test,
     };
     use crate::runtime::ingest::quarantine::SourceSweep;
@@ -2614,6 +2615,35 @@ mod recent_first_discovery_tests {
         assert!(
             rediscovered,
             "bounded idle authority must eventually validate files outside its active window"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unsettled_bucket_native_change_invalidates_even_with_same_entry_names() {
+        let temp = TempDir::new().unwrap();
+        let bucket = temp.path().join(".codex/sessions/2026/11/08");
+        std::fs::create_dir_all(&bucket).unwrap();
+        std::fs::write(bucket.join("rollout-existing.jsonl"), b"{}\n").unwrap();
+
+        // A recently changed bucket uses an entry-name witness when the
+        // clock is still coarse. Model a different previously observed stat
+        // (such as a directory metadata update) with identical entry names.
+        let mut stored = codex_directory_witness(&bucket).unwrap().unwrap();
+        assert!(
+            !directory_stat_witness(&bucket).unwrap().unwrap().settled,
+            "this regression requires the unsettled-clock branch"
+        );
+        assert!(stored.entries.is_some());
+        assert_eq!(
+            stored.entries,
+            Some(directory_entry_fingerprint(&bucket).unwrap())
+        );
+        stored.stat[0] ^= 1;
+
+        assert!(
+            codex_directory_changed(&bucket, Some(stored)).unwrap(),
+            "a changed native identity must invalidate even when the entry-name fingerprint is unchanged"
         );
     }
 
