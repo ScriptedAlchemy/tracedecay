@@ -861,6 +861,20 @@ fn prove_gix_ignored(root: &Path, logical_path: &str) -> Result<(), CodeIndexSch
     {
         return Err(CodeIndexIgnoredDependencyRefusalV1::NotIgnored.into());
     }
+    // A registered parent gitlink is still tracked source when the child
+    // checkout loses its .git marker. Ignore rules may match its descendants,
+    // but that cannot authorize indexing those descendants as dependencies.
+    let mut ancestor = Path::new(logical_path).parent();
+    while let Some(relative) = ancestor {
+        if relative
+            .to_str()
+            .and_then(|path| index.entry_by_path(path.as_bytes().as_bstr()))
+            .is_some_and(|entry| entry.mode.is_commit())
+        {
+            return Err(CodeIndexIgnoredDependencyRefusalV1::NotIgnored.into());
+        }
+        ancestor = relative.parent();
+    }
     let mut excludes = repository
         .excludes(
             &index,
@@ -932,4 +946,112 @@ fn map_reconcile_interruption_result<T>(
     result: Result<T, CodeIndexSchedulerErrorV1>,
 ) -> Result<T, CodeIndexSchedulerErrorV1> {
     result.map_err(map_reconcile_interruption)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+    use std::process::{Command, Output};
+
+    use super::{
+        CodeIndexIgnoredDependencyRefusalV1, CodeIndexSchedulerErrorV1, prove_gix_ignored,
+        read_bounded_admitted_source,
+    };
+
+    fn fixture_git(root: &Path, args: &[&str]) -> Output {
+        let program = tracedecay_runtime_core::git::try_git_program().expect("Git program");
+        let mut command = Command::new(program);
+        command.current_dir(root);
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("GIT_") {
+                command.env_remove(key);
+            }
+        }
+        let output = command
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", root.join(".fixture-gitconfig"))
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .expect("run fixture Git");
+        assert!(
+            output.status.success(),
+            "Git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    }
+
+    #[test]
+    fn parent_gitlink_cannot_be_admitted_as_ignored_dependency_without_gitdir_marker() {
+        let fixture = tempfile::tempdir().expect("repository fixture");
+        let parent = fixture.path().join("parent");
+        let child = fixture.path().join("child");
+        fs::create_dir_all(&parent).unwrap();
+        fs::create_dir_all(&child).unwrap();
+
+        fixture_git(&child, &["init", "-q"]);
+        fs::write(child.join("index.ts"), "export type Child = number;\n").unwrap();
+        fixture_git(&child, &["add", "."]);
+        fixture_git(&child, &["commit", "-qm", "child"]);
+
+        fixture_git(&parent, &["init", "-q"]);
+        fs::write(parent.join(".gitignore"), "node_modules/\n").unwrap();
+        fixture_git(&parent, &["add", ".gitignore"]);
+        fixture_git(&parent, &["commit", "-qm", "parent"]);
+        fixture_git(
+            &parent,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-f",
+                "-q",
+                "../child",
+                "node_modules/pkg",
+            ],
+        );
+
+        let staged = fixture_git(&parent, &["ls-files", "--stage", "--", "node_modules/pkg"]);
+        assert!(staged.stdout.starts_with(b"160000 "));
+        assert!(staged.stdout.ends_with(b" 0\tnode_modules/pkg\n"));
+        assert!(parent.join(".gitmodules").is_file());
+
+        fs::remove_file(parent.join("node_modules/pkg/.git")).unwrap();
+        assert!(parent.join("node_modules/pkg/index.ts").is_file());
+        let denied = prove_gix_ignored(&parent, "node_modules/pkg/index.ts");
+        assert!(matches!(
+            denied,
+            Err(CodeIndexSchedulerErrorV1::IgnoredDependency(
+                CodeIndexIgnoredDependencyRefusalV1::NotIgnored
+            ))
+        ));
+        let admitted = read_bounded_admitted_source(&parent, "node_modules/pkg/index.ts", None);
+        assert!(matches!(
+            admitted,
+            Err(CodeIndexSchedulerErrorV1::IgnoredDependency(
+                CodeIndexIgnoredDependencyRefusalV1::NotIgnored
+            ))
+        ));
+
+        // Ordinary ignored sources are still eligible; only gitlink ancestry
+        // withdraws the source trust that the ignored-dependency proof needs.
+        fs::create_dir_all(parent.join("node_modules/loose")).unwrap();
+        fs::write(
+            parent.join("node_modules/loose/index.ts"),
+            "export type Loose = string;\n",
+        )
+        .unwrap();
+        prove_gix_ignored(&parent, "node_modules/loose/index.ts")
+            .expect("non-repository ignored source remains admissible");
+    }
 }
