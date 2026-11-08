@@ -2534,6 +2534,9 @@ mod tests;
 
 #[cfg(test)]
 mod active_pointer_bounds_tests {
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
+
     use super::*;
 
     #[test]
@@ -2577,8 +2580,6 @@ mod active_pointer_bounds_tests {
     #[cfg(unix)]
     #[test]
     fn sparse_multigigabyte_pointer_and_foreign_symlink_fail_without_adoption() {
-        use std::os::unix::ffi::OsStrExt;
-
         let temp = tempfile::tempdir().unwrap();
         fixture::write_generation_store_fixture(temp.path(), 1);
         let path = temp.path().join(ACTIVE_POINTER_FILE);
