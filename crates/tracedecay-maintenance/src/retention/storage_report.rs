@@ -1590,9 +1590,7 @@ fn rollback_journal_uncommitted(path: &Path) -> std::io::Error {
 /// bytes instead of deleting the file. A zero magic prefix alone is NOT enough:
 /// SQLite may leave those first eight bytes zero during an active transaction,
 /// while the nonce and page/sector fields are already populated.
-fn inspect_inert_rollback_journal(
-    source: &Path,
-) -> std::io::Result<Option<std::fs::Metadata>> {
+fn inspect_inert_rollback_journal(source: &Path) -> std::io::Result<Option<std::fs::Metadata>> {
     let path = sqlite_family_member(source, "-journal");
     let checked = match std::fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.file_type().is_file() => metadata,
