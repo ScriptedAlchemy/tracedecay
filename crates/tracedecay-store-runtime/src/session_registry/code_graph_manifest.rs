@@ -441,6 +441,8 @@ fn with_verified_segments<T>(
     let mut read_segment = |request: SealedGenerationSegmentReadV1<'_>,
                             buffer: &mut Vec<u8>|
      -> Result<(), CodeIndexProductionErrorV1> {
+        // Cancellation must not expose bytes from a previously verified page.
+        buffer.clear();
         if let Err(error) = (check)() {
             if matches!(
                 error,
@@ -988,17 +990,27 @@ fn read_pinned_partitioned_segment(
             "sealed generation segment range exceeds addressable memory".to_owned(),
         )
     })?;
+    read_segment_range(&mut pinned.file, offset, length, buffer).map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!("sealed generation segment read failed: {error}"))
+    })
+}
+
+/// An interrupted or short page read must not publish any partially filled bytes.
+fn read_segment_range<R: Read + Seek>(
+    reader: &mut R,
+    offset: u64,
+    length: usize,
+    buffer: &mut Vec<u8>,
+) -> std::io::Result<()> {
     buffer.clear();
     buffer.resize(length, 0);
-    pinned
-        .file
+    let read = reader
         .seek(SeekFrom::Start(offset))
-        .and_then(|_| pinned.file.read_exact(buffer))
-        .map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed generation segment read failed: {error}"
-            ))
-        })
+        .and_then(|_| reader.read_exact(buffer));
+    if read.is_err() {
+        buffer.clear();
+    }
+    read
 }
 
 /// Read a whole segment and report the identity of the file the bytes came
@@ -2399,6 +2411,70 @@ mod tests {
             Err(CodeIndexProductionErrorV1::Contract(_))
         ));
         assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 0);
+    }
+
+
+    #[test]
+    fn graph_segment_interruption_clears_last_verified_page_without_reopen() {
+        let temporary = TempDir::new().unwrap();
+        let bytes = b"real authenticated segment data";
+        let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).unwrap();
+        let path = temporary.path().join(format!(
+            "segment-{}.json",
+            sha256_hex_suffix(digest.as_str()).unwrap()
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        let routes = SealRoutes {
+            seal_paths: vec![path],
+            segment_roots: vec![temporary.path().to_path_buf()],
+        };
+        let request = SealedGenerationSegmentReadV1::Whole {
+            digest: &digest,
+            size_bytes: bytes.len() as u64,
+        };
+        let checks = AtomicUsize::new(0);
+        SEGMENT_OPENS.with(|opens| opens.set(0));
+        let result = with_verified_segments(
+            &digest,
+            &routes,
+            &|| {
+                if checks.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Ok(())
+                } else {
+                    Err(GraphDbError::Cancelled)
+                }
+            },
+            |read| {
+                let mut buffer = Vec::new();
+                read(request, &mut buffer)?;
+                assert_eq!(buffer, bytes);
+                assert!(matches!(
+                    read(request, &mut buffer),
+                    Err(CodeIndexProductionErrorV1::Contract(_))
+                ));
+                assert!(
+                    buffer.is_empty(),
+                    "interrupted graph reads cannot expose prior page bytes"
+                );
+                Ok(())
+            },
+        );
+        assert_eq!(result.unwrap_err(), GraphDbError::Cancelled);
+        assert_eq!(checks.load(Ordering::SeqCst), 2);
+        assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 1);
+    }
+
+    #[test]
+    fn graph_segment_short_read_discards_partially_filled_output() {
+        let mut reader = std::io::Cursor::new(b"short".to_vec());
+        let mut buffer = vec![b'x'; 3];
+        assert!(super::read_segment_range(&mut reader, 0, 8, &mut buffer).is_err());
+        assert!(
+            buffer.is_empty(),
+            "failed reads cannot expose partial segment bytes"
+        );
+        super::read_segment_range(&mut reader, 0, 5, &mut buffer).unwrap();
+        assert_eq!(buffer, b"short");
     }
 
     #[test]
