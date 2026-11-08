@@ -598,7 +598,10 @@ async fn rewritten_bootstrap_checkpoint_refuses_commit_and_recovers_across_48_ro
         .await
         .unwrap();
     let staged_count: i64 = staged.next().await.unwrap().unwrap().get(0).unwrap();
-    assert_eq!(staged_count, 48, "the page was enrolled before checkpoint refusal");
+    assert_eq!(
+        staged_count, 48,
+        "the page was enrolled before checkpoint refusal"
+    );
     drop(staged);
     transaction.rollback().await.unwrap();
     assert_eq!(read_progress(store.conn()).await.unwrap().raw_through, 0);
