@@ -835,10 +835,33 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                             "staged sealed segment identity was invalidated".to_owned(),
                         ));
                     }
-                    let digest = match request {
-                        SealedGenerationSegmentReadV1::Whole { digest, .. }
-                        | SealedGenerationSegmentReadV1::Range { digest, .. } => digest,
+                    let (digest, size_bytes, offset, length) = match request {
+                        SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
+                            (digest, size_bytes, 0, size_bytes)
+                        }
+                        SealedGenerationSegmentReadV1::Range {
+                            digest,
+                            size_bytes,
+                            offset,
+                            length,
+                        } => (digest, size_bytes, offset, length),
                     };
+                    // Rejected requests are not cache accesses: they must not
+                    // evict a good handle or change the next eviction victim.
+                    if offset
+                        .checked_add(length)
+                        .is_none_or(|end| end > size_bytes)
+                    {
+                        return Err(CodeIndexProductionErrorV1::Contract(
+                            "sealed generation segment range exceeds its manifest identity"
+                                .to_owned(),
+                        ));
+                    }
+                    usize::try_from(length).map_err(|_| {
+                        CodeIndexProductionErrorV1::Contract(
+                            "sealed generation segment range exceeds addressable memory".to_owned(),
+                        )
+                    })?;
                     let suffix = sha256_hex_suffix(digest.as_str()).ok_or_else(|| {
                         CodeIndexProductionErrorV1::Contract(
                             "sealed segment digest is not sha256".to_owned(),
@@ -865,7 +888,14 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                             .iter()
                             .position(|entry| entry.path == path)
                         {
-                            let unchanged = files.pinned_segment_reads[position].unchanged();
+                            let cached = &files.pinned_segment_reads[position];
+                            if cached.segment.size_bytes != size_bytes {
+                                return Err(CodeIndexProductionErrorV1::Contract(
+                                    "sealed generation segment identity does not match its manifest"
+                                        .to_owned(),
+                                ));
+                            }
+                            let unchanged = cached.unchanged();
                             let entry =
                                 files.pinned_segment_reads.remove(position).ok_or_else(|| {
                                     CodeIndexProductionErrorV1::Contract(
@@ -893,10 +923,11 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                             // An evicted pathname cannot acquire a new
                             // identity merely because its handle was closed.
                             let observed = files.observed_segment_identities.get(&path).cloned();
+                            let named = path.symlink_metadata();
                             if let Some(original) = observed.as_ref()
-                                && !path.symlink_metadata().is_ok_and(|current| {
+                                && !named.as_ref().is_ok_and(|current| {
                                     DaemonCodeIndexPublicationStoreV1::same_unix_segment_identity(
-                                        original, &current,
+                                        original, current,
                                     )
                                 })
                             {
@@ -907,8 +938,19 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                                         .to_owned(),
                                 ));
                             }
-                            // Evict before opening so even a cache miss never
-                            // holds a ninth staged read descriptor.
+                            let named = named.map_err(|error| {
+                                CodeIndexProductionErrorV1::Contract(format!(
+                                    "staged sealed segment is unavailable: {error}"
+                                ))
+                            })?;
+                            if !named.file_type().is_file() || named.len() != size_bytes {
+                                return Err(CodeIndexProductionErrorV1::Contract(
+                                    "staged sealed segment identity does not match its manifest"
+                                        .to_owned(),
+                                ));
+                            }
+                            // Admit the request and path before eviction, then
+                            // evict before opening to retain the descriptor bound.
                             if files.pinned_segment_reads.len() == MAX_STAGED_SEGMENT_READ_HANDLES {
                                 files.pinned_segment_reads.pop_front();
                             }
@@ -916,6 +958,7 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                                 DaemonCodeIndexPublicationStoreV1::open_pinned_staged_segment(
                                     &path,
                                     request,
+                                    &named,
                                     &mut files.segment_read_open_attempts,
                                 )?;
                             if let Some(original) = observed.as_ref() {
@@ -2159,44 +2202,22 @@ impl DaemonCodeIndexPublicationStoreV1 {
             && named.ctime_nsec() == pinned.ctime_nsec()
     }
 
-    /// One actual file open per cache miss. Do not reopen via `Handle::from_path`
-    /// on macOS: comparing the Unix inode and change-time metadata before and
-    /// after open proves the same identity without another endpoint scan.
+    /// Open an admitted staged pathname without another pre-open stat or
+    /// `Handle::from_path` open. The caller validates the request and metadata
+    /// before evicting a cached handle; this checks identity across the open.
     #[cfg(unix)]
     fn open_pinned_staged_segment(
         path: &Path,
         request: SealedGenerationSegmentReadV1<'_>,
+        named: &std::fs::Metadata,
         open_attempts: &mut u64,
     ) -> Result<PinnedPreparationSegmentV1, CodeIndexProductionErrorV1> {
-        let (digest, size_bytes, offset, length) = match request {
-            SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
-                (digest.as_str(), size_bytes, 0, size_bytes)
-            }
-            SealedGenerationSegmentReadV1::Range {
-                digest,
-                size_bytes,
-                offset,
-                length,
-            } => (digest.as_str(), size_bytes, offset, length),
+        let (digest, size_bytes) = match request {
+            SealedGenerationSegmentReadV1::Whole { digest, size_bytes }
+            | SealedGenerationSegmentReadV1::Range {
+                digest, size_bytes, ..
+            } => (digest.as_str(), size_bytes),
         };
-        if offset
-            .checked_add(length)
-            .is_none_or(|end| end > size_bytes)
-        {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed generation segment range exceeds its manifest identity".to_owned(),
-            ));
-        }
-        let named = path.symlink_metadata().map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "staged sealed segment is unavailable: {error}"
-            ))
-        })?;
-        if !named.file_type().is_file() || named.len() != size_bytes {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "staged sealed segment identity does not match its manifest".to_owned(),
-            ));
-        }
         *open_attempts = (*open_attempts).saturating_add(1);
         tracing::trace!(
             target: "tracedecay::code_index",
@@ -2218,7 +2239,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "staged sealed segment pathname cannot be rechecked: {error}"
             ))
         })?;
-        if !Self::same_unix_segment_identity(&named, &opened)
+        if !Self::same_unix_segment_identity(named, &opened)
             || !Self::same_unix_segment_identity(&named_after_open, &opened)
         {
             return Err(CodeIndexProductionErrorV1::Contract(

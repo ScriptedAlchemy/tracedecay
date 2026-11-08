@@ -603,3 +603,127 @@ fn staged_preparation_exact_segment_bytes_commit_and_reload() {
         "a cold durable read must recover the exact published snapshot identity"
     );
 }
+
+#[test]
+fn staged_segment_rejected_reads_preserve_full_cache_and_recency() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let source_root = TempDir::new().expect("source store");
+    let generation = source_generation(&fixture, source_root.path());
+    let target_root = TempDir::new().expect("target store");
+    let mut target = target_store(target_root.path(), &fixture);
+    let mut preparation = target
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare target");
+    let contents = (0..9)
+        .map(|index| format!("admission-staged-segment-{index}-bytes").into_bytes())
+        .collect::<Vec<_>>();
+    let digests = contents
+        .iter()
+        .map(|bytes| segment_digest(bytes))
+        .collect::<Vec<_>>();
+    for (digest, bytes) in digests.iter().zip(&contents) {
+        preparation
+            .write_segment(SealedGenerationSegmentPublicationV1::File { digest, bytes })
+            .expect("stage real segment");
+    }
+    let reader = preparation.segment_reader();
+    let mut read = Vec::new();
+    for (digest, bytes) in digests.iter().zip(&contents).take(8) {
+        reader(
+            SealedGenerationSegmentReadV1::Whole {
+                digest,
+                size_bytes: bytes.len() as u64,
+            },
+            &mut read,
+        )
+        .expect("fill the handle cache");
+        assert_eq!(&read, bytes);
+    }
+    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 8);
+    assert_eq!(pinned_handle_count(&preparation), 8);
+    let missing_digest = segment_digest(b"never staged admission");
+    for request in [
+        SealedGenerationSegmentReadV1::Range {
+            digest: &digests[8],
+            size_bytes: contents[8].len() as u64,
+            offset: contents[8].len() as u64 - 1,
+            length: 2,
+        },
+        SealedGenerationSegmentReadV1::Range {
+            digest: &digests[8],
+            size_bytes: contents[8].len() as u64,
+            offset: u64::MAX,
+            length: 2,
+        },
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &digests[8],
+            size_bytes: contents[8].len() as u64 + 1,
+        },
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &missing_digest,
+            size_bytes: b"never staged admission".len() as u64,
+        },
+        SealedGenerationSegmentReadV1::Range {
+            digest: &digests[0],
+            size_bytes: contents[0].len() as u64,
+            offset: contents[0].len() as u64 - 1,
+            length: 2,
+        },
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &digests[0],
+            size_bytes: contents[0].len() as u64 + 1,
+        },
+    ] {
+        read.extend_from_slice(b"stale rejected-read sentinel");
+        assert!(matches!(
+            reader(request, &mut read),
+            Err(CodeIndexProductionErrorV1::Contract(_))
+        ));
+        assert_eq!(read, [] as [u8; 0]);
+        assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 8);
+        assert_eq!(
+            pinned_handle_count(&preparation),
+            8,
+            "a rejected request must not evict a valid handle"
+        );
+    }
+
+    // The next valid cold read must evict zero, not one: invalid accesses
+    // to zero above must not make it more recent than the other seven files.
+    reader(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &digests[8],
+            size_bytes: contents[8].len() as u64,
+        },
+        &mut read,
+    )
+    .expect("admit valid cold read after refusals");
+    assert_eq!(read, contents[8]);
+    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 9);
+    assert_eq!(pinned_handle_count(&preparation), 8);
+    reader(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &digests[1],
+            size_bytes: contents[1].len() as u64,
+        },
+        &mut read,
+    )
+    .expect("second-oldest handle must still be cached");
+    assert_eq!(read, contents[1]);
+    assert_eq!(
+        preparation.staged_segment_read_open_attempts_for_test(),
+        9,
+        "invalid cache hits must not change the eviction victim"
+    );
+    reader(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &digests[0],
+            size_bytes: contents[0].len() as u64,
+        },
+        &mut read,
+    )
+    .expect("reopen the actual least-recently-used segment");
+    assert_eq!(read, contents[0]);
+    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 10);
+    preparation.abort().expect("clean up staged cache fixture");
+}
