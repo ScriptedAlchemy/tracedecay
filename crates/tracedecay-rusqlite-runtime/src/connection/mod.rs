@@ -82,6 +82,31 @@ impl OpenedDatabaseFile {
         Self::adopt(file)
     }
 
+    /// Refuse unfinished stores before SQLite opens their WAL/SHM/journal.
+    /// A rejected new-basename reservation intentionally leaves the newly
+    /// created database in place so no pathname-based rollback can delete a
+    /// foreign replacement. That zero-length database must never become an
+    /// ordinary existing attachment on retry: SQLite would initialize it and
+    /// overwrite precisely the occupied sidecar that caused the refusal.
+    /// Read the magic through the existing pin; opening a second descriptor
+    /// here could discard another connection's POSIX locks on Unix.
+    pub(crate) fn pin_initialized(path: &Path) -> Result<Self, OpenedDatabaseFileError> {
+        let opened = Self::pin(path)?;
+        let initialized = opened.with_file(|file| {
+            let mut reader = file;
+            let mut header = [0_u8; 16];
+            match io::Read::read_exact(&mut reader, &mut header) {
+                Ok(()) => Ok(header == *b"SQLite format 3\0"),
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
+                Err(_) => Err(OpenedDatabaseFileError::Inspect),
+            }
+        })??;
+        if !initialized {
+            return Err(OpenedDatabaseFileError::InvalidHeader);
+        }
+        Ok(opened)
+    }
+
     pub(crate) fn create_new(path: &Path) -> Result<Self, OpenedDatabaseFileError> {
         let file = create_pinned_database(path).map_err(|_| OpenedDatabaseFileError::Create)?;
         // O_EXCL on the database alone does not own SQLite's basename:
@@ -326,6 +351,7 @@ pub(crate) fn live_path_identity(path: &Path) -> Result<u64, OpenedDatabaseFileE
 pub enum OpenedDatabaseFileError {
     Create,
     Reserve,
+    InvalidHeader,
     Open,
     Inspect,
     NotFile,
@@ -341,6 +367,7 @@ impl fmt::Display for OpenedDatabaseFileError {
         let message = match self {
             Self::Create => "could not create the canonical SQLite file",
             Self::Reserve => "could not exclusively reserve the new SQLite sidecar namespace",
+            Self::InvalidHeader => "existing SQLite file has no valid database header; refusing sidecar access",
             Self::Open => "could not open the verified SQLite file",
             Self::Inspect => "could not inspect the verified SQLite file descriptor",
             Self::NotFile => "verified SQLite locator is not a regular file",

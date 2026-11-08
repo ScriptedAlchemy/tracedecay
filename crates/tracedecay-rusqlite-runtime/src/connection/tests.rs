@@ -409,6 +409,47 @@ fn create_new_refuses_existing_sidecar_members_without_touching_their_bytes() {
     }
 }
 
+/// A reserved basename that failed on a foreign sidecar is left with an
+/// empty main DB. A later existing-mode attachment must not let SQLite
+/// initialize that empty file and destroy the foreign sidecar on retry.
+#[test]
+fn failed_sidecar_reservation_cannot_be_reopened_as_existing_sqlite() {
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.db");
+        let foreign = sidecar_path(&path, suffix);
+        let bytes = format!("foreign occupied {suffix} bytes");
+        std::fs::write(&foreign, bytes.as_bytes()).unwrap();
+
+        assert!(matches!(
+            OpenedDatabaseFile::create_new(&path),
+            Err(OpenedDatabaseFileError::Reserve)
+        ));
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+        assert!(matches!(
+            OpenedDatabaseFile::pin_initialized(&path),
+            Err(OpenedDatabaseFileError::InvalidHeader)
+        ));
+        assert_eq!(std::fs::read(&foreign).unwrap(), bytes.as_bytes());
+    }
+}
+
+#[test]
+fn existing_sqlite_admission_requires_a_completed_header() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.db");
+    std::fs::write(&path, b"invalid database, not SQLite").unwrap();
+    assert!(matches!(
+        OpenedDatabaseFile::pin_initialized(&path),
+        Err(OpenedDatabaseFileError::InvalidHeader)
+    ));
+    std::fs::remove_file(&path).unwrap();
+    let database = Connection::open(&path).unwrap();
+    database.execute_batch("CREATE TABLE probe(value INTEGER)").unwrap();
+    drop(database);
+    assert!(OpenedDatabaseFile::pin_initialized(&path).is_ok());
+}
+
 #[test]
 fn create_new_refuses_to_replace_an_existing_database() {
     let file = NamedTempFile::new().unwrap();

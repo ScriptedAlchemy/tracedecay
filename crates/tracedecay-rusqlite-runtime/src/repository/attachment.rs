@@ -55,7 +55,7 @@ impl RepositoryPhysicalAttachmentFactory {
         admission: AdmissionConfigV1,
     ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
         let opened_database =
-            OpenedDatabaseFile::pin(&path).map_err(RepositoryAttachmentStartError::Identity)?;
+            OpenedDatabaseFile::pin_initialized(&path).map_err(RepositoryAttachmentStartError::Identity)?;
         let reader_locator = ExistingReaderLocator::new(binding.clone(), locator, path.clone())
             .map_err(RepositoryAttachmentStartError::Reader)?;
         let reader_locator = reader_locator.with_opened_database(
@@ -124,7 +124,7 @@ impl RepositoryPhysicalAttachmentFactory {
         start_hook: &mut dyn FnMut(AttachmentWorkerStartStage),
     ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
         let opened_database =
-            OpenedDatabaseFile::pin(&path).map_err(RepositoryAttachmentStartError::Identity)?;
+            OpenedDatabaseFile::pin_initialized(&path).map_err(RepositoryAttachmentStartError::Identity)?;
         self.attach_opened(
             runtime,
             binding,
