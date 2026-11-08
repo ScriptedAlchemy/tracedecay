@@ -403,3 +403,132 @@ async fn zero_compaction_pages_advance_distinct_durable_frontiers() {
         ReplayMetadataCompactionReport::default()
     );
 }
+
+#[asupersync::test]
+async fn large_ineligible_metadata_is_bounded_before_eligibility_checks() {
+    let store = Store::open().await;
+    let structured = serde_json::json!([{
+        "type": "text",
+        "text": "retained structured replay ".repeat(20_000)
+    }]);
+    let mut originals = Vec::new();
+    for ordinal in 1..=9 {
+        let id = store
+            .insert(ordinal, "small verified body", structured.clone(), false)
+            .await;
+        originals.push((
+            id,
+            raw::load_raw_message_by_store_id(&store.conn, id)
+                .await
+                .unwrap(),
+        ));
+    }
+    let total_metadata_bytes: u64 = originals
+        .iter()
+        .map(|(_, message)| message.metadata_json.as_ref().unwrap().len() as u64)
+        .sum();
+    assert!(total_metadata_bytes > MAX_BATCH_BYTES);
+    assert!(originals.iter().all(|(_, message)| {
+        message.metadata_json.as_ref().unwrap().len() < 1024 * 1024
+    }));
+
+    let mut after = 0;
+    let mut examined = 0;
+    let mut scanned = 0;
+    let mut ticks = 0;
+    for _ in 0..originals.len() {
+        let report = store.tick(MAX_REPLAY_METADATA_COMPACTION_ROWS).await;
+        ticks += 1;
+        assert!(report.rows_scanned > 0);
+        assert_eq!(report.rows_compacted, 0);
+        assert_eq!(report.rows_skipped, 0);
+        assert_eq!(report.metadata_bytes_removed, 0);
+        assert!(report.metadata_bytes_examined > 0);
+        assert!(report.metadata_bytes_examined <= MAX_BATCH_BYTES);
+        assert_eq!(report.frontier_before, Some(after));
+        let next = report.frontier_after.unwrap();
+        assert!(next > after);
+        assert_eq!(frontier(&store.conn).await.unwrap(), next);
+        after = next;
+        examined += report.metadata_bytes_examined;
+        scanned += report.rows_scanned;
+        if !report.has_more {
+            break;
+        }
+    }
+    assert!(ticks > 1, "ineligible JSON must obey the byte budget too");
+    assert_eq!(scanned, originals.len() as u64);
+    assert_eq!(examined, total_metadata_bytes, "no document is revisited");
+    assert_eq!(after, originals.last().unwrap().0);
+    assert_eq!(
+        store.tick(MAX_REPLAY_METADATA_COMPACTION_ROWS).await,
+        ReplayMetadataCompactionReport::default()
+    );
+    for (id, original) in originals {
+        assert_eq!(
+            raw::load_raw_message_by_store_id(&store.conn, id)
+                .await
+                .unwrap(),
+            original,
+            "bounded scanning must preserve the body, replay and receipts"
+        );
+    }
+}
+
+#[asupersync::test]
+async fn oversized_metadata_is_preserved_without_blocking_later_compaction() {
+    let store = Store::open().await;
+    let text = "verified duplicate content ".repeat(80);
+    let oversized_id = store
+        .insert(1, &text, Value::String(text.clone()), false)
+        .await;
+    let next_id = store
+        .insert(2, &text, Value::String(text.clone()), false)
+        .await;
+    // Bypass ingress only to exercise a pre-existing oversized stored document.
+    // The repair must not parse or rewrite it, nor pin the durable frontier.
+    let oversized = serde_json::json!({
+        "lcm_active_replay": true,
+        "active_replay": {"content": text},
+        "padding": "x".repeat(MAX_BATCH_BYTES as usize)
+    })
+    .to_string();
+    store
+        .conn
+        .execute(
+            "UPDATE lcm_raw_messages SET metadata_json = ?1 WHERE store_id = ?2",
+            params![oversized.as_str(), oversized_id],
+        )
+        .await
+        .unwrap();
+    let report = store.tick(MAX_REPLAY_METADATA_COMPACTION_ROWS).await;
+    assert_eq!(report.rows_scanned, 2);
+    assert_eq!(report.rows_skipped, 1);
+    assert_eq!(report.rows_skipped_oversized, 1);
+    assert_eq!(report.rows_compacted, 1);
+    assert!(report.metadata_bytes_examined > 0);
+    assert!(report.metadata_bytes_examined < MAX_BATCH_BYTES);
+    assert_eq!(report.frontier_after, Some(next_id));
+    assert_eq!(frontier(&store.conn).await.unwrap(), next_id);
+    assert!(!report.has_more);
+    let mut rows = store
+        .conn
+        .query(
+            "SELECT metadata_json FROM lcm_raw_messages WHERE store_id = ?1",
+            params![oversized_id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<String>(0).unwrap(),
+        oversized
+    );
+    drop(rows);
+    assert_eq!(
+        store.tick(MAX_REPLAY_METADATA_COMPACTION_ROWS).await,
+        ReplayMetadataCompactionReport::default()
+    );
+    summary_convergence::validate_raw_update_guard(&store.conn)
+        .await
+        .unwrap();
+}
