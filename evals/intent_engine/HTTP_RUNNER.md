@@ -122,6 +122,14 @@ Create a separate JSON annotation manifest **before running inference** with
 (`dataset_sha256`), and `questions_sha256` equal to the canonical
 `qualification.sha256_json(common.noul_questions())` of the runner's exact
 question dictionary. This last digest must change with question text. Include
+an `arm` object predeclaring exactly one `config` renderer, a nullable
+`requested_model`, `endpoint_sha256` (SHA-256 of the exact URL bytes), and
+`server_config_sha256` (the sorted-JSON digest of the complete serving
+configuration, via `qualification.sha256_json(server_config)`). The runner
+refuses additional renderers or changed serving/model/endpoint declarations
+**before inference**; scoring rechecks these identities. This prevents choosing
+the best evaluation arm only after examining held-out predictions. These are
+operator declarations, not remote checkpoint attestation. Include
 `noul_temperature` as JSON `null` for no client calibration or a finite,
 positive number matching the runner's `--noul-temperature` argument. This
 client-side calibration must be frozen alongside the thresholds: changing it

@@ -407,6 +407,12 @@ def main(argv=None):
         qualified = validate_manifest(manifest, dataset_sha, questions, dataset)
         if args.noul_temperature != qualified["noul_temperature"]:
             raise ValueError("qualification client calibration differs from frozen manifest")
+        arm = qualified["arm"]
+        if (args.configs != [arm["config"]]
+                or args.send_model != arm["requested_model"]
+                or hashlib.sha256(args.url.encode("utf-8")).hexdigest() != arm["endpoint_sha256"]
+                or digest(server_config) != arm["server_config_sha256"]):
+            raise ValueError("qualification HTTP arm differs from frozen manifest")
         keep = set(qualified["heldout_ids"])
         dataset = [case for case in dataset if case["id"] in keep]
     if args.subset:

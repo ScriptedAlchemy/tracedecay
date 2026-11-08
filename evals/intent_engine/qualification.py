@@ -40,6 +40,22 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
     if manifest.get("questions_sha256") != sha256_json(questions):
         raise ValueError("qualification question vocabulary or instruction mismatch")
 
+    # A held-out split is not independent if the evaluator can try multiple
+    # renderers, model selectors or serving declarations and pick the winner.
+    arm = manifest.get("arm")
+    required_arm = {"config", "requested_model", "endpoint_sha256", "server_config_sha256"}
+    if not isinstance(arm, dict) or set(arm) != required_arm:
+        raise ValueError("qualification requires one frozen HTTP arm")
+    if not isinstance(arm["config"], str) or not arm["config"].strip():
+        raise ValueError("qualification HTTP arm requires a renderer config")
+    model = arm["requested_model"]
+    if model is not None and (not isinstance(model, str) or not model.strip()):
+        raise ValueError("qualification HTTP arm requires a valid requested model or null")
+    for field in ("endpoint_sha256", "server_config_sha256"):
+        value = arm[field]
+        if not isinstance(value, str) or not _DIGEST.fullmatch(value):
+            raise ValueError(f"qualification HTTP arm has invalid {field}")
+
     thresholds = manifest.get("thresholds")
     if not isinstance(thresholds, dict) or set(thresholds) != set(questions):
         raise ValueError("qualification thresholds must cover every requested question")
@@ -147,6 +163,7 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
                 )
     return {
         "heldout_ids": heldout,
+        "arm": arm,
         "thresholds": thresholds,
         "noul_temperature": client_temperature,
         "error_tolerances": tolerances,
@@ -210,6 +227,12 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes):
     if experiment.get("qualification_manifest_sha256") != manifest_sha:
         raise ValueError("qualification experiment is not bound to this frozen manifest")
     validated = validate_manifest(manifest, dataset_sha, questions, cases)
+    arm = validated["arm"]
+    if (experiment.get("config") != arm["config"]
+            or experiment.get("requested_model") != arm["requested_model"]
+            or experiment.get("endpoint_sha256") != arm["endpoint_sha256"]
+            or sha256_json(server) != arm["server_config_sha256"]):
+        raise ValueError("qualification HTTP arm differs from frozen manifest")
     rows = result.get("rows")
     if not isinstance(rows, list) or [r.get("id") for r in rows if isinstance(r, dict)] != validated["heldout_ids"]:
         raise ValueError("qualification result differs from frozen held-out case order")

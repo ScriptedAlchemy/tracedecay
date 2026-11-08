@@ -47,10 +47,20 @@ class QualificationTests(unittest.TestCase):
                 "verified_labels": case["labels"],
                 "verified_context_needed": case["context_needed"],
             })
+        self.endpoint = "http://127.0.0.1:8009/v1/systemone"
+        self.server_config = {
+            "checkpoint": "pinned", "server_revision": "r1",
+            "backend": "cpu", "dtype": "float32", "temperature": 2.41,
+        }
         self.manifest = {
             "version": 1, "application": "historical-intent-evaluation",
             "dataset_sha256": self.dataset_sha,
             "questions_sha256": qualification.sha256_json(self.questions),
+            "arm": {
+                "config": "B_noul_text", "requested_model": None,
+                "endpoint_sha256": qualification.sha256_bytes(self.endpoint.encode("utf-8")),
+                "server_config_sha256": qualification.sha256_json(self.server_config),
+            },
             "noul_temperature": None,
             "thresholds": {key: 0.6 for key in self.questions},
             "error_tolerances": {
@@ -209,6 +219,8 @@ class QualificationTests(unittest.TestCase):
         experiment = {
             "version": 2,
             "config": "B_noul_text",
+            "requested_model": None,
+            "endpoint_sha256": self.manifest["arm"]["endpoint_sha256"],
             "case_ids": [row["id"] for row in rows],
             "dataset_sha256": self.dataset_sha,
             "case_annotations_sha256": score.evidence_digest([
@@ -218,11 +230,7 @@ class QualificationTests(unittest.TestCase):
                 [r["id"], r["request_sha256"]] for r in rows
             ]),
             "noul_temperature": None,
-            "server_config": {
-                "checkpoint": "checkpoint-pinned-by-operator",
-                "server_revision": "immutable-server-revision",
-                "backend": "cpu", "dtype": "float32", "temperature": 2.41,
-            },
+            "server_config": copy.deepcopy(self.server_config),
             "qualification_manifest_sha256": self.manifest_sha,
         }
         return {
@@ -308,10 +316,7 @@ class QualificationTests(unittest.TestCase):
             (here / "dataset.json").write_bytes(self.dataset_bytes)
             manifest_path = here / "manifest.json"
             manifest_path.write_bytes(self.manifest_bytes)
-            (here / "server.json").write_text(json.dumps({
-                "checkpoint": "pinned", "server_revision": "r1",
-                "backend": "cpu", "dtype": "float32", "temperature": 2.41,
-            }))
+            (here / "server.json").write_text(json.dumps(self.server_config))
             args = [
                 "--url", "http://127.0.0.1:8009/v1/systemone",
                 "--tag", "calibration",
@@ -351,11 +356,7 @@ class QualificationTests(unittest.TestCase):
             here = Path(temp)
             (here / "dataset.json").write_bytes(self.dataset_bytes)
             (here / "manifest.json").write_bytes(self.manifest_bytes)
-            (here / "server.json").write_text(json.dumps({
-                "checkpoint": "example-pinned-checkpoint",
-                "server_revision": "example-pinned-server",
-                "backend": "example-backend", "dtype": "float32", "temperature": 2.41,
-            }))
+            (here / "server.json").write_text(json.dumps(self.server_config))
             calls = []
 
             def answer(url, body):
@@ -391,10 +392,7 @@ class QualificationTests(unittest.TestCase):
             changed = copy.deepcopy(self.manifest)
             changed["annotations"][2]["project_id"] = "project-a"
             (here / "manifest.json").write_text(json.dumps(changed))
-            (here / "server.json").write_text(json.dumps({
-                "checkpoint": "pinned", "server_revision": "r1", "backend": "cpu",
-                "dtype": "float32", "temperature": 2.41,
-            }))
+            (here / "server.json").write_text(json.dumps(self.server_config))
             args = [
                 "--url", "http://127.0.0.1:8009/v1/systemone",
                 "--tag", "refused",
@@ -423,10 +421,7 @@ class QualificationTests(unittest.TestCase):
             (here / "dataset.json").write_bytes(self.dataset_bytes)
             manifest_path = here / "manifest.json"
             manifest_path.write_bytes(self.manifest_bytes)
-            (here / "server.json").write_text(json.dumps({
-                "checkpoint": "pinned", "server_revision": "r1", "backend": "cpu",
-                "dtype": "float32", "temperature": 2.41,
-            }))
+            (here / "server.json").write_text(json.dumps(self.server_config))
             args = [
                 "--url", "http://127.0.0.1:8009/v1/systemone",
                 "--tag", "interrupted",
@@ -540,10 +535,7 @@ class QualificationTests(unittest.TestCase):
             dataset_path = here / "external-cases.json"
             dataset_path.write_bytes(self.dataset_bytes)
             (here / "manifest.json").write_bytes(self.manifest_bytes)
-            (here / "server.json").write_text(json.dumps({
-                "checkpoint": "pinned", "server_revision": "r1",
-                "backend": "cpu", "dtype": "float32", "temperature": 2.41,
-            }))
+            (here / "server.json").write_text(json.dumps(self.server_config))
             answer = {"answers": {
                 key: {"type": "noul", "noul": 0.5} for key in self.questions
             }}
@@ -566,6 +558,77 @@ class QualificationTests(unittest.TestCase):
                 self.questions, self.dataset_bytes,
             )
 
+
+
+    def test_frozen_http_arm_is_required_and_well_formed(self):
+        mutations = (
+            (lambda m: m.pop("arm"), "frozen HTTP arm"),
+            (lambda m: m["arm"].pop("config"), "frozen HTTP arm"),
+            (lambda m: m["arm"].update(config=""), "renderer config"),
+            (lambda m: m["arm"].update(requested_model=""), "requested model"),
+            (lambda m: m["arm"].update(endpoint_sha256="x" * 64), "endpoint_sha256"),
+            (lambda m: m["arm"].update(server_config_sha256=None), "server_config_sha256"),
+        )
+        for mutate, error in mutations:
+            with self.subTest(error=error):
+                manifest = copy.deepcopy(self.manifest)
+                mutate(manifest)
+                with self.assertRaisesRegex(ValueError, error):
+                    self.valid(manifest)
+
+    def test_frozen_http_arm_refuses_post_hoc_reselection_before_inference(self):
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            (here / "dataset.json").write_bytes(self.dataset_bytes)
+            (here / "manifest.json").write_bytes(self.manifest_bytes)
+            server = here / "server.json"
+            normal = [
+                "--url", self.endpoint, "--tag", "locked-arm",
+                "--server-config", str(server),
+                "--qualification-manifest", str(here / "manifest.json"),
+                "B_noul_text",
+            ]
+            trials = (
+                ("renderer", lambda a: a.__setitem__(-1, "A_noul_prompt")),
+                ("multiple-renderers", lambda a: a.append("A_noul_prompt")),
+                ("model", lambda a: a.__setitem__(slice(-1, -1), ["--send-model", "unfrozen-model"])),
+                ("endpoint", lambda a: a.__setitem__(1, "http://127.0.0.1:8010/v1/systemone")),
+            )
+            with patch.object(run_http, "HERE", str(here)):
+                for label, mutation in trials:
+                    with self.subTest(label=label):
+                        server.write_text(json.dumps(self.server_config))
+                        args = normal.copy()
+                        mutation(args)
+                        with patch.object(run_http, "post") as blocked:
+                            with self.assertRaisesRegex(ValueError, "HTTP arm differs"):
+                                run_http.main(args)
+                            blocked.assert_not_called()
+                        self.assertFalse((here / "results").exists())
+                drifted = copy.deepcopy(self.server_config)
+                drifted["checkpoint"] = "another-checkpoint"
+                server.write_text(json.dumps(drifted))
+                with patch.object(run_http, "post") as blocked:
+                    with self.assertRaisesRegex(ValueError, "HTTP arm differs"):
+                        run_http.main(normal)
+                    blocked.assert_not_called()
+                self.assertFalse((here / "results").exists())
+
+    def test_scorer_refuses_rehashed_unfrozen_http_arm(self):
+        mutations = (
+            lambda e: e.update(endpoint_sha256="f" * 64),
+            lambda e: e["server_config"].update(checkpoint="different-pinned-model"),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                result = self.signed_result()
+                mutate(result["experiment"])
+                result["experiment_sha256"] = score.evidence_digest(result["experiment"])
+                with self.assertRaisesRegex(ValueError, "HTTP arm differs"):
+                    qualification.qualified_report(
+                        result, self.manifest, self.manifest_sha,
+                        self.questions, self.dataset_bytes,
+                    )
 
 if __name__ == "__main__":
     unittest.main()
