@@ -2697,7 +2697,10 @@ mod tests {
                 parent_file_digests.contains(segment["segment_digest"].as_str().unwrap())
             })
             .count();
-        assert!(inherited_files > 0, "a one-file edit must retain sealed files");
+        assert!(
+            inherited_files > 0,
+            "a one-file edit must retain sealed files"
+        );
         let count_proof_reads = |record: &VerifiedSealedSegmentsV1| {
             let reads = AtomicUsize::new(0);
             assert_eq!(
