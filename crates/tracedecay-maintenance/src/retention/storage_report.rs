@@ -2571,8 +2571,7 @@ mod tests {
                 .unwrap()
                 .set_len(foreign_bytes)
                 .unwrap();
-            std::os::unix::fs::symlink(&foreign, sqlite_family_member(&registry, suffix))
-                .unwrap();
+            std::os::unix::fs::symlink(&foreign, sqlite_family_member(&registry, suffix)).unwrap();
 
             let destination = temporary.path().join("snapshot.db");
             let error = copy_sqlite_family(&registry, &destination)
