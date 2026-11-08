@@ -348,14 +348,20 @@ async fn stale_metadata_cannot_be_overwritten_and_missing_guard_refuses_repair()
 async fn row_and_byte_budgets_advance_a_durable_frontier_and_finished_pages_are_noops() {
     let store = Store::open().await;
     let text = "bounded replay text ".repeat(35_000);
+    let mut metadata_bytes = Vec::new();
     for ordinal in 1..=4 {
-        store
+        let id = store
             .insert(ordinal, &text, Value::String(text.clone()), true)
             .await;
+        let message = raw::load_raw_message_by_store_id(&store.conn, id)
+            .await
+            .unwrap();
+        metadata_bytes.push(message.metadata_json.unwrap().len() as u64);
     }
     let first = store.tick(1).await;
     assert_eq!(first.rows_scanned, 1);
     assert_eq!(first.rows_compacted, 1);
+    assert_eq!(first.metadata_bytes_examined, metadata_bytes[0]);
     assert!(first.has_more);
     assert_eq!(frontier(&store.conn).await.unwrap(), 1);
     let second = store.tick(48).await;
@@ -364,7 +370,20 @@ async fn row_and_byte_budgets_advance_a_durable_frontier_and_finished_pages_are_
         "byte cap stops before the third large row"
     );
     assert!(second.has_more);
+    assert_eq!(
+        second.metadata_bytes_examined,
+        metadata_bytes[1..1 + second.rows_scanned as usize]
+            .iter()
+            .sum::<u64>(),
+        "the body budget must not pre-parse replay metadata for deferred rows"
+    );
     let last = store.tick(48).await;
+    assert_eq!(
+        last.metadata_bytes_examined,
+        metadata_bytes[1 + second.rows_scanned as usize..]
+            .iter()
+            .sum::<u64>()
+    );
     assert!(!last.has_more);
     let idle = store.tick(48).await;
     assert_eq!(idle, ReplayMetadataCompactionReport::default());

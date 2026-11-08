@@ -39,7 +39,7 @@ pub struct ReplayMetadataCompactionReport {
     /// representations exceed this pass's 4 MiB read and verification budget.
     pub rows_skipped_oversized: u64,
     /// Metadata bytes admitted to SQL eligibility parsing, including ineligible
-    /// rows and any prefetched rows deferred by the separate body byte budget.
+    /// rows. Work deferred by the body verification budget is not parsed.
     pub metadata_bytes_examined: u64,
     /// UTF-8 metadata bytes removed. This does not measure file shrinkage.
     pub metadata_bytes_removed: u64,
@@ -106,8 +106,8 @@ struct Candidate {
     read_bytes: Option<u64>,
 }
 
-/// Admit a size-bounded prefix before parsing any metadata. Eligibility must
-/// not parse all 48 documents before the body's separate byte budget is applied.
+/// Admit a prefix bounded by both metadata parsing and body-read estimates
+/// before testing eligibility. Deferred rows must not be JSON-parsed again.
 async fn candidates(
     conn: &(impl QueryExecutor + ?Sized),
     after: i64,
@@ -131,6 +131,7 @@ async fn candidates(
     let mut result = Vec::new();
     let mut eligibility_ids = Vec::new();
     let mut remaining = MAX_BATCH_BYTES;
+    let mut read_remaining = MAX_BATCH_BYTES;
     while let Some(row) = rows.next().await? {
         let store_id: i64 = row.get(0)?;
         let inline = row.get::<i64>(1)? != 0;
@@ -143,15 +144,6 @@ async fn candidates(
             0
         };
         let metadata_oversized = metadata_bytes > MAX_BATCH_BYTES;
-        if !metadata_oversized {
-            if metadata_bytes > remaining {
-                break;
-            }
-            remaining -= metadata_bytes;
-            if inline && metadata.is_some() {
-                eligibility_ids.push(store_id);
-            }
-        }
         let read_bytes = metadata
             .zip(body)
             .and_then(|(metadata, body)| {
@@ -162,6 +154,25 @@ async fn candidates(
                 ))
             })
             .and_then(|(metadata, body, stored)| metadata.checked_add(body)?.checked_add(stored));
+        if !metadata_oversized {
+            if metadata_bytes > remaining {
+                break;
+            }
+            // Eligibility is not yet known. Charge every inline row against
+            // the verification budget so deferred rows are not JSON-parsed
+            // again on the next tick. Individually oversized rows still
+            // advance without loading their bodies.
+            if inline && let Some(bytes) = read_bytes && bytes <= MAX_BATCH_BYTES {
+                if bytes > read_remaining {
+                    break;
+                }
+                read_remaining -= bytes;
+            }
+            remaining -= metadata_bytes;
+            if inline && metadata.is_some() {
+                eligibility_ids.push(store_id);
+            }
+        }
         result.push(Candidate {
             store_id,
             eligible: false,
