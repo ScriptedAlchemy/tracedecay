@@ -57,7 +57,7 @@ fn retained_effect_payload<'a>(response: &'a Value, operation: &str) -> &'a Valu
 fn retained_admin_journey_commits_add_update_feedback_and_remove() {
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_dashboard_retained_memory_fixture().await;
+        let fixture = start_dashboard_configuration_fixture().await;
         let agent = http_agent();
 
         let (status, added) = post_json_body(
@@ -214,7 +214,7 @@ fn retained_admin_journey_commits_add_update_feedback_and_remove() {
 fn fact_detail_keeps_a_superseded_fact_readable_by_id() {
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_dashboard_retained_memory_fixture().await;
+        let fixture = start_dashboard_configuration_fixture().await;
         let agent = http_agent();
         let add = |content: &str| {
             let (status, added) = post_json_body(
@@ -276,7 +276,7 @@ fn fact_detail_keeps_a_superseded_fact_readable_by_id() {
 fn retained_mutations_deny_foreign_project_scope_without_a_receipt() {
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_dashboard_retained_memory_fixture().await;
+        let fixture = start_dashboard_configuration_fixture().await;
         let agent = http_agent();
         let (_target_root, target_cg) = crate::projects::setup_target_project(&fixture).await;
         let target_project_id = target_cg
