@@ -2733,6 +2733,67 @@ mod tests {
             );
         }
 
+        // A new segment must still be authenticated after the successor is
+        // warm. A proof that skips *all* segments could satisfy the read-count
+        // delta but would silently accept a corrupted edited file.
+        let changed_segment = successor["generation"]["file_segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|segment| {
+                !parent_file_digests.contains(segment["segment_digest"].as_str().unwrap())
+            })
+            .expect("a one-file successor must seal a changed file");
+        let changed_digest = tracedecay_domain::ManifestDigest::new(
+            changed_segment["segment_digest"].as_str().unwrap().to_owned(),
+        )
+        .unwrap();
+        let changed_path = super::segment_path(&fixture.segments_root, &changed_digest).unwrap();
+        let original_bytes = std::fs::read(&changed_path).unwrap();
+        assert!(!original_bytes.is_empty());
+        let successor_record = VerifiedSealedSegmentsV1::default();
+        assert_eq!(
+            verify_sealed_generation_source_from_roots(
+                &generations_root,
+                replay_root,
+                &successor_digest,
+                &successor_record,
+                &|| Ok(()),
+            ),
+            Ok(())
+        );
+        let original_permissions = std::fs::metadata(&changed_path).unwrap().permissions();
+        let mut writable_permissions = original_permissions.clone();
+        #[allow(clippy::permissions_set_readonly_false)]
+        writable_permissions.set_readonly(false);
+        std::fs::set_permissions(&changed_path, writable_permissions).unwrap();
+        let mut tampered_bytes = original_bytes.clone();
+        tampered_bytes[0] ^= 1;
+        std::fs::write(&changed_path, tampered_bytes).unwrap();
+        let corrupt_changed = verify_sealed_generation_source_from_roots(
+            &generations_root,
+            replay_root,
+            &successor_digest,
+            &successor_record,
+            &|| Ok(()),
+        );
+        assert!(
+            matches!(corrupt_changed, Err(GraphDbError::Corrupt { .. })),
+            "a warmed successor accepted a corrupt changed segment: {corrupt_changed:?}"
+        );
+        std::fs::write(&changed_path, original_bytes).unwrap();
+        std::fs::set_permissions(&changed_path, original_permissions).unwrap();
+        assert_eq!(
+            verify_sealed_generation_source_from_roots(
+                &generations_root,
+                replay_root,
+                &successor_digest,
+                &successor_record,
+                &|| Ok(()),
+            ),
+            Ok(())
+        );
+
         let inherited = successor["generation"]["file_segments"]
             .as_array_mut()
             .unwrap()
