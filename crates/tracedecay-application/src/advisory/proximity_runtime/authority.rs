@@ -834,6 +834,18 @@ fn participant_graph_address(
     })
 }
 
+const MAX_GRAPH_RELATION_SEEDS: usize = 32;
+
+fn relation_seeds(ids: &BTreeSet<SymbolOccurrenceId>) -> (Vec<SymbolOccurrenceId>, bool) {
+    (
+        ids.iter()
+            .take(MAX_GRAPH_RELATION_SEEDS)
+            .cloned()
+            .collect(),
+        ids.len() > MAX_GRAPH_RELATION_SEEDS,
+    )
+}
+
 #[derive(Clone)]
 struct GraphRelation {
     warning_class: ProximityWarningClassV1,
@@ -864,8 +876,9 @@ fn graph_relation(
         );
     }
 
-    let left_seeds = left_ids.iter().take(32).cloned().collect::<Vec<_>>();
-    let right_seeds = right_ids.iter().take(32).cloned().collect::<Vec<_>>();
+    let (left_seeds, left_truncated) = relation_seeds(&left_ids);
+    let (right_seeds, right_truncated) = relation_seeds(&right_ids);
+    let incomplete_seed_coverage = left_truncated || right_truncated;
     let Ok(left_edges) = graph.callees(
         &left_seeds,
         &[RelationEdgeKindV1::Calls],
@@ -874,7 +887,10 @@ fn graph_relation(
     ) else {
         return (None, true);
     };
-    for edges in left_edges {
+    if left_edges.len() != left_seeds.len() {
+        return (None, true);
+    }
+    for edges in &left_edges {
         if edges
             .iter()
             .any(|edge| right_ids.contains(&edge.edge.to_occurrence))
@@ -884,7 +900,7 @@ fn graph_relation(
                     warning_class: ProximityWarningClassV1::Neighborhood,
                     kinds: vec![ProximityRelationPathKindV1::DirectDependency],
                 }),
-                false,
+                incomplete_seed_coverage,
             );
         }
     }
@@ -896,7 +912,10 @@ fn graph_relation(
     ) else {
         return (None, true);
     };
-    for edges in right_edges {
+    if right_edges.len() != right_seeds.len() {
+        return (None, true);
+    }
+    for edges in &right_edges {
         if edges
             .iter()
             .any(|edge| left_ids.contains(&edge.edge.to_occurrence))
@@ -906,18 +925,28 @@ fn graph_relation(
                     warning_class: ProximityWarningClassV1::Neighborhood,
                     kinds: vec![ProximityRelationPathKindV1::DirectCaller],
                 }),
-                false,
+                incomplete_seed_coverage,
             );
         }
     }
 
+    // The direct relationship checks already read the first outgoing hop.
+    // Reuse those generation-pinned batches for transitive discovery.
+    let left_first_hop = left_edges
+        .into_iter()
+        .map(|edges| edges.into_iter().map(|edge| edge.edge.to_occurrence).collect())
+        .collect();
+    let right_first_hop = right_edges
+        .into_iter()
+        .map(|edges| edges.into_iter().map(|edge| edge.edge.to_occurrence).collect())
+        .collect();
     let Some((left_callers, left_dependencies, left_tests)) =
-        graph_neighborhood(graph, Arc::clone(&cancellation), &left_seeds)
+        graph_neighborhood(graph, Arc::clone(&cancellation), &left_seeds, left_first_hop)
     else {
         return (None, true);
     };
     let Some((right_callers, right_dependencies, right_tests)) =
-        graph_neighborhood(graph, cancellation, &right_seeds)
+        graph_neighborhood(graph, cancellation, &right_seeds, right_first_hop)
     else {
         return (None, true);
     };
@@ -927,7 +956,7 @@ fn graph_relation(
                 warning_class: ProximityWarningClassV1::SharedCaller,
                 kinds: vec![ProximityRelationPathKindV1::TransitiveCaller],
             }),
-            false,
+            incomplete_seed_coverage,
         );
     }
     if !left_dependencies.is_disjoint(&right_dependencies) {
@@ -936,7 +965,7 @@ fn graph_relation(
                 warning_class: ProximityWarningClassV1::SharedDependency,
                 kinds: vec![ProximityRelationPathKindV1::TransitiveDependency],
             }),
-            false,
+            incomplete_seed_coverage,
         );
     }
     if !left_tests.is_disjoint(&right_tests) {
@@ -945,10 +974,10 @@ fn graph_relation(
                 warning_class: ProximityWarningClassV1::SharedTest,
                 kinds: vec![ProximityRelationPathKindV1::AffectedTest],
             }),
-            false,
+            incomplete_seed_coverage,
         );
     }
-    (None, false)
+    (None, incomplete_seed_coverage)
 }
 
 /// Collect only the bounded incoming caller closure needed for qualitative
@@ -1011,6 +1040,7 @@ fn caller_neighborhood(
 /// a negative relationship result.
 fn dependency_neighborhood(
     seeds: &[SymbolOccurrenceId],
+    first_hop: Vec<Vec<SymbolOccurrenceId>>,
     mut read_callees: impl FnMut(&[SymbolOccurrenceId]) -> Option<Vec<Vec<SymbolOccurrenceId>>>,
 ) -> Option<BTreeSet<SymbolOccurrenceId>> {
     let mut frontier = seeds
@@ -1020,11 +1050,16 @@ fn dependency_neighborhood(
         .into_iter()
         .collect::<Vec<_>>();
     let mut dependencies = BTreeSet::new();
+    let mut first_hop = Some(first_hop);
     for _ in 0..2 {
         if frontier.is_empty() {
             break;
         }
-        let batches = read_callees(&frontier)?;
+        let batches = if let Some(first) = first_hop.take() {
+            first
+        } else {
+            read_callees(&frontier)?
+        };
         if batches.len() != frontier.len() {
             return None;
         }
@@ -1041,6 +1076,7 @@ fn graph_neighborhood(
     graph: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
     seeds: &[SymbolOccurrenceId],
+    first_hop: Vec<Vec<SymbolOccurrenceId>>,
 ) -> Option<(
     BTreeSet<SymbolOccurrenceId>,
     BTreeSet<SymbolOccurrenceId>,
@@ -1066,7 +1102,7 @@ fn graph_neighborhood(
                     .collect()
             })
     })?;
-    let dependencies = dependency_neighborhood(seeds, |frontier| {
+    let dependencies = dependency_neighborhood(seeds, first_hop, |frontier| {
         graph
             .callees(
                 frontier,
@@ -1394,35 +1430,53 @@ mod tests {
     }
 
     #[test]
-    fn dependency_neighborhood_deduplicates_seed_reads_and_refuses_missing_adjacency() {
+    fn relation_seeds_mark_unexamined_symbols_as_partial() {
+        let symbols = (0..33)
+            .map(|index| SymbolOccurrenceId::new(format!("symbol.{index:02}")).unwrap())
+            .collect::<BTreeSet<_>>();
+        let (seeds, truncated) = relation_seeds(&symbols);
+        assert_eq!(seeds.len(), MAX_GRAPH_RELATION_SEEDS);
+        assert!(truncated, "skipped graph nodes make a negative hint inconclusive");
+        assert!(!seeds.contains(&SymbolOccurrenceId::new("symbol.32").unwrap()));
+        let (complete_seeds, incomplete) = relation_seeds(&seeds.iter().cloned().collect());
+        assert!(!incomplete);
+        assert_eq!(complete_seeds, seeds);
+    }
+
+    #[test]
+    fn dependency_neighborhood_reuses_first_hop_and_refuses_missing_adjacency() {
         let root = SymbolOccurrenceId::new("symbol.root").unwrap();
         let direct = SymbolOccurrenceId::new("symbol.direct").unwrap();
         let transitive = SymbolOccurrenceId::new("symbol.transitive").unwrap();
         let mut reads = 0;
-        let result = dependency_neighborhood(&[root.clone(), root.clone()], |frontier| {
-            reads += 1;
-            assert_eq!(
-                frontier.len(),
-                1,
-                "duplicate seeds must not consume the read budget"
-            );
-            Some(
-                frontier
-                    .iter()
-                    .map(|id| match id.as_str() {
-                        "symbol.root" => vec![direct.clone()],
-                        "symbol.direct" => vec![root.clone(), transitive.clone()],
-                        _ => Vec::new(),
-                    })
-                    .collect(),
-            )
-        })
+        let result = dependency_neighborhood(
+            &[root.clone(), root.clone()],
+            vec![vec![direct.clone()]],
+            |frontier| {
+                reads += 1;
+                assert_eq!(frontier, &[direct.clone()], "only the second hop is read");
+                Some(vec![vec![root.clone(), transitive.clone()]])
+            },
+        )
         .expect("two complete dependency hops");
-        assert_eq!(reads, 2);
-        assert_eq!(result, BTreeSet::from([root.clone(), direct, transitive]));
+        assert_eq!(reads, 1, "the first direct-edge read is reused");
+        assert_eq!(result, BTreeSet::from([root.clone(), direct.clone(), transitive]));
+
         assert!(
-            dependency_neighborhood(std::slice::from_ref(&root), |_| Some(Vec::new())).is_none(),
-            "truncated seed adjacency cannot prove absence of shared dependencies"
+            dependency_neighborhood(std::slice::from_ref(&root), Vec::new(), |_| {
+                panic!("incomplete first-hop evidence must not trigger another read")
+            })
+            .is_none(),
+            "missing direct adjacency cannot prove absence of relationships"
+        );
+        assert!(
+            dependency_neighborhood(
+                std::slice::from_ref(&root),
+                vec![vec![direct]],
+                |_| Some(Vec::new())
+            )
+            .is_none(),
+            "missing second-hop adjacency cannot prove absence of relationships"
         );
     }
 
