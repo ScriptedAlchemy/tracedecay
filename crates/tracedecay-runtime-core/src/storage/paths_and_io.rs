@@ -762,6 +762,22 @@ pub(super) fn open_lock_file(lock_path: &Path, private: bool) -> io::Result<fs::
     Ok(file)
 }
 
+/// Keep the coordination inode outside a disposable private directory so
+/// removal never splits contenders across two generations of the lock.
+pub(crate) fn try_lock_durable_directory(path: &Path) -> io::Result<FileLease> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid_input("directory has no parent"))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| invalid_input("directory has no name"))?;
+    let lock_path = durable_directory_lock_path(&parent.canonicalize()?, name);
+    reject_symlink_components(&lock_path, "durable private store directory lock")?;
+    let file = open_lock_file(&lock_path, true)?;
+    file.try_lock().map_err(io::Error::from)?;
+    Ok(FileLease::held(file, SIDECAR_LEASE_LABEL))
+}
+
 /// Non-blocking sidecar lock acquisition. Returns the held lock file on
 /// success, or `None` when another process/thread already holds it (the caller
 /// then skips its critical section). See the sidecar-lock module note above for

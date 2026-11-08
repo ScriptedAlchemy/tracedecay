@@ -460,6 +460,7 @@ pub use layout::{
 };
 pub(crate) use layout::{has_path_local_profile_store, has_repository_profile_store};
 pub use manifest::{read_store_manifest, write_store_manifest, write_store_manifest_to_path};
+pub(crate) use paths_and_io::try_lock_durable_directory;
 pub use paths_and_io::{
     acquire_sidecar_lock_blocking, append_lock_path, reject_symlink_components,
     retry_transient_file_op, set_private_dir_permissions, try_acquire_sidecar_lock,

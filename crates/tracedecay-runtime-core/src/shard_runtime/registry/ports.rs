@@ -249,10 +249,14 @@ async fn initialize_staged_runtime(
             key: Box::new(StoreRuntimeKey::from_binding(&request.binding)),
         });
     }
-    crate::native_runtime::spawn_blocking(move || stage.publish())
-        .await
-        .map_err(|error| physical_failure(OPERATION, error))?
-        .map_err(|error| physical_failure(OPERATION, error))?;
+    crate::native_runtime::spawn_blocking(move || {
+        Arc::try_unwrap(stage)
+            .map_err(|_| std::io::Error::other("SQLite schema workers still hold staging"))?
+            .publish()
+    })
+    .await
+    .map_err(|error| physical_failure(OPERATION, error))?
+    .map_err(|error| physical_failure(OPERATION, error))?;
     Ok(identity)
 }
 

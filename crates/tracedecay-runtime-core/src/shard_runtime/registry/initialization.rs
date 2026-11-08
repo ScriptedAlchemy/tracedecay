@@ -18,12 +18,13 @@ use tracedecay_private_fs::{
 use crate::sqlite_read_snapshot::{fold_staging_to_standalone, with_suffix};
 
 const SIDECARS: [&str; 3] = ["-wal", "-shm", "-journal"];
+const OWNER: &str = "schema-installation.owner";
 const SYNC: DirectorySyncPolicy = DirectorySyncPolicy::TolerateUnsupported;
 
 pub(super) struct InitializationDirectory {
     destination: PathBuf,
     directory: PathBuf,
-    _directory_pin: File,
+    directory_pin: Option<File>,
     _lease: FileLease,
     owns_schema: bool,
 }
@@ -35,6 +36,7 @@ impl InitializationDirectory {
 
     fn acquire(destination: PathBuf, create: bool) -> io::Result<Self> {
         let directory = Self::path(&destination);
+        let lease = crate::storage::try_lock_durable_directory(&directory)?;
         if create {
             match create_private_directory(&directory) {
                 Ok(()) => sync_parent_directory(&directory, SYNC)?,
@@ -44,33 +46,35 @@ impl InitializationDirectory {
         }
         let directory_pin = open_private_directory(&directory)?;
         let directory = directory.canonicalize()?;
-        let path = directory.join("schema-installation.lock");
-        let lock = match open_private_file(&path) {
-            Ok(file) => file,
-            Err(error) if create && error.kind() == io::ErrorKind::NotFound => {
+        let marker = directory.join(OWNER);
+        match open_private_file(&marker) {
+            Ok(file) if file.metadata()?.len() == 0 => {}
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid SQLite initialization owner",
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 if fs::read_dir(&directory)?.next().transpose()?.is_some() {
                     return Err(io::Error::new(
                         io::ErrorKind::AlreadyExists,
                         "unclaimed SQLite initialization directory is occupied",
                     ));
                 }
-                match create_private_file(&path) {
-                    Ok(file) => file,
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                        open_private_file(&path)?
-                    }
-                    Err(error) => return Err(error),
+                if create {
+                    create_private_file(&marker)?.sync_all()?;
+                    sync_directory(&directory, SYNC)?;
                 }
             }
             Err(error) => return Err(error),
-        };
-        lock.try_lock().map_err(io::Error::from)?;
+        }
         Ok(Self {
             destination,
             directory,
-            _directory_pin: directory_pin,
+            directory_pin: Some(directory_pin),
             owns_schema: false,
-            _lease: FileLease::held(lock, "sqlite_initialization.owner"),
+            _lease: lease,
         })
     }
 
@@ -168,7 +172,7 @@ impl InitializationDirectory {
         self.validate_sidecars(true)
     }
 
-    pub(super) fn publish(&self) -> io::Result<()> {
+    pub(super) fn publish(mut self) -> io::Result<()> {
         let path = self.database();
         let connection = Connection::open_with_flags(
             &path,
@@ -201,7 +205,7 @@ impl InitializationDirectory {
         self.reserve_sidecars()
     }
 
-    fn finish_publication(&self) -> io::Result<()> {
+    fn finish_publication(&mut self) -> io::Result<()> {
         if present(&self.database())? {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -233,7 +237,23 @@ impl InitializationDirectory {
             remove_if_present(&self.witness(suffix))?;
         }
         remove_if_present(&self.transferred())?;
-        sync_directory(&self.directory, SYNC)
+        sync_directory(&self.directory, SYNC)?;
+        self.retire()
+    }
+
+    fn retire(&mut self) -> io::Result<()> {
+        for entry in fs::read_dir(&self.directory)? {
+            if entry?.file_name() != OWNER {
+                return Err(io::Error::new(
+                    io::ErrorKind::DirectoryNotEmpty,
+                    "SQLite initialization directory still contains files",
+                ));
+            }
+        }
+        remove_if_present(&self.directory.join(OWNER))?;
+        drop(self.directory_pin.take());
+        fs::remove_dir(&self.directory)?;
+        sync_parent_directory(&self.directory, SYNC)
     }
 
     // The normal existing/read-only route does not need to open an admission
@@ -244,15 +264,18 @@ impl InitializationDirectory {
         if !present(&directory)? {
             return Ok(());
         }
-        let _pin = open_private_directory(&directory)?;
-        if !Self::pending(&directory)? {
-            return Ok(());
+        let mut stage = match Self::acquire(destination.to_owned(), false) {
+            Ok(stage) => stage,
+            Err(error) if error.kind() == io::ErrorKind::NotFound && !present(&directory)? => {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        if Self::pending(&stage.directory)? {
+            stage.finish_publication()
+        } else {
+            stage.retire()
         }
-        let stage = Self::acquire(destination.to_owned(), false)?;
-        if !Self::pending(&directory)? {
-            return Ok(());
-        }
-        stage.finish_publication()
     }
 
     fn pending(directory: &Path) -> io::Result<bool> {
@@ -274,14 +297,31 @@ impl InitializationDirectory {
 
 impl Drop for InitializationDirectory {
     fn drop(&mut self) {
+        if self.directory_pin.is_none() {
+            return;
+        }
         if !self.owns_schema {
+            // Early refusals can leave our empty work directory. If a private
+            // schema or a reservation still exists, retain it for recovery.
+            if matches!(present(&self.directory.join(OWNER)), Ok(true))
+                && matches!(Self::pending(&self.directory), Ok(false))
+            {
+                if let Err(error) = self.retire() {
+                    tracing::warn!(%error, "could not retire SQLite initialization directory");
+                }
+            }
             return;
         }
         // A destination that appeared during this attempt is ambiguous until
         // a new opener verifies the prepared-main witness.
         match present(&self.destination) {
             Ok(false) => {
-                if let Err(error) = self.discard_schema() {
+                if let Err(error) = self.discard_schema().and_then(|()| {
+                    if !Self::pending(&self.directory)? {
+                        self.retire()?;
+                    }
+                    Ok(())
+                }) {
                     tracing::warn!(%error, "could not retire unpublished SQLite schema");
                 }
             }
@@ -427,10 +467,7 @@ mod tests {
                     .unwrap(),
                 "ok"
             );
-            assert!(
-                !InitializationDirectory::pending(&InitializationDirectory::path(&destination))
-                    .unwrap()
-            );
+            assert!(!InitializationDirectory::path(&destination).exists());
         }
     }
 
@@ -449,6 +486,7 @@ mod tests {
             assert!(InitializationDirectory::begin(destination.clone()).is_err());
             assert_eq!(fs::read(&foreign).unwrap(), b"pre-existing sidecar");
             assert!(!destination.exists());
+            assert!(!InitializationDirectory::path(&destination).exists());
             fs::remove_file(foreign).unwrap();
         }
     }
