@@ -134,7 +134,7 @@ class RunHttpTest(unittest.TestCase):
         self.assertTrue(sample.exists())
         self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
         self.assertFalse(self.partial.exists())
-        self.assertTrue(initial.endswith(b"\\n"))
+        self.assertTrue(initial.endswith(b"\n"))
 
     def test_ambiguous_partial_row_refuses_without_changing_resumable_evidence(self):
         self.interrupt()
