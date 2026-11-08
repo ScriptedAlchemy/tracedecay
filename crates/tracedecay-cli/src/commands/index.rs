@@ -475,16 +475,20 @@ impl FirstGenerationWorkMarker {
             if progress.phase == CodeIndexBuildPhaseV1::GraphPublication {
                 return None;
             }
-            if !matches!(
-                progress.phase,
-                CodeIndexBuildPhaseV1::Ready | CodeIndexBuildPhaseV1::SourceScan
-            ) {
-                return Some(Self::CommittedText {
-                    generation: progress.generation_id.clone(),
-                    owner: (progress.daemon_incarnation, progress.producer_incarnation),
-                    epoch: progress.progress_epoch,
-                    last_work_micros: progress.last_progress_micros,
-                });
+            match progress.phase {
+                CodeIndexBuildPhaseV1::BulkCommit => {
+                    return Some(Self::CommittedText {
+                        generation: progress.generation_id.clone(),
+                        owner: (progress.daemon_incarnation, progress.producer_incarnation),
+                        epoch: progress.progress_epoch,
+                        last_work_micros: progress.last_progress_micros,
+                    });
+                }
+                CodeIndexBuildPhaseV1::SourceScan => {}
+                // Preparing relations, building indexes and verifying the
+                // sealed source still lack an actual progress producer.
+                // Their phase labels alone cannot prove a stall either.
+                _ => return None,
             }
         }
         if let Some(attempt) = worktree.preseal_attempt.as_ref().filter(|a| a.active) {
@@ -890,14 +894,22 @@ mod daemon_precondition_tests {
         );
     }
 
-    fn attempt(phase: tracedecay_contracts::code_index_freshness::CodeIndexPresealWorkPhaseV1,
-        epoch: u64, completed: u64, sequence: u64) -> CodeIndexWorktreeFreshnessV1 {
+    fn attempt(
+        phase: tracedecay_contracts::code_index_freshness::CodeIndexPresealWorkPhaseV1,
+        epoch: u64,
+        completed: u64,
+        sequence: u64,
+    ) -> CodeIndexWorktreeFreshnessV1 {
         let mut result = building(true);
         result.preseal_attempt = Some(
             tracedecay_contracts::code_index_freshness::CodeIndexPresealAttemptProgressV1 {
-                daemon_incarnation: 3, producer_incarnation: 5,
-                attempt_sequence: sequence, progress_epoch: epoch, phase,
-                completed_items: completed, total_items: Some(50),
+                daemon_incarnation: 3,
+                producer_incarnation: 5,
+                attempt_sequence: sequence,
+                progress_epoch: epoch,
+                phase,
+                completed_items: completed,
+                total_items: Some(50),
                 last_progress_micros: (completed > 0).then_some((completed * 100) as i64),
                 active: true,
             },
@@ -953,8 +965,15 @@ mod daemon_precondition_tests {
         let marker = super::FirstGenerationWorkMarker::of(Some(&source));
         assert!(!window.observe(marker.clone(), now + Duration::from_secs(119)));
         assert!(window.observe(marker, now + Duration::from_secs(239)));
-        source.progress.as_mut().unwrap().phase = CodeIndexBuildPhaseV1::GraphPublication;
-        assert_eq!(super::FirstGenerationWorkMarker::of(Some(&source)), None);
+        for phase in [
+            CodeIndexBuildPhaseV1::RelationalPreparation,
+            CodeIndexBuildPhaseV1::IndexBuild,
+            CodeIndexBuildPhaseV1::Verification,
+            CodeIndexBuildPhaseV1::GraphPublication,
+        ] {
+            source.progress.as_mut().unwrap().phase = phase;
+            assert_eq!(super::FirstGenerationWorkMarker::of(Some(&source)), None);
+        }
         assert!(!window.observe(None, now + Duration::from_secs(1000)));
         source.progress.as_mut().unwrap().phase = CodeIndexBuildPhaseV1::Ready;
         assert_eq!(super::FirstGenerationWorkMarker::of(Some(&source)), None);
