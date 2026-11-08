@@ -776,3 +776,37 @@ fn staged_segment_publish_never_overwrites_a_concurrent_canonical_name() {
         changed
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn prepared_generation_rechecks_directory_identity_without_reopening_paths() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let source_root = TempDir::new().expect("source store");
+    let generation = source_generation(&fixture, source_root.path());
+    let target_root = TempDir::new().expect("target store");
+    let mut target = target_store(target_root.path(), &fixture);
+    let mut preparation = target
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare target");
+    let publication = generation
+        .stage_publication(&mut preparation)
+        .expect("stage generation");
+
+    target
+        .validate_preparation_store(&preparation, &publication)
+        .expect("unchanged directories must retain preparation identity");
+    let canonical = target.segments_root.clone();
+    let moved = target_root.path().join("detached-segments");
+    std::fs::rename(&canonical, &moved).expect("move original directory inode");
+    std::fs::create_dir(&canonical).expect("substitute another directory");
+    assert!(matches!(
+        target.validate_preparation_store(&preparation, &publication),
+        Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap)
+    ));
+    std::fs::remove_dir(&canonical).expect("remove empty substituted directory");
+    std::fs::rename(&moved, &canonical).expect("restore owned original inode");
+    target
+        .validate_preparation_store(&preparation, &publication)
+        .expect("restoring original inode restores the exact identity");
+    preparation.abort().expect("release owned preparation");
+}

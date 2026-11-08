@@ -18,6 +18,7 @@ use std::os::unix::fs::MetadataExt;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 
+#[cfg(not(unix))]
 use same_file::Handle;
 use sha2::{Digest, Sha256};
 use tracedecay_application::code_index::DaemonCodeIndexControlV1;
@@ -541,6 +542,31 @@ pub(super) struct UnpublishedCodeIndexPublicationV1 {
     pub(super) publication: CodeIndexSealedPublicationV1,
 }
 
+// On Unix, directory dev/inode is the same identity used by the handle
+// library, without an endpoint-authorized open for each prepare/commit check.
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct UnixDirectoryIdentityV1 {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+impl UnixDirectoryIdentityV1 {
+    fn at(path: &Path) -> Result<Self, CodeIndexPublicationStoreErrorV1> {
+        let metadata = path.metadata().map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        if !metadata.is_dir() {
+            return Err(DaemonCodeIndexPublicationStoreV1::unavailable(
+                "code-generation identity path is not a directory",
+            ));
+        }
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+}
+
 /// An unpublished store transaction. No full store handle is retained here:
 /// the current handle supplies the source fence when commit is retried.
 pub struct DaemonCodeIndexPreparationV1 {
@@ -548,8 +574,17 @@ pub struct DaemonCodeIndexPreparationV1 {
     expected_active_generation: Option<CodeGenerationId>,
     undecoded_expectation: Option<UndecodedActivePublicationExpectationV1>,
     incumbent_bytes: Option<Vec<u8>>,
+    #[cfg(unix)]
+    store_identity: UnixDirectoryIdentityV1,
+    #[cfg(not(unix))]
     store_identity: Handle,
+    #[cfg(unix)]
+    segments_identity: UnixDirectoryIdentityV1,
+    #[cfg(not(unix))]
     segments_identity: Handle,
+    #[cfg(unix)]
+    generations_identity: UnixDirectoryIdentityV1,
+    #[cfg(not(unix))]
     generations_identity: Handle,
     cache: Arc<DecodedGenerationCacheV1>,
     active_path: PathBuf,
@@ -3365,9 +3400,18 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         {
             return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
         }
+        #[cfg(unix)]
+        let store_identity = UnixDirectoryIdentityV1::at(store_root)?;
+        #[cfg(not(unix))]
         let store_identity = Handle::from_path(store_root).map_err(Self::unavailable)?;
+        #[cfg(unix)]
+        let segments_identity = UnixDirectoryIdentityV1::at(&self.segments_root)?;
+        #[cfg(not(unix))]
         let segments_identity =
             Handle::from_path(&self.segments_root).map_err(Self::unavailable)?;
+        #[cfg(unix)]
+        let generations_identity = UnixDirectoryIdentityV1::at(&self.generations_root)?;
+        #[cfg(not(unix))]
         let generations_identity =
             Handle::from_path(&self.generations_root).map_err(Self::unavailable)?;
         self.seal_checkpoint()?;
@@ -3767,15 +3811,26 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .ok_or_else(|| Self::unavailable("active code-generation pointer has no store root"))?;
         if self.active_path != preparation.active_path
             || !Arc::ptr_eq(&self.cache, &preparation.cache)
-            || Handle::from_path(store_root).map_err(Self::unavailable)?
-                != preparation.store_identity
-            || Handle::from_path(&self.segments_root).map_err(Self::unavailable)?
-                != preparation.segments_identity
-            || Handle::from_path(&self.generations_root).map_err(Self::unavailable)?
-                != preparation.generations_identity
             || self.disposition != preparation.disposition
             || CodeIndexGenerationScopeV1::for_snapshot(generation.snapshot()) != preparation.scope
         {
+            return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
+        }
+        #[cfg(unix)]
+        let same_directories = UnixDirectoryIdentityV1::at(store_root)?
+            == preparation.store_identity
+            && UnixDirectoryIdentityV1::at(&self.segments_root)?
+                == preparation.segments_identity
+            && UnixDirectoryIdentityV1::at(&self.generations_root)?
+                == preparation.generations_identity;
+        #[cfg(not(unix))]
+        let same_directories = Handle::from_path(store_root).map_err(Self::unavailable)?
+            == preparation.store_identity
+            && Handle::from_path(&self.segments_root).map_err(Self::unavailable)?
+                == preparation.segments_identity
+            && Handle::from_path(&self.generations_root).map_err(Self::unavailable)?
+                == preparation.generations_identity;
+        if !same_directories {
             return Err(CodeIndexPublicationStoreErrorV1::CompareAndSwap);
         }
         Ok(())
