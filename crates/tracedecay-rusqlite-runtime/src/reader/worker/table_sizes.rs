@@ -35,9 +35,8 @@ pub(super) fn read(connection: &Connection) -> rusqlite::Result<Vec<TableSizeTel
         })?;
         if let Some(total) = totals.get_mut(name) {
             let signed_payload = page.get::<_, i64>(1)?;
-            let payload = u64::try_from(signed_payload).map_err(|_| {
-                rusqlite::Error::IntegralValueOutOfRange(1, signed_payload)
-            })?;
+            let payload = u64::try_from(signed_payload)
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(1, signed_payload))?;
             *total = total
                 .checked_add(payload)
                 .ok_or(rusqlite::Error::IntegralValueOutOfRange(1, i64::MAX))?;
