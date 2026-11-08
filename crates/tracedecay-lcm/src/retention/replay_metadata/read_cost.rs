@@ -42,14 +42,13 @@ async fn oversized_rows_skip_payload_io() {
     }
 
     let directory = tempfile::tempdir().unwrap();
-    let conn = TestConnection::open(&directory.path().join("replay-read-cost.db"));
+    let database_path = directory.path().join("replay-read-cost.db");
+    let conn = TestConnection::open(&database_path);
     conn.execute_batch(
         "CREATE TABLE sessions (
             provider TEXT NOT NULL, session_id TEXT NOT NULL,
             PRIMARY KEY(provider, session_id)
-         ); INSERT INTO sessions VALUES ('codex', 'session');
-         PRAGMA cache_size = 8;
-         PRAGMA mmap_size = 0;",
+         ); INSERT INTO sessions VALUES ('codex', 'session');",
     )
     .await
     .unwrap();
@@ -109,9 +108,12 @@ async fn oversized_rows_skip_payload_io() {
         .unwrap();
     }
     let original = raw::load_raw_message_by_store_id(&conn, 4).await.unwrap();
+    drop(conn);
 
     for id in 1..=3 {
-        conn.execute_batch("PRAGMA shrink_memory;").await.unwrap();
+        // Fresh connections preserve the oversized-read measurement without
+        // issuing PRAGMAs forbidden by the exact-SQL test authority.
+        let conn = TestConnection::open(&database_path);
         let transaction = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
@@ -134,6 +136,7 @@ async fn oversized_rows_skip_payload_io() {
         assert!(report.has_more);
     }
 
+    let conn = TestConnection::open(&database_path);
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await
