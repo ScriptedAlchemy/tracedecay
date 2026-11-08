@@ -2132,27 +2132,35 @@ fn read_active_pointer(
     store_root: &Path,
 ) -> Result<DurablePublicationPointerV1, CodeGenerationRetentionErrorV1> {
     let path = store_root.join(ACTIVE_POINTER_FILE);
-    // A directory in the pointer slot makes `read(2)` return EISDIR. That is
-    // the same corrupt authority the publication store refuses; do not let the
-    // OS error replace the typed unsafe-state.
-    match std::fs::metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_file() => {}
-        Ok(_) => {
+    // The publisher enforces a 512 KiB durable limit, but a corrupt store,
+    // incomplete write, or substituted file need not honor that invariant.
+    // Bind the type/length checks and read to one no-follow, nonblocking handle
+    // before allocating any pointer bytes. The report's metadata-only mode
+    // still reads this pointer and must not allocate an untrusted file.
+    let bytes = match tracedecay_private_fs::framed_log::read_bounded(
+        &path,
+        MAX_DURABLE_PUBLICATION_POINTER_BYTES_V1 as usize,
+    ) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => {
             return Err(CodeGenerationRetentionErrorV1::UnsafeState(
-                "active code-generation pointer is not a regular file".to_owned(),
+                "active code-generation pointer disappeared during read".to_owned(),
             ));
         }
-        Err(error) => return Err(storage(error)),
-    }
-    let bytes = std::fs::read(&path).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::IsADirectory {
-            CodeGenerationRetentionErrorV1::UnsafeState(
-                "active code-generation pointer is not a regular file".to_owned(),
-            )
-        } else {
-            storage(error)
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::InvalidData
+                    | std::io::ErrorKind::InvalidInput
+                    | std::io::ErrorKind::IsADirectory
+            ) =>
+        {
+            return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
+                "active code-generation pointer is not a bounded regular file: {error}"
+            )));
         }
-    })?;
+        Err(error) => return Err(storage(error)),
+    };
     serde_json::from_slice(&bytes).map_err(|error| {
         CodeGenerationRetentionErrorV1::UnsafeState(format!(
             "active pointer '{}' is corrupt: {error}",
@@ -2523,3 +2531,84 @@ pub(super) fn deferred_if_absent(error: std::io::Error) -> CodeGenerationRetenti
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod active_pointer_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_json_pointer_is_refused_by_the_real_retention_planner() {
+        let temp = tempfile::tempdir().unwrap();
+        fixture::write_generation_store_fixture(temp.path(), 1);
+        let path = temp.path().join(ACTIVE_POINTER_FILE);
+        let original = std::fs::read(&path).unwrap();
+        assert!(read_active_pointer(temp.path()).is_ok());
+
+        // Trailing JSON whitespace made the previous unbounded read accept
+        // an arbitrarily large but otherwise valid publication pointer.
+        let mut padded = original;
+        padded.resize(MAX_DURABLE_PUBLICATION_POINTER_BYTES_V1 as usize + 1, b' ');
+        assert!(serde_json::from_slice::<DurablePublicationPointerV1>(&padded).is_ok());
+        std::fs::write(&path, &padded).unwrap();
+
+        assert!(matches!(
+            read_active_pointer(temp.path()),
+            Err(CodeGenerationRetentionErrorV1::UnsafeState(_))
+        ));
+        let mut remaining_entries = 128;
+        assert!(matches!(
+            plan_code_generation_retention_with_verification_budgeted_cancellable(
+                temp.path(),
+                &BTreeSet::new(),
+                GenerationDigestVerificationV1::MetadataOnly,
+                None,
+                &mut remaining_entries,
+                &|| false,
+            ),
+            Err(CodeGenerationRetentionErrorV1::UnsafeState(_))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), padded);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sparse_multigigabyte_pointer_and_foreign_symlink_fail_without_adoption() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        fixture::write_generation_store_fixture(temp.path(), 1);
+        let path = temp.path().join(ACTIVE_POINTER_FILE);
+        let foreign = temp.path().join("foreign-pointer.json");
+        let genuine = std::fs::read(&path).unwrap();
+        std::fs::rename(&path, &foreign).unwrap();
+        std::os::unix::fs::symlink(&foreign, &path).unwrap();
+
+        assert!(matches!(
+            read_active_pointer(temp.path()),
+            Err(CodeGenerationRetentionErrorV1::UnsafeState(_))
+        ));
+        assert_eq!(std::fs::read(&foreign).unwrap(), genuine);
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(15 * 1024 * 1024 * 1024)
+            .unwrap();
+        assert!(matches!(
+            read_active_pointer(temp.path()),
+            Err(CodeGenerationRetentionErrorV1::UnsafeState(_))
+        ));
+
+        // The same held-file reader opens nonblocking, so a substituted FIFO
+        // cannot strand a retention or report worker waiting for a writer.
+        std::fs::remove_file(&path).unwrap();
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(matches!(
+            read_active_pointer(temp.path()),
+            Err(CodeGenerationRetentionErrorV1::UnsafeState(_))
+        ));
+        assert_eq!(std::fs::read(&foreign).unwrap(), genuine);
+    }
+}
+
