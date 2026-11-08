@@ -1,6 +1,11 @@
-use std::{env, fs, path::Path, process::Command, time::Duration};
-use std::fs::OpenOptions;
-use std::os::{fd::AsRawFd, unix::fs::FileExt};
+use std::{
+    env,
+    fs::{self, OpenOptions},
+    os::{fd::AsRawFd, unix::fs::FileExt},
+    path::Path,
+    process::Command,
+    time::Duration,
+};
 
 use rusqlite::{Connection, Error, ErrorCode, OpenFlags};
 use tempfile::TempDir;
