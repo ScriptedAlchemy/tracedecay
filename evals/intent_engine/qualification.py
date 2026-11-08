@@ -58,10 +58,12 @@ def captured_request_bodies(raw, case_ids, questions, requested_model, max_bytes
                 or request["questions"] != questions
                 or (requested_model is not None and request.get("model") != requested_model)):
             raise ValueError(f"captured Scout request {record['id']} differs from frozen Noul contract")
-        # Dict equality ignores insertion order, but the model receives
-        # ordered wire bytes. The declared vocabulary freezes this order.
-        if list(request["questions"]) != list(questions):
-            raise ValueError(f"captured Scout request {record['id']} question order differs from frozen vocabulary")
+        # The production Rust serde_json::Map sorts keys on the Bazel
+        # build. The settings Vec order is not the serialized wire order.
+        # Capture bytes are pinned independently; reject any question-map
+        # order other than the production encoder's canonical sorted order.
+        if list(request["questions"]) != sorted(questions):
+            raise ValueError(f"captured Scout request {record['id']} question order differs from canonical Scout wire order")
         bodies[record["id"]] = encoded
     return bodies
 

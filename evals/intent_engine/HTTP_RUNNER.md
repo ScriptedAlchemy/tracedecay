@@ -293,7 +293,14 @@ The inner `body` string must be the literal UTF-8 JSON that the runtime sent:
 "instructions": "..."}}}` with optional `"model"` if the frozen model
 selector is non-null. Keep its exact byte encoding, escapes, whitespace and
 field order: the evaluator sends those bytes directly instead of generating
-new ones with the historical renderer.
+new ones with the historical renderer. In the pinned Bazel Rust runtime,
+`serde_json::Map` serializes question object keys in lexical order even when
+the effective settings' `questions` vector is configured in a different order.
+For this arm, `questions_sha256` binds the declared settings vocabulary and
+its order, while `captured_requests_sha256` and `holdout_requests_sha256`
+bind the actual ordered **wire bytes**. The capture validator requires the
+canonical sorted question-map wire order, not a match to the settings vector's
+iteration order.
 
 The manifest must set `arm.config` to `S_scout_captured`,
 `captured_requests_sha256` to the SHA-256 of the entire **original capture
@@ -320,8 +327,8 @@ python evals/intent_engine/score.py --qualified \
 ```
 
 Both the runner and independent scorer refuse altered capture bytes, missing
-or reordered held-out cases, invalid Noul questions, question key ordering that
-differs from the frozen vocabulary (even when map values match), differing model selectors,
+or reordered held-out cases, invalid Noul questions, noncanonical Scout wire
+question key ordering (even when map values match), differing model selectors,
 extra request keys, request-size violations, or a capture attached to an
 historical renderer. A capture is an **operator-supplied input**, not proof that
 its bytes came from Scout. The owning transcript's original store-id bounds,

@@ -1489,14 +1489,14 @@ class QualificationTests(unittest.TestCase):
                         qualification.load_questions(path)
 
     def captured_scout_fixture(self):
-        # The fixture deliberately uses Rust-style compact JSON and a request
-        # field order different from the historical Python renderer.
+        # Rust serde_json::Map emits lexicographically sorted object keys in
+        # the Bazel runtime. The settings Vec uses a different question order.
         records = []
         for case in self.dataset[2:]:
             body = {"questions": self.questions, "state": "User: " + case["current_prompt"]}
             records.append({
                 "id": case["id"],
-                "body": json.dumps(body, ensure_ascii=False, separators=(",", ":")),
+                "body": json.dumps(body, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
             })
         capture_bytes = json.dumps(records, ensure_ascii=False).encode("utf-8")
         manifest = copy.deepcopy(self.manifest)
@@ -1507,6 +1507,21 @@ class QualificationTests(unittest.TestCase):
             for record in records
         ])
         return capture_bytes, manifest
+
+    def test_captured_scout_accepts_canonical_wire_order_not_settings_vector_order(self):
+        capture, manifest = self.captured_scout_fixture()
+        self.assertNotEqual(list(self.questions), sorted(self.questions),
+                            "fixture must distinguish settings order from canonical wire order")
+        records = qualification.loads_unambiguous_json(capture)
+        wire_questions = qualification.loads_unambiguous_json(records[0]["body"])["questions"]
+        self.assertEqual(list(wire_questions), sorted(self.questions))
+        self.assertNotEqual(list(wire_questions), list(self.questions))
+        bodies = qualification.captured_request_bodies(
+            capture, ["holdout-positive", "holdout-negative"],
+            self.questions, None, manifest["max_request_bytes"],
+        )
+        self.assertEqual(bodies["holdout-positive"], records[0]["body"].encode("utf-8"))
+        self.assertEqual(bodies["holdout-negative"], records[1]["body"].encode("utf-8"))
 
     def test_captured_scout_requests_replay_exact_bytes_and_score(self):
         # This proves a captured arm is byte-exact, not that the synthetic
@@ -1643,7 +1658,7 @@ class QualificationTests(unittest.TestCase):
             body = qualification.loads_unambiguous_json(record["body"])
             body["questions"] = dict(reversed(list(body["questions"].items())))
             self.assertEqual(body["questions"], self.questions)
-            self.assertNotEqual(list(body["questions"]), list(self.questions))
+            self.assertNotEqual(list(body["questions"]), sorted(self.questions))
             record["body"] = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
         reordered = json.dumps(records, ensure_ascii=False).encode("utf-8")
         manifest["captured_requests_sha256"] = qualification.sha256_bytes(reordered)
@@ -1652,7 +1667,7 @@ class QualificationTests(unittest.TestCase):
             for record in records
         ])
         self.valid(manifest)
-        with self.assertRaisesRegex(ValueError, "question order"):
+        with self.assertRaisesRegex(ValueError, "canonical Scout wire order"):
             qualification.captured_request_bodies(
                 reordered, ["holdout-positive", "holdout-negative"],
                 self.questions, None, manifest["max_request_bytes"],
