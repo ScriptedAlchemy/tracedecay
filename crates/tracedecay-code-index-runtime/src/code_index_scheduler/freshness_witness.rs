@@ -132,15 +132,27 @@ fn source_candidates(
     let project_root = repository.workdir().ok_or_else(|| {
         CodeIndexSchedulerErrorV1::Git("source freshness requires a worktree".to_owned())
     })?;
+    // Explicit ignored-file enrollment lifts Git ignore rules, never the
+    // parent's index/HEAD gitlink boundary. A staged gitlink removal and
+    // missing child .git marker must not re-admit its files through freshness.
+    let parent_gitlinks = tracedecay_code_index::source_walk::parent_gitlink_paths(project_root)
+        .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.message))?;
     for path in &admitted_paths {
-        // Explicit ignored-file enrollment lifts Git ignore rules, not the
-        // nested repository boundary shared with capture and live search.
-        if !tracedecay_code_index::source_walk::has_nested_repository_ancestor(
-            project_root,
-            Path::new(path),
-        )? {
-            candidate_paths.insert((*path).to_owned());
+        let relative = Path::new(path);
+        let beneath_gitlink = relative
+            .ancestors()
+            .skip(1)
+            .filter_map(Path::to_str)
+            .any(|ancestor| parent_gitlinks.contains(ancestor));
+        if beneath_gitlink
+            || tracedecay_code_index::source_walk::has_nested_repository_ancestor(
+                project_root,
+                relative,
+            )?
+        {
+            continue;
         }
+        candidate_paths.insert((*path).to_owned());
     }
     let mut unrepresentable = classification
         .non_utf8_paths()
@@ -1073,7 +1085,10 @@ mod tracked_parent_boundary_tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use super::{CachedCandidateRosterV1, ChangeClockReading, roster_evidence};
+    use super::{
+        CachedCandidateRosterV1, ChangeClockReading, CodeIndexIgnoredSourceAdmissionV1,
+        roster_evidence, source_candidates,
+    };
 
     fn git(root: &Path, args: &[&str]) {
         let program = tracedecay_runtime_core::git::try_git_program().expect("fixture Git");
@@ -1102,6 +1117,73 @@ mod tracked_parent_boundary_tests {
             output.status.success(),
             "Git {args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn ignored_source_cannot_reenter_markerless_parent_gitlink_freshness() {
+        let fixture = tempfile::tempdir().expect("Git fixture");
+        let parent = fixture.path().join("parent");
+        let child = fixture.path().join("child");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::create_dir_all(&child).unwrap();
+
+        git(&child, &["init", "-q"]);
+        std::fs::write(child.join("child.rs"), "pub fn child() {}\n").unwrap();
+        git(&child, &["add", "child.rs"]);
+        git(&child, &["commit", "-qm", "child"]);
+
+        git(&parent, &["init", "-q"]);
+        std::fs::create_dir_all(parent.join("ignored")).unwrap();
+        std::fs::write(parent.join(".gitignore"), "ignored/\n").unwrap();
+        std::fs::write(parent.join("parent.rs"), "pub fn parent() {}\n").unwrap();
+        std::fs::write(
+            parent.join("ignored/ordinary.rs"),
+            "pub fn ordinary() {}\n",
+        )
+        .unwrap();
+        git(&parent, &["add", ".gitignore", "parent.rs"]);
+        git(&parent, &["commit", "-qm", "parent"]);
+        git(
+            &parent,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                "../child",
+                "app",
+            ],
+        );
+        git(&parent, &["add", ".gitmodules", "app"]);
+        git(&parent, &["commit", "-qm", "registered submodule"]);
+
+        // Git still records the child gitlink in HEAD after staging its
+        // removal. Its missing marker makes child.rs appear untracked, but
+        // an old explicit ignored admission must not revive it in freshness.
+        std::fs::remove_file(parent.join("app/.git")).unwrap();
+        git(&parent, &["rm", "-q", "--cached", "app"]);
+        let repository = tracedecay_runtime_core::git_open::open(&parent).unwrap();
+        let admitted = [
+            CodeIndexIgnoredSourceAdmissionV1 {
+                logical_path: "app/child.rs".to_owned(),
+            },
+            CodeIndexIgnoredSourceAdmissionV1 {
+                logical_path: "ignored/ordinary.rs".to_owned(),
+            },
+        ];
+        let candidates = source_candidates(&repository, &admitted).unwrap();
+        let paths = candidates
+            .candidates
+            .iter()
+            .map(|candidate| candidate.logical_path.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(paths.contains("parent.rs"));
+        assert!(paths.contains("ignored/ordinary.rs"));
+        assert!(
+            !paths.contains("app/child.rs"),
+            "ignored admission must not cross a HEAD gitlink boundary"
         );
     }
 
