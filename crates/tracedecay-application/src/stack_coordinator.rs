@@ -362,8 +362,9 @@ impl DaemonGitHubStackCoordinatorV1 {
             .lock()
             .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?;
         // Validation is part of the transition; no persisted record is changed on refusal.
+        let state = states.entry(scope.scope_digest.clone()).or_default();
         transition::restore_open_drift_interval(
-            &mut states.entry(scope.scope_digest.clone()).or_default().drift_intervals,
+            &mut state.drift_intervals,
             scope,
             observation,
         )
@@ -728,7 +729,10 @@ impl DaemonGitHubStackCoordinatorV1 {
         {
             return Ok(previous.clone());
         }
-        let previous = state.current.as_ref().and_then(|observation| observation.snapshot.as_ref());
+        let previous = state
+            .current
+            .as_ref()
+            .and_then(|observation| observation.snapshot.as_ref());
         let (transitions, drift_kinds) = stack_drift(previous, snapshot.as_ref());
         let drift_observations = transition::update_drift_intervals(
             &mut state.drift_intervals,

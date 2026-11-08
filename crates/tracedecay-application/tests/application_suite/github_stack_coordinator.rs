@@ -466,7 +466,11 @@ fn concurrent_identical_provider_publications_have_one_drift_transition() {
     assert_eq!(
         observations
             .iter()
-            .filter(|observation| observation.transitions.contains(&StackSignalKindV1::StackTipDrift))
+            .filter(|observation| {
+                observation
+                    .transitions
+                    .contains(&StackSignalKindV1::StackTipDrift)
+            })
             .count(),
         1,
         "one changed head must produce one transition, even with concurrent publishers"
@@ -483,12 +487,12 @@ fn concurrent_identical_provider_publications_have_one_drift_transition() {
         1,
         "only the winning transition may open a base-advance interval"
     );
-    assert!(
-        observations.iter().all(|observation| observation
+    assert!(observations.iter().all(|observation| {
+        observation
             .drift_observations
             .iter()
-            .all(|event| event.validate(&exact_scope.scope_digest).is_ok()))
-    );
+            .all(|event| event.validate(&exact_scope.scope_digest).is_ok())
+    }));
 }
 
 #[tokio::test]
