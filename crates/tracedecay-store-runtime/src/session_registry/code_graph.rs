@@ -2118,8 +2118,12 @@ impl RetainedCodeGraphRuntimeV1 {
                 deadline: deadline_identity,
                 cancellation: cancellation_identity,
             };
-            let context = GraphPublicationOperationContextV1::new(&control, &probe)
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+            // The journal read's context already carries the scheduler's
+            // owner-scoped observer. Native writes run under this separate
+            // one-shot commit probe; do not silently drop their real milestones.
+            let publish_context = GraphPublicationOperationContextV1::new(&control, &probe)
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?
+                .inheriting_native_work_from(context);
             let publish_registration = || GraphDbRegistration {
                 authority_lease: Arc::clone(&authority_lease),
                 cancellation: Arc::clone(&request_cancellation),
@@ -2155,7 +2159,7 @@ impl RetainedCodeGraphRuntimeV1 {
             let preparation = self.graph_registry.prepare_verified_publication(
                 publish_registration(),
                 storage,
-                &context,
+                &publish_context,
                 key,
                 Some(manifest),
             )?;
@@ -2172,7 +2176,7 @@ impl RetainedCodeGraphRuntimeV1 {
                         tracing::trace_span!("daemon.session_registry.publish_snapshot.gate_hold")
                             .entered();
                     self.graph_registry
-                        .complete_verified_publication(completion, storage, &context, *proven)
+                        .complete_verified_publication(completion, storage, &publish_context, *proven)
                 }
             }
         };

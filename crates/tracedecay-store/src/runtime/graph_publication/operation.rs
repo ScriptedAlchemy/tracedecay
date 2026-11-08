@@ -97,6 +97,18 @@ impl<'a> GraphPublicationOperationContextV1<'a> {
         self
     }
 
+    /// A journaled publication replaces its one-shot commit probe before
+    /// writing native rows. Carry the same writer observation authority into
+    /// that new commit context without carrying its spent commit grant.
+    #[must_use]
+    pub fn inheriting_native_work_from(
+        mut self,
+        original: &GraphPublicationOperationContextV1<'_>,
+    ) -> Self {
+        self.native_work_observer = original.native_work_observer.clone();
+        self
+    }
+
     pub fn observe_native_work(&self, work: GraphNativeWorkV1) {
         if let Some(observer) = &self.native_work_observer {
             observer(work);

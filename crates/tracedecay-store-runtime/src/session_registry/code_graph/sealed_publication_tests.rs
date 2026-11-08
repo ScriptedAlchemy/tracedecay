@@ -29,7 +29,8 @@ use tracedecay_graph_db::{
     GraphProjectorRevision, SealedCodeGenerationReplay, SealedGraphStateDigest,
 };
 use tracedecay_store::{
-    GraphGenerationIdV1, GraphProjectionIdV1, GraphProjectionIdentityV1,
+    GraphGenerationIdV1, GraphNativeWorkKindV1, GraphNativeWorkObserverV1, GraphNativeWorkV1,
+    GraphProjectionIdV1, GraphProjectionIdentityV1,
     GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
     GraphPublicationOperationContextV1, GraphPublicationReplayLookupV1, GraphPublicationReplayV1,
     GraphPublicationStoreV1, GraphReplayAppendOutcomeV1, RetainedGraphStoreLeaseV1,
@@ -1250,6 +1251,76 @@ async fn sealed_generation_fixture(project: &str, source: &str) -> SealedGenerat
         _database_scope,
         _temporary: temporary,
     }
+}
+
+/// The real sealed graph writer runs under a new commit probe after its
+/// journal lookup. Native work must reach the code-index observer through
+/// that second context, not disappear between journal and durable publication.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sealed_graph_writer_reports_native_work_through_journal_commit_boundary() {
+    let fixture = sealed_generation_fixture(
+        "project.native-graph-work",
+        "pub fn observed_graph_symbol() -> usize { 43 }\n",
+    )
+    .await;
+    let observed = Arc::new(Mutex::new(Vec::<GraphNativeWorkV1>::new()));
+    let observer: GraphNativeWorkObserverV1 = {
+        let observed = Arc::clone(&observed);
+        Arc::new(move |work| {
+            observed.lock().expect("native graph observation lock").push(work);
+        })
+    };
+    let first_snapshot = fixture
+        .runtime
+        .publish_verified_snapshot_with_admission(
+            Arc::new(AtomicBool::new(false)),
+            None,
+            Some(Arc::clone(&observer)),
+        )
+        .expect("real sealed graph publication");
+    let first_head = first_snapshot.verified_head().clone();
+    let first = observed.lock().expect("first native graph events").clone();
+    assert!(
+        first.iter().any(|work| matches!(
+            work,
+            GraphNativeWorkV1::CompactRowsEncoded {
+                kind: GraphNativeWorkKindV1::Entities,
+                completed_rows,
+                ..
+            } if *completed_rows > 0
+        )),
+        "native entity encoding must cross the nested commit context: {first:?}"
+    );
+    let verified_segments = first
+        .iter()
+        .filter(|work| {
+            matches!(
+                work,
+                GraphNativeWorkV1::CompactSegmentVerified { canonical_bytes, .. }
+                    if *canonical_bytes > 0
+            )
+        })
+        .count();
+    assert_eq!(
+        verified_segments, 1,
+        "exactly one installed and digest-verified graph segment must reach the observer: {first:?}"
+    );
+
+    drop(first_snapshot);
+    let resumed = fixture
+        .runtime
+        .publish_verified_snapshot_with_admission(
+            Arc::new(AtomicBool::new(false)),
+            None,
+            Some(observer),
+        )
+        .expect("same sealed graph publication reuses the durable head");
+    assert_eq!(resumed.verified_head(), &first_head);
+    assert_eq!(
+        *observed.lock().expect("replay native graph events"),
+        first,
+        "replaying the already verified head must report no new native work"
+    );
 }
 
 /// The graph store is the only owner of symbol, file, and import records:
