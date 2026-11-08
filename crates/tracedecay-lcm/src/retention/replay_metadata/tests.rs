@@ -539,3 +539,146 @@ async fn oversized_metadata_is_preserved_without_blocking_later_compaction() {
         .await
         .unwrap();
 }
+
+async fn assert_checkpoint_refusal_is_atomic(store: &Store, id: i64, trigger_sql: &str) {
+    let checkpoint = schema::get_gc_meta(&store.conn, FRONTIER_KEY)
+        .await
+        .unwrap();
+    let before = frontier(&store.conn).await.unwrap();
+    let original = raw::load_raw_message_by_store_id(&store.conn, id)
+        .await
+        .unwrap();
+    assert!(compacted_metadata(&original).unwrap().is_some());
+    let revision = scalar(
+        &store.conn,
+        "SELECT raw_revision_generation FROM lcm_summary_convergence_queue",
+    )
+    .await;
+    store.conn.execute_batch(trigger_sql).await.unwrap();
+    let transaction = store
+        .conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .unwrap();
+    let error = step(&transaction, 48).await.unwrap_err();
+    assert!(error.to_string().contains("frontier was not persisted"));
+    let staged = raw::load_raw_message_by_store_id(&transaction, id)
+        .await
+        .unwrap();
+    assert_ne!(staged.metadata_json, original.metadata_json);
+    assert!(metadata(&staged)["active_replay"].get("content").is_none());
+    transaction.rollback().await.unwrap();
+
+    assert_eq!(
+        schema::get_gc_meta(&store.conn, FRONTIER_KEY)
+            .await
+            .unwrap(),
+        checkpoint,
+        "rollback preserves even an absent checkpoint"
+    );
+    assert_eq!(
+        raw::load_raw_message_by_store_id(&store.conn, id)
+            .await
+            .unwrap(),
+        original,
+        "a refused checkpoint must restore the complete message and receipts"
+    );
+    assert_eq!(
+        scalar(
+            &store.conn,
+            "SELECT raw_revision_generation FROM lcm_summary_convergence_queue"
+        )
+        .await,
+        revision
+    );
+    summary_convergence::validate_raw_update_guard(&store.conn)
+        .await
+        .unwrap();
+
+    store
+        .conn
+        .execute_batch("DROP TRIGGER refuse_replay_checkpoint")
+        .await
+        .unwrap();
+    let recovered = store.tick(48).await;
+    assert_eq!(recovered.rows_scanned, 1);
+    assert_eq!(recovered.rows_compacted, 1);
+    assert!(recovered.metadata_bytes_removed > 0);
+    assert_eq!(recovered.frontier_before, Some(before));
+    assert_eq!(recovered.frontier_after, Some(id));
+    assert_eq!(frontier(&store.conn).await.unwrap(), id);
+    assert!(!recovered.has_more);
+    let repaired = raw::load_raw_message_by_store_id(&store.conn, id)
+        .await
+        .unwrap();
+    assert_eq!(repaired.content, original.content);
+    assert_eq!(repaired.content_hash, original.content_hash);
+    assert_eq!(
+        crate::replay_transactions::raw_replay_message(&repaired),
+        crate::replay_transactions::raw_replay_message(&original)
+    );
+    assert_eq!(
+        store.tick(48).await,
+        ReplayMetadataCompactionReport::default()
+    );
+}
+
+#[asupersync::test]
+async fn ignored_initial_checkpoint_rolls_back_compaction() {
+    let store = Store::open().await;
+    let text = "verified replay checkpoint content ".repeat(80);
+    let id = store
+        .insert(1, &text, Value::String(text.clone()), false)
+        .await;
+    let trigger = format!(
+        "CREATE TRIGGER refuse_replay_checkpoint BEFORE INSERT ON lcm_gc_meta
+         WHEN NEW.key = '{FRONTIER_KEY}' BEGIN SELECT RAISE(IGNORE); END"
+    );
+    assert_checkpoint_refusal_is_atomic(&store, id, &trigger).await;
+}
+
+#[asupersync::test]
+async fn rewritten_checkpoint_cannot_claim_durable_progress() {
+    let store = Store::open().await;
+    let text = "verified replay checkpoint content ".repeat(80);
+    let previous_id = store
+        .insert(1, &text, Value::String(text.clone()), false)
+        .await;
+    let first = store.tick(48).await;
+    assert_eq!(first.rows_compacted, 1);
+    assert_eq!(first.frontier_after, Some(previous_id));
+    let id = store
+        .insert(2, &text, Value::String(text.clone()), false)
+        .await;
+    // A successful INSERT can still leave a different checkpoint behind.
+    // Counting affected rows alone cannot detect this failure.
+    let trigger = format!(
+        "CREATE TRIGGER refuse_replay_checkpoint AFTER INSERT ON lcm_gc_meta
+         WHEN NEW.key = '{FRONTIER_KEY}' BEGIN
+             UPDATE lcm_gc_meta SET value = '{previous_id}' WHERE key = NEW.key;
+         END"
+    );
+    assert_checkpoint_refusal_is_atomic(&store, id, &trigger).await;
+}
+
+#[asupersync::test]
+async fn idle_page_does_not_initialize_a_checkpoint() {
+    let store = Store::open().await;
+    let trigger = format!(
+        "CREATE TRIGGER refuse_replay_checkpoint BEFORE INSERT ON lcm_gc_meta
+         WHEN NEW.key = '{FRONTIER_KEY}' BEGIN
+             SELECT RAISE(ABORT, 'idle page attempted a checkpoint write');
+         END"
+    );
+    store.conn.execute_batch(&trigger).await.unwrap();
+    assert_eq!(
+        store.tick(48).await,
+        ReplayMetadataCompactionReport::default()
+    );
+    assert_eq!(
+        schema::get_gc_meta(&store.conn, FRONTIER_KEY)
+            .await
+            .unwrap(),
+        None
+    );
+}

@@ -272,10 +272,19 @@ async fn step(
                 "replay metadata page did not advance its frontier",
             ));
         }
+        schema::set_gc_meta(conn, FRONTIER_KEY, &after.to_string()).await?;
+        // An advancing local key is not proof that its checkpoint was stored.
+        // Verify inside the same writer so a refused or rewritten checkpoint
+        // rolls back this page instead of committing a false progress report.
+        let persisted = frontier(conn).await?;
+        if persisted != after {
+            return Err(db_error(format!(
+                "replay metadata frontier was not persisted: expected {after}, found {persisted}"
+            )));
+        }
         report.frontier_before = Some(before);
-        report.frontier_after = Some(after);
+        report.frontier_after = Some(persisted);
     }
-    schema::set_gc_meta(conn, FRONTIER_KEY, &after.to_string()).await?;
     report.has_more = has_work(conn, after).await?;
     Ok(report)
 }
