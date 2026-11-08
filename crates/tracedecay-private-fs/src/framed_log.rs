@@ -152,18 +152,24 @@ impl DurableFileBatch {
     pub fn written(&mut self, path: &Path, file: &File) -> io::Result<()> {
         #[cfg(target_os = "linux")]
         {
+            let identity = DurableFileIdentity {
+                path: path.to_path_buf(),
+                metadata: file.metadata()?,
+            };
+            // An invalid incoming member must not force a full, otherwise
+            // healthy window to fsync before its admission is rejected.
+            identity.validate_path()?;
             if self.pending.len() == DURABLE_BATCH_CONCURRENT_SYNCS {
                 // Keep ownership on failure: no unproven member may move to
                 // the synced set, and no additional descriptor is admitted.
                 self.sync_pending()?;
                 self.synced
                     .extend(self.pending.drain(..).map(|member| member.identity));
+                // A slow filesystem barrier leaves time for the incoming
+                // path or descriptor to change. Do not admit that change.
+                identity.validate_metadata(&file.metadata()?)?;
+                identity.validate_path()?;
             }
-            let identity = DurableFileIdentity {
-                path: path.to_path_buf(),
-                metadata: file.metadata()?,
-            };
-            identity.validate_path()?;
             // Duplication retains the writer's inode without a pathname open.
             let retained = file.try_clone()?;
             // SAFETY: `retained` is an open descriptor for the whole call.

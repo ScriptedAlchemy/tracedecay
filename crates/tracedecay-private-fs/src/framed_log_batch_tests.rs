@@ -237,6 +237,55 @@ fn durable_batch_refuses_same_inode_mutation_after_early_flush() {
     );
 }
 
+#[cfg(feature = "test-helpers")]
+#[test]
+fn durable_batch_invalid_next_member_does_not_flush_a_full_window() {
+    let root = tempfile::tempdir().expect("batch root");
+    let mut batch = DurableFileBatch::new();
+    for index in 0..DURABLE_BATCH_CONCURRENT_SYNCS {
+        write_member(&mut batch, root.path(), index);
+    }
+
+    let next = root.path().join("next.tmp");
+    let other = root.path().join("unrelated.tmp");
+    let mut writer = File::create(&next).expect("next writer");
+    writer.write_all(b"next segment").expect("next bytes");
+    fs::write(&other, b"next segment").expect("same bytes, different inode");
+    let barriers = sync_latency::inject(root.path(), Duration::ZERO);
+
+    assert_eq!(
+        batch
+            .written(&other, &writer)
+            .expect_err("a foreign pathname must be rejected before flushing")
+            .kind(),
+        ErrorKind::InvalidData
+    );
+    assert_eq!(
+        barriers.syncs(),
+        0,
+        "an invalid new member must not trigger durability work on a full valid window"
+    );
+    assert_eq!(batch.pending.len(), DURABLE_BATCH_CONCURRENT_SYNCS);
+    assert_eq!(batch.synced.len(), 0);
+
+    batch.written(&next, &writer).expect("admit correct member");
+    assert_eq!(
+        barriers.syncs(),
+        u64::try_from(DURABLE_BATCH_CONCURRENT_SYNCS).expect("window size"),
+        "admitting the real next member must flush the previous window"
+    );
+    assert_eq!(batch.pending.len(), 1);
+    assert_eq!(batch.synced.len(), DURABLE_BATCH_CONCURRENT_SYNCS);
+    drop(writer);
+    batch.sync().expect("flush admitted member");
+    assert_eq!(
+        barriers.syncs(),
+        u64::try_from(DURABLE_BATCH_CONCURRENT_SYNCS + 1).expect("member count"),
+        "the optimization must not skip a durability barrier"
+    );
+    assert_eq!(fs::read(&next).expect("durable member"), b"next segment");
+}
+
 #[test]
 fn durable_batch_failed_window_keeps_handles_and_does_not_admit_another_member() {
     let root = tempfile::tempdir().expect("batch root");
