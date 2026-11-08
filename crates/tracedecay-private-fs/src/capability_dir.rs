@@ -16,10 +16,10 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use cap_fs_ext::DirExt;
-#[cfg(windows)]
-use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 #[cfg(not(windows))]
 use cap_fs_ext::OpenOptionsMaybeDirExt;
+#[cfg(windows)]
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, File, OpenOptions};
 
 /// How many times a create-or-open that reports the entry missing is asked
@@ -218,9 +218,7 @@ pub fn sync_directory(directory: &Dir) -> io::Result<()> {
 
 fn single_component(name: &OsStr) -> io::Result<()> {
     let mut parts = Path::new(name).components();
-    if !matches!(parts.next(), Some(std::path::Component::Normal(_)))
-        || parts.next().is_some()
-    {
+    if !matches!(parts.next(), Some(std::path::Component::Normal(_))) || parts.next().is_some() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "directory operation requires one entry name",
@@ -356,9 +354,8 @@ fn read_bounded_child_receipt(
     name: &OsStr,
     maximum: usize,
 ) -> io::Result<Vec<u8>> {
-    let name = CString::new(name.as_bytes()).map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidInput, "receipt name contains NUL")
-    })?;
+    let name = CString::new(name.as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "receipt name contains NUL"))?;
     // SAFETY: the held directory fd is valid; name is a NUL-terminated
     // sibling component. O_NOFOLLOW prevents link traversal and O_NONBLOCK
     // prevents a substituted FIFO from blocking before the regular-file check.
@@ -550,7 +547,6 @@ mod tests {
         );
     }
 
-
     /// A parent-path swap after receipt validation must not redirect cleanup:
     /// the already-open child is removed, and matching foreign bytes survive.
     #[cfg(unix)]
@@ -581,7 +577,10 @@ mod tests {
         .unwrap();
         assert_eq!(removed, 1);
         assert!(!displaced.join("a").exists());
-        assert_eq!(std::fs::read(foreign.join("a/sentinel")).unwrap(), b"foreign");
+        assert_eq!(
+            std::fs::read(foreign.join("a/sentinel")).unwrap(),
+            b"foreign"
+        );
     }
 
     /// The child also remains the exact opened directory when its original
@@ -618,13 +617,9 @@ mod tests {
         let root = temp.path().join("sealed");
         std::fs::create_dir(&root).unwrap();
         for receipt in ["../outside", "a/b", "."] {
-            let error = remove_receipted_directories_nofollow(
-                &root,
-                OsStr::new(receipt),
-                512,
-                |_, _| true,
-            )
-            .unwrap_err();
+            let error =
+                remove_receipted_directories_nofollow(&root, OsStr::new(receipt), 512, |_, _| true)
+                    .unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         }
     }
@@ -671,10 +666,7 @@ mod tests {
             !moved.exists(),
             "only the receipt-authorized directory is deleted"
         );
-        assert_eq!(
-            std::fs::read(child.join("foreign")).unwrap(),
-            b"preserve"
-        );
+        assert_eq!(std::fs::read(child.join("foreign")).unwrap(), b"preserve");
     }
 
     #[cfg(unix)]

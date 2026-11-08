@@ -763,10 +763,12 @@ pub(crate) fn sweep_abandoned_row_spills(database_path: &Path) {
             .is_some_and(|name| name.starts_with(ROW_SPILL_PREFIX) && !name.starts_with(&own))
         {
             let path = entry.path();
-            if let Err(error) = tracedecay_private_fs::capability_dir::remove_child_directory_nofollow(
-                &root,
-                &entry.file_name(),
-            ) {
+            if let Err(error) =
+                tracedecay_private_fs::capability_dir::remove_child_directory_nofollow(
+                    &root,
+                    &entry.file_name(),
+                )
+            {
                 tracing::warn!(
                     event = "graph_row_spill_sweep_failed",
                     path = %path.display(),
@@ -807,9 +809,9 @@ fn retire_sealed_directory_checked(
             "sealed retirement directory does not match generation identity",
         ));
     }
-    let name = directory
-        .file_name()
-        .ok_or_else(|| GraphDbError::unavailable("sealed retirement directory has no entry name"))?;
+    let name = directory.file_name().ok_or_else(|| {
+        GraphDbError::unavailable("sealed retirement directory has no entry name")
+    })?;
     let result = tracedecay_private_fs::capability_dir::remove_receipted_child_directory_nofollow(
         root,
         name,
@@ -3041,7 +3043,11 @@ mod receipt_budget_tests {
         let receipt_path = directory.join(SEALED_STORE_RECEIPT_FILE);
         std::fs::write(
             &receipt_path,
-            receipt(GraphFormatVersion::current().get(), name, "generation:other"),
+            receipt(
+                GraphFormatVersion::current().get(),
+                name,
+                "generation:other",
+            ),
         )
         .unwrap();
         std::fs::write(directory.join("sentinel"), b"preserve").unwrap();
@@ -3400,8 +3406,7 @@ mod build_tests {
         let identity = manifest.identity();
         let expected = manifest.expected_recovered_digest(check).unwrap();
         let root = sealed_store_root(&database_path);
-        let directory =
-            sealed_generation_directory(&root, &identity.physical_namespace().unwrap());
+        let directory = sealed_generation_directory(&root, &identity.physical_namespace().unwrap());
         let staging = root.join(format!(
             ".staging-{}",
             directory.file_name().unwrap().to_str().unwrap()
