@@ -554,7 +554,9 @@ struct UnixDirectoryIdentityV1 {
 #[cfg(unix)]
 impl UnixDirectoryIdentityV1 {
     fn at(path: &Path) -> Result<Self, CodeIndexPublicationStoreErrorV1> {
-        let metadata = path.metadata().map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        let metadata = path
+            .metadata()
+            .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
         if !metadata.is_dir() {
             return Err(DaemonCodeIndexPublicationStoreV1::unavailable(
                 "code-generation identity path is not a directory",
@@ -3846,8 +3848,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         #[cfg(unix)]
         let same_directories = UnixDirectoryIdentityV1::at(store_root)?
             == preparation.store_identity
-            && UnixDirectoryIdentityV1::at(&self.segments_root)?
-                == preparation.segments_identity
+            && UnixDirectoryIdentityV1::at(&self.segments_root)? == preparation.segments_identity
             && UnixDirectoryIdentityV1::at(&self.generations_root)?
                 == preparation.generations_identity;
         #[cfg(not(unix))]

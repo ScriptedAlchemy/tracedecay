@@ -825,7 +825,10 @@ fn generation_manifest_publication_preserves_concurrent_canonical_bytes() {
             .tempfile_in(root.path())
             .expect("stage generation");
         temporary.write_all(bytes).expect("write staged manifest");
-        temporary.as_file().sync_all().expect("durable staged manifest");
+        temporary
+            .as_file()
+            .sync_all()
+            .expect("durable staged manifest");
         temporary
     };
 
@@ -853,11 +856,8 @@ fn generation_manifest_publication_preserves_concurrent_canonical_bytes() {
     );
 
     // A second publisher with identical content may safely deduplicate.
-    DaemonCodeIndexPublicationStoreV1::publish_missing_generation_manifest(
-        stage(good),
-        &canonical,
-    )
-    .expect("identical immutable generation deduplicates");
+    DaemonCodeIndexPublicationStoreV1::publish_missing_generation_manifest(stage(good), &canonical)
+        .expect("identical immutable generation deduplicates");
     assert_eq!(std::fs::read(&canonical).expect("original content"), good);
     assert_eq!(
         std::fs::read_dir(root.path())
@@ -868,12 +868,12 @@ fn generation_manifest_publication_preserves_concurrent_canonical_bytes() {
     );
 
     std::fs::remove_file(&canonical).expect("vacate immutable name");
-    DaemonCodeIndexPublicationStoreV1::publish_missing_generation_manifest(
-        stage(good),
-        &canonical,
-    )
-    .expect("publish new immutable name");
-    assert_eq!(std::fs::read(&canonical).expect("new generation bytes"), good);
+    DaemonCodeIndexPublicationStoreV1::publish_missing_generation_manifest(stage(good), &canonical)
+        .expect("publish new immutable name");
+    assert_eq!(
+        std::fs::read(&canonical).expect("new generation bytes"),
+        good
+    );
     assert_eq!(
         std::fs::read_dir(root.path())
             .expect("generation directory")
