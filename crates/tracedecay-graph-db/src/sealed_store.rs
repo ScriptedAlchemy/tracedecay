@@ -207,6 +207,8 @@ pub(crate) fn open_direct_sealed_generation(
 const SEALED_COPY_GUARD_CHUNK_ROWS: usize = 4096;
 
 const SEALED_STORE_RECEIPT_VERSION: u32 = 1;
+/// A proof marker contains one canonical recovered digest, never a payload.
+const MAX_SEALED_CHECK_BYTES: usize = 256;
 /// Identity metadata, never an unbounded content read.
 const MAX_SEALED_RECEIPT_BYTES: usize = 64 * 1024;
 
@@ -2489,9 +2491,12 @@ fn sealed_store_check_matches(
     expected_digest: &str,
 ) -> Result<bool, GraphDbError> {
     let path = directory.join(SEALED_STORE_CHECKED_FILE);
-    match std::fs::read_to_string(&path) {
-        Ok(digest) => Ok(digest == expected_digest),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+    // This is a rebuildable proof hint. Invalid or overlarge bytes cause a
+    // fresh proof, never an unbounded allocation or a trusted cache hit.
+    match tracedecay_private_fs::framed_log::read_bounded(&path, MAX_SEALED_CHECK_BYTES) {
+        Ok(Some(bytes)) => Ok(bytes == expected_digest.as_bytes()),
+        Ok(None) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => Ok(false),
         Err(error) => Err(sealed_store_io_failure("sealed check read failed", error)),
     }
 }
@@ -2500,8 +2505,15 @@ fn persist_sealed_store_check(directory: &Path, expected_digest: &str) -> Result
     if sealed_store_check_matches(directory, expected_digest)? {
         return Ok(());
     }
-    std::fs::write(directory.join(SEALED_STORE_CHECKED_FILE), expected_digest)
-        .map_err(|error| sealed_store_io_failure("sealed check persist failed", error))
+    // Never truncate an existing symlink target: the marker is a rebuildable
+    // cache, so stage a regular file and publish it by atomic replacement.
+    tracedecay_private_fs::framed_log::atomic_write(
+        &directory.join(SEALED_STORE_CHECKED_FILE),
+        "sealed-check",
+        expected_digest.as_bytes(),
+        tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
+    )
+    .map_err(|error| sealed_store_io_failure("sealed check persist failed", error))
 }
 
 fn open_sealed_store_checked(
@@ -2840,6 +2852,58 @@ mod receipt_budget_tests {
                 read_sealed_receipt_bytes(&receipt_path).unwrap_err().kind(),
                 std::io::ErrorKind::InvalidData
             );
+        }
+    }
+
+    #[test]
+    fn sealed_check_marker_is_bounded_and_never_overwrites_a_foreign_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("sealed");
+        std::fs::create_dir(&directory).unwrap();
+        let marker = directory.join(SEALED_STORE_CHECKED_FILE);
+        let digest = format!("sha256:{}", "a".repeat(64));
+
+        assert!(!sealed_store_check_matches(&directory, &digest).unwrap());
+        persist_sealed_store_check(&directory, &digest).unwrap();
+        assert!(sealed_store_check_matches(&directory, &digest).unwrap());
+        assert_eq!(std::fs::read(&marker).unwrap(), digest.as_bytes());
+
+        let mut oversized = digest.as_bytes().to_vec();
+        oversized.extend(vec![b' '; MAX_SEALED_CHECK_BYTES]);
+        std::fs::write(&marker, oversized).unwrap();
+        assert!(!sealed_store_check_matches(&directory, &digest).unwrap());
+        persist_sealed_store_check(&directory, &digest).unwrap();
+        assert!(sealed_store_check_matches(&directory, &digest).unwrap());
+
+        #[cfg(unix)]
+        {
+            // Sparse bytes establish the large-file refusal without writing
+            // or allocating a multi-gigabyte test payload.
+            std::fs::File::create(&marker)
+                .unwrap()
+                .set_len(15 * 1024 * 1024 * 1024)
+                .unwrap();
+            assert!(!sealed_store_check_matches(&directory, &digest).unwrap());
+            persist_sealed_store_check(&directory, &digest).unwrap();
+            assert!(sealed_store_check_matches(&directory, &digest).unwrap());
+
+            let foreign = temp.path().join("foreign");
+            std::fs::remove_file(&marker).unwrap();
+            std::fs::write(&foreign, digest.as_bytes()).unwrap();
+            std::os::unix::fs::symlink(&foreign, &marker).unwrap();
+            assert!(
+                sealed_store_check_matches(&directory, &digest).is_err(),
+                "a symlink cannot supply proof evidence"
+            );
+
+            std::fs::remove_file(&marker).unwrap();
+            std::fs::write(&foreign, b"foreign sentinel").unwrap();
+            std::os::unix::fs::symlink(&foreign, &marker).unwrap();
+            assert!(
+                persist_sealed_store_check(&directory, &digest).is_err(),
+                "publishing a proof marker must refuse a foreign symlink"
+            );
+            assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign sentinel");
         }
     }
 
