@@ -78,10 +78,7 @@ fn write_rollout(path: &Path, cwd: &Path, session: &str) -> u64 {
 }
 
 fn append_in_scope(path: &Path, cwd: &Path, session: &str, item: &str) -> u64 {
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(path)
-        .unwrap();
+    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
     writeln!(
         file,
         "{}",
@@ -115,7 +112,11 @@ impl Fixture {
             let output = std::process::Command::new(
                 tracedecay_runtime_core::git::try_git_program().unwrap(),
             )
-            .args(plain_git_args(&["init", "--quiet", "--initial-branch=main"]))
+            .args(plain_git_args(&[
+                "init",
+                "--quiet",
+                "--initial-branch=main",
+            ]))
             .current_dir(repository)
             .output()
             .unwrap();
@@ -254,7 +255,10 @@ fn unchanged_corpus_reoffers_skip_cold_scope_resolution() {
             );
             assert_eq!(reoffers, 96);
             assert_eq!(resolutions, 0, "empty pages must not resolve Git scope");
-            assert_eq!(stores.map(MemoryHostAdmission::capture_call_counts), captures);
+            assert_eq!(
+                stores.map(MemoryHostAdmission::capture_call_counts),
+                captures
+            );
             for (store, retained) in stores.into_iter().zip(retained) {
                 let current = store
                     .observations()
@@ -266,7 +270,10 @@ fn unchanged_corpus_reoffers_skip_cold_scope_resolution() {
                         )
                     })
                     .collect::<Vec<_>>();
-                assert_eq!(current, retained, "accepted source identity must not change");
+                assert_eq!(
+                    current, retained,
+                    "accepted source identity must not change"
+                );
             }
         },
     ))
@@ -295,12 +302,8 @@ fn append_after_empty_reoffer_rechecks_scope_and_source_identity() {
             }
             assert_eq!(resolution_count(&fixture.root), 0);
 
-            let new_len = append_in_scope(
-                &path,
-                &fixture.outside.join("src"),
-                session,
-                "outside-item",
-            );
+            let new_len =
+                append_in_scope(&path, &fixture.outside.join("src"), session, "outside-item");
             let appended = fixture.admit(&path, &cache, &cancellation).await;
             assert_eq!(appended[0].frames_persisted, 0);
             assert!(appended[1].frames_persisted > 0);
