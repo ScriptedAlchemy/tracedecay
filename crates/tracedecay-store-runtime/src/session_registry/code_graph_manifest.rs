@@ -847,8 +847,9 @@ impl<'a> GraphSegmentReadPassV1<'a> {
             let selected = select_partitioned_segment_root(self.roots, request);
             let opened = match selected {
                 Ok((root, path_metadata)) => {
-                    self.open_attempts += 1;
-                    open_partitioned_segment(root, &path_metadata, request)
+                    open_partitioned_segment(root, &path_metadata, request, || {
+                        self.open_attempts += 1;
+                    })
                 }
                 Err(error) => Err(error),
             };
@@ -927,6 +928,7 @@ fn open_partitioned_segment(
     segments_root: &std::path::Path,
     path_metadata: &std::fs::Metadata,
     request: tracedecay_code_index::production::SealedGenerationSegmentReadV1<'_>,
+    record_open_attempt: impl FnOnce(),
 ) -> Result<PinnedPartitionedSegmentV1, tracedecay_code_index::production::CodeIndexProductionErrorV1>
 {
     use tracedecay_code_index::production::CodeIndexProductionErrorV1;
@@ -943,6 +945,8 @@ fn open_partitioned_segment(
             "sealed generation segment identity does not match its manifest".to_owned(),
         ));
     }
+    // Count attempted opens, not pathname probes or rejected metadata.
+    record_open_attempt();
     #[cfg(test)]
     SEGMENT_OPENS.with(|opens| opens.set(opens.get() + 1));
     let file = File::open(&path).map_err(|error| {
@@ -1210,7 +1214,7 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
                         let (root, path_metadata) =
                             select_partitioned_segment_root(&roots, request)?;
                         pinned_evidence =
-                            Some(open_partitioned_segment(root, &path_metadata, request)?);
+                            Some(open_partitioned_segment(root, &path_metadata, request, || {})?);
                         if let Some(barrier) = evidence_barrier.take() {
                             barrier();
                         }
@@ -2425,6 +2429,22 @@ mod tests {
             fresh.read(request, &mut Vec::new()),
             Err(CodeIndexProductionErrorV1::Contract(_))
         ));
+        assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 0);
+        assert_eq!(fresh.open_attempts, 0, "invalid pathname must not count as an open");
+
+        // A valid pathname with a mismatched manifest extent must also stop
+        // before File::open, without inflating the reported open count.
+        let roots = vec![second.path().to_path_buf()];
+        let mut wrong_extent = super::GraphSegmentReadPassV1::new(&roots);
+        let mismatch = SealedGenerationSegmentReadV1::Whole {
+            digest: &digest,
+            size_bytes: bytes.len() as u64 + 1,
+        };
+        assert!(matches!(
+            wrong_extent.read(mismatch, &mut Vec::new()),
+            Err(CodeIndexProductionErrorV1::Contract(_))
+        ));
+        assert_eq!(wrong_extent.open_attempts, 0);
         assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 0);
     }
 
