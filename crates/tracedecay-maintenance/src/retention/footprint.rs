@@ -1049,9 +1049,16 @@ mod tests {
         assert!(statement.contains("DELETES project data"), "{statement}");
 
         let unregistered = &over_findings["projects/proj_stray"];
-        assert_eq!(unregistered.finding().state(), DoctorEvidenceStateV1::Degraded);
+        assert_eq!(
+            unregistered.finding().state(),
+            DoctorEvidenceStateV1::Degraded
+        );
         assert!(
-            !unregistered.finding().coverage().statement().contains("projects forget"),
+            !unregistered
+                .finding()
+                .coverage()
+                .statement()
+                .contains("projects forget"),
             "an unregistered directory has no safe project selector"
         );
         assert!(
@@ -1075,7 +1082,10 @@ mod tests {
             .expect("registered project")
             .registered_root = Some(long_root);
         let bounded = findings(&over);
-        let bounded_statement = bounded["projects/proj_live"].finding().coverage().statement();
+        let bounded_statement = bounded["projects/proj_live"]
+            .finding()
+            .coverage()
+            .statement();
         assert!(
             bounded_statement.contains("tracedecay --dry-run projects forget proj_live"),
             "{bounded_statement}"
