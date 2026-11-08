@@ -6,6 +6,7 @@
 //! budget keep this repair off the foreground ingest path.
 
 use std::collections::BTreeSet;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,6 +29,8 @@ const MAX_BATCH_BYTES: u64 = 4 * 1024 * 1024;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayMetadataCompactionReport {
     pub rows_scanned: u64,
+    /// Wall-clock duration from initial frontier read through commit, not CPU time.
+    pub elapsed_ms: Option<u128>,
     /// Transactional store-id frontier consumed by this page, absent on idle reads.
     pub frontier_before: Option<i64>,
     pub frontier_after: Option<i64>,
@@ -79,6 +82,7 @@ pub async fn compact_replay_metadata(
     database: &Database,
     max_rows: usize,
 ) -> Result<ReplayMetadataCompactionReport, LcmError> {
+    let started = Instant::now();
     let read = database.read_connection();
     if !has_work(&read, frontier(&read).await?).await? {
         return Ok(ReplayMetadataCompactionReport::default());
@@ -88,8 +92,9 @@ pub async fn compact_replay_metadata(
         .await
         .map_err(db_error)?;
     match step(&transaction, max_rows).await {
-        Ok(report) => {
+        Ok(mut report) => {
             transaction.commit().await.map_err(db_error)?;
+            report.elapsed_ms = Some(started.elapsed().as_millis());
             Ok(report)
         }
         Err(error) => match transaction.rollback().await {

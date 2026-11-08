@@ -6,6 +6,8 @@
 //! bootstrap frontiers are complete. A candidate and its indexed references are
 //! checked under one guarded writer, so another owner cannot race collection.
 
+use std::time::Instant;
+
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::db::Database;
@@ -25,6 +27,8 @@ pub const MAX_CANONICAL_BODY_GC_ROWS: usize = 48;
 pub struct CanonicalBodyGcReport {
     pub roots_scanned: u64,
     pub bodies_scanned: u64,
+    /// Wall-clock duration from writer admission through commit, not CPU time.
+    pub elapsed_ms: Option<u128>,
     /// Candidates discharged in the committed page, even if their body stays live.
     pub candidates_discharged: u64,
     pub bodies_deleted: u64,
@@ -134,10 +138,12 @@ async fn save_progress(conn: &(impl Executor + ?Sized), progress: &Progress) -> 
 
 #[tracing::instrument(name = "global_db.canonical_bodies.gc", level = "trace", skip_all)]
 pub(crate) async fn run(database: &Database, max_rows: usize) -> Result<CanonicalBodyGcReport> {
+    let started = Instant::now();
     let transaction = database.begin_write_transaction(OPERATION).await?;
     match step(&transaction, max_rows).await {
-        Ok(report) => {
+        Ok(mut report) => {
             transaction.commit().await?;
+            report.elapsed_ms = Some(started.elapsed().as_millis());
             Ok(report)
         }
         Err(error) => match transaction.rollback().await {
