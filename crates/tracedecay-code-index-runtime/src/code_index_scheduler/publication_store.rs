@@ -580,6 +580,10 @@ struct DaemonCodeIndexPreparationFilesV1 {
     pinned_segment_reads: VecDeque<PinnedPreparationSegmentV1>,
     #[cfg(unix)]
     segment_read_open_attempts: u64,
+    // One changed sealed pathname invalidates the entire transaction. Retrying
+    // must not silently accept substituted bytes under the same digest name.
+    #[cfg(unix)]
+    segment_reads_poisoned: bool,
     directory: tempfile::TempDir,
     _retention: CodeGenerationStoreLockV1,
     referenced_segment_bytes: u64,
@@ -810,6 +814,13 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                     )
                 }
                 DaemonCodeIndexPreparationStateV1::Open(files) => {
+                    #[cfg(unix)]
+                    if files.segment_reads_poisoned {
+                        buffer.clear();
+                        return Err(CodeIndexProductionErrorV1::Contract(
+                            "staged sealed segment identity was invalidated".to_owned(),
+                        ));
+                    }
                     let digest = match request {
                         SealedGenerationSegmentReadV1::Whole { digest, .. }
                         | SealedGenerationSegmentReadV1::Range { digest, .. } => digest,
@@ -864,6 +875,7 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                                 // replaced during one preparation. Reopening it
                                 // could return bytes that do not match the
                                 // manifest's digest, even with the same size.
+                                files.segment_reads_poisoned = true;
                                 buffer.clear();
                                 return Err(CodeIndexProductionErrorV1::Contract(
                                     "staged sealed segment identity changed while pinned"
@@ -878,14 +890,10 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                         {
                             let segment =
                                 DaemonCodeIndexPublicationStoreV1::open_pinned_staged_segment(
-                                    &path, request,
+                                    &path,
+                                    request,
+                                    &mut files.segment_read_open_attempts,
                                 )?;
-                            files.segment_read_open_attempts += 1;
-                            tracing::trace!(
-                                target: "tracedecay::code_index",
-                                staged_segment_file_open_count = files.segment_read_open_attempts,
-                                "opened staged segment handle after an LRU miss"
-                            );
                             if files.pinned_segment_reads.len()
                                 == MAX_STAGED_SEGMENT_READ_HANDLES
                             {
@@ -2023,24 +2031,32 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "sealed generation segment metadata cannot be read: {error}"
             ))
         })?;
-        let file_identity = Handle::from_file(file.try_clone().map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed generation segment handle cannot be cloned: {error}"
-            ))
-        })?)
-        .map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed generation segment handle identity cannot be read: {error}"
-            ))
-        })?;
-        let path_identity = Handle::from_path(&path).map_err(|error| {
-            CodeIndexProductionErrorV1::Contract(format!(
-                "sealed generation segment path identity cannot be read: {error}"
-            ))
-        })?;
+        // On Unix the pathname/opened inode and change-time identity can be
+        // compared without Handle::from_path (another endpoint-scanned open).
+        #[cfg(unix)]
+        let same_identity = Self::same_unix_segment_identity(&path_metadata, &file_metadata);
+        #[cfg(not(unix))]
+        let same_identity = {
+            let file_identity = Handle::from_file(file.try_clone().map_err(|error| {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation segment handle cannot be cloned: {error}"
+                ))
+            })?)
+            .map_err(|error| {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation segment handle identity cannot be read: {error}"
+                ))
+            })?;
+            let path_identity = Handle::from_path(&path).map_err(|error| {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation segment path identity cannot be read: {error}"
+                ))
+            })?;
+            file_identity == path_identity
+        };
         if !file_metadata.is_file()
             || file_metadata.len() != expected_size
-            || file_identity != path_identity
+            || !same_identity
         {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "sealed generation segment identity changed while it was opened".to_owned(),
@@ -2078,6 +2094,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
     fn open_pinned_staged_segment(
         path: &Path,
         request: SealedGenerationSegmentReadV1<'_>,
+        open_attempts: &mut u64,
     ) -> Result<PinnedGenerationSegmentV1, CodeIndexProductionErrorV1> {
         let (digest, size_bytes, offset, length) = match request {
             SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
@@ -2108,6 +2125,12 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "staged sealed segment identity does not match its manifest".to_owned(),
             ));
         }
+        *open_attempts = (*open_attempts).saturating_add(1);
+        tracing::trace!(
+            target: "tracedecay::code_index",
+            staged_segment_file_open_count = *open_attempts,
+            "attempted staged segment pathname open after an LRU miss"
+        );
         let file = File::open(path).map_err(|error| {
             CodeIndexProductionErrorV1::Contract(format!(
                 "staged sealed segment cannot be opened: {error}"
@@ -2135,6 +2158,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
         request: SealedGenerationSegmentReadV1<'_>,
         buffer: &mut Vec<u8>,
     ) -> Result<(), CodeIndexProductionErrorV1> {
+        // Errors must not leave bytes from an earlier successful range visible.
+        buffer.clear();
         let (digest, expected_size, offset, length) = match request {
             SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
                 (digest.as_str(), size_bytes, 0, size_bytes)
@@ -2161,13 +2186,13 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "sealed generation segment range exceeds addressable memory".to_owned(),
             )
         })?;
-        buffer.clear();
         buffer.resize(length, 0);
         pinned
             .file
             .seek(SeekFrom::Start(offset))
             .and_then(|_| pinned.file.read_exact(buffer))
             .map_err(|error| {
+                buffer.clear();
                 CodeIndexProductionErrorV1::Contract(format!(
                     "sealed generation segment read failed: {error}"
                 ))
@@ -3250,6 +3275,8 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                     pinned_segment_reads: VecDeque::new(),
                     #[cfg(unix)]
                     segment_read_open_attempts: 0,
+                    #[cfg(unix)]
+                    segment_reads_poisoned: false,
                     _retention: retention,
                     referenced_segment_bytes: 0,
                     manifest_identity: None,

@@ -162,6 +162,7 @@ fn staged_segment_range_reads_open_once_per_cached_file_and_revalidate_replaceme
         matches!(invalid_range, Err(CodeIndexProductionErrorV1::Contract(_))),
         "a range outside the sealed extent must be refused",
     );
+    assert!(read.is_empty(), "an invalid range must not expose stale read bytes");
     assert_eq!(
         preparation.staged_segment_read_open_attempts_for_test(),
         1,
@@ -235,6 +236,22 @@ fn staged_segment_range_reads_open_once_per_cached_file_and_revalidate_replaceme
         preparation.staged_segment_read_open_attempts_for_test(),
         10,
         "refusing a replaced pinned file must not open untrusted bytes",
+    );
+    // A second request must not turn the first identity refusal into a new
+    // successful read of substituted content with the same size and name.
+    let retry = reader(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &digests[0],
+            size_bytes: contents[0].len() as u64,
+        },
+        &mut read,
+    );
+    assert!(matches!(retry, Err(CodeIndexProductionErrorV1::Contract(_))));
+    assert!(read.is_empty(), "a poisoned preparation must remain closed to reads");
+    assert_eq!(
+        preparation.staged_segment_read_open_attempts_for_test(),
+        10,
+        "poisoned staged segment must not be reopened after identity refusal",
     );
     drop(reader);
     preparation.abort().expect("abort and clean staged files");
