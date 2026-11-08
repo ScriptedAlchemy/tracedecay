@@ -2794,10 +2794,19 @@ mod tests {
         // Rechecking the repaired changed segment is necessary, but rehashing
         // every untouched inherited segment would make recovery cold again.
         let recovered_reads = count_proof_reads(&successor_record);
-        assert!(
-            recovered_reads > warmed_reads,
-            "recovery did not re-authenticate repaired source: warmed={warmed_reads}, recovered={recovered_reads}"
-        );
+        if cfg!(unix) {
+            assert!(
+                recovered_reads > warmed_reads,
+                "recovery did not re-authenticate repaired source: warmed={warmed_reads}, recovered={recovered_reads}"
+            );
+        } else {
+            // Without fingerprint reuse, a warm proof still rehashes every
+            // segment. The corruption refusal above checks edited source.
+            assert_eq!(
+                recovered_reads, warmed_reads,
+                "a platform without fingerprints must rehash every segment"
+            );
+        }
         let rewarmed_reads = count_proof_reads(&successor_record);
         assert_eq!(
             rewarmed_reads, warmed_reads,
