@@ -325,6 +325,8 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes, c
     if not isinstance(dataset_bytes, bytes):
         raise ValueError("qualification requires the original dataset bytes")
     dataset_sha = sha256_bytes(dataset_bytes)
+    if not isinstance(result, dict):
+        raise ValueError("qualification result must be an object")
     if result.get("dataset_sha256") != dataset_sha:
         raise ValueError("qualification result dataset digest differs from supplied evidence")
     cases = loads_unambiguous_json(dataset_bytes)
@@ -355,7 +357,8 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes, c
     if experiment.get("requests_sha256") != validated["holdout_requests_sha256"]:
         raise ValueError("qualification rendered held-out requests differ from frozen manifest")
     rows = result.get("rows")
-    if not isinstance(rows, list) or [r.get("id") for r in rows if isinstance(r, dict)] != validated["heldout_ids"]:
+    if (not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows)
+            or [row.get("id") for row in rows] != validated["heldout_ids"]):
         raise ValueError("qualification result differs from frozen held-out case order")
     for row in rows:
         annotation = validated["annotations"][row["id"]]

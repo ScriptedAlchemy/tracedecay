@@ -692,7 +692,8 @@ class QualificationTests(unittest.TestCase):
                     partial.write_text(header + "\n" + json.dumps(corrupted) + "\n")
                     before = partial.read_bytes()
                     with patch.object(run_http, "post") as blocked:
-                        with self.assertRaisesRegex(ValueError, "frozen selector"):
+                        expected = "requires a server-reported model" if altered_model is None else "frozen selector"
+                        with self.assertRaisesRegex(ValueError, expected):
                             run_http.main(args)
                         blocked.assert_not_called()
                     self.assertEqual(partial.read_bytes(), before)
@@ -823,6 +824,7 @@ class QualificationTests(unittest.TestCase):
         for field, mutation, pattern in (
             ("label", lambda r: r["rows"][0].update(labels=[]), "reviewed labels"),
             ("order", lambda r: r["rows"].reverse(), "held-out case order"),
+            ("non_object_row", lambda r: r["rows"].append(None), "held-out case order"),
             ("identity", lambda r: r["experiment"].pop("qualification_manifest_sha256"), "not bound"),
             ("forged_review", lambda r: r["rows"][1].update(context_needed=True), "reviewed labels"),
         ):
@@ -1080,11 +1082,16 @@ class QualificationTests(unittest.TestCase):
         altered["experiment"]["requests_sha256"] = score.evidence_digest([
             [row["id"], row["request_sha256"]] for row in altered["rows"]
         ])
+        # Keep the declaration and the result internally consistent so this
+        # exercises reconstruction against the original requests.
+        manifest = copy.deepcopy(self.manifest)
+        manifest["holdout_requests_sha256"] = altered["experiment"]["requests_sha256"]
+        manifest_sha = qualification.sha256_bytes(json.dumps(manifest).encode("utf-8"))
+        altered["experiment"]["qualification_manifest_sha256"] = manifest_sha
         altered["experiment_sha256"] = score.evidence_digest(altered["experiment"])
         with self.assertRaisesRegex(ValueError, "request fingerprint disagrees"):
             qualification.qualified_report(
-                altered, self.manifest, self.manifest_sha,
-                self.questions, self.dataset_bytes,
+                altered, manifest, manifest_sha, self.questions, self.dataset_bytes,
             )
 
     def test_runner_can_consume_explicit_frozen_input_file(self):

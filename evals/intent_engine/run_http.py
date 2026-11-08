@@ -316,9 +316,9 @@ def checked_qualified_model(previous, reported, requested):
         raise ValueError("qualified HTTP response requires a server-reported model")
     if requested is not None and reported != requested:
         raise ValueError("qualified HTTP reported model differs from frozen selector")
-    if previous is not None and reported is not None and reported != previous:
+    if previous is not None and reported != previous:
         raise ValueError("qualified HTTP responses mix reported models")
-    return previous if reported is None else reported
+    return reported
 
 
 def serialize_result(row, questions, temperature):
@@ -439,16 +439,15 @@ def resume_rows(partial, header, cases, requests, questions, temperature):
                 or row.get("labels") != case["labels"]
                 or row.get("context_needed") != case["context_needed"]):
             raise ValueError(f"partial output has mismatched case evidence for {case_id}")
-        if ("qualification_manifest_sha256" in header["experiment"]
-                and (isinstance(row.get("request_size_bytes"), bool)
-                     or row.get("request_size_bytes") != len(request_bytes(requests[case_id][0])))):
-            raise ValueError(f"partial output has mismatched request byte count for {case_id}")
-        serialize_result(row, questions, temperature)
         if qualified:
+            recorded_size = row.get("request_size_bytes")
+            if type(recorded_size) is not int or recorded_size != len(request_bytes(requests[case_id][0])):
+                raise ValueError(f"partial output has mismatched request byte count for {case_id}")
             previous_model = checked_qualified_model(
                 previous_model, row.get("observed_model"),
                 header["experiment"].get("requested_model"),
             )
+        serialize_result(row, questions, temperature)
         done[case_id] = row
     return done
 
