@@ -36,6 +36,7 @@ pub struct CanonicalBodyGcReport {
     pub has_more: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Progress {
     raw_through: i64,
     raw_until: i64,
@@ -120,6 +121,14 @@ async fn save_progress(conn: &(impl Executor + ?Sized), progress: &Progress) -> 
     if changed != 1 {
         return Err(integrity_error("canonical body ownership frontier changed"));
     }
+    // The UPDATE can report one affected row even if a database trigger
+    // rewrites the checkpoint. Verify the durable value before committing the
+    // references or candidate seed that depended on this bootstrap page.
+    if read_progress(conn).await? != *progress {
+        return Err(integrity_error(
+            "canonical body ownership bootstrap frontier was not persisted",
+        ));
+    }
     Ok(())
 }
 
@@ -146,12 +155,18 @@ async fn step(conn: &(impl Executor + ?Sized), max_rows: usize) -> Result<Canoni
     let mut progress = read_progress(conn).await?;
     let mut report = CanonicalBodyGcReport::default();
     if !progress.complete() {
+        let before = progress.clone();
         if progress.raw_through < progress.raw_until {
             report.roots_scanned = bootstrap_raw(conn, &mut progress, limit).await?;
         } else if progress.observations_through < progress.observations_until {
             report.roots_scanned = bootstrap_observations(conn, &mut progress, limit).await?;
         } else {
             report.bodies_scanned = bootstrap_bodies(conn, &mut progress, limit).await?;
+        }
+        if progress == before {
+            return Err(integrity_error(
+                "canonical body ownership bootstrap page did not advance",
+            ));
         }
         save_progress(conn, &progress).await?;
     } else {

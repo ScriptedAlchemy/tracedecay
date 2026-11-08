@@ -555,3 +555,82 @@ async fn zero_delete_pages_discharge_distinct_candidates_and_quiesce() {
     let count: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
     assert_eq!(count, 52);
 }
+
+#[asupersync::test]
+async fn rewritten_bootstrap_checkpoint_refuses_commit_and_recovers_across_48_row_pages() {
+    let store = Store::open().await;
+    let shared = StoredCanonicalBody::pack(b"shared canonical body").unwrap();
+    insert_body(store.conn(), &shared).await;
+    for _ in 0..52 {
+        store
+            .conn()
+            .execute(
+                "INSERT INTO lcm_raw_messages(storage_kind, content, content_hash)
+                 VALUES ('inline', NULL, ?1)",
+                params![shared.content_hash.as_str()],
+            )
+            .await
+            .unwrap();
+    }
+    store.install().await;
+    // Even with recursive triggers enabled, the inner write terminates at zero.
+    // SQLite reports one updated row for the outer statement, but a plain
+    // affected-row check would miss the nonadvancing durable frontier.
+    store
+        .conn()
+        .execute_batch(
+            "CREATE TRIGGER corrupt_gc_bootstrap AFTER UPDATE ON canonical_body_gc_progress
+             WHEN NEW.raw_through > 0 BEGIN
+                 UPDATE canonical_body_gc_progress SET raw_through = 0 WHERE singleton = 1;
+             END",
+        )
+        .await
+        .unwrap();
+    let transaction = store
+        .conn()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .unwrap();
+    let error = step(&transaction, 48).await.unwrap_err();
+    assert!(error.to_string().contains("frontier was not persisted"));
+    let mut staged = transaction
+        .query("SELECT COUNT(*) FROM canonical_body_gc_refs", ())
+        .await
+        .unwrap();
+    let staged_count: i64 = staged.next().await.unwrap().unwrap().get(0).unwrap();
+    assert_eq!(staged_count, 48, "the page was enrolled before checkpoint refusal");
+    drop(staged);
+    transaction.rollback().await.unwrap();
+    assert_eq!(read_progress(store.conn()).await.unwrap().raw_through, 0);
+    let mut durable = store
+        .conn()
+        .query("SELECT COUNT(*) FROM canonical_body_gc_refs", ())
+        .await
+        .unwrap();
+    let durable_count: i64 = durable.next().await.unwrap().unwrap().get(0).unwrap();
+    assert_eq!(durable_count, 0, "the refused page must roll back its refs");
+    drop(durable);
+    assert!(body_exists(store.conn(), &shared.content_hash).await);
+
+    store
+        .conn()
+        .execute_batch("DROP TRIGGER corrupt_gc_bootstrap")
+        .await
+        .unwrap();
+    let first = store.tick(48).await;
+    assert_eq!(first.roots_scanned, 48);
+    assert!(first.has_more);
+    assert_eq!(read_progress(store.conn()).await.unwrap().raw_through, 48);
+    let second = store.tick(48).await;
+    assert_eq!(second.roots_scanned, 4);
+    assert_eq!(read_progress(store.conn()).await.unwrap().raw_through, 52);
+    let (deleted, bytes) = drain(&store, 48).await;
+    assert_eq!((deleted, bytes), (0, 0), "live bodies remain referenced");
+    assert!(body_exists(store.conn(), &shared.content_hash).await);
+    assert!(!has_candidates(store.conn()).await.unwrap());
+    let idle = store.tick(48).await;
+    assert!(idle.bootstrap_complete);
+    assert_eq!(idle.roots_scanned, 0);
+    assert_eq!(idle.bodies_scanned, 0);
+    assert!(!idle.has_more);
+}
