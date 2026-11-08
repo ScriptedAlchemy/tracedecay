@@ -1511,10 +1511,9 @@ fn database_family_bytes(database_path: &Path) -> u64 {
         // Physical profile bytes must not include a symlink's foreign target.
         // The full-profile walk separately marks a linked member unavailable.
         if let Ok(metadata) = std::fs::symlink_metadata(sqlite_family_member(database_path, suffix))
+            && metadata.file_type().is_file()
         {
-            if metadata.file_type().is_file() {
-                total_bytes = total_bytes.saturating_add(metadata.len());
-            }
+            total_bytes = total_bytes.saturating_add(metadata.len());
         }
     }
     total_bytes
@@ -1524,6 +1523,16 @@ fn database_family_bytes(database_path: &Path) -> u64 {
 /// caller opens only `destination`, which prevents reporting from creating
 /// sidecars under the profile it is inspecting.
 fn copy_sqlite_family(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let generation =
+        tracedecay_runtime_core::sqlite_read_snapshot::SourceGeneration::capture(source)?;
+    copy_sqlite_family_at_generation(source, destination, &generation)
+}
+
+fn copy_sqlite_family_at_generation(
+    source: &Path,
+    destination: &Path,
+    generation: &tracedecay_runtime_core::sqlite_read_snapshot::SourceGeneration,
+) -> std::io::Result<()> {
     // Refuse nonregular and linked source members before copying any bytes.
     // Path::is_file() follows symlinks, potentially copying an arbitrarily
     // large foreign file into the report's temporary SQLite snapshot.
@@ -1547,8 +1556,6 @@ fn copy_sqlite_family(source: &Path, destination: &Path) -> std::io::Result<()> 
             Err(error) => return Err(error),
         }
     }
-    let generation =
-        tracedecay_runtime_core::sqlite_read_snapshot::SourceGeneration::capture(source)?;
     for (source_member, suffix) in members {
         std::fs::copy(&source_member, sqlite_family_member(destination, suffix))?;
     }
@@ -2584,6 +2591,70 @@ mod tests {
             );
             assert_eq!(foreign.metadata().unwrap().len(), foreign_bytes);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_snapshot_rejects_wal_committed_after_generation_capture() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let registry = temporary.path().join(GLOBAL_DB_FILENAME);
+        let writer = rusqlite::Connection::open(&registry).unwrap();
+        writer
+            .execute_batch(
+                "CREATE TABLE code_projects (
+                    project_id TEXT PRIMARY KEY,
+                    canonical_root TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+        let generation =
+            tracedecay_runtime_core::sqlite_read_snapshot::SourceGeneration::capture(&registry)
+                .unwrap();
+        // A new committed WAL must invalidate the preexisting generation.
+        // The old order captured membership before the generation and then
+        // silently copied only the main database, losing this project.
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 PRAGMA wal_autocheckpoint = 0;
+                 INSERT INTO code_projects VALUES ('proj_new', '/repos/new');",
+            )
+            .unwrap();
+        let wal = sqlite_family_member(&registry, "-wal");
+        assert!(wal.metadata().unwrap().len() > 0);
+
+        let destination = temporary.path().join("report-snapshot.db");
+        let error = copy_sqlite_family_at_generation(&registry, &destination, &generation)
+            .expect_err("a post-capture WAL commit must invalidate the snapshot");
+        assert!(
+            error.to_string().contains("changed after inspection"),
+            "the snapshot must fail closed instead of misclassifying new projects: {error}"
+        );
+        let canonical_root: String = writer
+            .query_row(
+                "SELECT canonical_root FROM code_projects WHERE project_id = 'proj_new'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(canonical_root, "/repos/new");
+
+        // A new complete generation must still be usable on the same live
+        // registry; the rejection is for racing changes, not WAL mode itself.
+        let stable =
+            tracedecay_runtime_core::sqlite_read_snapshot::SourceGeneration::capture(&registry)
+                .unwrap();
+        let stable_destination = temporary.path().join("stable-snapshot.db");
+        copy_sqlite_family_at_generation(&registry, &stable_destination, &stable).unwrap();
+        let snapshot = rusqlite::Connection::open(&stable_destination).unwrap();
+        let snapshot_root: String = snapshot
+            .query_row(
+                "SELECT canonical_root FROM code_projects WHERE project_id = 'proj_new'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(snapshot_root, "/repos/new");
     }
 
     #[cfg(unix)]
