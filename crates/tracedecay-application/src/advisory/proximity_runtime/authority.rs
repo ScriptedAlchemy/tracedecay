@@ -951,6 +951,57 @@ fn graph_relation(
     (None, false)
 }
 
+/// Collect only the bounded incoming caller closure needed for qualitative
+/// proximity hints. A budget refusal cannot silently turn an uncertain
+/// relationship into a negative result. The real producer supplies one
+/// generation-pinned caller batch per hop; the injected reader lets tests
+/// exercise cycles and incomplete batches rather than inspecting source text.
+fn caller_neighborhood(
+    seeds: &[SymbolOccurrenceId],
+    max_symbols: usize,
+    mut read_callers: impl FnMut(&[SymbolOccurrenceId]) -> Option<Vec<Vec<CodeGraphSymbolSummaryV1>>>,
+) -> Option<(BTreeSet<SymbolOccurrenceId>, BTreeSet<SymbolOccurrenceId>)> {
+    if max_symbols == 0 {
+        return None;
+    }
+    let mut seen = seeds.iter().cloned().collect::<BTreeSet<_>>();
+    let mut frontier = seeds.to_vec();
+    let mut callers = BTreeSet::new();
+    let mut tests = BTreeSet::new();
+    for depth in 1..=3 {
+        if frontier.is_empty() {
+            break;
+        }
+        let batches = read_callers(&frontier)?;
+        if batches.len() != frontier.len() {
+            return None;
+        }
+        let mut next = Vec::new();
+        for neighbor in batches.into_iter().flatten() {
+            let occurrence = neighbor.occurrence.clone();
+            if !seen.insert(occurrence.clone()) {
+                continue;
+            }
+            if seen.len().saturating_sub(seeds.len()) > max_symbols {
+                return None;
+            }
+            if depth <= 2 {
+                callers.insert(occurrence.clone());
+            }
+            if neighbor
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.kind.eq_ignore_ascii_case("test"))
+            {
+                tests.insert(occurrence.clone());
+            }
+            next.push(occurrence);
+        }
+        frontier = next;
+    }
+    Some((callers, tests))
+}
+
 fn graph_neighborhood(
     graph: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
@@ -960,34 +1011,26 @@ fn graph_neighborhood(
     BTreeSet<SymbolOccurrenceId>,
     BTreeSet<SymbolOccurrenceId>,
 )> {
-    let impact = graph
-        .impact(
-            seeds,
-            &[RelationEdgeKindV1::Calls],
-            3,
-            100_000,
-            100_000,
-            Arc::clone(&cancellation),
-        )
-        .ok()?;
-    let callers = impact
-        .impacted
-        .iter()
-        .filter(|symbol| symbol.depth <= 2)
-        .map(|symbol| symbol.summary.occurrence.clone())
-        .collect();
-    let tests = impact
-        .impacted
-        .iter()
-        .filter(|symbol| {
-            symbol
-                .summary
-                .metadata
-                .as_ref()
-                .is_some_and(|metadata| metadata.kind.eq_ignore_ascii_case("test"))
-        })
-        .map(|symbol| symbol.summary.occurrence.clone())
-        .collect();
+    // The former graph.impact() created a complete impact report, then kept
+    // only depth-2 callers and test identities. Read those actual caller
+    // edges directly and refuse incomplete closures instead of accepting
+    // impact.complete=false as if the relationship were known absent.
+    let (callers, tests) = caller_neighborhood(seeds, 100_000, |frontier| {
+        graph
+            .callers(
+                frontier,
+                &[RelationEdgeKindV1::Calls],
+                100_000,
+                Arc::clone(&cancellation),
+            )
+            .ok()
+            .map(|batches| {
+                batches
+                    .into_iter()
+                    .map(|edges| edges.into_iter().map(|edge| edge.neighbor).collect())
+                    .collect()
+            })
+    })?;
     let mut dependencies = BTreeSet::new();
     let mut frontier = seeds.to_vec();
     for _ in 0..2 {
@@ -1230,6 +1273,66 @@ mod tests {
         assert_eq!(
             exact_warning_class(ProximityWarningClassV1::SameSymbol, false),
             ProximityWarningClassV1::SameFile
+        );
+    }
+
+
+    #[test]
+    fn caller_neighborhood_preserves_depth_bounds_cycles_and_refusals() {
+        let root = SymbolOccurrenceId::new("symbol.root").unwrap();
+        let first = SymbolOccurrenceId::new("symbol.first").unwrap();
+        let second = SymbolOccurrenceId::new("symbol.second").unwrap();
+        let third = SymbolOccurrenceId::new("symbol.third").unwrap();
+        let node = |id| {
+            callable(
+                id,
+                SourceSpan {
+                    start_byte: 0,
+                    end_byte: 1,
+                },
+            )
+        };
+        let mut reads = 0;
+        let (callers, tests) = caller_neighborhood(std::slice::from_ref(&root), 3, |frontier| {
+            reads += 1;
+            Some(
+                frontier
+                    .iter()
+                    .map(|id| match id.as_str() {
+                        "symbol.root" => vec![node("symbol.first")],
+                        "symbol.first" => vec![node("symbol.root"), node("symbol.second")],
+                        "symbol.second" => vec![node("symbol.third")],
+                        _ => Vec::new(),
+                    })
+                    .collect(),
+            )
+        })
+        .expect("complete bounded caller closure");
+        assert_eq!(reads, 3, "one generation-pinned caller batch per depth");
+        assert_eq!(callers, BTreeSet::from([first, second]));
+        assert!(!callers.contains(&third), "third hop is not a direct hint");
+        assert!(tests.is_empty());
+
+        assert!(
+            caller_neighborhood(std::slice::from_ref(&root), 2, |frontier| {
+                Some(
+                    frontier
+                        .iter()
+                        .map(|id| match id.as_str() {
+                            "symbol.root" => vec![node("symbol.first")],
+                            "symbol.first" => vec![node("symbol.second")],
+                            "symbol.second" => vec![node("symbol.third")],
+                            _ => Vec::new(),
+                        })
+                        .collect(),
+                )
+            })
+            .is_none(),
+            "exhaustion is partial, never a false negative"
+        );
+        assert!(
+            caller_neighborhood(std::slice::from_ref(&root), 10, |_| Some(Vec::new())).is_none(),
+            "incomplete per-seed evidence is refused"
         );
     }
 
