@@ -8,18 +8,19 @@ use tracedecay_code_index::{
     chunks::content_digest,
     incremental::plan_chunk_increment,
     production::{
-        CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionOwnerV1,
-        CodeIndexPublishedGenerationV1, MemorySealedPublicationStoreV1,
+        CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionErrorV1,
+        CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1,
+        MemorySealedPublicationStoreV1,
     },
 };
 use tracedecay_domain::{
-    FileOccurrenceId, LanguageId, ManifestDigest, SanitizedCodeFileV1, SensitivityLevelV1,
-    SnapshotFileDispositionV1, SymbolOccurrenceId,
+    FileOccurrenceId, LanguageId, ManifestDigest, RelationEdgeKindV1, SanitizedCodeFileV1,
+    SensitivityLevelV1, SnapshotFileDispositionV1, SymbolOccurrenceId,
 };
 
 use crate::{
     production_orchestration::{ActiveControl, config, request_with_source},
-    support::{cold_generation, id},
+    support::{PartitionedSealV1, cold_generation, id, reseal_manifest},
 };
 
 fn tree_request(util: &str, sealed_at: i64, phase: &str) -> CodeIndexBuildRequestV1 {
@@ -95,11 +96,31 @@ fn symbol(generation: &CodeIndexPublishedGenerationV1, name: &str) -> SymbolOccu
         .symbols()
         .symbols
         .iter()
-        .filter(|symbol| symbol.simple_name == name)
+        .filter(|symbol| symbol.qualified_name == name)
         .map(|symbol| symbol.occurrence.clone())
         .collect::<Vec<_>>();
     assert_eq!(matches.len(), 1, "fixture must have exactly one {name}");
     matches[0].clone()
+}
+
+fn assert_unrelated_calls(generation: &CodeIndexPublishedGenerationV1) {
+    let target = symbol(generation, "src/other.rs::new");
+    for n in 0..4 {
+        let caller = symbol(generation, &format!("src/caller{n}.rs::caller{n}"));
+        assert_eq!(
+            generation
+                .edges()
+                .iter()
+                .filter(|edge| {
+                    edge.from_occurrence == caller
+                        && edge.to_occurrence == target
+                        && edge.kind == RelationEdgeKindV1::Calls
+                })
+                .count(),
+            1,
+            "caller{n} must bind the unrelated file, not just seal a descriptor"
+        );
+    }
 }
 
 #[test]
@@ -117,6 +138,10 @@ fn comment_successor_skips_unrelated_evidence_and_publishes_the_cold_chunk_delta
         .build_and_publish(before_request.clone(), &ActiveControl)
         .expect("parent publishes");
     assert!(parent.cold_reason().is_some());
+    // Descriptor presence alone does not prove a resolved call. Establish
+    // the four actual unrelated edges before taking the read baselines.
+    let before = cold_generation(&parent);
+    assert_unrelated_calls(&before);
     let envelope: serde_json::Value =
         serde_json::from_slice(parent.manifest_bytes()).expect("sealed manifest envelope");
     let evidence_digest = |path: &str| {
@@ -132,7 +157,7 @@ fn comment_successor_skips_unrelated_evidence_and_publishes_the_cold_chunk_delta
             .expect("evidence descriptors")
             .iter()
             .find(|descriptor| descriptor["file_key"].as_u64() == Some(key))
-            .expect("fixture must seal real cross-file evidence");
+            .unwrap_or_else(|| panic!("{path} must seal real cross-file evidence"));
         serde_json::from_value::<ManifestDigest>(descriptor["segment_digest"].clone())
             .expect("evidence digest")
     };
@@ -179,9 +204,9 @@ fn comment_successor_skips_unrelated_evidence_and_publishes_the_cold_chunk_delta
         .build_and_publish(cold_request, &ActiveControl)
         .expect("cold successor publishes");
     assert!(cold.cold_reason().is_some());
-    let before = cold_generation(&parent);
     let after = cold_generation(&sparse);
     let expected = cold_generation(&cold);
+    assert_unrelated_calls(&after);
     let expected_delta = plan_chunk_increment(Some(before.chunks()), expected.chunks())
         .expect("cold chunks define the complete expected delta");
     assert!(!expected_delta.added_or_changed.is_empty());
@@ -205,16 +230,16 @@ fn comment_successor_skips_unrelated_evidence_and_publishes_the_cold_chunk_delta
     assert_eq!(changes.reused_digest, expected_delta.reused_digest);
     assert_eq!(after.edges(), expected.edges());
 
-    let old_helper = symbol(&before, "helper");
-    let helper = symbol(&after, "helper");
-    let old_other = symbol(&before, "extra");
-    let other = symbol(&after, "extra");
-    let run = symbol(&after, "run");
-    let sibling = symbol(&after, "second_caller");
+    let old_helper = symbol(&before, "src/util.rs::helper");
+    let helper = symbol(&after, "src/util.rs::helper");
+    let old_other = symbol(&before, "src/util.rs::extra");
+    let other = symbol(&after, "src/util.rs::extra");
+    let run = symbol(&after, "src/main.rs::run");
+    let sibling = symbol(&after, "src/sibling.rs::second_caller");
     assert_ne!(old_helper, helper, "comment edit re-keys its target");
     assert_ne!(old_other, other);
-    assert_eq!(run, symbol(&before, "run"));
-    assert_eq!(sibling, symbol(&before, "second_caller"));
+    assert_eq!(run, symbol(&before, "src/main.rs::run"));
+    assert_eq!(sibling, symbol(&before, "src/sibling.rs::second_caller"));
     for (from, to) in [(&run, &helper), (&run, &other), (&sibling, &helper)] {
         assert_eq!(
             after
@@ -250,4 +275,49 @@ fn comment_successor_skips_unrelated_evidence_and_publishes_the_cold_chunk_delta
         2,
         "untouched caller fan-out survives repointing"
     );
+}
+
+#[test]
+fn sealed_evidence_refuses_a_resealed_false_negative_target_filter() {
+    let util = "pub fn helper() -> u32 { 1 }\npub fn extra() -> u32 { 2 }\n";
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(config(), MemorySealedPublicationStoreV1::default())
+            .expect("owner");
+    let published = owner
+        .build_and_publish(tree_request(util, 1_100_000, "filter"), &ActiveControl)
+        .expect("generation publishes");
+    let generation = cold_generation(&published);
+    assert_unrelated_calls(&generation);
+    let seal = PartitionedSealV1::of(&generation);
+    let mut envelope = seal.envelope();
+    let descriptor = envelope["generation"]["file_evidence"]
+        .as_array_mut()
+        .expect("evidence descriptors")
+        .iter_mut()
+        .find(|descriptor| {
+            descriptor["target_filter"]
+                .as_array()
+                .expect("target filter words")
+                .iter()
+                .any(|word| word.as_u64().expect("target filter word") != 0)
+        })
+        .expect("real cross-file evidence must have a nonempty target filter");
+    descriptor["target_filter"] = serde_json::json!([0_u64, 0_u64, 0_u64, 0_u64]);
+    // Recompute the outer digest so this reaches semantic descriptor checking,
+    // not an unrelated manifest authentication failure. Segment bytes stay intact.
+    let tampered = reseal_manifest(envelope);
+    CodeIndexPublishedGenerationV1::partitioned_text_metadata(&tampered)
+        .expect("resealed metadata is structurally valid");
+    let error = seal
+        .restore(&tampered)
+        .expect_err("a false-negative target filter must not restore");
+    assert!(
+        matches!(
+            &error,
+            CodeIndexProductionErrorV1::Contract(message)
+                if message == "sealed file evidence does not match its descriptor"
+        ),
+        "unexpected evidence refusal: {error}"
+    );
+    assert_eq!(seal.restored().edges(), generation.edges());
 }
