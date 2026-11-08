@@ -2027,78 +2027,44 @@ async fn clear_active_projection(
     conn: &impl Executor,
     generation: &str,
 ) -> ProjectionStoreResult<()> {
-    conn.execute_batch(
-        "CREATE TEMP TABLE IF NOT EXISTS observation_projection_rebuild_retained_outputs (
-            output_provider TEXT NOT NULL,
-            output_message_id TEXT NOT NULL,
-            PRIMARY KEY(output_provider, output_message_id)
-         ) WITHOUT ROWID;
-         CREATE TEMP TABLE IF NOT EXISTS observation_projection_rebuild_cleared_outputs (
-            output_provider TEXT NOT NULL,
-            output_message_id TEXT NOT NULL,
-            PRIMARY KEY(output_provider, output_message_id)
-         ) WITHOUT ROWID;
-         DELETE FROM temp.observation_projection_rebuild_retained_outputs;
-         DELETE FROM temp.observation_projection_rebuild_cleared_outputs;",
-    )
-    .await
-    .map_err(|error| storage("prepare projection rebuild activation", error))?;
-    conn.execute(
-        "INSERT INTO temp.observation_projection_rebuild_retained_outputs (
-            output_provider, output_message_id
-         )
-         SELECT DISTINCT current.output_provider, current.output_message_id
-         FROM observation_projection_provenance AS current
-         WHERE current.projector_version = ?1
-           AND EXISTS (
-             SELECT 1 FROM observation_projection_provenance AS retained
-             WHERE retained.output_provider = current.output_provider
-               AND retained.output_message_id = current.output_message_id
-               AND retained.projector_version <> current.projector_version
-           )",
-        params![SESSION_MESSAGE_PROJECTOR_VERSION],
-    )
-    .await
-    .map_err(|error| storage("materialize retained projection outputs", error))?;
-    conn.execute(
-        "INSERT INTO temp.observation_projection_rebuild_cleared_outputs (
-            output_provider, output_message_id
-         )
-         SELECT DISTINCT provenance.output_provider, provenance.output_message_id
-         FROM observation_projection_provenance AS provenance
-         WHERE provenance.projector_version = ?1 AND provenance.message_created = 1
-           AND NOT EXISTS (
-             SELECT 1 FROM temp.observation_projection_rebuild_retained_outputs AS retained
-             WHERE retained.output_provider = provenance.output_provider
-               AND retained.output_message_id = provenance.output_message_id
-           )
-           AND NOT EXISTS (
-             SELECT 1 FROM observation_projection_rebuild_messages AS staged
-             WHERE staged.projector_version = ?1 AND staged.generation = ?2
-               AND staged.output_provider = provenance.output_provider
-               AND staged.output_message_id = provenance.output_message_id
-           )",
-        params![SESSION_MESSAGE_PROJECTOR_VERSION, generation],
-    )
-    .await
-    .map_err(|error| storage("materialize cleared projection outputs", error))?;
+    // Projector ownership is indexed by output identity. Query that authority
+    // directly instead of materializing two large TEMP tables on the long-lived
+    // SQLite writer; their unlinked temp files can survive DELETE and DROP.
     conn.execute(
         "DELETE FROM lcm_raw_messages
          WHERE EXISTS (
-           SELECT 1 FROM temp.observation_projection_rebuild_cleared_outputs AS cleared
-           WHERE cleared.output_provider = lcm_raw_messages.provider
-             AND cleared.output_message_id = lcm_raw_messages.message_id
+             SELECT 1 FROM observation_projection_provenance AS current
+             WHERE current.projector_version = ?1
+               AND current.message_created = 1
+               AND current.output_provider = lcm_raw_messages.provider
+               AND current.output_message_id = lcm_raw_messages.message_id
+         )
+           AND NOT EXISTS (
+             SELECT 1 FROM observation_projection_provenance AS foreign_owner
+             WHERE foreign_owner.projector_version <> ?1
+               AND foreign_owner.output_provider = lcm_raw_messages.provider
+               AND foreign_owner.output_message_id = lcm_raw_messages.message_id
+         )
+           AND NOT EXISTS (
+             SELECT 1 FROM observation_projection_rebuild_messages AS staged
+             WHERE staged.projector_version = ?1 AND staged.generation = ?2
+               AND staged.output_provider = lcm_raw_messages.provider
+               AND staged.output_message_id = lcm_raw_messages.message_id
          )",
-        (),
+        params![SESSION_MESSAGE_PROJECTOR_VERSION, generation],
     )
     .await
     .map_err(|error| storage("clear projected message rows for rebuild", error))?;
+    // Foreign projector versions are never deleted. The predicate reads only
+    // those other versions, which remain stable while this version is cleared.
     conn.execute(
         "DELETE FROM observation_projection_provenance
-         WHERE projector_version = ?1 AND NOT EXISTS (
-           SELECT 1 FROM temp.observation_projection_rebuild_retained_outputs AS retained
-           WHERE retained.output_provider = observation_projection_provenance.output_provider
-             AND retained.output_message_id = observation_projection_provenance.output_message_id
+         WHERE projector_version = ?1
+           AND NOT EXISTS (
+             SELECT 1 FROM observation_projection_provenance AS foreign_owner
+             WHERE foreign_owner.projector_version <> ?1
+               AND foreign_owner.output_provider = observation_projection_provenance.output_provider
+               AND foreign_owner.output_message_id = observation_projection_provenance.output_message_id
          )",
         params![SESSION_MESSAGE_PROJECTOR_VERSION],
     )
@@ -2609,7 +2575,7 @@ mod activation_tests {
     use super::{
         REBUILD_PAGE_SIZE, SESSION_MESSAGE_PROJECTOR_VERSION,
         activate_projection_rebuild_transaction, activate_rebuild_sessions,
-        reconcile_overlapping_rebuild_sessions, write_staged_message,
+        clear_active_projection, reconcile_overlapping_rebuild_sessions, write_staged_message,
     };
     use crate::tests::harness::RegisteredGlobalDbHarness;
     use tracedecay_runtime_core::db::engine::{Executor, params};
@@ -2730,6 +2696,32 @@ mod activation_tests {
         assert_eq!(
             reconciled, OVERLAPS_PAST_TRANSPORT_ROW_CAP,
             "every overlapping session must be reconciled, not one page of {REBUILD_PAGE_SIZE}",
+        );
+    }
+
+    #[asupersync::test]
+    async fn clearing_projection_does_not_retain_temp_output_tables() {
+        let harness = RegisteredGlobalDbHarness::open("projection-clear-no-temp-cache").await;
+        let transaction = harness.registered.begin_write_transaction().await.unwrap();
+
+        clear_active_projection(&transaction, "generation.no-temp")
+            .await
+            .unwrap();
+
+        let mut rows = transaction
+            .query(
+                "SELECT name FROM sqlite_temp_master
+                 WHERE name IN (
+                    'observation_projection_rebuild_retained_outputs',
+                    'observation_projection_rebuild_cleared_outputs'
+                 ) LIMIT 1",
+                (),
+            )
+            .await
+            .unwrap();
+        assert!(
+            rows.next().await.unwrap().is_none(),
+            "clearing projector ownership must not leave output TEMP tables on the writer"
         );
     }
 
