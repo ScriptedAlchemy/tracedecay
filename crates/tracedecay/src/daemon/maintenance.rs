@@ -1852,19 +1852,16 @@ mod tests {
             None
         );
         assert_eq!(constructed.load(Ordering::SeqCst), 0);
-        poll_fn(|cx| {
-            assert!(follower.as_mut().poll(cx).is_pending());
-            Poll::Ready(())
-        })
-        .await;
-        release_tx.send(()).expect("release held writer");
-        writer.await.expect("held writer exits");
+        // Owner and content otherwise run concurrently. Only queued exclusive
+        // maintenance blocked this content writer on the same store.
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(2), &mut follower)
                 .await
-                .expect("next store writer proceeds after the holder exits"),
+                .expect("content writer resumes while the owner is still active"),
             8
         );
+        release_tx.send(()).expect("release held writer");
+        writer.await.expect("held writer exits");
         assert_eq!(
             administration.try_with_writer(|| async { 9_u8 }).await,
             Some(9)
