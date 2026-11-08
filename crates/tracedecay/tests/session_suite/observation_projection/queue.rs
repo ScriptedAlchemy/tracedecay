@@ -733,9 +733,7 @@ async fn empty_projection_drain_does_not_wait_for_an_unrelated_writer() {
     let store = runtime
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
-    let database_path = runtime
-        .database_path(HostAdmissionScope::Profile)
-        .unwrap();
+    let database_path = runtime.database_path(HostAdmissionScope::Profile).unwrap();
 
     // A separate connection holds SQLite's writer reservation. An idle
     // projection pass must still finish using only the read connection.
@@ -763,7 +761,11 @@ async fn empty_projection_drain_does_not_wait_for_an_unrelated_writer() {
         conversational_payload("message-empty-drain", "post-idle admission"),
     );
     persist(&store, new_record, None).await;
-    let after = store.project_queued_observations(32).await.unwrap().unwrap();
+    let after = store
+        .project_queued_observations(32)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(after.items.len(), 1);
     assert!(!after.has_more);
     assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 1);
