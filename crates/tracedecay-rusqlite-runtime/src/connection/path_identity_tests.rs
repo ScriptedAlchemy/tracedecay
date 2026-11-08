@@ -392,10 +392,19 @@ fn verified_reader_release_preserves_independent_writer_exclusion() {
                 .execute_batch(&format!(
                     "PRAGMA journal_mode = {journal};
                      CREATE TABLE sample(value INTEGER);
-                     INSERT INTO sample VALUES (1);
-                     BEGIN IMMEDIATE;
-                     UPDATE sample SET value = 2;"
+                     INSERT INTO sample VALUES (1);"
                 ))
+                .expect("seed committed SQLite row");
+            if journal == "WAL" && immutable {
+                // Immutable readers cannot rely on uncheckpointed WAL content.
+                // Give this variant a proven, durable committed baseline;
+                // the ordinary WAL snapshot variant stays uncheckpointed.
+                writer
+                    .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                    .expect("checkpoint immutable reader baseline");
+            }
+            writer
+                .execute_batch("BEGIN IMMEDIATE; UPDATE sample SET value = 2;")
                 .expect("hold SQLite writer lock");
             let operation = if journal == "WAL" { "journal" } else { "write" };
             probe_external_connection(&path, operation, true);
@@ -407,31 +416,19 @@ fn verified_reader_release_preserves_independent_writer_exclusion() {
             }
             .expect("verified read-only connection");
             assert_eq!(reader.file_identity(), live_path_identity(&path).unwrap());
-            if immutable {
-                // An immutable view need not include uncheckpointed WAL data.
-                assert_eq!(
-                    reader
-                        .connection()
-                        .query_row("SELECT 1", [], |row| row.get::<_, i64>(0)),
-                    Ok(1)
-                );
-            } else {
-                assert_eq!(
-                    reader
-                        .connection()
-                        .query_row("SELECT value FROM sample", [], |row| row.get::<_, i64>(0)),
-                    Ok(1),
-                    "verified snapshot must see the last committed value"
-                );
-                probe_external_connection_expectation(&path, "read", "read:1");
-            }
+            assert_eq!(
+                reader
+                    .connection()
+                    .query_row("SELECT value FROM sample", [], |row| row.get::<_, i64>(0)),
+                Ok(1),
+                "both verified reader policies must see committed rows, never the pending update"
+            );
+            probe_external_connection_expectation(&path, "read", "read:1");
             drop(reader);
             probe_external_connection(&path, operation, true);
-            if !immutable {
-                // Reader destruction must not lose the writer's lock or
-                // prevent another process from reading the committed snapshot.
-                probe_external_connection_expectation(&path, "read", "read:1");
-            }
+            // Reader destruction must not lose the writer's lock or
+            // prevent another process from reading the committed snapshot.
+            probe_external_connection_expectation(&path, "read", "read:1");
 
             writer.execute_batch("COMMIT").expect("commit writer");
             probe_external_connection_expectation(&path, "read", "read:2");
