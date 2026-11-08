@@ -2328,57 +2328,6 @@ async fn prepare_rebuild_output_activation(
     conn: &impl Executor,
     generation: &str,
 ) -> ProjectionStoreResult<()> {
-    conn.execute_batch(
-        "DROP TABLE IF EXISTS temp.observation_projection_rebuild_preexisting_outputs;
-         CREATE TEMP TABLE observation_projection_rebuild_preexisting_outputs (
-            output_provider TEXT NOT NULL,
-            output_message_id TEXT NOT NULL,
-            active_exists INTEGER NOT NULL CHECK(active_exists IN (0, 1)),
-            current_owned INTEGER NOT NULL CHECK(current_owned IN (0, 1)),
-            cross_owned INTEGER NOT NULL CHECK(cross_owned IN (0, 1)),
-            staged_created INTEGER NOT NULL CHECK(staged_created IN (0, 1)),
-            PRIMARY KEY(output_provider, output_message_id)
-         ) WITHOUT ROWID;",
-    )
-    .await
-    .map_err(|error| storage("prepare staged projection output activation", error))?;
-    conn.execute(
-        "INSERT INTO temp.observation_projection_rebuild_preexisting_outputs (
-            output_provider, output_message_id, active_exists,
-            current_owned, cross_owned, staged_created
-         )
-         SELECT staged.output_provider, staged.output_message_id,
-                EXISTS (
-                  SELECT 1 FROM lcm_raw_messages AS active
-                  WHERE active.provider = staged.output_provider
-                    AND active.message_id = staged.output_message_id
-                ),
-                EXISTS (
-                  SELECT 1 FROM observation_projection_provenance AS owner
-                  WHERE owner.projector_version = ?1 AND owner.message_created = 1
-                    AND owner.output_provider = staged.output_provider
-                    AND owner.output_message_id = staged.output_message_id
-                ),
-                EXISTS (
-                  SELECT 1 FROM observation_projection_provenance AS owner
-                  WHERE owner.projector_version <> ?1
-                    AND owner.output_provider = staged.output_provider
-                    AND owner.output_message_id = staged.output_message_id
-                ),
-                EXISTS (
-                  SELECT 1 FROM observation_projection_rebuild_provenance AS owner
-                  WHERE owner.projector_version = ?1 AND owner.generation = ?2
-                    AND owner.message_created = 1
-                    AND owner.output_provider = staged.output_provider
-                    AND owner.output_message_id = staged.output_message_id
-                )
-         FROM observation_projection_rebuild_messages AS staged
-         WHERE staged.projector_version = ?1 AND staged.generation = ?2",
-        params![SESSION_MESSAGE_PROJECTOR_VERSION, generation],
-    )
-    .await
-    .map_err(|error| storage("materialize preexisting projection outputs", error))?;
-
     let message_conflicts = format!(
         "{}
                      OR (active.provider <> 'hermes' AND (
@@ -2393,26 +2342,46 @@ async fn prepare_rebuild_output_activation(
         json_extract_expr(STAGED_MESSAGE_JSON_COLUMN, "text"),
         json_extract_expr(STAGED_MESSAGE_JSON_COLUMN, "metadata_json"),
     );
+    // Validate against live indexed ownership while the old projector still owns
+    // its outputs. A long-lived writer must not materialize connection-local
+    // TEMP tables: they can keep unlinked SQLite files allocated between rebuilds.
     let mut conflicts = conn
         .query(
             &format!(
                 "SELECT staged.output_provider, staged.output_message_id
              FROM observation_projection_rebuild_messages AS staged
-             JOIN temp.observation_projection_rebuild_preexisting_outputs AS ownership
-               ON ownership.output_provider = staged.output_provider
-              AND ownership.output_message_id = staged.output_message_id
              LEFT JOIN lcm_raw_messages AS active
                ON active.provider = staged.output_provider
               AND active.message_id = staged.output_message_id
              WHERE staged.projector_version = ?1 AND staged.generation = ?2
                AND (
-                 (ownership.active_exists = 0 AND ownership.staged_created = 0)
+                 (active.message_id IS NULL
+                   AND NOT EXISTS (
+                     SELECT 1 FROM observation_projection_rebuild_provenance AS staged_owner
+                     WHERE staged_owner.projector_version = ?1
+                       AND staged_owner.generation = ?2
+                       AND staged_owner.message_created = 1
+                       AND staged_owner.output_provider = staged.output_provider
+                       AND staged_owner.output_message_id = staged.output_message_id
+                   ))
                  OR (
-                   ownership.active_exists = 1
-                   AND NOT (ownership.current_owned = 1 AND ownership.cross_owned = 0)
+                   active.message_id IS NOT NULL
                    AND (
-                     {message_conflicts}
+                     NOT EXISTS (
+                       SELECT 1 FROM observation_projection_provenance AS current_owner
+                       WHERE current_owner.projector_version = ?1
+                         AND current_owner.message_created = 1
+                         AND current_owner.output_provider = staged.output_provider
+                         AND current_owner.output_message_id = staged.output_message_id
+                     )
+                     OR EXISTS (
+                       SELECT 1 FROM observation_projection_provenance AS foreign_owner
+                       WHERE foreign_owner.projector_version <> ?1
+                         AND foreign_owner.output_provider = staged.output_provider
+                         AND foreign_owner.output_message_id = staged.output_message_id
+                     )
                    )
+                   AND ({message_conflicts})
                  )
                )
              LIMIT 1"
@@ -2609,7 +2578,8 @@ mod activation_tests {
     use super::{
         REBUILD_PAGE_SIZE, SESSION_MESSAGE_PROJECTOR_VERSION,
         activate_projection_rebuild_transaction, activate_rebuild_sessions,
-        reconcile_overlapping_rebuild_sessions, write_staged_message,
+        prepare_rebuild_output_activation, reconcile_overlapping_rebuild_sessions,
+        write_staged_message,
     };
     use crate::tests::harness::RegisteredGlobalDbHarness;
     use tracedecay_runtime_core::db::engine::{Executor, params};
@@ -2793,6 +2763,115 @@ mod activation_tests {
             rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
             0,
             "failed activation staging rolls back with the transaction"
+        );
+    }
+
+    #[asupersync::test]
+    async fn output_preflight_rejects_unowned_changes_without_retaining_temp_storage() {
+        const GENERATION: &str = "generation.output-preflight";
+        let harness = RegisteredGlobalDbHarness::open("output-preflight-no-temp").await;
+        let active = session(None, None);
+        assert!(harness.registered.upsert_session(&active).await);
+        let transaction = harness.registered.begin_write_transaction().await.unwrap();
+        stage(&transaction, GENERATION, &active).await;
+
+        let foreign = SessionMessageRecord {
+            provider: active.provider.clone(),
+            session_id: active.session_id.clone(),
+            message_id: "message.unowned".to_owned(),
+            role: "assistant".to_owned(),
+            timestamp: Some(1),
+            ordinal: 1,
+            text: "foreign durable body".to_owned(),
+            kind: None,
+            model: None,
+            tool_names: None,
+            source_path: None,
+            source_offset: None,
+            metadata_json: None,
+        };
+        tracedecay_lcm::raw::upsert_projection_raw_message(
+            &transaction,
+            &foreign,
+            Some("/foreign"),
+        )
+        .await
+        .unwrap();
+        let changed = SessionMessageRecord {
+            text: "overwritten body".to_owned(),
+            ..foreign.clone()
+        };
+        write_staged_message(&transaction, GENERATION, &changed)
+            .await
+            .unwrap();
+        let error = prepare_rebuild_output_activation(&transaction, GENERATION)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ProjectionStoreError::OutputCollision { provider, message_id }
+                if provider == "cursor" && message_id == "message.unowned"),
+            "rebuild must refuse a foreign output with different content"
+        );
+
+        // Matching foreign bodies are compatible; rejecting every unowned row
+        // would also avoid spills, but would break legitimate rebuilds.
+        write_staged_message(&transaction, GENERATION, &foreign)
+            .await
+            .unwrap();
+        prepare_rebuild_output_activation(&transaction, GENERATION)
+            .await
+            .expect("unchanged foreign output must remain eligible");
+
+        let missing = SessionMessageRecord {
+            message_id: "message.not-created".to_owned(),
+            ..foreign.clone()
+        };
+        write_staged_message(&transaction, GENERATION, &missing)
+            .await
+            .unwrap();
+        let error = prepare_rebuild_output_activation(&transaction, GENERATION)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ProjectionStoreError::OutputCollision { provider, message_id }
+                if provider == "cursor" && message_id == "message.not-created"),
+            "an absent output without staged creation evidence must be rejected"
+        );
+
+        let mut rows = transaction
+            .query(
+                "SELECT name FROM sqlite_temp_master
+                 WHERE name = 'observation_projection_rebuild_preexisting_outputs'",
+                (),
+            )
+            .await
+            .unwrap();
+        assert!(
+            rows.next().await.unwrap().is_none(),
+            "repeated preflight checks must not retain a connection-local TEMP table"
+        );
+        drop(rows);
+
+        let mut rows = transaction
+            .query(
+                "SELECT content FROM lcm_raw_messages
+                 WHERE provider = ?1 AND message_id = ?2",
+                params![foreign.provider.as_str(), foreign.message_id.as_str()],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<String>(0).unwrap(),
+            foreign.text,
+            "a denied activation must not change a protected durable body"
+        );
+        drop(rows);
+
+        let mut integrity = transaction.query("PRAGMA main.integrity_check", ()).await.unwrap();
+        assert_eq!(
+            integrity.next().await.unwrap().unwrap().get::<String>(0).unwrap(),
+            "ok",
+            "the real registered SQLite store must remain structurally sound"
         );
     }
 
