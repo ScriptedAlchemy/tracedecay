@@ -2430,7 +2430,10 @@ mod tests {
             Err(CodeIndexProductionErrorV1::Contract(_))
         ));
         assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 0);
-        assert_eq!(fresh.open_attempts, 0, "invalid pathname must not count as an open");
+        assert_eq!(
+            fresh.open_attempts, 0,
+            "invalid pathname must not count as an open"
+        );
 
         // A valid pathname with a mismatched manifest extent must also stop
         // before File::open, without inflating the reported open count.
