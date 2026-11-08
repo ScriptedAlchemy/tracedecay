@@ -1,5 +1,7 @@
 #[cfg(unix)]
 use std::ffi::CString;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use std::os::unix::fs::OpenOptionsExt;
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
 use std::{
@@ -400,7 +402,18 @@ impl fmt::Display for OpenedDatabaseFileError {
 
 impl std::error::Error for OpenedDatabaseFileError {}
 
-#[cfg(not(windows))]
+/// An O_PATH descriptor pins the inode for /proc/self/fd based SQLite opens,
+/// but its close does not release another connection's process-wide POSIX
+/// record locks. O_RDONLY pins have that destructive close behavior on Linux.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn open_pinned_database(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH)
+        .open(path)
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
 fn open_pinned_database(path: &Path) -> io::Result<File> {
     File::open(path)
 }

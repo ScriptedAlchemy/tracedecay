@@ -193,6 +193,44 @@ fn rejecting_empty_attachment_does_not_release_another_writer_lock() {
 /// SQLite's immutable header inspection during existing-store admission must
 /// not release an unrelated live connection's process-owned POSIX locks.
 /// A separate process is essential: same-process SQLite handles can mask loss.
+/// Releasing an existing-store identity pin must not cancel locks owned by
+/// a different live SQLite writer in this process. O_RDONLY descriptors do
+/// exactly that on Linux even if they never acquired a lock themselves.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn releasing_existing_store_pin_preserves_unrelated_writer_locks() {
+    for journal_mode in ["DELETE", "WAL"] {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("sessions.db");
+        let writer = Connection::open(&path).expect("initialize database");
+        writer
+            .execute_batch("CREATE TABLE sample(value INTEGER); INSERT INTO sample VALUES (1);")
+            .expect("initialize committed schema");
+        writer
+            .pragma_update(None, "journal_mode", journal_mode)
+            .expect("select journal mode");
+        if journal_mode == "WAL" {
+            writer
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                .expect("checkpoint the initial schema");
+        }
+        let pin = OpenedDatabaseFile::pin_initialized(&path)
+            .expect("pin fully initialized existing database");
+
+        writer
+            .execute_batch("BEGIN IMMEDIATE; UPDATE sample SET value = 2;")
+            .expect("hold an unrelated writer reservation");
+        probe_external_connection(&path, "write", true);
+        pin.release_after_workers_exit();
+        probe_external_connection(&path, "write", true);
+
+        writer.execute_batch("COMMIT").expect("commit");
+        drop(writer);
+        probe_external_connection(&path, "write", false);
+        assert_committed_data(&path);
+    }
+}
+
 #[test]
 fn admitting_initialized_store_keeps_existing_writer_locks() {
     for journal_mode in ["DELETE", "WAL"] {
