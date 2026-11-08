@@ -1702,3 +1702,88 @@ fn initial_pointer_publication_reuses_persisted_descriptor_without_pathname_open
         "open-free memo population must preserve cold snapshot identity"
     );
 }
+
+#[test]
+fn staged_evidence_pack_writer_authentication_avoids_extra_opens_and_refuses_replacement() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn evidence() -> u32 { 1 }\n")]);
+    let source_root = TempDir::new().expect("source store");
+    let generation = source_generation(&fixture, source_root.path());
+    let target_root = TempDir::new().expect("target store");
+    let mut target = target_store(target_root.path(), &fixture);
+    let mut preparation = target
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare target");
+    let bytes = b"nonempty evidence pack data, authenticated after the staging rename";
+    let digest = segment_digest(bytes);
+    preparation
+        .write_segment(SealedGenerationSegmentPublicationV1::GenerationEvidencePage {
+            page_ordinal: 0,
+            page_digest: &digest,
+            bytes,
+        })
+        .expect("append a real evidence pack page");
+    let before = PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get);
+    preparation
+        .write_segment(SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+            segment_digest: &digest,
+            segment_size_bytes: bytes.len() as u64,
+            page_count: 1,
+        })
+        .expect("flush and stage evidence pack");
+    let (path, witness) = {
+        let state = preparation.state.lock().expect("preparation state");
+        let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
+            panic!("evidence preparation must remain open");
+        };
+        let path = files
+            .evidence
+            .published_path
+            .as_ref()
+            .expect("nonempty evidence pack was staged")
+            .clone();
+        let witness = files
+            .segments
+            .authenticated_segments
+            .get(&path)
+            .expect("the evidence pack must retain its writer's authenticated inode")
+            .clone();
+        assert!(
+            files.segments.pending.values().any(|pending| pending == &path),
+            "the authenticated file must still be pending publication"
+        );
+        (path, witness)
+    };
+    assert_eq!(std::fs::read(&path).expect("staged evidence bytes"), bytes);
+    assert_eq!(segment_digest(bytes), digest);
+    assert_eq!(
+        PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get),
+        before,
+        "staging must authenticate through the writer, not reopen the evidence pack"
+    );
+
+    // Prove the instrumented counter would observe a real digest pathname open.
+    assert_eq!(
+        DaemonCodeIndexPublicationStoreV1::state_digest_existing_segment(
+            &path,
+            &path.symlink_metadata().expect("original staged inode"),
+        )
+        .expect("positive digest-open control"),
+        digest.as_str()
+    );
+    assert_eq!(
+        PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get),
+        before + 1,
+        "positive control must observe one actual pathname open"
+    );
+    let replacement = path.with_extension("evidence-replacement.tmp");
+    std::fs::write(&replacement, bytes).expect("write equal-byte different inode");
+    std::fs::rename(&replacement, &path).expect("replace staged inode");
+    assert!(
+        !DaemonCodeIndexPublicationStoreV1::same_unix_segment_identity(
+            &witness,
+            &path.symlink_metadata().expect("replacement inode"),
+        ),
+        "equal bytes cannot reuse an authenticated inode witness"
+    );
+    preparation.abort().expect("release failed preparation");
+}
