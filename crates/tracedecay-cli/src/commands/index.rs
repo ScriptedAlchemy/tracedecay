@@ -468,7 +468,15 @@ enum FirstGenerationWorkMarker {
 
 impl FirstGenerationWorkMarker {
     fn of(worktree: Option<&CodeIndexWorktreeFreshnessV1>) -> Option<Self> {
-        let worktree = worktree.filter(|state| state.rebuild_in_flight)?;
+        let worktree = worktree?;
+        // Restoring and verifying are readiness work even when the canonical
+        // freshness ladder deliberately reports rebuild_in_flight=false.
+        // A real active attempt remains authoritative in either state.
+        if !worktree.rebuild_in_flight
+            && !worktree.preseal_attempt.as_ref().is_some_and(|a| a.active)
+        {
+            return None;
+        }
         if let Some(progress) = &worktree.progress {
             // Native writer events are not yet on the status wire. A graph
             // publication phase cannot prove the graph writer has stalled.
@@ -920,7 +928,10 @@ mod daemon_precondition_tests {
     #[test]
     fn active_capture_without_work_is_not_an_infinite_wait() {
         use tracedecay_contracts::code_index_freshness::CodeIndexPresealWorkPhaseV1::Capture;
-        let source = attempt(Capture, 1, 0, 1);
+        let mut source = attempt(Capture, 1, 0, 1);
+        // Restore/verification may own real pre-seal work without counting
+        // as a rebuild in the canonical freshness ladder.
+        source.rebuild_in_flight = false;
         let now = Instant::now();
         let marker = super::FirstGenerationWorkMarker::of(Some(&source));
         assert!(marker.is_some());
