@@ -1962,6 +1962,27 @@ impl DaemonCodeIndexPublicationStoreV1 {
         // a fixed-width pointer through another path, and a 1-second mtime
         // filesystem can leave both unchanged while the bytes move. The memo
         // is reused only when the file digest matches.
+        // A cold pointer validation must not authorize a second pathname
+        // open merely to populate the memo. Keep the original descriptor
+        // through parsing and authenticate its bytes again before memoizing.
+        #[cfg(unix)]
+        let (bytes, mut opened_pointer) = {
+            let mut file = File::open(&self.active_path).map_err(Self::map_pointer_io)?;
+            let mut bytes = Vec::new();
+            (&mut file)
+                .take(MAX_DURABLE_PUBLICATION_POINTER_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map_err(Self::map_pointer_io)?;
+            if u64::try_from(bytes.len()).map_err(Self::unavailable)?
+                > MAX_DURABLE_PUBLICATION_POINTER_BYTES
+            {
+                return Err(Self::corruption(
+                    "durable code-generation index exceeds its byte bound",
+                ));
+            }
+            (bytes, file)
+        };
+        #[cfg(not(unix))]
         let bytes = std::fs::read(&self.active_path).map_err(Self::map_pointer_io)?;
         let digest = Self::state_digest(&bytes);
         {
@@ -2092,7 +2113,29 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .unwrap_or_else(PoisonError::into_inner);
         // Install only when the file is still the bytes just parsed. A rename
         // that landed during validation owns the memo.
-        if std::fs::read(&self.active_path).ok().as_deref() == Some(bytes.as_slice()) {
+        // On Unix, re-read through the authenticated descriptor rather than
+        // opening the same endpoint-scanned pathname again. The two inode
+        // witnesses reject a concurrent rename; the second byte comparison
+        // rejects an in-place change during parsing, even on coarse clocks.
+        #[cfg(unix)]
+        let unchanged = (|| -> std::io::Result<bool> {
+            let opened_before = opened_pointer.metadata()?;
+            opened_pointer.seek(SeekFrom::Start(0))?;
+            let mut current = Vec::new();
+            (&mut opened_pointer)
+                .take(MAX_DURABLE_PUBLICATION_POINTER_BYTES + 1)
+                .read_to_end(&mut current)?;
+            let opened_after = opened_pointer.metadata()?;
+            let named_after = std::fs::metadata(&self.active_path)?;
+            Ok(current == bytes
+                && Self::same_unix_segment_identity(&metadata, &opened_before)
+                && Self::same_unix_segment_identity(&opened_before, &opened_after)
+                && Self::same_unix_segment_identity(&opened_before, &named_after))
+        })()
+        .unwrap_or(false);
+        #[cfg(not(unix))]
+        let unchanged = std::fs::read(&self.active_path).ok().as_deref() == Some(bytes.as_slice());
+        if unchanged {
             *memo = Some(PublicationPointerMemoV1 {
                 mtime,
                 size,

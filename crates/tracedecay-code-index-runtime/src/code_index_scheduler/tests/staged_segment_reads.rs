@@ -1533,3 +1533,84 @@ fn failed_durability_admission_cannot_leave_a_publishable_segment() {
     preparation.abort().expect("abort failed durability window");
     assert!(!pending_path.exists());
 }
+
+#[cfg(target_os = "linux")]
+fn observed_pointer_opens(
+    events: &std::sync::mpsc::Receiver<notify::Result<notify::Event>>,
+) -> usize {
+    let mut opens = 0;
+    // Inotify delivers access events asynchronously through notify. Drain to
+    // quiescence rather than observing an arbitrary instant after the call.
+    while let Ok(event) = events.recv_timeout(Duration::from_millis(250)) {
+        let event = event.expect("kernel file watch event");
+        if matches!(
+            event.kind,
+            notify::EventKind::Access(notify::event::AccessKind::Open(_))
+        ) {
+            opens += 1;
+        }
+    }
+    opens
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cold_publication_pointer_validation_uses_one_kernel_open_and_recovers_snapshot() {
+    use notify::Watcher;
+
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let source_root = TempDir::new().expect("source store");
+    let generation = source_generation(&fixture, source_root.path());
+    let target_root = TempDir::new().expect("target store");
+    let mut publisher = target_store(target_root.path(), &fixture);
+    let mut preparation = publisher
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare published generation");
+    let publication = generation
+        .stage_publication(&mut preparation)
+        .expect("stage source snapshot");
+    publisher
+        .commit(&mut preparation, &publication)
+        .expect("commit real generation");
+    drop(preparation);
+    drop(publisher);
+
+    let cold = target_store(target_root.path(), &fixture);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut watcher = notify::recommended_watcher(
+        move |event: notify::Result<notify::Event>| {
+            let _ = sender.send(event);
+        },
+    )
+    .expect("native file observer");
+    watcher
+        .watch(&cold.active_path, notify::RecursiveMode::NonRecursive)
+        .expect("watch the exact publication pointer");
+    drop(File::open(&cold.active_path).expect("nonzero control open"));
+    assert_eq!(
+        observed_pointer_opens(&receiver),
+        1,
+        "the observer must report a real kernel pathname open"
+    );
+
+    let pointer = cold
+        .read_publication_pointer()
+        .expect("cold pointer validation")
+        .expect("published pointer");
+    assert_eq!(pointer.generation_id, generation.manifest().generation_id.as_str());
+    assert_eq!(
+        observed_pointer_opens(&receiver),
+        1,
+        "parse and post-parse byte revalidation must share one file open"
+    );
+
+    let reloaded = cold
+        .load_active_shared()
+        .expect("read committed snapshot")
+        .expect("published generation");
+    assert_eq!(
+        reloaded.snapshot().content_identity,
+        generation.snapshot().content_identity,
+        "one-open validation must not alter the durable snapshot"
+    );
+}
