@@ -29,6 +29,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{
     CodeGenerationId, CursorBindingMismatchV1, CursorBindingV1, decode_bound_cursor,
@@ -1556,10 +1558,41 @@ fn copy_sqlite_family_at_generation(
             Err(error) => return Err(error),
         }
     }
-    for (source_member, suffix) in members {
-        std::fs::copy(&source_member, sqlite_family_member(destination, suffix))?;
-    }
+    copy_sqlite_members_nofollow(source, destination, &members)?;
     generation.validate()
+}
+
+/// Open the checked member through a held directory, refusing a symlink even
+/// when its name is replaced after the family preflight. A bare fs::copy would
+/// follow that replacement and import foreign bytes into report scratch.
+fn copy_sqlite_members_nofollow(
+    source: &Path,
+    destination: &Path,
+    members: &[(PathBuf, &str)],
+) -> std::io::Result<()> {
+    let parent = source
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let directory = cap_std::fs::Dir::open_ambient_dir(parent, cap_std::ambient_authority())?;
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true);
+    options.follow(FollowSymlinks::No);
+    for (member, suffix) in members {
+        let name = member.file_name().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "SQLite member has no filename")
+        })?;
+        let mut input = directory.open_with(name, &options)?;
+        if !input.metadata()?.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "SQLite report source member is not a regular file",
+            ));
+        }
+        let mut output = std::fs::File::create(sqlite_family_member(destination, suffix))?;
+        std::io::copy(&mut input, &mut output)?;
+    }
+    Ok(())
 }
 
 fn validate_external_scratch(profile_root: &Path, scratch_root: &Path) -> std::io::Result<()> {
@@ -2591,6 +2624,31 @@ mod tests {
             );
             assert_eq!(foreign.metadata().unwrap().len(), foreign_bytes);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_snapshot_member_cannot_follow_a_post_preflight_link_swap() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let registry = temporary.path().join(GLOBAL_DB_FILENAME);
+        let wal = sqlite_family_member(&registry, "-wal");
+        std::fs::write(&wal, b"original WAL member").unwrap();
+        assert!(std::fs::symlink_metadata(&wal).unwrap().file_type().is_file());
+        // The production preflight recorded this pathname as a regular file.
+        let checked = vec![(wal.clone(), "-wal")];
+        std::fs::remove_file(&wal).unwrap();
+        let foreign = temporary.path().join("foreign-data.bin");
+        std::fs::write(&foreign, vec![73u8; 4096]).unwrap();
+        std::os::unix::fs::symlink(&foreign, &wal).unwrap();
+
+        let destination = temporary.path().join("report-snapshot.db");
+        copy_sqlite_members_nofollow(&registry, &destination, &checked)
+            .expect_err("a swapped link must never supply snapshot bytes");
+        assert!(
+            !sqlite_family_member(&destination, "-wal").exists(),
+            "a link swapped after preflight cannot be copied into report scratch"
+        );
+        assert_eq!(std::fs::metadata(&foreign).unwrap().len(), 4096);
     }
 
     #[cfg(unix)]
