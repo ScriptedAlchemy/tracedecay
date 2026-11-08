@@ -638,7 +638,10 @@ fn staged_writer_authentication_avoids_commit_reopens_and_rejects_replaced_inode
         .expect("nonempty generation segment");
     let path = staged_path(&preparation, &identity.digest);
     let bytes = std::fs::read(&path).expect("real staged segment");
-    assert!(!bytes.is_empty(), "the test must authenticate real segment bytes");
+    assert!(
+        !bytes.is_empty(),
+        "the test must authenticate real segment bytes"
+    );
     assert_eq!(segment_digest(&bytes), identity.digest);
     let before = PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get);
     {
@@ -646,7 +649,10 @@ fn staged_writer_authentication_avoids_commit_reopens_and_rejects_replaced_inode
         let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
             panic!("preparation must remain open");
         };
-        assert!(!files.segments.pending.is_empty(), "real files must be staged");
+        assert!(
+            !files.segments.pending.is_empty(),
+            "real files must be staged"
+        );
         assert!(
             files.segments.authenticated_segments.contains_key(&path),
             "new staged bytes must be verified through their original writer"
@@ -684,7 +690,9 @@ fn staged_writer_authentication_avoids_commit_reopens_and_rejects_replaced_inode
         before_refusal,
         "identity rejection must not reopen a substituted staged inode"
     );
-    preparation.abort().expect("abort replaced staged generation");
+    preparation
+        .abort()
+        .expect("abort replaced staged generation");
 }
 
 #[test]
@@ -996,7 +1004,10 @@ fn repeated_pending_segment_accepts_identical_concurrent_canonical_publication()
             "this preparation still owns its original temporary bytes"
         );
         assert!(
-            !files.segments.authenticated_segments.contains_key(&canonical),
+            !files
+                .segments
+                .authenticated_segments
+                .contains_key(&canonical),
             "the concurrently named inode must not masquerade as our pending inode"
         );
         target

@@ -1717,44 +1717,45 @@ impl DaemonCodeIndexPublicationStoreV1 {
         // A read and an inode/metadata witness prove the bytes at write time;
         // no second endpoint-authorized pathname open is required at commit.
         // Non-Unix durability and verification remain unchanged.
-        let admitted = (|| -> Result<Option<std::fs::Metadata>, CodeIndexPublicationStoreErrorV1> {
-            file.write_all(bytes).map_err(Self::unavailable)?;
-            #[cfg(unix)]
-            let original = {
-                let before = file.metadata().map_err(Self::unavailable)?;
-                file.seek(SeekFrom::Start(0)).map_err(Self::unavailable)?;
-                if Self::state_digest_reader(&mut file)? != expected_digest {
-                    return Err(Self::corruption(
-                        "newly staged segment differs from its content address",
-                    ));
+        let admitted =
+            (|| -> Result<Option<std::fs::Metadata>, CodeIndexPublicationStoreErrorV1> {
+                file.write_all(bytes).map_err(Self::unavailable)?;
+                #[cfg(unix)]
+                let original = {
+                    let before = file.metadata().map_err(Self::unavailable)?;
+                    file.seek(SeekFrom::Start(0)).map_err(Self::unavailable)?;
+                    if Self::state_digest_reader(&mut file)? != expected_digest {
+                        return Err(Self::corruption(
+                            "newly staged segment differs from its content address",
+                        ));
+                    }
+                    let after = file.metadata().map_err(Self::unavailable)?;
+                    if !Self::same_unix_segment_identity(&before, &after) {
+                        return Err(Self::corruption(
+                            "newly staged segment changed during authentication",
+                        ));
+                    }
+                    after
+                };
+                staged
+                    .durable
+                    .written(&temporary_path, &file)
+                    .map_err(Self::unavailable)?;
+                #[cfg(unix)]
+                {
+                    let after = file.metadata().map_err(Self::unavailable)?;
+                    if !Self::same_unix_segment_identity(&original, &after) {
+                        return Err(Self::corruption(
+                            "newly staged segment changed during durability admission",
+                        ));
+                    }
+                    Ok(Some(after))
                 }
-                let after = file.metadata().map_err(Self::unavailable)?;
-                if !Self::same_unix_segment_identity(&before, &after) {
-                    return Err(Self::corruption(
-                        "newly staged segment changed during authentication",
-                    ));
+                #[cfg(not(unix))]
+                {
+                    Ok(None)
                 }
-                after
-            };
-            staged
-                .durable
-                .written(&temporary_path, &file)
-                .map_err(Self::unavailable)?;
-            #[cfg(unix)]
-            {
-                let after = file.metadata().map_err(Self::unavailable)?;
-                if !Self::same_unix_segment_identity(&original, &after) {
-                    return Err(Self::corruption(
-                        "newly staged segment changed during durability admission",
-                    ));
-                }
-                Ok(Some(after))
-            }
-            #[cfg(not(unix))]
-            {
-                Ok(None)
-            }
-        })();
+            })();
         drop(file);
         // The pending index is publication authority. Never enroll a file
         // whose write, content authentication or durability admission failed.
