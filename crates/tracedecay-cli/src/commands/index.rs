@@ -6,8 +6,8 @@ use tracedecay_project::project::TraceDecay;
 
 use tracedecay_contracts::code_index_freshness::{
     CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
-    CodeIndexBuildBlockedReasonV1, CodeIndexBuildProgressV1, CodeIndexReadinessWaitOutcomeV1,
-    CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
+    CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1, CodeIndexBuildProgressV1,
+    CodeIndexReadinessWaitOutcomeV1, CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_contracts::graph_tool::GraphToolResultV1;
 use tracedecay_contracts::retrieval::{
@@ -450,19 +450,22 @@ impl FirstGenerationStall {
     }
 }
 
-/// One real producer's last boundary. A polling read is never a heartbeat.
+/// Observed work under one producer. Epochs order reports; they are not work.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum FirstGenerationWorkMarker {
     Preseal {
         owner: (u64, u64, u64),
         epoch: u64,
+        phase: tracedecay_contracts::code_index_freshness::CodeIndexPresealWorkPhaseV1,
+        completed: u64,
         last_work_micros: Option<i64>,
     },
     CommittedText {
         generation: String,
+        sealed_source_digest: String,
         owner: (u64, u64),
         epoch: u64,
-        last_work_micros: i64,
+        completed: [u64; 6],
     },
 }
 
@@ -478,24 +481,12 @@ impl FirstGenerationWorkMarker {
             return None;
         }
         if let Some(progress) = &worktree.progress {
-            // Native writer events are not yet on the status wire. A graph
-            // publication phase cannot prove the graph writer has stalled.
-            if progress.phase == CodeIndexBuildPhaseV1::GraphPublication {
-                return None;
-            }
             match progress.phase {
-                CodeIndexBuildPhaseV1::BulkCommit => {
-                    return Some(Self::CommittedText {
-                        generation: progress.generation_id.clone(),
-                        owner: (progress.daemon_incarnation, progress.producer_incarnation),
-                        epoch: progress.progress_epoch,
-                        last_work_micros: progress.last_progress_micros,
-                    });
-                }
+                CodeIndexBuildPhaseV1::BulkCommit => return Some(Self::text(progress)),
                 CodeIndexBuildPhaseV1::SourceScan => {}
-                // Preparing relations, building indexes and verifying the
-                // sealed source still lack an actual progress producer.
-                // Their phase labels alone cannot prove a stall either.
+                // Graph publication, relational preparation, index builds
+                // and verification lack work observations on this wire. Do
+                // not infer a writer stall from their phase labels alone.
                 _ => return None,
             }
         }
@@ -507,6 +498,8 @@ impl FirstGenerationWorkMarker {
                     attempt.attempt_sequence,
                 ),
                 epoch: attempt.progress_epoch,
+                phase: attempt.phase,
+                completed: attempt.completed_items,
                 last_work_micros: attempt.last_progress_micros,
             });
         }
@@ -514,19 +507,118 @@ impl FirstGenerationWorkMarker {
             .progress
             .as_ref()
             .filter(|progress| progress.phase == CodeIndexBuildPhaseV1::SourceScan)
-            .map(|progress| Self::CommittedText {
-                generation: progress.generation_id.clone(),
-                owner: (progress.daemon_incarnation, progress.producer_incarnation),
-                epoch: progress.progress_epoch,
-                last_work_micros: progress.last_progress_micros,
-            })
+            .map(Self::text)
+    }
+
+    fn text(progress: &CodeIndexBuildProgressV1) -> Self {
+        Self::CommittedText {
+            generation: progress.generation_id.clone(),
+            sealed_source_digest: progress.sealed_source_digest.clone(),
+            owner: (progress.daemon_incarnation, progress.producer_incarnation),
+            epoch: progress.progress_epoch,
+            completed: [
+                progress.completed_files,
+                progress.completed_lexical_units,
+                progress.committed_pages,
+                progress.committed_chunks,
+                progress.committed_imports,
+                progress.committed_payload_bytes,
+            ],
+        }
+    }
+
+    fn owner(&self) -> (u64, u64) {
+        match self {
+            Self::Preseal { owner, .. } => (owner.0, owner.1),
+            Self::CommittedText { owner, .. } => *owner,
+        }
+    }
+
+    /// Accept a newer report and say whether actual work advanced. A newer
+    /// refusal, retry, timestamp or daemon incarnation is not itself work.
+    /// `None` rejects a duplicate or stale report without lowering the fence.
+    fn advance_from(&self, previous: &Self) -> Option<bool> {
+        match (self, previous) {
+            (
+                Self::Preseal {
+                    owner,
+                    epoch,
+                    phase,
+                    completed,
+                    last_work_micros,
+                },
+                Self::Preseal {
+                    owner: prior_owner,
+                    epoch: prior_epoch,
+                    phase: prior_phase,
+                    completed: prior_completed,
+                    ..
+                },
+            ) => {
+                use tracedecay_contracts::code_index_freshness::CodeIndexPresealWorkPhaseV1::{
+                    Capture, ParseEvidence,
+                };
+                if (owner, epoch) <= (prior_owner, prior_epoch) {
+                    return None;
+                }
+                if owner == prior_owner {
+                    if matches!((prior_phase, phase), (ParseEvidence, Capture))
+                        || (phase == prior_phase && completed < prior_completed)
+                    {
+                        return None;
+                    }
+                    if phase == prior_phase {
+                        return Some(completed > prior_completed && last_work_micros.is_some());
+                    }
+                }
+                Some(*completed > 0 && last_work_micros.is_some())
+            }
+            (
+                Self::CommittedText {
+                    generation,
+                    sealed_source_digest,
+                    owner,
+                    epoch,
+                    completed,
+                },
+                Self::CommittedText {
+                    generation: prior_generation,
+                    sealed_source_digest: prior_digest,
+                    owner: prior_owner,
+                    epoch: prior_epoch,
+                    completed: prior_completed,
+                },
+            ) => {
+                if (owner, epoch) <= (prior_owner, prior_epoch) {
+                    return None;
+                }
+                if generation != prior_generation {
+                    return Some(completed.iter().any(|count| *count > 0));
+                }
+                if sealed_source_digest != prior_digest {
+                    return None;
+                }
+                // A verified staging restart may reset counters. Adopt that
+                // newer baseline, but only subsequent work renews the wait.
+                Some(
+                    completed != prior_completed
+                        && completed
+                            .iter()
+                            .zip(prior_completed)
+                            .all(|(now, prior)| now >= prior),
+                )
+            }
+            _ => None,
+        }
     }
 }
 
-/// Compare work boundaries across status slices without renewing the clock
-/// on a read. A new owner or observed work epoch restarts the silence window.
+/// Maintain independent watermarks for pre-seal and text work. Polling,
+/// status changes and empty retries cannot renew an observed silence window.
 struct FirstGenerationProgressWindow {
-    last: Option<FirstGenerationWorkMarker>,
+    preseal: Option<FirstGenerationWorkMarker>,
+    text: Option<FirstGenerationWorkMarker>,
+    owner: Option<(u64, u64)>,
     unchanged_since: Option<Instant>,
     stall_window: Duration,
 }
@@ -534,25 +626,58 @@ struct FirstGenerationProgressWindow {
 impl FirstGenerationProgressWindow {
     fn new(stall_window: Duration) -> Self {
         Self {
-            last: None,
+            preseal: None,
+            text: None,
+            owner: None,
             unchanged_since: None,
             stall_window,
         }
     }
 
     fn observe(&mut self, marker: Option<FirstGenerationWorkMarker>, now: Instant) -> bool {
-        if marker.is_none() {
-            self.last = None;
+        let Some(marker) = marker else {
+            // Uninstrumented work is unknown, not stalled. Keep watermarks
+            // so returning to an old report cannot fabricate new work.
             self.unchanged_since = None;
             return false;
-        }
-        if self.last != marker {
-            self.last = marker;
+        };
+        let advanced = self.record(marker);
+        if advanced || self.unchanged_since.is_none() {
             self.unchanged_since = Some(now);
             return false;
         }
-        let since = *self.unchanged_since.get_or_insert(now);
-        now.duration_since(since) >= self.stall_window
+        self.unchanged_since
+            .is_some_and(|since| now.duration_since(since) >= self.stall_window)
+    }
+
+    fn record(&mut self, marker: FirstGenerationWorkMarker) -> bool {
+        let owner = marker.owner();
+        if self.owner.is_some_and(|current| owner < current) {
+            return false;
+        }
+        self.owner = Some(owner);
+        let previous = match &marker {
+            FirstGenerationWorkMarker::Preseal { .. } => &mut self.preseal,
+            FirstGenerationWorkMarker::CommittedText { .. } => &mut self.text,
+        };
+        let advanced = match previous.as_ref() {
+            Some(prior) => match marker.advance_from(prior) {
+                Some(advanced) => advanced,
+                None => return false,
+            },
+            None => match &marker {
+                FirstGenerationWorkMarker::Preseal {
+                    completed,
+                    last_work_micros,
+                    ..
+                } => *completed > 0 && last_work_micros.is_some(),
+                FirstGenerationWorkMarker::CommittedText { completed, .. } => {
+                    completed.iter().any(|count| *count > 0)
+                }
+            },
+        };
+        *previous = Some(marker);
+        advanced
     }
 }
 
@@ -942,7 +1067,7 @@ mod daemon_precondition_tests {
     }
 
     #[test]
-    fn real_capture_parse_and_successor_attempts_reset_the_silence_window() {
+    fn real_capture_parse_and_resumed_work_reset_the_silence_window() {
         use tracedecay_contracts::code_index_freshness::CodeIndexPresealWorkPhaseV1::{
             Capture, ParseEvidence,
         };
@@ -959,8 +1084,12 @@ mod daemon_precondition_tests {
         assert!(window.observe(marker, now + Duration::from_secs(239)));
         let retry = attempt(Capture, 4, 0, 2);
         let marker = super::FirstGenerationWorkMarker::of(Some(&retry));
-        assert!(!window.observe(marker.clone(), now + Duration::from_secs(239)));
-        assert!(!window.observe(marker, now + Duration::from_secs(358)));
+        assert!(window.observe(marker, now + Duration::from_secs(239)));
+        let resumed = attempt(Capture, 5, 1, 2);
+        let marker = super::FirstGenerationWorkMarker::of(Some(&resumed));
+        assert!(!window.observe(marker.clone(), now + Duration::from_secs(240)));
+        assert!(!window.observe(marker.clone(), now + Duration::from_secs(359)));
+        assert!(window.observe(marker, now + Duration::from_secs(360)));
     }
 
     #[test]
@@ -988,6 +1117,188 @@ mod daemon_precondition_tests {
         assert!(!window.observe(None, now + Duration::from_secs(1000)));
         source.progress.as_mut().unwrap().phase = CodeIndexBuildPhaseV1::Ready;
         assert_eq!(super::FirstGenerationWorkMarker::of(Some(&source)), None);
+    }
+
+    #[test]
+    fn status_epochs_timestamps_and_recovery_do_not_renew_work() {
+        let now = Instant::now();
+        let mut source = building(true);
+        let mut report = progress(40, None);
+        report.phase = CodeIndexBuildPhaseV1::BulkCommit;
+        source.progress = Some(report.clone());
+        let mut window = super::FirstGenerationProgressWindow::new(Duration::from_secs(120));
+        assert!(!window.observe(
+            super::FirstGenerationWorkMarker::of(Some(&source)),
+            now,
+        ));
+        for (seconds, blocked) in [
+            (40, Some(CodeIndexBuildBlockedReasonV1::ResidentMemory)),
+            (80, None),
+            (120, Some(CodeIndexBuildBlockedReasonV1::RetryBackoff)),
+        ] {
+            report.progress_epoch += 1;
+            report.last_progress_micros += 100;
+            report.elapsed_micros += 100;
+            report.current_batch_pages += 1;
+            report.current_batch_payload_bytes += 4096;
+            report.files_per_second = Some(42.0);
+            report.blocked_reason = blocked;
+            source.progress = Some(report.clone());
+            assert_eq!(
+                window.observe(
+                    super::FirstGenerationWorkMarker::of(Some(&source)),
+                    now + Duration::from_secs(seconds),
+                ),
+                seconds == 120,
+                "metadata and blocked/recovered state are not completed work",
+            );
+        }
+        report.blocked_reason = None;
+        report.progress_epoch += 1;
+        report.committed_pages += 1;
+        report.committed_payload_bytes += 1024;
+        source.progress = Some(report);
+        let marker = super::FirstGenerationWorkMarker::of(Some(&source));
+        assert!(!window.observe(marker.clone(), now + Duration::from_secs(121)));
+        assert!(!window.observe(marker.clone(), now + Duration::from_secs(240)));
+        assert!(window.observe(marker, now + Duration::from_secs(241)));
+    }
+
+    #[test]
+    fn preseal_phase_only_changes_and_delayed_callbacks_do_not_renew_work() {
+        use tracedecay_contracts::code_index_freshness::CodeIndexPresealWorkPhaseV1::{
+            Capture, ParseEvidence,
+        };
+        let now = Instant::now();
+        let mut window = super::FirstGenerationProgressWindow::new(Duration::from_secs(120));
+        let capture = attempt(Capture, 2, 3, 1);
+        assert!(!window.observe(
+            super::FirstGenerationWorkMarker::of(Some(&capture)),
+            now,
+        ));
+        let entered_parse = attempt(ParseEvidence, 3, 0, 1);
+        assert!(!window.observe(
+            super::FirstGenerationWorkMarker::of(Some(&entered_parse)),
+            now + Duration::from_secs(119),
+        ));
+        let stale_capture = attempt(Capture, 99, 50, 1);
+        assert!(window.observe(
+            super::FirstGenerationWorkMarker::of(Some(&stale_capture)),
+            now + Duration::from_secs(120),
+        ));
+        let parsed = attempt(ParseEvidence, 4, 1, 1);
+        let marker = super::FirstGenerationWorkMarker::of(Some(&parsed));
+        assert!(!window.observe(marker.clone(), now + Duration::from_secs(121)));
+        assert!(!window.observe(marker.clone(), now + Duration::from_secs(240)));
+        assert!(window.observe(marker, now + Duration::from_secs(241)));
+    }
+
+    #[test]
+    fn restart_adoption_is_not_work_and_old_daemon_reports_stay_fenced() {
+        let now = Instant::now();
+        let mut window = super::FirstGenerationProgressWindow::new(Duration::from_secs(120));
+        let mut source = building(true);
+        source.progress = Some(progress(40, None));
+        assert!(!window.observe(
+            super::FirstGenerationWorkMarker::of(Some(&source)),
+            now,
+        ));
+        let mut adopted = progress(40, None);
+        adopted.daemon_incarnation = 2;
+        adopted.progress_epoch = 1;
+        source.progress = Some(adopted.clone());
+        assert!(!window.observe(
+            super::FirstGenerationWorkMarker::of(Some(&source)),
+            now + Duration::from_secs(119),
+        ));
+        source.progress = Some(progress(500, None));
+        assert!(window.observe(
+            super::FirstGenerationWorkMarker::of(Some(&source)),
+            now + Duration::from_secs(120),
+        ));
+        adopted.completed_files += 1;
+        adopted.committed_pages += 1;
+        adopted.progress_epoch += 1;
+        source.progress = Some(adopted);
+        let marker = super::FirstGenerationWorkMarker::of(Some(&source));
+        assert!(!window.observe(marker.clone(), now + Duration::from_secs(121)));
+        assert!(window.observe(marker, now + Duration::from_secs(241)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_loop_refuses_epoch_only_changes_before_a_later_ready() {
+        let mut first = building(true);
+        let mut report = progress(40, None);
+        report.phase = CodeIndexBuildPhaseV1::BulkCommit;
+        first.progress = Some(report.clone());
+        let mut unchanged = first.clone();
+        report.progress_epoch += 1;
+        report.last_progress_micros += 1000;
+        report.elapsed_micros += 1000;
+        unchanged.progress = Some(report);
+        let (result, reads) = hold_over(
+            vec![
+                status(timed_out(), warming(first)),
+                status(timed_out(), warming(unchanged)),
+                ready_status(),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        assert_eq!(reads, 2, "do not consume a later ready after a real stall");
+        let (code, message) = refusal(result);
+        assert_eq!(code, CODE_INDEX_READINESS_WAIT_TIMED_OUT);
+        assert!(message.contains("no observed capture, parse, or committed text work"));
+        assert!(message.contains("40/6136 files"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_loop_empty_retries_cannot_hide_frozen_preseal_work() {
+        use tracedecay_contracts::code_index_freshness::CodeIndexPresealWorkPhaseV1::Capture;
+        let (result, reads) = hold_over(
+            vec![
+                status(timed_out(), warming(attempt(Capture, 2, 3, 1))),
+                status(timed_out(), warming(attempt(Capture, 3, 0, 2))),
+                ready_status(),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        assert_eq!(reads, 2);
+        let (code, message) = refusal(result);
+        assert_eq!(code, CODE_INDEX_READINESS_WAIT_TIMED_OUT);
+        assert!(message.contains("attempt=3:5:2"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_loop_requires_work_across_capture_parse_and_text_handoff() {
+        use tracedecay_contracts::code_index_freshness::CodeIndexPresealWorkPhaseV1::{
+            Capture, ParseEvidence,
+        };
+        let mut first_text = building(true);
+        let mut report = progress(2, None);
+        report.daemon_incarnation = 3;
+        report.producer_incarnation = 5;
+        report.phase = CodeIndexBuildPhaseV1::BulkCommit;
+        first_text.progress = Some(report.clone());
+        let mut next_text = first_text.clone();
+        report.progress_epoch += 1;
+        report.committed_chunks = 7;
+        report.committed_payload_bytes = 1024;
+        next_text.progress = Some(report);
+        let (result, reads) = hold_over(
+            vec![
+                status(timed_out(), warming(attempt(Capture, 2, 3, 1))),
+                status(timed_out(), warming(attempt(ParseEvidence, 3, 1, 1))),
+                status(timed_out(), warming(first_text)),
+                status(timed_out(), warming(next_text)),
+                ready_status(),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        assert!(result.is_ok(), "real work must keep the wait alive: {result:?}");
+        assert_eq!(reads, 5, "only the reached proof ends a progressing wait");
     }
 
     fn progress(
