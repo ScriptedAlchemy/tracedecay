@@ -1508,8 +1508,13 @@ fn user_sessions_family_bytes(profile_root: &Path) -> u64 {
 fn database_family_bytes(database_path: &Path) -> u64 {
     let mut total_bytes = 0u64;
     for suffix in ["", "-wal", "-shm"] {
-        if let Ok(metadata) = std::fs::metadata(sqlite_family_member(database_path, suffix)) {
-            total_bytes = total_bytes.saturating_add(metadata.len());
+        // Physical profile bytes must not include a symlink's foreign target.
+        // The full-profile walk separately marks a linked member unavailable.
+        if let Ok(metadata) = std::fs::symlink_metadata(sqlite_family_member(database_path, suffix))
+        {
+            if metadata.file_type().is_file() {
+                total_bytes = total_bytes.saturating_add(metadata.len());
+            }
         }
     }
     total_bytes
@@ -1519,13 +1524,32 @@ fn database_family_bytes(database_path: &Path) -> u64 {
 /// caller opens only `destination`, which prevents reporting from creating
 /// sidecars under the profile it is inspecting.
 fn copy_sqlite_family(source: &Path, destination: &Path) -> std::io::Result<()> {
+    // Refuse nonregular and linked source members before copying any bytes.
+    // Path::is_file() follows symlinks, potentially copying an arbitrarily
+    // large foreign file into the report's temporary SQLite snapshot.
+    let mut members = Vec::with_capacity(3);
+    for suffix in ["", "-wal", "-shm"] {
+        let member = sqlite_family_member(source, suffix);
+        match std::fs::symlink_metadata(&member) {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                members.push((member, suffix));
+            }
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "SQLite report source member '{}' is not a regular file; symbolic links are not allowed",
+                        member.display()
+                    ),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
     let generation =
         tracedecay_runtime_core::sqlite_read_snapshot::SourceGeneration::capture(source)?;
-    for suffix in ["", "-wal", "-shm"] {
-        let source_member = sqlite_family_member(source, suffix);
-        if !source_member.is_file() {
-            continue;
-        }
+    for (source_member, suffix) in members {
         std::fs::copy(&source_member, sqlite_family_member(destination, suffix))?;
     }
     generation.validate()
@@ -2522,6 +2546,115 @@ mod tests {
             error.to_string().contains("symbolic link"),
             "the error must name the profile registry's disallowed link: {error}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_snapshot_refuses_foreign_sidecar_links_before_copying() {
+        for suffix in ["-wal", "-shm"] {
+            let temporary = tempfile::TempDir::new().unwrap();
+            let registry = temporary.path().join(GLOBAL_DB_FILENAME);
+            let connection = rusqlite::Connection::open(&registry).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE code_projects (
+                        project_id TEXT PRIMARY KEY,
+                        canonical_root TEXT NOT NULL
+                    );",
+                )
+                .unwrap();
+            drop(connection);
+
+            let foreign = temporary.path().join("foreign.bin");
+            let foreign_bytes = 512 * 1024 * 1024;
+            std::fs::File::create(&foreign)
+                .unwrap()
+                .set_len(foreign_bytes)
+                .unwrap();
+            std::os::unix::fs::symlink(&foreign, sqlite_family_member(&registry, suffix))
+                .unwrap();
+
+            let destination = temporary.path().join("snapshot.db");
+            let error = copy_sqlite_family(&registry, &destination)
+                .expect_err("a linked SQLite family member cannot supply snapshot bytes");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains("symbolic links"), "{error}");
+            assert!(
+                !destination.exists(),
+                "the invalid family must be refused before making a partial copy"
+            );
+            assert_eq!(foreign.metadata().unwrap().len(), foreign_bytes);
+        }
+    }
+
+    #[cfg(unix)]
+    #[asupersync::test]
+    async fn offline_report_refuses_a_foreign_registry_wal_before_sampling() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let profile_root = temporary.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let registry = profile_root.join(GLOBAL_DB_FILENAME);
+        let connection = rusqlite::Connection::open(&registry).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE code_projects (
+                    project_id TEXT PRIMARY KEY,
+                    canonical_root TEXT NOT NULL
+                );",
+            )
+            .unwrap();
+        drop(connection);
+
+        let foreign = temporary.path().join("foreign-wal.bin");
+        std::fs::File::create(&foreign)
+            .unwrap()
+            .set_len(512 * 1024 * 1024)
+            .unwrap();
+        std::os::unix::fs::symlink(&foreign, sqlite_family_member(&registry, "-wal")).unwrap();
+
+        let error = build_storage_report(&profile_root)
+            .await
+            .expect_err("a linked registry WAL must fail instead of copying a foreign file");
+        assert!(
+            matches!(&error, TraceDecayError::Database { .. }),
+            "expected a typed storage report failure: {error}"
+        );
+        assert!(error.to_string().contains("symbolic links"), "{error}");
+        assert_eq!(foreign.metadata().unwrap().len(), 512 * 1024 * 1024);
+    }
+
+    #[cfg(unix)]
+    #[asupersync::test]
+    async fn user_sessions_family_excludes_foreign_wal_bytes_and_downgrades_coverage() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let profile_root = temporary.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        seed_global_db(&profile_root, &[]).await;
+        std::fs::write(
+            profile_root.join(USER_SESSIONS_DB_FILENAME),
+            vec![1u8; 4_096],
+        )
+        .unwrap();
+        let foreign = temporary.path().join("foreign-sessions-wal.bin");
+        std::fs::File::create(&foreign)
+            .unwrap()
+            .set_len(512 * 1024 * 1024)
+            .unwrap();
+        std::os::unix::fs::symlink(
+            &foreign,
+            profile_root.join(format!("{USER_SESSIONS_DB_FILENAME}-wal")),
+        )
+        .unwrap();
+
+        let report = build_storage_report(&profile_root).await.unwrap();
+        assert_eq!(report.user_sessions_db_bytes, 4_096);
+        let profile_size = report.full_profile_size.expect("measured profile");
+        assert_eq!(profile_size.state, ProfileTotalCoverageStateV1::Partial);
+        assert!(
+            profile_size.unavailable_entry_count > 0,
+            "the linked WAL must remain explicitly unavailable, not be counted as zero"
+        );
+        assert_eq!(foreign.metadata().unwrap().len(), 512 * 1024 * 1024);
     }
 
     #[asupersync::test]
