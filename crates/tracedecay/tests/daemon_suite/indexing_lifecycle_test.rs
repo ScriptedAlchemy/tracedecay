@@ -344,7 +344,9 @@ async fn hard_killed_cold_preseal_attempt_recovers_a_verified_native_graph() {
             let attempt = &receipt["code_index_freshness"]["worktree"]["preseal_attempt"];
             if attempt["active"] == true
                 && attempt["phase"] == "parse_evidence"
-                && attempt["completed_items"].as_u64().is_some_and(|count| count > 0)
+                && attempt["completed_items"]
+                    .as_u64()
+                    .is_some_and(|count| count > 0)
             {
                 return receipt;
             }
@@ -380,13 +382,15 @@ async fn hard_killed_cold_preseal_attempt_recovers_a_verified_native_graph() {
     );
     let repeat = status(&socket, &handshake).await;
     assert_eq!(
-        repeat["code_index_freshness"]["worktree"]["preseal_attempt"],
-        *attempt,
+        repeat["code_index_freshness"]["worktree"]["preseal_attempt"], *attempt,
         "status polling under a paused producer must not invent new work"
     );
 
     let killed = daemon.kill_and_wait().expect("hard-kill the cold daemon");
-    assert!(!killed.success(), "cold interruption must be a real process kill");
+    assert!(
+        !killed.success(),
+        "cold interruption must be a real process kill"
+    );
 
     // The hold is deliberately not propagated to the new daemon. It has to
     // capture, parse, seal, and publish from the surviving real Git tree.

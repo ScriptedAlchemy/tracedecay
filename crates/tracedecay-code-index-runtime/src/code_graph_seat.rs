@@ -25,8 +25,8 @@ use tracedecay_domain::errors::Result;
 use tracedecay_domain::{CodeGenerationId, ProjectId, RefId, RepositoryId, WorktreeId};
 use tracedecay_graph_db::{GraphDbError, SealedGraphStateDigest, VerifiedGraphSnapshot};
 use tracedecay_runtime_core::db::Database;
-use tracedecay_store::GraphNativeWorkObserverV1;
 use tracedecay_runtime_core::shard_runtime::registry::CanonicalCodeGraphStoreLeaseV1;
+use tracedecay_store::GraphNativeWorkObserverV1;
 
 /// Sealed-generation replay identity the seat port needs to retain a runtime.
 #[derive(Clone, Debug, Eq, PartialEq)]

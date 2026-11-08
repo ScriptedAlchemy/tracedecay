@@ -24,7 +24,11 @@ pub(crate) struct CodeIndexBuildAttemptSlotStateV1 {
 }
 
 impl CodeIndexBuildAttemptSlotStateV1 {
-    fn begin(&mut self, daemon_incarnation: u64, producer_incarnation: u64) -> CodeIndexBuildAttemptIdentityV1 {
+    fn begin(
+        &mut self,
+        daemon_incarnation: u64,
+        producer_incarnation: u64,
+    ) -> CodeIndexBuildAttemptIdentityV1 {
         self.next_sequence = self.next_sequence.saturating_add(1).max(1);
         self.epoch = self.epoch.saturating_add(1).max(1);
         let identity = CodeIndexBuildAttemptIdentityV1 {
@@ -63,7 +67,9 @@ impl CodeIndexBuildAttemptSlotStateV1 {
     ) -> bool {
         if !self.owns(identity)
             || work.completed_items == 0
-            || work.total_items.is_some_and(|total| work.completed_items > total)
+            || work
+                .total_items
+                .is_some_and(|total| work.completed_items > total)
         {
             return false;
         }
@@ -92,8 +98,9 @@ impl CodeIndexBuildAttemptSlotStateV1 {
         next.phase = work.phase;
         next.completed_items = work.completed_items;
         next.total_items = work.total_items;
-        next.last_progress_micros =
-            Some(observed_at_micros.max(current.last_progress_micros.unwrap_or(observed_at_micros)));
+        next.last_progress_micros = Some(
+            observed_at_micros.max(current.last_progress_micros.unwrap_or(observed_at_micros)),
+        );
         self.epoch = self.epoch.saturating_add(1).max(1);
         next.progress_epoch = self.epoch;
         self.snapshot = Some(next);
@@ -131,7 +138,9 @@ impl CodeIndexPresealAttemptGuardV1 {
         daemon_incarnation: u64,
         producer_incarnation: u64,
     ) -> Self {
-        let identity = slot.write().unwrap_or_else(PoisonError::into_inner)
+        let identity = slot
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
             .begin(daemon_incarnation, producer_incarnation);
         Self { slot, identity }
     }
@@ -140,7 +149,8 @@ impl CodeIndexPresealAttemptGuardV1 {
         let slot = Arc::clone(&self.slot);
         let identity = self.identity;
         Arc::new(move |work| {
-            slot.write().unwrap_or_else(PoisonError::into_inner)
+            slot.write()
+                .unwrap_or_else(PoisonError::into_inner)
                 .observe(identity, work, now_micros().0);
         })
     }
@@ -148,7 +158,9 @@ impl CodeIndexPresealAttemptGuardV1 {
 
 impl Drop for CodeIndexPresealAttemptGuardV1 {
     fn drop(&mut self) {
-        self.slot.write().unwrap_or_else(PoisonError::into_inner)
+        self.slot
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
             .finish(self.identity);
     }
 }
@@ -157,8 +169,16 @@ impl Drop for CodeIndexPresealAttemptGuardV1 {
 mod tests {
     use super::*;
 
-    fn work(phase: CodeIndexPresealWorkPhaseV1, n: u64, total: Option<u64>) -> CodeIndexPresealWorkV1 {
-        CodeIndexPresealWorkV1 { phase, completed_items: n, total_items: total }
+    fn work(
+        phase: CodeIndexPresealWorkPhaseV1,
+        n: u64,
+        total: Option<u64>,
+    ) -> CodeIndexPresealWorkV1 {
+        CodeIndexPresealWorkV1 {
+            phase,
+            completed_items: n,
+            total_items: total,
+        }
     }
 
     #[test]
@@ -166,24 +186,52 @@ mod tests {
         let mut slot = CodeIndexBuildAttemptSlotStateV1::default();
         let id = slot.begin(7, 9);
         assert_eq!(slot.snapshot().unwrap().last_progress_micros, None);
-        assert!(slot.observe(id, work(CodeIndexPresealWorkPhaseV1::Capture, 2, Some(5)), 100));
+        assert!(slot.observe(
+            id,
+            work(CodeIndexPresealWorkPhaseV1::Capture, 2, Some(5)),
+            100
+        ));
         let first = slot.snapshot().unwrap();
         assert_eq!(first.completed_items, 2);
         assert_eq!(first.last_progress_micros, Some(100));
-        assert!(!slot.observe(id, work(CodeIndexPresealWorkPhaseV1::Capture, 2, Some(5)), 900));
-        assert!(!slot.observe(id, work(CodeIndexPresealWorkPhaseV1::Capture, 1, Some(5)), 950));
-        assert!(!slot.observe(id, work(CodeIndexPresealWorkPhaseV1::Capture, 6, Some(5)), 990));
+        assert!(!slot.observe(
+            id,
+            work(CodeIndexPresealWorkPhaseV1::Capture, 2, Some(5)),
+            900
+        ));
+        assert!(!slot.observe(
+            id,
+            work(CodeIndexPresealWorkPhaseV1::Capture, 1, Some(5)),
+            950
+        ));
+        assert!(!slot.observe(
+            id,
+            work(CodeIndexPresealWorkPhaseV1::Capture, 6, Some(5)),
+            990
+        ));
         assert_eq!(slot.snapshot().unwrap(), first);
-        assert!(slot.observe(id, work(CodeIndexPresealWorkPhaseV1::ParseEvidence, 1, Some(3)), 95));
+        assert!(slot.observe(
+            id,
+            work(CodeIndexPresealWorkPhaseV1::ParseEvidence, 1, Some(3)),
+            95
+        ));
         let parsed = slot.snapshot().unwrap();
         assert_eq!(parsed.last_progress_micros, Some(100));
         assert!(parsed.progress_epoch > first.progress_epoch);
-        assert!(!slot.observe(id, work(CodeIndexPresealWorkPhaseV1::Capture, 3, Some(5)), 150));
+        assert!(!slot.observe(
+            id,
+            work(CodeIndexPresealWorkPhaseV1::Capture, 3, Some(5)),
+            150
+        ));
         slot.finish(id);
         let ended = slot.snapshot().unwrap();
         assert!(!ended.active);
         assert_eq!(ended.last_progress_micros, Some(100));
-        assert!(!slot.observe(id, work(CodeIndexPresealWorkPhaseV1::ParseEvidence, 2, Some(3)), 200));
+        assert!(!slot.observe(
+            id,
+            work(CodeIndexPresealWorkPhaseV1::ParseEvidence, 2, Some(3)),
+            200
+        ));
         assert_eq!(slot.snapshot().unwrap(), ended);
     }
 
@@ -242,15 +290,35 @@ mod tests {
     fn retry_and_remount_fence_old_producers_even_when_counters_match() {
         let mut slot = CodeIndexBuildAttemptSlotStateV1::default();
         let first = slot.begin(1, 11);
-        assert!(slot.observe(first, work(CodeIndexPresealWorkPhaseV1::Capture, 3, None), 100));
+        assert!(slot.observe(
+            first,
+            work(CodeIndexPresealWorkPhaseV1::Capture, 3, None),
+            100
+        ));
         let second = slot.begin(1, 11);
         assert_ne!(first.sequence, second.sequence);
-        assert!(!slot.observe(first, work(CodeIndexPresealWorkPhaseV1::Capture, 40, None), 800));
+        assert!(!slot.observe(
+            first,
+            work(CodeIndexPresealWorkPhaseV1::Capture, 40, None),
+            800
+        ));
         slot.finish(first);
-        assert!(slot.observe(second, work(CodeIndexPresealWorkPhaseV1::Capture, 1, Some(2)), 200));
+        assert!(slot.observe(
+            second,
+            work(CodeIndexPresealWorkPhaseV1::Capture, 1, Some(2)),
+            200
+        ));
         let third = slot.begin(2, 1);
-        assert!(!slot.observe(second, work(CodeIndexPresealWorkPhaseV1::ParseEvidence, 2, Some(2)), 700));
-        assert!(slot.observe(third, work(CodeIndexPresealWorkPhaseV1::Capture, 1, Some(3)), 400));
+        assert!(!slot.observe(
+            second,
+            work(CodeIndexPresealWorkPhaseV1::ParseEvidence, 2, Some(2)),
+            700
+        ));
+        assert!(slot.observe(
+            third,
+            work(CodeIndexPresealWorkPhaseV1::Capture, 1, Some(3)),
+            400
+        ));
         let visible = slot.snapshot().unwrap();
         assert_eq!(visible.daemon_incarnation, 2);
         assert_eq!(visible.producer_incarnation, 1);

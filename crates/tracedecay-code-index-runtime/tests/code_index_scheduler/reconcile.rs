@@ -120,9 +120,20 @@ fn cold_build_reports_actual_preseal_capture_and_parser_evidence() {
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
     let slot = owner.preseal_attempt_progress_slot();
-    assert!(slot.read().unwrap().snapshot().is_none(), "no fabricated cold progress");
-    published(owner.reconcile_now().expect("real cold capture and publication"));
-    let observed = slot.read().unwrap().snapshot().expect("pre-seal observation");
+    assert!(
+        slot.read().unwrap().snapshot().is_none(),
+        "no fabricated cold progress"
+    );
+    published(
+        owner
+            .reconcile_now()
+            .expect("real cold capture and publication"),
+    );
+    let observed = slot
+        .read()
+        .unwrap()
+        .snapshot()
+        .expect("pre-seal observation");
     assert!(!observed.active, "a finished attempt cannot appear stalled");
     assert_eq!(
         observed.phase,
@@ -173,12 +184,18 @@ fn retained_restart_capture_publishes_and_fences_preseal_attempt() {
         observed.phase,
         tracedecay_code_index::production::CodeIndexPresealWorkPhaseV1::Capture
     );
-    assert!(observed.completed_items >= 2, "two files were actually captured");
+    assert!(
+        observed.completed_items >= 2,
+        "two files were actually captured"
+    );
     assert!(observed.progress_epoch > 1);
     assert!(observed.last_progress_micros.is_some_and(|at| at > 0));
     drop(capture);
     let finished = slot.read().unwrap().snapshot().expect("finished attempt");
-    assert!(!finished.active, "dropping the retained owner fences callbacks");
+    assert!(
+        !finished.active,
+        "dropping the retained owner fences callbacks"
+    );
     assert_eq!(finished.completed_items, observed.completed_items);
     assert_eq!(finished.last_progress_micros, observed.last_progress_micros);
     assert!(finished.progress_epoch > observed.progress_epoch);

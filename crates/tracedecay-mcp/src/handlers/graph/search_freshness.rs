@@ -232,11 +232,12 @@ pub(super) fn search_freshness(
                 attempt.attempt_sequence,
                 attempt.progress_epoch,
                 attempt.completed_items,
-                attempt.total_items.map_or_else(|| "unknown".to_owned(), |n| n.to_string()),
-                attempt.last_progress_micros.map_or_else(
-                    || "unreported".to_owned(),
-                    |micros| micros.to_string()
-                ),
+                attempt
+                    .total_items
+                    .map_or_else(|| "unknown".to_owned(), |n| n.to_string()),
+                attempt
+                    .last_progress_micros
+                    .map_or_else(|| "unreported".to_owned(), |micros| micros.to_string()),
                 attempt.active,
             );
         }
@@ -265,10 +266,9 @@ pub(super) fn search_freshness(
                 graph.committed_stage_bytes,
                 graph.committed_compact_segments,
                 graph.committed_compact_bytes,
-                graph.last_progress_micros.map_or_else(
-                    || "unreported".to_owned(),
-                    |micros| micros.to_string()
-                ),
+                graph
+                    .last_progress_micros
+                    .map_or_else(|| "unreported".to_owned(), |micros| micros.to_string()),
                 graph.active,
             );
         }
@@ -298,13 +298,17 @@ pub(super) fn search_freshness(
                 progress.blocked_reason.map_or("none", blocked_reason_label)
             );
         } else if state.rebuild_in_flight {
-            if state.native_graph_progress.as_ref().is_some_and(|graph| {
-                graph.active && graph.last_progress_micros.is_some()
-            }) {
+            if state
+                .native_graph_progress
+                .as_ref()
+                .is_some_and(|graph| graph.active && graph.last_progress_micros.is_some())
+            {
                 summary.push_str(" progress=native_graph");
-            } else if state.preseal_attempt.as_ref().is_some_and(|attempt| {
-                attempt.active && attempt.last_progress_micros.is_some()
-            }) {
+            } else if state
+                .preseal_attempt
+                .as_ref()
+                .is_some_and(|attempt| attempt.active && attempt.last_progress_micros.is_some())
+            {
                 summary.push_str(" progress=preseal");
             } else {
                 summary.push_str(" progress=unreported");
@@ -577,7 +581,9 @@ mod tests {
             ..CodeIndexWorktreeFreshnessV1::default()
         };
         let rendered = freshness_lines(&search_freshness(
-            ServedGenerationV1::Unavailable { reason: "generation_unavailable" },
+            ServedGenerationV1::Unavailable {
+                reason: "generation_unavailable",
+            },
             &CodeIndexSearchCoverageV1::unavailable("generation_rebuilding"),
             &WorktreeFreshnessSourceV1::Worktree(Box::new(state)),
         ));
@@ -785,7 +791,9 @@ mod tests {
             ..CodeIndexWorktreeFreshnessV1::default()
         };
         let rendered = freshness_lines(&search_freshness(
-            ServedGenerationV1::Unavailable { reason: "generation_unavailable" },
+            ServedGenerationV1::Unavailable {
+                reason: "generation_unavailable",
+            },
             &CodeIndexSearchCoverageV1::unavailable("generation_rebuilding"),
             &WorktreeFreshnessSourceV1::Worktree(Box::new(state)),
         ));
@@ -799,5 +807,4 @@ mod tests {
         assert!(rendered.contains("progress=native_graph"));
         assert!(!rendered.contains("committed_text_pages="));
     }
-
 }

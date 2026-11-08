@@ -332,10 +332,7 @@ fn cold_resolution_index_publication_advances_actual_work_counts() {
             "src/alpha.rs".to_owned(),
             "pub fn alpha() { crate::beta::beta(); }\n".to_owned(),
         ),
-        (
-            "src/beta.rs".to_owned(),
-            "pub fn beta() {}\n".to_owned(),
-        ),
+        ("src/beta.rs".to_owned(), "pub fn beta() {}\n".to_owned()),
     ];
     let store = WorkerPublicationStore::default();
     let mut owner =
@@ -344,10 +341,9 @@ fn cold_resolution_index_publication_advances_actual_work_counts() {
     let published = owner
         .build_and_publish(fixture_request(&files, None, false, 1_500_000), &observer)
         .expect("real cold reference resolution");
-    let manifest = super::partitioned_codec::parse_partitioned_manifest(
-        published.manifest_bytes().as_ref(),
-    )
-    .expect("verified published index manifest");
+    let manifest =
+        super::partitioned_codec::parse_partitioned_manifest(published.manifest_bytes().as_ref())
+            .expect("verified published index manifest");
 
     let index_segments = manifest.resolution_index.segments().count();
     assert!(
@@ -361,11 +357,7 @@ fn cold_resolution_index_publication_advances_actual_work_counts() {
             + index_segments,
     )
     .expect("bounded cold resolution work");
-    let observed = observer
-        .0
-        .lock()
-        .expect("resolution observations")
-        .clone();
+    let observed = observer.0.lock().expect("resolution observations").clone();
     assert_eq!(
         observed,
         (1..=expected).collect::<Vec<_>>(),
@@ -516,12 +508,9 @@ fn a_restored_parent_and_the_edit_over_it_resolve_nothing_whole() {
             .decode_active(&scope)
             .expect("the edit restores")
             .expect("an active edit");
-        let full_resolution = resolve_cross_file_references_charged(
-            &edited.files,
-            &mut |_| Ok(()),
-            None,
-        )
-        .expect("whole reference resolution");
+        let full_resolution =
+            resolve_cross_file_references_charged(&edited.files, &mut |_| Ok(()), None)
+                .expect("whole reference resolution");
         let (full_edges, _) =
             edge_evidence(&edited.files, full_resolution.edges).expect("whole edge evidence");
         assert_eq!(

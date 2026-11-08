@@ -24,7 +24,8 @@ pub use cleanup::{
 mod operation;
 pub use operation::{
     GraphNativeWorkKindV1, GraphNativeWorkObserverV1, GraphNativeWorkV1,
-    GraphPublicationOperationContextV1, GraphPublicationStoreErrorV1, GraphPublicationStoreResultV1,
+    GraphPublicationOperationContextV1, GraphPublicationStoreErrorV1,
+    GraphPublicationStoreResultV1,
 };
 #[path = "graph_publication/store.rs"]
 mod store;

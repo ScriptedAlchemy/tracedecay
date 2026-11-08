@@ -22,15 +22,15 @@ use tracedecay_runtime_core::shard_runtime::registry::{
     CanonicalCodeGraphStoreLeaseV1, CanonicalGraphStoreOwnerRetirementTargetV1, StoreRuntimeKey,
 };
 use tracedecay_store::{
-    CodeShardScopeV1, FactReadControl, GraphGenerationIdV1, GraphPendingReplayDiscardOutcomeV1,
-    GraphProjectionIdV1, GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1,
-    GraphPublicationInputDigestV1, GraphPublicationKeyV1, GraphPublicationOperationContextV1,
-    GraphNativeWorkObserverV1,
-    GraphPublicationProjectionPageRequestV1, GraphPublicationReplayLookupV1,
-    GraphPublicationReplayRecordV1, GraphPublicationStoreV1, GraphReplayAppendOutcomeV1,
-    GraphVerifiedHeadV1, ProjectId, RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1,
-    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1,
-    RuntimeRequestControlV1, RuntimeRequestProbeV1, StoreShardIdV1, StoreShardScopeV1,
+    CodeShardScopeV1, FactReadControl, GraphGenerationIdV1, GraphNativeWorkObserverV1,
+    GraphPendingReplayDiscardOutcomeV1, GraphProjectionIdV1, GraphProjectionIdentityV1,
+    GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
+    GraphPublicationOperationContextV1, GraphPublicationProjectionPageRequestV1,
+    GraphPublicationReplayLookupV1, GraphPublicationReplayRecordV1, GraphPublicationStoreV1,
+    GraphReplayAppendOutcomeV1, GraphVerifiedHeadV1, ProjectId, RetainedGraphStoreLeaseV1,
+    RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
+    RuntimeInterruptionV1, RuntimeRequestControlV1, RuntimeRequestProbeV1, StoreShardIdV1,
+    StoreShardScopeV1,
 };
 
 use super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
@@ -2168,8 +2168,12 @@ impl RetainedCodeGraphRuntimeV1 {
                     let _span =
                         tracing::trace_span!("daemon.session_registry.publish_snapshot.gate_hold")
                             .entered();
-                    self.graph_registry
-                        .complete_verified_publication(completion, storage, &publish_context, *proven)
+                    self.graph_registry.complete_verified_publication(
+                        completion,
+                        storage,
+                        &publish_context,
+                        *proven,
+                    )
                 }
             }
         };
@@ -3110,11 +3114,7 @@ impl CodeGraphSeatLeaseV1 for RetainedCodeGraphRuntimeV1 {
         tracedecay_graph_db::VerifiedGraphSnapshot,
         tracedecay_graph_db::GraphDbError,
     > {
-        self.publish_verified_snapshot_with_admission(
-            request_cancelled,
-            None,
-            Some(native_work),
-        )
+        self.publish_verified_snapshot_with_admission(request_cancelled, None, Some(native_work))
     }
 
     fn publish_verified_snapshot_admitted(

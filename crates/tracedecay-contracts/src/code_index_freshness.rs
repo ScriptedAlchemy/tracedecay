@@ -123,7 +123,9 @@ pub struct CodeIndexBuildProgressV1 {
 }
 
 /// Observed capture, parse, and source-reference resolution before sealing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum CodeIndexPresealWorkPhaseV1 {
     Capture,
@@ -1528,5 +1530,4 @@ mod tests {
                 .is_none()
         );
     }
-
 }

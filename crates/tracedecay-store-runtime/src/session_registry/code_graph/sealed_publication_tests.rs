@@ -30,12 +30,11 @@ use tracedecay_graph_db::{
 };
 use tracedecay_store::{
     GraphGenerationIdV1, GraphNativeWorkKindV1, GraphNativeWorkObserverV1, GraphNativeWorkV1,
-    GraphProjectionIdV1, GraphProjectionIdentityV1,
-    GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
-    GraphPublicationOperationContextV1, GraphPublicationReplayLookupV1, GraphPublicationReplayV1,
-    GraphPublicationStoreV1, GraphReplayAppendOutcomeV1, RetainedGraphStoreLeaseV1,
-    RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
-    RuntimeRequestControlV1,
+    GraphProjectionIdV1, GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1,
+    GraphPublicationInputDigestV1, GraphPublicationKeyV1, GraphPublicationOperationContextV1,
+    GraphPublicationReplayLookupV1, GraphPublicationReplayV1, GraphPublicationStoreV1,
+    GraphReplayAppendOutcomeV1, RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1,
+    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeRequestControlV1,
 };
 
 use sha2::{Digest as _, Sha256};
@@ -741,7 +740,11 @@ async fn a_pending_predecessor_pooled_by_retention_yields_to_the_next_generation
             }
         })
     };
-    let published = successor_runtime.publish_verified_snapshot_with_admission(Arc::clone(&cancelled), None, None);
+    let published = successor_runtime.publish_verified_snapshot_with_admission(
+        Arc::clone(&cancelled),
+        None,
+        None,
+    );
     drop(finished);
     watchdog.join().expect("publication watchdog");
     let snapshot = published.expect("the successor publishes past its pooled pending predecessor");
@@ -878,7 +881,11 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
 
     std::fs::write(&canonical_seal, &mutated_seal).expect("mutate sealed generation in place");
     assert!(matches!(
-        runtime.publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None),
+        runtime.publish_verified_snapshot_with_admission(
+            Arc::new(AtomicBool::new(false)),
+            None,
+            None
+        ),
         Err(GraphDbError::Corrupt { .. })
     ));
     assert_unverified_publication_state(&runtime, false);
@@ -888,7 +895,11 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
     std::fs::rename(&canonical_seal, &retained_seal).expect("retain original sealed inode");
     std::fs::write(&canonical_seal, &mutated_seal).expect("replace canonical sealed inode");
     assert!(matches!(
-        runtime.publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None),
+        runtime.publish_verified_snapshot_with_admission(
+            Arc::new(AtomicBool::new(false)),
+            None,
+            None
+        ),
         Err(GraphDbError::Corrupt { .. })
     ));
     assert_unverified_publication_state(&runtime, false);
@@ -902,7 +913,11 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
         std::fs::rename(&canonical_seal, &retained_seal).expect("retain symlink target evidence");
         symlink(&retained_seal, &canonical_seal).expect("swap canonical seal for symlink");
         assert!(matches!(
-            runtime.publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None),
+            runtime.publish_verified_snapshot_with_admission(
+                Arc::new(AtomicBool::new(false)),
+                None,
+                None
+            ),
             Err(GraphDbError::Corrupt { .. })
         ));
         assert_unverified_publication_state(&runtime, false);
@@ -915,7 +930,11 @@ async fn sealed_generation_publishes_and_republishes_without_eager_replay_payloa
     std::fs::write(&canonical_seal, &mutated_seal)
         .expect("mutate source before active replay completion");
     assert!(matches!(
-        runtime.publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None),
+        runtime.publish_verified_snapshot_with_admission(
+            Arc::new(AtomicBool::new(false)),
+            None,
+            None
+        ),
         Err(GraphDbError::Corrupt { .. })
     ));
     assert_unverified_publication_state(&runtime, true);
@@ -1267,7 +1286,10 @@ async fn sealed_graph_writer_reports_native_work_through_journal_commit_boundary
     let observer: GraphNativeWorkObserverV1 = {
         let observed = Arc::clone(&observed);
         Arc::new(move |work| {
-            observed.lock().expect("native graph observation lock").push(work);
+            observed
+                .lock()
+                .expect("native graph observation lock")
+                .push(work);
         })
     };
     let first_snapshot = fixture
@@ -2119,7 +2141,9 @@ async fn concurrent_sealed_publishers_share_one_gate_and_converge_on_one_head() 
         .lock()
         .expect("hold the publication gate");
     let outcome = std::thread::scope(|scope| {
-        let worker = scope.spawn(|| reconcile.publish_verified_snapshot_with_admission(Arc::clone(&cancelled), None, None));
+        let worker = scope.spawn(|| {
+            reconcile.publish_verified_snapshot_with_admission(Arc::clone(&cancelled), None, None)
+        });
         cancelled.store(true, Ordering::Release);
         drop(held);
         worker.join().expect("join the cancelled publisher")
@@ -2131,10 +2155,20 @@ async fn concurrent_sealed_publishers_share_one_gate_and_converge_on_one_head() 
     // generation concurrently: the loser waits out the winner, then resumes
     // the winner's exact publication instead of conflicting.
     let (seat_outcome, reconcile_outcome) = std::thread::scope(|scope| {
-        let seat_worker =
-            scope.spawn(|| seat.publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None));
-        let reconcile_worker =
-            scope.spawn(|| reconcile.publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None));
+        let seat_worker = scope.spawn(|| {
+            seat.publish_verified_snapshot_with_admission(
+                Arc::new(AtomicBool::new(false)),
+                None,
+                None,
+            )
+        });
+        let reconcile_worker = scope.spawn(|| {
+            reconcile.publish_verified_snapshot_with_admission(
+                Arc::new(AtomicBool::new(false)),
+                None,
+                None,
+            )
+        });
         (
             seat_worker.join().expect("join the seat publisher"),
             reconcile_worker
@@ -2324,7 +2358,8 @@ async fn sealed_publication_refuses_over_the_resident_memory_watermark() {
 
     set_sample(&sample, pressure.low_watermark_bytes());
     let not_cancelled = Arc::new(AtomicBool::new(false));
-    let refused = runtime.publish_verified_snapshot_with_admission(Arc::clone(&not_cancelled), None, None);
+    let refused =
+        runtime.publish_verified_snapshot_with_admission(Arc::clone(&not_cancelled), None, None);
     // The projection peak is process-global and other cases reset it; this
     // cell's own sampler is what saw the crossing.
     assert!(
@@ -3061,7 +3096,11 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
             workers.push(thread_scope.spawn(move || {
                 worker_barrier.wait();
                 let started = Instant::now();
-                let result = runtime.publish_verified_snapshot_with_admission(Arc::new(AtomicBool::new(false)), None, None);
+                let result = runtime.publish_verified_snapshot_with_admission(
+                    Arc::new(AtomicBool::new(false)),
+                    None,
+                    None,
+                );
                 let elapsed_ms =
                     u64::try_from(started.elapsed().as_millis()).expect("publish milliseconds");
                 (scope_index, result, elapsed_ms)

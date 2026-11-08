@@ -1404,7 +1404,9 @@ impl CodeIndexWorktreeSchedulerV1 {
             refused_ignored_source_paths: BTreeSet::new(),
             query_owners: Mutex::new(None),
             build_progress: Arc::new(RwLock::new(CodeIndexBuildProgressSlotStateV1::default())),
-            preseal_attempt_progress: Arc::new(RwLock::new(CodeIndexBuildAttemptSlotStateV1::default())),
+            preseal_attempt_progress: Arc::new(RwLock::new(
+                CodeIndexBuildAttemptSlotStateV1::default(),
+            )),
             progress_daemon_incarnation: 1,
             progress_producer_incarnation: 1,
         };
@@ -2370,7 +2372,9 @@ impl CodeIndexWorktreeSchedulerV1 {
             self.progress_daemon_incarnation,
             self.progress_producer_incarnation,
         );
-        let control = self.reconcile_control().with_preseal_observer(attempt.observer());
+        let control = self
+            .reconcile_control()
+            .with_preseal_observer(attempt.observer());
         let captured = self
             .capture_authoritative_snapshot_without_active_generation_reuse(Some(&control))
             .map_err(|error| prefer_resident_memory_refusal(&control, error))?;
@@ -2989,7 +2993,9 @@ impl CodeIndexWorktreeSchedulerV1 {
                 self.progress_daemon_incarnation,
                 self.progress_producer_incarnation,
             );
-            let control = self.reconcile_control().with_preseal_observer(attempt.observer());
+            let control = self
+                .reconcile_control()
+                .with_preseal_observer(attempt.observer());
             // Every earlier attempt was cancelled by a newer source epoch. A
             // source that changes faster than a pass lasts would cancel this
             // one too, so it seals what it captured; the epoch that

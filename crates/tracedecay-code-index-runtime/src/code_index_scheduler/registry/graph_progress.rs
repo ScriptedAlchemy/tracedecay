@@ -6,9 +6,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 use tracedecay_contracts::code_index_freshness::{
     CodeIndexNativeGraphPhaseV1, CodeIndexNativeGraphProgressV1,
 };
-use tracedecay_store::{
-    GraphNativeWorkKindV1, GraphNativeWorkObserverV1, GraphNativeWorkV1,
-};
+use tracedecay_store::{GraphNativeWorkKindV1, GraphNativeWorkObserverV1, GraphNativeWorkV1};
 
 pub(super) type CodeIndexNativeGraphProgressSlotV1 =
     Arc<RwLock<CodeIndexNativeGraphProgressSlotStateV1>>;
@@ -121,12 +119,13 @@ impl CodeIndexNativeGraphProgressSlotStateV1 {
     }
 
     fn owns(&self, owner: GraphAttemptOwnerV1) -> bool {
-        self.sequence == owner.sequence && self.snapshot.as_ref().is_some_and(|state| {
-            state.active
-                && state.daemon_incarnation == owner.daemon
-                && state.producer_incarnation == owner.producer
-                && state.attempt_sequence == owner.sequence
-        })
+        self.sequence == owner.sequence
+            && self.snapshot.as_ref().is_some_and(|state| {
+                state.active
+                    && state.daemon_incarnation == owner.daemon
+                    && state.producer_incarnation == owner.producer
+                    && state.attempt_sequence == owner.sequence
+            })
     }
 
     fn observe(&mut self, owner: GraphAttemptOwnerV1, work: GraphNativeWorkV1, now: i64) -> bool {
@@ -139,11 +138,7 @@ impl CodeIndexNativeGraphProgressSlotStateV1 {
             let pending = pending.clone();
             let mut candidate = self.clone();
             candidate.pending_activation = None;
-            candidate.start_with_owner(
-                owner,
-                pending.generation_id,
-                pending.sealed_graph_digest,
-            );
+            candidate.start_with_owner(owner, pending.generation_id, pending.sealed_graph_digest);
             if !candidate.observe(owner, work, now) {
                 return false;
             }
@@ -164,7 +159,8 @@ impl CodeIndexNativeGraphProgressSlotStateV1 {
                 total_rows,
                 total_relations,
             } => {
-                if completed_rows == 0 || completed_rows > total_rows
+                if completed_rows == 0
+                    || completed_rows > total_rows
                     || next.committed_compact_segments != 0
                 {
                     return false;
@@ -172,9 +168,10 @@ impl CodeIndexNativeGraphProgressSlotStateV1 {
                 // The manifest already authenticates the relation count,
                 // including zero, while entity windows are still being encoded.
                 // Never treat an unknown relation bound as completed work.
-                if next.total_relations.is_some_and(|known| known != total_relations)
-                    || (kind == GraphNativeWorkKindV1::Relations
-                        && total_rows != total_relations)
+                if next
+                    .total_relations
+                    .is_some_and(|known| known != total_relations)
+                    || (kind == GraphNativeWorkKindV1::Relations && total_rows != total_relations)
                 {
                     return false;
                 }
@@ -189,9 +186,7 @@ impl CodeIndexNativeGraphProgressSlotStateV1 {
                         (&mut next.encoded_relations, &mut next.total_relations)
                     }
                 };
-                if completed_rows <= *completed
-                    || total.is_some_and(|prior| prior != total_rows)
-                {
+                if completed_rows <= *completed || total.is_some_and(|prior| prior != total_rows) {
                     return false;
                 }
                 *completed = completed_rows;
@@ -205,22 +200,18 @@ impl CodeIndexNativeGraphProgressSlotStateV1 {
                 live_bytes,
                 ..
             } => {
-                if mutations == 0
-                    || self.last_stage_ordinal.is_some_and(|last| ordinal <= last)
-                {
+                if mutations == 0 || self.last_stage_ordinal.is_some_and(|last| ordinal <= last) {
                     return false;
                 }
                 self.last_stage_ordinal = Some(ordinal);
                 next.committed_stage_pages = next.committed_stage_pages.saturating_add(1);
                 next.committed_stage_mutations =
                     next.committed_stage_mutations.saturating_add(mutations);
-                next.committed_stage_bytes =
-                    next.committed_stage_bytes.saturating_add(live_bytes);
+                next.committed_stage_bytes = next.committed_stage_bytes.saturating_add(live_bytes);
                 next.phase = Some(CodeIndexNativeGraphPhaseV1::StagePageCommit);
             }
             GraphNativeWorkV1::CompactSegmentVerified {
-                canonical_bytes,
-                ..
+                canonical_bytes, ..
             } => {
                 if canonical_bytes == 0 || next.committed_compact_segments != 0 {
                     return false;
@@ -233,14 +224,20 @@ impl CodeIndexNativeGraphProgressSlotStateV1 {
         self.epoch = self.epoch.saturating_add(1).max(1);
         next.progress_epoch = self.epoch;
         next.last_progress_micros = Some(
-            current.last_progress_micros.map_or(now, |prior| prior.max(now)),
+            current
+                .last_progress_micros
+                .map_or(now, |prior| prior.max(now)),
         );
         self.snapshot = Some(next);
         true
     }
 
     fn finish(&mut self, owner: GraphAttemptOwnerV1) {
-        if self.pending_activation.as_ref().is_some_and(|pending| pending.owner == owner) {
+        if self
+            .pending_activation
+            .as_ref()
+            .is_some_and(|pending| pending.owner == owner)
+        {
             self.pending_activation = None;
             return;
         }
@@ -274,8 +271,12 @@ impl CodeIndexNativeGraphProgressGuardV1 {
         generation_id: String,
         sealed_graph_digest: String,
     ) -> Self {
-        let owner = slot.write().unwrap_or_else(PoisonError::into_inner)
-            .begin(daemon, producer, generation_id, sealed_graph_digest);
+        let owner = slot.write().unwrap_or_else(PoisonError::into_inner).begin(
+            daemon,
+            producer,
+            generation_id,
+            sealed_graph_digest,
+        );
         Self { slot, owner }
     }
 
@@ -286,7 +287,9 @@ impl CodeIndexNativeGraphProgressGuardV1 {
         generation_id: String,
         sealed_graph_digest: String,
     ) -> Self {
-        let owner = slot.write().unwrap_or_else(PoisonError::into_inner)
+        let owner = slot
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
             .begin_on_first_work(daemon, producer, generation_id, sealed_graph_digest);
         Self { slot, owner }
     }
@@ -295,7 +298,8 @@ impl CodeIndexNativeGraphProgressGuardV1 {
         let slot = Arc::clone(&self.slot);
         let owner = self.owner;
         Arc::new(move |work| {
-            slot.write().unwrap_or_else(PoisonError::into_inner)
+            slot.write()
+                .unwrap_or_else(PoisonError::into_inner)
                 .observe(owner, work, tracedecay_contracts::now_micros().0);
         })
     }
@@ -303,7 +307,9 @@ impl CodeIndexNativeGraphProgressGuardV1 {
 
 impl Drop for CodeIndexNativeGraphProgressGuardV1 {
     fn drop(&mut self) {
-        self.slot.write().unwrap_or_else(PoisonError::into_inner)
+        self.slot
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
             .finish(self.owner);
     }
 }
@@ -314,9 +320,15 @@ mod tests {
 
     #[test]
     fn real_native_work_distinguishes_encoding_receipted_pages_and_verified_segment() {
-        let slot = Arc::new(RwLock::new(CodeIndexNativeGraphProgressSlotStateV1::default()));
+        let slot = Arc::new(RwLock::new(
+            CodeIndexNativeGraphProgressSlotStateV1::default(),
+        ));
         let attempt = CodeIndexNativeGraphProgressGuardV1::begin(
-            Arc::clone(&slot), 4, 6, "generation.a".into(), "digest.a".into(),
+            Arc::clone(&slot),
+            4,
+            6,
+            "generation.a".into(),
+            "digest.a".into(),
         );
         let observer = attempt.observer();
         let initial = slot.read().unwrap().snapshot().unwrap();
@@ -361,18 +373,26 @@ mod tests {
             "changing the sealed relation bound cannot renew progress"
         );
         observer(GraphNativeWorkV1::StagePageApplied {
-            ordinal: 0, kind: GraphNativeWorkKindV1::Entities, mutations: 36, live_bytes: 4096,
+            ordinal: 0,
+            kind: GraphNativeWorkKindV1::Entities,
+            mutations: 36,
+            live_bytes: 4096,
         });
         let durable = slot.read().unwrap().snapshot().unwrap();
         assert_eq!(durable.committed_stage_pages, 1);
         assert_eq!(durable.committed_stage_mutations, 36);
         assert_eq!(durable.committed_stage_bytes, 4096);
         observer(GraphNativeWorkV1::StagePageApplied {
-            ordinal: 0, kind: GraphNativeWorkKindV1::Entities, mutations: 36, live_bytes: 4096,
+            ordinal: 0,
+            kind: GraphNativeWorkKindV1::Entities,
+            mutations: 36,
+            live_bytes: 4096,
         });
         assert_eq!(slot.read().unwrap().snapshot().unwrap(), durable);
         observer(GraphNativeWorkV1::CompactSegmentVerified {
-            entities: 1101, relations: 1143, canonical_bytes: 67890,
+            entities: 1101,
+            relations: 1143,
+            canonical_bytes: 67890,
         });
         let installed = slot.read().unwrap().snapshot().unwrap();
         assert_eq!(installed.committed_compact_segments, 1);
@@ -381,21 +401,34 @@ mod tests {
         drop(attempt);
         let finished = slot.read().unwrap().snapshot().unwrap();
         assert!(!finished.active);
-        assert_eq!(finished.last_progress_micros, installed.last_progress_micros);
+        assert_eq!(
+            finished.last_progress_micros,
+            installed.last_progress_micros
+        );
         observer(GraphNativeWorkV1::CompactSegmentVerified {
-            entities: 1101, relations: 1143, canonical_bytes: 67890,
+            entities: 1101,
+            relations: 1143,
+            canonical_bytes: 67890,
         });
         assert_eq!(slot.read().unwrap().snapshot().unwrap(), finished);
     }
 
     #[test]
     fn read_only_activation_keeps_verified_native_milestones_until_real_write() {
-        let slot = Arc::new(RwLock::new(CodeIndexNativeGraphProgressSlotStateV1::default()));
+        let slot = Arc::new(RwLock::new(
+            CodeIndexNativeGraphProgressSlotStateV1::default(),
+        ));
         let publication = CodeIndexNativeGraphProgressGuardV1::begin(
-            Arc::clone(&slot), 3, 8, "generation.a".into(), "digest.a".into(),
+            Arc::clone(&slot),
+            3,
+            8,
+            "generation.a".into(),
+            "digest.a".into(),
         );
         publication.observer()(GraphNativeWorkV1::CompactSegmentVerified {
-            entities: 11, relations: 9, canonical_bytes: 4096,
+            entities: 11,
+            relations: 9,
+            canonical_bytes: 4096,
         });
         drop(publication);
         let verified = slot.read().unwrap().snapshot().unwrap();
@@ -405,26 +438,42 @@ mod tests {
         // The worker publishes from sealed rows, then activates the decoded
         // serving generation. Reopening its verified head writes no segment.
         let activation = CodeIndexNativeGraphProgressGuardV1::begin_for_activation(
-            Arc::clone(&slot), 3, 8, "generation.a".into(), "digest.a".into(),
+            Arc::clone(&slot),
+            3,
+            8,
+            "generation.a".into(),
+            "digest.a".into(),
         );
         let callback = activation.observer();
         assert_eq!(slot.read().unwrap().snapshot().unwrap(), verified);
         callback(GraphNativeWorkV1::CompactSegmentVerified {
-            entities: 0, relations: 0, canonical_bytes: 0,
+            entities: 0,
+            relations: 0,
+            canonical_bytes: 0,
         });
         assert_eq!(slot.read().unwrap().snapshot().unwrap(), verified);
         drop(activation);
         assert_eq!(slot.read().unwrap().snapshot().unwrap(), verified);
         callback(GraphNativeWorkV1::StagePageApplied {
-            ordinal: 0, kind: GraphNativeWorkKindV1::Entities, mutations: 5, live_bytes: 120,
+            ordinal: 0,
+            kind: GraphNativeWorkKindV1::Entities,
+            mutations: 5,
+            live_bytes: 120,
         });
         assert_eq!(slot.read().unwrap().snapshot().unwrap(), verified);
 
         let retry = CodeIndexNativeGraphProgressGuardV1::begin_for_activation(
-            Arc::clone(&slot), 3, 8, "generation.a".into(), "digest.a".into(),
+            Arc::clone(&slot),
+            3,
+            8,
+            "generation.a".into(),
+            "digest.a".into(),
         );
         retry.observer()(GraphNativeWorkV1::StagePageApplied {
-            ordinal: 0, kind: GraphNativeWorkKindV1::Entities, mutations: 5, live_bytes: 120,
+            ordinal: 0,
+            kind: GraphNativeWorkKindV1::Entities,
+            mutations: 5,
+            live_bytes: 120,
         });
         let restarted = slot.read().unwrap().snapshot().unwrap();
         assert!(restarted.active);
@@ -440,21 +489,37 @@ mod tests {
 
     #[test]
     fn restarted_native_publication_fences_old_callbacks_and_resets_attempt_counters() {
-        let slot = Arc::new(RwLock::new(CodeIndexNativeGraphProgressSlotStateV1::default()));
+        let slot = Arc::new(RwLock::new(
+            CodeIndexNativeGraphProgressSlotStateV1::default(),
+        ));
         let stale = CodeIndexNativeGraphProgressGuardV1::begin(
-            Arc::clone(&slot), 1, 9, "generation.a".into(), "digest.a".into(),
+            Arc::clone(&slot),
+            1,
+            9,
+            "generation.a".into(),
+            "digest.a".into(),
         );
         let old_observer = stale.observer();
         old_observer(GraphNativeWorkV1::StagePageApplied {
-            ordinal: 0, kind: GraphNativeWorkKindV1::Entities, mutations: 2, live_bytes: 18,
+            ordinal: 0,
+            kind: GraphNativeWorkKindV1::Entities,
+            mutations: 2,
+            live_bytes: 18,
         });
         let old_epoch = slot.read().unwrap().snapshot().unwrap().progress_epoch;
         let current = CodeIndexNativeGraphProgressGuardV1::begin(
-            Arc::clone(&slot), 2, 1, "generation.a".into(), "digest.a".into(),
+            Arc::clone(&slot),
+            2,
+            1,
+            "generation.a".into(),
+            "digest.a".into(),
         );
         let current_observer = current.observer();
         old_observer(GraphNativeWorkV1::StagePageApplied {
-            ordinal: 1, kind: GraphNativeWorkKindV1::Entities, mutations: 100, live_bytes: 1000,
+            ordinal: 1,
+            kind: GraphNativeWorkKindV1::Entities,
+            mutations: 100,
+            live_bytes: 1000,
         });
         drop(stale);
         let reopened = slot.read().unwrap().snapshot().unwrap();
@@ -463,7 +528,10 @@ mod tests {
         assert!(reopened.progress_epoch > old_epoch);
         assert_eq!(reopened.last_progress_micros, None);
         current_observer(GraphNativeWorkV1::StagePageApplied {
-            ordinal: 0, kind: GraphNativeWorkKindV1::Relations, mutations: 3, live_bytes: 120,
+            ordinal: 0,
+            kind: GraphNativeWorkKindV1::Relations,
+            mutations: 3,
+            live_bytes: 120,
         });
         let resumed = slot.read().unwrap().snapshot().unwrap();
         assert_eq!(resumed.committed_stage_pages, 1);

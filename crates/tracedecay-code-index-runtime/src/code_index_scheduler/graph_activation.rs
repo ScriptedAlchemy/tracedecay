@@ -481,7 +481,9 @@ impl CodeGraphActivationAuthorityV1 {
                     Some(admission) => retained
                         .publish_verified_snapshot_admitted(cancellation, admission, native_work)
                         .map(drop),
-                    None => retained.publish_verified_snapshot(cancellation, native_work).map(drop),
+                    None => retained
+                        .publish_verified_snapshot(cancellation, native_work)
+                        .map(drop),
                 })
                 .await
                 .map_err(|error| {

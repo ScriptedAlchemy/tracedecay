@@ -562,7 +562,8 @@ impl CodeIndexWorktreeSchedulerV1 {
                 completed_candidates = completed_candidates.saturating_add(1);
                 observer.observed_preseal_work(
                     tracedecay_code_index::production::CodeIndexPresealWorkV1 {
-                        phase: tracedecay_code_index::production::CodeIndexPresealWorkPhaseV1::Capture,
+                        phase:
+                            tracedecay_code_index::production::CodeIndexPresealWorkPhaseV1::Capture,
                         completed_items: completed_candidates,
                         total_items: None,
                     },

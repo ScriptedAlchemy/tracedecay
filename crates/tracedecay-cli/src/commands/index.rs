@@ -8,8 +8,7 @@ use tracedecay_contracts::code_index_freshness::{
     CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
     CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1, CodeIndexBuildProgressV1,
     CodeIndexNativeGraphPhaseV1, CodeIndexPresealWorkPhaseV1, CodeIndexReadinessWaitOutcomeV1,
-    CodeIndexStalenessStateV1,
-    CodeIndexWorktreeFreshnessV1,
+    CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_contracts::graph_tool::GraphToolResultV1;
 use tracedecay_contracts::retrieval::{
@@ -493,7 +492,10 @@ impl FirstGenerationWorkMarker {
         // A real active attempt remains authoritative in either state.
         if !worktree.rebuild_in_flight
             && !worktree.preseal_attempt.as_ref().is_some_and(|a| a.active)
-            && !worktree.native_graph_progress.as_ref().is_some_and(|g| g.active)
+            && !worktree
+                .native_graph_progress
+                .as_ref()
+                .is_some_and(|g| g.active)
         {
             return None;
         }
@@ -502,9 +504,12 @@ impl FirstGenerationWorkMarker {
             // digest verification AFTER all accepted row windows. That work
             // has no intermediate native milestone. Never call a healthy
             // final write a stall merely because the last encode clock froze.
-            let encoding_finished = graph.phase == Some(CodeIndexNativeGraphPhaseV1::CompactEncoding)
+            let encoding_finished = graph.phase
+                == Some(CodeIndexNativeGraphPhaseV1::CompactEncoding)
                 && graph.total_entities == Some(graph.encoded_entities)
-                && graph.total_relations.is_some_and(|total| total == graph.encoded_relations);
+                && graph
+                    .total_relations
+                    .is_some_and(|total| total == graph.encoded_relations);
             if encoding_finished
                 || graph.phase == Some(CodeIndexNativeGraphPhaseV1::CompactSegmentVerified)
             {
@@ -629,8 +634,7 @@ impl FirstGenerationWorkMarker {
                     return None;
                 }
                 if owner == prior_owner {
-                    if phase < prior_phase
-                        || (phase == prior_phase && completed < prior_completed)
+                    if phase < prior_phase || (phase == prior_phase && completed < prior_completed)
                     {
                         return None;
                     }
@@ -871,9 +875,13 @@ fn native_graph_progress_summary(
          attempt={}:{}:{} epoch={} last_work_micros={}",
         graph.phase,
         graph.encoded_entities,
-        graph.total_entities.map_or_else(|| "unknown".to_owned(), |n| n.to_string()),
+        graph
+            .total_entities
+            .map_or_else(|| "unknown".to_owned(), |n| n.to_string()),
         graph.encoded_relations,
-        graph.total_relations.map_or_else(|| "unknown".to_owned(), |n| n.to_string()),
+        graph
+            .total_relations
+            .map_or_else(|| "unknown".to_owned(), |n| n.to_string()),
         graph.committed_stage_pages,
         graph.committed_stage_mutations,
         graph.committed_compact_segments,
@@ -881,10 +889,9 @@ fn native_graph_progress_summary(
         graph.producer_incarnation,
         graph.attempt_sequence,
         graph.progress_epoch,
-        graph.last_progress_micros.map_or_else(
-            || "unreported".to_owned(),
-            |micros| micros.to_string(),
-        )
+        graph
+            .last_progress_micros
+            .map_or_else(|| "unreported".to_owned(), |micros| micros.to_string(),)
     )
 }
 
@@ -1006,8 +1013,8 @@ mod daemon_precondition_tests {
         CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1,
         CodeIndexBuildProgressV1, CodeIndexFreshnessLadderInputsV1, CodeIndexFreshnessLadderV1,
         CodeIndexNativeGraphPhaseV1, CodeIndexReadinessTargetV1, CodeIndexReadinessV1,
-        CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitReadV1,
-        CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
+        CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitReadV1, CodeIndexStalenessStateV1,
+        CodeIndexWorktreeFreshnessV1,
     };
     use tracedecay_contracts::retrieval::StatusCodeIndexFreshnessV1;
     use tracedecay_domain::errors::TraceDecayError;
@@ -1146,17 +1153,19 @@ mod daemon_precondition_tests {
 
     #[test]
     fn init_wait_preseal_summary_does_not_report_sealed_work() {
-        let attempt = tracedecay_contracts::code_index_freshness::CodeIndexPresealAttemptProgressV1 {
-            daemon_incarnation: 2,
-            producer_incarnation: 5,
-            attempt_sequence: 6,
-            progress_epoch: 11,
-            phase: tracedecay_contracts::code_index_freshness::CodeIndexPresealWorkPhaseV1::Capture,
-            completed_items: 16,
-            total_items: None,
-            last_progress_micros: Some(123),
-            active: true,
-        };
+        let attempt =
+            tracedecay_contracts::code_index_freshness::CodeIndexPresealAttemptProgressV1 {
+                daemon_incarnation: 2,
+                producer_incarnation: 5,
+                attempt_sequence: 6,
+                progress_epoch: 11,
+                phase:
+                    tracedecay_contracts::code_index_freshness::CodeIndexPresealWorkPhaseV1::Capture,
+                completed_items: 16,
+                total_items: None,
+                last_progress_micros: Some(123),
+                active: true,
+            };
         assert_eq!(
             super::preseal_progress_summary(&attempt),
             "capturing 16/unknown items, attempt=2:5:6 epoch=11 last_work_micros=123"
@@ -1263,10 +1272,7 @@ mod daemon_precondition_tests {
         report.phase = CodeIndexBuildPhaseV1::BulkCommit;
         source.progress = Some(report.clone());
         let mut window = super::FirstGenerationProgressWindow::new(Duration::from_secs(120));
-        assert!(!window.observe(
-            super::FirstGenerationWorkMarker::of(Some(&source)),
-            now,
-        ));
+        assert!(!window.observe(super::FirstGenerationWorkMarker::of(Some(&source)), now,));
         for (seconds, blocked) in [
             (40, Some(CodeIndexBuildBlockedReasonV1::ResidentMemory)),
             (80, None),
@@ -1308,10 +1314,7 @@ mod daemon_precondition_tests {
         let now = Instant::now();
         let mut window = super::FirstGenerationProgressWindow::new(Duration::from_secs(120));
         let capture = attempt(Capture, 2, 3, 1);
-        assert!(!window.observe(
-            super::FirstGenerationWorkMarker::of(Some(&capture)),
-            now,
-        ));
+        assert!(!window.observe(super::FirstGenerationWorkMarker::of(Some(&capture)), now,));
         let entered_parse = attempt(ParseEvidence, 3, 0, 1);
         assert!(!window.observe(
             super::FirstGenerationWorkMarker::of(Some(&entered_parse)),
@@ -1335,10 +1338,7 @@ mod daemon_precondition_tests {
         let mut window = super::FirstGenerationProgressWindow::new(Duration::from_secs(120));
         let mut source = building(true);
         source.progress = Some(progress(40, None));
-        assert!(!window.observe(
-            super::FirstGenerationWorkMarker::of(Some(&source)),
-            now,
-        ));
+        assert!(!window.observe(super::FirstGenerationWorkMarker::of(Some(&source)), now,));
         let mut adopted = progress(40, None);
         adopted.daemon_incarnation = 2;
         adopted.progress_epoch = 1;
@@ -1433,7 +1433,10 @@ mod daemon_precondition_tests {
             Duration::ZERO,
         )
         .await;
-        assert!(result.is_ok(), "real work must keep the wait alive: {result:?}");
+        assert!(
+            result.is_ok(),
+            "real work must keep the wait alive: {result:?}"
+        );
         assert_eq!(reads, 5, "only the reached proof ends a progressing wait");
     }
 
@@ -1479,7 +1482,11 @@ mod daemon_precondition_tests {
             })
         ));
         let mut repeated = cold.clone();
-        repeated.native_graph_progress.as_mut().unwrap().progress_epoch += 1;
+        repeated
+            .native_graph_progress
+            .as_mut()
+            .unwrap()
+            .progress_epoch += 1;
         // A changed status epoch without a physical row or durable page
         // must not turn the initial unreported native attempt into progress.
         let (result, reads) = hold_over(
@@ -1491,7 +1498,10 @@ mod daemon_precondition_tests {
             Duration::ZERO,
         )
         .await;
-        assert_eq!(reads, 2, "the frozen writer must refuse before a later ready");
+        assert_eq!(
+            reads, 2,
+            "the frozen writer must refuse before a later ready"
+        );
         let (code, reason) = refusal(result);
         assert_eq!(code, CODE_INDEX_READINESS_WAIT_TIMED_OUT);
         assert!(
@@ -1665,7 +1675,10 @@ mod daemon_precondition_tests {
             };
         worktree.native_graph_progress = Some(graph.clone());
         let marker = super::FirstGenerationWorkMarker::of(Some(&worktree));
-        assert!(marker.is_some(), "a pending relation stream is still observable work");
+        assert!(
+            marker.is_some(),
+            "a pending relation stream is still observable work"
+        );
         let now = Instant::now();
         let mut window = super::FirstGenerationProgressWindow::new(Duration::from_secs(120));
         assert!(!window.observe(marker.clone(), now));

@@ -840,9 +840,7 @@ impl GraphDb {
                     current,
                     check,
                 )?;
-                if let (GenerationStagePageCommitV1::Applied, Some(observer)) =
-                    (outcome, observe)
-                {
+                if let (GenerationStagePageCommitV1::Applied, Some(observer)) = (outcome, observe) {
                     observer(GraphNativeWorkV1::StagePageApplied {
                         ordinal: u64::try_from(page.ordinal).unwrap_or(u64::MAX),
                         kind: match page.kind {
@@ -963,9 +961,7 @@ impl GraphDb {
                     current.take(),
                     check,
                 )?;
-                if let (GenerationStagePageCommitV1::Applied, Some(observer)) =
-                    (outcome, observe)
-                {
+                if let (GenerationStagePageCommitV1::Applied, Some(observer)) = (outcome, observe) {
                     observer(GraphNativeWorkV1::StagePageApplied {
                         ordinal: u64::try_from(page.ordinal).unwrap_or(u64::MAX),
                         kind: match page.kind {
@@ -2857,11 +2853,11 @@ mod tests {
     };
     use crate::{
         GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDurability,
-        GraphEntity, GraphEntityId, GraphEntityRef, GraphFormatVersion,
-        GraphGenerationDependency, GraphGenerationId, GraphGenerationManifest,
-        GraphGenerationRelation, GraphIdempotencyKey, GraphNamespace, GraphProjectionId,
-        GraphProjectionIdentity, GraphRelationId, GraphRelationKind, GraphWatermark,
-        MAX_VERIFIED_GENERATION_BATCH_MUTATIONS, NeverCancelled, SourceGeneration,
+        GraphEntity, GraphEntityId, GraphEntityRef, GraphFormatVersion, GraphGenerationDependency,
+        GraphGenerationId, GraphGenerationManifest, GraphGenerationRelation, GraphIdempotencyKey,
+        GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphRelationId,
+        GraphRelationKind, GraphWatermark, MAX_VERIFIED_GENERATION_BATCH_MUTATIONS, NeverCancelled,
+        SourceGeneration,
     };
 
     use super::{
@@ -3857,17 +3853,18 @@ mod tests {
                     projection.clone(),
                     GraphEntityId::new("entity:00000").unwrap(),
                 ),
-                GraphEntityRef::new(
-                    projection,
-                    GraphEntityId::new("entity:00001").unwrap(),
-                ),
+                GraphEntityRef::new(projection, GraphEntityId::new("entity:00001").unwrap()),
                 GraphRelationKind::new("calls").unwrap(),
                 BTreeMap::new(),
             )
             .unwrap(),
         );
         let pages = generation_stage_pages(&manifest).expect("real page plan");
-        assert_eq!(pages.len(), 2, "entities and relations must use distinct pages");
+        assert_eq!(
+            pages.len(),
+            2,
+            "entities and relations must use distinct pages"
+        );
         let expected = sealed_digest(&manifest);
         let temp = TempDir::new().expect("persistent graph store");
         let (owner, database) = persistent_database(&temp);
@@ -4021,12 +4018,7 @@ mod tests {
         let (reopened_owner, reopened) = persistent_database(&temp);
         assert!(
             reopened
-                .generation_stage_page_already_applied(
-                    &identity,
-                    &sealed,
-                    &context,
-                    &pages[0],
-                )
+                .generation_stage_page_already_applied(&identity, &sealed, &context, &pages[0],)
                 .expect("verify row receipt after restart"),
             "a reported native page must survive a close/reopen, not merely staging memory"
         );

@@ -716,13 +716,20 @@ impl CodeIndexSchedulerRegistryV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .progress_incarnations();
-        let graph_attempt = super::graph_progress::CodeIndexNativeGraphProgressGuardV1::begin_for_activation(
-            native_graph_progress,
-            daemon_incarnation,
-            producer_incarnation,
-            build.latest.generation().manifest().generation_id.as_str().to_owned(),
-            replay_binding.sealed_state_digest.as_str().to_owned(),
-        );
+        let graph_attempt =
+            super::graph_progress::CodeIndexNativeGraphProgressGuardV1::begin_for_activation(
+                native_graph_progress,
+                daemon_incarnation,
+                producer_incarnation,
+                build
+                    .latest
+                    .generation()
+                    .manifest()
+                    .generation_id
+                    .as_str()
+                    .to_owned(),
+                replay_binding.sealed_state_digest.as_str().to_owned(),
+            );
         let activation = activate_committed_generation(
             &graph_activation,
             &project_id,

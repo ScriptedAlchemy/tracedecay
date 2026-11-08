@@ -1749,10 +1749,7 @@ pub(crate) enum SealedRowSource<'a> {
 /// Returns whether this writer installed a new sealed segment. A losing
 /// concurrent writer can adopt the winner only after the caller reopens and
 /// verifies its digest; existence alone is not a new durable write.
-fn install_staged_sealed_store(
-    staging: &Path,
-    directory: &Path,
-) -> Result<bool, GraphDbError> {
+fn install_staged_sealed_store(staging: &Path, directory: &Path) -> Result<bool, GraphDbError> {
     match std::fs::rename(staging, directory) {
         Ok(()) => Ok(true),
         Err(error) => {
@@ -2865,17 +2862,17 @@ pub(crate) fn sealed_copy_proof(
 #[cfg(test)]
 mod build_tests {
     use std::collections::{BTreeMap, BTreeSet};
-    use std::sync::{Arc, Mutex};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use rayon::ThreadPoolBuilder;
 
     use super::{
         NativeCompactEncodeBoundaryV1, NativeCompactEncodeKindV1, SEALED_STORE_DATABASE_FILE,
         SealedCompactRows, SealedRowSource, build_or_open_sealed_store,
-        build_or_open_sealed_store_with_work, build_sealed_container_with_work,
-        push_manifest_rows, sealed_artifact_database_options, sealed_copy_proof,
-        sealed_generation_directory, sealed_store_root,
+        build_or_open_sealed_store_with_work, build_sealed_container_with_work, push_manifest_rows,
+        sealed_artifact_database_options, sealed_copy_proof, sealed_generation_directory,
+        sealed_store_root,
     };
     use tracedecay_store::runtime::{GraphNativeWorkKindV1, GraphNativeWorkV1};
 
@@ -3030,8 +3027,14 @@ mod build_tests {
             .iter()
             .filter(|event| event.kind == NativeCompactEncodeKindV1::Relations)
             .collect();
-        assert!(entities.len() >= 2, "must record multiple real entity windows");
-        assert!(relations.len() >= 2, "must record multiple real relation windows");
+        assert!(
+            entities.len() >= 2,
+            "must record multiple real entity windows"
+        );
+        assert!(
+            relations.len() >= 2,
+            "must record multiple real relation windows"
+        );
         for (events, total) in [(entities, 1_101), (relations, 1_143)] {
             let mut prior = 0;
             for event in events {
@@ -3431,15 +3434,10 @@ mod build_tests {
         );
         assert!(!staging.exists(), "the losing staging data must be removed");
         assert!(!directory.join("loser.tmp").exists());
-        let reopened = super::open_sealed_store_checked(
-            &directory,
-            &identity,
-            &expected,
-            check,
-            None,
-        )
-        .expect("verify the actual winning native segment")
-        .expect("the winning segment remains installed");
+        let reopened =
+            super::open_sealed_store_checked(&directory, &identity, &expected, check, None)
+                .expect("verify the actual winning native segment")
+                .expect("the winning segment remains installed");
         assert_eq!(reopened.recovered_digest(), expected.as_str());
         assert_eq!((reopened.entity_count, reopened.relation_count), (7, 9));
         let _ = reopened.database().close();
