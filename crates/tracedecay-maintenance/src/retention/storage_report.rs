@@ -3617,6 +3617,7 @@ mod tests {
                 .any(|family| family.contains("stopped at its entry budget"))
         );
     }
+
     #[cfg(unix)]
     #[test]
     fn large_sealed_and_code_index_store_reports_invalid_pointer_as_unavailable() {
@@ -3640,10 +3641,8 @@ mod tests {
                 .unwrap();
         }
         let canonical = Path::new("/repos/large");
-        let code_root = scoped_code_index_store_root(
-            &data_root.join(CODE_INDEX_DIRECTORY),
-            canonical,
-        );
+        let code_root =
+            scoped_code_index_store_root(&data_root.join(CODE_INDEX_DIRECTORY), canonical);
         let segments = code_root.join("code-generation-segments-v1");
         std::fs::create_dir_all(&segments).unwrap();
         std::fs::File::create(segments.join("large-segments.bin"))
@@ -3658,15 +3657,14 @@ mod tests {
 
         // Exercise the same production project-report collector that invokes
         // retention's active-pointer reader when a protection set is present.
-        let report = build_project_storage_report(
-            &profile,
-            "proj_large",
-            canonical,
-            Ok(BTreeSet::new()),
-        )
-        .unwrap();
+        let report =
+            build_project_storage_report(&profile, "proj_large", canonical, Ok(BTreeSet::new()))
+                .unwrap();
         assert_eq!(report.stores.len(), 1);
-        assert_eq!(report.stores[0].size_coverage.state, StorageReportSizeStateV1::Complete);
+        assert_eq!(
+            report.stores[0].size_coverage.state,
+            StorageReportSizeStateV1::Complete
+        );
         assert_eq!(report.stores[0].kinds.sealed_graph, 70 * SEALED_BYTES);
         assert!(report.stores[0].kinds.generation_artifacts >= 15 * GIB);
         assert_eq!(report.code_generation_retention.len(), 0);
@@ -3681,5 +3679,4 @@ mod tests {
         );
         assert_eq!(std::fs::metadata(pointer).unwrap().len(), 2 * MIB);
     }
-
 }

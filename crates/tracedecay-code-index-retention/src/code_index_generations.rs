@@ -2567,6 +2567,7 @@ mod active_pointer_bounds_tests {
             ),
             Err(CodeGenerationRetentionErrorV1::UnsafeState(_))
         ));
+        assert_eq!(remaining_entries, 128, "refusal must precede directory inventory");
         assert_eq!(std::fs::read(&path).unwrap(), padded);
     }
 
