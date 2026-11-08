@@ -445,7 +445,9 @@ fn existing_sqlite_admission_requires_a_completed_header() {
     ));
     std::fs::remove_file(&path).unwrap();
     let database = Connection::open(&path).unwrap();
-    database.execute_batch("CREATE TABLE probe(value INTEGER)").unwrap();
+    database
+        .execute_batch("CREATE TABLE probe(value INTEGER)")
+        .unwrap();
     drop(database);
     assert!(OpenedDatabaseFile::pin_initialized(&path).is_ok());
 }

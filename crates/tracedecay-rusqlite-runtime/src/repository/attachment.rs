@@ -1083,7 +1083,10 @@ mod tests {
             .unwrap();
 
         attachment.abort_initialization().unwrap();
-        assert!(path.is_file(), "abort must not unlink the initialized store");
+        assert!(
+            path.is_file(),
+            "abort must not unlink the initialized store"
+        );
         assert!(held_pin.try_clone().is_err());
         {
             let state = attachment.lock_state();

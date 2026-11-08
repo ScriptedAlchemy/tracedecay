@@ -325,7 +325,6 @@ impl OpenedDatabaseFile {
         }
         Ok(())
     }
-
 }
 
 /// Check a live SQLite worker's physical file without opening and closing a
@@ -367,7 +366,9 @@ impl fmt::Display for OpenedDatabaseFileError {
         let message = match self {
             Self::Create => "could not create the canonical SQLite file",
             Self::Reserve => "could not exclusively reserve the new SQLite sidecar namespace",
-            Self::InvalidHeader => "existing SQLite file has no valid database header; refusing sidecar access",
+            Self::InvalidHeader => {
+                "existing SQLite file has no valid database header; refusing sidecar access"
+            }
             Self::Open => "could not open the verified SQLite file",
             Self::Inspect => "could not inspect the verified SQLite file descriptor",
             Self::NotFile => "verified SQLite locator is not a regular file",
