@@ -63,7 +63,14 @@ fn tree_request(util: &str, sealed_at: i64, phase: &str) -> CodeIndexBuildReques
     let mut identity = Sha256::new();
     for (path, source) in sources {
         let digest = Sha256::digest([path.as_bytes(), b"\0", source.as_bytes()].concat());
-        let occurrence = id::<FileOccurrenceId>(&format!("file.sparse.{digest:x}"));
+        let occurrence = id::<FileOccurrenceId>(&format!(
+            "file.sparse.{}",
+            digest
+                .iter()
+                .take(12)
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        ));
         identity.update(digest);
         request.snapshot.files.push(SanitizedCodeFileV1 {
             file_occurrence_id: occurrence.clone(),
