@@ -93,6 +93,26 @@ struct RuntimeFixture {
     _environment: common::IsolatedHome,
 }
 
+struct AckTimings(PathBuf);
+
+impl Drop for AckTimings {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        let Ok(events) = std::fs::read_to_string(&self.0) else {
+            return;
+        };
+        let phases = events.lines().filter_map(|line| {
+            line.split_once("LSP_ACK_MEASUREMENT ")
+                .and_then(|(_, phase)| line.split_whitespace().next().map(|time| (time, phase)))
+        });
+        for (time, phase) in phases.rev().take(24).collect::<Vec<_>>().into_iter().rev() {
+            eprintln!("LSP ACK timing {time} {phase}");
+        }
+    }
+}
+
 impl RuntimeFixture {
     fn home(&self) -> &Path {
         self._environment.home()
@@ -221,7 +241,9 @@ async fn lsp_runtime_fixture() -> RuntimeFixture {
     let daemon_log = std::fs::File::create(&daemon_events).expect("create isolated LSP daemon log");
     let daemon = common::spawn_tracedecay_daemon_with(environment.home(), |command| {
         environment.apply_toolchain_env(command);
-        command.env("RUST_LOG", "info").stderr(daemon_log);
+        command
+            .env("RUST_LOG", "info,lsp_ack_measurement=debug")
+            .stderr(daemon_log);
     });
     let output = common::tracedecay_command_with_home(environment.home())
         .arg("init")
@@ -427,10 +449,12 @@ async fn poll_lsp_response(session: &mut DaemonLspSessionClient, response_id: u6
                 let value: Value =
                     serde_json::from_slice(frame.as_slice()).expect("daemon LSP JSON");
                 let (operation_deadline, cancellation) = lsp_control();
-                session
-                    .acknowledge_daemon_frame(operation_deadline, cancellation)
-                    .await
-                    .expect("acknowledge daemon LSP frame");
+                let sent_at = wall_clock_micros().0;
+                let ack_start = std::time::Instant::now();
+                session.acknowledge_daemon_frame(operation_deadline, cancellation).await.unwrap_or_else(|error| {
+                    panic!("acknowledge daemon LSP frame: {error:?}; requested id {response_id}, response id {:?}, notification {}, sent_at_utc_us {sent_at}, client elapsed {:?}",
+                        value.get("id").and_then(Value::as_u64), value.get("method").is_some(), ack_start.elapsed())
+                });
                 if value.get("id").and_then(Value::as_u64) == Some(response_id) {
                     return value;
                 }
@@ -2459,6 +2483,7 @@ async fn stdio_bridge_exits_successfully_after_client_shutdown_and_exit() {
 #[tokio::test(flavor = "multi_thread")]
 async fn production_lsp_negotiates_and_projects_canonical_context() {
     let fixture = lsp_runtime_fixture().await;
+    let _ack_timings = AckTimings(fixture._environment.scratch().join("runtime-daemon.log"));
     let client_project = fixture.client_project_path();
     let root_uri = url::Url::from_directory_path(&client_project)
         .expect("project root URI")

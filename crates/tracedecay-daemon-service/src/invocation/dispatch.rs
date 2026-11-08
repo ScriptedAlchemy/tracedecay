@@ -142,6 +142,8 @@ impl DaemonInvocationService {
     ) -> DaemonInvocationResponse {
         // Keep the admitted dispatch frame behind one allocation for every invocation entry point.
         Box::pin(async move {
+        let ack_measurement = (request.operation() == DaemonInvocationOperation::LspAcknowledge).then(std::time::Instant::now);
+        if ack_measurement.is_some() { tracing::debug!(target: "lsp_ack_measurement", "LSP_ACK_MEASUREMENT phase=dispatch elapsed_us=0"); }
         let request_id = request.request_id.clone();
         let cancellation_lease = if admitted_cancellation.is_none() {
             let Some(lease) = self.request_cancellations.register(&request_id) else {
@@ -179,6 +181,7 @@ impl DaemonInvocationService {
                 .await
             }
         };
+        if let Some(start) = ack_measurement { tracing::debug!(target: "lsp_ack_measurement", "LSP_ACK_MEASUREMENT phase=admitted elapsed_us={}", start.elapsed().as_micros()); }
         let project_runtime_admitted = runtimes.is_admitted();
         let registered_project_root = runtimes.resolved_root;
         let publication = runtimes.publication;
@@ -262,6 +265,7 @@ impl DaemonInvocationService {
         let now_ms = now_millis();
         tracing::Instrument::instrument(self.expire_sessions(now_ms), tracing::trace_span!("daemon.service.invocation.expire_sessions"))
         .await;
+        if let Some(start) = ack_measurement { tracing::debug!(target: "lsp_ack_measurement", "LSP_ACK_MEASUREMENT phase=expired_sessions elapsed_us={}", start.elapsed().as_micros()); }
         let feedback_service = runtimes.feedback_owner;
         let advisory_cycle = runtimes.advisory_cycle;
         let configuration_runtime = runtimes.configuration;

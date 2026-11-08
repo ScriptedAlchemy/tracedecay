@@ -769,10 +769,14 @@ impl DaemonInvocationService {
         session: DaemonLspSessionAccess,
         now_ms: u64,
     ) -> DaemonInvocationResponse {
+        let start = std::time::Instant::now();
+        let phase = |name| tracing::debug!(target: "lsp_ack_measurement", "LSP_ACK_MEASUREMENT phase={name} elapsed_us={}", start.elapsed().as_micros());
+        phase("authenticate");
         let access = match self.authenticate(lsp_registry, session, now_ms).await {
             Ok(access) => access,
             Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
         };
+        phase("acquire_sessions");
         let mut sessions = self.lsp_sessions.lock().await;
         let Some(session) = sessions.get_mut(access.session_id()) else {
             return DaemonInvocationResponse::problem(
@@ -780,13 +784,16 @@ impl DaemonInvocationService {
                 DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         };
+        phase("acknowledge_actor");
         let acknowledged = session.actor.acknowledge_outbound();
         if acknowledged {
+            phase("settle_receipt");
             let _ = session.settle_in_flight_delivery(
                 tracedecay_domain::DeliverySettlementOutcomeV1::Delivered,
                 None,
             );
         }
+        phase("reply");
         DaemonInvocationResponse::with_outcome(
             request_id,
             DaemonInvocationOutcome::LspAcknowledged { acknowledged },
