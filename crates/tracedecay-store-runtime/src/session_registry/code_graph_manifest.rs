@@ -1035,6 +1035,8 @@ fn read_fingerprinted_segment(
     expected_size: u64,
     buffer: &mut Vec<u8>,
 ) -> Result<Option<SealedSegmentFingerprintV1>, CodeIndexProductionErrorV1> {
+    // A rejected identity or missing file must not expose the previous segment.
+    buffer.clear();
     let path_metadata = segment_path.symlink_metadata().map_err(|error| {
         CodeIndexProductionErrorV1::Contract(format!(
             "sealed generation segment is unavailable: {error}"
@@ -1060,9 +1062,7 @@ fn read_fingerprinted_segment(
             "sealed generation segment metadata cannot be read: {error}"
         ))
     })?;
-    buffer.clear();
-    buffer.resize(length, 0);
-    file.read_exact(buffer).map_err(|error| {
+    read_segment_range(&mut file, 0, length, buffer).map_err(|error| {
         CodeIndexProductionErrorV1::Contract(format!(
             "sealed generation segment read failed: {error}"
         ))
@@ -2605,6 +2605,38 @@ mod tests {
         );
         super::read_segment_range(&mut reader, 0, 5, &mut buffer).unwrap();
         assert_eq!(buffer, b"short");
+    }
+
+    #[test]
+    fn graph_fingerprint_read_clears_refused_and_stale_page_output() {
+        let temporary = TempDir::new().unwrap();
+        let bytes = b"verified graph evidence segment";
+        let path = temporary.path().join("segment.json");
+        std::fs::write(&path, bytes).unwrap();
+        let mut buffer = b"old page".to_vec();
+
+        super::read_fingerprinted_segment(&path, bytes.len() as u64, &mut buffer).unwrap();
+        assert_eq!(buffer, bytes);
+        assert!(matches!(
+            super::read_fingerprinted_segment(&path, bytes.len() as u64 + 1, &mut buffer),
+            Err(CodeIndexProductionErrorV1::Contract(_))
+        ));
+        assert!(
+            buffer.is_empty(),
+            "a refused fingerprint must not return the previous verified page"
+        );
+
+        super::read_fingerprinted_segment(&path, bytes.len() as u64, &mut buffer).unwrap();
+        assert_eq!(buffer, bytes);
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(
+            super::read_fingerprinted_segment(&path, bytes.len() as u64, &mut buffer),
+            Err(CodeIndexProductionErrorV1::Contract(_))
+        ));
+        assert!(
+            buffer.is_empty(),
+            "missing graph evidence must not return previously verified bytes"
+        );
     }
 
     #[test]
