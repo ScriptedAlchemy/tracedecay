@@ -156,7 +156,7 @@ pub fn parent_gitlink_paths(project_root: &Path) -> Result<BTreeSet<String>, Sou
         })?;
     let mut paths = BTreeSet::new();
     for entry in index.entries() {
-        if entry.mode.is_commit() {
+        if entry.mode.is_submodule() {
             let path: &[u8] = entry.path(&index).as_ref();
             let relative = std::str::from_utf8(path).map_err(|_| SourceWalkError {
                 glob: String::new(),
