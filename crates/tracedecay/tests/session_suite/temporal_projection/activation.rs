@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
@@ -328,14 +328,16 @@ async fn activation_is_pinned_to_the_generation_the_refresh_extends() {
 #[derive(Default)]
 struct GatedHistory {
     entered: tokio::sync::Notify,
-    release: tokio::sync::Notify,
+    release: OnceLock<()>,
 }
 
 impl SessionHistoricalIngestor for GatedHistory {
     fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
         Box::pin(async move {
             self.entered.notify_one();
-            self.release.notified().await;
+            // Both readers must register before the native worker can capture
+            // the superseded candidate. A yielding history pass serves live joins.
+            self.release.wait();
             SessionHistoricalIngestOutcome::Complete.into()
         })
     }
@@ -345,7 +347,7 @@ impl SessionHistoricalIngestor for GatedHistory {
     }
 
     fn cancel(&self) {
-        self.release.notify_one();
+        let _ = self.release.set(());
     }
 }
 
@@ -409,7 +411,7 @@ async fn reset_requested_during_a_refresh_supersedes_its_candidate() {
         .await,
         (true, true)
     );
-    history.release.notify_one();
+    history.release.set(()).unwrap();
     assert_eq!(
         tokio::join!(named_join, aggregate_join),
         (false, false),
