@@ -819,6 +819,10 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                         .insert(self.segments_root.join(name), path);
                     files.evidence.attach_to_manifest();
                 }
+                #[cfg(unix)]
+                if let Some((path, identity)) = files.evidence.authenticated.take() {
+                    files.segments.authenticated_segments.insert(path, identity);
+                }
                 files.referenced_segment_bytes = files
                     .referenced_segment_bytes
                     .saturating_add(segment_size_bytes);
@@ -1064,6 +1068,8 @@ pub(super) struct TemporaryEvidencePackV1 {
     page_count: u32,
     committed: bool,
     published_path: Option<PathBuf>,
+    #[cfg(unix)]
+    authenticated: Option<(PathBuf, std::fs::Metadata)>,
 }
 
 /// One seal's new file segments. Each keeps a temporary name until the whole
@@ -1207,9 +1213,11 @@ impl PinnedPreparationSegmentV1 {
 
 impl TemporaryEvidencePackV1 {
     pub(super) fn create(path: PathBuf) -> Result<Self, CodeIndexPublicationStoreErrorV1> {
-        let file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        options.read(true);
+        let file = options
             .open(&path)
             .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
         Ok(Self {
@@ -1220,6 +1228,8 @@ impl TemporaryEvidencePackV1 {
             page_count: 0,
             committed: false,
             published_path: None,
+            #[cfg(unix)]
+            authenticated: None,
         })
     }
 
@@ -1296,14 +1306,26 @@ impl TemporaryEvidencePackV1 {
         let final_path = root.join(format!("segment-{digest_hex}.json"));
         match final_path.symlink_metadata() {
             Ok(metadata) => {
+                #[cfg(unix)]
+                let actual = DaemonCodeIndexPublicationStoreV1::state_digest_existing_segment(
+                    &final_path,
+                    &metadata,
+                )?;
+                #[cfg(not(unix))]
+                let actual = DaemonCodeIndexPublicationStoreV1::state_digest_file(&final_path)?;
                 if !metadata.file_type().is_file()
                     || metadata.len() != segment_size_bytes
-                    || DaemonCodeIndexPublicationStoreV1::state_digest_file(&final_path)?
-                        != segment_digest.as_str()
+                    || actual != segment_digest.as_str()
                 {
                     return Err(DaemonCodeIndexPublicationStoreV1::corruption(
                         "existing sealed evidence pack does not match its content address",
                     ));
+                }
+                // The same opened inode verified by SHA-256 is authoritative
+                // for this preparation's subsequent manifest verification.
+                #[cfg(unix)]
+                {
+                    self.authenticated = Some((final_path, metadata));
                 }
                 drop(self.file.take());
                 std::fs::remove_file(&self.path)
@@ -1323,11 +1345,73 @@ impl TemporaryEvidencePackV1 {
             })?
             .sync_all()
             .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        // On Unix, keep the original writer descriptor through the rename
+        // and hash the actual published bytes. Opening the pack by pathname
+        // again would trigger endpoint authorization for no additional proof.
+        #[cfg(unix)]
+        let before_rename = self
+            .file
+            .as_ref()
+            .ok_or_else(|| {
+                DaemonCodeIndexPublicationStoreV1::unavailable(
+                    "sealed evidence pack writer is already closed",
+                )
+            })?
+            .metadata()
+            .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+        #[cfg(not(unix))]
         drop(self.file.take());
         let staged_path = staging_root.join(format!("segment-{digest_hex}.json"));
         std::fs::rename(&self.path, &staged_path)
             .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
-        self.published_path = Some(staged_path);
+        self.published_path = Some(staged_path.clone());
+        #[cfg(unix)]
+        {
+            let file = self.file.as_mut().ok_or_else(|| {
+                DaemonCodeIndexPublicationStoreV1::unavailable(
+                    "sealed evidence pack writer is already closed",
+                )
+            })?;
+            let opened = file
+                .metadata()
+                .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+            // Rename may change ctime, but must not change the writer inode.
+            if !opened.is_file()
+                || opened.dev() != before_rename.dev()
+                || opened.ino() != before_rename.ino()
+                || opened.len() != before_rename.len()
+                || opened.mtime() != before_rename.mtime()
+                || opened.mtime_nsec() != before_rename.mtime_nsec()
+            {
+                return Err(DaemonCodeIndexPublicationStoreV1::corruption(
+                    "sealed evidence pack writer changed during staging",
+                ));
+            }
+            file.seek(SeekFrom::Start(0))
+                .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+            if DaemonCodeIndexPublicationStoreV1::state_digest_reader(file)?
+                != segment_digest.as_str()
+            {
+                return Err(DaemonCodeIndexPublicationStoreV1::corruption(
+                    "staged evidence pack bytes differ from the authenticated content address",
+                ));
+            }
+            let after = file
+                .metadata()
+                .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+            let named = staged_path
+                .symlink_metadata()
+                .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+            if !DaemonCodeIndexPublicationStoreV1::same_unix_segment_identity(&opened, &after)
+                || !DaemonCodeIndexPublicationStoreV1::same_unix_segment_identity(&after, &named)
+            {
+                return Err(DaemonCodeIndexPublicationStoreV1::corruption(
+                    "sealed evidence pack changed during writer authentication",
+                ));
+            }
+            self.authenticated = Some((staged_path, after));
+        }
+        drop(self.file.take());
         DaemonCodeIndexPublicationStoreV1::sync_directory(staging_root)?;
         Ok(true)
     }
