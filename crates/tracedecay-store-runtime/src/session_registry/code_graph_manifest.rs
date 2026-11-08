@@ -849,7 +849,7 @@ impl<'a> GraphSegmentReadPassV1<'a> {
                 )
             })?;
             self.pinned.push_back(pinned);
-            return Ok(());
+            Ok(())
         } else {
             // Include route lookup, pathname validation and the actual open.
             // Endpoint authorization can stall in any of these operations.
@@ -864,7 +864,7 @@ impl<'a> GraphSegmentReadPassV1<'a> {
                 Err(error) => Err(error),
             };
             self.open_wall_time += started.elapsed();
-            return self.read_and_pin(opened?, request, buffer);
+            self.read_and_pin(opened?, request, buffer)
         }
     }
 
