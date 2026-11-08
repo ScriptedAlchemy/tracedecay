@@ -1835,7 +1835,7 @@ mod tests {
         })
         .await;
         let follower = administration.with_writer_in(
-            WriterScope::store("/follower-store", StoreWriterClass::Content),
+            WriterScope::store("/held-store", StoreWriterClass::Content),
             || async { 8_u8 },
         );
         tokio::pin!(follower);
@@ -1852,14 +1852,19 @@ mod tests {
             None
         );
         assert_eq!(constructed.load(Ordering::SeqCst), 0);
+        poll_fn(|cx| {
+            assert!(follower.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        release_tx.send(()).expect("release held writer");
+        writer.await.expect("held writer exits");
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(2), &mut follower)
                 .await
-                .expect("cancellation removes the queued writer before the holder exits"),
+                .expect("next store writer proceeds after the holder exits"),
             8
         );
-        release_tx.send(()).expect("release held writer");
-        writer.await.expect("held writer exits");
         assert_eq!(
             administration.try_with_writer(|| async { 9_u8 }).await,
             Some(9)
