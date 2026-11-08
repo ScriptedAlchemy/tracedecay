@@ -407,16 +407,34 @@ fn verified_reader_release_preserves_independent_writer_exclusion() {
             }
             .expect("verified read-only connection");
             assert_eq!(reader.file_identity(), live_path_identity(&path).unwrap());
-            assert_eq!(
-                reader
-                    .connection()
-                    .query_row("SELECT 1", [], |row| row.get::<_, i64>(0)),
-                Ok(1)
-            );
+            if immutable {
+                // An immutable view need not include uncheckpointed WAL data.
+                assert_eq!(
+                    reader
+                        .connection()
+                        .query_row("SELECT 1", [], |row| row.get::<_, i64>(0)),
+                    Ok(1)
+                );
+            } else {
+                assert_eq!(
+                    reader
+                        .connection()
+                        .query_row("SELECT value FROM sample", [], |row| row.get::<_, i64>(0)),
+                    Ok(1),
+                    "verified snapshot must see the last committed value"
+                );
+                probe_external_connection_expectation(&path, "read", "read:1");
+            }
             drop(reader);
             probe_external_connection(&path, operation, true);
+            if !immutable {
+                // Reader destruction must not lose the writer's lock or
+                // prevent another process from reading the committed snapshot.
+                probe_external_connection_expectation(&path, "read", "read:1");
+            }
 
             writer.execute_batch("COMMIT").expect("commit writer");
+            probe_external_connection_expectation(&path, "read", "read:2");
             if journal == "WAL" {
                 probe_external_connection(&path, "journal", true);
             } else {
