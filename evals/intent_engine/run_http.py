@@ -23,6 +23,7 @@ from urllib.parse import urlsplit
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from common import calibrated, noul_questions, prompt_only, text_window
+from qualification import load_manifest, validate_manifest
 
 STATES = {
     "A_noul_prompt": prompt_only,
@@ -365,6 +366,7 @@ def main(argv=None):
     ap.add_argument("--tag", required=True)
     ap.add_argument("--server-config", required=True, help="JSON file with immutable serving identity; omit credentials")
     ap.add_argument("--subset")
+    ap.add_argument("--qualification-manifest", help="freeze reviewed held-out labels, groups, thresholds and tolerances")
     ap.add_argument("--send-model")
     ap.add_argument("--bearer-token-env", metavar="NAME",
                     help="name of an environment variable holding a bearer token (never recorded)")
@@ -389,6 +391,14 @@ def main(argv=None):
     dataset_sha = hashlib.sha256(dataset_bytes).hexdigest()
     questions = noul_questions()
     case_ids = validate_dataset(dataset, questions)
+    qualification_sha = None
+    if args.qualification_manifest:
+        if args.subset:
+            raise ValueError("qualification selects its own frozen holdout; --subset is not allowed")
+        manifest, qualification_sha = load_manifest(args.qualification_manifest)
+        qualified = validate_manifest(manifest, dataset_sha, questions, dataset)
+        keep = set(qualified["heldout_ids"])
+        dataset = [case for case in dataset if case["id"] in keep]
     if args.subset:
         with open(args.subset, encoding="utf-8") as source:
             ids = json.load(source)["ids"]
@@ -433,6 +443,8 @@ def main(argv=None):
             "noul_temperature": args.noul_temperature,
             "server_config": server_config,
         }
+        if qualification_sha is not None:
+            identity["qualification_manifest_sha256"] = qualification_sha
         header = {"experiment": identity, "experiment_sha256": digest(identity)}
         partial_path = path + ".partial"
         try:

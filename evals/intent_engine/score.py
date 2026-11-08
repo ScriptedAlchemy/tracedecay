@@ -210,6 +210,8 @@ def lat(rows):
     observed_truncated = sum(value > 0 for value in dropped)
     result = {
         "median_ms": round(statistics.median(ms)),
+        "p50_ms": statistics.median(ms),
+        "p95_ms": ms[math.ceil(0.95 * len(ms)) - 1],
         "p90_ms": round(ms[int(0.9 * (len(ms) - 1))]),
         "total_cases": len(rows),
         "cases_truncated": observed_truncated if len(dropped) == len(rows) else None,
@@ -304,6 +306,18 @@ def score_config(res, fixed_t=None):
 
 if __name__ == "__main__":
     here = os.path.dirname(os.path.abspath(__file__))
+    if len(sys.argv) > 1:
+        if len(sys.argv) != 4 or sys.argv[1] != "--qualified":
+            raise ValueError("usage: score.py [--qualified MANIFEST RESULT]")
+        from qualification import load_manifest, qualified_report
+        from common import noul_questions
+        manifest, manifest_sha = load_manifest(sys.argv[2])
+        with open(sys.argv[3], encoding="utf-8") as source:
+            result = json.load(source)
+        report = qualified_report(result, manifest, manifest_sha, noul_questions())
+        publish_summary(os.path.join(here, "qualification_summary.json"), report)
+        print(json.dumps(report, indent=2, allow_nan=False))
+        sys.exit(0)
     fixed = json.load(open(os.path.join(here, "fixed_thresholds.json"))) if os.path.exists(os.path.join(here, "fixed_thresholds.json")) else None
     summary = {}; allres = {}
     for f in sorted(glob.glob(os.path.join(here, "results", "*.json"))):

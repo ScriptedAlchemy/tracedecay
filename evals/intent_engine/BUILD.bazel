@@ -5,6 +5,7 @@ py_test(
     size = "small",
     srcs = [
         "common.py",
+        "qualification.py",
         "run_http.py",
         "score.py",
         "test_run_http.py",
@@ -14,10 +15,25 @@ py_test(
 )
 
 py_test(
+    name = "qualification_test",
+    size = "small",
+    srcs = [
+        "common.py",
+        "qualification.py",
+        "run_http.py",
+        "score.py",
+        "test_qualification.py",
+    ],
+    imports = ["."],
+    main = "test_qualification.py",
+)
+
+py_test(
     name = "scoring_test",
     size = "small",
     srcs = [
         "common.py",
+        "qualification.py",
         "compare.py",
         "score.py",
         "test_score.py",

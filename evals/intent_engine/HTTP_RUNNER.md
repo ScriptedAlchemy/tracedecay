@@ -106,3 +106,56 @@ bazel test //evals/intent_engine:http_runner_test //evals/intent_engine:scoring_
 The tests exercise the actual runner and filesystem with substituted HTTP
 responses. They do not download models, spend inference tokens, or qualify a
 model's quality or performance.
+
+## Frozen held-out qualification (additional, not runtime parity)
+
+The historical nine-category evaluation is **not** a qualification of the ten
+current Scout intent questions. The optional qualification mode makes the
+existing HTTP runner/scorer fail closed on case-group leakage, unreviewed labels,
+changed question instructions, post-hoc thresholds and incomplete holdout
+metrics; it cannot reconstruct a canonical Scout transcript or attest a model.
+
+Create a separate JSON annotation manifest **before running inference** with
+`version: 1`, `application`, the SHA-256 of the original dataset file
+(`dataset_sha256`), and `questions_sha256` equal to the canonical
+`qualification.sha256_json(common.noul_questions())` of the runner's exact
+question dictionary. This last digest must change with question text. Include
+`thresholds` with one frozen probability threshold per requested question and
+`error_tolerances` with all three numbers:
+`max_none_false_hint_rate` (0–1), `min_positive_case_recall` (0–1) and
+`max_p95_ms` (nonnegative milliseconds).
+
+The `annotations` array must cover every case in the original dataset, in
+that dataset's order. Each annotation has `id`, `split` (`tune` or
+`holdout`), `project_id`, `session_id`, `author`, a distinct independent
+`reviewer`, `review_ref`, `verified_labels` and Boolean
+`verified_context_needed`. The independently reviewed labels must exactly
+match the inference dataset. Tune and held-out projects cannot overlap; session
+groups cannot overlap. The held-out group must contain both a positive and a
+negative example. Reviewer identifiers and references are **declarations**,
+not cryptographic verification of independent label quality. Do not forge them
+from model predictions or adoption events.
+
+Run with the pinned remote serving declaration as before, adding
+`--qualification-manifest /path/to/frozen.json`. The runner refuses an
+additional `--subset`, validates every case and its group before network
+traffic, infers **only the frozen held-out cases**, and binds the raw manifest's
+SHA-256 to the experiment identity and resumable partial log. A changed
+manifest cannot resume the old run. The scorer accepts exactly one result and
+the same manifest:
+
+```sh
+python evals/intent_engine/score.py --qualified /path/to/frozen.json \
+  evals/intent_engine/results/pinned-run_B_noul_text.json
+bazel test //evals/intent_engine:qualification_test --test_output=errors
+```
+
+This writes `evals/intent_engine/qualification_summary.json` separately from
+the historical `summary.json`, and reports only **frozen-threshold** held-out
+false hints, positive-case recall, p50/p95 measured end-to-end HTTP latency and
+the predeclared tolerances. It deliberately does not publish optimized
+in-sample thresholds as qualification. Neither correct answers nor those metrics
+alone demonstrate task success, ignored/acted outcomes, cold/warm cost, native
+runtime renderer/settings parity or a real Kev checkpoint. All those require
+canonical transcript export, independent review, real host inference and
+application-specific trials before any replacement or merge decision.
