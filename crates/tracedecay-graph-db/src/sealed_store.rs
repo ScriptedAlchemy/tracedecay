@@ -1737,6 +1737,28 @@ pub(crate) enum SealedRowSource<'a> {
     Layered(&'a LayeredGraphGeneration),
 }
 
+/// Returns whether this writer installed a new sealed segment. A losing
+/// concurrent writer can adopt the winner only after the caller reopens and
+/// verifies its digest; existence alone is not a new durable write.
+fn install_staged_sealed_store(
+    staging: &Path,
+    directory: &Path,
+) -> Result<bool, GraphDbError> {
+    match std::fs::rename(staging, directory) {
+        Ok(()) => Ok(true),
+        Err(error) => {
+            remove_sealed_directory(staging);
+            if directory.exists() {
+                // A winner may have installed the same generation. The
+                // caller still requires a full identity/digest reopen proof.
+                Ok(false)
+            } else {
+                Err(sealed_store_io_failure("artifact install failed", error))
+            }
+        }
+    }
+}
+
 /// Builds (or adopts) the sealed store for `identity` and returns the
 /// reopened, digest-verified reader.
 ///
@@ -1796,14 +1818,10 @@ fn build_or_open_sealed_store(
     std::fs::write(staging.join(SEALED_STORE_RECEIPT_FILE), encoded)
         .inspect_err(|_| remove_sealed_directory(&staging))
         .map_err(|error| sealed_store_io_failure("receipt write failed", error))?;
-    if let Err(error) = std::fs::rename(&staging, &directory) {
-        remove_sealed_directory(&staging);
-        // A concurrent seal of the same generation may have installed the
-        // directory first; adopting it below keeps this path idempotent.
-        if !directory.exists() {
-            return Err(sealed_store_io_failure("artifact install failed", error));
-        }
-    }
+    // The transaction boundary matters to progress: a second writer can
+    // lose the destination race and verify the winner's sealed segment.
+    // Only the writer that installed this directory may report a new write.
+    let installed_here = install_staged_sealed_store(&staging, &directory)?;
     let match_result = {
         let _span = tracing::trace_span!("code_index.seal.verify").entered();
         open_sealed_store_checked(
@@ -1825,14 +1843,16 @@ fn build_or_open_sealed_store(
             // not resumable row pages. Only the installed + reopened digest-
             // verified segment is reportable as a completed durable write.
             // A reused prior artifact returned above emits no new segment.
-            tracing::info!(
-                event = "graph_native_compact_segment_verified",
-                generation = %identity.generation,
-                entities = receipt.entities,
-                relations = receipt.relations,
-                canonical_bytes = store.canonical_bytes,
-                "installed and reopened the native graph compact segment"
-            );
+            if installed_here {
+                tracing::info!(
+                    event = "graph_native_compact_segment_verified",
+                    generation = %identity.generation,
+                    entities = receipt.entities,
+                    relations = receipt.relations,
+                    canonical_bytes = store.canonical_bytes,
+                    "installed and reopened the native graph compact segment"
+                );
+            }
             Ok((store, staging_proof))
         }
         Ok(None) => {
@@ -3121,6 +3141,62 @@ mod build_tests {
             written,
             "reopen, proof, reads, and close must leave the sealed bytes exactly as written"
         );
+    }
+
+    /// A competing writer's already installed segment is read-only evidence,
+    /// not a new native write by this attempt. The loser must clean up its
+    /// staging directory and can adopt only the digest-verified real segment.
+    #[test]
+    fn concurrent_sealed_install_candidate_does_not_count_as_new_write() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().expect("persistent sealed graph root");
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(7, 9);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        let (installed, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .expect("install the actual winning native graph segment");
+        assert_eq!(installed.recovered_digest(), expected.as_str());
+        let _ = installed.database().close();
+
+        let root = sealed_store_root(&database_path);
+        let directory = sealed_generation_directory(
+            &root,
+            &identity.physical_namespace().expect("physical namespace"),
+        );
+        let staging = root.join(format!(
+            ".staging-{}",
+            directory.file_name().unwrap().to_str().unwrap()
+        ));
+        std::fs::create_dir_all(&staging).expect("losing writer staging");
+        std::fs::write(staging.join("loser.tmp"), b"uninstalled").unwrap();
+
+        let installed_by_loser = super::install_staged_sealed_store(&staging, &directory)
+            .expect("candidate exists after the install collision");
+        assert!(
+            !installed_by_loser,
+            "the losing writer committed no new native segment"
+        );
+        assert!(!staging.exists(), "the losing staging data must be removed");
+        assert!(!directory.join("loser.tmp").exists());
+        let reopened = super::open_sealed_store_checked(
+            &directory,
+            &identity,
+            &expected,
+            check,
+            None,
+        )
+        .expect("verify the actual winning native segment")
+        .expect("the winning segment remains installed");
+        assert_eq!(reopened.recovered_digest(), expected.as_str());
+        assert_eq!((reopened.entity_count, reopened.relation_count), (7, 9));
+        let _ = reopened.database().close();
     }
 
     /// Two builds of the same staged rows write byte-identical section
