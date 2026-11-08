@@ -633,6 +633,45 @@ mod tests {
         );
     }
 
+    /// Real registered-store admission must accept the two queue indexes while
+    /// preserving the strict authority inventory and the partial-index contract.
+    #[asupersync::test]
+    async fn registered_projection_queue_indexes_match_authority_schema() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("global.db");
+        drop(open_registered_schema(&path).await.unwrap());
+        // Reopening validates the persisted index inventory, not just creation.
+        drop(open_registered_schema(&path).await.unwrap());
+
+        let conn = TestConnection::open(&path);
+        let mut rows = conn
+            .query(
+                "SELECT name, partial FROM pragma_index_list('projection_queue')
+                 WHERE name IN (
+                     'idx_projection_queue_active_sequence',
+                     'idx_projection_queue_retry_deadline'
+                 ) ORDER BY name",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut indexes = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            indexes.push((
+                row.get::<String>(0).unwrap(),
+                row.get::<i64>(1).unwrap(),
+            ));
+        }
+        assert_eq!(
+            indexes,
+            vec![
+                ("idx_projection_queue_active_sequence".to_owned(), 1),
+                ("idx_projection_queue_retry_deadline".to_owned(), 0),
+            ],
+            "the registered store must retain both exact queue indexes"
+        );
+    }
+
     #[asupersync::test]
     async fn performance_indexes_install_outside_schema_transaction() {
         let temp = TempDir::new().unwrap();

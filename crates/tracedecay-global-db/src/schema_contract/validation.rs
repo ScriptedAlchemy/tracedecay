@@ -156,6 +156,7 @@ fn index_matches(actual: &ActualIndex, expected: &Index) -> bool {
         name.eq_ignore_ascii_case("idx_session_temporal_generations_one_active")
             || name.eq_ignore_ascii_case("idx_session_refresh_operations_one_running")
             || name.eq_ignore_ascii_case("idx_observations_valid_session_sequence")
+            || name.eq_ignore_ascii_case("idx_projection_queue_active_sequence")
     });
     if expected
         .name
