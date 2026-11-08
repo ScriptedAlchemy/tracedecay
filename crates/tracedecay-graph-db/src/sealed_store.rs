@@ -3450,8 +3450,11 @@ mod build_tests {
 
         for foreign_receipt in [false, true] {
             if foreign_receipt {
-                std::fs::write(directory.join(SEALED_STORE_RECEIPT_FILE), b"invalid receipt")
-                    .unwrap();
+                std::fs::write(
+                    directory.join(SEALED_STORE_RECEIPT_FILE),
+                    b"invalid receipt",
+                )
+                .unwrap();
             }
             let result = build_or_open_sealed_store(
                 SealedRowSource::Manifest(&manifest),
@@ -3506,8 +3509,14 @@ mod build_tests {
             &database_path,
             check,
         );
-        assert!(result.is_err(), "a symlinked sealed root must refuse writes");
-        assert_eq!(std::fs::read(foreign.join("sentinel")).unwrap(), b"not owned");
+        assert!(
+            result.is_err(),
+            "a symlinked sealed root must refuse writes"
+        );
+        assert_eq!(
+            std::fs::read(foreign.join("sentinel")).unwrap(),
+            b"not owned"
+        );
         assert_eq!(
             std::fs::read_dir(&foreign).unwrap().count(),
             1,
