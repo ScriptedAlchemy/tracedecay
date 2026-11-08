@@ -309,13 +309,13 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         if len(sys.argv) != 5 or sys.argv[1] != "--qualified":
             raise ValueError("usage: score.py [--qualified MANIFEST DATASET RESULT]")
-        from qualification import load_manifest, qualified_report
+        from qualification import load_manifest, loads_unambiguous_json, qualified_report
         from common import noul_questions
         manifest, manifest_sha = load_manifest(sys.argv[2])
         with open(sys.argv[3], "rb") as source:
             dataset_bytes = source.read()
         with open(sys.argv[4], encoding="utf-8") as source:
-            result = json.load(source)
+            result = loads_unambiguous_json(source.read())
         report = qualified_report(result, manifest, manifest_sha, noul_questions(), dataset_bytes)
         publish_summary(os.path.join(here, "qualification_summary.json"), report)
         print(json.dumps(report, indent=2, allow_nan=False))

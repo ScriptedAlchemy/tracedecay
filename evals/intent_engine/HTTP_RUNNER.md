@@ -24,6 +24,13 @@ name in result evidence. An authenticated remote endpoint must use HTTPS;
 plain HTTP is accepted only for direct loopback addresses. Ambient proxies
 and HTTP redirects are disabled, including for authenticated requests.
 
+Frozen inputs and HTTP responses must be unambiguous JSON: repeated object keys
+(including identical duplicate values) and nonfinite constants such as `NaN`
+are refused. A last-key-wins parse could otherwise make a reviewer see a
+different model, split, threshold or measurement than the evaluator used.
+Malformed `.partial` rows are refused without append, and qualified scoring
+rejects ambiguous original data or result JSON before publishing a report.
+
 The JSON declaration must contain nonempty `checkpoint`, `server_revision`,
 `backend`, and `dtype` strings, and the actual finite, nonnegative server
 `temperature`. Include other settings that affect inference as additional keys.

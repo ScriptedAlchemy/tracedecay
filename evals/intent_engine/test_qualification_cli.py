@@ -47,6 +47,26 @@ class QualificationCliTests(unittest.TestCase):
         self.assertFalse((self.root / "summary.json").exists())
         return report
 
+    def test_duplicate_result_keys_cannot_publish_a_passing_report(self):
+        valid = self.fixture.signed_result()
+        raw = json.dumps(valid, allow_nan=False)
+        self.assertIn('"config": "trial_B_noul_text"', raw)
+        (self.root / "result.json").write_text(
+            raw.replace('"config": "trial_B_noul_text"',
+                        '"config": "trial_B_noul_text", "config": "trial_B_noul_text"', 1),
+            encoding="utf-8",
+        )
+        process = subprocess.run(
+            [sys.executable, str(self.root / "score.py"), "--qualified",
+             str(self.root / "manifest.json"), str(self.root / "dataset.json"),
+             str(self.root / "result.json")],
+            cwd=self.root, capture_output=True, text=True, timeout=30,
+        )
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn("duplicate JSON object key", process.stderr)
+        self.assertEqual(process.stdout, "")
+        self.assertFalse((self.root / "qualification_summary.json").exists())
+
     def test_passing_qualification_exits_zero_with_matching_report(self):
         process = self.run_score(self.fixture.signed_result())
         self.assertEqual(process.returncode, 0, process.stderr)

@@ -78,6 +78,37 @@ class RunHttpTest(unittest.TestCase):
         self.assertEqual(self.partial.read_bytes(), before)
         self.assertFalse(self.output.exists())
 
+    def test_ambiguous_http_json_is_rejected_before_response_admission(self):
+        for name, payload, message in (
+            ("duplicate_answer_map", b'{"answers": {}, "answers": {}}',
+             "duplicate JSON object key"),
+            ("nonfinite_unused_field", b'{"answers": {}, "debug": NaN}',
+             "nonfinite JSON constant"),
+        ):
+            with self.subTest(name=name):
+                with patch("urllib.request.build_opener") as opener:
+                    opener.return_value.open.return_value = io.BytesIO(payload)
+                    with self.assertRaisesRegex(ValueError, message):
+                        run_http.post("http://localhost:8009/v1/systemone",
+                                      {"state": "test", "questions": {}})
+
+    def test_ambiguous_partial_row_refuses_without_changing_resumable_evidence(self):
+        self.interrupt()
+        original = self.partial.read_bytes()
+        lines = original.decode("utf-8").splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertIn('"id": "first"', lines[1])
+        lines[1] = lines[1].replace('"id": "first"',
+                                    '"id": "first", "id": "first"', 1)
+        self.partial.write_text("\n".join(lines) + "\n")
+        self.assert_refused_unchanged()
+        # The original interrupted prefix remains safe to replay.
+        self.partial.write_bytes(original)
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main()
+        post.assert_called_once()
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+
     def test_invalid_dataset_is_refused_before_network_or_partial_output(self):
         malformed = [
             ("not_a_list", {"cases": self.dataset}),

@@ -12,6 +12,23 @@ import statistics
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 
 
+def loads_unambiguous_json(raw):
+    """Reject duplicate keys and nonfinite constants in evidence JSON."""
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON object key: {key}")
+            result[key] = value
+        return result
+
+    def reject_nonfinite(constant):
+        raise ValueError(f"nonfinite JSON constant: {constant}")
+
+    return json.loads(raw, object_pairs_hook=unique_object,
+                      parse_constant=reject_nonfinite)
+
+
 def sha256_bytes(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -23,7 +40,7 @@ def sha256_json(value):
 def load_manifest(path):
     with open(path, "rb") as source:
         raw = source.read()
-    return json.loads(raw), sha256_bytes(raw)
+    return loads_unambiguous_json(raw), sha256_bytes(raw)
 
 
 def validate_manifest(manifest, dataset_sha, questions, cases=None):
@@ -220,7 +237,7 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes):
     dataset_sha = sha256_bytes(dataset_bytes)
     if result.get("dataset_sha256") != dataset_sha:
         raise ValueError("qualification result dataset digest differs from supplied evidence")
-    cases = json.loads(dataset_bytes)
+    cases = loads_unambiguous_json(dataset_bytes)
     validate_dataset(cases, questions)
 
     experiment = result.get("experiment")

@@ -83,6 +83,58 @@ class QualificationTests(unittest.TestCase):
             self.dataset if cases is None else cases,
         )
 
+    def test_ambiguous_frozen_input_json_refuses_without_model_calls(self):
+        # Same-value duplicates are deliberately non-vacuous: the old
+        # last-key-wins parser accepted all three frozen artifacts.
+        raw_manifest = self.manifest_bytes.decode("utf-8")
+        raw_dataset = self.dataset_bytes.decode("utf-8")
+        raw_server = json.dumps(self.server_config)
+        variants = (
+            ("manifest", raw_manifest.replace(
+                '"max_input_tokens": 64',
+                '"max_input_tokens": 64, "max_input_tokens": 64', 1)),
+            ("dataset", raw_dataset.replace(
+                '"project_id": "project-b"',
+                '"project_id": "project-b", "project_id": "project-b"', 1)),
+            ("server", raw_server.replace(
+                '"checkpoint": "pinned"',
+                '"checkpoint": "pinned", "checkpoint": "pinned"', 1)),
+        )
+        for changed_file, ambiguous in variants:
+            with self.subTest(changed_file=changed_file):
+                with tempfile.TemporaryDirectory() as temp:
+                    here = Path(temp)
+                    dataset_bytes = (ambiguous.encode("utf-8")
+                                     if changed_file == "dataset" else self.dataset_bytes)
+                    manifest = copy.deepcopy(self.manifest)
+                    manifest["dataset_sha256"] = qualification.sha256_bytes(dataset_bytes)
+                    (here / "dataset.json").write_bytes(dataset_bytes)
+                    (here / "manifest.json").write_text(
+                        ambiguous if changed_file == "manifest" else json.dumps(manifest)
+                    )
+                    (here / "server.json").write_text(
+                        ambiguous if changed_file == "server" else raw_server
+                    )
+                    with patch.object(run_http, "HERE", str(here)), patch.object(
+                        run_http, "post"
+                    ) as post:
+                        with self.assertRaisesRegex(ValueError, "duplicate JSON object key"):
+                            run_http.main([
+                                "--url", self.endpoint, "--tag", "frozen",
+                                "--server-config", str(here / "server.json"),
+                                "--qualification-manifest", str(here / "manifest.json"),
+                                "B_noul_text",
+                            ])
+                        post.assert_not_called()
+                    self.assertFalse((here / "results").exists())
+
+    def test_nonfinite_unused_manifest_field_is_not_reproducible_json(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "manifest.json"
+            path.write_bytes(self.manifest_bytes[:-1] + b', "unreviewed": NaN}')
+            with self.assertRaisesRegex(ValueError, "nonfinite JSON constant"):
+                qualification.load_manifest(path)
+
     def test_positive_and_negative_holdout_is_separate_from_tuning(self):
         verified = self.valid()
         self.assertEqual(verified["heldout_ids"], ["holdout-positive", "holdout-negative"])
