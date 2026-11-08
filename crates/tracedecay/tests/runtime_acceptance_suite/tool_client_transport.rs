@@ -566,11 +566,30 @@ fn generic_tool_json_preserves_large_result_while_daemon_waits() {
         .spawn()
         .expect("spawn CLI for held response");
     let mut child = common::TestChildProcess::new(child);
-    // Measure completion while the admitted request's connection remains open.
-    // The daemon has its own bounded acceptance window for cold CLI startup.
-    requests
-        .recv_timeout(ACCEPT_HANG_GUARD)
-        .expect("daemon received the large-result request");
+    // Request admission and CLI startup share the original child deadline.
+    // Poll the child as well as the receipt: waiting only for the daemon's
+    // 120-second accept leak guard would mask an early CLI exit or failure.
+    let request_deadline = Instant::now() + CHILD_TIMEOUT;
+    loop {
+        match requests.recv_timeout(Duration::from_millis(50)) {
+            Ok(()) => break,
+            Err(RecvTimeoutError::Timeout) => {
+                assert!(
+                    child.try_wait().expect("poll CLI before daemon request").is_none(),
+                    "CLI exited before the fake daemon received its request"
+                );
+                assert!(
+                    Instant::now() < request_deadline,
+                    "CLI did not send a daemon request within the child startup deadline"
+                );
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                panic!("fake daemon stopped before the CLI sent its request")
+            }
+        }
+    }
+    // Once admitted, prove the full response is written while the daemon
+    // deliberately holds the connection open, not after an EOF or stall.
     let output = child
         .wait_with_output(CHILD_TIMEOUT)
         .expect("CLI must finish without waiting for daemon EOF");
