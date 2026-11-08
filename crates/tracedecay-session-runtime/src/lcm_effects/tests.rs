@@ -2458,8 +2458,9 @@ async fn malformed_relation_receipt_is_permanent_without_starving_summary_work()
     let changed = transaction
         .execute(
             "UPDATE session_relation_receipts
-             SET state = 'pending', recovery_state = 'pending',
-                 recovery_failure_code = NULL, recovery_failure_count = 0,
+             SET state = 'pending', graph_watermark = NULL, applied_at = NULL,
+                 recovery_state = 'pending', recovery_failure_code = NULL,
+                 recovery_failure_count = 0,
                  recovery_next_attempt_at = 0
              WHERE session_id IN (?1, ?2)",
             params![poison_session, healthy_session],
