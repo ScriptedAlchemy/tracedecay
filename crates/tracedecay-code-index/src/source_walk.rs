@@ -120,19 +120,22 @@ fn nested_repository_marker(directory: &Path) -> std::io::Result<bool> {
 /// not an ordinary directory the live source walker can authenticate.
 /// This is deny-only; it never enables submodule admission.
 pub fn parent_gitlink_paths(project_root: &Path) -> Result<BTreeSet<String>, SourceWalkError> {
-    let marker = project_root.join(".git");
     let repository = match tracedecay_runtime_core::git_open::open(project_root) {
         Ok(repository) => repository,
         Err(error) => {
             // Non-Git projects still support source walks. An initialized
             // checkout whose Git authority is unreadable must fail closed.
-            if marker.is_file() || marker.join("HEAD").is_file() {
-                return Err(SourceWalkError {
+            return match nested_repository_marker(project_root) {
+                Ok(false) => Ok(BTreeSet::new()),
+                Ok(true) => Err(SourceWalkError {
                     glob: String::new(),
                     message: format!("cannot inspect parent Git boundaries: {error}"),
-                });
-            }
-            return Ok(BTreeSet::new());
+                }),
+                Err(marker_error) => Err(SourceWalkError {
+                    glob: String::new(),
+                    message: format!("cannot inspect parent Git marker: {marker_error}"),
+                }),
+            };
         }
     };
     if repository
@@ -642,7 +645,7 @@ mod tests {
     #[test]
     fn nested_repository_is_not_part_of_the_parent_source_tree() {
         let root = TempDir::new().expect("project root");
-        fs::create_dir(root.path().join(".git")).expect("parent git directory");
+        fixture_git(root.path(), &["init", "-q"]);
         fs::create_dir_all(root.path().join("src")).expect("parent source directory");
         fs::write(root.path().join("src/lib.rs"), "pub fn parent() {}\n").expect("parent source");
         fs::create_dir_all(root.path().join("plain")).expect("plain directory");
@@ -828,7 +831,7 @@ mod tests {
     #[test]
     fn submodule_metadata_cannot_break_an_unrelated_source_include() {
         let root = TempDir::new().expect("project root");
-        fs::create_dir_all(root.path().join(".git")).unwrap();
+        fixture_git(root.path(), &["init", "-q"]);
         fs::create_dir_all(root.path().join("src")).unwrap();
         fs::create_dir_all(root.path().join("app/.git")).unwrap();
         fs::write(root.path().join("src/keep.rs"), "pub fn keep() {}\n").unwrap();

@@ -181,3 +181,17 @@ fn missing_source_root_is_an_error_not_a_clean_audit() {
         Ok(_) => panic!("a failed walk must not report an empty successful audit"),
     }
 }
+
+#[test]
+fn incomplete_git_root_is_refused_before_walking_sources() {
+    let root = tempfile::tempdir().unwrap();
+    write(root.path(), "src/lib.rs", "pub fn source() {}");
+    let policy = IndexPathPolicyV1::new(vec![], vec![]).unwrap();
+    assert!(audit_project(root.path(), &policy).is_ok());
+
+    std::fs::create_dir(root.path().join(".git")).unwrap();
+    assert!(matches!(
+        audit_project(root.path(), &policy),
+        Err(TraceDecayError::Config { message }) if message.contains("parent Git boundaries")
+    ));
+}

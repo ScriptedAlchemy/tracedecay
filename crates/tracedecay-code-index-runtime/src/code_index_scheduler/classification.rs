@@ -97,6 +97,7 @@ pub struct WorktreeChangeClassificationV1 {
     /// Files still tracked by the parent but hidden behind a nested checkout
     /// or symlinked ancestor. These are tombstones, not indexable candidates.
     nested_repository_exclusions: BTreeSet<String>,
+    parent_gitlinks: BTreeSet<String>,
 }
 
 impl WorktreeChangeClassificationV1 {
@@ -213,26 +214,28 @@ impl WorktreeChangeClassificationV1 {
         // refuses those files; classification must also exclude them and
         // invalidate clean-tree and active-generation reuse. Resolve each
         // parent directory once rather than probing per source file.
-        let mut nested_repository_exclusions = BTreeSet::new();
+        let mut classification = Self {
+            committed_baseline,
+            changes,
+            non_utf8_changes,
+            non_utf8_paths,
+            ..Self::default()
+        };
         if let Some(project_root) = repository.workdir() {
             // The live walker also denies HEAD gitlinks staged for removal.
             // Without this check, Git reports their markerless child sources
             // as untracked, and worktree capture can re-admit those bytes.
-            let parent_gitlinks = parent_gitlink_paths(project_root)
+            classification.parent_gitlinks = parent_gitlink_paths(project_root)
                 .map_err(|error| ClassificationErrorV1::Git(error.message))?;
             let mut checked_parents = BTreeMap::new();
-            for path in committed_baseline
+            for path in classification
+                .committed_baseline
                 .iter()
-                .chain(changes.iter().map(|change| &change.path))
+                .chain(classification.changes.iter().map(|change| &change.path))
             {
                 let relative = Path::new(path);
                 let parent = relative.parent().unwrap_or_else(|| Path::new(""));
-                let excluded = if relative
-                    .ancestors()
-                    .skip(1)
-                    .filter_map(Path::to_str)
-                    .any(|ancestor| parent_gitlinks.contains(ancestor))
-                {
+                let excluded = if classification.beneath_gitlink(relative) {
                     true
                 } else {
                     match checked_parents.get(parent) {
@@ -245,18 +248,23 @@ impl WorktreeChangeClassificationV1 {
                     }
                 };
                 if excluded {
-                    nested_repository_exclusions.insert(path.clone());
+                    classification
+                        .nested_repository_exclusions
+                        .insert(path.clone());
                 }
             }
         }
 
-        Ok(Self {
-            committed_baseline,
-            changes,
-            non_utf8_changes,
-            non_utf8_paths,
-            nested_repository_exclusions,
-        })
+        Ok(classification)
+    }
+
+    /// Explicitly enrolled files must respect the same Git boundary snapshot
+    /// as ordinary candidates, including a gitlink staged for removal.
+    pub(super) fn beneath_gitlink(&self, path: &Path) -> bool {
+        path.ancestors()
+            .skip(1)
+            .filter_map(Path::to_str)
+            .any(|ancestor| self.parent_gitlinks.contains(ancestor))
     }
 
     /// Paths whose Git bytes are not UTF-8, present or not.

@@ -135,16 +135,9 @@ fn source_candidates(
     // Explicit ignored-file enrollment lifts Git ignore rules, never the
     // parent's index/HEAD gitlink boundary. A staged gitlink removal and
     // missing child .git marker must not re-admit its files through freshness.
-    let parent_gitlinks = tracedecay_code_index::source_walk::parent_gitlink_paths(project_root)
-        .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.message))?;
     for path in &admitted_paths {
         let relative = Path::new(path);
-        let beneath_gitlink = relative
-            .ancestors()
-            .skip(1)
-            .filter_map(Path::to_str)
-            .any(|ancestor| parent_gitlinks.contains(ancestor));
-        if beneath_gitlink
+        if classification.beneath_gitlink(relative)
             || tracedecay_code_index::source_walk::has_nested_repository_ancestor(
                 project_root,
                 relative,
