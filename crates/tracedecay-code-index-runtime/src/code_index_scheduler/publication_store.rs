@@ -1073,10 +1073,11 @@ struct StagedGenerationSegmentsV1 {
     durable: DurableFileBatch,
     /// Temporary path of every written segment, keyed by its final name.
     pending: BTreeMap<PathBuf, PathBuf>,
-    // Previously authenticated canonical inodes need only an identity check
-    // at commit; reopening all unchanged segments repeats endpoint scans.
+    // Canonical files and newly written temporaries are authenticated by
+    // their original opened handles. Commit rechecks inode identity rather
+    // than reopening and hashing already authenticated segment pathnames.
     #[cfg(unix)]
-    verified_existing: BTreeMap<PathBuf, std::fs::Metadata>,
+    authenticated_segments: BTreeMap<PathBuf, std::fs::Metadata>,
     flushed: bool,
 }
 
@@ -1086,7 +1087,7 @@ impl StagedGenerationSegmentsV1 {
             durable: DurableFileBatch::new(),
             pending: BTreeMap::new(),
             #[cfg(unix)]
-            verified_existing: BTreeMap::new(),
+            authenticated_segments: BTreeMap::new(),
             flushed: false,
         }
     }
@@ -1665,7 +1666,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         // The original opened-file witness is authoritative only while its
         // exact pathname inode and metadata remain unchanged.
         #[cfg(unix)]
-        if let Some(original) = staged.verified_existing.get(&final_path) {
+        if let Some(original) = staged.authenticated_segments.get(&final_path) {
             let current = final_path.symlink_metadata().map_err(Self::unavailable)?;
             if !Self::same_unix_segment_identity(original, &current) {
                 return Err(Self::corruption(
@@ -1693,7 +1694,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                             "existing sealed segment does not match its content address",
                         ));
                     }
-                    staged.verified_existing.insert(final_path, metadata);
+                    staged.authenticated_segments.insert(final_path, metadata);
                 }
                 #[cfg(not(unix))]
                 if Self::state_digest_file(&final_path)? != expected_digest {
@@ -1707,25 +1708,74 @@ impl DaemonCodeIndexPublicationStoreV1 {
             Err(error) => return Err(Self::unavailable(error)),
         }
         let temporary_path = staging_root.join(format!("segment-{digest_hex}.json"));
-        let mut file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary_path)
-            .map_err(Self::unavailable)?;
-        // The pending index is publication authority. Never enroll a file
-        // whose write or durability admission failed: a later retry must not
-        // mistake an unflushed temporary for a successfully staged segment.
-        let admitted = file
-            .write_all(bytes)
-            .and_then(|()| staged.durable.written(&temporary_path, &file));
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        options.read(true);
+        let mut file = options.open(&temporary_path).map_err(Self::unavailable)?;
+        // Read the actual staged bytes through their writer descriptor.
+        // A read and an inode/metadata witness prove the bytes at write time;
+        // no second endpoint-authorized pathname open is required at commit.
+        // Non-Unix durability and verification remain unchanged.
+        let admitted = (|| -> Result<Option<std::fs::Metadata>, CodeIndexPublicationStoreErrorV1> {
+            file.write_all(bytes).map_err(Self::unavailable)?;
+            #[cfg(unix)]
+            let original = {
+                let before = file.metadata().map_err(Self::unavailable)?;
+                file.seek(SeekFrom::Start(0)).map_err(Self::unavailable)?;
+                if Self::state_digest_reader(&mut file)? != expected_digest {
+                    return Err(Self::corruption(
+                        "newly staged segment differs from its content address",
+                    ));
+                }
+                let after = file.metadata().map_err(Self::unavailable)?;
+                if !Self::same_unix_segment_identity(&before, &after) {
+                    return Err(Self::corruption(
+                        "newly staged segment changed during authentication",
+                    ));
+                }
+                after
+            };
+            staged
+                .durable
+                .written(&temporary_path, &file)
+                .map_err(Self::unavailable)?;
+            #[cfg(unix)]
+            {
+                let after = file.metadata().map_err(Self::unavailable)?;
+                if !Self::same_unix_segment_identity(&original, &after) {
+                    return Err(Self::corruption(
+                        "newly staged segment changed during durability admission",
+                    ));
+                }
+                Ok(Some(after))
+            }
+            #[cfg(not(unix))]
+            {
+                Ok(None)
+            }
+        })();
         drop(file);
-        if let Err(error) = admitted {
-            std::fs::remove_file(&temporary_path).map_err(|cleanup| {
-                Self::unavailable(format!(
-                    "staged segment admission failed: {error}; temporary cleanup failed: {cleanup}"
-                ))
-            })?;
-            return Err(Self::unavailable(error));
+        // The pending index is publication authority. Never enroll a file
+        // whose write, content authentication or durability admission failed.
+        let witness = match admitted {
+            Ok(witness) => witness,
+            Err(error) => {
+                std::fs::remove_file(&temporary_path).map_err(|cleanup| {
+                    Self::unavailable(format!(
+                        "staged segment admission failed: {error}; temporary cleanup failed: {cleanup}"
+                    ))
+                })?;
+                return Err(error);
+            }
+        };
+        if let Some(witness) = witness {
+            #[cfg(unix)]
+            staged
+                .authenticated_segments
+                .insert(temporary_path.clone(), witness);
+            #[cfg(not(unix))]
+            let _ = witness;
         }
         staged.pending.insert(final_path, temporary_path);
         Ok(())
@@ -4039,7 +4089,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 ));
             }
             #[cfg(unix)]
-            if let Some(original) = files.segments.verified_existing.get(&canonical) {
+            if let Some(original) = files.segments.authenticated_segments.get(path) {
                 if !Self::same_unix_segment_identity(original, &metadata) {
                     return Err(Self::corruption(
                         "previously verified sealed segment changed before commit",

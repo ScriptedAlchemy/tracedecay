@@ -615,6 +615,79 @@ fn staged_preparation_exact_segment_bytes_commit_and_reload() {
 }
 
 #[test]
+fn staged_writer_authentication_avoids_commit_reopens_and_rejects_replaced_inode() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let source_root = TempDir::new().expect("source store");
+    let generation = source_generation(&fixture, source_root.path());
+    let target_root = TempDir::new().expect("target store");
+    let mut target = target_store(target_root.path(), &fixture);
+    let mut preparation = target
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare target");
+    let publication = generation
+        .stage_publication(&mut preparation)
+        .expect("stage real generation");
+    let identities = CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+        publication.manifest_bytes().as_ref(),
+    )
+    .expect("parse staged segment identities")
+    .expect("partitioned generation");
+    let identity = identities
+        .into_iter()
+        .find(|identity| identity.size_bytes > 0)
+        .expect("nonempty generation segment");
+    let path = staged_path(&preparation, &identity.digest);
+    let bytes = std::fs::read(&path).expect("real staged segment");
+    assert!(!bytes.is_empty(), "the test must authenticate real segment bytes");
+    assert_eq!(segment_digest(&bytes), identity.digest);
+    let before = PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get);
+    {
+        let state = preparation.state.lock().expect("preparation state");
+        let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
+            panic!("preparation must remain open");
+        };
+        assert!(!files.segments.pending.is_empty(), "real files must be staged");
+        assert!(
+            files.segments.authenticated_segments.contains_key(&path),
+            "new staged bytes must be verified through their original writer"
+        );
+        target
+            .verify_prepared_segments(files, publication.manifest_bytes().as_ref())
+            .expect("authenticate exact pending generation without reopening");
+    }
+    assert_eq!(
+        PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get),
+        before,
+        "commit verification must not reopen authenticated staged segments"
+    );
+
+    // Digest equality alone cannot authorize a replacement of the original
+    // writer's inode, even when the replacement has byte-identical content.
+    let replacement = path.with_extension("replacement.tmp");
+    std::fs::write(&replacement, &bytes).expect("make equal-byte replacement");
+    std::fs::rename(&replacement, &path).expect("replace staged inode");
+    let before_refusal = PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get);
+    {
+        let state = preparation.state.lock().expect("preparation state");
+        let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
+            panic!("preparation must remain open");
+        };
+        assert!(
+            target
+                .verify_prepared_segments(files, publication.manifest_bytes().as_ref())
+                .is_err(),
+            "replacing a staged inode must fail even if its bytes are identical"
+        );
+    }
+    assert_eq!(
+        PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get),
+        before_refusal,
+        "identity rejection must not reopen a substituted staged inode"
+    );
+    preparation.abort().expect("abort replaced staged generation");
+}
+
+#[test]
 fn committed_whole_segment_read_refuses_same_length_corruption() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let source_root = TempDir::new().expect("source store");
@@ -923,7 +996,7 @@ fn repeated_pending_segment_accepts_identical_concurrent_canonical_publication()
             "this preparation still owns its original temporary bytes"
         );
         assert!(
-            !files.segments.verified_existing.contains_key(&canonical),
+            !files.segments.authenticated_segments.contains_key(&canonical),
             "the concurrently named inode must not masquerade as our pending inode"
         );
         target
@@ -1225,7 +1298,7 @@ fn staged_existing_segments_reuse_authenticated_inodes_without_reopening() {
         };
         let path = files
             .segments
-            .verified_existing
+            .authenticated_segments
             .keys()
             .next()
             .expect("previously verified canonical segment")
