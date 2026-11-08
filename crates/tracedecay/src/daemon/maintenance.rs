@@ -1986,6 +1986,49 @@ mod tests {
         );
         drop(release);
 
+        // A long-lived, unrelated content writer holds the daemon read gate.
+        // Two real retention ticks must defer, and the next must queue rather
+        // than missing the same writer again. The fixture's six on-disk
+        // generations make forward progress observable through actual GC.
+        let (writer_started, writer_entered) = tokio::sync::oneshot::channel();
+        let (release_writer, writer_released) = tokio::sync::oneshot::channel();
+        let holding_admin = administration.clone();
+        let writer = NativeTask::spawn(async move {
+            holding_admin
+                .with_writer_in(
+                    crate::daemon::branch_admin::WriterScope::store(
+                        "/unrelated-project",
+                        crate::daemon::branch_admin::StoreWriterClass::Content,
+                    ),
+                    move || async move {
+                        writer_started.send(()).expect("writer admitted");
+                        writer_released.await.expect("writer released");
+                    },
+                )
+                .await;
+        })
+        .expect("start competing store writer");
+        writer_entered.await.expect("unrelated store writer owns shared gate");
+        for _ in 0..super::MAINTENANCE_WRITER_FAST_DEFERRALS {
+            let deferred = coordinator
+                .run_tick(
+                    &profile_root,
+                    &profile_database,
+                    &administration,
+                    &schedulers,
+                    &retention,
+                    branch_gc,
+                    None,
+                )
+                .await;
+            assert_eq!(deferred, MaintenanceTickOutcome::Retry);
+            assert_eq!(generation_files(), 6, "fast probe must not collect under a writer");
+        }
+
+        let release_after_queue = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            release_writer.send(()).expect("release competing writer");
+        });
         coordinator
             .run_tick(
                 &profile_root,
@@ -1997,7 +2040,16 @@ mod tests {
                 None,
             )
             .await;
-        assert_eq!(generation_files(), 1, "the full tick collects the backlog");
+        release_after_queue.join().expect("writer release thread");
+        assert!(
+            matches!(writer.wait().await, native_runtime::NativeTaskOutcome::Completed(())),
+            "competing writer must complete normally"
+        );
+        assert_eq!(
+            generation_files(),
+            1,
+            "queued retention reclaims five verified superseded generations after writer release"
+        );
 
         let continuation = coordinator
             .run_tick(
