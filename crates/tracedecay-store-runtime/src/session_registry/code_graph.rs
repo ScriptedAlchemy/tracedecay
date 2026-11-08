@@ -25,6 +25,7 @@ use tracedecay_store::{
     CodeShardScopeV1, FactReadControl, GraphGenerationIdV1, GraphPendingReplayDiscardOutcomeV1,
     GraphProjectionIdV1, GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1,
     GraphPublicationInputDigestV1, GraphPublicationKeyV1, GraphPublicationOperationContextV1,
+    GraphNativeWorkObserverV1,
     GraphPublicationProjectionPageRequestV1, GraphPublicationReplayLookupV1,
     GraphPublicationReplayRecordV1, GraphPublicationStoreV1, GraphReplayAppendOutcomeV1,
     GraphVerifiedHeadV1, ProjectId, RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1,
@@ -1290,13 +1291,14 @@ impl RetainedCodeGraphRuntimeV1 {
         &self,
         request_cancelled: Arc<AtomicBool>,
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
-        self.publish_verified_snapshot_with_admission(request_cancelled, None)
+        self.publish_verified_snapshot_with_admission(request_cancelled, None, None)
     }
 
     fn publish_verified_snapshot_with_admission(
         &self,
         request_cancelled: Arc<AtomicBool>,
         admission: Option<Arc<dyn CodeGraphBuildAdmissionV1>>,
+        native_work: Option<GraphNativeWorkObserverV1>,
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
         // The project-shard build permit is claimed before any row is built
         // and held through publication so 1/2/4/8 worktree scopes cannot
@@ -1347,8 +1349,11 @@ impl RetainedCodeGraphRuntimeV1 {
             deadline: deadline_identity,
             cancellation: cancellation_identity,
         };
-        let context = GraphPublicationOperationContextV1::new(&control, &probe)
+        let mut context = GraphPublicationOperationContextV1::new(&control, &probe)
             .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+        if let Some(observer) = native_work {
+            context = context.with_native_work_observer(observer);
+        }
         let interruption = || match probe.interruption() {
             Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
             Some(RuntimeInterruptionV1::DeadlineExceeded) => Err(GraphDbError::DeadlineExceeded),
@@ -3103,22 +3108,32 @@ impl CodeGraphSeatLeaseV1 for RetainedCodeGraphRuntimeV1 {
     fn publish_verified_snapshot(
         &self,
         request_cancelled: Arc<AtomicBool>,
+        native_work: GraphNativeWorkObserverV1,
     ) -> std::result::Result<
         tracedecay_graph_db::VerifiedGraphSnapshot,
         tracedecay_graph_db::GraphDbError,
     > {
-        Self::publish_verified_snapshot(self, request_cancelled)
+        self.publish_verified_snapshot_with_admission(
+            request_cancelled,
+            None,
+            Some(native_work),
+        )
     }
 
     fn publish_verified_snapshot_admitted(
         &self,
         request_cancelled: Arc<AtomicBool>,
         admission: Arc<dyn CodeGraphBuildAdmissionV1>,
+        native_work: GraphNativeWorkObserverV1,
     ) -> std::result::Result<
         tracedecay_graph_db::VerifiedGraphSnapshot,
         tracedecay_graph_db::GraphDbError,
     > {
-        self.publish_verified_snapshot_with_admission(request_cancelled, Some(admission))
+        self.publish_verified_snapshot_with_admission(
+            request_cancelled,
+            Some(admission),
+            Some(native_work),
+        )
     }
 
     fn recover_verified_snapshot_from_head(

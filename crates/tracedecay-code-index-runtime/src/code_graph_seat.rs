@@ -25,6 +25,7 @@ use tracedecay_domain::errors::Result;
 use tracedecay_domain::{CodeGenerationId, ProjectId, RefId, RepositoryId, WorktreeId};
 use tracedecay_graph_db::{GraphDbError, SealedGraphStateDigest, VerifiedGraphSnapshot};
 use tracedecay_runtime_core::db::Database;
+use tracedecay_store::GraphNativeWorkObserverV1;
 use tracedecay_runtime_core::shard_runtime::registry::CanonicalCodeGraphStoreLeaseV1;
 
 /// Sealed-generation replay identity the seat port needs to retain a runtime.
@@ -55,12 +56,14 @@ pub trait CodeGraphSeatLeaseV1: Send {
     fn publish_verified_snapshot(
         &self,
         request_cancelled: Arc<AtomicBool>,
+        native_work: GraphNativeWorkObserverV1,
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError>;
 
     fn publish_verified_snapshot_admitted(
         &self,
         request_cancelled: Arc<AtomicBool>,
         admission: Arc<dyn CodeGraphBuildAdmissionV1>,
+        native_work: GraphNativeWorkObserverV1,
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError>;
 
     fn recover_verified_snapshot_from_head(

@@ -203,6 +203,7 @@ mod tests {
                     omitted_sources: None,
                     progress: None,
                     preseal_attempt: None,
+                    native_graph_progress: None,
                     restore_progress: None,
                     parked: None,
                     generation_recovery: None,

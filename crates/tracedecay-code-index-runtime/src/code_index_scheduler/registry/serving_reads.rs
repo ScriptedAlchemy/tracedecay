@@ -289,6 +289,7 @@ impl CodeIndexSchedulerRegistryV1 {
             generation_recovery,
             build_progress,
             preseal_attempt_progress,
+            native_graph_progress,
             hints,
             pending_wake,
             source_freshness,
@@ -308,6 +309,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.generation_recovery),
                 Arc::clone(&worktree.build_progress),
                 Arc::clone(&worktree.preseal_attempt_progress),
+                Arc::clone(&worktree.native_graph_progress),
                 Arc::clone(&worktree.hints),
                 Arc::clone(&worktree.pending_wake),
                 worktree.source_freshness.clone(),
@@ -327,6 +329,10 @@ impl CodeIndexSchedulerRegistryV1 {
                     .map(|snapshot| snapshot.as_ref().clone())
             };
             let preseal_attempt = preseal_attempt_progress
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .snapshot();
+            let native_graph_progress = native_graph_progress
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .snapshot();
@@ -450,6 +456,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         coverage: observation.coverage,
                         progress,
                         preseal_attempt,
+                        native_graph_progress,
                         restore_progress,
                         parked,
                         generation_recovery,
@@ -539,6 +546,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 coverage: observation.coverage,
                 progress,
                 preseal_attempt,
+                native_graph_progress,
                 restore_progress,
                 parked,
                 generation_recovery,

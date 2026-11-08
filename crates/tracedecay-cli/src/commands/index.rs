@@ -378,6 +378,13 @@ where
                 .as_ref()
                 .filter(|attempt| attempt.active)
                 .map(preseal_progress_summary)
+                .or_else(|| {
+                    worktree
+                        .native_graph_progress
+                        .as_ref()
+                        .filter(|graph| graph.active)
+                        .map(native_graph_progress_summary)
+                })
                 .or_else(|| worktree.progress.as_ref().map(build_progress_summary))
         });
         let progress_suffix = progress
@@ -405,7 +412,7 @@ where
                 CODE_INDEX_READINESS_WAIT_TIMED_OUT,
                 format!(
                     "init --wait stopped waiting for the first generation: no observed \
-                     capture, parse, or committed text work for {}s; last state: \
+                     capture, parse, text, or native graph work for {}s; last state: \
                      {last_state}{progress_suffix}",
                     stall_window.as_secs(),
                 ),
@@ -460,6 +467,13 @@ enum FirstGenerationWorkMarker {
         completed: u64,
         last_work_micros: Option<i64>,
     },
+    NativeGraph {
+        generation: String,
+        sealed_graph_digest: String,
+        owner: (u64, u64, u64),
+        epoch: u64,
+        completed: [u64; 6],
+    },
     CommittedText {
         generation: String,
         sealed_source_digest: String,
@@ -477,8 +491,14 @@ impl FirstGenerationWorkMarker {
         // A real active attempt remains authoritative in either state.
         if !worktree.rebuild_in_flight
             && !worktree.preseal_attempt.as_ref().is_some_and(|a| a.active)
+            && !worktree.native_graph_progress.as_ref().is_some_and(|g| g.active)
         {
             return None;
+        }
+        if let Some(graph) = worktree.native_graph_progress.as_ref().filter(|g| {
+            g.active && g.last_progress_micros.is_some()
+        }) {
+            return Some(Self::native_graph(graph));
         }
         if let Some(progress) = &worktree.progress {
             match progress.phase {
@@ -510,6 +530,29 @@ impl FirstGenerationWorkMarker {
             .map(Self::text)
     }
 
+    fn native_graph(
+        graph: &tracedecay_contracts::code_index_freshness::CodeIndexNativeGraphProgressV1,
+    ) -> Self {
+        Self::NativeGraph {
+            generation: graph.generation_id.clone(),
+            sealed_graph_digest: graph.sealed_graph_digest.clone(),
+            owner: (
+                graph.daemon_incarnation,
+                graph.producer_incarnation,
+                graph.attempt_sequence,
+            ),
+            epoch: graph.progress_epoch,
+            completed: [
+                graph.encoded_entities,
+                graph.encoded_relations,
+                graph.committed_stage_pages,
+                graph.committed_stage_mutations,
+                graph.committed_stage_bytes,
+                graph.committed_compact_segments,
+            ],
+        }
+    }
+
     fn text(progress: &CodeIndexBuildProgressV1) -> Self {
         Self::CommittedText {
             generation: progress.generation_id.clone(),
@@ -530,6 +573,7 @@ impl FirstGenerationWorkMarker {
     fn owner(&self) -> (u64, u64) {
         match self {
             Self::Preseal { owner, .. } => (owner.0, owner.1),
+            Self::NativeGraph { owner, .. } => (owner.0, owner.1),
             Self::CommittedText { owner, .. } => *owner,
         }
     }
@@ -572,6 +616,41 @@ impl FirstGenerationWorkMarker {
                     }
                 }
                 Some(*completed > 0 && last_work_micros.is_some())
+            }
+            (
+                Self::NativeGraph {
+                    generation,
+                    sealed_graph_digest,
+                    owner,
+                    epoch,
+                    completed,
+                },
+                Self::NativeGraph {
+                    generation: prior_generation,
+                    sealed_graph_digest: prior_digest,
+                    owner: prior_owner,
+                    epoch: prior_epoch,
+                    completed: prior_completed,
+                },
+            ) => {
+                if (owner, epoch) <= (prior_owner, prior_epoch) {
+                    return None;
+                }
+                if owner == prior_owner
+                    && (generation != prior_generation || sealed_graph_digest != prior_digest)
+                {
+                    return None;
+                }
+                if owner != prior_owner {
+                    return Some(completed.iter().any(|count| *count > 0));
+                }
+                Some(
+                    completed != prior_completed
+                        && completed
+                            .iter()
+                            .zip(prior_completed)
+                            .all(|(now, prior)| now >= prior),
+                )
             }
             (
                 Self::CommittedText {
@@ -618,6 +697,7 @@ impl FirstGenerationWorkMarker {
 struct FirstGenerationProgressWindow {
     preseal: Option<FirstGenerationWorkMarker>,
     text: Option<FirstGenerationWorkMarker>,
+    native_graph: Option<FirstGenerationWorkMarker>,
     owner: Option<(u64, u64)>,
     unchanged_since: Option<Instant>,
     stall_window: Duration,
@@ -628,6 +708,7 @@ impl FirstGenerationProgressWindow {
         Self {
             preseal: None,
             text: None,
+            native_graph: None,
             owner: None,
             unchanged_since: None,
             stall_window,
@@ -658,6 +739,7 @@ impl FirstGenerationProgressWindow {
         self.owner = Some(owner);
         let previous = match &marker {
             FirstGenerationWorkMarker::Preseal { .. } => &mut self.preseal,
+            FirstGenerationWorkMarker::NativeGraph { .. } => &mut self.native_graph,
             FirstGenerationWorkMarker::CommittedText { .. } => &mut self.text,
         };
         let advanced = match previous.as_ref() {
@@ -671,7 +753,8 @@ impl FirstGenerationProgressWindow {
                     last_work_micros,
                     ..
                 } => *completed > 0 && last_work_micros.is_some(),
-                FirstGenerationWorkMarker::CommittedText { completed, .. } => {
+                FirstGenerationWorkMarker::NativeGraph { completed, .. }
+                | FirstGenerationWorkMarker::CommittedText { completed, .. } => {
                     completed.iter().any(|count| *count > 0)
                 }
             },
@@ -750,6 +833,32 @@ fn preseal_progress_summary(
         progress
             .last_progress_micros
             .map_or_else(|| "unreported".to_owned(), |micros| micros.to_string()),
+    )
+}
+
+fn native_graph_progress_summary(
+    graph: &tracedecay_contracts::code_index_freshness::CodeIndexNativeGraphProgressV1,
+) -> String {
+    format!(
+        "native graph {:?}: encoded={}/{} entities and {}/{} relations, \
+         durable_pages={} durable_mutations={} verified_segments={}, \
+         attempt={}:{}:{} epoch={} last_work_micros={}",
+        graph.phase,
+        graph.encoded_entities,
+        graph.total_entities.map_or_else(|| "unknown".to_owned(), |n| n.to_string()),
+        graph.encoded_relations,
+        graph.total_relations.map_or_else(|| "unknown".to_owned(), |n| n.to_string()),
+        graph.committed_stage_pages,
+        graph.committed_stage_mutations,
+        graph.committed_compact_segments,
+        graph.daemon_incarnation,
+        graph.producer_incarnation,
+        graph.attempt_sequence,
+        graph.progress_epoch,
+        graph.last_progress_micros.map_or_else(
+            || "unreported".to_owned(),
+            |micros| micros.to_string(),
+        )
     )
 }
 
@@ -1301,6 +1410,65 @@ mod daemon_precondition_tests {
         assert_eq!(reads, 5, "only the reached proof ends a progressing wait");
     }
 
+
+    #[test]
+    fn native_graph_real_counts_refresh_wait_but_duplicate_epochs_and_stale_owners_do_not() {
+        let now = Instant::now();
+        let mut worktree = building(true);
+        worktree.progress = Some(CodeIndexBuildProgressV1 {
+            phase: CodeIndexBuildPhaseV1::GraphPublication,
+            ..progress(6_136, None)
+        });
+        let mut graph =
+            tracedecay_contracts::code_index_freshness::CodeIndexNativeGraphProgressV1 {
+                generation_id: "generation.v1.first".to_owned(),
+                sealed_graph_digest: "sha256:sealed".to_owned(),
+                daemon_incarnation: 3,
+                producer_incarnation: 4,
+                attempt_sequence: 1,
+                progress_epoch: 1,
+                phase: None,
+                encoded_entities: 0,
+                total_entities: None,
+                encoded_relations: 0,
+                total_relations: None,
+                committed_stage_pages: 0,
+                committed_stage_mutations: 0,
+                committed_stage_bytes: 0,
+                committed_compact_segments: 0,
+                committed_compact_bytes: 0,
+                last_progress_micros: None,
+                active: true,
+            };
+        let mut window = super::FirstGenerationProgressWindow::new(Duration::from_secs(120));
+        worktree.native_graph_progress = Some(graph.clone());
+        let first = super::FirstGenerationWorkMarker::of(Some(&worktree));
+        assert!(!window.observe(first, now));
+        graph.encoded_entities = 512;
+        graph.total_entities = Some(1_100);
+        graph.progress_epoch += 1;
+        graph.last_progress_micros = Some(100);
+        worktree.native_graph_progress = Some(graph.clone());
+        let advanced = super::FirstGenerationWorkMarker::of(Some(&worktree));
+        assert!(!window.observe(advanced, now + Duration::from_secs(119)));
+        graph.progress_epoch += 1;
+        // A phase or progress-epoch update without accepted rows is not work.
+        worktree.native_graph_progress = Some(graph.clone());
+        let unchanged = super::FirstGenerationWorkMarker::of(Some(&worktree));
+        assert!(window.observe(unchanged, now + Duration::from_secs(239)));
+        graph.committed_stage_pages = 1;
+        graph.committed_stage_mutations = 100;
+        graph.progress_epoch += 1;
+        worktree.native_graph_progress = Some(graph.clone());
+        let committed = super::FirstGenerationWorkMarker::of(Some(&worktree));
+        assert!(!window.observe(committed, now + Duration::from_secs(239)));
+        graph.daemon_incarnation = 2;
+        graph.progress_epoch += 1;
+        graph.committed_stage_pages = 100;
+        worktree.native_graph_progress = Some(graph);
+        let stale = super::FirstGenerationWorkMarker::of(Some(&worktree));
+        assert!(window.observe(stale, now + Duration::from_secs(359)));
+    }
     fn progress(
         completed_files: u64,
         blocked_reason: Option<CodeIndexBuildBlockedReasonV1>,

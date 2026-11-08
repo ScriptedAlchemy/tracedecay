@@ -239,6 +239,38 @@ pub(super) fn search_freshness(
                 attempt.active,
             );
         }
+        if let Some(graph) = &state.native_graph_progress {
+            // These are owned writer callbacks. Encoding is explicitly not a
+            // graph commit; native staging receipts and verified installs are.
+            let _ = write!(
+                summary,
+                " native_graph_generation={} native_graph_owner={}:{}:{} \
+                 native_graph_epoch={} native_graph_phase={:?} \
+                 native_encoded_entities={} native_encoded_relations={} \
+                 native_committed_pages={} native_committed_mutations={} \
+                 native_committed_bytes={} native_verified_segments={} \
+                 native_verified_bytes={} native_last_progress_micros={} \
+                 native_graph_active={}",
+                graph.generation_id,
+                graph.daemon_incarnation,
+                graph.producer_incarnation,
+                graph.attempt_sequence,
+                graph.progress_epoch,
+                graph.phase,
+                graph.encoded_entities,
+                graph.encoded_relations,
+                graph.committed_stage_pages,
+                graph.committed_stage_mutations,
+                graph.committed_stage_bytes,
+                graph.committed_compact_segments,
+                graph.committed_compact_bytes,
+                graph.last_progress_micros.map_or_else(
+                    || "unreported".to_owned(),
+                    |micros| micros.to_string()
+                ),
+                graph.active,
+            );
+        }
         if let Some(progress) = &state.progress {
             // Keep the producer's identity and clock. Reading a response is
             // not work, and an epoch is comparable only within its owner.
@@ -265,7 +297,11 @@ pub(super) fn search_freshness(
                 progress.blocked_reason.map_or("none", blocked_reason_label)
             );
         } else if state.rebuild_in_flight {
-            if state.preseal_attempt.as_ref().is_some_and(|attempt| {
+            if state.native_graph_progress.as_ref().is_some_and(|graph| {
+                graph.active && graph.last_progress_micros.is_some()
+            }) {
+                summary.push_str(" progress=native_graph");
+            } else if state.preseal_attempt.as_ref().is_some_and(|attempt| {
                 attempt.active && attempt.last_progress_micros.is_some()
             }) {
                 summary.push_str(" progress=preseal");
@@ -717,4 +753,50 @@ mod tests {
             "a park every wake re-checks is not terminal"
         );
     }
+    #[test]
+    fn native_graph_summary_does_not_conflate_encoded_rows_and_committed_pages() {
+        let state = CodeIndexWorktreeFreshnessV1 {
+            rebuild_in_flight: true,
+            native_graph_progress: Some(
+                tracedecay_contracts::code_index_freshness::CodeIndexNativeGraphProgressV1 {
+                    generation_id: "generation.native".to_owned(),
+                    sealed_graph_digest: "sha256:real".to_owned(),
+                    daemon_incarnation: 3,
+                    producer_incarnation: 5,
+                    attempt_sequence: 8,
+                    progress_epoch: 12,
+                    phase: Some(
+                        tracedecay_contracts::code_index_freshness::CodeIndexNativeGraphPhaseV1::CompactEncoding,
+                    ),
+                    encoded_entities: 512,
+                    total_entities: Some(1024),
+                    encoded_relations: 17,
+                    total_relations: Some(200),
+                    committed_stage_pages: 0,
+                    committed_stage_mutations: 0,
+                    committed_stage_bytes: 0,
+                    committed_compact_segments: 0,
+                    committed_compact_bytes: 0,
+                    last_progress_micros: Some(123),
+                    active: true,
+                },
+            ),
+            ..CodeIndexWorktreeFreshnessV1::default()
+        };
+        let rendered = freshness_lines(&search_freshness(
+            ServedGenerationV1::Unavailable { reason: "generation_unavailable" },
+            &CodeIndexSearchCoverageV1::unavailable("generation_rebuilding"),
+            &WorktreeFreshnessSourceV1::Worktree(Box::new(state)),
+        ));
+        assert!(rendered.contains("native_graph_generation=generation.native"));
+        assert!(rendered.contains("native_graph_owner=3:5:8"));
+        assert!(rendered.contains("native_graph_epoch=12"));
+        assert!(rendered.contains("native_encoded_entities=512 native_encoded_relations=17"));
+        assert!(rendered.contains("native_committed_pages=0"));
+        assert!(rendered.contains("native_verified_segments=0"));
+        assert!(rendered.contains("native_last_progress_micros=123"));
+        assert!(rendered.contains("progress=native_graph"));
+        assert!(!rendered.contains("committed_text_pages="));
+    }
+
 }
