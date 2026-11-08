@@ -691,6 +691,101 @@ class QualificationTests(unittest.TestCase):
                         (here / "results" / "model-resume_B_noul_text.json").read_text()
                     )["rows"]), 2)
 
+    def test_frozen_arm_refuses_missing_reported_model_before_appending(self):
+        # With no explicit model selector, an absent identity used to be
+        # appended and the runner continued spending holdout calls.
+        good = {
+            "model": "observed-checkpoint",
+            "answers": {key: {"type": "noul", "noul": 0.5}
+                        for key in self.questions},
+            "usage": {"input_tokens": 64, "state_tokens": 32,
+                      "state_tokens_used": 32},
+            "truncated": False,
+        }
+        for index in (0, 1):
+            with self.subTest(failing_case=index), tempfile.TemporaryDirectory() as temp:
+                here = Path(temp)
+                (here / "dataset.json").write_bytes(self.dataset_bytes)
+                (here / "manifest.json").write_bytes(self.manifest_bytes)
+                (here / "server.json").write_text(json.dumps(self.server_config))
+                replies = [copy.deepcopy(good), copy.deepcopy(good)]
+                del replies[index]["model"]
+                args = [
+                    "--url", self.endpoint, "--tag", "missing-model",
+                    "--server-config", str(here / "server.json"),
+                    "--qualification-manifest", str(here / "manifest.json"),
+                    "B_noul_text",
+                ]
+                with patch.object(run_http, "HERE", str(here)), patch.object(
+                    run_http, "post", side_effect=[(reply, 10.0) for reply in replies]
+                ) as post:
+                    with self.assertRaisesRegex(ValueError, "requires a server-reported model"):
+                        run_http.main(args)
+                    self.assertEqual(post.call_count, index + 1)
+                completed = here / "results" / "missing-model_B_noul_text.json"
+                self.assertFalse(completed.exists())
+                partial = Path(str(completed) + ".partial")
+                recorded = partial.read_text().splitlines()
+                self.assertEqual(len(recorded), index + 1)
+                if index:
+                    self.assertEqual(json.loads(recorded[1])["observed_model"],
+                                     "observed-checkpoint")
+
+    def test_frozen_resume_refuses_missing_default_model_before_network(self):
+        # No --send-model: absent/null/blank names must still be refused before
+        # another held-out inference. An unchanged valid prefix can resume.
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            (here / "dataset.json").write_bytes(self.dataset_bytes)
+            (here / "manifest.json").write_bytes(self.manifest_bytes)
+            (here / "server.json").write_text(json.dumps(self.server_config))
+            args = [
+                "--url", self.endpoint, "--tag", "missing-resume-model",
+                "--server-config", str(here / "server.json"),
+                "--qualification-manifest", str(here / "manifest.json"),
+                "B_noul_text",
+            ]
+            reply = {
+                "model": "observed-checkpoint",
+                "answers": {key: {"type": "noul", "noul": 0.5}
+                            for key in self.questions},
+                "usage": {"input_tokens": 64, "state_tokens": 32,
+                          "state_tokens_used": 32},
+                "truncated": False,
+            }
+            with patch.object(run_http, "HERE", str(here)):
+                with patch.object(run_http, "post", side_effect=[
+                    (reply, 10.0), OSError("interrupted")
+                ]):
+                    with self.assertRaisesRegex(OSError, "interrupted"):
+                        run_http.main(args)
+                completed = here / "results" / "missing-resume-model_B_noul_text.json"
+                partial = Path(str(completed) + ".partial")
+                original = partial.read_bytes()
+                header, row = original.decode("utf-8").splitlines()
+                for changed in ("absent", "null", "blank"):
+                    with self.subTest(changed=changed):
+                        forged = json.loads(row)
+                        if changed == "absent":
+                            del forged["observed_model"]
+                        else:
+                            forged["observed_model"] = None if changed == "null" else " "
+                        partial.write_text(header + "\n" + json.dumps(forged) + "\n")
+                        before = partial.read_bytes()
+                        with patch.object(run_http, "post") as blocked:
+                            with self.assertRaisesRegex(ValueError, "requires a server-reported model"):
+                                run_http.main(args)
+                            blocked.assert_not_called()
+                        self.assertEqual(partial.read_bytes(), before)
+                        self.assertFalse(completed.exists())
+                partial.write_bytes(original)
+                with patch.object(run_http, "post", return_value=(reply, 10.0)) as remaining:
+                    run_http.main(args)
+                    remaining.assert_called_once()
+                self.assertEqual([r["observed_model"] for r in json.loads(
+                    completed.read_text()
+                )["rows"]], ["observed-checkpoint", "observed-checkpoint"])
+
     def test_qualification_requires_complete_serving_identity(self):
         for field, change in (
             ("missing_server", lambda r: r["experiment"].pop("server_config")),
@@ -760,7 +855,7 @@ class QualificationTests(unittest.TestCase):
                 frozen = copy.deepcopy(self.manifest)
                 frozen["noul_temperature"] = 1.25
                 manifest_path.write_text(json.dumps(frozen))
-                answer = {"answers": {
+                answer = {"model": "self-reported-test-model", "answers": {
                     key: {"type": "noul", "noul": 0.5}
                     for key in self.questions
                 }}
@@ -864,7 +959,7 @@ class QualificationTests(unittest.TestCase):
                 "--qualification-manifest", str(manifest_path),
                 "B_noul_text",
             ]
-            answer = {"answers": {
+            answer = {"model": "self-reported-test-model", "answers": {
                 key: {"type": "noul", "noul": 0.5} for key in self.questions
             }}
             with patch.object(run_http, "HERE", str(here)):
@@ -982,7 +1077,7 @@ class QualificationTests(unittest.TestCase):
             dataset_path.write_bytes(self.dataset_bytes)
             (here / "manifest.json").write_bytes(self.manifest_bytes)
             (here / "server.json").write_text(json.dumps(self.server_config))
-            answer = {"answers": {
+            answer = {"model": "self-reported-test-model", "answers": {
                 key: {"type": "noul", "noul": 0.5} for key in self.questions
             }}
             with patch.object(run_http, "HERE", str(here)):

@@ -157,11 +157,13 @@ qualification independently reconstructs and verifies the byte count of every
 held-out request. Every HTTP result also records the model name *reported by
 the server*, including explicit null when the endpoint omits it. A frozen-arm
 qualification fails if this name is missing, differs among held-out responses,
-or contradicts a non-null requested model selector. For an explicit selector,
-a contradictory response is rejected before appending the row. A change in the
-server-reported name between cases is also refused before the second append;
-resuming an interrupted frozen arm rejects a stored contradictory name before
-sending more requests. The reported name is **not** cryptographic server
+or contradicts a non-null requested model selector. A frozen arm now requires a nonblank server-reported model on **each** response,
+even with no explicit model selector. Missing identities are rejected before
+appending the response; missing or blank identities in an existing partial are
+rejected before sending more requests. For an explicit selector, a contradictory
+response is likewise rejected before appending. A change in the server-reported
+name between cases is refused before the second append; valid interrupted runs
+still resume with their recorded model identity. The reported name is **not** cryptographic server
 identity or checkpoint attestation; a
 remote service can misreport it.
 

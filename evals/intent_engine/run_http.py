@@ -307,6 +307,8 @@ def checked_qualified_model(previous, reported, requested):
     A server name is not checkpoint attestation, but neither a resumed row
     nor a new response may contradict the selected or previously seen name.
     """
+    if not isinstance(reported, str) or not reported.strip():
+        raise ValueError("qualified HTTP response requires a server-reported model")
     if requested is not None and reported != requested:
         raise ValueError("qualified HTTP reported model differs from frozen selector")
     if previous is not None and reported is not None and reported != previous:
