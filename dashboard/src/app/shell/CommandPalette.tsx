@@ -85,7 +85,11 @@ export function CommandPalette({
         const sameScope = scope.kind === 'all'
           ? !params.has('scope') && !params.has('scopeLabel')
           : params.get('scope') === scope.projectId && params.get('scopeLabel') === scope.label;
-        if (location.pathname !== `/${channel.path}` || !sameScope) {
+        // The index route mounts Brain too. Reopening it through the palette
+        // must preserve field=sigma and entity selection just like /brain.
+        const sameWorkspace = location.pathname === `/${channel.path}` ||
+          (channel.path === 'brain' && location.pathname === '/');
+        if (!sameWorkspace || !sameScope) {
           navigate(scopedWorkspacePath(scope, channel.path));
         }
         onOpenChange(false);

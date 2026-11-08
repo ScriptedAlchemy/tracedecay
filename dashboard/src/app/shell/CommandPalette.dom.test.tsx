@@ -162,6 +162,7 @@ describe('CommandPalette keyboard operation', () => {
   it.each([
     ['/loom?loomRenderer=rails&session=run-7', 'Loom'],
     ['/brain?field=sigma&node=node-3', 'Brain'],
+    ['/?field=sigma&node=node-3', 'Brain'],
     ['/code?render=relief&symbol=symbol-2', 'Code'],
   ])('reselects %s without resetting its active view', async (entry, label) => {
     const user = userEvent.setup();
