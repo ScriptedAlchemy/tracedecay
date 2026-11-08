@@ -690,7 +690,7 @@ pub(crate) fn discard_superseded_sealed_generations(
         if !recognized || !recognized_form || receipt.version != SEALED_STORE_RECEIPT_VERSION {
             continue;
         }
-        if receipt.graph_format < GraphFormatVersion::current().get() {
+        if receipt.graph_format > 0 && receipt.graph_format < GraphFormatVersion::current().get() {
             match std::fs::remove_dir_all(&path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -2852,6 +2852,8 @@ mod receipt_budget_tests {
         let old = generation(&root, 'a', &receipt(current - 1, &"a".repeat(64), "old"));
         let live = generation(&root, 'b', &receipt(current, &"b".repeat(64), "live"));
         let invalid = generation(&root, 'c', b"not a receipt");
+        // Zero is not a valid GraphFormatVersion, even when the JSON is well formed.
+        let zero_format = generation(&root, '0', &receipt(0, &"0".repeat(64), "zero"));
         let future = generation(
             &root,
             'f',
@@ -2884,13 +2886,13 @@ mod receipt_budget_tests {
             std::fs::write(directory.join("sentinel"), b"unowned").unwrap();
             (directory, foreign)
         };
-        for dir in [&old, &live, &invalid, &oversized, &missing, &future] {
+        for dir in [&old, &live, &invalid, &zero_format, &oversized, &missing, &future] {
             std::fs::write(dir.join("sentinel"), b"owned").unwrap();
         }
 
         discard_superseded_sealed_generations(&database).unwrap();
         assert!(!old.exists(), "verified old-format receipt is reclaimable");
-        for dir in [&live, &invalid, &oversized, &missing, &future] {
+        for dir in [&live, &invalid, &zero_format, &oversized, &missing, &future] {
             assert_eq!(std::fs::read(dir.join("sentinel")).unwrap(), b"owned");
         }
         assert_eq!(std::fs::read(&unrelated).unwrap(), b"foreign");
