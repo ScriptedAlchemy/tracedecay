@@ -1582,10 +1582,7 @@ fn copy_sqlite_family_at_generation(
     generation.validate()
 }
 
-fn matches_checked_sqlite_member(
-    checked: &std::fs::Metadata,
-    opened: &std::fs::Metadata,
-) -> bool {
+fn matches_checked_sqlite_member(checked: &std::fs::Metadata, opened: &std::fs::Metadata) -> bool {
     if !opened.is_file() || checked.len() != opened.len() {
         return false;
     }
@@ -1629,7 +1626,10 @@ fn copy_sqlite_members_nofollow(
     options.follow(FollowSymlinks::No);
     for (member, suffix, checked) in members {
         let name = member.file_name().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "SQLite member has no filename")
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "SQLite member has no filename",
+            )
         })?;
         let mut input = directory.open_with(name, &options)?.into_std();
         if !matches_checked_sqlite_member(checked, &input.metadata()?) {
@@ -2666,7 +2666,10 @@ mod tests {
             )
             .unwrap();
         let journal = sqlite_family_member(&registry, "-journal");
-        assert!(journal.is_file(), "the uncommitted update needs an undo journal");
+        assert!(
+            journal.is_file(),
+            "the uncommitted update needs an undo journal"
+        );
 
         let destination = temporary.path().join("snapshot.db");
         let error = copy_sqlite_family(&registry, &destination)
@@ -2677,7 +2680,10 @@ mod tests {
 
         writer.execute_batch("ROLLBACK").unwrap();
         drop(writer);
-        assert!(!journal.exists(), "DELETE-mode rollback removes the journal");
+        assert!(
+            !journal.exists(),
+            "DELETE-mode rollback removes the journal"
+        );
         copy_sqlite_family(&registry, &destination).unwrap();
         let snapshot = rusqlite::Connection::open(&destination).unwrap();
         let root: String = snapshot
@@ -2716,7 +2722,10 @@ mod tests {
         let error = build_storage_report(&profile_root)
             .await
             .expect_err("an active rollback journal must not become registration truth");
-        assert!(matches!(&error, TraceDecayError::Database { .. }), "{error}");
+        assert!(
+            matches!(&error, TraceDecayError::Database { .. }),
+            "{error}"
+        );
         assert!(error.to_string().contains("rollback journal"), "{error}");
 
         writer.execute_batch("ROLLBACK").unwrap();
@@ -2773,7 +2782,12 @@ mod tests {
         let registry = temporary.path().join(GLOBAL_DB_FILENAME);
         let wal = sqlite_family_member(&registry, "-wal");
         std::fs::write(&wal, b"original WAL member").unwrap();
-        assert!(std::fs::symlink_metadata(&wal).unwrap().file_type().is_file());
+        assert!(
+            std::fs::symlink_metadata(&wal)
+                .unwrap()
+                .file_type()
+                .is_file()
+        );
         // The production preflight recorded this pathname as a regular file.
         let checked = vec![(
             wal.clone(),
@@ -2817,13 +2831,21 @@ mod tests {
                 .set_len(replacement_bytes)
                 .unwrap();
             std::fs::rename(&incoming, &wal).unwrap();
-            assert!(std::fs::symlink_metadata(&wal).unwrap().file_type().is_file());
+            assert!(
+                std::fs::symlink_metadata(&wal)
+                    .unwrap()
+                    .file_type()
+                    .is_file()
+            );
 
             let destination = temporary.path().join("report-snapshot.db");
             let error = copy_sqlite_members_nofollow(&registry, &destination, &checked)
                 .expect_err("a regular member swapped after preflight must be refused");
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-            assert!(error.to_string().contains("changed after preflight"), "{error}");
+            assert!(
+                error.to_string().contains("changed after preflight"),
+                "{error}"
+            );
             assert!(
                 !sqlite_family_member(&destination, "-wal").exists(),
                 "the replacement must be refused before any bytes enter scratch"
