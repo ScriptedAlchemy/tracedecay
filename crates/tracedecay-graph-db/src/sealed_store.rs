@@ -2876,17 +2876,21 @@ mod receipt_budget_tests {
             let directory = root.join("1".repeat(64));
             std::fs::create_dir_all(&directory).unwrap();
             let foreign = temp.path().join("foreign-receipt.json");
-            std::fs::write(
-                &foreign,
-                receipt(current - 1, &"1".repeat(64), "foreign"),
-            )
-            .unwrap();
+            std::fs::write(&foreign, receipt(current - 1, &"1".repeat(64), "foreign")).unwrap();
             std::os::unix::fs::symlink(&foreign, directory.join(SEALED_STORE_RECEIPT_FILE))
                 .unwrap();
             std::fs::write(directory.join("sentinel"), b"unowned").unwrap();
             (directory, foreign)
         };
-        for dir in [&old, &live, &invalid, &zero_format, &oversized, &missing, &future] {
+        for dir in [
+            &old,
+            &live,
+            &invalid,
+            &zero_format,
+            &oversized,
+            &missing,
+            &future,
+        ] {
             std::fs::write(dir.join("sentinel"), b"owned").unwrap();
         }
 
