@@ -670,7 +670,10 @@ async fn reinserted_candidate_page_refuses_false_discharge_and_recovers() {
             break;
         }
     }
-    assert!(bootstrap_finished, "candidate collection must become eligible");
+    assert!(
+        bootstrap_finished,
+        "candidate collection must become eligible"
+    );
     assert_eq!(candidate_count(store.conn()).await, 52);
 
     // The explicit DELETE returns 48 affected rows even when an AFTER DELETE
@@ -694,7 +697,9 @@ async fn reinserted_candidate_page_refuses_false_discharge_and_recovers() {
         .unwrap();
     let error = step(&transaction, 48).await.unwrap_err();
     assert!(
-        error.to_string().contains("candidate discharge was not persisted"),
+        error
+            .to_string()
+            .contains("candidate discharge was not persisted"),
         "an apparent 48-row DELETE must not count as committed progress: {error}"
     );
     assert_eq!(
