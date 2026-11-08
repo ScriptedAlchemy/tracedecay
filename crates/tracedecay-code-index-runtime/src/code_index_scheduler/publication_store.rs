@@ -2043,6 +2043,9 @@ impl DaemonCodeIndexPublicationStoreV1 {
         buffer: &mut Vec<u8>,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<(), CodeIndexProductionErrorV1> {
+        // A rejected or interrupted request must not return bytes left by
+        // an earlier successful read, even when it never reaches the file.
+        buffer.clear();
         let root = self
             .active_path
             .parent()
@@ -2077,7 +2080,22 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 CodeIndexInterruptionV1::Cancelled,
             ));
         }
-        self.read_partitioned_segment(request, buffer)
+        let result = self.read_partitioned_segment(request, buffer);
+        // Endpoint authorization may block inside open(). A request that was
+        // live before I/O must not return data after its deadline or cancel.
+        if control.is_cancelled() {
+            buffer.clear();
+            return Err(CodeIndexProductionErrorV1::Interrupted(
+                CodeIndexInterruptionV1::Cancelled,
+            ));
+        }
+        if control.is_deadline_exceeded() {
+            buffer.clear();
+            return Err(CodeIndexProductionErrorV1::Interrupted(
+                CodeIndexInterruptionV1::DeadlineExceeded,
+            ));
+        }
+        result
     }
 
     fn read_partitioned_segment(

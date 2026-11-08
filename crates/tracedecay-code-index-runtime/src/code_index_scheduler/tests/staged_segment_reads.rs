@@ -4,17 +4,22 @@ use std::{
     io::Write,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_code_index::production::{
-    CodeIndexAtomicPublicationPort, CodeIndexPreparationPort, CodeIndexProductionErrorV1,
-    CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-    SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
+    CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1, CodeIndexInterruptionV1,
+    CodeIndexPreparationPort, CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
+    CodeIndexPublishedGenerationV1, SealedGenerationSegmentPublicationV1,
+    SealedGenerationSegmentReadV1,
 };
+use tracedecay_code_index_retention::code_index_generations::DurableSealedCodeGenerationIdentityV1;
 use tracedecay_domain::{ManifestDigest, ProjectId, SanitizerRevision, sha256_hex_suffix};
 
 use super::{
@@ -881,4 +886,119 @@ fn generation_manifest_publication_preserves_concurrent_canonical_bytes() {
         1,
         "successful publication must consume staging"
     );
+}
+
+struct InterruptOnCheckpoint {
+    interrupt_at: usize,
+    deadline: bool,
+    checks: AtomicUsize,
+}
+
+impl InterruptOnCheckpoint {
+    fn new(interrupt_at: usize, deadline: bool) -> Self {
+        Self {
+            interrupt_at,
+            deadline,
+            checks: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl CodeIndexExecutionControlV1 for InterruptOnCheckpoint {
+    fn is_cancelled(&self) -> bool {
+        let check = self.checks.fetch_add(1, Ordering::SeqCst) + 1;
+        !self.deadline && check >= self.interrupt_at
+    }
+
+    fn is_deadline_exceeded(&self) -> bool {
+        let check = self.checks.fetch_add(1, Ordering::SeqCst) + 1;
+        self.deadline && check >= self.interrupt_at
+    }
+}
+
+#[test]
+fn retained_generation_read_refuses_pre_and_post_io_interruptions_without_leaking_bytes() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let source_root = TempDir::new().expect("source store");
+    let generation = source_generation(&fixture, source_root.path());
+    let target_root = TempDir::new().expect("target store");
+    let mut target = target_store(target_root.path(), &fixture);
+    let mut preparation = target
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare target");
+    let publication = generation
+        .stage_publication(&mut preparation)
+        .expect("stage real generation");
+    target
+        .commit(&mut preparation, &publication)
+        .expect("publish real generation");
+    drop(preparation);
+
+    let pointer = target
+        .read_publication_pointer()
+        .expect("read durable pointer")
+        .expect("active generation pointer");
+    let active = pointer
+        .generation_index
+        .iter()
+        .find(|entry| entry.generation_id == pointer.generation_id)
+        .expect("active generation entry");
+    let sealed = DurableSealedCodeGenerationIdentityV1 {
+        locator: active.generation_file.clone(),
+        digest: ManifestDigest::new(active.state_digest.clone()).expect("canonical digest"),
+        size_bytes: active.size_bytes,
+    };
+    let segment = CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+        publication.manifest_bytes().as_ref(),
+    )
+    .expect("parse real manifest")
+    .expect("current generation revision")
+    .into_iter()
+    .find(|segment| segment.size_bytes > 0)
+    .expect("nonempty retained segment");
+    let request = SealedGenerationSegmentReadV1::Whole {
+        digest: &segment.digest,
+        size_bytes: segment.size_bytes,
+    };
+    let mut expected = Vec::new();
+    target
+        .read_partitioned_segment(request, &mut expected)
+        .expect("read exact committed segment");
+    assert_eq!(segment_digest(&expected), segment.digest);
+
+    // A control refuses after the initial two checks, i.e. after the real
+    // pointer and segment reads. A stale successful result is not acceptable.
+    for (checkpoint, deadline) in [(1, false), (2, true), (3, false), (4, true)] {
+        let control = InterruptOnCheckpoint::new(checkpoint, deadline);
+        let mut bytes = b"previous successful read must not survive".to_vec();
+        let error = target
+            .read_retained_partitioned_segment(&sealed, request, &mut bytes, &control)
+            .expect_err("interrupted retained read must refuse");
+        if deadline {
+            assert!(matches!(
+                error,
+                CodeIndexProductionErrorV1::Interrupted(
+                    CodeIndexInterruptionV1::DeadlineExceeded
+                )
+            ));
+        } else {
+            assert!(matches!(
+                error,
+                CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::Cancelled)
+            ));
+        }
+        assert_eq!(bytes, [] as [u8; 0], "no earlier or late bytes may escape");
+        assert_eq!(
+            control.checks.load(Ordering::SeqCst),
+            checkpoint,
+            "interrupt must occur at the intended pre/post-I/O checkpoint"
+        );
+    }
+
+    let active = InterruptOnCheckpoint::new(usize::MAX, false);
+    let mut bytes = b"stale".to_vec();
+    target
+        .read_retained_partitioned_segment(&sealed, request, &mut bytes, &active)
+        .expect("unchanged generation remains readable");
+    assert_eq!(bytes, expected);
 }
