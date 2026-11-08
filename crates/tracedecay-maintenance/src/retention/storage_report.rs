@@ -3674,7 +3674,9 @@ mod tests {
             StorageReportAvailabilityState::Unavailable
         );
         assert_eq!(
-            report.code_generation_retention_availability[0].reason.as_deref(),
+            report.code_generation_retention_availability[0]
+                .reason
+                .as_deref(),
             Some("generation_retention_plan_unavailable")
         );
         assert_eq!(std::fs::metadata(pointer).unwrap().len(), 2 * MIB);
