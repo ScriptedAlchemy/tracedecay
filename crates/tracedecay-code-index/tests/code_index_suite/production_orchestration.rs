@@ -3458,6 +3458,34 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
         !file_evidence_digests.is_empty(),
         "the fixture must seal file evidence"
     );
+    // This revision requires each evidence descriptor's authenticated target
+    // filter. A missing filter is not a permissive legacy manifest.
+    let evidence_descriptors = envelope["generation"]["file_evidence"]
+        .as_array()
+        .expect("file evidence descriptors");
+    for descriptor in evidence_descriptors {
+        assert_eq!(
+            descriptor["target_filter"].as_array().map(Vec::len),
+            Some(4),
+            "each sealed evidence descriptor has four target-filter words"
+        );
+    }
+    let mut filterless = envelope.clone();
+    filterless["generation"]["file_evidence"]
+        .as_array_mut()
+        .expect("file evidence descriptors")
+        .first_mut()
+        .expect("fixture has evidence")
+        .as_object_mut()
+        .expect("typed evidence descriptor")
+        .remove("target_filter")
+        .expect("filter must be present");
+    let error = CodeIndexPublishedGenerationV1::partitioned_text_metadata(&reseal_manifest(filterless))
+        .expect_err("a current-revision manifest without a target filter must be refused");
+    assert!(
+        error.to_string().contains("missing field `target_filter`"),
+        "filterless manifest reached the wrong refusal: {error}"
+    );
     // Buffer address -> its capacity after the last read it served.
     let mut file_buffers = BTreeMap::new();
     let mut file_evidence_buffers = BTreeMap::new();
