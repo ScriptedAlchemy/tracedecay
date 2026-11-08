@@ -9,7 +9,7 @@ type ProjectionPage = (AuditCheckpoint, i64, i64, i64, bool);
 use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION;
 
 use super::super::global_db_operation_error;
-use super::normalize_trigger_sql;
+use super::normalize_schema_sql;
 use tracedecay_runtime_core::db::{
     Database, DatabaseEngineReadSnapshot, DatabaseWriteTransaction,
     engine::{Executor, QueryExecutor, params},

@@ -5,7 +5,7 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Result};
 
 use super::rows::audit_read_error;
 
-use super::normalize_trigger_sql;
+use super::normalize_schema_sql;
 
 pub(in crate::schema_contract) struct Trigger {
     pub(in crate::schema_contract) name: &'static str,
@@ -1684,7 +1684,7 @@ pub(in crate::schema_contract) async fn first_invalid_trigger(
                 .get(&trigger.name.to_ascii_lowercase())
                 .is_some_and(|(table, sql)| {
                     table.eq_ignore_ascii_case(trigger.table)
-                        && normalize_trigger_sql(sql) == normalize_trigger_sql(trigger.create_sql)
+                        && normalize_schema_sql(sql) == normalize_schema_sql(trigger.create_sql)
                 })
         }))
 }

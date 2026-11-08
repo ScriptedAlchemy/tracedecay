@@ -10,11 +10,14 @@ use tracedecay_rusqlite_runtime::repository::{
     GraphPublicationSchemaObjectV1, canonical_graph_publication_schema_inventory,
 };
 
+use crate::observation_projection::ACTIVE_QUEUE_INDEX_SQL;
+
 use super::super::{global_db_operation_error, global_db_operation_message};
 use super::definitions::{
     Column, INDEX_DESCENDING_COLUMNS, INDEX_EXPRESSION_COLUMN, INDEXES, Index,
     REGISTRY_TABLE_NAMES, TABLES, Table,
 };
+use super::normalize_schema_sql;
 use super::pragma::{
     ActualColumn, ActualForeignKey, ActualIndex, ActualTableMetadata, read_table_metadata,
 };
@@ -158,15 +161,10 @@ fn queue_active_index_predicate_matches(definition_sql: Option<&str>) -> bool {
     let Some(sql) = definition_sql else {
         return false;
     };
-    let sql = sql.to_ascii_lowercase();
-    let Some((_, predicate)) = sql.rsplit_once("where") else {
-        return false;
-    };
-    let predicate = predicate
-        .chars()
-        .filter(|character| !character.is_ascii_whitespace() && *character != ';')
-        .collect::<String>();
-    predicate == "next_retry_at_micros<9223372036854775807"
+    // sqlite_schema stores CREATE INDEX without IF NOT EXISTS. Compare the
+    // complete stored definition so SQL comments cannot stand in for a predicate.
+    let expected = ACTIVE_QUEUE_INDEX_SQL.replacen(" IF NOT EXISTS", "", 1);
+    normalize_schema_sql(sql) == normalize_schema_sql(&expected)
 }
 
 fn index_matches(actual: &ActualIndex, expected: &Index) -> bool {
