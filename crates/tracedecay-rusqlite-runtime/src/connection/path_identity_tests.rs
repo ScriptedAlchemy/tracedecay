@@ -177,7 +177,9 @@ fn rejecting_empty_attachment_does_not_release_another_writer_lock() {
     ));
     probe_external_connection(&path, "write", true);
 
-    writer.execute_batch("ROLLBACK").expect("release writer reservation");
+    writer
+        .execute_batch("ROLLBACK")
+        .expect("release writer reservation");
     probe_external_connection(&path, "write", false);
 }
 
