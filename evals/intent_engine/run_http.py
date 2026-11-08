@@ -288,6 +288,19 @@ def validate_row_truncation(row):
         raise ValueError("truncation row disagrees with recorded server counters")
 
 
+def checked_qualified_model(previous, reported, requested):
+    """Refuse a changed reported model within one frozen HTTP arm.
+
+    A server name is not checkpoint attestation, but neither a resumed row
+    nor a new response may contradict the selected or previously seen name.
+    """
+    if requested is not None and reported != requested:
+        raise ValueError("qualified HTTP reported model differs from frozen selector")
+    if previous is not None and reported is not None and reported != previous:
+        raise ValueError("qualified HTTP responses mix reported models")
+    return previous if reported is None else reported
+
+
 def serialize_result(row, questions, temperature):
     """Admit fresh and resumed rows before any durable output is changed."""
     probabilities(row.get("probs"), questions)
@@ -382,6 +395,8 @@ def resume_rows(partial, header, cases, requests, questions, temperature):
         raise ValueError("partial output belongs to another or unrecorded experiment; use a new tag")
     done = {}
     ordered_ids = tuple(cases)
+    qualified = "qualification_manifest_sha256" in header["experiment"]
+    previous_model = None
     for line_number, line in enumerate(partial, 2):
         if not line.endswith("\n"):
             raise ValueError(f"partial output has an incomplete row at line {line_number}")
@@ -405,6 +420,11 @@ def resume_rows(partial, header, cases, requests, questions, temperature):
                      or row.get("request_size_bytes") != len(request_bytes(requests[case_id][0])))):
             raise ValueError(f"partial output has mismatched request byte count for {case_id}")
         serialize_result(row, questions, temperature)
+        if qualified:
+            previous_model = checked_qualified_model(
+                previous_model, row.get("observed_model"),
+                header["experiment"].get("requested_model"),
+            )
         done[case_id] = row
     return done
 
@@ -564,6 +584,10 @@ def main(argv=None):
                 done = {}
             else:
                 done = resume_rows(partial, header, cases, requests, questions, args.noul_temperature)
+            previous_model = next(
+                (row["observed_model"] for row in done.values()
+                 if row.get("observed_model") is not None), None
+            )
             for index, case in enumerate(dataset):
                 if case["id"] in done:
                     continue
@@ -577,6 +601,10 @@ def main(argv=None):
                 if (args.send_model is not None and observed_model is not None
                         and observed_model != args.send_model):
                     raise ValueError("reported model differs from requested model")
+                if qualification_sha is not None:
+                    previous_model = checked_qualified_model(
+                        previous_model, observed_model, args.send_model,
+                    )
                 server_ms = response.get("latency_ms")
                 if server_ms is None:
                     server_ms = (response.get("timing") or {}).get("inference_ms")

@@ -525,6 +525,98 @@ class QualificationTests(unittest.TestCase):
             partial = here / "results" / "model-mismatch_B_noul_text.json.partial"
             self.assertEqual(len(partial.read_text().splitlines()), 1)
 
+    def test_qualified_inference_refuses_server_model_change_before_second_append(self):
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            (here / "dataset.json").write_bytes(self.dataset_bytes)
+            (here / "manifest.json").write_bytes(self.manifest_bytes)
+            (here / "server.json").write_text(json.dumps(self.server_config))
+            args = [
+                "--url", self.endpoint, "--tag", "model-drift",
+                "--server-config", str(here / "server.json"),
+                "--qualification-manifest", str(here / "manifest.json"),
+                "B_noul_text",
+            ]
+
+            def reply(model):
+                return {
+                    "model": model,
+                    "answers": {key: {"type": "noul", "noul": 0.5}
+                                for key in self.questions},
+                    "usage": {"input_tokens": 64, "state_tokens": 32,
+                              "state_tokens_used": 32},
+                    "truncated": False,
+                }, 10.0
+
+            with patch.object(run_http, "HERE", str(here)), patch.object(
+                run_http, "post", side_effect=[
+                    reply("reported-model-a"), reply("reported-model-b"),
+                ]
+            ) as post:
+                with self.assertRaisesRegex(ValueError, "mix reported models"):
+                    run_http.main(args)
+                self.assertEqual(post.call_count, 2)
+            path = here / "results" / "model-drift_B_noul_text.json"
+            self.assertFalse(path.exists())
+            header, first = (here / "results" / "model-drift_B_noul_text.json.partial").read_text().splitlines()
+            self.assertEqual(json.loads(first)["observed_model"], "reported-model-a")
+            self.assertEqual(json.loads(header)["experiment"]["case_ids"],
+                             ["holdout-positive", "holdout-negative"])
+
+    def test_qualified_resume_refuses_forged_model_before_network(self):
+        for altered_model in (None, "different-model"):
+            with self.subTest(altered_model=altered_model), tempfile.TemporaryDirectory() as temp:
+                here = Path(temp)
+                (here / "dataset.json").write_bytes(self.dataset_bytes)
+                manifest = copy.deepcopy(self.manifest)
+                manifest["arm"]["requested_model"] = "selected-model"
+                (here / "manifest.json").write_text(json.dumps(manifest))
+                (here / "server.json").write_text(json.dumps(self.server_config))
+                args = [
+                    "--url", self.endpoint, "--tag", "model-resume",
+                    "--server-config", str(here / "server.json"),
+                    "--qualification-manifest", str(here / "manifest.json"),
+                    "--send-model", "selected-model", "B_noul_text",
+                ]
+                answer = {
+                    "model": "selected-model",
+                    "answers": {key: {"type": "noul", "noul": 0.5}
+                                for key in self.questions},
+                    "usage": {"input_tokens": 64, "state_tokens": 32,
+                              "state_tokens_used": 32},
+                    "truncated": False,
+                }
+                with patch.object(run_http, "HERE", str(here)):
+                    with patch.object(run_http, "post", side_effect=[
+                        (answer, 10.0), OSError("interrupted"),
+                    ]) as first:
+                        with self.assertRaisesRegex(OSError, "interrupted"):
+                            run_http.main(args)
+                        self.assertEqual(first.call_count, 2)
+                    partial = here / "results" / "model-resume_B_noul_text.json.partial"
+                    original = partial.read_bytes()
+                    header, row = original.decode("utf-8").splitlines()
+                    corrupted = json.loads(row)
+                    corrupted["observed_model"] = altered_model
+                    partial.write_text(header + "\n" + json.dumps(corrupted) + "\n")
+                    before = partial.read_bytes()
+                    with patch.object(run_http, "post") as blocked:
+                        with self.assertRaisesRegex(ValueError, "frozen selector"):
+                            run_http.main(args)
+                        blocked.assert_not_called()
+                    self.assertEqual(partial.read_bytes(), before)
+                    self.assertFalse(
+                        (here / "results" / "model-resume_B_noul_text.json").exists()
+                    )
+                    # The valid original prefix must still resume normally.
+                    partial.write_bytes(original)
+                    with patch.object(run_http, "post", return_value=(answer, 10.0)) as remaining:
+                        run_http.main(args)
+                        remaining.assert_called_once()
+                    self.assertEqual(len(json.loads(
+                        (here / "results" / "model-resume_B_noul_text.json").read_text()
+                    )["rows"]), 2)
+
     def test_qualification_requires_complete_serving_identity(self):
         for field, change in (
             ("missing_server", lambda r: r["experiment"].pop("server_config")),

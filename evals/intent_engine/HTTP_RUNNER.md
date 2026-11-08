@@ -151,8 +151,11 @@ held-out request. Every HTTP result also records the model name *reported by
 the server*, including explicit null when the endpoint omits it. A frozen-arm
 qualification fails if this name is missing, differs among held-out responses,
 or contradicts a non-null requested model selector. For an explicit selector,
-a contradictory response is rejected before appending the row. The reported
-name is **not** cryptographic server identity or checkpoint attestation; a
+a contradictory response is rejected before appending the row. A change in the
+server-reported name between cases is also refused before the second append;
+resuming an interrupted frozen arm rejects a stored contradictory name before
+sending more requests. The reported name is **not** cryptographic server
+identity or checkpoint attestation; a
 remote service can misreport it.
 
 Include `thresholds` with one frozen probability threshold per requested
