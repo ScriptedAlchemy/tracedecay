@@ -2772,8 +2772,6 @@ mod activation_tests {
         let harness = RegisteredGlobalDbHarness::open("output-preflight-no-temp").await;
         let active = session(None, None);
         assert!(harness.registered.upsert_session(&active).await);
-        let transaction = harness.registered.begin_write_transaction().await.unwrap();
-        stage(&transaction, GENERATION, &active).await;
 
         let foreign = SessionMessageRecord {
             provider: active.provider.clone(),
@@ -2790,6 +2788,7 @@ mod activation_tests {
             source_offset: None,
             metadata_json: None,
         };
+        let transaction = harness.registered.begin_write_transaction().await.unwrap();
         tracedecay_lcm::raw::upsert_projection_raw_message(
             &transaction,
             &foreign,
@@ -2797,6 +2796,12 @@ mod activation_tests {
         )
         .await
         .unwrap();
+        transaction.commit().await.unwrap();
+
+        // The foreign message must exist in the committed store before a
+        // separate rebuild transaction attempts to replace it.
+        let transaction = harness.registered.begin_write_transaction().await.unwrap();
+        stage(&transaction, GENERATION, &active).await;
         let changed = SessionMessageRecord {
             text: "overwritten body".to_owned(),
             ..foreign.clone()
@@ -2852,30 +2857,55 @@ mod activation_tests {
         );
         drop(rows);
 
-        let mut rows = transaction
+        // A dropped TEMP b-tree can disappear from sqlite_temp_master while
+        // its pages remain allocated on this writer. Measure actual SQLite
+        // TEMP database pages too, not just the surviving schema.
+        let mut pages = transaction
+            .query("PRAGMA temp.page_count", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            pages.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            0,
+            "preflight must not allocate TEMP b-tree pages on the long-lived writer"
+        );
+        drop(pages);
+
+        transaction.rollback().await.unwrap();
+        let snapshot = harness.registered.read_snapshot().await.unwrap();
+        let mut rows = snapshot
             .query(
-                "SELECT content FROM lcm_raw_messages
+                "SELECT content, location_path FROM lcm_raw_messages
                  WHERE provider = ?1 AND message_id = ?2",
                 params![foreign.provider.as_str(), foreign.message_id.as_str()],
             )
             .await
             .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
         assert_eq!(
-            rows.next()
-                .await
-                .unwrap()
-                .unwrap()
-                .get::<String>(0)
-                .unwrap(),
+            row.get::<String>(0).unwrap(),
             foreign.text,
-            "a denied activation must not change a protected durable body"
+            "a denied rebuild must not replace a committed foreign body"
+        );
+        assert_eq!(row.get::<String>(1).unwrap(), "/foreign");
+        drop(rows);
+
+        let mut rows = snapshot
+            .query(
+                "SELECT COUNT(*) FROM observation_projection_rebuilds
+                 WHERE generation = ?1",
+                params![GENERATION],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            0,
+            "a failed rebuild must leave no durable staging generation"
         );
         drop(rows);
 
-        let mut integrity = transaction
-            .query("PRAGMA integrity_check", ())
-            .await
-            .unwrap();
+        let mut integrity = snapshot.query("PRAGMA integrity_check", ()).await.unwrap();
         assert_eq!(
             integrity
                 .next()
@@ -2885,7 +2915,7 @@ mod activation_tests {
                 .get::<String>(0)
                 .unwrap(),
             "ok",
-            "the real registered SQLite store must remain structurally sound"
+            "the committed SQLite store must remain structurally sound after rollback"
         );
     }
 
