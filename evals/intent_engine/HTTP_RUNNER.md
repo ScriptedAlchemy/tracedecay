@@ -320,7 +320,8 @@ python evals/intent_engine/score.py --qualified \
 ```
 
 Both the runner and independent scorer refuse altered capture bytes, missing
-or reordered held-out cases, invalid Noul questions, differing model selectors,
+or reordered held-out cases, invalid Noul questions, question key ordering that
+differs from the frozen vocabulary (even when map values match), differing model selectors,
 extra request keys, request-size violations, or a capture attached to an
 historical renderer. A capture is an **operator-supplied input**, not proof that
 its bytes came from Scout. The owning transcript's original store-id bounds,

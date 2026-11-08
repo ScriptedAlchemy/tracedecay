@@ -1633,5 +1633,71 @@ class QualificationTests(unittest.TestCase):
                         run_http.main(args[:-3] + [qualification.CAPTURED_SCOUT_CONFIG])
                     post.assert_not_called()
 
+    def test_captured_question_order_cannot_be_changed_even_when_all_hashes_are_refrozen(self):
+        # Dict equality ignores insertion order, but the model receives ordered
+        # question bytes. Rehash every capture/manifest/result identity to
+        # isolate the missing order check rather than a digest mismatch.
+        capture, manifest = self.captured_scout_fixture()
+        records = qualification.loads_unambiguous_json(capture)
+        for record in records:
+            body = qualification.loads_unambiguous_json(record["body"])
+            body["questions"] = dict(reversed(list(body["questions"].items())))
+            self.assertEqual(body["questions"], self.questions)
+            self.assertNotEqual(list(body["questions"]), list(self.questions))
+            record["body"] = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+        reordered = json.dumps(records, ensure_ascii=False).encode("utf-8")
+        manifest["captured_requests_sha256"] = qualification.sha256_bytes(reordered)
+        manifest["holdout_requests_sha256"] = score.evidence_digest([
+            [record["id"], qualification.sha256_bytes(record["body"].encode("utf-8"))]
+            for record in records
+        ])
+        self.valid(manifest)
+        with self.assertRaisesRegex(ValueError, "question order"):
+            qualification.captured_request_bodies(
+                reordered, ["holdout-positive", "holdout-negative"],
+                self.questions, None, manifest["max_request_bytes"],
+            )
+
+        # Runner refusal precedes network traffic and evidence-file creation.
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            (here / "dataset.json").write_bytes(self.dataset_bytes)
+            manifest_bytes = json.dumps(manifest).encode("utf-8")
+            (here / "manifest.json").write_bytes(manifest_bytes)
+            (here / "server.json").write_text(json.dumps(self.server_config))
+            (here / "captured.json").write_bytes(reordered)
+            with patch.object(run_http, "HERE", str(here)):
+                with patch.object(run_http, "post") as post:
+                    with self.assertRaisesRegex(ValueError, "question order"):
+                        run_http.main([
+                            "--url", self.endpoint, "--tag", "reordered-capture",
+                            "--server-config", str(here / "server.json"),
+                            "--qualification-manifest", str(here / "manifest.json"),
+                            "--captured-requests", str(here / "captured.json"),
+                            qualification.CAPTURED_SCOUT_CONFIG,
+                        ])
+                    post.assert_not_called()
+            self.assertFalse((here / "results").exists())
+
+        # An independently supplied result with matching rewritten request
+        # fingerprints and experiment SHA must be refused by the scorer too.
+        result = self.signed_result()
+        for row, record in zip(result["rows"], records, strict=True):
+            body_bytes = record["body"].encode("utf-8")
+            row["request_sha256"] = qualification.sha256_bytes(body_bytes)
+            row["request_size_bytes"] = len(body_bytes)
+        result["config"] = "trial_" + qualification.CAPTURED_SCOUT_CONFIG
+        experiment = result["experiment"]
+        experiment["config"] = qualification.CAPTURED_SCOUT_CONFIG
+        experiment["requests_sha256"] = manifest["holdout_requests_sha256"]
+        experiment["qualification_manifest_sha256"] = qualification.sha256_bytes(manifest_bytes)
+        result["experiment_sha256"] = score.evidence_digest(experiment)
+        with self.assertRaisesRegex(ValueError, "question order"):
+            qualification.qualified_report(
+                result, manifest, qualification.sha256_bytes(manifest_bytes),
+                self.questions, self.dataset_bytes, reordered,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
