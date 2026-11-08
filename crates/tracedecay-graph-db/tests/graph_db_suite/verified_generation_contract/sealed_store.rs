@@ -1578,7 +1578,8 @@ fn replay_retirement_reclaims_four_sealed_generations_and_preserves_live_head() 
             previous_head,
             input,
         );
-        let committed = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
+        let committed =
+            publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
         previous_head = Some(committed.head.clone());
         if sequence == 4 {
             assert_snapshot_reads(&committed.snapshot, &identity, &marker);
