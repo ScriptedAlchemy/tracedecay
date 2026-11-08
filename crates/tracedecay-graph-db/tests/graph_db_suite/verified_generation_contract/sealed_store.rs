@@ -1553,6 +1553,75 @@ fn retirement_deletes_the_superseded_sealed_artifact() {
     );
 }
 
+/// Repeated retention must converge after more than three sealed publications.
+/// Older code generations become collectable without disturbing the latest
+/// verified head or its still-live serving snapshot.
+#[test]
+fn replay_retirement_reclaims_four_sealed_generations_and_preserves_live_head() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("sealed-store:retire-many", "code");
+    let mut previous_head = None;
+    let mut latest = None;
+
+    for sequence in 0..5_u8 {
+        let generation = format!("retire-many-g{sequence}");
+        let marker = format!("marker-{sequence}");
+        let manifest = rich_manifest(identity.clone(), &generation, &marker);
+        let input = char::from(b'1' + sequence);
+        let record = stage_sealed_manifest(
+            &mut authority,
+            &registered.binding,
+            &manifest,
+            &format!("publish:retire-many-{sequence}"),
+            previous_head,
+            input,
+        );
+        let committed = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
+        previous_head = Some(committed.head.clone());
+        if sequence == 4 {
+            assert_snapshot_reads(&committed.snapshot, &identity, &marker);
+            latest = Some(committed);
+        }
+    }
+
+    assert_eq!(sealed_receipts(temp.path()).len(), 5);
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    for sequence in 0..4_u8 {
+        let generation = format!("retire-many-g{sequence}");
+        let input = char::from(b'1' + sequence);
+        let source_generation =
+            CodeGenerationId::new(format!("code-generation.{generation}")).unwrap();
+        let source_digest =
+            SealedGraphStateDigest::try_from(format!("sha256:{}", input.to_string().repeat(64)))
+                .unwrap();
+        assert!(matches!(
+            registered
+                .registry
+                .retire_one_code_generation_replay(
+                    registration(registered.binding.clone(), temp.path()),
+                    &mut authority,
+                    &context,
+                    &source_generation,
+                    &source_digest,
+                )
+                .unwrap(),
+            GraphReplayCollectionOutcome::Retired(_)
+        ));
+        assert!(
+            receipt_for_generation(temp.path(), &generation).is_none(),
+            "retired sealed artifact survived: {generation}"
+        );
+    }
+
+    let live = latest.expect("the last publication retains a live snapshot");
+    assert_snapshot_reads(&live.snapshot, &identity, "marker-4");
+    assert_eq!(sealed_receipts(temp.path()).len(), 1);
+    assert!(receipt_for_generation(temp.path(), "retire-many-g4").is_some());
+}
+
 /// A live direct-sealed reader (recovered through
 /// `recover_verified_sealed_snapshot`, which bypasses the staging database's
 /// verified-generation state) must gate retirement of its generation exactly
