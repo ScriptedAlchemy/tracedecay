@@ -203,7 +203,18 @@ abstention, positive-case recall, reconstructed JSON request sizes
 coverage, observed peak and over-budget cases, p50/p95 measured end-to-end HTTP
 latency and the predeclared tolerances. A passing report requires every held-out case to
 report measured zero dropped state tokens and a consistent self-reported
-model name. Missing truncation telemetry is unknown, and a response measured after truncated input cannot prove the full
+model name. Native Kev's optional truncation receipts use a top-level Boolean
+`truncated` and numeric `usage.state_tokens` / `usage.state_tokens_used`,
+not `usage.state_tokens_dropped`. The runner reconstructs their difference
+and rejects inconsistent counts or flags before recording a row. The native
+server's original and used token counts and explicit truncation flags are
+retained in the output; an independent scorer and partial-resume reader reject
+a rewritten normalized drop count. Direct `state_tokens_dropped` counts remain
+supported for servers that expose them.
+Kev emits those paired counters only when its `KEV_TRUNCATE_STATES=1` serving
+setting is enabled; a bare `truncated: false` without numeric counters is
+**unknown, not measured zero**, and cannot pass qualification. Freeze the
+serving configuration; no infrastructure change is implied. Missing truncation telemetry is unknown, and a response measured after truncated input cannot prove the full
 frozen request was evaluated; the measurements remain in the failing report. Scoring reads the original frozen case bytes,
 checks all reviewed labels/splits against them and recreates each HTTP
 request fingerprint with the runner's own renderer. Self-consistent result

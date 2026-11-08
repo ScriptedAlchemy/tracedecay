@@ -213,7 +213,7 @@ def holdout_decision_metrics(rows, thresholds):
 def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes):
     """Reproduce qualified predictions from the frozen original dataset."""
     from score import score_config
-    from run_http import STATES, request_bytes, validate_dataset
+    from run_http import STATES, request_bytes, validate_dataset, validate_row_truncation
 
     if not isinstance(dataset_bytes, bytes):
         raise ValueError("qualification requires the original dataset bytes")
@@ -253,6 +253,10 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes):
         if (row.get("labels") != annotation["verified_labels"]
                 or row.get("context_needed") != annotation["verified_context_needed"]):
             raise ValueError(f"qualification result {row['id']} does not match reviewed labels")
+    # Native truncation counters and the normalized drop count must remain
+    # consistent even if the result JSON was edited after the HTTP response.
+    for row in rows:
+        validate_row_truncation(row)
     # Reconstruct real HTTP request bytes: self-consistent metadata hashes
     # alone cannot prove the frozen prompts were used.
     renderer = STATES.get(experiment.get("config"))

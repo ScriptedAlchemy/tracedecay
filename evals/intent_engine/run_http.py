@@ -224,6 +224,70 @@ def noul_probabilities(response, questions):
     return probabilities(values, questions)
 
 
+def dropped_state_tokens(response, usage):
+    """Derive measurable truncation from the native HTTP response contract.
+
+    Kev reports the original and used state-token counts with a top-level
+    truncated flag. Other servers may report state_tokens_dropped directly.
+    A bare false flag is not numeric evidence of zero dropped tokens.
+    """
+    direct = usage.get("state_tokens_dropped")
+    if direct is not None and (type(direct) is not int or direct < 0):
+        raise ValueError("invalid truncation dropped-token count")
+
+    original = usage.get("state_tokens")
+    used = usage.get("state_tokens_used")
+    for value in (original, used):
+        if value is not None and (type(value) is not int or value < 0):
+            raise ValueError("invalid truncation state-token count")
+
+    derived = None
+    if original is not None and used is not None:
+        if used > original:
+            raise ValueError("invalid truncation: used state tokens exceed original")
+        derived = original - used
+        if direct is not None and direct != derived:
+            raise ValueError("inconsistent truncation token counts")
+
+    dropped = derived if derived is not None else direct
+    flags = []
+    for envelope, field in ((response, "truncated"), (usage, "truncated")):
+        if field in envelope:
+            flag = envelope[field]
+            if type(flag) is not bool:
+                raise ValueError("invalid truncation flag")
+            flags.append(flag)
+            if dropped is not None and flag != (dropped > 0):
+                raise ValueError("inconsistent truncation flag and token counts")
+    if len(set(flags)) > 1:
+        raise ValueError("inconsistent truncation flags")
+    return dropped
+
+
+def validate_row_truncation(row):
+    """Recheck persisted server counters; normalized dropped alone is mutable.
+
+    Older rows without raw counter fields still have unknown original source
+    semantics. New rows retain the supplied counts/flags for independent
+    qualification and exact partial-resume validation.
+    """
+    native_fields = ("state_tokens_used", "reported_state_tokens_dropped",
+                     "truncated", "usage_truncated")
+    if not any(field in row for field in native_fields):
+        return
+    usage = {"state_tokens": row.get("state_tokens")}
+    if "state_tokens_used" in row:
+        usage["state_tokens_used"] = row["state_tokens_used"]
+    if "reported_state_tokens_dropped" in row:
+        usage["state_tokens_dropped"] = row["reported_state_tokens_dropped"]
+    if "usage_truncated" in row:
+        usage["truncated"] = row["usage_truncated"]
+    envelope = {"truncated": row["truncated"]} if "truncated" in row else {}
+    expected = dropped_state_tokens(envelope, usage)
+    if row.get("dropped") != expected:
+        raise ValueError("truncation row disagrees with recorded server counters")
+
+
 def serialize_result(row, questions, temperature):
     """Admit fresh and resumed rows before any durable output is changed."""
     probabilities(row.get("probs"), questions)
@@ -252,6 +316,7 @@ def serialize_result(row, questions, temperature):
         raw = probabilities(row.get("probs_raw"), questions)
         if row["probs"] != {key: calibrated(value, temperature) for key, value in raw.items()}:
             raise ValueError("calibrated probabilities disagree with raw probabilities")
+    validate_row_truncation(row)
     # json.loads accepts NaN/Infinity, including in extra nested fields. Reject
     # them while validating the partial log, not after opening the final file.
     return json.dumps(row, allow_nan=False)
@@ -527,9 +592,20 @@ def main(argv=None):
                     "ms": ms, "server_ms": server_ms,
                     "input_tokens": usage.get("input_tokens"),
                     "state_tokens": usage.get("state_tokens"),
-                    "dropped": usage.get("state_tokens_dropped"), "probs": probs,
+                    "dropped": dropped_state_tokens(response, usage), "probs": probs,
                     "observed_model": observed_model,
                 }
+                # Retain the original typed truncation measurements so a
+                # resume and an independent scorer can reconstruct dropped.
+                for field, persisted in (
+                    ("state_tokens_used", "state_tokens_used"),
+                    ("state_tokens_dropped", "reported_state_tokens_dropped"),
+                    ("truncated", "usage_truncated"),
+                ):
+                    if field in usage:
+                        row[persisted] = usage[field]
+                if "truncated" in response:
+                    row["truncated"] = response["truncated"]
                 if args.noul_temperature is not None:
                     row["probs_raw"] = probs
                     row["probs"] = {key: calibrated(value, args.noul_temperature) for key, value in probs.items()}

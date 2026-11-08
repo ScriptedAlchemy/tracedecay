@@ -145,6 +145,177 @@ class QualificationTests(unittest.TestCase):
         self.assertFalse(report["checks"]["unwanted_hint_rate"])
         self.assertFalse(report["qualified_against_frozen_tolerances"])
 
+
+    def test_native_kev_truncation_is_measured_not_assumed_from_a_flag(self):
+        # Native Kev emits state_tokens/state_tokens_used and a top-level
+        # truncated flag, not necessarily state_tokens_dropped.
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            (here / "dataset.json").write_bytes(self.dataset_bytes)
+            (here / "manifest.json").write_bytes(self.manifest_bytes)
+            (here / "server.json").write_text(json.dumps(self.server_config))
+            args = [
+                "--url", self.endpoint, "--tag", "native-kev",
+                "--server-config", str(here / "server.json"),
+                "--qualification-manifest", str(here / "manifest.json"),
+                "B_noul_text",
+            ]
+            calls = []
+
+            def native_answer(url, body):
+                index = len(calls)
+                calls.append(body)
+                case = self.dataset[index + 2]
+                return {
+                    "model": "self-reported-test-model",
+                    "answers": {
+                        key: {"type": "noul", "noul": 0.9 if key in case["labels"] else 0.1}
+                        for key in self.questions
+                    },
+                    "usage": {
+                        "input_tokens": 64, "state_tokens": 32,
+                        "state_tokens_used": 32 if index == 0 else 24,
+                    },
+                    "truncated": index == 1,
+                    "latency_ms": 5.0,
+                }, 10.0
+
+            with patch.object(run_http, "HERE", str(here)), patch.object(
+                run_http, "post", side_effect=native_answer
+            ):
+                run_http.main(args)
+            self.assertEqual(len(calls), 2)
+            result = json.loads(
+                (here / "results" / "native-kev_B_noul_text.json").read_text()
+            )
+            self.assertEqual([r["dropped"] for r in result["rows"]], [0, 8])
+            self.assertEqual([r["state_tokens"] for r in result["rows"]], [32, 32])
+            self.assertEqual([r["state_tokens_used"] for r in result["rows"]], [32, 24])
+            self.assertEqual([r["truncated"] for r in result["rows"]], [False, True])
+            report = qualification.qualified_report(
+                result, self.manifest, self.manifest_sha, self.questions,
+                self.dataset_bytes,
+            )
+            self.assertEqual(report["latency"]["cases_truncated"], 1)
+            self.assertFalse(report["checks"]["untruncated_input_evidence"])
+            self.assertFalse(report["qualified_against_frozen_tolerances"])
+            self.assertTrue(report["checks"]["reported_input_token_budget"])
+            # Rehashing only the declared experiment cannot hide a rewritten
+            # normalized drop count when native server counts are present.
+            forged = copy.deepcopy(result)
+            forged["rows"][1]["dropped"] = 0
+            with self.assertRaisesRegex(ValueError, "truncation row disagrees"):
+                qualification.qualified_report(
+                    forged, self.manifest, self.manifest_sha,
+                    self.questions, self.dataset_bytes,
+                )
+
+    def test_conflicting_native_truncation_is_refused_before_row_append(self):
+        cases = (
+            ("used_exceeds_original", {"truncated": False,
+                "usage": {"state_tokens": 24, "state_tokens_used": 32}}),
+            ("flag_contradicts_counts", {"truncated": False,
+                "usage": {"state_tokens": 32, "state_tokens_used": 24}}),
+            ("direct_contradicts_native", {"truncated": True,
+                "usage": {"state_tokens": 32, "state_tokens_used": 24,
+                          "state_tokens_dropped": 0}}),
+            ("invalid_flag", {"truncated": 0,
+                "usage": {"state_tokens": 32, "state_tokens_used": 32}}),
+            ("flags_disagree", {"truncated": False,
+                "usage": {"truncated": True}}),
+            ("invalid_count", {"truncated": False,
+                "usage": {"state_tokens": True, "state_tokens_used": 32}}),
+        )
+        for label, metadata in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temp:
+                here = Path(temp)
+                (here / "dataset.json").write_bytes(self.dataset_bytes)
+                (here / "manifest.json").write_bytes(self.manifest_bytes)
+                (here / "server.json").write_text(json.dumps(self.server_config))
+                args = [
+                    "--url", self.endpoint, "--tag", "bad-native",
+                    "--server-config", str(here / "server.json"),
+                    "--qualification-manifest", str(here / "manifest.json"),
+                    "B_noul_text",
+                ]
+                response = {
+                    "model": "self-reported-test-model",
+                    "answers": {
+                        key: {"type": "noul", "noul": 0.5}
+                        for key in self.questions
+                    },
+                    "usage": {"input_tokens": 64, **metadata["usage"]},
+                    "truncated": metadata["truncated"],
+                }
+                with patch.object(run_http, "HERE", str(here)), patch.object(
+                    run_http, "post", return_value=(response, 10.0)
+                ) as post:
+                    with self.assertRaisesRegex(ValueError, "truncation"):
+                        run_http.main(args)
+                post.assert_called_once()
+                self.assertFalse(
+                    (here / "results" / "bad-native_B_noul_text.json").exists()
+                )
+                partial = here / "results" / "bad-native_B_noul_text.json.partial"
+                self.assertEqual(len(partial.read_text().splitlines()), 1)
+
+
+    def test_native_truncation_partial_tampering_refuses_without_network(self):
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            (here / "dataset.json").write_bytes(self.dataset_bytes)
+            (here / "manifest.json").write_bytes(self.manifest_bytes)
+            (here / "server.json").write_text(json.dumps(self.server_config))
+            args = [
+                "--url", self.endpoint, "--tag", "native-partial",
+                "--server-config", str(here / "server.json"),
+                "--qualification-manifest", str(here / "manifest.json"),
+                "B_noul_text",
+            ]
+            response = {
+                "model": "self-reported-test-model",
+                "answers": {
+                    key: {"type": "noul", "noul": 0.9}
+                    for key in self.questions
+                },
+                "usage": {
+                    "input_tokens": 64, "state_tokens": 30,
+                    "state_tokens_used": 25,
+                },
+                "truncated": True,
+            }
+            with patch.object(run_http, "HERE", str(here)):
+                with patch.object(run_http, "post", side_effect=[
+                    (response, 10.0), RuntimeError("network interruption")
+                ]) as first:
+                    with self.assertRaisesRegex(RuntimeError, "network interruption"):
+                        run_http.main(args)
+                    self.assertEqual(first.call_count, 2)
+                partial = here / "results" / "native-partial_B_noul_text.json.partial"
+                header, row = partial.read_text().splitlines()
+                original = json.loads(row)
+                self.assertEqual(original["dropped"], 5)
+                original["dropped"] = 0
+                partial.write_text(header + "\n" + json.dumps(original) + "\n")
+                before = partial.read_bytes()
+                with patch.object(run_http, "post") as blocked:
+                    with self.assertRaisesRegex(ValueError, "truncation row disagrees"):
+                        run_http.main(args)
+                    blocked.assert_not_called()
+                self.assertEqual(partial.read_bytes(), before)
+                self.assertFalse(
+                    (here / "results" / "native-partial_B_noul_text.json").exists()
+                )
+
+    def test_boolean_truncation_without_counts_is_unknown(self):
+        self.assertIsNone(run_http.dropped_state_tokens({"truncated": False}, {}))
+        self.assertIsNone(run_http.dropped_state_tokens({"truncated": True}, {}))
+        self.assertEqual(
+            run_http.dropped_state_tokens(
+                {"truncated": False}, {"state_tokens_dropped": 0}
+            ), 0
+        )
+
     def test_missing_or_dropped_server_tokens_cannot_qualify(self):
         for value in (None, 1):
             with self.subTest(state_tokens_dropped=value):
