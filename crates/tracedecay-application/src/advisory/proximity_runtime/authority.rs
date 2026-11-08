@@ -1276,7 +1276,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn caller_neighborhood_preserves_depth_bounds_cycles_and_refusals() {
         let root = SymbolOccurrenceId::new("symbol.root").unwrap();
