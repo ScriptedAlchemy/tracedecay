@@ -56,11 +56,12 @@ def captured_request_bodies(raw, case_ids, questions, requested_model, max_bytes
         if (not isinstance(request, dict) or set(request) != expected_keys
                 or not isinstance(request["state"], str) or not request["state"].strip()
                 or request["questions"] != questions
-                # Object equality ignores insertion order. The model sees the
-                # actual wire order, so it must match the frozen vocabulary.
-                or list(request["questions"]) != list(questions)
                 or (requested_model is not None and request.get("model") != requested_model)):
             raise ValueError(f"captured Scout request {record['id']} differs from frozen Noul contract")
+        # Dict equality ignores insertion order, but the model receives
+        # ordered wire bytes. The declared vocabulary freezes this order.
+        if list(request["questions"]) != list(questions):
+            raise ValueError(f"captured Scout request {record['id']} question order differs from frozen vocabulary")
         bodies[record["id"]] = encoded
     return bodies
 
