@@ -2433,7 +2433,10 @@ mod tests {
             pass.read(invalid, &mut buffer),
             Err(CodeIndexProductionErrorV1::Contract(_))
         ));
-        assert!(buffer.is_empty(), "a refused page cannot expose prior bytes");
+        assert!(
+            buffer.is_empty(),
+            "a refused page cannot expose prior bytes"
+        );
         assert_eq!(pass.open_attempts, 1);
 
         pass.read(request, &mut buffer).unwrap();
@@ -2448,7 +2451,10 @@ mod tests {
             ),
             Err(CodeIndexProductionErrorV1::Contract(_))
         ));
-        assert!(buffer.is_empty(), "a mismatched manifest cannot expose prior bytes");
+        assert!(
+            buffer.is_empty(),
+            "a mismatched manifest cannot expose prior bytes"
+        );
         assert_eq!(pass.open_attempts, 1);
     }
 
