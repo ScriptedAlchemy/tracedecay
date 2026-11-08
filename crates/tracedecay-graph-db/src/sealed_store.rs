@@ -865,9 +865,7 @@ fn discard_failed_sealed_adoption(
     locator: &GenerationLocator,
     expected_digest: &str,
 ) {
-    if let Err(error) =
-        retire_sealed_directory_checked(directory, locator, Some(expected_digest))
-    {
+    if let Err(error) = retire_sealed_directory_checked(directory, locator, Some(expected_digest)) {
         tracing::warn!(
             %error,
             path = %directory.display(),
@@ -3098,8 +3096,7 @@ mod receipt_budget_tests {
             ),
             crate::GraphGenerationId::new("generation:retirement").unwrap(),
         );
-        let directory =
-            sealed_generation_directory(&root, &locator.physical_namespace().unwrap());
+        let directory = sealed_generation_directory(&root, &locator.physical_namespace().unwrap());
         std::fs::create_dir_all(&directory).unwrap();
         let name = directory.file_name().unwrap().to_str().unwrap();
         let sentinel = directory.join("foreign-sentinel");
@@ -3130,7 +3127,10 @@ mod receipt_budget_tests {
         discard_failed_sealed_adoption(&directory, &locator, "other-digest");
         assert_eq!(std::fs::read(&sentinel).unwrap(), b"preserve");
         discard_failed_sealed_adoption(&directory, &locator, "digest");
-        assert!(!directory.exists(), "owned invalid artifacts can be reclaimed");
+        assert!(
+            !directory.exists(),
+            "owned invalid artifacts can be reclaimed"
+        );
         assert_eq!(std::fs::read(sibling.join("sentinel")).unwrap(), b"other");
     }
 
