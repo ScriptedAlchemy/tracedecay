@@ -56,10 +56,11 @@ use tracedecay_code_index::production::{
     CodeGraphBuildBoundV1, CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1,
     CodeIndexInterruptionV1, CodeIndexPreparationPort, CodeIndexProductionErrorV1,
     CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-    SEALED_GENERATION_FORMAT_REVISION_V1, SealedGenerationSegmentPublicationV1,
-    SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1,
-    UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
+    SEALED_GENERATION_FORMAT_REVISION_V1, SealedGenerationSegmentReadV1,
+    SharedDecodedContentPoolV1, UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
 };
+#[cfg(unix)]
+use tracedecay_code_index::production::SealedGenerationSegmentPublicationV1;
 
 /// Re-publication stages an already validated decoded generation through the
 /// same target writer; failures retain the port's exact typed refusal.
