@@ -15,7 +15,9 @@ use std::{
 use tempfile::TempDir;
 use tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort;
-use tracedecay_code_index_retention::code_index_generations::acquire_code_generation_store_lock;
+use tracedecay_code_index_retention::code_index_generations::{
+    acquire_code_generation_store_lock, try_acquire_code_generation_store_read_lock,
+};
 use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexReadinessTargetV1,
     CodeIndexReadinessV1, CodeIndexReadinessWaitReadV1, CodeIndexStalenessStateV1,
@@ -11836,7 +11838,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
     let (scope, privacy_domain) = {
         let mut scheduler = scheduler(
             &fixture,
-            scoped_store,
+            scoped_store.clone(),
             Arc::new(SharedCodeIndexBytePoolV1::default()),
         );
         published(scheduler.reconcile_now().expect("seed retained generation"));
@@ -11932,16 +11934,11 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
         progress.owner_epoch
     };
 
-    let durable_generations_root = {
-        let mut scheduler = scheduler
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let durable = scheduler.publication.generations_root.clone();
-        let blocker = store.path().join("publication-root-blocker");
-        std::fs::write(&blocker, b"not a directory").expect("write publication blocker");
-        scheduler.publication.generations_root = blocker;
-        durable
-    };
+    // A reader permits preparation against the real store and holds off
+    // only the exclusive pointer commit, leaving a valid candidate to retry.
+    let publication_reader = try_acquire_code_generation_store_read_lock(&scoped_store)
+        .expect("open store reader")
+        .expect("generation A has settled");
     fixture.edit(
         "src/file_0000.rs",
         "pub fn beta_0000() -> usize { 10_000 }\n",
@@ -12032,7 +12029,7 @@ async fn graph_off_changed_source_advances_text_authority_without_full_decode() 
             fixture.path(),
             &["commit", "-qam", "advance to generation C"],
         );
-        scheduler.publication.generations_root = durable_generations_root;
+        drop(publication_reader);
         scheduler.request_background_reconcile_for_observed_change();
         assert!(
             scheduler

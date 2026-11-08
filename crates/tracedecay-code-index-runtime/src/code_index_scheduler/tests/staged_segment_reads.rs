@@ -1323,9 +1323,9 @@ fn staged_existing_segments_reuse_authenticated_inodes_without_reopening() {
     let warm_opens = PREPARED_SEGMENT_DIGEST_OPENS
         .with(std::cell::Cell::get)
         .saturating_sub(before);
-    assert!(
-        warm_opens < full_opens,
-        "staged existing segments must not be opened again during verification"
+    assert_eq!(
+        warm_opens, 0,
+        "the pack and all other authenticated segments must stay closed during verification"
     );
 
     // Equal bytes do not authorize silently replacing an already witnessed
@@ -1716,19 +1716,23 @@ fn staged_evidence_pack_writer_authentication_avoids_extra_opens_and_refuses_rep
     let bytes = b"nonempty evidence pack data, authenticated after the staging rename";
     let digest = segment_digest(bytes);
     preparation
-        .write_segment(SealedGenerationSegmentPublicationV1::GenerationEvidencePage {
-            page_ordinal: 0,
-            page_digest: &digest,
-            bytes,
-        })
+        .write_segment(
+            SealedGenerationSegmentPublicationV1::GenerationEvidencePage {
+                page_ordinal: 0,
+                page_digest: &digest,
+                bytes,
+            },
+        )
         .expect("append a real evidence pack page");
     let before = PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get);
     preparation
-        .write_segment(SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
-            segment_digest: &digest,
-            segment_size_bytes: bytes.len() as u64,
-            page_count: 1,
-        })
+        .write_segment(
+            SealedGenerationSegmentPublicationV1::GenerationEvidenceCommit {
+                segment_digest: &digest,
+                segment_size_bytes: bytes.len() as u64,
+                page_count: 1,
+            },
+        )
         .expect("flush and stage evidence pack");
     let (path, witness) = {
         let state = preparation.state.lock().expect("preparation state");
@@ -1748,13 +1752,19 @@ fn staged_evidence_pack_writer_authentication_avoids_extra_opens_and_refuses_rep
             .expect("the evidence pack must retain its writer's authenticated inode")
             .clone();
         assert!(
-            files.segments.pending.values().any(|pending| pending == &path),
+            files
+                .segments
+                .pending
+                .values()
+                .any(|pending| pending == &path),
             "the authenticated file must still be pending publication"
         );
         (path, witness)
     };
     assert_eq!(
-        std::fs::read(&path).expect("staged evidence bytes").as_slice(),
+        std::fs::read(&path)
+            .expect("staged evidence bytes")
+            .as_slice(),
         &bytes[..]
     );
     assert_eq!(segment_digest(bytes), digest);
