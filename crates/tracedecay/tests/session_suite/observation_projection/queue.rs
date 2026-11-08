@@ -568,3 +568,116 @@ async fn stale_exact_duplicate_queue_item_is_consumed_before_later_observation()
     );
     assert_eq!(projection_counts(&tmp).await, (1, 2, 2, 1, 0, 0));
 }
+
+#[tokio::test]
+async fn batched_projection_resumes_after_restart_without_replaying_parked_or_deferred_heads() {
+    let tmp = TempDir::new().unwrap();
+    let database_path;
+    let records = (0_u64..5)
+        .map(|ordinal| {
+            observation(
+                "session-windowed-restart",
+                ordinal * 100,
+                (ordinal + 1) * 100,
+                &format!("receipt.windowed.{ordinal}"),
+                conversational_payload(
+                    &format!("message-windowed-{ordinal}"),
+                    &format!("windowed restart canary {ordinal}"),
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    {
+        let runtime = profile_runtime(&tmp).await;
+        let store = runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
+        database_path = runtime
+            .database_path(HostAdmissionScope::Profile)
+            .unwrap()
+            .to_path_buf();
+
+        for (index, record) in records.iter().enumerate() {
+            let expected = (index > 0)
+                .then(|| cursor("session-windowed-restart", index as u64 * 100));
+            persist(&store, record.clone(), expected).await;
+        }
+        store
+            .project_observation(records[0].observation_id())
+            .await
+            .unwrap();
+        assert_eq!(store.projection_checkpoint().await.unwrap().last_sequence(), 1);
+
+        // A terminal collision remains in the queue behind the committed
+        // checkpoint, while the next real head is initially ready.
+        let conn = rusqlite::Connection::open(&database_path).unwrap();
+        conn.execute(
+            "INSERT INTO projection_queue (observation_id, observation_sequence)
+             VALUES (?1, 1)",
+            rusqlite::params![records[0].observation_id().as_str()],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE projection_queue SET next_retry_at_micros = ?2
+             WHERE observation_id = ?1",
+            rusqlite::params![records[0].observation_id().as_str(), i64::MAX],
+        )
+        .unwrap();
+        // A nonterminal future retry at sequence 4 must fence sequence 5
+        // even though sequence 5 is already due.
+        conn.execute(
+            "UPDATE projection_queue SET next_retry_at_micros = ?2
+             WHERE observation_id = ?1",
+            rusqlite::params![
+                records[3].observation_id().as_str(),
+                i64::MAX - 1
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let batch = store.project_queued_observations(32).await.unwrap().unwrap();
+        assert_eq!(batch.items.len(), 2, "only sequences 2 and 3 are ready");
+        assert!(batch.has_more, "the deferred sequence 4 must remain pending");
+        assert_eq!(store.projection_checkpoint().await.unwrap().last_sequence(), 3);
+        assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 3);
+    }
+
+    {
+        let runtime = profile_runtime(&tmp).await;
+        let store = runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
+        let parked = store.project_queued_observations(32).await.unwrap().unwrap();
+        assert!(parked.items.is_empty(), "restart must not replay committed work");
+        assert!(parked.has_more, "restart must not skip the deferred head");
+        assert_eq!(store.projection_checkpoint().await.unwrap().last_sequence(), 3);
+
+        rusqlite::Connection::open(&database_path)
+            .unwrap()
+            .execute(
+                "UPDATE projection_queue SET next_retry_at_micros = 0
+                 WHERE observation_id = ?1",
+                rusqlite::params![records[3].observation_id().as_str()],
+            )
+            .unwrap();
+
+        let first = store.project_queued_observations(1).await.unwrap().unwrap();
+        assert_eq!(first.items.len(), 1, "one-item window must not overrun its bound");
+        assert!(first.has_more);
+        assert_eq!(store.projection_checkpoint().await.unwrap().last_sequence(), 4);
+
+        let tail = store.project_queued_observations(32).await.unwrap().unwrap();
+        assert_eq!(tail.items.len(), 1);
+        assert!(!tail.has_more, "the terminal collision is not runnable backlog");
+        assert_eq!(store.projection_checkpoint().await.unwrap().last_sequence(), 5);
+        assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 5);
+        assert_eq!(table_count(&tmp, "projection_queue").await, 1);
+
+        let idle = store.project_queued_observations(32).await.unwrap().unwrap();
+        assert!(idle.items.is_empty());
+        assert!(!idle.has_more);
+        assert_eq!(store.projection_checkpoint().await.unwrap().last_sequence(), 5);
+    }
+}
