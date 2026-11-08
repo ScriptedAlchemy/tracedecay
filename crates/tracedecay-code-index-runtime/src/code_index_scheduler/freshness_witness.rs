@@ -535,7 +535,7 @@ fn roster_evidence(
         }
     };
     for entry in index.entries() {
-        collect_ancestors(gix::path::from_bstr(entry.path(&index)).ok()?);
+        collect_ancestors(gix::path::from_bstr(entry.path(&index)).ok()?.as_ref());
     }
     for admission in ignored_source_admissions {
         if validate_code_logical_path(&admission.logical_path).is_err() {
