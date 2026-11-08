@@ -392,7 +392,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         source: &ExactGitTreeSourceV1,
         control: &branch_generations::BranchGenerationReadControlV1,
     ) -> Result<CapturedSnapshotV1, CodeIndexSearchUnavailableReasonV1> {
-        self.capture_git_tree_snapshot(source, control, false)
+        self.capture_git_tree_snapshot(source, control, false, None)
     }
 
     /// HEAD's tree standing in for a clean checkout. Git stores a symlink as
@@ -404,8 +404,9 @@ impl CodeIndexWorktreeSchedulerV1 {
         &self,
         source: &ExactGitTreeSourceV1,
         control: &branch_generations::BranchGenerationReadControlV1,
+        work_observer: Option<&dyn CodeIndexExecutionControlV1>,
     ) -> Result<CapturedSnapshotV1, CodeIndexSearchUnavailableReasonV1> {
-        self.capture_git_tree_snapshot(source, control, true)
+        self.capture_git_tree_snapshot(source, control, true, work_observer)
     }
 
     fn capture_git_tree_snapshot(
@@ -413,6 +414,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         source: &ExactGitTreeSourceV1,
         control: &branch_generations::BranchGenerationReadControlV1,
         refuse_source_links: bool,
+        work_observer: Option<&dyn CodeIndexExecutionControlV1>,
     ) -> Result<CapturedSnapshotV1, CodeIndexSearchUnavailableReasonV1> {
         control.termination().map_or(Ok(()), Err)?;
         let repository = tracedecay_runtime_core::git_open::open(&self.project_root)
@@ -457,6 +459,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             Some(source.revision.clone()),
             source.tree.clone(),
             control,
+            work_observer,
             |visitor| {
                 for entry in entries {
                     control.termination().map_or(Ok(()), Err)?;
@@ -509,6 +512,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             None,
             expected_tree.clone(),
             control,
+            None,
             |visitor| {
                 candidate.visit_blobs(|path| is_source_path(&registry, path), visitor).map_err(|error| match error {
                     tracedecay_runtime_core::git_repository::GitNativeCandidateTreeVisitError::Repository(_) => {
@@ -528,12 +532,14 @@ impl CodeIndexWorktreeSchedulerV1 {
         source_revision: Option<tracedecay_domain::CommitId>,
         tree: tracedecay_domain::TreeId,
         control: &branch_generations::BranchGenerationReadControlV1,
+        work_observer: Option<&dyn CodeIndexExecutionControlV1>,
         visit: impl FnOnce(
             &mut dyn FnMut(&[u8], &[u8]) -> Result<(), CodeIndexSearchUnavailableReasonV1>,
         ) -> Result<(), CodeIndexSearchUnavailableReasonV1>,
     ) -> Result<CapturedSnapshotV1, CodeIndexSearchUnavailableReasonV1> {
         let registry = StaticLanguageRegistry::new();
         let mut roster = CapturedFileRosterV1::default();
+        let mut completed_candidates = 0_u64;
         let _scan_batch = tracedecay_privacy::code_source_scan_batch();
         visit(&mut |git_path, raw_bytes| {
             control.termination().map_or(Ok(()), Err)?;
@@ -550,6 +556,18 @@ impl CodeIndexWorktreeSchedulerV1 {
                 }
             })?;
             roster.push(outcome);
+            // Clean HEAD-tree capture is the common cold path. Its visitor
+            // reports successful real decisions, with no invented total.
+            if let Some(observer) = work_observer {
+                completed_candidates = completed_candidates.saturating_add(1);
+                observer.observed_preseal_work(
+                    tracedecay_code_index::production::CodeIndexPresealWorkV1 {
+                        phase: tracedecay_code_index::production::CodeIndexPresealWorkPhaseV1::Capture,
+                        completed_items: completed_candidates,
+                        total_items: None,
+                    },
+                );
+            }
             Ok(())
         })?;
         let CapturedFileRosterV1 {

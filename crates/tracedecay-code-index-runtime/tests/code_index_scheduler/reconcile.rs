@@ -108,6 +108,33 @@ const MIXED_SOURCE_ROSTER: &[(&str, &str)] = &[
 ];
 
 #[test]
+fn cold_build_reports_actual_preseal_capture_and_parser_evidence() {
+    let fixture = GitFixture::new(&[
+        ("src/a.rs", "pub fn a() -> u32 { 1 }\n"),
+        ("src/b.rs", "pub fn b() -> u32 { 2 }\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let mut owner = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let slot = owner.preseal_attempt_progress_slot();
+    assert!(slot.read().unwrap().snapshot().is_none(), "no fabricated cold progress");
+    published(owner.reconcile_now().expect("real cold capture and publication"));
+    let observed = slot.read().unwrap().snapshot().expect("pre-seal observation");
+    assert!(!observed.active, "a finished attempt cannot appear stalled");
+    assert_eq!(
+        observed.phase,
+        tracedecay_code_index::production::CodeIndexPresealWorkPhaseV1::ParseEvidence
+    );
+    assert_eq!(observed.completed_items, 2);
+    assert_eq!(observed.total_items, Some(2));
+    assert!(observed.last_progress_micros.is_some_and(|at| at > 0));
+    assert!(observed.progress_epoch >= 5, "two captures and two parses plus start");
+}
+
+#[test]
 fn unchanged_mixed_roster_restart_retains_generation_pointer_and_artifact() {
     let fixture = GitFixture::new(MIXED_SOURCE_ROSTER);
     let store = TempDir::new().expect("store root");

@@ -9,7 +9,8 @@ use tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1;
 use tracedecay_domain::CodeGenerationId;
 
 use tracedecay_code_index::{
-    chunks::CodeIndexImportEvidenceV1, production::CodeIndexExecutionControlV1,
+    chunks::CodeIndexImportEvidenceV1,
+    production::{CodeIndexExecutionControlV1, CodeIndexPresealWorkV1},
 };
 use tracedecay_runtime_core::resident_memory::{
     ResidentMemoryPressureStateV1, ResidentMemoryPressureV1,
@@ -99,6 +100,7 @@ pub struct DaemonCodeIndexControlV1 {
     pressure: Option<Arc<ResidentMemoryPressureV1>>,
     tripped: Arc<AtomicBool>,
     ignores_source_epoch: bool,
+    preseal_observer: Option<Arc<dyn Fn(CodeIndexPresealWorkV1) + Send + Sync>>,
 }
 
 impl Default for DaemonCodeIndexControlV1 {
@@ -120,6 +122,7 @@ impl DaemonCodeIndexControlV1 {
             pressure: None,
             tripped: Arc::new(AtomicBool::new(false)),
             ignores_source_epoch: false,
+            preseal_observer: None,
         }
     }
 
@@ -151,6 +154,17 @@ impl DaemonCodeIndexControlV1 {
     #[must_use]
     pub fn with_resident_memory(mut self, pressure: Arc<ResidentMemoryPressureV1>) -> Self {
         self.pressure = Some(pressure);
+        self
+    }
+
+    /// The producer reports only to the separately scoped capture/parse
+    /// attempt, never to the sealed-generation text-progress authority.
+    #[must_use]
+    pub fn with_preseal_observer(
+        mut self,
+        observer: Arc<dyn Fn(CodeIndexPresealWorkV1) + Send + Sync>,
+    ) -> Self {
+        self.preseal_observer = Some(observer);
         self
     }
 
@@ -195,6 +209,12 @@ impl CodeIndexExecutionControlV1 for DaemonCodeIndexControlV1 {
 
     fn is_deadline_exceeded(&self) -> bool {
         false
+    }
+
+    fn observed_preseal_work(&self, work: CodeIndexPresealWorkV1) {
+        if let Some(observer) = &self.preseal_observer {
+            observer(work);
+        }
     }
 }
 

@@ -282,10 +282,32 @@ pub struct CodeIndexCapturedFileV1 {
     pub sensitivity_level: SensitivityLevelV1,
 }
 
+/// Successful pre-seal work observed before a generation ID/digest exists.
+/// Neither event represents a durable text or native graph commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodeIndexPresealWorkPhaseV1 {
+    Capture,
+    /// Parser evidence was materialized or authenticated for reuse, not
+    /// necessarily newly parsed (a retained parent may supply the evidence).
+    ParseEvidence,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CodeIndexPresealWorkV1 {
+    pub phase: CodeIndexPresealWorkPhaseV1,
+    pub completed_items: u64,
+    /// None when a Git tree visitor has no authenticated source count yet.
+    pub total_items: Option<u64>,
+}
+
 /// Synchronous checkpoints exposed by an application/daemon request.
 pub trait CodeIndexExecutionControlV1: Sync {
     fn is_cancelled(&self) -> bool;
     fn is_deadline_exceeded(&self) -> bool;
+
+    /// Only a daemon-bound attempt has a progress owner. A benchmark,
+    /// historical read or standalone extraction has none to update.
+    fn observed_preseal_work(&self, _work: CodeIndexPresealWorkV1) {}
 }
 
 /// A control that never interrupts. Sealed seating uses it when the caller
@@ -2713,6 +2735,13 @@ where
                         chunk_policy.with_chunks_under(&chunk.sensitivity.policy_revision);
                 }
                 file_segments.push(descriptor);
+                // The file segment is staged, but no generation has sealed.
+                // Do not count this as a durable lexical or native graph page.
+                control.observed_preseal_work(CodeIndexPresealWorkV1 {
+                    phase: CodeIndexPresealWorkPhaseV1::ParseEvidence,
+                    completed_items: u64::try_from(file_segments.len()).unwrap_or(u64::MAX),
+                    total_items: Some(u64::try_from(present_count).unwrap_or(u64::MAX)),
+                });
                 captured_files.remove(&artifact.extraction.file_occurrence_id);
                 self.physical_artifacts.insert(reuse_key, &artifact);
                 // Both cache authorities are weak: dropping this artifact is
