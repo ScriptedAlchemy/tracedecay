@@ -18,6 +18,12 @@ use std::os::unix::fs::MetadataExt;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 
+#[cfg(all(test, unix))]
+thread_local! {
+    static PREPARED_SEGMENT_DIGEST_OPENS: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
 #[cfg(not(unix))]
 use same_file::Handle;
 use sha2::{Digest, Sha256};
@@ -1067,6 +1073,10 @@ struct StagedGenerationSegmentsV1 {
     durable: DurableFileBatch,
     /// Temporary path of every written segment, keyed by its final name.
     pending: BTreeMap<PathBuf, PathBuf>,
+    // Previously authenticated canonical inodes need only an identity check
+    // at commit; reopening all unchanged segments repeats endpoint scans.
+    #[cfg(unix)]
+    verified_existing: BTreeMap<PathBuf, std::fs::Metadata>,
     flushed: bool,
 }
 
@@ -1075,6 +1085,8 @@ impl StagedGenerationSegmentsV1 {
         Self {
             durable: DurableFileBatch::new(),
             pending: BTreeMap::new(),
+            #[cfg(unix)]
+            verified_existing: BTreeMap::new(),
             flushed: false,
         }
     }
@@ -1646,8 +1658,24 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 existing_segment_bytes_read.fetch_add(metadata.len(), Ordering::Relaxed);
                 if !metadata.file_type().is_file()
                     || metadata.len() != u64::try_from(bytes.len()).map_err(Self::unavailable)?
-                    || Self::state_digest_file(&final_path)? != expected_digest
                 {
+                    return Err(Self::corruption(
+                        "existing sealed segment does not match its content address",
+                    ));
+                }
+                #[cfg(unix)]
+                {
+                    if Self::state_digest_existing_segment(&final_path, &metadata)?
+                        != expected_digest
+                    {
+                        return Err(Self::corruption(
+                            "existing sealed segment does not match its content address",
+                        ));
+                    }
+                    staged.verified_existing.insert(final_path, metadata);
+                }
+                #[cfg(not(unix))]
+                if Self::state_digest_file(&final_path)? != expected_digest {
                     return Err(Self::corruption(
                         "existing sealed segment does not match its content address",
                     ));
@@ -1674,7 +1702,36 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .map_err(Self::unavailable)
     }
 
+    #[cfg(unix)]
+    fn state_digest_existing_segment(
+        path: &Path,
+        original: &std::fs::Metadata,
+    ) -> Result<String, CodeIndexPublicationStoreErrorV1> {
+        #[cfg(test)]
+        PREPARED_SEGMENT_DIGEST_OPENS.with(|count| count.set(count.get().saturating_add(1)));
+        let mut file = File::open(path).map_err(Self::unavailable)?;
+        let opened = file.metadata().map_err(Self::unavailable)?;
+        if !Self::same_unix_segment_identity(original, &opened) {
+            return Err(Self::corruption(
+                "existing sealed segment changed before authentication",
+            ));
+        }
+        let digest = Self::state_digest_reader(&mut file)?;
+        let after = file.metadata().map_err(Self::unavailable)?;
+        let named = path.symlink_metadata().map_err(Self::unavailable)?;
+        if !Self::same_unix_segment_identity(original, &after)
+            || !Self::same_unix_segment_identity(original, &named)
+        {
+            return Err(Self::corruption(
+                "existing sealed segment changed during authentication",
+            ));
+        }
+        Ok(digest)
+    }
+
     fn state_digest_file(path: &Path) -> Result<String, CodeIndexPublicationStoreErrorV1> {
+        #[cfg(all(test, unix))]
+        PREPARED_SEGMENT_DIGEST_OPENS.with(|count| count.set(count.get().saturating_add(1)));
         let mut file = File::open(path).map_err(Self::unavailable)?;
         Self::state_digest_reader(&mut file)
     }
@@ -3947,10 +4004,22 @@ impl DaemonCodeIndexPublicationStoreV1 {
                     Self::unavailable(error)
                 }
             })?;
-            if !metadata.file_type().is_file()
-                || metadata.len() != identity.size_bytes
-                || Self::state_digest_file(path)? != identity.digest.as_str()
-            {
+            if !metadata.file_type().is_file() || metadata.len() != identity.size_bytes {
+                return Err(Self::corruption(
+                    "prepared generation segment does not match its manifest identity",
+                ));
+            }
+            #[cfg(unix)]
+            if let Some(original) = files.segments.verified_existing.get(&canonical) {
+                if !Self::same_unix_segment_identity(original, &metadata) {
+                    return Err(Self::corruption(
+                        "previously verified sealed segment changed before commit",
+                    ));
+                }
+                verified.insert(identity.digest, identity.size_bytes);
+                continue;
+            }
+            if Self::state_digest_file(path)? != identity.digest.as_str() {
                 return Err(Self::corruption(
                     "prepared generation segment does not match its manifest identity",
                 ));

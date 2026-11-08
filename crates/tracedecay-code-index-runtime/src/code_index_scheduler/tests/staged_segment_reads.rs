@@ -24,7 +24,8 @@ use tracedecay_domain::{ManifestDigest, ProjectId, SanitizerRevision, sha256_hex
 
 use super::{
     DaemonCodeIndexPreparationStateV1, DaemonCodeIndexPreparationV1,
-    DaemonCodeIndexPublicationStoreV1, MAX_STAGED_SEGMENT_READ_HANDLES, SharedCodeIndexBytePoolV1,
+    DaemonCodeIndexPublicationStoreV1, MAX_STAGED_SEGMENT_READ_HANDLES,
+    PREPARED_SEGMENT_DIGEST_OPENS, SharedCodeIndexBytePoolV1,
 };
 use crate::code_index_scheduler::tests::GitFixture;
 use crate::code_index_scheduler::{CodeIndexReconcileOutcomeV1, CodeIndexWorktreeSchedulerV1};
@@ -1076,4 +1077,111 @@ fn retained_generation_read_refuses_pre_and_post_io_interruptions_without_leakin
         .read_retained_partitioned_segment(&sealed, request, &mut bytes, &active)
         .expect("unchanged generation remains readable");
     assert_eq!(bytes, expected);
+}
+
+#[test]
+fn staged_existing_segments_reuse_authenticated_inodes_without_reopening() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let source_root = TempDir::new().expect("source store");
+    let generation = source_generation(&fixture, source_root.path());
+    let target_root = TempDir::new().expect("target store");
+    let mut target = target_store(target_root.path(), &fixture);
+    let mut first = target
+        .prepare(&generation.sealed_scope(), None)
+        .expect("first preparation");
+    let publication = generation
+        .stage_publication(&mut first)
+        .expect("stage real generation");
+    target
+        .commit(&mut first, &publication)
+        .expect("publish canonical sealed segments");
+    drop(first);
+
+    // A manifest supplied without stage ownership must authenticate every
+    // canonical file, not trust its digest-shaped filename.
+    let unproven = target
+        .prepare(
+            &generation.sealed_scope(),
+            Some(&generation.manifest().generation_id),
+        )
+        .expect("unproven preparation");
+    let full_before = PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get);
+    {
+        let state = unproven.state.lock().expect("unproven state");
+        let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
+            panic!("unproven preparation must remain open");
+        };
+        target
+            .verify_prepared_segments(files, publication.manifest_bytes().as_ref())
+            .expect("authenticate independently supplied manifest");
+    }
+    let full_opens = PREPARED_SEGMENT_DIGEST_OPENS
+        .with(std::cell::Cell::get)
+        .saturating_sub(full_before);
+    assert!(full_opens > 0, "the counter must observe canonical file opens");
+    unproven.abort().expect("abort unproven preparation");
+
+    let mut staged = target
+        .prepare(
+            &generation.sealed_scope(),
+            Some(&generation.manifest().generation_id),
+        )
+        .expect("new preparation");
+    let staged_publication = generation
+        .stage_publication(&mut staged)
+        .expect("restage existing canonical bytes");
+    let before = PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get);
+    let existing_path = {
+        let state = staged.state.lock().expect("staged state");
+        let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
+            panic!("staged preparation must remain open");
+        };
+        let path = files
+            .segments
+            .verified_existing
+            .keys()
+            .next()
+            .expect("previously verified canonical segment")
+            .clone();
+        target
+            .verify_prepared_segments(files, staged_publication.manifest_bytes().as_ref())
+            .expect("reuse sealed inode authentication");
+        path
+    };
+    let warm_opens = PREPARED_SEGMENT_DIGEST_OPENS
+        .with(std::cell::Cell::get)
+        .saturating_sub(before);
+    assert!(
+        warm_opens < full_opens,
+        "staged existing segments must not be opened again during verification"
+    );
+
+    // Equal bytes do not authorize silently replacing an already witnessed
+    // immutable inode between stage and commit.
+    let replacement = existing_path.with_extension("witness-replacement.tmp");
+    std::fs::write(
+        &replacement,
+        std::fs::read(&existing_path).expect("canonical bytes"),
+    )
+    .expect("same-content replacement");
+    std::fs::rename(&replacement, &existing_path).expect("replace canonical inode");
+    let opens_before_refusal = PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get);
+    {
+        let state = staged.state.lock().expect("staged state after replacement");
+        let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
+            panic!("staged preparation must remain open");
+        };
+        assert!(
+            target
+                .verify_prepared_segments(files, staged_publication.manifest_bytes().as_ref())
+                .is_err(),
+            "a substituted inode must be refused even with identical bytes"
+        );
+    }
+    assert_eq!(
+        PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get),
+        opens_before_refusal,
+        "identity refusal must not reopen the replaced pathname"
+    );
+    staged.abort().expect("abort changed preparation");
 }
