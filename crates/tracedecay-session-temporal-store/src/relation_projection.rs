@@ -1304,32 +1304,13 @@ pub(crate) async fn introduced_logical_copies(
 pub(crate) async fn candidate_session_relation_projection(
     conn: &impl crate::handle::SessionTemporalQuery,
     scope: &SessionRelationScope,
-    store: &super::relations::SessionRelationGraphStore,
+    base: Option<&SessionRelationProjection>,
     session_id: &SessionId,
     generation: SessionProjectionGenerationV1,
     max_entities: usize,
     max_relations: usize,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> SessionStoreResult<SessionRelationProjection> {
-    let generation_value = generation_i64(generation, RECONSTRUCT_OPERATION)?;
-    let mut rows = conn
-        .query(
-            "SELECT generation FROM session_temporal_generations
-             WHERE session_id = ?1 AND generation < ?2 AND state = 'active'",
-            params![session_id.as_str(), generation_value],
-        )
-        .await
-        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-    let base_generation = rows
-        .next()
-        .await
-        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
-        .map(|row| {
-            row.get::<i64>(0)
-                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))
-        })
-        .transpose()?;
-    drop(rows);
     let reconstruct = || {
         reconstruct_session_relation_projection(
             conn,
@@ -1341,24 +1322,8 @@ pub(crate) async fn candidate_session_relation_projection(
             Arc::clone(&cancellation),
         )
     };
-    let Some(base_generation) = base_generation else {
+    let Some(base) = base else {
         return reconstruct().await;
-    };
-    let base_generation =
-        u64::try_from(base_generation).map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-    let base = match store.load_projection(
-        scope,
-        session_id,
-        base_generation,
-        max_entities,
-        max_relations,
-        Arc::clone(&cancellation),
-    ) {
-        Ok(base) => base,
-        Err(SessionRelationError::NotFound) => {
-            return reconstruct().await;
-        }
-        Err(error) => return Err(storage(RECONSTRUCT_OPERATION, error)),
     };
     let Some(introduced) =
         introduced_occurrence_relations(conn, session_id, generation, max_entities, &cancellation)
@@ -1366,7 +1331,7 @@ pub(crate) async fn candidate_session_relation_projection(
     else {
         return reconstruct().await;
     };
-    let mut relations = OccurrenceRelations::from_projection(&base);
+    let mut relations = OccurrenceRelations::from_projection(base);
     let (copies, threads, agents, observed_parent) = introduced.into_parts();
     for copy in copies {
         relations.insert_copy(copy);
