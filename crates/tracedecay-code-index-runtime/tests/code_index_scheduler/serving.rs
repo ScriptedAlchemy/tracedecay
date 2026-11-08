@@ -3157,6 +3157,72 @@ fn a_new_staging_attempt_can_truthfully_restart_committed_progress() {
 }
 
 #[test]
+fn retrying_an_unchanged_phase_does_not_fabricate_status_progress() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn caller() { callee(); }\npub fn callee() {}\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("publish"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    assert!(
+        !latest.advance_text_serving(0).expect("open text projection"),
+        "a zero-work admission must leave the projection pending"
+    );
+    let before = build_progress_snapshot(&scheduler);
+    assert_ne!(before.phase, CodeIndexBuildPhaseV1::Ready);
+
+    latest.text.publish_text_progress_phase(
+        before.phase,
+        before.current_batch_pages,
+        before.current_batch_payload_bytes,
+    );
+    let repeated = build_progress_snapshot(&scheduler);
+    assert_eq!(
+        repeated.progress_epoch, before.progress_epoch,
+        "a retry reporting no new phase or batch boundary must not feign progress"
+    );
+    assert_eq!(repeated.last_progress_micros, before.last_progress_micros);
+    assert_eq!(repeated.committed_pages, before.committed_pages);
+
+    let next_phase = if before.phase == CodeIndexBuildPhaseV1::Verification {
+        CodeIndexBuildPhaseV1::GraphPublication
+    } else {
+        CodeIndexBuildPhaseV1::Verification
+    };
+    latest.text.publish_text_progress_phase(
+        next_phase,
+        before.current_batch_pages,
+        before.current_batch_payload_bytes,
+    );
+    let transitioned = build_progress_snapshot(&scheduler);
+    assert_eq!(transitioned.phase, next_phase);
+    assert!(transitioned.progress_epoch > before.progress_epoch);
+    latest.text.publish_text_progress_phase(
+        next_phase,
+        before.current_batch_pages,
+        before.current_batch_payload_bytes,
+    );
+    let unchanged = build_progress_snapshot(&scheduler);
+    assert_eq!(unchanged.progress_epoch, transitioned.progress_epoch);
+    assert_eq!(unchanged.last_progress_micros, transitioned.last_progress_micros);
+
+    let mut advances = 0;
+    while !latest.advance_text_serving(8).expect("resume durable text build") {
+        advances += 1;
+        assert!(advances < 1_000, "text build failed to finish");
+    }
+    let ready = build_progress_snapshot(&scheduler);
+    assert_eq!(ready.phase, CodeIndexBuildPhaseV1::Ready);
+    assert!(ready.progress_epoch > transitioned.progress_epoch);
+}
+
+#[test]
 fn repeated_blocked_reason_is_not_reported_as_new_progress() {
     let generation = CodeGenerationId::new("generation.blocked-report").expect("generation");
     let mut slot = super::super::CodeIndexBuildProgressSlotStateV1::default();

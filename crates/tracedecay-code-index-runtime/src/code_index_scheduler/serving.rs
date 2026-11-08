@@ -2732,6 +2732,15 @@ impl LatestCodeTextGenerationV1 {
                 let Some(current) = slot.snapshot() else {
                     return;
                 };
+                // A retry that re-enters an unchanged phase has not made
+                // progress. Keep the last committed observation epoch and
+                // elapsed sample until a new phase or batch boundary arrives.
+                if current.phase == phase
+                    && current.current_batch_pages == current_batch_pages
+                    && current.current_batch_payload_bytes == current_batch_payload_bytes
+                {
+                    return;
+                }
                 let mut snapshot = current.as_ref().clone();
                 snapshot.phase = phase;
                 if !phase_has_file_rate_estimate(phase) {
