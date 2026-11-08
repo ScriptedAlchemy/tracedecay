@@ -328,12 +328,12 @@ fn a_comment_beside_same_named_symbols_decodes_only_what_it_reaches() {
         .collect::<String>()
         + UTIL;
     let edited = format!("{util}// probe line\n");
-    let other = "pub struct Other;\nimpl Other { pub fn new() -> Self { Other } }\n";
+    let other = "pub fn new() -> u32 { 7 }\n";
     let callers = (0..4)
         .map(|n| {
             (
                 format!("src/caller{n}.rs"),
-                format!("pub fn caller{n}() {{ let _ = crate::other::Other::new(); }}\n"),
+                format!("pub fn caller{n}() {{ let _ = crate::other::new(); }}\n"),
             )
         })
         .collect::<Vec<_>>();

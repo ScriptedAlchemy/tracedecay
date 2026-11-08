@@ -47,13 +47,13 @@ fn tree_request(util: &str, sealed_at: i64, phase: &str) -> CodeIndexBuildReques
         ("src/util.rs".to_owned(), util.to_owned()),
         (
             "src/other.rs".to_owned(),
-            "pub struct Other;\nimpl Other { pub fn new() -> Self { Other } }\n".to_owned(),
+            "pub fn new() -> u32 { 7 }\n".to_owned(),
         ),
     ];
     sources.extend((0..4).map(|n| {
         (
             format!("src/caller{n}.rs"),
-            format!("pub fn caller{n}() {{ let _ = crate::other::Other::new(); }}\n"),
+            format!("pub fn caller{n}() {{ let _ = crate::other::new(); }}\n"),
         )
     }));
     sources.sort();
@@ -190,7 +190,9 @@ fn comment_successor_skips_unrelated_evidence_and_publishes_the_cold_chunk_delta
     // successor advances its parent's generation sequence. Their canonical
     // partitions must agree, but their seal/generation identities must not.
     let changes = &sparse.projection().request().changes;
-    changes.validate().expect("published chunk delta is canonical");
+    changes
+        .validate()
+        .expect("published chunk delta is canonical");
     assert_eq!(
         changes.from_generation.as_ref(),
         Some(&parent.manifest().generation_id)
