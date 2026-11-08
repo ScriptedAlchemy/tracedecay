@@ -5,11 +5,19 @@
 //! Every mutation is relative to an open `Dir` handle so a parent path
 //! swapped for a symlink cannot redirect the operation.
 
+#[cfg(unix)]
+use std::ffi::CString;
 use std::ffi::OsStr;
 use std::io;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 
-#[cfg(windows)]
 use cap_fs_ext::DirExt;
+#[cfg(windows)]
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 #[cfg(not(windows))]
 use cap_fs_ext::OpenOptionsMaybeDirExt;
 use cap_std::fs::{Dir, File, OpenOptions};
@@ -72,8 +80,6 @@ pub fn rename_noreplace(
 ) -> io::Result<()> {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
-        use std::os::fd::AsRawFd;
-
         crate::rename_noreplace::rename_noreplace_at(
             from_parent.as_raw_fd(),
             from,
@@ -83,8 +89,6 @@ pub fn rename_noreplace(
     }
     #[cfg(target_os = "macos")]
     {
-        use std::os::fd::AsRawFd;
-
         crate::rename_noreplace::rename_noreplace_at(
             from_parent.as_raw_fd(),
             from,
@@ -210,6 +214,179 @@ pub fn sync_directory(directory: &Dir) -> io::Result<()> {
             .open_with(".", &options)
             .and_then(|file| file.sync_all())
     }
+}
+
+fn single_component(name: &OsStr) -> io::Result<()> {
+    let mut parts = Path::new(name).components();
+    if !matches!(parts.next(), Some(std::path::Component::Normal(_)))
+        || parts.next().is_some()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "directory operation requires one entry name",
+        ));
+    }
+    Ok(())
+}
+
+fn open_root_nofollow(root_path: &Path) -> io::Result<Dir> {
+    let parent_path = root_path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "sealed root has no parent"))?;
+    let root_name = root_path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "sealed root has no name"))?;
+    let parent = Dir::open_ambient_dir(parent_path, cap_std::ambient_authority())?;
+    parent.open_dir_nofollow(root_name)
+}
+
+/// Remove exactly one held child directory without following a substituted
+/// sealed-root or child symlink. Missing entries are idempotent; other failures
+/// remain errors so callers can retain retry ownership.
+pub fn remove_child_directory_nofollow(root_path: &Path, name: &OsStr) -> io::Result<bool> {
+    single_component(name)?;
+    let root = match open_root_nofollow(root_path) {
+        Ok(root) => root,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let child = match root.open_dir_nofollow(name) {
+        Ok(child) => child,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    remove_open_dir_all_nofollow(child)?;
+    Ok(true)
+}
+
+/// Retire a named generation only when a bounded receipt read from the SAME
+/// opened directory proves the requested identity. Missing is idempotent;
+/// unknown receipts are refusals, never permission to discard durable bytes.
+pub fn remove_receipted_child_directory_nofollow(
+    root_path: &Path,
+    child_name: &OsStr,
+    receipt_name: &OsStr,
+    maximum: usize,
+    authorized: impl FnOnce(&[u8]) -> bool,
+) -> io::Result<bool> {
+    single_component(child_name)?;
+    single_component(receipt_name)?;
+    let root = match open_root_nofollow(root_path) {
+        Ok(root) => root,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let child = match root.open_dir_nofollow(child_name) {
+        Ok(child) => child,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let receipt = read_bounded_child_receipt(&child, receipt_name, maximum)?;
+    if !authorized(&receipt) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "sealed generation retirement receipt did not prove its ownership",
+        ));
+    }
+    remove_open_dir_all_nofollow(child)?;
+    Ok(true)
+}
+
+/// Removes only children authorized by a bounded receipt read from the exact
+/// directory handle that will be deleted. The sealed root and each child are
+/// held capabilities: replacing either pathname after receipt validation
+/// cannot redirect recursive removal to a different tree.
+///
+/// The caller must own exclusive store maintenance. Unknown, invalid and
+/// unreadable child receipts preserve their directory; an actual deletion
+/// failure is returned so retirement can retry instead of claiming success.
+pub fn remove_receipted_directories_nofollow(
+    root_path: &Path,
+    receipt_name: &OsStr,
+    maximum: usize,
+    mut authorized: impl FnMut(&OsStr, &[u8]) -> bool,
+) -> io::Result<usize> {
+    // Receipt names are always a single sibling: a slash-bearing name could
+    // otherwise traverse a different directory even with O_NOFOLLOW.
+    let mut receipt_components = Path::new(receipt_name).components();
+    if !matches!(
+        receipt_components.next(),
+        Some(std::path::Component::Normal(_))
+    ) || receipt_components.next().is_some()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "receipt must be a single filename",
+        ));
+    }
+    let root = open_root_nofollow(root_path)?;
+    let mut removed = 0usize;
+    for entry in root.read_dir(".")? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        // Do not trust the DirEntry's former pathname kind after a rename.
+        let child = match root.open_dir_nofollow(&name) {
+            Ok(child) => child,
+            Err(error) => {
+                tracing::warn!(%error, entry = ?name, "sealed child could not be verified");
+                continue;
+            }
+        };
+        let receipt = match read_bounded_child_receipt(&child, receipt_name, maximum) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                tracing::warn!(%error, entry = ?name, "unverified sealed receipt preserved");
+                continue;
+            }
+        };
+        if authorized(&name, &receipt) {
+            remove_open_dir_all_nofollow(child)?;
+            removed = removed.saturating_add(1);
+        }
+    }
+    Ok(removed)
+}
+
+#[cfg(unix)]
+fn read_bounded_child_receipt(
+    directory: &Dir,
+    name: &OsStr,
+    maximum: usize,
+) -> io::Result<Vec<u8>> {
+    let name = CString::new(name.as_bytes()).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidInput, "receipt name contains NUL")
+    })?;
+    // SAFETY: the held directory fd is valid; name is a NUL-terminated
+    // sibling component. O_NOFOLLOW prevents link traversal and O_NONBLOCK
+    // prevents a substituted FIFO from blocking before the regular-file check.
+    let descriptor = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        )
+    };
+    if descriptor < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: openat returned a new owned fd and this File is its sole owner.
+    let file = unsafe { std::fs::File::from_raw_fd(descriptor) };
+    crate::framed_log::read_bounded_open_file(file, maximum)
+}
+
+#[cfg(windows)]
+fn read_bounded_child_receipt(
+    directory: &Dir,
+    name: &OsStr,
+    maximum: usize,
+) -> io::Result<Vec<u8>> {
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let file = directory.open_with(name, &options)?.into_std();
+    crate::framed_log::read_bounded_open_file(file, maximum)
 }
 
 /// Removes the held directory without following child symlinks.
@@ -370,6 +547,174 @@ mod tests {
         assert_eq!(
             std::fs::read(external.path().join("sentinel")).expect("sentinel survives"),
             b"preserve"
+        );
+    }
+
+
+    /// A parent-path swap after receipt validation must not redirect cleanup:
+    /// the already-open child is removed, and matching foreign bytes survive.
+    #[cfg(unix)]
+    #[test]
+    fn verified_cleanup_remains_bound_when_sealed_root_is_substituted() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("graph.sealed");
+        let displaced = temp.path().join("owned-displaced");
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::create_dir_all(foreign.join("a")).unwrap();
+        std::fs::write(root.join("a/sealed.json"), b"owned receipt").unwrap();
+        std::fs::write(root.join("a/owned"), b"owned").unwrap();
+        std::fs::write(foreign.join("a/sentinel"), b"foreign").unwrap();
+
+        let removed = remove_receipted_directories_nofollow(
+            &root,
+            OsStr::new("sealed.json"),
+            1024,
+            |name, bytes| {
+                assert_eq!(name, OsStr::new("a"));
+                assert_eq!(bytes, b"owned receipt");
+                std::fs::rename(&root, &displaced).unwrap();
+                std::os::unix::fs::symlink(&foreign, &root).unwrap();
+                true
+            },
+        )
+        .unwrap();
+        assert_eq!(removed, 1);
+        assert!(!displaced.join("a").exists());
+        assert_eq!(std::fs::read(foreign.join("a/sentinel")).unwrap(), b"foreign");
+    }
+
+    /// The child also remains the exact opened directory when its original
+    /// entry name becomes occupied by an unrelated real directory.
+    #[cfg(unix)]
+    #[test]
+    fn verified_cleanup_does_not_remove_a_replacement_real_child() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("graph.sealed");
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::write(root.join("a/sealed.json"), b"owned receipt").unwrap();
+        let moved = root.join("moved");
+        let removed = remove_receipted_directories_nofollow(
+            &root,
+            OsStr::new("sealed.json"),
+            1024,
+            |_, bytes| {
+                assert_eq!(bytes, b"owned receipt");
+                std::fs::rename(root.join("a"), &moved).unwrap();
+                std::fs::create_dir(root.join("a")).unwrap();
+                std::fs::write(root.join("a/sentinel"), b"foreign").unwrap();
+                true
+            },
+        )
+        .unwrap();
+        assert_eq!(removed, 1);
+        assert!(!moved.exists());
+        assert_eq!(std::fs::read(root.join("a/sentinel")).unwrap(), b"foreign");
+    }
+
+    #[test]
+    fn a_receipt_filename_cannot_escape_its_held_child() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sealed");
+        std::fs::create_dir(&root).unwrap();
+        for receipt in ["../outside", "a/b", "."] {
+            let error = remove_receipted_directories_nofollow(
+                &root,
+                OsStr::new(receipt),
+                512,
+                |_, _| true,
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_receipted_retirement_preserves_unknown_and_swapped_real_children() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("graph.sealed");
+        let child = root.join("a");
+        let moved = root.join("moved");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(child.join("sealed.json"), b"owned receipt").unwrap();
+        std::fs::write(child.join("owned"), b"owned").unwrap();
+        assert_eq!(
+            remove_receipted_child_directory_nofollow(
+                &root,
+                OsStr::new("a"),
+                OsStr::new("sealed.json"),
+                1024,
+                |_| false,
+            )
+            .unwrap_err()
+            .kind(),
+            io::ErrorKind::PermissionDenied,
+        );
+        assert_eq!(std::fs::read(child.join("owned")).unwrap(), b"owned");
+        let removed = remove_receipted_child_directory_nofollow(
+            &root,
+            OsStr::new("a"),
+            OsStr::new("sealed.json"),
+            1024,
+            |receipt| {
+                assert_eq!(receipt, b"owned receipt");
+                std::fs::rename(&child, &moved).unwrap();
+                std::fs::create_dir(&child).unwrap();
+                std::fs::write(child.join("foreign"), b"preserve").unwrap();
+                true
+            },
+        )
+        .unwrap();
+        assert!(removed);
+        assert!(
+            !moved.exists(),
+            "only the receipt-authorized directory is deleted"
+        );
+        assert_eq!(
+            std::fs::read(child.join("foreign")).unwrap(),
+            b"preserve"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_cleanup_refuses_a_substituted_root_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("graph.sealed");
+        let displaced = temp.path().join("original");
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::create_dir_all(foreign.join("a")).unwrap();
+        std::fs::write(root.join("a/sealed.json"), b"owned").unwrap();
+        std::fs::write(foreign.join("a/sealed.json"), b"foreign").unwrap();
+        std::fs::write(foreign.join("a/sentinel"), b"preserve").unwrap();
+        std::fs::rename(&root, &displaced).unwrap();
+        std::os::unix::fs::symlink(&foreign, &root).unwrap();
+        assert!(remove_child_directory_nofollow(&root, OsStr::new("a")).is_err());
+        assert!(
+            remove_receipted_child_directory_nofollow(
+                &root,
+                OsStr::new("a"),
+                OsStr::new("sealed.json"),
+                1024,
+                |_| true,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read(foreign.join("a/sentinel")).unwrap(),
+            b"preserve"
+        );
+        assert_eq!(
+            std::fs::read(displaced.join("a/sealed.json")).unwrap(),
+            b"owned"
+        );
+        assert_eq!(
+            remove_child_directory_nofollow(&displaced, OsStr::new("../a"))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput,
         );
     }
 
