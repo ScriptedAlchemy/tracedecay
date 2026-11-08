@@ -4,19 +4,15 @@
 //! (`store_maintenance::run_registered_code_generation_retention`).
 
 use std::collections::BTreeSet;
-use std::ffi::OsStr;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
-#[cfg(unix)]
-use cap_std::fs::OpenOptionsExt;
+use cap_fs_ext::{DirExt, FollowSymlinks, MetadataExt, OpenOptionsFollowExt, OpenOptionsSyncExt};
 use cap_std::fs::{Dir, OpenOptions};
 use serde::{Deserialize, Serialize};
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_private_fs::capability_dir::{replace_file, sync_directory};
+use tracedecay_private_fs::capability_dir::replace_file_in_open_directory;
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
 use super::{incident_debris, orphan_stores};
@@ -26,7 +22,6 @@ const COLD_STORE_PAGE_LIMIT: usize = 8;
 const CHECKPOINT_DIRECTORY: &str = "maintenance";
 const CHECKPOINT_FILE: &str = "retention-cold-store-cursor-v1.json";
 const MAX_CHECKPOINT_BYTES: u64 = 64 * 1024;
-static CURSOR_TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 struct ColdStoreCursorV1 {
@@ -85,8 +80,13 @@ pub async fn run_cold_store_page(
     owner_roots: &BTreeSet<PathBuf>,
     cancellation: &CancellationToken,
 ) -> tracedecay_domain::errors::Result<ColdStorePageReportV1> {
-    let checkpoint_path = checkpoint_path(profile_root);
-    let cursor = load_cursor(&checkpoint_path).unwrap_or(ColdStoreCursorV1 {
+    let admitted = Dir::from_std_file(profile_database.profile_sessions_directory()?);
+    let directory = admitted_checkpoint_directory(&admitted, profile_root).map_err(|error| {
+        tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("open maintenance cold-store cursor directory: {error}"),
+        }
+    })?;
+    let cursor = load_cursor_in_dir(&directory).unwrap_or(ColdStoreCursorV1 {
         after_project_id: None,
         after_unregistered_directory: None,
     });
@@ -205,7 +205,7 @@ pub async fn run_cold_store_page(
         after_project_id: page.next_cursor,
         after_unregistered_directory,
     };
-    persist_cursor(&checkpoint_path, &next_cursor).map_err(|error| {
+    persist_cursor_in_dir(&directory, &next_cursor).map_err(|error| {
         tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("persist maintenance cold-store cursor: {error}"),
         }
@@ -229,52 +229,41 @@ fn classify_cold_store_state(
     }
 }
 
+#[cfg(test)]
 fn checkpoint_path(profile_root: &Path) -> PathBuf {
     profile_root
         .join(CHECKPOINT_DIRECTORY)
         .join(CHECKPOINT_FILE)
 }
 
+fn admitted_checkpoint_directory(admitted: &Dir, profile_root: &Path) -> io::Result<Dir> {
+    let supplied =
+        Dir::open_ambient_dir(profile_root, cap_std::ambient_authority())?.dir_metadata()?;
+    let owner = admitted.dir_metadata()?;
+    if (supplied.dev(), supplied.ino()) != (owner.dev(), owner.ino()) {
+        return Err(io::Error::other(
+            "profile directory differs from the admitted owner",
+        ));
+    }
+    checkpoint_directory(admitted)
+}
+
 // Keep the maintenance directory capability open for the whole cursor read or
 // publish. A path check followed by a path-based open or rename can be raced
 // with a symlink substitution of "maintenance".
-fn checkpoint_directory(path: &Path, create: bool) -> io::Result<Dir> {
-    let profile = path
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| io::Error::other("maintenance cursor has no profile root"))?;
-    let root = Dir::open_ambient_dir(profile, cap_std::ambient_authority())?;
-    if create {
-        match root.create_dir(CHECKPOINT_DIRECTORY) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
-        }
+fn checkpoint_directory(root: &Dir) -> io::Result<Dir> {
+    match root.create_dir(CHECKPOINT_DIRECTORY) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
     }
     root.open_dir_nofollow(CHECKPOINT_DIRECTORY)
 }
 
 #[tracing::instrument(name = "maintenance.cold_store.load_cursor", level = "trace", skip_all)]
-fn load_cursor(path: &Path) -> Option<ColdStoreCursorV1> {
-    let directory = match checkpoint_directory(path, false) {
-        Ok(directory) => directory,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
-        Err(error) => {
-            tracing::warn!(
-                event = "retention_cold_store_cursor_invalid",
-                reason = "untrusted_directory",
-                %error,
-                "maintenance cursor directory is unsafe; restarting its bounded census"
-            );
-            return None;
-        }
-    };
-    load_cursor_in_dir(&directory)
-}
-
 fn load_cursor_in_dir(directory: &Dir) -> Option<ColdStoreCursorV1> {
     let mut options = OpenOptions::new();
-    options.read(true).follow(FollowSymlinks::No);
+    options.read(true).follow(FollowSymlinks::No).nonblock(true);
     let file = match directory.open_with(CHECKPOINT_FILE, &options) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
@@ -325,50 +314,9 @@ fn load_cursor_in_dir(directory: &Dir) -> Option<ColdStoreCursorV1> {
     level = "trace",
     skip_all
 )]
-fn persist_cursor(path: &Path, cursor: &ColdStoreCursorV1) -> io::Result<()> {
-    let directory = checkpoint_directory(path, true)?;
-    persist_cursor_in_dir(&directory, cursor)
-}
-
 fn persist_cursor_in_dir(directory: &Dir, cursor: &ColdStoreCursorV1) -> io::Result<()> {
     let bytes = serde_json::to_vec(cursor).map_err(io::Error::other)?;
-    // The name supplies no authority. create_new + no-follow guarantees that
-    // even a collided or attacker-prepared staging name cannot be truncated.
-    for _ in 0..16 {
-        let nonce = CURSOR_TEMP_NONCE.fetch_add(1, Ordering::Relaxed);
-        let temporary_name = format!(".retention-cold-store-{}-{nonce}.tmp", std::process::id());
-        let mut options = OpenOptions::new();
-        options
-            .write(true)
-            .create_new(true)
-            .follow(FollowSymlinks::No);
-        #[cfg(unix)]
-        options.mode(0o600);
-        let mut temporary = match directory.open_with(&temporary_name, &options) {
-            Ok(temporary) => temporary,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        };
-        let result = (|| {
-            temporary.write_all(&bytes)?;
-            temporary.sync_all()?;
-            drop(temporary);
-            replace_file(
-                directory,
-                OsStr::new(&temporary_name),
-                OsStr::new(CHECKPOINT_FILE),
-            )?;
-            sync_directory(directory)
-        })();
-        if result.is_err() {
-            let _ = directory.remove_file(&temporary_name);
-        }
-        return result;
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "maintenance cursor staging names are occupied",
-    ))
+    replace_file_in_open_directory(directory, CHECKPOINT_FILE, &bytes)
 }
 
 fn retention_window_secs(days: u64) -> i64 {
@@ -381,6 +329,22 @@ fn retention_window_secs(days: u64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn open_test_directory(path: &Path) -> io::Result<Dir> {
+        let root = Dir::open_ambient_dir(
+            path.parent().unwrap().parent().unwrap(),
+            cap_std::ambient_authority(),
+        )?;
+        checkpoint_directory(&root)
+    }
+
+    fn load_cursor(path: &Path) -> Option<ColdStoreCursorV1> {
+        load_cursor_in_dir(&open_test_directory(path).ok()?)
+    }
+
+    fn persist_cursor(path: &Path, cursor: &ColdStoreCursorV1) -> io::Result<()> {
+        persist_cursor_in_dir(&open_test_directory(path)?, cursor)
+    }
 
     #[asupersync::test]
     async fn cold_store_cursor_advances_across_projects_without_profile_stores() {
@@ -443,6 +407,50 @@ mod tests {
                 .after_project_id,
             None,
             "the final registry page must finish instead of repeating its first page"
+        );
+    }
+
+    #[cfg(unix)]
+    #[asupersync::test]
+    async fn cold_store_cursor_uses_the_directory_its_profile_database_admitted() {
+        use std::os::unix::fs::symlink;
+        use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let owner = temporary.path().join("owner");
+        let supplied = temporary.path().join("profile");
+        let foreign = temporary.path().join("other");
+        let foreign_cursor = checkpoint_path(&foreign);
+        std::fs::create_dir_all(foreign_cursor.parent().unwrap()).unwrap();
+        std::fs::write(&foreign_cursor, b"another profile's resume point").unwrap();
+        let runtime = RegisteredGlobalDbTestRuntime::profile(&owner)
+            .await
+            .unwrap();
+        let database = runtime.profile_database_arc();
+        symlink(&owner, &supplied).unwrap();
+        let owners = BTreeSet::new();
+        let cancellation = CancellationToken::new();
+        let run =
+            || run_cold_store_page(&supplied, database.as_ref(), None, &owners, &cancellation);
+        run().await.unwrap();
+        assert!(checkpoint_path(&owner).is_file());
+
+        std::fs::remove_file(&supplied).unwrap();
+        symlink(&foreign, &supplied).unwrap();
+        assert!(run().await.is_err());
+        std::fs::remove_file(&supplied).unwrap();
+        std::fs::rename(&foreign, &supplied).unwrap();
+        assert!(run().await.is_err());
+        let foreign_cursor = checkpoint_path(&supplied);
+        assert_eq!(
+            std::fs::read(&foreign_cursor).unwrap(),
+            b"another profile's resume point"
+        );
+        assert_eq!(
+            std::fs::read_dir(foreign_cursor.parent().unwrap())
+                .unwrap()
+                .count(),
+            1
         );
     }
 
@@ -563,7 +571,7 @@ mod tests {
         std::fs::create_dir(&profile).unwrap();
         std::fs::create_dir(&foreign).unwrap();
         let path = checkpoint_path(&profile);
-        let directory = checkpoint_directory(&path, true).unwrap();
+        let directory = open_test_directory(&path).unwrap();
         let expected = ColdStoreCursorV1 {
             after_project_id: Some("local".to_owned()),
             after_unregistered_directory: None,

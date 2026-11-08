@@ -218,7 +218,7 @@ pub fn sync_directory(directory: &Dir) -> io::Result<()> {
 
 /// Open an owned leaf through a held parent, never following a replaced root
 /// symlink. Missing roots are normal before the first artifact is sealed.
-fn open_owned_directory_nofollow(root: &Path) -> io::Result<Option<Dir>> {
+pub fn open_owned_directory_nofollow(root: &Path) -> io::Result<Option<Dir>> {
     let name = root
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "root has no leaf name"))?;
@@ -312,13 +312,15 @@ static PROOF_TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
 /// Publish a proof atomically relative to the same held generation used for
 /// staging. A substituted root/child link cannot redirect or truncate bytes.
 pub fn replace_nested_file_nofollow(directory: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
-    let leaf = checked_leaf_name(name)?;
     let child = open_nested_directory_nofollow(directory)?;
-    replace_file_in_open_directory(&child, leaf, bytes)
+    replace_file_in_open_directory(&child, name, bytes)
 }
 
-fn replace_file_in_open_directory(directory: &Dir, leaf: &OsStr, bytes: &[u8]) -> io::Result<()> {
+/// Atomically replaces a single file beneath a directory held by its owner.
+pub fn replace_file_in_open_directory(directory: &Dir, name: &str, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write;
+
+    let leaf = checked_leaf_name(name)?;
 
     for _ in 0..16 {
         let nonce = PROOF_TEMP_NONCE.fetch_add(1, Ordering::Relaxed);
@@ -621,7 +623,7 @@ mod replacement_tests {
         let held = open_nested_directory_nofollow(&generation).unwrap();
         std::fs::rename(&root, &moved).unwrap();
         symlink(&foreign, &root).unwrap();
-        replace_file_in_open_directory(&held, OsStr::new("sealed.checked"), b"verified").unwrap();
+        replace_file_in_open_directory(&held, "sealed.checked", b"verified").unwrap();
         assert_eq!(
             std::fs::read(moved.join("generation/sealed.checked")).unwrap(),
             b"verified"

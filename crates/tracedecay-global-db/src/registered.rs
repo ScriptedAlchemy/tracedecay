@@ -966,6 +966,13 @@ impl RegisteredGlobalDb {
         .await
     }
 
+    /// Directory retained by the registered profile sessions writer at admission.
+    pub fn profile_sessions_directory(&self) -> tracedecay_domain::errors::Result<std::fs::File> {
+        self.database
+            .write_authority()?
+            .profile_sessions_directory()
+    }
+
     pub fn db_path(&self) -> &Path {
         self.database.canonical_database_path()
     }

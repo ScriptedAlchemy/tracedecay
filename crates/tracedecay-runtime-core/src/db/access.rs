@@ -139,6 +139,7 @@ struct MaintenanceScopeState {
 #[derive(Debug)]
 struct AuthorityInner {
     identity: DatabaseIdentity,
+    profile_directory: Option<std::fs::File>,
     role: DatabaseAuthorityRole,
     token: String,
 }
@@ -353,10 +354,37 @@ impl DatabaseAuthority {
         role: DatabaseAuthorityRole,
         intent: &str,
     ) -> Result<Self> {
+        // Cold-store checkpoints belong to the profile that admitted its sessions
+        // database. Retain that directory before publishing its writer authority.
+        let profile_directory = if identity.database_path
+            == identity
+                .profile_root
+                .join(crate::storage::USER_SESSIONS_DB_FILENAME)
+        {
+            Some(
+                tracedecay_private_fs::capability_dir::open_owned_directory_nofollow(
+                    &identity.profile_root,
+                )
+                .map_err(|error| {
+                    access_io_error("open profile directory", &identity.profile_root, &error)
+                })?
+                .ok_or_else(|| {
+                    access_error(
+                        "open profile directory",
+                        &identity.profile_root,
+                        "profile directory disappeared",
+                    )
+                })?
+                .into_std_file(),
+            )
+        } else {
+            None
+        };
         let token = acquire_process_lease(&identity, role, intent)?;
         Ok(Self {
             inner: Arc::new(AuthorityInner {
                 identity,
+                profile_directory,
                 role,
                 token,
             }),
@@ -373,6 +401,23 @@ impl DatabaseAuthority {
             ));
         }
         Ok(self.clone())
+    }
+
+    pub fn profile_sessions_directory(&self) -> Result<std::fs::File> {
+        let operation = "access admitted profile directory";
+        self.require_active_write_scope(operation)?;
+        self.inner
+            .profile_directory
+            .as_ref()
+            .ok_or_else(|| {
+                access_error(
+                    operation,
+                    &self.inner.identity.database_path,
+                    "a profile sessions writer is required",
+                )
+            })?
+            .try_clone()
+            .map_err(|error| access_io_error(operation, &self.inner.identity.profile_root, &error))
     }
 
     pub fn canonical_database_path(&self) -> &Path {
