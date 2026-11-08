@@ -162,6 +162,47 @@ fn parent_gitlink_paths(project_root: &Path) -> Result<BTreeSet<String>, SourceW
             paths.insert(relative.to_owned());
         }
     }
+    // A staged gitlink removal does not erase the checkout boundary from
+    // HEAD. Without this second authority, a child whose .git marker was
+    // removed becomes ordinary live source until the parent commits.
+    let head = repository.head().map_err(|error| SourceWalkError {
+        glob: String::new(),
+        message: format!("cannot inspect parent Git HEAD: {error}"),
+    })?;
+    if head.id().is_some() {
+        let commit = repository.head_commit().map_err(|error| SourceWalkError {
+            glob: String::new(),
+            message: format!("cannot resolve parent Git HEAD: {error}"),
+        })?;
+        let tree = commit.tree().map_err(|error| SourceWalkError {
+            glob: String::new(),
+            message: format!("cannot read parent Git HEAD tree: {error}"),
+        })?;
+        let entries = tree
+            .traverse()
+            .breadthfirst
+            .files()
+            .map_err(|error| SourceWalkError {
+                glob: String::new(),
+                message: format!("cannot walk parent Git HEAD tree: {error}"),
+            })?;
+        for entry in entries {
+            if !entry.mode.is_commit() {
+                continue;
+            }
+            let path: &[u8] = entry.filepath.as_ref();
+            let relative = std::str::from_utf8(path).map_err(|_| SourceWalkError {
+                glob: String::new(),
+                message: "non-UTF-8 HEAD gitlink cannot be safely scoped".to_owned(),
+            })?;
+            paths.insert(relative.to_owned());
+        }
+    } else if head.referent_name().is_none() {
+        return Err(SourceWalkError {
+            glob: String::new(),
+            message: "parent Git HEAD has neither a commit nor an unborn branch".to_owned(),
+        });
+    }
     Ok(paths)
 }
 
@@ -752,6 +793,36 @@ mod tests {
             .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
             .count();
         assert_eq!(explicitly_scoped, 0);
+
+        // Staging removal of the gitlink also removes it from the parent
+        // index, but HEAD still owns that repository boundary. Neither an
+        // explicit include nor a path glob may adopt its live child bytes.
+        fixture_git(&root, &["add", ".gitmodules", "src/parent.rs"]);
+        fixture_git(&root, &["commit", "-qm", "parent with submodule"]);
+        fixture_git(&root, &["rm", "--cached", "-f", "app"]);
+        assert!(
+            fixture_git(&root, &["ls-files", "--stage", "--", "app"])
+                .stdout
+                .is_empty()
+        );
+        assert!(
+            fixture_git(&root, &["ls-tree", "HEAD", "--", "app"])
+                .stdout
+                .starts_with(b"160000 commit ")
+        );
+        assert!(root.join("app/src/feature.rs").is_file());
+
+        let files = walked_files(&root, &policy);
+        assert!(
+            files.iter().all(|path| !path.starts_with("app")),
+            "HEAD gitlink is still an excluded source boundary: {files:?}"
+        );
+        let scoped = source_walk(&root, Some("app/**"), &policy)
+            .expect("scope cannot cross HEAD gitlink")
+            .map(|entry| entry.expect("source entry"))
+            .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+            .count();
+        assert_eq!(scoped, 0);
     }
 
     #[test]
