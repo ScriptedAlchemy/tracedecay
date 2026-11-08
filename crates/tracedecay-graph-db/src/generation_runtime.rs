@@ -591,7 +591,7 @@ impl GraphDb {
         expected: &GraphRecoveredGenerationDigestV1,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphCommit, GraphDbError> {
-        self.apply_generation_unverified_with_digest_observed(manifest, expected, check)
+        self.apply_generation_unverified_with_digest_and_work(manifest, expected, check, None)
             .map(GenerationStageOutcome::commit)
     }
 
@@ -604,18 +604,9 @@ impl GraphDb {
     /// caller is about to close, reopen, and rebuild the in-RAM store -- the
     /// overlap that made publication the peak-RSS moment. Every later stage
     /// reads only the identity, which the caller keeps.
-    #[tracing::instrument(name = "graph_db.generation.stage", level = "trace", skip_all)]
-    pub(crate) fn apply_generation_unverified_with_digest_observed(
-        &self,
-        manifest: Arc<GraphGenerationManifest>,
-        expected: &GraphRecoveredGenerationDigestV1,
-        check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<GenerationStageOutcome, GraphDbError> {
-        self.apply_generation_unverified_with_digest_and_work(manifest, expected, check, None)
-    }
-
     /// Observable native stage work is emitted only after the real page
     /// transaction and matching receipt have settled, never on read/replay.
+    #[tracing::instrument(name = "graph_db.generation.stage", level = "trace", skip_all)]
     pub(crate) fn apply_generation_unverified_with_digest_and_work(
         &self,
         manifest: Arc<GraphGenerationManifest>,
@@ -3289,10 +3280,11 @@ mod tests {
         let manifest = large_manifest("retry-admission");
         let sealed = sealed_digest(&manifest);
         let first = database
-            .apply_generation_unverified_with_digest_observed(
+            .apply_generation_unverified_with_digest_and_work(
                 arc_manifest(&manifest),
                 &sealed,
                 &|| Ok(()),
+                None,
             )
             .unwrap();
         let GenerationStageOutcome::Applied(first) = first else {
@@ -3306,10 +3298,11 @@ mod tests {
         reset_manifest_canonicalizations();
         reset_batch_canonicalizations();
         let reapplied = database
-            .apply_generation_unverified_with_digest_observed(
+            .apply_generation_unverified_with_digest_and_work(
                 arc_manifest(&manifest),
                 &sealed,
                 &|| Ok(()),
+                None,
             )
             .unwrap();
         let GenerationStageOutcome::Reseated(reapplied) = reapplied else {
@@ -3364,10 +3357,11 @@ mod tests {
             GenerationLocator::new(manifest.projection.clone(), manifest.generation.clone());
         let (owner, database) = persistent_database(&temp);
         database
-            .apply_generation_unverified_with_digest_observed(
+            .apply_generation_unverified_with_digest_and_work(
                 arc_manifest(&manifest),
                 &sealed,
                 &|| Ok(()),
+                None,
             )
             .unwrap();
         crate::state::reset_retirement_page_record_reads();
@@ -3405,10 +3399,11 @@ mod tests {
             GenerationLocator::new(manifest.projection.clone(), manifest.generation.clone());
         let (owner, database) = persistent_database(&temp);
         let staged = database
-            .apply_generation_unverified_with_digest_observed(
+            .apply_generation_unverified_with_digest_and_work(
                 Arc::clone(&retained_manifest),
                 &sealed,
                 &|| Ok(()),
+                None,
             )
             .unwrap();
         assert!(matches!(staged, GenerationStageOutcome::Applied(_)));
@@ -3428,10 +3423,11 @@ mod tests {
 
         let (reopened_owner, reopened) = persistent_database(&temp);
         let replayed = reopened
-            .apply_generation_unverified_with_digest_observed(
+            .apply_generation_unverified_with_digest_and_work(
                 Arc::clone(&retained_manifest),
                 &sealed,
                 &|| Ok(()),
+                None,
             )
             .unwrap();
         assert!(matches!(replayed, GenerationStageOutcome::Applied(_)));
@@ -3498,10 +3494,11 @@ mod tests {
         let retained_manifest = arc_manifest(&manifest);
         let (owner, database) = persistent_database(&temp);
         database
-            .apply_generation_unverified_with_digest_observed(
+            .apply_generation_unverified_with_digest_and_work(
                 Arc::clone(&retained_manifest),
                 &sealed,
                 &|| Ok(()),
+                None,
             )
             .unwrap();
 
@@ -3536,7 +3533,12 @@ mod tests {
             retained_manifest
         };
         reopened
-            .apply_generation_unverified_with_digest_observed(replay_manifest, &sealed, &|| Ok(()))
+            .apply_generation_unverified_with_digest_and_work(
+                replay_manifest,
+                &sealed,
+                &|| Ok(()),
+                None,
+            )
             .expect("a retained generation must replay after a partial durable row release");
         let (_, recovered) = reopened
             .reopen_and_verify_existing_generation(
@@ -4065,6 +4067,7 @@ mod tests {
                     context: &context,
                     pages: &pages,
                     restaging_sealed_only: false,
+                    observe: None,
                 },
                 &|| Ok(()),
             )
@@ -4121,10 +4124,11 @@ mod tests {
             }
         };
         assert!(matches!(
-            second_database.apply_generation_unverified_with_digest_observed(
+            second_database.apply_generation_unverified_with_digest_and_work(
                 arc_manifest(&manifest),
                 &sealed,
-                &cancel_after_first_page
+                &cancel_after_first_page,
+                None,
             ),
             Err(GraphDbError::Cancelled)
         ));
@@ -4148,10 +4152,11 @@ mod tests {
 
         reset_batch_canonicalizations();
         let resumed = second_database
-            .apply_generation_unverified_with_digest_observed(
+            .apply_generation_unverified_with_digest_and_work(
                 arc_manifest(&manifest),
                 &sealed,
                 &|| Ok(()),
+                None,
             )
             .unwrap();
         let GenerationStageOutcome::Applied(resumed) = resumed else {
@@ -4166,10 +4171,11 @@ mod tests {
         reset_recovered_generation_enumerations();
         reset_batch_canonicalizations();
         let exact = second_database
-            .apply_generation_unverified_with_digest_observed(
+            .apply_generation_unverified_with_digest_and_work(
                 arc_manifest(&manifest),
                 &sealed,
                 &|| Ok(()),
+                None,
             )
             .unwrap();
         let GenerationStageOutcome::Reseated(exact) = exact else {

@@ -1462,6 +1462,15 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.progress_producer_incarnation = producer_incarnation.max(1);
     }
 
+    /// Exact daemon/producer identity of this mounted scheduler, reused by
+    /// query-driven graph activation after its durable generation commit.
+    pub(crate) const fn progress_incarnations(&self) -> (u64, u64) {
+        (
+            self.progress_daemon_incarnation,
+            self.progress_producer_incarnation,
+        )
+    }
+
     #[cfg(test)]
     pub const fn progress_incarnations_for_test(&self) -> (u64, u64) {
         (

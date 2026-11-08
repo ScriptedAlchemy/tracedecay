@@ -11,6 +11,7 @@ use std::sync::{
 use tracedecay_code_index::graph_projection::CodeGraphProjectionStore;
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexProductionErrorV1};
 use tracedecay_domain::canonical_sha256;
+use tracedecay_store::GraphNativeWorkObserverV1;
 
 use super::super::control_poll;
 use super::{
@@ -601,6 +602,7 @@ impl CodeIndexSchedulerRegistryV1 {
             serving_generation_epoch,
             serving_generation_changed,
             graph_activation,
+            native_graph_progress,
             build_publication_lock,
             shutting_down,
             wake,
@@ -624,6 +626,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.serving_generation_epoch),
                 worktree.serving_generation_changed.clone(),
                 worktree.graph_activation.clone(),
+                Arc::clone(&worktree.native_graph_progress),
                 Arc::clone(&worktree.build_publication_lock),
                 Arc::clone(&worktree.shutting_down),
                 Arc::clone(&worktree.wake),
@@ -706,7 +709,20 @@ impl CodeIndexSchedulerRegistryV1 {
             return Err(CodeIndexIgnoredDependencyRefusalV1::StaleGeneration.into());
         }
         let project_id = build.latest.generation().manifest().project_id.clone();
-
+        // This admission published a durable successor; graph activation may
+        // still write native pages. Observe them under the exact mounted owner
+        // instead of silently discarding the new graph observer parameter.
+        let (daemon_incarnation, producer_incarnation) = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .progress_incarnations();
+        let graph_attempt = super::graph_progress::CodeIndexNativeGraphProgressGuardV1::begin_for_activation(
+            native_graph_progress,
+            daemon_incarnation,
+            producer_incarnation,
+            build.latest.generation().manifest().generation_id.as_str().to_owned(),
+            replay_binding.sealed_state_digest.as_str().to_owned(),
+        );
         let activation = activate_committed_generation(
             &graph_activation,
             &project_id,
@@ -715,6 +731,7 @@ impl CodeIndexSchedulerRegistryV1 {
             build.latest.clone(),
             serving.interactive_graph_store().ok(),
             replay_binding,
+            graph_attempt.observer(),
         )
         .await;
         let catalog_warm = match activation {
@@ -899,6 +916,7 @@ async fn activate_committed_generation(
     latest: LatestCompleteCodeIndexV1,
     predecessor: Option<Arc<CodeGraphProjectionStore>>,
     replay_binding: CodeGraphReplayBindingV1,
+    native_work: GraphNativeWorkObserverV1,
 ) -> Result<Option<CodeGraphCatalogWarmV1>, CodeIndexSchedulerErrorV1> {
     graph_activation
         .activate(
@@ -909,6 +927,7 @@ async fn activate_committed_generation(
             predecessor,
             replay_binding,
             Arc::new(AtomicBool::new(false)),
+            native_work,
         )
         .await
 }

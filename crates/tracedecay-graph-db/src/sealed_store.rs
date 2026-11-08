@@ -1984,15 +1984,6 @@ fn stage_sealed_artifact(
 /// has written nothing under `staging` that the caller keeps, the container
 /// appears complete or not at all, and the next attempt rebuilds from the
 /// same source.
-fn build_sealed_container(
-    rows: SealedRowSource<'_>,
-    identity: &GraphGenerationManifestIdentity,
-    staging: &Path,
-    check: &dyn Fn() -> Result<(), GraphDbError>,
-) -> Result<(usize, usize), GraphDbError> {
-    build_sealed_container_with_work(rows, identity, staging, check, None)
-}
-
 fn build_sealed_container_with_work(
     rows: SealedRowSource<'_>,
     identity: &GraphGenerationManifestIdentity,
@@ -2980,11 +2971,12 @@ mod build_tests {
         let staging = tempfile::tempdir().unwrap();
 
         let (built, peak) = crate::thread_allocation::peak_above_start(|| {
-            build_sealed_container(
+            build_sealed_container_with_work(
                 SealedRowSource::Manifest(&manifest),
                 &identity,
                 staging.path(),
                 check,
+                None,
             )
         });
         eprintln!("SEALED BUILD peak {peak}");
@@ -3093,11 +3085,12 @@ mod build_tests {
         let identity = manifest.identity();
         let namespace = identity.physical_namespace().unwrap();
         let staging = tempfile::tempdir().unwrap();
-        build_sealed_container(
+        build_sealed_container_with_work(
             SealedRowSource::Manifest(&manifest),
             &identity,
             staging.path(),
             check,
+            None,
         )
         .unwrap();
         let path = staging.path().join(SEALED_STORE_DATABASE_FILE);
@@ -3175,11 +3168,12 @@ mod build_tests {
         let expected = manifest.expected_recovered_digest(check).unwrap();
         let namespace = identity.physical_namespace().unwrap();
         let staging = tempfile::tempdir().unwrap();
-        build_sealed_container(
+        build_sealed_container_with_work(
             SealedRowSource::Manifest(&manifest),
             &identity,
             staging.path(),
             check,
+            None,
         )
         .unwrap();
         let path = staging.path().join(SEALED_STORE_DATABASE_FILE);

@@ -2677,6 +2677,8 @@ async fn graph_activation_does_not_wait_for_bounded_text_projection() {
             None,
             replay_binding,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            // In-memory test activation has no native graph writer.
+            Arc::new(|_| {}),
         )
         .await
         .expect("graph activation must not wait for the independently bounded text projection");
