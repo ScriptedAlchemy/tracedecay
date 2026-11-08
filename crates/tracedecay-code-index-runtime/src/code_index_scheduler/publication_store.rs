@@ -1653,6 +1653,13 @@ impl DaemonCodeIndexPublicationStoreV1 {
             ));
         }
         let final_path = segments_root.join(format!("segment-{digest_hex}.json"));
+        // A pending file remains this preparation's verification authority even
+        // when another publisher installs its canonical name in the meantime.
+        // Verify its bytes at commit; publish() authenticates the competing
+        // canonical bytes before deduplicating without replacing them.
+        if staged.contains(&final_path) {
+            return Ok(());
+        }
         match final_path.symlink_metadata() {
             Ok(metadata) => {
                 existing_segment_bytes_read.fetch_add(metadata.len(), Ordering::Relaxed);
@@ -1684,9 +1691,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(Self::unavailable(error)),
-        }
-        if staged.contains(&final_path) {
-            return Ok(());
         }
         let temporary_path = staging_root.join(format!("segment-{digest_hex}.json"));
         let mut file = std::fs::OpenOptions::new()

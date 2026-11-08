@@ -860,6 +860,87 @@ fn staged_segment_publish_never_overwrites_a_concurrent_canonical_name() {
     );
 }
 
+#[test]
+fn repeated_pending_segment_accepts_identical_concurrent_canonical_publication() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn fixture() -> u32 { 7 }\n")]);
+    let source_root = TempDir::new().expect("source store");
+    let generation = source_generation(&fixture, source_root.path());
+    let target_root = TempDir::new().expect("target store");
+    let mut target = target_store(target_root.path(), &fixture);
+    let mut preparation = target
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare target");
+    let publication = generation
+        .stage_publication(&mut preparation)
+        .expect("stage real generation");
+
+    let (canonical, temporary) = {
+        let state = preparation.state.lock().expect("preparation state");
+        let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
+            panic!("preparation must remain open");
+        };
+        files
+            .segments
+            .pending
+            .iter()
+            .next()
+            .map(|(name, temporary)| (name.clone(), temporary.clone()))
+            .expect("a real generation must stage at least one segment")
+    };
+    let bytes = std::fs::read(&temporary).expect("staged segment bytes");
+    let digest = segment_digest(&bytes);
+    assert!(!canonical.exists(), "the first stage has not named its segment");
+
+    // A separate publisher wins the canonical name after this preparation
+    // writes its own temporary file. It has the same authenticated bytes but
+    // a different inode. Repeating the write must not confuse their identities.
+    let mut foreign = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&canonical)
+        .expect("concurrent canonical publication");
+    foreign.write_all(&bytes).expect("canonical bytes");
+    foreign.sync_all().expect("durable competing segment");
+    let foreign_identity = foreign.metadata().expect("canonical inode");
+    drop(foreign);
+    preparation
+        .write_segment(SealedGenerationSegmentPublicationV1::File {
+            digest: &digest,
+            bytes: &bytes,
+        })
+        .expect("repeat an already-pending segment after concurrent naming");
+    {
+        let state = preparation.state.lock().expect("preparation state");
+        let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
+            panic!("preparation must remain open");
+        };
+        assert_eq!(
+            files.segments.pending.get(&canonical),
+            Some(&temporary),
+            "this preparation still owns its original temporary bytes"
+        );
+        assert!(
+            !files.segments.verified_existing.contains_key(&canonical),
+            "the concurrently named inode must not masquerade as our pending inode"
+        );
+        target
+            .verify_prepared_segments(files, publication.manifest_bytes().as_ref())
+            .expect("verification authenticates pending bytes instead of another inode");
+    }
+
+    target
+        .commit(&mut preparation, &publication)
+        .expect("identical canonical bytes deduplicate at commit");
+    assert!(!temporary.exists(), "deduplicated temporary is discharged");
+    assert_eq!(
+        std::fs::read(&canonical).expect("canonical bytes after commit"),
+        bytes
+    );
+    let after = canonical.metadata().expect("canonical inode after commit");
+    assert_eq!(after.dev(), foreign_identity.dev());
+    assert_eq!(after.ino(), foreign_identity.ino());
+}
+
 #[cfg(unix)]
 #[test]
 fn prepared_generation_rechecks_directory_identity_without_reopening_paths() {
