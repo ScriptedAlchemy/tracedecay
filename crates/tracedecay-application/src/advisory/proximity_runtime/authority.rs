@@ -1481,6 +1481,106 @@ mod tests {
     }
 
     #[test]
+    fn caller_neighborhood_retains_third_hop_tests_without_expanding_them() {
+        let root = SymbolOccurrenceId::new("symbol.root").unwrap();
+        let first = SymbolOccurrenceId::new("symbol.first").unwrap();
+        let second = SymbolOccurrenceId::new("symbol.second").unwrap();
+        let test_id = SymbolOccurrenceId::new("symbol.test").unwrap();
+        let span = SourceSpan {
+            start_byte: 0,
+            end_byte: 1,
+        };
+        let mut test_node = callable(test_id.as_str(), span);
+        let digest = format!("sha256:{}", "a".repeat(64));
+        test_node.metadata = Some(tracedecay_code_index::lineage::LineageSymbolRecordV1 {
+            occurrence: test_id.clone(),
+            identity: digest.clone().try_into().unwrap(),
+            qualified_name: "tests::shared".to_owned(),
+            simple_name: "shared".to_owned(),
+            kind: "TeSt".to_owned(),
+            visibility: "private".to_owned(),
+            branches: 0,
+            loops: 0,
+            max_nesting: 0,
+            complexity_analysis: tracedecay_domain::ComplexityAnalysisV1::Complete,
+            line_span: 1,
+            start_line: 0,
+            signature: None,
+            docstring: None,
+            is_async: false,
+            derives: Vec::new(),
+            skip_test_coverage: false,
+            file_identity: digest.try_into().unwrap(),
+            content_digest: ContentDigest::of_bytes(b"shared test"),
+        });
+        let mut frontiers = Vec::new();
+        let (callers, tests) = caller_neighborhood(std::slice::from_ref(&root), 3, |frontier| {
+            frontiers.push(frontier.to_vec());
+            assert_eq!(frontier.len(), 1);
+            let neighbors = match frontier[0].as_str() {
+                "symbol.root" => vec![callable(first.as_str(), span)],
+                "symbol.first" => vec![callable(second.as_str(), span)],
+                "symbol.second" => vec![test_node.clone(), test_node.clone()],
+                _ => panic!("third-hop tests must not trigger a fourth graph read"),
+            };
+            Some(vec![neighbors])
+        })
+        .expect("three unique neighbors fit the budget exactly");
+        assert_eq!(
+            frontiers,
+            vec![vec![root], vec![first.clone()], vec![second.clone()]]
+        );
+        assert_eq!(callers, BTreeSet::from([first, second]));
+        assert_eq!(tests, BTreeSet::from([test_id.clone()]));
+        assert!(!callers.contains(&test_id));
+    }
+
+    #[test]
+    fn caller_neighborhood_refuses_failed_reads_at_every_hop() {
+        let root = SymbolOccurrenceId::new("symbol.root").unwrap();
+        for failed_hop in 1..=3 {
+            let mut reads = 0;
+            let result = caller_neighborhood(std::slice::from_ref(&root), 3, |_| {
+                reads += 1;
+                if reads == failed_hop {
+                    return None;
+                }
+                Some(vec![vec![callable(
+                    &format!("symbol.hop.{reads}"),
+                    SourceSpan {
+                        start_byte: 0,
+                        end_byte: 1,
+                    },
+                )]])
+            });
+            assert!(
+                result.is_none(),
+                "hop {failed_hop} cannot publish partial evidence as complete"
+            );
+            assert_eq!(reads, failed_hop, "a failed read must stop traversal");
+        }
+    }
+
+    #[test]
+    fn empty_neighborhoods_do_not_issue_additional_graph_reads() {
+        let empty = caller_neighborhood(&[], 3, |_| {
+            panic!("an empty caller seed set requires no read")
+        })
+        .expect("empty caller closure is complete");
+        assert!(empty.0.is_empty());
+        assert!(empty.1.is_empty());
+
+        let root = SymbolOccurrenceId::new("symbol.root").unwrap();
+        let dependencies = dependency_neighborhood(
+            std::slice::from_ref(&root),
+            vec![Vec::new()],
+            |_| panic!("empty first-hop adjacency requires no second-hop read"),
+        )
+        .expect("empty dependency closure is complete");
+        assert!(dependencies.is_empty());
+    }
+
+    #[test]
     fn edited_path_evidence_accepts_only_valid_typed_ranges() {
         let root = Path::new("/repo");
         let edits = edited_paths(
