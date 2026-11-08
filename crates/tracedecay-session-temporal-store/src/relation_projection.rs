@@ -297,6 +297,44 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         let (scope, _) = self
             .session_relation_store()
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        // An idle pass with only sleeping retries must not scan all pending
+        // receipts in creation order. The recovery-due index answers this
+        // probe without visiting each deferred journal row.
+        let mut due_rows = snapshot
+            .query(
+                "SELECT MIN(recovery_next_attempt_at), unixepoch()
+                 FROM session_relation_receipts
+                 WHERE state = 'pending'
+                   AND recovery_state IN ('pending', 'retryable')",
+                (),
+            )
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let earliest = due_rows
+            .next()
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+            .ok_or_else(|| {
+                storage_message(
+                    RECONSTRUCT_OPERATION,
+                    "relation retry probe returned no aggregate row",
+                )
+            })?;
+        let retry_at: Option<i64> = earliest
+            .get(0)
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let now: i64 = earliest
+            .get(1)
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        drop(due_rows);
+        if retry_at.is_none_or(|deadline| deadline > now) {
+            return Ok(SessionRelationRecoveryPage {
+                recovered: 0,
+                processed: 0,
+                has_more: false,
+                next_retry_at_unix_seconds: retry_at,
+            });
+        }
         let mut rows = snapshot
             .query(
                 "SELECT receipt.session_id, receipt.generation, receipt.scope_kind,
@@ -311,7 +349,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                    AND receipt.recovery_next_attempt_at <= unixepoch()
                  ORDER BY receipt.created_at, receipt.session_id, receipt.generation
                  LIMIT ?1",
-                params![bounded_query_limit(limit)?],
+                params![bounded_query_limit(limit.saturating_add(1))?],
             )
             .await
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;

@@ -2440,6 +2440,63 @@ async fn malformed_relation_receipt_is_permanent_without_starving_summary_work()
             .is_some_and(|delay| !delay.is_zero() && delay <= std::time::Duration::from_secs(60)),
         "the scheduler must retain the isolated relation retry deadline"
     );
+    let deferred = SessionTemporalAccess::new(&*db)
+        .recover_pending_session_relation_projection_page(
+            1,
+            std::sync::Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deferred.processed, 0, "a future retry is not due");
+    assert!(!deferred.has_more);
+    assert!(deferred.next_retry_at_unix_seconds.is_some());
+
+    // Two durable receipts becoming due at once must be offered in distinct
+    // bounded pages. A one-row LIMIT used to hide the second due receipt
+    // even though the scheduler depended on has_more to resume promptly.
+    let transaction = db.begin_write_transaction().await.unwrap();
+    let changed = transaction
+        .execute(
+            "UPDATE session_relation_receipts
+             SET state = 'pending', recovery_state = 'pending',
+                 recovery_failure_code = NULL, recovery_failure_count = 0,
+                 recovery_next_attempt_at = 0
+             WHERE session_id IN (?1, ?2)",
+            params![poison_session, healthy_session],
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed, 2, "both durable receipts must be present");
+    transaction.commit().await.unwrap();
+
+    let recovered_first = SessionTemporalAccess::new(&*db)
+        .recover_pending_session_relation_projection_page(
+            1,
+            std::sync::Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recovered_first.processed, 1);
+    assert!(recovered_first.has_more, "the second due receipt is owed");
+
+    let recovered_second = SessionTemporalAccess::new(&*db)
+        .recover_pending_session_relation_projection_page(
+            1,
+            std::sync::Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recovered_second.processed, 1);
+    assert!(!recovered_second.has_more);
+    let idle = SessionTemporalAccess::new(&*db)
+        .recover_pending_session_relation_projection_page(
+            1,
+            std::sync::Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .await
+        .unwrap();
+    assert_eq!(idle.processed, 0, "settled receipts stay parked");
+    assert!(!idle.has_more);
 }
 
 #[test]
