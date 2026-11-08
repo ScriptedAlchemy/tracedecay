@@ -611,7 +611,9 @@ fn directory_bytes(
     while let Some(directory) = pending.pop() {
         for entry in std::fs::read_dir(&directory)? {
             let entry = entry?;
-            let metadata = entry.metadata()?;
+            // Count only the link itself: following a foreign directory link
+            // can mischarge its entire tree or revisit an ancestor forever.
+            let metadata = std::fs::symlink_metadata(entry.path())?;
             if metadata.is_dir() {
                 pending.push(entry.path());
                 continue;
@@ -2942,12 +2944,27 @@ mod receipt_budget_tests {
                 .set_len(FILE_BYTES)
                 .unwrap();
         }
+        // A sealed directory must never account bytes outside its own tree.
+        // A missing target must also remain a harmless link, not abort census.
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::File::create(foreign.join("payload"))
+            .unwrap()
+            .set_len(20 * 1024 * 1024 * 1024)
+            .unwrap();
+        let oldest = root.join("0".repeat(64));
+        std::os::unix::fs::symlink(&foreign, oldest.join("foreign")).unwrap();
+        std::os::unix::fs::symlink(temp.path().join("missing"), oldest.join("dangling")).unwrap();
         let census = census_sealed_store(&database, &BTreeSet::from(["g69".to_owned()])).unwrap();
         assert_eq!(census.head_count, 1);
         assert_eq!(census.superseded_count, 69);
         assert_eq!(census.unrecognized_count, 0);
         assert!(census.head_bytes >= FILE_BYTES);
         assert!(census.superseded_bytes >= 69 * FILE_BYTES);
+        assert!(
+            census.superseded_bytes < 70 * FILE_BYTES,
+            "foreign link targets must not contribute to sealed generation bytes"
+        );
     }
 }
 
