@@ -857,6 +857,11 @@ mod published_artifact_ceiling {
              INSERT INTO workflow_artifact_payloads
              SELECT 'sha256:large-' || i, 1048576, randomblob(1048576) FROM n;",
         );
+        store.run(
+            "CREATE TABLE freed_pages(payload BLOB);
+             INSERT INTO freed_pages VALUES (zeroblob(2097152));
+             DROP TABLE freed_pages;",
+        );
         let before = store.state();
         let wal_path = format!("{}-wal", store.path.display());
         let wal_bytes = || fs::metadata(&wal_path).map_or(0, |metadata| metadata.len());
@@ -874,6 +879,11 @@ mod published_artifact_ceiling {
         );
         assert!(owner.reset_required().is_none());
         let lease = owner.issue_lease().unwrap();
+        let (_, _, free_pages) = lease.storage_page_counts().await.unwrap();
+        assert!(
+            free_pages > 0,
+            "admission reclaimed pages before convergence"
+        );
         let issuer = owner.weak_lease_issuer();
         assert_workflow_recovering(&lease).await;
         assert_workflow_recovering(&issuer.issue_lease().unwrap()).await;
