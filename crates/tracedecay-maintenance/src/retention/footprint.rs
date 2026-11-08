@@ -587,7 +587,9 @@ fn registered_project_reclaim_hint(entry: &ProfileFootprintEntryV1) -> Option<St
     let id = entry.key.strip_prefix("projects/").filter(|id| {
         id.starts_with("proj_")
             && id.len() > "proj_".len()
-            && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
     })?;
     Some(format!(
         "; if retention stalls, LAST RESORT (DELETES project data): `tracedecay --dry-run projects forget {id}` then `tracedecay --yes projects forget {id}`"
