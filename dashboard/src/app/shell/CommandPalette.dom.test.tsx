@@ -112,7 +112,7 @@ function stubListing(payload: ProjectsPayloadV1) {
 
 function PaletteLocation() {
   const location = useLocation();
-  return <output data-testid="palette-location">{location.pathname}{location.search}</output>;
+  return <output data-testid="palette-location">{location.pathname}{location.search}{location.hash}</output>;
 }
 
 function renderPalette(initialEntry = '/') {
@@ -161,6 +161,7 @@ afterEach(() => {
 describe('CommandPalette keyboard operation', () => {
   it.each([
     ['/loom?loomRenderer=rails&session=run-7', 'Loom'],
+    ['/Loom/?loomRenderer=rails&session=run-7', 'Loom'],
     ['/brain?field=sigma&node=node-3', 'Brain'],
     ['/?field=sigma&node=node-3', 'Brain'],
     ['/code?render=relief&symbol=symbol-2', 'Code'],
@@ -196,9 +197,9 @@ describe('CommandPalette keyboard operation', () => {
       '/loom?scope=project-1&loomRenderer=strata&session=run-4&scopeLabel=Alpha',
     ],
     [
-      '/brain?scope=project-1&scopeLabel=OldName&field=sigma&node=node-3',
+      '/brain?scope=project-1&scopeLabel=OldName&field=sigma&node=node-3#selection',
       'Brain',
-      '/brain?scope=project-1&scopeLabel=Alpha&field=sigma&node=node-3',
+      '/brain?scope=project-1&scopeLabel=Alpha&field=sigma&node=node-3#selection',
     ],
   ])('reconciles the label in %s without dropping its selected view', async (url, label, expected) => {
     const user = userEvent.setup();

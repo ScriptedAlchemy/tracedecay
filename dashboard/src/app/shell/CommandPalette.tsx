@@ -1,7 +1,7 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command as CommandIcon, CornerDownLeft, Search } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router';
+import { matchPath, useLocation, useNavigate } from 'react-router';
 import {
   CHANNELS,
   channelNumber,
@@ -90,7 +90,7 @@ export function CommandPalette({
           : params.get('scope') === scope.projectId;
         // The index route mounts Brain too. Reopening it through the palette
         // must preserve field=sigma and entity selection just like /brain.
-        const sameWorkspace = location.pathname === `/${channel.path}` ||
+        const sameWorkspace = matchPath(`/${channel.path}`, location.pathname) !== null ||
           (channel.path === 'brain' && location.pathname === '/');
         if (!sameWorkspace || !sameScope) {
           navigate(scopedWorkspacePath(scope, channel.path));
@@ -99,7 +99,7 @@ export function CommandPalette({
           // as an authority or clearing workspace-owned query parameters.
           params.set('scopeLabel', scope.label);
           navigate(
-            { pathname: location.pathname, search: `?${params.toString()}` },
+            { pathname: location.pathname, search: `?${params.toString()}`, hash: location.hash },
             { replace: true },
           );
         }
@@ -139,7 +139,7 @@ export function CommandPalette({
           )
         : [];
     return [...workspaceEntries, ...projectEntries];
-  }, [navigate, location.pathname, location.search, onOpenChange, projects.data, scope, selectProject]);
+  }, [navigate, location.pathname, location.search, location.hash, onOpenChange, projects.data, scope, selectProject]);
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
