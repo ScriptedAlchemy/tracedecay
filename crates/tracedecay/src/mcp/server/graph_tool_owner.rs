@@ -5,11 +5,9 @@
 use std::path::Path;
 use std::sync::{Arc, Weak};
 
-use tracedecay_contracts::{
-    ApplicationProblem, CancellationStage, ResolvedScope, RetryDirective,
-};
 use tracedecay_contracts::graph_tool::GraphToolResultV1;
 use tracedecay_contracts::retrieval::HookRuntimeResultV1;
+use tracedecay_contracts::{ApplicationProblem, CancellationStage, ResolvedScope, RetryDirective};
 use tracedecay_daemon_service::{
     DaemonInvocationService, GraphToolFuture, GraphToolInvocationV1, ProjectGraphToolPortV1,
     RegisteredGraphToolOwnerV1,
