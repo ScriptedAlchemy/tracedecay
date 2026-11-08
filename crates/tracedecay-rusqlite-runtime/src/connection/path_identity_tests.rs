@@ -1,4 +1,6 @@
 use std::{env, fs, path::Path, process::Command, time::Duration};
+use std::fs::OpenOptions;
+use std::os::{fd::AsRawFd, unix::fs::FileExt};
 
 use rusqlite::{Connection, Error, ErrorCode, OpenFlags};
 use tempfile::TempDir;
@@ -418,4 +420,106 @@ fn path_checks_keep_pinned_identity_and_reject_missing_or_replaced_files() {
         pinned.verify_current_path(&path),
         Err(OpenedDatabaseFileError::Replaced),
     );
+}
+
+const RESERVED_LOCK_PROBE_PATH: &str = "TRACEDECAY_SQLITE_RESERVED_LOCK_PROBE_PATH";
+const RESERVED_LOCK_PROBE_EXPECTATION: &str = "TRACEDECAY_SQLITE_RESERVED_LOCK_PROBE_EXPECTATION";
+const RESERVED_LOCK_PROBE_COMPLETE: &str = "tracedecay-sqlite-reserved-lock-probe-complete";
+
+/// Inspect SQLite's POSIX RESERVED byte from a different process. This avoids
+/// an SQLite schema read after we deliberately corrupt the fixture header.
+#[test]
+fn external_reserved_lock_probe() {
+    let Some(path) = env::var_os(RESERVED_LOCK_PROBE_PATH) else {
+        return;
+    };
+    let file = OpenOptions::new().read(true).write(true).open(path).unwrap();
+    let mut reservation = libc::flock {
+        l_type: libc::F_WRLCK as libc::c_short,
+        l_whence: libc::SEEK_SET as libc::c_short,
+        l_start: 0x4000_0001,
+        l_len: 1,
+        l_pid: 0,
+    };
+    // SAFETY: the file owns a valid descriptor and reservation is initialized
+    // and writable for the F_SETLK request.
+    let result = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLK, &mut reservation) };
+    match env::var(RESERVED_LOCK_PROBE_EXPECTATION).unwrap().as_str() {
+        "blocked" => {
+            assert_eq!(result, -1, "SQLite writer's RESERVED lock was lost");
+            let error = std::io::Error::last_os_error().raw_os_error();
+            assert!(
+                error == Some(libc::EACCES) || error == Some(libc::EAGAIN),
+                "unexpected advisory-lock refusal: {error:?}"
+            );
+        }
+        "allowed" => assert_eq!(
+            result,
+            0,
+            "RESERVED byte remained locked after the writer closed: {}",
+            std::io::Error::last_os_error()
+        ),
+        other => panic!("unknown reserved lock expectation: {other}"),
+    }
+    println!("{RESERVED_LOCK_PROBE_COMPLETE}");
+}
+
+fn probe_reserved_lock(path: &Path, blocked: bool) {
+    let (_, module) = module_path!().split_once("::").unwrap();
+    let output = Command::new(env::current_exe().unwrap())
+        .args([
+            "--exact",
+            &format!("{module}::external_reserved_lock_probe"),
+            "--nocapture",
+        ])
+        .env(RESERVED_LOCK_PROBE_PATH, path)
+        .env(
+            RESERVED_LOCK_PROBE_EXPECTATION,
+            if blocked { "blocked" } else { "allowed" },
+        )
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success()
+            && stdout.contains("1 passed")
+            && stdout.contains(RESERVED_LOCK_PROBE_COMPLETE),
+        "cross-process lock probe failed: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn malformed_existing_store_refusal_keeps_other_sqlite_writer_locks() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("sessions.db");
+    let writer = Connection::open(&path).unwrap();
+    writer
+        .execute_batch(
+            "PRAGMA journal_mode = DELETE;
+             CREATE TABLE sample(value INTEGER);
+             INSERT INTO sample VALUES (1);",
+        )
+        .unwrap();
+    // Retain this descriptor through the original writer's entire lifetime:
+    // closing it early would itself discard the POSIX locks under test.
+    let mutation = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+    writer
+        .execute_batch("BEGIN IMMEDIATE; UPDATE sample SET value = 2;")
+        .unwrap();
+    probe_reserved_lock(&path, true);
+
+    // Corrupt only a disposable fixture, in place and without closing a raw
+    // descriptor. The main file remains page-aligned but is no longer SQLite.
+    mutation.write_all_at(b"Not SQLite data!", 0).unwrap();
+    probe_reserved_lock(&path, true);
+    assert!(matches!(
+        OpenedDatabaseFile::pin_initialized(&path),
+        Err(OpenedDatabaseFileError::InvalidHeader)
+    ));
+    probe_reserved_lock(&path, true);
+
+    drop(writer);
+    drop(mutation);
+    probe_reserved_lock(&path, false);
 }
