@@ -15,6 +15,8 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use crate::{LcmError, LcmRawMessage, gc, payload, raw, schema, security, summary_convergence};
 
+#[cfg(all(test, target_os = "linux"))]
+mod read_cost;
 #[cfg(test)]
 mod tests;
 
@@ -41,7 +43,7 @@ pub struct ReplayMetadataCompactionReport {
     /// Subset of skipped rows whose metadata plus canonical/stored body
     /// representations exceed this pass's 4 MiB read and verification budget.
     pub rows_skipped_oversized: u64,
-    /// Metadata bytes admitted to SQL eligibility parsing, including ineligible
+    /// Metadata bytes admitted to SQL eligibility checks, including ineligible
     /// rows. Work deferred by the body verification budget is not parsed.
     pub metadata_bytes_examined: u64,
     /// UTF-8 metadata bytes removed. This does not measure file shrinkage.
@@ -107,7 +109,7 @@ pub async fn compact_replay_metadata(
 struct Candidate {
     store_id: i64,
     eligible: bool,
-    metadata_oversized: bool,
+    oversized: bool,
     read_bytes: Option<u64>,
 }
 
@@ -118,18 +120,24 @@ async fn candidates(
     after: i64,
     limit: usize,
 ) -> Result<(Vec<Candidate>, u64), LcmError> {
+    // octet_length reads record metadata, unlike length(CAST(text AS BLOB)).
+    // Even a small scalar after a large body can load its overflow chain:
+    // defer storage_kind to eligibility and avoid unnecessary canonical joins.
     let mut rows = conn
         .query(
-            "SELECT r.store_id, r.storage_kind = 'inline',
-                    LENGTH(CAST(r.metadata_json AS BLOB)),
-                    COALESCE(LENGTH(CAST(r.content AS BLOB)), b.uncompressed_bytes),
+            "SELECT r.store_id, octet_length(r.metadata_json),
+                    COALESCE(octet_length(r.content),
+                        CASE WHEN LENGTH(b.body) <= ?3 THEN b.uncompressed_bytes END),
                     COALESCE(LENGTH(b.body), 0)
              FROM lcm_raw_messages r
-             LEFT JOIN session_canonical_bodies b ON b.content_hash = r.content_hash
+             LEFT JOIN session_canonical_bodies b ON b.content_hash = CASE
+                 WHEN r.content IS NULL AND octet_length(r.metadata_json) <= ?3
+                 THEN r.content_hash END
              WHERE r.store_id > ?1 ORDER BY r.store_id LIMIT ?2",
             params![
                 after,
-                limit.clamp(1, MAX_REPLAY_METADATA_COMPACTION_ROWS) as i64
+                limit.clamp(1, MAX_REPLAY_METADATA_COMPACTION_ROWS) as i64,
+                MAX_BATCH_BYTES as i64
             ],
         )
         .await?;
@@ -139,16 +147,10 @@ async fn candidates(
     let mut read_remaining = MAX_BATCH_BYTES;
     while let Some(row) = rows.next().await? {
         let store_id: i64 = row.get(0)?;
-        let inline = row.get::<i64>(1)? != 0;
-        let metadata: Option<i64> = row.get(2)?;
-        let body: Option<i64> = row.get(3)?;
-        let stored: i64 = row.get(4)?;
-        let metadata_bytes = if inline {
-            u64::try_from(metadata.unwrap_or(0)).map_err(db_error)?
-        } else {
-            0
-        };
-        let metadata_oversized = metadata_bytes > MAX_BATCH_BYTES;
+        let metadata: Option<i64> = row.get(1)?;
+        let body: Option<i64> = row.get(2)?;
+        let stored: i64 = row.get(3)?;
+        let metadata_bytes = u64::try_from(metadata.unwrap_or(0)).map_err(db_error)?;
         let read_bytes = metadata
             .zip(body)
             .and_then(|(metadata, body)| {
@@ -159,32 +161,30 @@ async fn candidates(
                 ))
             })
             .and_then(|(metadata, body, stored)| metadata.checked_add(body)?.checked_add(stored));
-        if !metadata_oversized {
+        let oversized = metadata_bytes > MAX_BATCH_BYTES
+            || stored > MAX_BATCH_BYTES as i64
+            || read_bytes.is_some_and(|bytes| bytes > MAX_BATCH_BYTES);
+        if !oversized {
             if metadata_bytes > remaining {
                 break;
             }
-            // Eligibility is not yet known. Charge every inline row against
-            // the verification budget so deferred rows are not JSON-parsed
-            // again on the next tick. Individually oversized rows still
-            // advance without loading their bodies.
-            if inline
-                && let Some(bytes) = read_bytes
-                && bytes <= MAX_BATCH_BYTES
-            {
+            // Eligibility is not yet known. Charge each potential body read
+            // before parsing so deferred rows are not revisited for JSON work.
+            if let Some(bytes) = read_bytes {
                 if bytes > read_remaining {
                     break;
                 }
                 read_remaining -= bytes;
             }
             remaining -= metadata_bytes;
-            if inline && metadata.is_some() {
+            if metadata.is_some() {
                 eligibility_ids.push(store_id);
             }
         }
         result.push(Candidate {
             store_id,
             eligible: false,
-            metadata_oversized,
+            oversized,
             read_bytes,
         });
     }
@@ -238,7 +238,7 @@ async fn step(
     let mut remaining = MAX_BATCH_BYTES;
     let mut guard_suspended = false;
     for candidate in candidates {
-        if candidate.metadata_oversized {
+        if candidate.oversized {
             report.rows_skipped += 1;
             report.rows_skipped_oversized += 1;
         } else if candidate.eligible {
