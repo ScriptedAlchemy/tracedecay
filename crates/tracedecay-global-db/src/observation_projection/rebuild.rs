@@ -220,32 +220,33 @@ pub async fn project_queued_observations(
     if max == 0 {
         return Ok(ProjectionDrainBatch::default());
     }
-    // The deadline index proves when no nonterminal row is due without
-    // taking a writer lease. A deferred-only queue is pending work, but must
-    // not burn an empty write transaction on every poll while its retry clock
-    // runs. When anything is due, the writer remains authoritative for
-    // sequence order, rebuild fences, and concurrent admissions.
+    // Sequence order, not the earliest deadline anywhere in the queue,
+    // determines readiness. A deferred head fences even a later due row:
+    // neither case should take a writer lease just to find no ready work.
+    // The partial sequence index excludes terminal (i64::MAX) collisions.
+    // The writer remains authoritative when this check finds a ready head.
     {
         let reader = database.read_connection();
         let mut rows = reader
             .query(
+                // The fixed terminal sentinel matches the partial index predicate.
                 "SELECT next_retry_at_micros FROM projection_queue
-                 WHERE next_retry_at_micros < ?1
-                 ORDER BY next_retry_at_micros LIMIT 1",
-                params![PROJECTION_TERMINAL_RETRY_MICROS],
+                 WHERE next_retry_at_micros < 9223372036854775807
+                 ORDER BY observation_sequence LIMIT 1",
+                (),
             )
             .await
             .map_err(|error| storage("probe ready projection queue", error))?;
-        let earliest = rows
+        let head = rows
             .next()
             .await
             .map_err(|error| storage("probe ready projection queue", error))?;
-        let Some(earliest) = earliest else {
+        let Some(head) = head else {
             return Ok(ProjectionDrainBatch::default());
         };
-        let deadline = earliest
+        let deadline = head
             .get::<i64>(0)
-            .map_err(|error| storage("decode earliest projection deadline", error))?;
+            .map_err(|error| storage("decode projection head deadline", error))?;
         if deadline > tracedecay_contracts::clock::now_micros().0 {
             return Ok(ProjectionDrainBatch {
                 items: Vec::new(),
@@ -313,18 +314,14 @@ async fn ready_projection_window(
     let mut rows = conn
         .query(
             "SELECT observation_id, next_retry_at_micros FROM projection_queue
-             WHERE next_retry_at_micros < ?1
+             WHERE next_retry_at_micros < 9223372036854775807
                AND NOT EXISTS (
                  SELECT 1 FROM observation_projection_rebuilds
-                 WHERE projector_version = ?2
+                 WHERE projector_version = ?1
                )
              ORDER BY observation_sequence
-             LIMIT ?3",
-            params![
-                PROJECTION_TERMINAL_RETRY_MICROS,
-                SESSION_MESSAGE_PROJECTOR_VERSION,
-                limit
-            ],
+             LIMIT ?2",
+            params![SESSION_MESSAGE_PROJECTOR_VERSION, limit],
         )
         .await
         .map_err(|error| storage("read projection queue window", error))?;

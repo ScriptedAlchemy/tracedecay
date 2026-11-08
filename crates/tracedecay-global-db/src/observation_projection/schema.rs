@@ -313,6 +313,12 @@ const OBSERVATION_PROJECTION_BINDING_TRIGGERS_SQL: &str =
 /// Historical-data indexes the schema contract requires on the projection
 /// authority.
 pub(crate) const OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL: &[&str] = &[
+    // The terminal collision sentinel is i64::MAX. Keep this literal
+    // predicate identical to the ordered queue-head reads so SQLite can
+    // avoid scanning the parked prefix while honoring sequence fences.
+    "CREATE INDEX IF NOT EXISTS idx_projection_queue_active_sequence
+     ON projection_queue (observation_sequence, next_retry_at_micros)
+     WHERE next_retry_at_micros < 9223372036854775807;",
     // Nonterminal queue probes must not scan every permanently parked collision
     // on every idle pass. SQLite can also use this for retry frontier reads.
     "CREATE INDEX IF NOT EXISTS idx_projection_queue_retry_deadline
@@ -634,7 +640,8 @@ mod tests {
         drop(open_registered_schema(&path).await.unwrap());
         let conn = TestConnection::open(&path);
         conn.execute_batch(
-            "DROP INDEX idx_projection_queue_retry_deadline;
+            "DROP INDEX idx_projection_queue_active_sequence;
+             DROP INDEX idx_projection_queue_retry_deadline;
              DROP INDEX idx_observation_projection_provenance_output;
              DROP INDEX idx_observation_projection_provenance_global_output;
              DROP INDEX idx_observation_workflow_facts_query;
@@ -661,6 +668,7 @@ mod tests {
             .query(
                 "SELECT name FROM sqlite_schema
                  WHERE name IN (
+                    'idx_projection_queue_active_sequence',
                     'idx_projection_queue_retry_deadline',
                     'idx_observation_projection_provenance_output',
                     'idx_observation_projection_provenance_global_output',

@@ -772,6 +772,13 @@ async fn deferred_only_reopened_queue_skips_writer_until_retry_is_due() {
         "receipt.deferred-only-second",
         conversational_payload("message-deferred-only-second", "second deferred-only canary"),
     );
+    let third = observation(
+        "session-deferred-only",
+        200,
+        300,
+        "receipt.deferred-only-third",
+        conversational_payload("message-deferred-only-third", "due behind deferred head"),
+    );
     {
         let runtime = profile_runtime(&tmp).await;
         let store = runtime
@@ -788,13 +795,19 @@ async fn deferred_only_reopened_queue_skips_writer_until_retry_is_due() {
             Some(cursor("session-deferred-only", 100)),
         )
         .await;
+        persist(
+            &store,
+            third.clone(),
+            Some(cursor("session-deferred-only", 200)),
+        )
+        .await;
         store
             .project_observation(first.observation_id())
             .await
             .unwrap();
 
-        // Keep a terminal collision and a deferred sequence, with no ready
-        // work. Both survive the restart; neither should require a writer.
+        // Keep a terminal collision and a deferred sequence. Sequence three
+        // is due, but must not bypass the deferred sequence two across restart.
         let connection = rusqlite::Connection::open(&database_path).unwrap();
         connection
             .execute(
@@ -858,13 +871,22 @@ async fn deferred_only_reopened_queue_skips_writer_until_retry_is_due() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(resumed.items.len(), 1);
-    assert!(!resumed.has_more, "the remaining row is terminal");
+    assert_eq!(resumed.items.len(), 1, "the one-item window cannot skip ahead");
+    assert!(resumed.has_more, "the later ready sequence still needs projection");
     assert_eq!(
         store.projection_checkpoint().await.unwrap().last_sequence(),
         2
     );
     assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 2);
+
+    let tail = store.project_queued_observations(1).await.unwrap().unwrap();
+    assert_eq!(tail.items.len(), 1);
+    assert!(!tail.has_more, "only the terminal collision remains");
+    assert_eq!(
+        store.projection_checkpoint().await.unwrap().last_sequence(),
+        3
+    );
+    assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 3);
 }
 
 #[tokio::test]
