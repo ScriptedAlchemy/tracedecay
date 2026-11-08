@@ -140,7 +140,12 @@ pub(crate) fn source_walk_with_diagnostics(
     path_policy: &IndexPathPolicyV1,
 ) -> Result<(Walk, SourceWalkDiagnostics), SourceWalkError> {
     let diagnostics = SourceWalkDiagnostics::default();
-    let walk = source_walk_inner(project_root, path_glob, path_policy, Some(diagnostics.clone()))?;
+    let walk = source_walk_inner(
+        project_root,
+        path_glob,
+        path_policy,
+        Some(diagnostics.clone()),
+    )?;
     Ok((walk, diagnostics))
 }
 

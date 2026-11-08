@@ -157,14 +157,11 @@ pub(super) struct ProjectFiles {
 
 impl ProjectFiles {
     fn collect(project_root: &Path, path_policy: &IndexPathPolicyV1) -> Result<Self> {
-        let (walk, diagnostics) = crate::source_walk::source_walk_with_diagnostics(
-            project_root,
-            None,
-            path_policy,
-        )
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("source walk rejected its own scope: {}", error.message),
-        })?;
+        let (walk, diagnostics) =
+            crate::source_walk::source_walk_with_diagnostics(project_root, None, path_policy)
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("source walk rejected its own scope: {}", error.message),
+                })?;
         let mut files = Vec::new();
         for entry in walk {
             let Ok(entry) = entry else { continue };
@@ -437,7 +434,11 @@ mod tests {
         write(root.path(), "app/.git", "gitdir: ../.git/modules/app\n");
         write(root.path(), "app/src/child.rs", "pub fn child() {}\n");
         write(root.path(), "unrelated/.git/HEAD", "ref: refs/heads/main\n");
-        write(root.path(), "unrelated/src/foreign.rs", "pub fn foreign() {}\n");
+        write(
+            root.path(),
+            "unrelated/src/foreign.rs",
+            "pub fn foreign() {}\n",
+        );
 
         let audit = audit_project(root.path(), &no_exclusions()).expect("audit");
         let rust = ecosystem(&audit, "rust");
