@@ -3532,6 +3532,12 @@ mod tests {
                         }
                         let bytes = std::fs::read(&path).unwrap();
                         originals.borrow_mut().push((path.clone(), bytes));
+                        // Published segments can be read-only. This disposable
+                        // fixture must permit the deliberate in-place fault.
+                        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+                        #[allow(clippy::permissions_set_readonly_false)]
+                        permissions.set_readonly(false);
+                        std::fs::set_permissions(&path, permissions).unwrap();
                         std::fs::OpenOptions::new()
                             .write(true)
                             .open(&path)
