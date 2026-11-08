@@ -239,13 +239,12 @@ impl CodeIndexBuildProgressSlotStateV1 {
         // The same scheduler owner may rebuild its SQLite staging file, but
         // it must not change the sealed source or the report incarnation.
         // Keep this binding even when begin_staging_attempt clears counters.
-        if let Some((daemon, producer, digest)) = self.progress_identity.as_ref() {
-            if *daemon != snapshot.daemon_incarnation
+        if let Some((daemon, producer, digest)) = self.progress_identity.as_ref()
+            && (*daemon != snapshot.daemon_incarnation
                 || *producer != snapshot.producer_incarnation
-                || digest != &snapshot.sealed_source_digest
-            {
-                return false;
-            }
+                || digest != &snapshot.sealed_source_digest)
+        {
+            return false;
         }
         if let Some(current) = self.snapshot.as_ref() {
             // Concurrent phase/report producers may complete out of order.
@@ -265,22 +264,21 @@ impl CodeIndexBuildProgressSlotStateV1 {
         // accepted source work, or a changed refusal. Elapsed time, a rate
         // resample, or another reading of the same committed cursor is not
         // progress; renewing its timestamp defeats stall detection.
-        if let Some(current) = self.snapshot.as_ref() {
-            if snapshot.phase == current.phase
-                && snapshot.committed_pages == current.committed_pages
-                && snapshot.committed_chunks == current.committed_chunks
-                && snapshot.committed_imports == current.committed_imports
-                && snapshot.committed_payload_bytes == current.committed_payload_bytes
-                && snapshot.completed_files == current.completed_files
-                && snapshot.total_files == current.total_files
-                && snapshot.completed_lexical_units == current.completed_lexical_units
-                && snapshot.total_lexical_units == current.total_lexical_units
-                && snapshot.current_batch_pages == current.current_batch_pages
-                && snapshot.current_batch_payload_bytes == current.current_batch_payload_bytes
-                && snapshot.blocked_reason == current.blocked_reason
-            {
-                return false;
-            }
+        if let Some(current) = self.snapshot.as_ref()
+            && snapshot.phase == current.phase
+            && snapshot.committed_pages == current.committed_pages
+            && snapshot.committed_chunks == current.committed_chunks
+            && snapshot.committed_imports == current.committed_imports
+            && snapshot.committed_payload_bytes == current.committed_payload_bytes
+            && snapshot.completed_files == current.completed_files
+            && snapshot.total_files == current.total_files
+            && snapshot.completed_lexical_units == current.completed_lexical_units
+            && snapshot.total_lexical_units == current.total_lexical_units
+            && snapshot.current_batch_pages == current.current_batch_pages
+            && snapshot.current_batch_payload_bytes == current.current_batch_payload_bytes
+            && snapshot.blocked_reason == current.blocked_reason
+        {
+            return false;
         }
         // The next producer may have assembled its report before an earlier
         // producer acquired the lock. Keep the owner's latest observed time
