@@ -211,7 +211,11 @@ mod tests {
             .unwrap();
         assert_eq!(grown.bytes, u64::try_from(expected).unwrap());
         assert!(grown.bytes > initial.bytes);
-        assert!(after.iter().all(|sample| sample.table_name != "sqlite_sequence"));
+        assert!(
+            after
+                .iter()
+                .all(|sample| sample.table_name != "sqlite_sequence")
+        );
     }
 
     #[test]
