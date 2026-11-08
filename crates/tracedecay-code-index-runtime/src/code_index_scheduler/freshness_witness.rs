@@ -490,6 +490,7 @@ fn roster_evidence(
     repository: &gix::Repository,
     project_root: &Path,
     sampled_at: ChangeClockReading,
+    ignored_source_admissions: &[CodeIndexIgnoredSourceAdmissionV1],
 ) -> Option<Vec<(PathBuf, Option<StatKeyV1>)>> {
     let mut recorder = DirectoryEvidenceV1 {
         root: project_root.to_path_buf(),
@@ -513,6 +514,37 @@ fn roster_evidence(
     }
     recorder.record_directory(project_root.to_path_buf());
     let index = repository.index_or_empty().ok()?;
+    // Git's directory walk may not descend into tracked-only directories.
+    // Their nested .git markers still change source admission without a
+    // parent index or HEAD update, so key each tracked and explicitly
+    // admitted source ancestor independently of dirwalk traversal.
+    let mut source_ancestors = BTreeSet::new();
+    let mut collect_ancestors = |relative: &Path| {
+        let mut current = relative.parent();
+        while let Some(parent) = current {
+            if parent.as_os_str().is_empty() {
+                break;
+            }
+            source_ancestors.insert(parent.to_path_buf());
+            current = parent.parent();
+        }
+    };
+    for entry in index.entries() {
+        collect_ancestors(gix::path::from_bstr(entry.path(&index)).ok()?);
+    }
+    for admission in ignored_source_admissions {
+        if validate_code_logical_path(&admission.logical_path).is_err() {
+            return None;
+        }
+        collect_ancestors(Path::new(&admission.logical_path));
+    }
+    for relative in source_ancestors {
+        let directory = project_root.join(relative);
+        recorder.record_directory(directory.clone());
+        // A missing marker is evidence too: a newly created gitdir file or
+        // directory must invalidate the roster even if Git ignores it.
+        recorder.record(directory.join(".git"), false);
+    }
     let options = repository
         .dirwalk_options()
         .ok()?
@@ -597,7 +629,12 @@ impl SourceSweepCacheV1 {
                 let Ok(repository) = tracedecay_runtime_core::git_open::open(project_root) else {
                     return (false, stats);
                 };
-                let evidence = roster_evidence(&repository, project_root, sampled_at);
+                let evidence = roster_evidence(
+                    &repository,
+                    project_root,
+                    sampled_at,
+                    ignored_source_admissions,
+                );
                 let Ok(SourceCandidatesV1 {
                     candidates,
                     unrepresentable,
@@ -1027,5 +1064,98 @@ mod tests {
         let first = sample(&path, sampled_at).unwrap().unwrap();
         assert!(first.settled());
         assert_eq!(first, sample(&path, sampled_at).unwrap().unwrap());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tracked_parent_boundary_tests {
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use super::{CachedCandidateRosterV1, ChangeClockReading, roster_evidence};
+
+    fn git(root: &Path, args: &[&str]) {
+        let program = tracedecay_runtime_core::git::try_git_program().expect("fixture Git");
+        let mut command = std::process::Command::new(program);
+        command.current_dir(root);
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("GIT_") {
+                command.env_remove(key);
+            }
+        }
+        let output = command
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", root.join(".fixture-gitconfig"))
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .expect("run fixture Git");
+        assert!(
+            output.status.success(),
+            "Git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn cached_tracked_directory_roster_invalidates_on_nested_git_marker() {
+        let root = tempfile::tempdir().expect("parent checkout");
+        let tracked = root.path().join("src/nested/tracked.rs");
+        std::fs::create_dir_all(tracked.parent().unwrap()).unwrap();
+        std::fs::write(&tracked, "pub fn tracked() {}\n").unwrap();
+        git(root.path(), &["init", "-q"]);
+        git(root.path(), &["add", "src/nested/tracked.rs"]);
+        git(root.path(), &["commit", "-qm", "parent source"]);
+
+        let repository =
+            tracedecay_runtime_core::git_open::open(root.path()).expect("open parent Git");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let evidence = loop {
+            if let Some(evidence) =
+                roster_evidence(&repository, root.path(), ChangeClockReading::now(), &[])
+            {
+                break evidence;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "tracked parent directories never became settleable"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let marker = root.path().join("src/nested/.git");
+        assert!(
+            evidence
+                .iter()
+                .any(|(path, key)| path == &marker && key.is_none()),
+            "missing nested marker must be sampled independently of gix dirwalk"
+        );
+
+        let cached = CachedCandidateRosterV1 {
+            git_metadata_signature: "unchanged-parent-git".to_owned(),
+            admitted_paths: Vec::new(),
+            evidence,
+            candidates: Arc::new(Vec::new()),
+            unrepresentable: Arc::new(Vec::new()),
+        };
+        assert!(cached.holds("unchanged-parent-git", &[]));
+        std::fs::write(&marker, "gitdir: ../../.git/modules/nested\n")
+            .expect("create nested gitdir marker");
+        assert!(
+            !cached.holds("unchanged-parent-git", &[]),
+            "a new nested repository marker must invalidate the cached roster even when parent Git metadata is unchanged"
+        );
+        std::fs::remove_file(&marker).unwrap();
+        assert!(
+            cached.holds("unchanged-parent-git", &[]),
+            "the pre-marker evidence should be valid again after removing it"
+        );
     }
 }
