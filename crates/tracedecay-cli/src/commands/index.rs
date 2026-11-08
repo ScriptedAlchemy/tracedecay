@@ -7,7 +7,8 @@ use tracedecay_project::project::TraceDecay;
 use tracedecay_contracts::code_index_freshness::{
     CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
     CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1, CodeIndexBuildProgressV1,
-    CodeIndexReadinessWaitOutcomeV1, CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
+    CodeIndexNativeGraphPhaseV1, CodeIndexReadinessWaitOutcomeV1, CodeIndexStalenessStateV1,
+    CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_contracts::graph_tool::GraphToolResultV1;
 use tracedecay_contracts::retrieval::{
@@ -374,16 +375,16 @@ where
         };
         let progress = worktree.as_ref().ok().and_then(|worktree| {
             worktree
-                .preseal_attempt
+                .native_graph_progress
                 .as_ref()
-                .filter(|attempt| attempt.active)
-                .map(preseal_progress_summary)
+                .filter(|graph| graph.active && graph.last_progress_micros.is_some())
+                .map(native_graph_progress_summary)
                 .or_else(|| {
                     worktree
-                        .native_graph_progress
+                        .preseal_attempt
                         .as_ref()
-                        .filter(|graph| graph.active)
-                        .map(native_graph_progress_summary)
+                        .filter(|attempt| attempt.active)
+                        .map(preseal_progress_summary)
                 })
                 .or_else(|| worktree.progress.as_ref().map(build_progress_summary))
         });
@@ -495,10 +496,22 @@ impl FirstGenerationWorkMarker {
         {
             return None;
         }
-        if let Some(graph) = worktree.native_graph_progress.as_ref().filter(|g| {
-            g.active && g.last_progress_micros.is_some()
-        }) {
-            return Some(Self::native_graph(graph));
+        if let Some(graph) = worktree.native_graph_progress.as_ref().filter(|g| g.active) {
+            // Direct seal has one final Grafeo compact-container write and
+            // digest verification AFTER all accepted row windows. That work
+            // has no intermediate native milestone. Never call a healthy
+            // final write a stall merely because the last encode clock froze.
+            let encoding_finished = graph.phase == Some(CodeIndexNativeGraphPhaseV1::CompactEncoding)
+                && graph.total_entities == Some(graph.encoded_entities)
+                && graph.total_relations.is_none_or(|total| total == graph.encoded_relations);
+            if encoding_finished
+                || graph.phase == Some(CodeIndexNativeGraphPhaseV1::CompactSegmentVerified)
+            {
+                return None;
+            }
+            if graph.last_progress_micros.is_some() {
+                return Some(Self::native_graph(graph));
+            }
         }
         if let Some(progress) = &worktree.progress {
             match progress.phase {
@@ -979,8 +992,9 @@ mod daemon_precondition_tests {
         CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
         CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1,
         CodeIndexBuildProgressV1, CodeIndexFreshnessLadderInputsV1, CodeIndexFreshnessLadderV1,
-        CodeIndexReadinessTargetV1, CodeIndexReadinessV1, CodeIndexReadinessWaitOutcomeV1,
-        CodeIndexReadinessWaitReadV1, CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
+        CodeIndexNativeGraphPhaseV1, CodeIndexReadinessTargetV1, CodeIndexReadinessV1,
+        CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitReadV1,
+        CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
     };
     use tracedecay_contracts::retrieval::StatusCodeIndexFreshnessV1;
     use tracedecay_domain::errors::TraceDecayError;
@@ -1469,6 +1483,49 @@ mod daemon_precondition_tests {
         let stale = super::FirstGenerationWorkMarker::of(Some(&worktree));
         assert!(window.observe(stale, now + Duration::from_secs(359)));
     }
+
+    #[test]
+    fn final_compact_write_is_uninstrumented_not_a_false_stall() {
+        let mut worktree = building(true);
+        worktree.progress = Some(CodeIndexBuildProgressV1 {
+            phase: CodeIndexBuildPhaseV1::GraphPublication,
+            ..progress(6_136, None)
+        });
+        let mut graph =
+            tracedecay_contracts::code_index_freshness::CodeIndexNativeGraphProgressV1 {
+                generation_id: "generation.v1.first".to_owned(),
+                sealed_graph_digest: "sha256:sealed".to_owned(),
+                daemon_incarnation: 3,
+                producer_incarnation: 5,
+                attempt_sequence: 2,
+                progress_epoch: 7,
+                phase: Some(CodeIndexNativeGraphPhaseV1::CompactEncoding),
+                encoded_entities: 512,
+                total_entities: Some(1024),
+                encoded_relations: 0,
+                total_relations: None,
+                committed_stage_pages: 0,
+                committed_stage_mutations: 0,
+                committed_stage_bytes: 0,
+                committed_compact_segments: 0,
+                committed_compact_bytes: 0,
+                last_progress_micros: Some(20),
+                active: true,
+            };
+        worktree.native_graph_progress = Some(graph.clone());
+        assert!(super::FirstGenerationWorkMarker::of(Some(&worktree)).is_some());
+        graph.encoded_entities = 1024;
+        // Zero relations cannot emit a positive row window. The writer is
+        // about to perform its single non-progress-reporting compact write.
+        worktree.native_graph_progress = Some(graph.clone());
+        assert_eq!(super::FirstGenerationWorkMarker::of(Some(&worktree)), None);
+        graph.phase = Some(CodeIndexNativeGraphPhaseV1::CompactSegmentVerified);
+        graph.committed_compact_segments = 1;
+        graph.committed_compact_bytes = 50_000;
+        worktree.native_graph_progress = Some(graph);
+        assert_eq!(super::FirstGenerationWorkMarker::of(Some(&worktree)), None);
+    }
+
     fn progress(
         completed_files: u64,
         blocked_reason: Option<CodeIndexBuildBlockedReasonV1>,
