@@ -437,8 +437,8 @@ fn failed_sidecar_reservation_cannot_be_reopened_as_existing_sqlite() {
 #[test]
 fn existing_sqlite_admission_requires_a_completed_header() {
     let directory = tempfile::tempdir().unwrap();
-    for size in [513_usize, 1023, 1025] {
-        let path = directory.path().join(format!("truncated-{size}.db"));
+    for size in [512_usize, 513, 1023, 1025, 4096] {
+        let path = directory.path().join(format!("incomplete-{size}.db"));
         let mut bytes = vec![0_u8; size];
         bytes[..16].copy_from_slice(b"SQLite format 3\0");
         std::fs::write(&path, &bytes).unwrap();
@@ -461,6 +461,33 @@ fn existing_sqlite_admission_requires_a_completed_header() {
         .unwrap();
     drop(database);
     assert!(OpenedDatabaseFile::pin_initialized(&path).is_ok());
+}
+
+#[test]
+fn initialized_wal_with_uncheckpointed_schema_remains_attachable() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.db");
+    let writer = Connection::open(&path).unwrap();
+    writer
+        .execute_batch(
+            "PRAGMA journal_mode = WAL;
+             CREATE TABLE probe(value INTEGER);
+             INSERT INTO probe VALUES (42);",
+        )
+        .unwrap();
+    let wal = sidecar_path(&path, "-wal");
+    let before = std::fs::read(&wal).unwrap();
+    assert!(!before.is_empty());
+    let pinned = OpenedDatabaseFile::pin_initialized(&path).unwrap();
+    assert_ne!(pinned.identity(), 0);
+    assert_eq!(std::fs::read(&wal).unwrap(), before);
+    drop(writer);
+    pinned.release_after_workers_exit();
+    let reader = Connection::open(&path).unwrap();
+    assert_eq!(
+        reader.query_row("SELECT value FROM probe", [], |row| row.get::<_, i64>(0)),
+        Ok(42)
+    );
 }
 
 #[test]

@@ -106,20 +106,19 @@ impl OpenedDatabaseFile {
                 return Err(OpenedDatabaseFileError::InvalidHeader);
             }
         }
-        let opened = Self::pin(path)?;
-        let initialized = opened.with_file(|file| {
-            let mut reader = file;
-            let mut header = [0_u8; 16];
-            match io::Read::read_exact(&mut reader, &mut header) {
-                Ok(()) => Ok(header == *b"SQLite format 3\0"),
-                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
-                Err(_) => Err(OpenedDatabaseFileError::Inspect),
-            }
-        })??;
-        if !initialized {
-            return Err(OpenedDatabaseFileError::InvalidHeader);
-        }
-        Ok(opened)
+        // Inspect the main SQLite file without opening and closing a separate
+        // raw descriptor on a rejected header: on Unix that close can release
+        // locks held by another live SQLite connection in this process.
+        // An immutable SQLite reader uses the VFS's lock-aware lifetime and
+        // never opens or mutates the unverified WAL/SHM/journal sidecars.
+        let inspection = open_immutable_reader(path)
+            .map_err(|_| OpenedDatabaseFileError::InvalidHeader)?;
+        let _: i64 = inspection
+            .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
+            .map_err(|_| OpenedDatabaseFileError::InvalidHeader)?;
+        drop(inspection);
+        // A valid main-file schema is necessary, not proof of sidecar ownership.
+        Self::pin(path)
     }
 
     pub(crate) fn create_new(path: &Path) -> Result<Self, OpenedDatabaseFileError> {

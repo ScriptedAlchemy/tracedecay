@@ -1256,9 +1256,9 @@ mod tests {
     }
 
     #[test]
-    fn truncated_existing_sqlite_refuses_before_touching_sidecars() {
+    fn malformed_existing_sqlite_refuses_before_touching_sidecars() {
         let binding = binding();
-        for size in [513_usize, 1025] {
+        for size in [512_usize, 513, 1025, 4096] {
             for suffix in ["-wal", "-shm", "-journal"] {
                 let directory = TempDir::new().unwrap();
                 let path = directory.path().join("sessions.db");
