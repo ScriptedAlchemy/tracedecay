@@ -253,6 +253,16 @@ fn staged_segment_range_reads_open_once_per_cached_file_and_revalidate_replaceme
         10,
         "poisoned staged segment must not be reopened after identity refusal",
     );
+    let write_after_poison = preparation.write_segment(
+        SealedGenerationSegmentPublicationV1::File {
+            digest: &digests[1],
+            bytes: &contents[1],
+        },
+    );
+    assert!(
+        matches!(write_after_poison, Err(CodeIndexPublicationStoreErrorV1::Unavailable(_))),
+        "a poisoned preparation must refuse further writes as well as reads",
+    );
     drop(reader);
     preparation.abort().expect("abort and clean staged files");
     assert!(

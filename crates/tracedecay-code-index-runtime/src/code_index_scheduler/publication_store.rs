@@ -689,6 +689,12 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
         let DaemonCodeIndexPreparationStateV1::Open(files) = &mut *state else {
             return Err(Self::closed());
         };
+        #[cfg(unix)]
+        if files.segment_reads_poisoned {
+            return Err(DaemonCodeIndexPublicationStoreV1::unavailable(
+                "staged sealed segment identity was invalidated",
+            ));
+        }
         if files.manifest_identity.is_some() {
             return Err(DaemonCodeIndexPublicationStoreV1::unavailable(
                 "code-index preparation already entered commit",
@@ -3336,6 +3342,12 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let DaemonCodeIndexPreparationStateV1::Open(files) = &mut *session else {
             return Err(DaemonCodeIndexPreparationV1::closed());
         };
+        #[cfg(unix)]
+        if files.segment_reads_poisoned {
+            return Err(Self::unavailable(
+                "staged sealed segment identity was invalidated",
+            ));
+        }
         let manifest_bytes = generation.manifest_bytes();
         let generation_size = u64::try_from(manifest_bytes.len()).map_err(Self::unavailable)?;
         if generation_size > MAX_DURABLE_GENERATION_INDEX_BYTES_V1 {
