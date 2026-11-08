@@ -2844,12 +2844,14 @@ mod tests {
 
     use std::cell::Cell;
     use std::collections::{BTreeMap, BTreeSet};
-    use std::sync::Arc;
-    use std::sync::mpsc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, mpsc};
     use std::time::{Duration, Instant};
 
     use tempfile::TempDir;
-    use tracedecay_store::runtime::GraphRecoveredGenerationDigestV1;
+    use tracedecay_store::runtime::{
+        GraphNativeWorkKindV1, GraphNativeWorkV1, GraphRecoveredGenerationDigestV1,
+    };
 
     use crate::generation::{
         canonical_buffer_allocation_growths, manifest_canonicalizations,
@@ -2864,9 +2866,10 @@ mod tests {
     };
     use crate::{
         GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDurability,
-        GraphEntity, GraphEntityId, GraphFormatVersion, GraphGenerationDependency,
-        GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace,
-        GraphProjectionId, GraphProjectionIdentity, GraphWatermark,
+        GraphEntity, GraphEntityId, GraphEntityRef, GraphFormatVersion,
+        GraphGenerationDependency, GraphGenerationId, GraphGenerationManifest,
+        GraphGenerationRelation, GraphIdempotencyKey, GraphNamespace, GraphProjectionId,
+        GraphProjectionIdentity, GraphRelationId, GraphRelationKind, GraphWatermark,
         MAX_VERIFIED_GENERATION_BATCH_MUTATIONS, NeverCancelled, SourceGeneration,
     };
 
@@ -3836,6 +3839,125 @@ mod tests {
             }
         )));
         owner.close().expect("close native graph store");
+    }
+
+    /// The callback follows the durable page transaction, not final generation
+    /// verification. An interrupted writer must retain that page across
+    /// a physical store reopen, then report only the newly committed successor.
+    #[test]
+    fn interrupted_native_stage_resumes_receipts_without_fabricating_writes() {
+        let mut manifest = large_manifest("interrupted-native-stage");
+        let projection = manifest.projection.clone();
+        manifest.relations.push(
+            GraphGenerationRelation::new(
+                GraphRelationId::new("relation:00000").unwrap(),
+                GraphEntityRef::new(
+                    projection.clone(),
+                    GraphEntityId::new("entity:00000").unwrap(),
+                ),
+                GraphEntityRef::new(
+                    projection,
+                    GraphEntityId::new("entity:00001").unwrap(),
+                ),
+                GraphRelationKind::new("calls").unwrap(),
+                BTreeMap::new(),
+            )
+            .unwrap(),
+        );
+        let pages = generation_stage_pages(&manifest).expect("real page plan");
+        assert_eq!(pages.len(), 2, "entities and relations must use distinct pages");
+        let expected = sealed_digest(&manifest);
+        let temp = TempDir::new().expect("persistent graph store");
+        let (owner, database) = persistent_database(&temp);
+        let cancel = AtomicBool::new(false);
+        let first_events = Mutex::new(Vec::new());
+        let first_observer = |event| {
+            first_events.lock().unwrap().push(event);
+            cancel.store(true, Ordering::Release);
+        };
+        let check = || {
+            if cancel.load(Ordering::Acquire) {
+                Err(GraphDbError::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
+        let interrupted = database.apply_generation_unverified_with_digest_and_work(
+            arc_manifest(&manifest),
+            &expected,
+            &check,
+            Some(&first_observer),
+        );
+        assert!(
+            matches!(interrupted, Err(GraphDbError::Cancelled)),
+            "a real post-page cancellation must prevent finalization"
+        );
+        let committed_before_kill = first_events.lock().unwrap().clone();
+        assert_eq!(committed_before_kill.len(), 1, "one real page must commit");
+        assert!(matches!(
+            &committed_before_kill[0],
+            GraphNativeWorkV1::StagePageApplied {
+                ordinal: 0,
+                kind: GraphNativeWorkKindV1::Entities,
+                mutations: 1..,
+                live_bytes: 1..,
+            }
+        ));
+        drop(database);
+        owner.close().expect("settle durable page before restart");
+
+        let (reopened_owner, reopened) = persistent_database(&temp);
+        let resumed_events = Mutex::new(Vec::new());
+        let resume_observer = |event| resumed_events.lock().unwrap().push(event);
+        let outcome = reopened
+            .apply_generation_unverified_with_digest_and_work(
+                arc_manifest(&manifest),
+                &expected,
+                &|| Ok(()),
+                Some(&resume_observer),
+            )
+            .expect("recover the durable first page and commit relation page");
+        assert!(matches!(outcome, GenerationStageOutcome::Applied(_)));
+        let resumed = resumed_events.lock().unwrap().clone();
+        assert_eq!(
+            resumed.len(),
+            1,
+            "the resumed writer must not count a reused entity receipt as new work"
+        );
+        assert!(matches!(
+            &resumed[0],
+            GraphNativeWorkV1::StagePageApplied {
+                ordinal: 1,
+                kind: GraphNativeWorkKindV1::Relations,
+                mutations: 1,
+                live_bytes: 1..,
+            }
+        ));
+
+        let (_, recovered) = reopened
+            .reopen_and_verify_existing_generation(
+                &manifest.identity(),
+                &expected,
+                manifest.row_counts(),
+                &|| Ok(()),
+            )
+            .expect("the resumed native graph must survive a recovered digest proof");
+        assert_eq!(recovered, expected);
+        let replay = reopened
+            .apply_generation_unverified_with_digest_and_work(
+                arc_manifest(&manifest),
+                &expected,
+                &|| Ok(()),
+                Some(&resume_observer),
+            )
+            .expect("idempotent replay after completed recovery");
+        assert!(matches!(replay, GenerationStageOutcome::Reseated(_)));
+        assert_eq!(
+            resumed_events.lock().unwrap().as_slice(),
+            resumed.as_slice(),
+            "replaying an already verified graph cannot invent new page writes"
+        );
+        reopened_owner.close().expect("close recovered graph store");
     }
 
     #[test]
