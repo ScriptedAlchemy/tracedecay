@@ -18,7 +18,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use gix::bstr::ByteSlice;
-use tracedecay_code_index::source_walk::{has_nested_repository_ancestor, parent_gitlink_paths};
+use tracedecay_code_index::source_walk::{
+    has_nested_repository_ancestor, is_source_symlink, parent_gitlink_paths,
+};
 use tracedecay_runtime_core::git_repository::GIT_STATUS_MODIFICATION_CHECK_THREADS;
 
 /// Failure to classify worktree changes through gix.
@@ -235,7 +237,13 @@ impl WorktreeChangeClassificationV1 {
             {
                 let relative = Path::new(path);
                 let parent = relative.parent().unwrap_or_else(|| Path::new(""));
-                let excluded = if classification.beneath_gitlink(relative) {
+                // The live walker never follows a symlink file, even when
+                // the lexical parent is ordinary and the target is inside a
+                // registered submodule. Do not capture its target through a
+                // clean-tree or worktree path.
+                let excluded = if classification.beneath_gitlink(relative)
+                    || is_source_symlink(project_root, relative)?
+                {
                     true
                 } else {
                     match checked_parents.get(parent) {
@@ -493,6 +501,57 @@ mod nested_repository_tests {
         assert!(!restored.has_changes());
         assert!(restored.candidate_paths().contains("nested/foreign.rs"));
         assert!(restored.candidate_paths().contains("linked/foreign.rs"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tracked_symlink_into_submodule_is_not_parent_source() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let parent = fixture.path().join("parent");
+        let child = fixture.path().join("child");
+        fs::create_dir_all(&parent).unwrap();
+        fs::create_dir_all(&child).unwrap();
+        fixture_git(&child, &["init", "-q"]);
+        fs::create_dir_all(child.join("src")).unwrap();
+        fs::write(child.join("src/lib.rs"), "pub fn child() {}\n").unwrap();
+        fixture_git(&child, &["add", "."]);
+        fixture_git(&child, &["commit", "-qm", "child"]);
+        fixture_git(&parent, &["init", "-q"]);
+        fixture_git(
+            &parent,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                "../child",
+                "app",
+            ],
+        );
+        symlink("app/src/lib.rs", parent.join("bridge.rs")).unwrap();
+        fixture_git(&parent, &["add", ".gitmodules", "app", "bridge.rs"]);
+        fixture_git(&parent, &["commit", "-qm", "registered child and source alias"]);
+        assert_eq!(
+            fs::read_to_string(parent.join("bridge.rs")).unwrap(),
+            "pub fn child() {}\n",
+            "fixture must prove the parent symlink actually reaches child bytes"
+        );
+        assert!(
+            fs::symlink_metadata(parent.join("bridge.rs"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        let repository = tracedecay_runtime_core::git_open::open(&parent).unwrap();
+        let classified = WorktreeChangeClassificationV1::classify(&repository).unwrap();
+        assert!(!classified.candidate_paths().contains("bridge.rs"));
+        assert!(classified.changed_paths().contains("bridge.rs"));
+        assert!(classified.has_changes(), "do not reuse HEAD tree source bytes");
+        assert!(!classified.candidate_paths().contains("app/src/lib.rs"));
     }
 
     #[test]

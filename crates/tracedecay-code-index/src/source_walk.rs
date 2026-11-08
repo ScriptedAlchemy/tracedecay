@@ -247,6 +247,28 @@ pub fn has_nested_repository_ancestor(
     Ok(false)
 }
 
+/// A worktree source entry must be a real file, not a link to bytes outside
+/// the parent's Git authority. The shared live walker does not follow leaf
+/// symlinks; classification, capture, and freshness must make the same choice.
+/// Missing paths remain possible tombstones and are not symlink exclusions.
+pub fn is_source_symlink(project_root: &Path, relative_path: &Path) -> std::io::Result<bool> {
+    if relative_path.as_os_str().is_empty()
+        || relative_path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "source path must be repository-relative",
+        ));
+    }
+    match std::fs::symlink_metadata(project_root.join(relative_path)) {
+        Ok(metadata) => Ok(metadata.file_type().is_symlink()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Diagnostics emitted by the same source walker that enforces the nested
 /// repository boundary. Only directories within the walk's policy are named.
 #[derive(Clone, Default)]
@@ -480,7 +502,9 @@ mod tests {
     use tempfile::TempDir;
     use tracedecay_domain::IndexPathPolicyV1;
 
-    use super::{has_nested_repository_ancestor, source_walk, source_walk_with_diagnostics};
+    use super::{
+        has_nested_repository_ancestor, is_source_symlink, source_walk, source_walk_with_diagnostics,
+    };
 
     #[test]
     fn nested_repository_boundary_excludes_parent_markers_and_path_escape() {
@@ -524,6 +548,20 @@ mod tests {
             has_nested_repository_ancestor(root.path(), std::path::Path::new("foreign/source.rs"))
                 .unwrap()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readable_symlink_leaf_is_not_an_admissible_source() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        fs::write(root.path().join("real.rs"), "pub fn real() {}\n").unwrap();
+        symlink("real.rs", root.path().join("alias.rs")).unwrap();
+        assert!(is_source_symlink(root.path(), std::path::Path::new("alias.rs")).unwrap());
+        assert!(!is_source_symlink(root.path(), std::path::Path::new("real.rs")).unwrap());
+        assert!(!is_source_symlink(root.path(), std::path::Path::new("missing.rs")).unwrap());
+        assert!(is_source_symlink(root.path(), std::path::Path::new("../escape.rs")).is_err());
     }
 
     fn walked_files(root: &std::path::Path, path_policy: &IndexPathPolicyV1) -> Vec<PathBuf> {

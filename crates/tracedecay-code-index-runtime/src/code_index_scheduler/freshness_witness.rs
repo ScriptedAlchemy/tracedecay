@@ -142,6 +142,7 @@ fn source_candidates(
                 project_root,
                 relative,
             )?
+            || tracedecay_code_index::source_walk::is_source_symlink(project_root, relative)?
         {
             continue;
         }
@@ -243,6 +244,18 @@ fn read_candidate(
     project_root: &Path,
     candidate: &StatCandidateV1,
 ) -> Result<Vec<u8>, CodeIndexSchedulerErrorV1> {
+    // A link installed after candidate classification must not turn a
+    // freshness proof into a read of a different repository's source bytes.
+    if tracedecay_code_index::source_walk::is_source_symlink(
+        project_root,
+        Path::new(&candidate.logical_path),
+    )? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "source symlink is outside the parent source inventory",
+        )
+        .into());
+    }
     if candidate.explicitly_admitted {
         ignored_dependencies::read_explicitly_admitted_source(
             project_root,
