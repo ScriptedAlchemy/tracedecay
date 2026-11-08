@@ -349,7 +349,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                    AND receipt.recovery_next_attempt_at <= unixepoch()
                  ORDER BY receipt.created_at, receipt.session_id, receipt.generation
                  LIMIT ?1",
-                params![bounded_query_limit(limit.saturating_add(1))?],
+                params![bounded_query_limit(limit)?],
             )
             .await
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
