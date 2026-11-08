@@ -97,6 +97,11 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
     validate_questions(questions)
     if manifest.get("questions_sha256") != sha256_ordered_questions(questions):
         raise ValueError("qualification question vocabulary or instruction mismatch")
+    # Renderer names are not immutable code identities. Freeze actual held-out
+    # HTTP request bytes before seeing any model predictions.
+    frozen_requests = manifest.get("holdout_requests_sha256")
+    if not isinstance(frozen_requests, str) or not _DIGEST.fullmatch(frozen_requests):
+        raise ValueError("qualification requires a frozen held-out request digest")
 
     # A held-out split is not independent if the evaluator can try multiple
     # renderers, model selectors or serving declarations and pick the winner.
@@ -230,6 +235,7 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
                 )
     return {
         "heldout_ids": heldout,
+        "holdout_requests_sha256": frozen_requests,
         "arm": arm,
         "max_request_bytes": request_limit,
         "max_input_tokens": token_limit,
@@ -305,6 +311,8 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes):
             or experiment.get("endpoint_sha256") != arm["endpoint_sha256"]
             or sha256_json(server) != arm["server_config_sha256"]):
         raise ValueError("qualification HTTP arm differs from frozen manifest")
+    if experiment.get("requests_sha256") != validated["holdout_requests_sha256"]:
+        raise ValueError("qualification rendered held-out requests differ from frozen manifest")
     rows = result.get("rows")
     if not isinstance(rows, list) or [r.get("id") for r in rows if isinstance(r, dict)] != validated["heldout_ids"]:
         raise ValueError("qualification result differs from frozen held-out case order")

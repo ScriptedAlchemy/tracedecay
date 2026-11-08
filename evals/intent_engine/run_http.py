@@ -541,14 +541,20 @@ def main(argv=None):
         raise ValueError("the experiment must contain at least one case")
     cases = {case["id"]: case for case in dataset}
     if qualification_sha is not None:
-        # Bound exact JSON requests before creating result files or calling the model.
+        # Bound and verify precommitted request bodies before opening any
+        # output. A stable config name does not imply a stable renderer.
         renderer = STATES[qualified["arm"]["config"]]
+        rendered_requests = []
         for case in dataset:
             body = {"state": renderer(case), "questions": questions}
             if args.send_model:
                 body["model"] = args.send_model
-            if len(request_bytes(body)) > qualified["max_request_bytes"]:
+            encoded = request_bytes(body)
+            if len(encoded) > qualified["max_request_bytes"]:
                 raise ValueError(f"qualification case {case['id']} exceeds frozen request byte limit")
+            rendered_requests.append([case["id"], hashlib.sha256(encoded).hexdigest()])
+        if digest(rendered_requests) != qualified["holdout_requests_sha256"]:
+            raise ValueError("qualification rendered held-out requests differ from frozen manifest")
     os.makedirs(os.path.join(HERE, "results"), exist_ok=True)
     for cfg in args.configs:
         name = f"{args.tag}_{cfg}"

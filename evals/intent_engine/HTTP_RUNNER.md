@@ -131,7 +131,17 @@ Create a separate JSON annotation manifest **before running inference** with
 runner's exact question dictionary. This digest freezes **question key order
 as emitted in the HTTP body**, as well as question names/instructions; a
 sorted-object digest does not prevent trying reordered held-out arms. Include
-an `arm` object predeclaring exactly one `config` renderer, a nullable
+`holdout_requests_sha256`, a precommitted SHA-256 of the ordered
+`[[case_id, request_sha256], ...]` pairs for the held-out cases. Construct each
+request SHA-256 from the exact serialized JSON body (the selected renderer
+state, ordered questions and optional model selector) **before** evaluating
+any holdout. The runner refuses a changed renderer output under an unchanged
+manifest before model calls or output creation. Qualified scoring independently
+checks the result experiment's request digest against this precommitment.
+Generate a new frozen manifest for a changed renderer; a renderer config name
+alone is not a code or output identity. This remains declared benchmark
+evidence, **not** production Scout transcript rehydration or runtime parity.
+Include an `arm` object predeclaring exactly one `config` renderer, a nullable
 `requested_model`, `endpoint_sha256` (SHA-256 of the exact URL bytes), and
 `server_config_sha256` (the sorted-JSON digest of the complete serving
 configuration, via `qualification.sha256_json(server_config)`). The runner

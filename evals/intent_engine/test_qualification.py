@@ -56,6 +56,7 @@ class QualificationTests(unittest.TestCase):
             "version": 1, "application": "historical-intent-evaluation",
             "dataset_sha256": self.dataset_sha,
             "questions_sha256": qualification.sha256_ordered_questions(self.questions),
+            "holdout_requests_sha256": self.holdout_request_digest(),
             "arm": {
                 "config": "B_noul_text", "requested_model": None,
                 "endpoint_sha256": qualification.sha256_bytes(self.endpoint.encode("utf-8")),
@@ -75,6 +76,19 @@ class QualificationTests(unittest.TestCase):
         }
         self.manifest_bytes = json.dumps(self.manifest).encode("utf-8")
         self.manifest_sha = qualification.sha256_bytes(self.manifest_bytes)
+
+    def holdout_request_digest(self, questions=None, model=None, config="B_noul_text"):
+        questions = self.questions if questions is None else questions
+        fingerprints = []
+        for case in self.dataset[2:]:
+            body = {"state": run_http.STATES[config](case), "questions": questions}
+            if model is not None:
+                body["model"] = model
+            fingerprints.append([
+                case["id"],
+                hashlib.sha256(run_http.request_bytes(body)).hexdigest(),
+            ])
+        return score.evidence_digest(fingerprints)
 
     def valid(self, manifest=None, cases=None):
         return qualification.validate_manifest(
@@ -541,6 +555,7 @@ class QualificationTests(unittest.TestCase):
     def test_qualification_rejects_model_different_from_frozen_selector(self):
         manifest = copy.deepcopy(self.manifest)
         manifest["arm"]["requested_model"] = "pinned-model-selector"
+        manifest["holdout_requests_sha256"] = self.holdout_request_digest(model="pinned-model-selector")
         manifest_sha = qualification.sha256_bytes(
             json.dumps(manifest).encode("utf-8")
         )
@@ -574,6 +589,7 @@ class QualificationTests(unittest.TestCase):
             (here / "dataset.json").write_bytes(self.dataset_bytes)
             manifest = copy.deepcopy(self.manifest)
             manifest["arm"]["requested_model"] = "pinned-model-selector"
+            manifest["holdout_requests_sha256"] = self.holdout_request_digest(model="pinned-model-selector")
             (here / "manifest.json").write_text(json.dumps(manifest))
             (here / "server.json").write_text(json.dumps(self.server_config))
             response = {
@@ -644,6 +660,7 @@ class QualificationTests(unittest.TestCase):
                 (here / "dataset.json").write_bytes(self.dataset_bytes)
                 manifest = copy.deepcopy(self.manifest)
                 manifest["arm"]["requested_model"] = "selected-model"
+                manifest["holdout_requests_sha256"] = self.holdout_request_digest(model="selected-model")
                 (here / "manifest.json").write_text(json.dumps(manifest))
                 (here / "server.json").write_text(json.dumps(self.server_config))
                 args = [
@@ -1271,6 +1288,47 @@ class QualificationTests(unittest.TestCase):
             )
 
 
+    def test_frozen_rendered_requests_refuse_renderer_drift_before_inference(self):
+        # The renderer's name, source cases, and questions may all remain
+        # unchanged while the actual outbound model prompt changes.
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            (here / "dataset.json").write_bytes(self.dataset_bytes)
+            (here / "manifest.json").write_bytes(self.manifest_bytes)
+            (here / "server.json").write_text(json.dumps(self.server_config))
+            with patch.object(run_http, "HERE", str(here)), patch.dict(
+                run_http.STATES, {"B_noul_text": lambda case: "changed renderer output"},
+            ), patch.object(run_http, "post") as inference:
+                with self.assertRaisesRegex(ValueError, "rendered held-out requests differ"):
+                    run_http.main([
+                        "--url", self.endpoint, "--tag", "renderer-drift",
+                        "--server-config", str(here / "server.json"),
+                        "--qualification-manifest", str(here / "manifest.json"),
+                        "B_noul_text",
+                    ])
+                inference.assert_not_called()
+            self.assertFalse((here / "results").exists())
+
+    def test_frozen_rendered_request_digest_refuses_rehashed_result(self):
+        for bad_digest in (None, 42, "f" * 64):
+            with self.subTest(frozen_digest=bad_digest):
+                changed = copy.deepcopy(self.manifest)
+                changed["holdout_requests_sha256"] = bad_digest
+                if bad_digest is None or bad_digest == 42:
+                    with self.assertRaisesRegex(ValueError, "frozen held-out request digest"):
+                        self.valid(changed)
+                    continue
+                changed_sha = qualification.sha256_json(changed)
+                forged = self.signed_result()
+                forged["experiment"]["qualification_manifest_sha256"] = changed_sha
+                forged["experiment_sha256"] = score.evidence_digest(forged["experiment"])
+                # Every result/experiment fingerprint still agrees internally.
+                # The independently frozen request body digest must also match.
+                with self.assertRaisesRegex(ValueError, "rendered held-out requests differ"):
+                    qualification.qualified_report(
+                        forged, changed, changed_sha, self.questions, self.dataset_bytes,
+                    )
+
     def test_frozen_question_order_refuses_a_second_holdout_arm_before_inference(self):
         # Sorted-key JSON digests collide across question reordering although
         # the runner sends dict entries in insertion order. That let the same
@@ -1347,6 +1405,7 @@ class QualificationTests(unittest.TestCase):
         manifest = copy.deepcopy(self.manifest)
         manifest["questions_sha256"] = qualification.sha256_ordered_questions(questions)
         manifest["thresholds"] = {key: 0.6 for key in questions}
+        manifest["holdout_requests_sha256"] = self.holdout_request_digest(questions=questions)
         manifest_sha = qualification.sha256_bytes(json.dumps(manifest).encode())
         with tempfile.TemporaryDirectory() as temp:
             here = Path(temp)
