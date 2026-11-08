@@ -218,6 +218,7 @@ class QualificationTests(unittest.TestCase):
                 "dropped": 0,
                 "request_sha256": hashlib.sha256(rendered).hexdigest(),
                 "request_size_bytes": len(rendered),
+                "observed_model": "self-reported-test-model",
             })
         experiment = {
             "version": 2,
@@ -261,6 +262,8 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(report["holdout_decisions"]["abstention_rate"], 0.5)
         self.assertEqual(report["holdout_decisions"]["unwanted_hint_rate"], 0)
         self.assertTrue(report["checks"]["untruncated_input_evidence"])
+        self.assertEqual(report["reported_model"], "self-reported-test-model")
+        self.assertTrue(report["checks"]["reported_model_consistency"])
         self.assertEqual(report["fixed_threshold_metrics"]["none_false_hint_rate"], 0)
         self.assertEqual(report["fixed_threshold_metrics"]["pos_cases_with_a_correct_hint"], 1)
 
@@ -270,6 +273,80 @@ class QualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not bound"):
             qualification.qualified_report(result, stricter, qualification.sha256_json(stricter), self.questions, self.dataset_bytes)
 
+
+    def test_qualification_reports_missing_or_drifting_model_identity(self):
+        for value in (None, "", True, "another-model"):
+            with self.subTest(observed_model=value):
+                result = self.signed_result()
+                result["rows"][1]["observed_model"] = value
+                report = qualification.qualified_report(
+                    result, self.manifest, self.manifest_sha,
+                    self.questions, self.dataset_bytes,
+                )
+                self.assertFalse(report["qualified_against_frozen_tolerances"])
+                self.assertFalse(report["checks"]["reported_model_consistency"])
+                self.assertIsNone(report["reported_model"])
+
+    def test_qualification_rejects_model_different_from_frozen_selector(self):
+        manifest = copy.deepcopy(self.manifest)
+        manifest["arm"]["requested_model"] = "pinned-model-selector"
+        manifest_sha = qualification.sha256_bytes(
+            json.dumps(manifest).encode("utf-8")
+        )
+        result = self.signed_result()
+        experiment = result["experiment"]
+        experiment["qualification_manifest_sha256"] = manifest_sha
+        experiment["requested_model"] = "pinned-model-selector"
+        for row in result["rows"]:
+            case = next(c for c in self.dataset if c["id"] == row["id"])
+            body = {
+                "state": run_http.STATES["B_noul_text"](case),
+                "questions": self.questions,
+                "model": "pinned-model-selector",
+            }
+            rendered = run_http.request_bytes(body)
+            row["request_sha256"] = hashlib.sha256(rendered).hexdigest()
+            row["request_size_bytes"] = len(rendered)
+        experiment["requests_sha256"] = score.evidence_digest([
+            [row["id"], row["request_sha256"]] for row in result["rows"]
+        ])
+        result["experiment_sha256"] = score.evidence_digest(experiment)
+        report = qualification.qualified_report(
+            result, manifest, manifest_sha, self.questions, self.dataset_bytes
+        )
+        self.assertFalse(report["checks"]["reported_model_consistency"])
+        self.assertFalse(report["qualified_against_frozen_tolerances"])
+
+    def test_runner_refuses_explicit_model_mismatch_before_result_append(self):
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            (here / "dataset.json").write_bytes(self.dataset_bytes)
+            manifest = copy.deepcopy(self.manifest)
+            manifest["arm"]["requested_model"] = "pinned-model-selector"
+            (here / "manifest.json").write_text(json.dumps(manifest))
+            (here / "server.json").write_text(json.dumps(self.server_config))
+            response = {
+                "model": "wrong-model",
+                "answers": {
+                    key: {"type": "noul", "noul": 0.5}
+                    for key in self.questions
+                },
+            }
+            args = [
+                "--url", self.endpoint,
+                "--tag", "model-mismatch",
+                "--server-config", str(here / "server.json"),
+                "--qualification-manifest", str(here / "manifest.json"),
+                "--send-model", "pinned-model-selector", "B_noul_text",
+            ]
+            with patch.object(run_http, "HERE", str(here)):
+                with patch.object(run_http, "post", return_value=(response, 12.0)) as post:
+                    with self.assertRaisesRegex(ValueError, "reported model differs"):
+                        run_http.main(args)
+                    self.assertEqual(post.call_count, 1)
+            self.assertFalse((here / "results" / "model-mismatch_B_noul_text.json").exists())
+            partial = here / "results" / "model-mismatch_B_noul_text.json.partial"
+            self.assertEqual(len(partial.read_text().splitlines()), 1)
 
     def test_qualification_requires_complete_serving_identity(self):
         for field, change in (
@@ -368,7 +445,7 @@ class QualificationTests(unittest.TestCase):
 
             def answer(url, body):
                 calls.append(body)
-                return {"answers": {
+                return {"model": "self-reported-test-model", "answers": {
                     key: {"type": "noul", "noul": 0.5}
                     for key in body["questions"]
                 }}, 12.0
@@ -391,6 +468,10 @@ class QualificationTests(unittest.TestCase):
             self.assertEqual([r["id"] for r in result["rows"]], [
                 "holdout-positive", "holdout-negative"
             ])
+            self.assertEqual(
+                [r["observed_model"] for r in result["rows"]],
+                ["self-reported-test-model", "self-reported-test-model"],
+            )
             self.assertEqual(result["experiment"]["qualification_manifest_sha256"], self.manifest_sha)
             self.assertEqual(result["experiment"]["case_ids"], [
                 "holdout-positive", "holdout-negative"

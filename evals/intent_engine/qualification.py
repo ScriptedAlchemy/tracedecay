@@ -277,6 +277,20 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes):
             or experiment["noul_temperature"] != validated["noul_temperature"]):
         raise ValueError("qualification client calibration differs from frozen manifest")
 
+    # The serving declaration is operator-supplied. Compare it to the model
+    # reported by each actual HTTP response so a changed serving default or
+    # a mismatched explicit selector cannot silently qualify.
+    observed_models = [row.get("observed_model") for row in rows]
+    reported_model = observed_models[0] if (
+        all(isinstance(value, str) and value.strip()
+            and value == observed_models[0] for value in observed_models)
+    ) else None
+    reported_model_consistent = (
+        reported_model is not None
+        and (arm["requested_model"] is None
+             or reported_model == arm["requested_model"])
+    )
+
     scores = score_config(result, fixed_t=validated["thresholds"])
     fixed = scores["fixed"]["all"]
     latency = scores["latency"]
@@ -303,12 +317,14 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes):
         "positive_case_recall": rates["positive_case_recall"] >= tolerances["min_positive_case_recall"],
         "p95_ms": rates["p95_ms"] <= tolerances["max_p95_ms"],
         "untruncated_input_evidence": complete_input_evidence,
+        "reported_model_consistency": reported_model_consistent,
     }
     return {
         "application": validated["application"],
         "kind": "declared_independent_labels_heldout_not_runtime_parity",
         "experiment_sha256": result["experiment_sha256"],
         "qualification_manifest_sha256": manifest_sha,
+        "reported_model": reported_model,
         "cases": len(rows),
         "thresholds": validated["thresholds"],
         "tolerances": tolerances,
@@ -324,5 +340,5 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes):
         "latency": latency,
         "checks": checks,
         "qualified_against_frozen_tolerances": all(checks.values()),
-        "limits": "Reviewer independence is declared, not authenticated; task effectiveness and canonical Scout transcript parity are not proven.",
+        "limits": "Reviewer and serving/model identities are self-declared, not authenticated or checkpoint-attested; task effectiveness and canonical Scout transcript parity are not proven.",
     }

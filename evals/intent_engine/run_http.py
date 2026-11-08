@@ -239,6 +239,12 @@ def serialize_result(row, questions, temperature):
         elif (isinstance(value, bool) or not isinstance(value, (int, float))
               or value < 0 or (isinstance(value, float) and not math.isfinite(value))):
             raise ValueError(f"{field} must be a finite nonnegative number")
+    if "observed_model" in row:
+        observed_model = row["observed_model"]
+        if observed_model is not None and (
+            not isinstance(observed_model, str) or not observed_model.strip()
+        ):
+            raise ValueError("reported HTTP model must be a nonempty string or null")
     if temperature is None:
         if "probs_raw" in row:
             raise ValueError("uncalibrated result must not contain raw probabilities")
@@ -502,6 +508,10 @@ def main(argv=None):
                 else:
                     response, ms = post(args.url, body, bearer_token=bearer_token)
                 probs = noul_probabilities(response, questions)
+                observed_model = response.get("model")
+                if (args.send_model is not None and observed_model is not None
+                        and observed_model != args.send_model):
+                    raise ValueError("reported model differs from requested model")
                 server_ms = response.get("latency_ms")
                 if server_ms is None:
                     server_ms = (response.get("timing") or {}).get("inference_ms")
@@ -518,6 +528,7 @@ def main(argv=None):
                     "input_tokens": usage.get("input_tokens"),
                     "state_tokens": usage.get("state_tokens"),
                     "dropped": usage.get("state_tokens_dropped"), "probs": probs,
+                    "observed_model": observed_model,
                 }
                 if args.noul_temperature is not None:
                     row["probs_raw"] = probs

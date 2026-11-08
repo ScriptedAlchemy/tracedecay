@@ -140,8 +140,16 @@ JSON request body. This precommitted byte limit is **not** the model's
 validated 8,192-token context limit: byte counts and token counts are different.
 The runner refuses oversized requests before any result file or model call;
 qualification independently reconstructs and verifies the byte count of every
-held-out request. Include `thresholds` with one frozen probability threshold per requested question and
-`error_tolerances` with all four numbers:
+held-out request. Every HTTP result also records the model name *reported by
+the server*, including explicit null when the endpoint omits it. A frozen-arm
+qualification fails if this name is missing, differs among held-out responses,
+or contradicts a non-null requested model selector. For an explicit selector,
+a contradictory response is rejected before appending the row. The reported
+name is **not** cryptographic server identity or checkpoint attestation; a
+remote service can misreport it.
+
+Include `thresholds` with one frozen probability threshold per requested
+question and `error_tolerances` with all four numbers:
 `max_none_false_hint_rate` (0–1), `max_unwanted_hint_rate` (0–1),
 `min_positive_case_recall` (0–1), and `max_p95_ms` (nonnegative milliseconds).
 The unwanted-hint budget counts an incorrect extra suggestion on a positive
@@ -186,8 +194,8 @@ false hints, all-case unwanted suggestions, missed positive cases, coverage,
 abstention, positive-case recall, reconstructed JSON request sizes
 (min/p50/max/total and the frozen byte ceiling), p50/p95 measured end-to-end HTTP latency and
 the predeclared tolerances. A passing report requires every held-out case to
-report measured zero dropped state tokens. Missing truncation telemetry is
-unknown, and a response measured after truncated input cannot prove the full
+report measured zero dropped state tokens and a consistent self-reported
+model name. Missing truncation telemetry is unknown, and a response measured after truncated input cannot prove the full
 frozen request was evaluated; the measurements remain in the failing report. Scoring reads the original frozen case bytes,
 checks all reviewed labels/splits against them and recreates each HTTP
 request fingerprint with the runner's own renderer. Self-consistent result
