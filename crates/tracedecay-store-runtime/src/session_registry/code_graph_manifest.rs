@@ -2979,7 +2979,10 @@ mod tests {
         .unwrap();
         assert_eq!(&buffer, oldest_bytes);
         assert_eq!(pass.open_attempts, initial_opens);
-        assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), opens_after_candidate);
+        assert_eq!(
+            SEGMENT_OPENS.with(|opens| opens.get()),
+            opens_after_candidate
+        );
 
         // Recovery must read the exact restored candidate, then admit it.
         std::fs::write(path, bytes).unwrap();
