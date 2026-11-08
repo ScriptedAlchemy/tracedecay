@@ -2489,7 +2489,7 @@ mod tests {
         let absent = build_storage_report(&profile_root)
             .await
             .expect("a genuinely absent registry is still reportable");
-        assert!(absent.stores.is_empty());
+        assert_eq!(absent.stores, Vec::<StoreSizeReportEntry>::new());
         assert_eq!(absent.unregistered_dir_count, 1);
         assert!(absent.unregistered_bytes >= 17);
     }
