@@ -3974,6 +3974,14 @@ impl CodeIndexWorktreeSchedulerV1 {
         control: Option<&dyn CodeIndexExecutionControlV1>,
         explicitly_admitted: bool,
     ) -> Result<CapturedFileOutcomeV1, CodeIndexSchedulerErrorV1> {
+        // Explicit ignored-source admission cannot cross a nested checkout
+        // any more than an ordinary Git candidate or interactive source walk.
+        if tracedecay_code_index::source_walk::has_nested_repository_ancestor(
+            &self.project_root,
+            std::path::Path::new(logical_path),
+        )? {
+            return Ok(CapturedFileOutcomeV1::Absent);
+        }
         let absolute = self.project_root.join(logical_path);
         match absolute.metadata() {
             Ok(metadata) if !metadata.is_file() => return Ok(CapturedFileOutcomeV1::Absent),

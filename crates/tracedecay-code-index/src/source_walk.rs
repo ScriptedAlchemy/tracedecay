@@ -10,7 +10,7 @@
 //! crate reuses this policy instead of restating it.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use ignore::overrides::{Override, OverrideBuilder};
@@ -106,6 +106,52 @@ impl PathGlobScope {
 
 const MAX_REPOSITORY_NAMES: usize = 8;
 const MAX_REPOSITORY_PATH_CHARS: usize = 160;
+
+fn nested_repository_marker(directory: &Path) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(directory.join(".git")) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Reject a source beneath another checkout or a symlinked directory.
+/// The root's own Git metadata is exempt. This boundary is shared by
+/// interactive source walks and the indexed worktree candidate roster,
+/// so neither may admit bytes the other refuses.
+pub fn has_nested_repository_ancestor(
+    project_root: &Path,
+    relative_path: &Path,
+) -> std::io::Result<bool> {
+    if relative_path
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "source path must be repository-relative",
+        ));
+    }
+
+    let mut parent = relative_path.parent();
+    while let Some(relative_dir) = parent {
+        if relative_dir.as_os_str().is_empty() {
+            break;
+        }
+        let directory = project_root.join(relative_dir);
+        match std::fs::symlink_metadata(&directory) {
+            Ok(metadata) if !metadata.is_dir() => return Ok(true),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        if nested_repository_marker(&directory)? {
+            return Ok(true);
+        }
+        parent = relative_dir.parent();
+    }
+    Ok(false)
+}
 
 /// Diagnostics emitted by the same source walker that enforces the nested
 /// repository boundary. Only directories within the walk's policy are named.
@@ -272,13 +318,18 @@ fn source_walk_inner(
             // freshness, so even registered submodules remain separate
             // sources. Linked worktrees and nested clones share this boundary.
             // The project root is deliberately exempt at depth zero above.
-            if std::fs::symlink_metadata(entry.path().join(".git")).is_ok() {
-                if let Some(diagnostics) = &diagnostics {
-                    diagnostics.record_skipped_nested_repository(relative);
+            match nested_repository_marker(entry.path()) {
+                Ok(true) => {
+                    if let Some(diagnostics) = &diagnostics {
+                        diagnostics.record_skipped_nested_repository(relative);
+                    }
+                    false
                 }
-                return false;
+                Ok(false) => true,
+                // The walk cannot prove that an unreadable Git marker is
+                // absent. Never admit files across that boundary.
+                Err(_) => false,
             }
-            true
         });
     if let Some(overrides) = overrides {
         builder.overrides(overrides);
@@ -328,7 +379,49 @@ mod tests {
     use tempfile::TempDir;
     use tracedecay_domain::IndexPathPolicyV1;
 
-    use super::{source_walk, source_walk_with_diagnostics};
+    use super::{
+        has_nested_repository_ancestor, source_walk, source_walk_with_diagnostics,
+    };
+
+    #[test]
+    fn nested_repository_boundary_excludes_parent_markers_and_path_escape() {
+        let root = TempDir::new().unwrap();
+        fs::create_dir_all(root.path().join("parent/nested/.git")).unwrap();
+        fs::write(root.path().join("parent/nested/.git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert!(
+            !has_nested_repository_ancestor(root.path(), std::path::Path::new("parent/source.rs"))
+                .unwrap()
+        );
+        assert!(
+            has_nested_repository_ancestor(
+                root.path(),
+                std::path::Path::new("parent/nested/source.rs")
+            )
+            .unwrap()
+        );
+        assert!(
+            has_nested_repository_ancestor(root.path(), std::path::Path::new("../escape.rs"))
+                .is_err()
+        );
+        assert!(
+            has_nested_repository_ancestor(root.path(), std::path::Path::new("/absolute.rs"))
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_repository_boundary_excludes_symlinked_ancestors() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let external = TempDir::new().unwrap();
+        symlink(external.path(), root.path().join("foreign")).unwrap();
+        assert!(
+            has_nested_repository_ancestor(root.path(), std::path::Path::new("foreign/source.rs"))
+                .unwrap()
+        );
+    }
 
     fn walked_files(root: &std::path::Path, path_policy: &IndexPathPolicyV1) -> Vec<PathBuf> {
         let mut files = source_walk(root, None, path_policy)

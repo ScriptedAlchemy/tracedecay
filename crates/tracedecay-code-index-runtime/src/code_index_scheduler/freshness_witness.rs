@@ -129,7 +129,19 @@ fn source_candidates(
         .map(|admission| admission.logical_path.as_str())
         .collect::<BTreeSet<_>>();
     let mut candidate_paths = classification.candidate_paths();
-    candidate_paths.extend(admitted_paths.iter().map(|path| (*path).to_owned()));
+    let project_root = repository.workdir().ok_or_else(|| {
+        CodeIndexSchedulerErrorV1::Git("source freshness requires a worktree".to_owned())
+    })?;
+    for path in &admitted_paths {
+        // Explicit ignored-file enrollment lifts Git ignore rules, not the
+        // nested repository boundary shared with capture and live search.
+        if !tracedecay_code_index::source_walk::has_nested_repository_ancestor(
+            project_root,
+            Path::new(path),
+        )? {
+            candidate_paths.insert((*path).to_owned());
+        }
+    }
     let mut unrepresentable = classification
         .non_utf8_paths()
         .iter()
