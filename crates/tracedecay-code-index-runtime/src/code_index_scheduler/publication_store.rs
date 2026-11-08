@@ -2047,6 +2047,16 @@ impl DaemonCodeIndexPublicationStoreV1 {
     pub(super) fn read_publication_pointer(
         &self,
     ) -> Result<Option<DurablePublicationPointerV1>, CodeIndexPublicationStoreErrorV1> {
+        self.read_publication_pointer_with_bytes()
+            .map(|result| result.map(|(pointer, _)| pointer))
+    }
+
+    // The CAS callers need the *exact serialized bytes* of the pointer they
+    // just authenticated. Return those bytes from the original file open
+    // rather than making an independent endpoint-scanned pathname open.
+    fn read_publication_pointer_with_bytes(
+        &self,
+    ) -> Result<Option<(DurablePublicationPointerV1, Vec<u8>)>, CodeIndexPublicationStoreErrorV1> {
         let metadata = match std::fs::metadata(&self.active_path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -2105,7 +2115,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             {
                 memo.mtime = mtime;
                 memo.size = size;
-                return Ok(Some(memo.pointer.clone()));
+                return Ok(Some((memo.pointer.clone(), bytes)));
             }
         }
         let pointer: DurablePublicationPointerV1 =
@@ -2253,7 +2263,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 pointer: pointer.clone(),
             });
         }
-        Ok(Some(pointer))
+        Ok(Some((pointer, bytes)))
     }
 
     fn remember_publication_pointer(
@@ -3773,13 +3783,10 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         };
         let (incumbent_bytes, pointer) = {
             let _read = self.acquire_generation_read_lock()?;
-            let pointer = self.read_publication_pointer()?;
-            let bytes = if pointer.is_some() {
-                Some(std::fs::read(&self.active_path).map_err(Self::unavailable)?)
-            } else {
-                None
-            };
-            (bytes, pointer)
+            match self.read_publication_pointer_with_bytes()? {
+                Some((pointer, bytes)) => (Some(bytes), Some(pointer)),
+                None => (None, None),
+            }
         };
         match undecoded_expectation.as_ref() {
             Some(expected)
@@ -3941,11 +3948,9 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .map_err(Self::unavailable)?
             .ok_or(CodeIndexPublicationStoreErrorV1::StoreLockContended)?;
         self.validate_preparation_store(preparation, generation)?;
-        let prior_pointer = self.read_publication_pointer()?;
-        let prior_bytes = if prior_pointer.is_some() {
-            Some(std::fs::read(&self.active_path).map_err(Self::unavailable)?)
-        } else {
-            None
+        let (prior_pointer, prior_bytes) = match self.read_publication_pointer_with_bytes()? {
+            Some((pointer, bytes)) => (Some(pointer), Some(bytes)),
+            None => (None, None),
         };
         let pointer_already_installed = files.pending_pointer.as_deref().is_some()
             && files.pending_pointer.as_deref() == prior_bytes.as_deref();

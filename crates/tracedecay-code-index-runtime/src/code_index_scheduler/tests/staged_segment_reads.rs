@@ -1562,6 +1562,73 @@ fn observed_pointer_opens(
 
 #[cfg(target_os = "linux")]
 #[test]
+fn publication_pointer_cas_reads_exact_bytes_with_one_kernel_open() {
+    use notify::Watcher;
+
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 3 }\n")]);
+    let source_root = TempDir::new().expect("source store");
+    let generation = source_generation(&fixture, source_root.path());
+    let target_root = TempDir::new().expect("target store");
+    let mut publisher = target_store(target_root.path(), &fixture);
+    let mut preparation = publisher
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare real generation");
+    let publication = generation
+        .stage_publication(&mut preparation)
+        .expect("stage real snapshot");
+    publisher
+        .commit(&mut preparation, &publication)
+        .expect("persist actual generation");
+    drop(preparation);
+    drop(publisher);
+
+    let cold = target_store(target_root.path(), &fixture);
+    let expected = std::fs::read(&cold.active_path).expect("persisted exact pointer bytes");
+    assert!(!expected.is_empty(), "CAS must compare an actual pointer");
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        let _ = sender.send(event);
+    })
+    .expect("native file observer");
+    watcher
+        .watch(&cold.active_path, notify::RecursiveMode::NonRecursive)
+        .expect("watch exact pointer inode");
+    drop(File::open(&cold.active_path).expect("positive pathname-open control"));
+    assert_eq!(
+        observed_pointer_opens(&receiver),
+        1,
+        "observer must count a real kernel open"
+    );
+
+    let (pointer, bytes) = cold
+        .read_publication_pointer_with_bytes()
+        .expect("read one authenticated pointer and its CAS bytes")
+        .expect("published pointer");
+    assert_eq!(
+        observed_pointer_opens(&receiver),
+        1,
+        "reading the exact CAS bytes must not reopen the pointer"
+    );
+    assert_eq!(bytes, expected, "CAS must retain the exact persisted bytes");
+    assert_eq!(
+        pointer.generation_id,
+        generation.manifest().generation_id.as_str()
+    );
+
+    let reloaded = cold
+        .load_active_shared()
+        .expect("cold read published generation")
+        .expect("published snapshot");
+    assert_eq!(
+        reloaded.snapshot().content_identity,
+        generation.snapshot().content_identity,
+        "one-open pointer CAS read must preserve cold snapshot identity"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn cold_publication_pointer_validation_uses_one_kernel_open_and_recovers_snapshot() {
     use notify::Watcher;
 
