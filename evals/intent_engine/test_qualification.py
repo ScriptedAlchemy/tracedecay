@@ -51,6 +51,7 @@ class QualificationTests(unittest.TestCase):
             "version": 1, "application": "historical-intent-evaluation",
             "dataset_sha256": self.dataset_sha,
             "questions_sha256": qualification.sha256_json(self.questions),
+            "noul_temperature": None,
             "thresholds": {key: 0.6 for key in self.questions},
             "error_tolerances": {
                 "max_none_false_hint_rate": 0.0,
@@ -179,6 +180,10 @@ class QualificationTests(unittest.TestCase):
             ("unfrozen_tolerance", lambda m: m["error_tolerances"].pop("max_p95_ms"), "tolerances"),
             ("unfrozen_unwanted", lambda m: m["error_tolerances"].pop("max_unwanted_hint_rate"), "tolerances"),
             ("dataset", lambda m: m.update(dataset_sha256="f" * 64), "dataset digest mismatch"),
+            ("missing_calibration", lambda m: m.pop("noul_temperature"), "frozen client calibration"),
+            ("nonfinite_calibration", lambda m: m.update(noul_temperature=float("nan")), "client calibration"),
+            ("zero_calibration", lambda m: m.update(noul_temperature=0), "client calibration"),
+            ("boolean_calibration", lambda m: m.update(noul_temperature=True), "client calibration"),
         ):
             with self.subTest(name=name):
                 changed = copy.deepcopy(self.manifest)
@@ -279,6 +284,67 @@ class QualificationTests(unittest.TestCase):
                 mutation(result)
                 with self.assertRaisesRegex(ValueError, pattern):
                     qualification.qualified_report(result, self.manifest, self.manifest_sha, self.questions, self.dataset_bytes)
+
+
+    def test_frozen_client_calibration_cannot_be_changed_by_rehashing(self):
+        # Rehashing both the declared manifest and experiment must not make
+        # an unfrozen post-hoc client temperature qualify.
+        for temperature in (0.5, 1.25):
+            with self.subTest(temperature=temperature):
+                changed = copy.deepcopy(self.manifest)
+                changed["noul_temperature"] = temperature
+                changed_sha = qualification.sha256_json(changed)
+                forged = self.signed_result()
+                forged["experiment"]["qualification_manifest_sha256"] = changed_sha
+                forged["experiment_sha256"] = score.evidence_digest(forged["experiment"])
+                with self.assertRaisesRegex(ValueError, "client calibration differs"):
+                    qualification.qualified_report(
+                        forged, changed, changed_sha, self.questions, self.dataset_bytes
+                    )
+
+    def test_http_runner_requires_frozen_client_calibration_before_network(self):
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            (here / "dataset.json").write_bytes(self.dataset_bytes)
+            manifest_path = here / "manifest.json"
+            manifest_path.write_bytes(self.manifest_bytes)
+            (here / "server.json").write_text(json.dumps({
+                "checkpoint": "pinned", "server_revision": "r1",
+                "backend": "cpu", "dtype": "float32", "temperature": 2.41,
+            }))
+            args = [
+                "--url", "http://127.0.0.1:8009/v1/systemone",
+                "--tag", "calibration",
+                "--server-config", str(here / "server.json"),
+                "--qualification-manifest", str(manifest_path),
+                "--noul-temperature", "1.25", "B_noul_text",
+            ]
+            with patch.object(run_http, "HERE", str(here)):
+                with patch.object(run_http, "post") as blocked:
+                    with self.assertRaisesRegex(ValueError, "client calibration differs"):
+                        run_http.main(args)
+                    blocked.assert_not_called()
+                self.assertFalse((here / "results").exists())
+                frozen = copy.deepcopy(self.manifest)
+                frozen["noul_temperature"] = 1.25
+                manifest_path.write_text(json.dumps(frozen))
+                answer = {"answers": {
+                    key: {"type": "noul", "noul": 0.5}
+                    for key in self.questions
+                }}
+                with patch.object(run_http, "post", return_value=(answer, 12.0)) as infer:
+                    run_http.main(args)
+                    self.assertEqual(infer.call_count, 2)
+                result = json.loads(
+                    (here / "results" / "calibration_B_noul_text.json").read_text()
+                )
+                self.assertEqual(result["experiment"]["noul_temperature"], 1.25)
+                self.assertEqual(result["rows"][0]["probs_raw"]["impact"], 0.5)
+                report = qualification.qualified_report(
+                    result, frozen, qualification.sha256_bytes(manifest_path.read_bytes()),
+                    self.questions, self.dataset_bytes,
+                )
+                self.assertFalse(report["qualified_against_frozen_tolerances"])
 
     def test_http_runner_asks_only_pre_frozen_holdout_and_resumes_with_exact_identity(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -120,6 +120,11 @@ Create a separate JSON annotation manifest **before running inference** with
 (`dataset_sha256`), and `questions_sha256` equal to the canonical
 `qualification.sha256_json(common.noul_questions())` of the runner's exact
 question dictionary. This last digest must change with question text. Include
+`noul_temperature` as JSON `null` for no client calibration or a finite,
+positive number matching the runner's `--noul-temperature` argument. This
+client-side calibration must be frozen alongside the thresholds: changing it
+after seeing holdout predictions would select a new effective decision boundary
+without changing the threshold manifest. Include
 `thresholds` with one frozen probability threshold per requested question and
 `error_tolerances` with all four numbers:
 `max_none_false_hint_rate` (0–1), `max_unwanted_hint_rate` (0–1),
@@ -145,7 +150,9 @@ from model predictions or adoption events.
 Run with the pinned remote serving declaration as before, adding
 `--dataset /path/to/original-cases.json` and
 `--qualification-manifest /path/to/frozen.json`. The dataset file's bytes
-are bound to the run and must be supplied again when scoring. The runner refuses an
+are bound to the run and must be supplied again when scoring. The runner also
+refuses a missing or mismatched frozen client-calibration setting before any
+HTTP request and the scorer rechecks it against the experiment identity. The runner refuses an
 additional `--subset`, validates every case and its group before network
 traffic, infers **only the frozen held-out cases**, and binds the raw manifest's
 SHA-256 to the experiment identity and resumable partial log. A changed

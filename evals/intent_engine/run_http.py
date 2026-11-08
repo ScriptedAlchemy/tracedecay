@@ -398,6 +398,8 @@ def main(argv=None):
             raise ValueError("qualification selects its own frozen holdout; --subset is not allowed")
         manifest, qualification_sha = load_manifest(args.qualification_manifest)
         qualified = validate_manifest(manifest, dataset_sha, questions, dataset)
+        if args.noul_temperature != qualified["noul_temperature"]:
+            raise ValueError("qualification client calibration differs from frozen manifest")
         keep = set(qualified["heldout_ids"])
         dataset = [case for case in dataset if case["id"] in keep]
     if args.subset:

@@ -48,6 +48,20 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
                 or not math.isfinite(value) or not 0 <= value <= 1):
             raise ValueError("qualification thresholds must be finite probabilities")
 
+    # Freeze client-side probability calibration before any held-out inference.
+    # Otherwise an operator can pick a post-hoc temperature while preserving
+    # the same question, threshold, and holdout identities.
+    if "noul_temperature" not in manifest:
+        raise ValueError("qualification requires frozen client calibration")
+    client_temperature = manifest["noul_temperature"]
+    if client_temperature is not None and (
+        isinstance(client_temperature, bool)
+        or not isinstance(client_temperature, (int, float))
+        or not math.isfinite(client_temperature)
+        or client_temperature <= 0
+    ):
+        raise ValueError("qualification client calibration must be null or positive finite")
+
     tolerances = manifest.get("error_tolerances")
     required = ("max_none_false_hint_rate", "max_unwanted_hint_rate", "min_positive_case_recall", "max_p95_ms")
     if not isinstance(tolerances, dict) or set(tolerances) != set(required):
@@ -134,6 +148,7 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
     return {
         "heldout_ids": heldout,
         "thresholds": thresholds,
+        "noul_temperature": client_temperature,
         "error_tolerances": tolerances,
         "annotations": {a["id"]: a for a in annotations},
         "application": application,
@@ -218,6 +233,10 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes):
             raise ValueError(
                 f"qualification request fingerprint disagrees with frozen renderer for {row['id']}"
             )
+
+    if ("noul_temperature" not in experiment
+            or experiment["noul_temperature"] != validated["noul_temperature"]):
+        raise ValueError("qualification client calibration differs from frozen manifest")
 
     scores = score_config(result, fixed_t=validated["thresholds"])
     fixed = scores["fixed"]["all"]
