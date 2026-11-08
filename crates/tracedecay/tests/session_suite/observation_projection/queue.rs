@@ -882,7 +882,7 @@ async fn deferred_only_reopened_queue_skips_writer_until_retry_is_due() {
         .unwrap();
     assert_eq!(
         store.next_queued_observation().await.unwrap(),
-        Some(second.observation_id()),
+        Some(second.observation_id().clone()),
         "the released sequence head must be the next queued observation"
     );
     let resumed = store.project_queued_observations(1).await.unwrap().unwrap();
