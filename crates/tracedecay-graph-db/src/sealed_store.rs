@@ -2789,6 +2789,7 @@ pub(crate) fn sealed_copy_proof(
 
 #[cfg(test)]
 mod receipt_budget_tests {
+    #[cfg(unix)]
     use std::collections::BTreeSet;
     use std::path::Path;
 
