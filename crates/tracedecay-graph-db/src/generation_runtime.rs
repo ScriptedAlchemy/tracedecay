@@ -128,6 +128,15 @@ enum GenerationStagePageKind {
     Relations,
 }
 
+/// Whether the native page transaction actually applied rows or replay
+/// adopted an already durable, matching receipt. This is a write verdict, not
+/// a read-side projection or a guessed number of graph pages.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GenerationStagePageCommitV1 {
+    Applied,
+    Reused,
+}
+
 impl GenerationStagePageKind {
     fn as_str(self) -> &'static str {
         match self {
@@ -1068,10 +1077,10 @@ impl GraphDb {
         page: &GenerationStagePage,
         prepared: Option<PreparedGenerationStagePage>,
         check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<GraphCommit, GraphDbError> {
+    ) -> Result<(GraphCommit, GenerationStagePageCommitV1), GraphDbError> {
         let (idempotency_key, input_digest) =
             generation_stage_page_receipt(identity, expected, page)?;
-        self.run_gated_batch(
+        let (commit, outcome) = self.run_gated_batch(
             check,
             |database| {
                 let mut reuse_receipt = false;
@@ -1087,7 +1096,10 @@ impl GraphDb {
                         if !context.replay_every_page
                             && Self::generation_stage_page_rows_present(database, context, page)?
                         {
-                            return Ok(GraphBatchPlan::Settled(existing.commit, ()));
+                            return Ok(GraphBatchPlan::Settled(
+                                existing.commit,
+                                GenerationStagePageCommitV1::Reused,
+                            ));
                         }
                         // The receipt still binds this exact page to this
                         // identity and recovered digest, so re-applying it is
@@ -1173,11 +1185,27 @@ impl GraphDb {
                         },
                         endpoint_namespaces,
                     },
-                    (),
+                    GenerationStagePageCommitV1::Applied,
                 ))
             },
-            |_database, commit, ()| Ok(commit),
-        )
+            |_database, commit, outcome| Ok((commit, outcome)),
+        )?;
+        if outcome == GenerationStagePageCommitV1::Applied {
+            // run_gated_batch only returns after the real page transaction
+            // and its receipt have committed, including WAL settlement for
+            // persistent stores. A replayed receipt emits no new-write event.
+            tracing::info!(
+                event = "graph_native_stage_page_applied",
+                generation = %identity.generation,
+                ordinal = page.ordinal,
+                kind = page.kind.as_str(),
+                mutations = page.mutation_count(),
+                live_bytes = page.live_bytes(),
+                wal_synced = matches!(self.inner.durability, crate::GraphDurability::WalSync),
+                "native graph page transaction completed"
+            );
+        }
+        Ok((commit, outcome))
     }
 
     /// Binds the dependency metadata in one empty batch, after every page
@@ -3729,6 +3757,77 @@ mod tests {
             "page_construct pages={} serial={serial_ms:?} parallel={parallel_ms:?}",
             pages.len()
         );
+    }
+
+    #[test]
+    fn native_graph_page_reports_real_wal_commits_but_not_replayed_receipts() {
+        let manifest = large_manifest("native-write-observation");
+        let pages = generation_stage_pages(&manifest).expect("native page plan");
+        assert!(!pages.is_empty(), "nonzero source rows must produce a page");
+        let identity = manifest.identity();
+        let sealed = sealed_digest(&manifest);
+        let temp = TempDir::new().expect("graph store");
+        let (owner, database) = persistent_database(&temp);
+        let context = super::GenerationStageContext {
+            locator: GenerationLocator::new(
+                manifest.projection.clone(),
+                manifest.generation.clone(),
+            ),
+            physical_namespace: identity.physical_namespace().unwrap(),
+            dependency_namespaces: database.require_exact_dependencies(&identity).unwrap(),
+            dependency_digest: manifest.dependency_closure_digest(&|| Ok(())).unwrap(),
+            replay_every_page: false,
+        };
+        let prepared = super::construct_generation_stage_page(
+            &manifest,
+            &identity,
+            &context,
+            &pages[0],
+            &|| Ok(()),
+        )
+        .expect("actual native page preparation");
+        let (_, first) = database
+            .apply_prepared_generation_stage_page(
+                Some(&manifest),
+                &identity,
+                &sealed,
+                &context,
+                None,
+                &pages[0],
+                Some(prepared),
+                &|| Ok(()),
+            )
+            .expect("durably commit the first native page");
+        assert_eq!(first, super::GenerationStagePageCommitV1::Applied);
+        assert!(pages[0].mutation_count() > 0);
+        let (_, repeated) = database
+            .apply_prepared_generation_stage_page(
+                Some(&manifest),
+                &identity,
+                &sealed,
+                &context,
+                None,
+                &pages[0],
+                None,
+                &|| Ok(()),
+            )
+            .expect("reuse durable native page receipt");
+        assert_eq!(repeated, super::GenerationStagePageCommitV1::Reused);
+        drop(database);
+        owner.close().expect("close graph store");
+        let (reopened_owner, reopened) = persistent_database(&temp);
+        assert!(
+            reopened
+                .generation_stage_page_already_applied(
+                    &identity,
+                    &sealed,
+                    &context,
+                    &pages[0],
+                )
+                .expect("verify row receipt after restart"),
+            "a reported native page must survive a close/reopen, not merely staging memory"
+        );
+        reopened_owner.close().expect("close reopened graph store");
     }
 
     #[test]

@@ -1821,6 +1821,18 @@ fn build_or_open_sealed_store(
         // canonical bytes the reopen hashed.
         Ok(Some(store)) => {
             let staging_proof = staging_sourced.then_some(store.canonical_bytes);
+            // The direct manifest path writes a SINGLE compact container,
+            // not resumable row pages. Only the installed + reopened digest-
+            // verified segment is reportable as a completed durable write.
+            // A reused prior artifact returned above emits no new segment.
+            tracing::info!(
+                event = "graph_native_compact_segment_verified",
+                generation = %identity.generation,
+                entities = receipt.entities,
+                relations = receipt.relations,
+                canonical_bytes = store.canonical_bytes,
+                "installed and reopened the native graph compact segment"
+            );
             Ok((store, staging_proof))
         }
         Ok(None) => {
