@@ -1291,6 +1291,67 @@ mod tests {
         }
     }
 
+    /// The factory must refuse foreign sidecars before starting SQLite, and a
+    /// failed first creation must not become an existing database on retry.
+    /// Test the actual attachment entry points rather than just the pin helper.
+    #[test]
+    fn occupied_sidecar_refuses_initialization_and_existing_attachment_retries() {
+        let binding = binding();
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let directory = TempDir::new().unwrap();
+            let path = directory.path().join("sessions.db");
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            let sidecar = PathBuf::from(sidecar);
+            let sentinel = format!("unowned {suffix} content");
+            fs::write(&sidecar, sentinel.as_bytes()).unwrap();
+
+            let initialized = RepositoryPhysicalAttachmentFactory.initialize(
+                &native_runtime(),
+                binding.clone(),
+                locator(&binding),
+                path.clone(),
+                AdmissionConfigV1::default(),
+            );
+            assert!(matches!(
+                initialized,
+                Err(RepositoryAttachmentStartError::Identity(
+                    OpenedDatabaseFileError::Reserve
+                ))
+            ));
+            assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+            assert_eq!(fs::read(&sidecar).unwrap(), sentinel.as_bytes());
+
+            let existing = RepositoryPhysicalAttachmentFactory.attach(
+                &native_runtime(),
+                binding.clone(),
+                locator(&binding),
+                path.clone(),
+                AdmissionConfigV1::default(),
+            );
+            assert!(matches!(
+                existing,
+                Err(RepositoryAttachmentStartError::Identity(
+                    OpenedDatabaseFileError::InvalidHeader
+                ))
+            ));
+            let read_only = RepositoryPhysicalAttachmentFactory.attach_read_only(
+                binding.clone(),
+                locator(&binding),
+                path.clone(),
+                AdmissionConfigV1::default(),
+            );
+            assert!(matches!(
+                read_only,
+                Err(RepositoryAttachmentStartError::Identity(
+                    OpenedDatabaseFileError::InvalidHeader
+                ))
+            ));
+            assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+            assert_eq!(fs::read(&sidecar).unwrap(), sentinel.as_bytes());
+        }
+    }
+
     #[test]
     fn failed_initialization_preserves_created_database_and_sidecars() {
         let directory = TempDir::new().unwrap();
