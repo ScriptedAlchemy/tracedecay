@@ -2037,10 +2037,9 @@ async fn unchanged_codex_reoffer_propagates_rewrite_completion_failure() {
     let captures = spy.capture_count();
     assert!(rows > 0, "the source must have real committed evidence");
     spy.rewrites.lock().unwrap().clear();
-    *spy.rewrite_completion_failure.lock().unwrap() =
-        Some(HostAdmissionOutcome::retained_unavailable(
-            "projection_storage_retry_scheduled",
-        ));
+    *spy.rewrite_completion_failure.lock().unwrap() = Some(
+        HostAdmissionOutcome::retained_unavailable("projection_storage_retry_scheduled"),
+    );
 
     let request = super::JsonlObservationAdmissionRequest::new(
         "codex",
