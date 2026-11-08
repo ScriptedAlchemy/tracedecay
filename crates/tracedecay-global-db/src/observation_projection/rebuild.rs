@@ -2023,38 +2023,86 @@ async fn activate_rebuild_provider_usage(
     .map_err(|error| storage("activate rebuilt provider usage", error))
 }
 
+/// Only this projector's provenance can authorize deleting a message. Bound
+/// SQLite's transient list of output keys and seek directly into the message
+/// identity index, including when most messages came from another source.
+async fn clear_created_projection_messages(
+    conn: &impl Executor,
+    generation: &str,
+) -> ProjectionStoreResult<()> {
+    // All observation IDs are TEXT and all stored output ordinals are >= 0.
+    let mut after_id = String::new();
+    let mut after_ordinal = -1_i64;
+    loop {
+        const BOUNDARY: &str = "read projection cleanup page boundary";
+        let mut rows = conn
+            .query(
+                "SELECT observation_id, output_ordinal FROM (
+                 SELECT observation_id, output_ordinal FROM observation_projection_provenance
+                 WHERE projector_version = ?1 AND (observation_id, output_ordinal) > (?2, ?3)
+                 ORDER BY observation_id, output_ordinal LIMIT ?4
+             ) ORDER BY observation_id DESC, output_ordinal DESC LIMIT 1",
+                params![
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                    after_id.as_str(),
+                    after_ordinal,
+                    REBUILD_PAGE_SIZE
+                ],
+            )
+            .await
+            .map_err(|error| storage(BOUNDARY, error))?;
+        let Some(end) = rows
+            .next()
+            .await
+            .map_err(|error| storage(BOUNDARY, error))?
+        else {
+            return Ok(());
+        };
+        let end_id: String = end.get(0).map_err(|error| storage(BOUNDARY, error))?;
+        let end_ordinal: i64 = end.get(1).map_err(|error| storage(BOUNDARY, error))?;
+        drop(rows);
+
+        conn.execute(
+            "DELETE FROM lcm_raw_messages WHERE (provider, message_id) IN (
+                 SELECT current.output_provider, current.output_message_id
+                 FROM observation_projection_provenance AS current
+                 WHERE current.projector_version = ?1 AND current.message_created = 1
+                   AND (current.observation_id, current.output_ordinal) > (?3, ?4)
+                   AND (current.observation_id, current.output_ordinal) <= (?5, ?6)
+                   AND NOT EXISTS (
+                       SELECT 1 FROM observation_projection_provenance AS foreign_owner
+                       WHERE foreign_owner.projector_version <> ?1
+                         AND foreign_owner.output_provider = current.output_provider
+                         AND foreign_owner.output_message_id = current.output_message_id
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM observation_projection_rebuild_messages AS staged
+                       WHERE staged.projector_version = ?1 AND staged.generation = ?2
+                         AND staged.output_provider = current.output_provider
+                         AND staged.output_message_id = current.output_message_id
+                   )
+             )",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                generation,
+                after_id.as_str(),
+                after_ordinal,
+                end_id.as_str(),
+                end_ordinal
+            ],
+        )
+        .await
+        .map_err(|error| storage("clear projected message rows for rebuild", error))?;
+        after_id = end_id;
+        after_ordinal = end_ordinal;
+    }
+}
+
 async fn clear_active_projection(
     conn: &impl Executor,
     generation: &str,
 ) -> ProjectionStoreResult<()> {
-    // Projector ownership is indexed by output identity. Query that authority
-    // directly instead of materializing two large TEMP tables on the long-lived
-    // SQLite writer; their unlinked temp files can survive DELETE and DROP.
-    conn.execute(
-        "DELETE FROM lcm_raw_messages
-         WHERE EXISTS (
-             SELECT 1 FROM observation_projection_provenance AS current
-             WHERE current.projector_version = ?1
-               AND current.message_created = 1
-               AND current.output_provider = lcm_raw_messages.provider
-               AND current.output_message_id = lcm_raw_messages.message_id
-         )
-           AND NOT EXISTS (
-             SELECT 1 FROM observation_projection_provenance AS foreign_owner
-             WHERE foreign_owner.projector_version <> ?1
-               AND foreign_owner.output_provider = lcm_raw_messages.provider
-               AND foreign_owner.output_message_id = lcm_raw_messages.message_id
-         )
-           AND NOT EXISTS (
-             SELECT 1 FROM observation_projection_rebuild_messages AS staged
-             WHERE staged.projector_version = ?1 AND staged.generation = ?2
-               AND staged.output_provider = lcm_raw_messages.provider
-               AND staged.output_message_id = lcm_raw_messages.message_id
-         )",
-        params![SESSION_MESSAGE_PROJECTOR_VERSION, generation],
-    )
-    .await
-    .map_err(|error| storage("clear projected message rows for rebuild", error))?;
+    clear_created_projection_messages(conn, generation).await?;
     // Foreign projector versions are never deleted. The predicate reads only
     // those other versions, which remain stable while this version is cleared.
     conn.execute(
@@ -2788,28 +2836,16 @@ mod activation_tests {
             "UPDATE observation_projection_provenance SET message_created = 0 WHERE observation_id = ?1",
             params![ids["existing"].as_str()]).await.unwrap(), 1);
 
-        let staged_session = SessionRecord {
-            provider: "collision-test".to_owned(),
-            session_id: "staged".to_owned(),
-            ..session(None, None)
-        };
+        let staged_session = super::read_session(&transaction, "collision-test", "staged")
+            .await
+            .unwrap()
+            .unwrap();
         stage(&transaction, GENERATION, &staged_session).await;
-        let (message_id, text, _) = &first["staged"];
-        let message = SessionMessageRecord {
-            provider: staged_session.provider,
-            session_id: staged_session.session_id,
-            message_id: message_id.clone(),
-            text: text.clone(),
-            role: "assistant".to_owned(),
-            ordinal: 1,
-            timestamp: None,
-            kind: None,
-            model: None,
-            tool_names: None,
-            source_path: None,
-            source_offset: None,
-            metadata_json: None,
-        };
+        let message =
+            super::read_message(&transaction, &staged_session.provider, &first["staged"].0)
+                .await
+                .unwrap()
+                .unwrap();
         write_staged_message(&transaction, GENERATION, &message)
             .await
             .unwrap();
