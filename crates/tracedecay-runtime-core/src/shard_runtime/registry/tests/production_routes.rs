@@ -331,8 +331,8 @@ async fn read_only_open_mounts_readers_without_acquiring_a_writer() {
 
 /// The store file is a FIFO, so opening it waits until a writer opens the
 /// other end. Only a task on the runtime's single worker does that while the
-/// open waits; a fallback thread ends a wait that parked the worker, so the
-/// failure is an assertion rather than a hang.
+/// open waits. A nonregular-file preflight may also refuse the FIFO before
+/// opening it; the fallback must not block waiting for a reader in that case.
 #[cfg(unix)]
 #[asupersync::test]
 async fn store_open_keeps_the_async_worker_serving_while_the_file_opens() {
@@ -363,9 +363,20 @@ async fn store_open_keeps_the_async_worker_serving_while_the_file_opens() {
     let fallback = {
         let held = held.clone();
         std::thread::spawn(move || {
-            let parked = fallback_stop.recv_timeout(Duration::from_secs(10)).is_err();
+            let parked = matches!(
+                fallback_stop.recv_timeout(Duration::from_secs(10)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            );
             if parked {
-                drop(OpenOptions::new().write(true).open(&held));
+                // No FIFO reader exists if admission rejected the special
+                // file before SQLite could open it. The rescue itself must
+                // never introduce a second, unbounded blocking open.
+                drop(
+                    OpenOptions::new()
+                        .write(true)
+                        .custom_flags(libc::O_NONBLOCK)
+                        .open(&held),
+                );
             }
             parked
         })
@@ -404,9 +415,15 @@ async fn store_open_keeps_the_async_worker_serving_while_the_file_opens() {
     drop(released_by_worker);
     let parked = fallback.join().unwrap();
 
+    let refused_nonregular = matches!(
+        &outcome,
+        StoreRuntimeOpenResult::Failed(
+            StoreRuntimeRegistryFailure::PhysicalRuntimeFailed { message, .. }
+        ) if message.contains("not a regular file")
+    );
     assert!(
-        released && !parked,
-        "the store open parked the runtime's only worker until the fallback thread released the file"
+        !parked && (released || refused_nonregular),
+        "the worker must release a pending FIFO reader, or admission must refuse the nonregular file before opening it: {outcome:?}"
     );
     assert!(
         matches!(
