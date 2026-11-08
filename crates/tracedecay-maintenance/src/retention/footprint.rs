@@ -1031,8 +1031,14 @@ mod tests {
         let live = &over_findings["projects/proj_live"];
         assert_eq!(live.finding().state(), DoctorEvidenceStateV1::Degraded);
         let statement = live.finding().coverage().statement();
-        assert!(statement.contains("tracedecay --dry-run projects forget proj_live"), "{statement}");
-        assert!(statement.contains("tracedecay --yes projects forget proj_live"), "{statement}");
+        assert!(
+            statement.contains("tracedecay --dry-run projects forget proj_live"),
+            "{statement}"
+        );
+        assert!(
+            statement.contains("tracedecay --yes projects forget proj_live"),
+            "{statement}"
+        );
         assert!(statement.contains("DELETES project data"), "{statement}");
 
         let unregistered = &over_findings["projects/proj_stray"];
@@ -1050,7 +1056,8 @@ mod tests {
             "a profile total does not identify a reclaimable project"
         );
 
-        let normal = census_profile_footprint(&fixture.profile, &fixture.registered, &BTreeMap::new());
+        let normal =
+            census_profile_footprint(&fixture.profile, &fixture.registered, &BTreeMap::new());
         let healthy = findings(&normal);
         assert_eq!(
             healthy["projects/proj_live"].finding().state(),
