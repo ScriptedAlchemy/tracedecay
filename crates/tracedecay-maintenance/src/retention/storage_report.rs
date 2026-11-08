@@ -606,10 +606,14 @@ async fn build_storage_report_with_walk_budget(
     let global_db_path = profile_root.join(GLOBAL_DB_FILENAME);
     // The registry rows come from an off-profile copy, so reading them first
     // leaves the profile untouched.
-    let registered_projects = if global_db_path.exists() {
-        load_registered_project_rows(profile_root, &global_db_path).await?
-    } else {
-        Vec::new()
+    // `Path::exists` hides permission errors and dangling symlinks as
+    // absence. That would misclassify every registered store as unregistered.
+    let registered_projects = match std::fs::symlink_metadata(&global_db_path) {
+        Ok(_) => load_registered_project_rows(profile_root, &global_db_path).await?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            return Err(report_error("inspect profile registry for storage report", error));
+        }
     };
     // Capture the profile's physical footprint before opening any SQLite
     // readers. A report must describe the profile supplied by its caller, not
@@ -2444,6 +2448,38 @@ mod tests {
                 ("projects/proj_ghost", ProjectRootStateV1::Unregistered),
             ])
         );
+    }
+
+    #[cfg(unix)]
+    #[asupersync::test]
+    async fn dangling_profile_registry_cannot_make_registered_stores_look_unregistered() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let profile_root = temporary.path().join("profile");
+        let project = profile_root.join("projects/proj_retained");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("sessions.db"), b"retained sessions").unwrap();
+
+        let registry = profile_root.join(GLOBAL_DB_FILENAME);
+        std::os::unix::fs::symlink(temporary.path().join("missing-global.db"), &registry)
+            .unwrap();
+        assert!(std::fs::symlink_metadata(&registry).is_ok());
+        assert!(!registry.exists(), "the old existence test silently lost this registry");
+
+        let error = build_storage_report(&profile_root)
+            .await
+            .expect_err("a broken registry link must not imply zero registered projects");
+        assert!(
+            matches!(&error, TraceDecayError::Database { .. }),
+            "the unreadable registry must have a typed storage failure: {error}"
+        );
+
+        std::fs::remove_file(&registry).unwrap();
+        let absent = build_storage_report(&profile_root)
+            .await
+            .expect("a genuinely absent registry is still reportable");
+        assert!(absent.stores.is_empty());
+        assert_eq!(absent.unregistered_dir_count, 1);
+        assert!(absent.unregistered_bytes >= 17);
     }
 
     #[asupersync::test]
