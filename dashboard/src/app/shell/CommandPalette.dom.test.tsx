@@ -480,6 +480,34 @@ describe('CommandPalette long and shrinking lists', () => {
     });
   });
 
+  it('forgets a chosen project when the search is edited and then restored', async () => {
+    const user = userEvent.setup();
+    const alpha = registryEntry('proj-alpha', 'Rare Alpha', false);
+    const beta = registryEntry('proj-beta', 'Rare Beta', true);
+    stubListing(listing([alpha, beta]));
+    const { findByText } = renderPalette();
+    await findByText('Rare Beta');
+
+    await user.keyboard('Rare');
+    await waitFor(() => expect(activeOptionLabel()).toBe('Rare Alpha'));
+    await user.keyboard('{ArrowDown}');
+    expect(activeOptionLabel()).toBe('Rare Beta');
+
+    await user.keyboard('x');
+    await waitFor(() =>
+      expect(activeOptionLabel()).toBe('(nothing is announced as active)'),
+    );
+    await user.keyboard('{Backspace}');
+    await waitFor(() => expect(activeOptionLabel()).toBe('Rare Alpha'));
+
+    await user.keyboard('{Enter}');
+    expect(useScope.getState().scope).toMatchObject({
+      kind: 'project',
+      projectId: 'proj-alpha',
+      activation: 'selected',
+    });
+  });
+
   it('clamps the active row when the listing shrinks, and Enter still fires', async () => {
     const user = userEvent.setup();
     stubListing(listing(MANY));

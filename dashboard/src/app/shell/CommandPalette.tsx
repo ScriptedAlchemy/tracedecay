@@ -227,7 +227,13 @@ export function CommandPalette({
             <input
               autoFocus
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              onChange={(e) => {
+                const nextQuery = e.target.value;
+                // A query edit starts a new search even if the text later
+                // returns to an earlier value. Registry refreshes do not.
+                setSelection({ query: nextQuery, index: 0, rowId: null });
+                setQuery(nextQuery);
+              }}
               placeholder="Go to workspace or project…"
               className="min-h-[var(--touch-target-min)] w-full bg-transparent text-body outline-none placeholder:text-text-muted"
               role="combobox"
