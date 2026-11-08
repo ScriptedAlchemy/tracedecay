@@ -196,7 +196,10 @@ fn health_request(
 
 fn seed_db(root: &TempDir, name: &str) -> PathBuf {
     let path = root.path().join(name);
-    Connection::open(&path).unwrap();
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch("PRAGMA user_version = 0")
+        .unwrap();
     path.canonicalize().unwrap()
 }
 

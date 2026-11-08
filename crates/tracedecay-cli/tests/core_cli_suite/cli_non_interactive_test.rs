@@ -1052,7 +1052,10 @@ fn write_empty_sqlite_fixture(path: &Path) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).unwrap();
     }
-    drop(rusqlite::Connection::open(path).expect("empty SQLite fixture"));
+    rusqlite::Connection::open(path)
+        .expect("empty SQLite fixture")
+        .execute_batch("PRAGMA user_version = 0")
+        .expect("materialize an initialized empty-schema SQLite fixture");
 }
 
 async fn register_profile_sharded_store(
