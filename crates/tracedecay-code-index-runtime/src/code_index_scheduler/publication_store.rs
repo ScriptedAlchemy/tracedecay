@@ -1712,12 +1712,23 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .write(true)
             .open(&temporary_path)
             .map_err(Self::unavailable)?;
-        staged.pending.insert(final_path, temporary_path.clone());
-        file.write_all(bytes).map_err(Self::unavailable)?;
-        staged
-            .durable
-            .written(&temporary_path, &file)
-            .map_err(Self::unavailable)
+        // The pending index is publication authority. Never enroll a file
+        // whose write or durability admission failed: a later retry must not
+        // mistake an unflushed temporary for a successfully staged segment.
+        let admitted = file
+            .write_all(bytes)
+            .and_then(|()| staged.durable.written(&temporary_path, &file));
+        drop(file);
+        if let Err(error) = admitted {
+            std::fs::remove_file(&temporary_path).map_err(|cleanup| {
+                Self::unavailable(format!(
+                    "staged segment admission failed: {error}; temporary cleanup failed: {cleanup}"
+                ))
+            })?;
+            return Err(Self::unavailable(error));
+        }
+        staged.pending.insert(final_path, temporary_path);
+        Ok(())
     }
 
     #[cfg(unix)]

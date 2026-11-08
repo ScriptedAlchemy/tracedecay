@@ -1356,3 +1356,84 @@ fn repeated_canonical_segment_writes_reuse_witness_and_refuse_replacement() {
     );
     preparation.abort().expect("release repeated-write preparation");
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn failed_durability_admission_cannot_leave_a_publishable_segment() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn fixture() -> u32 { 7 }\n")]);
+    let source_root = TempDir::new().expect("source store");
+    let generation = source_generation(&fixture, source_root.path());
+    let target_root = TempDir::new().expect("target store");
+    let mut target = target_store(target_root.path(), &fixture);
+    let mut preparation = target
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare target");
+
+    // The 33rd admission flushes the first 32 real writer handles on Linux.
+    // Mutating a member makes that barrier fail after the 33rd temporary was
+    // created, exposing the old bug that nevertheless enrolled the temporary.
+    let contents = (0..33)
+        .map(|index| format!("durability-admission-{index}-bytes").into_bytes())
+        .collect::<Vec<_>>();
+    let digests = contents
+        .iter()
+        .map(|bytes| segment_digest(bytes))
+        .collect::<Vec<_>>();
+    for (digest, bytes) in digests.iter().zip(&contents).take(32) {
+        preparation
+            .write_segment(SealedGenerationSegmentPublicationV1::File { digest, bytes })
+            .expect("stage first durability window");
+    }
+
+    let first_path = staged_path(&preparation, &digests[0]);
+    let prior = first_path.symlink_metadata().expect("first member metadata");
+    let mut writer = File::options()
+        .write(true)
+        .open(&first_path)
+        .expect("mutate same inode");
+    writer
+        .write_all(&vec![b'X'; contents[0].len()])
+        .expect("same-length mutation");
+    writer
+        .set_modified(prior.modified().expect("mtime") + Duration::from_secs(2))
+        .expect("force distinct mtime");
+    drop(writer);
+
+    let pending_path = {
+        let state = preparation.state.lock().expect("preparation state");
+        let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
+            panic!("preparation must be open");
+        };
+        let suffix = sha256_hex_suffix(digests[32].as_str()).expect("digest suffix");
+        files.directory.path().join(format!("segment-{suffix}.json"))
+    };
+    for _ in 0..2 {
+        let result = preparation.write_segment(SealedGenerationSegmentPublicationV1::File {
+            digest: &digests[32],
+            bytes: &contents[32],
+        });
+        assert!(matches!(
+            result,
+            Err(CodeIndexPublicationStoreErrorV1::Unavailable(_))
+        ));
+        assert!(
+            !pending_path.exists(),
+            "a failed writer must clean its temporary, including on retry"
+        );
+        let state = preparation.state.lock().expect("preparation state");
+        let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
+            panic!("preparation must remain abortable");
+        };
+        assert!(
+            !files.segments.pending.values().any(|path| path == &pending_path),
+            "failed durable admission must not be treated as staged"
+        );
+        assert_eq!(
+            files.segments.pending.len(),
+            32,
+            "only the initially admitted members remain owned"
+        );
+    }
+    preparation.abort().expect("abort failed durability window");
+    assert!(!pending_path.exists());
+}
