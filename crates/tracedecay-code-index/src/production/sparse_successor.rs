@@ -988,7 +988,7 @@ pub(super) fn resolve_staged_generation(
     let resolution_index = super::resolution_index::seal_resolution_index_charged(
         &facts,
         &mut |workspace| retain_facts(count(phase_base)?.saturating_add(workspace)),
-        &mut |segment| {
+        |segment: SealedGenerationSegmentPublicationV1<'_>| {
             publish(segment)?;
             // An accepted resolution-index segment is genuine staged work,
             // not a committed native graph page or a status-read heartbeat.
