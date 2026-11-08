@@ -811,6 +811,8 @@ impl<'a> GraphSegmentReadPassV1<'a> {
         request: SealedGenerationSegmentReadV1<'_>,
         buffer: &mut Vec<u8>,
     ) -> Result<(), CodeIndexProductionErrorV1> {
+        // A failed request must not leave bytes from a previous verified page.
+        buffer.clear();
         let (digest, _, _, _) = partitioned_segment_request(request)?;
         if let Some(position) = self
             .pinned
@@ -2397,6 +2399,57 @@ mod tests {
             Err(CodeIndexProductionErrorV1::Contract(_))
         ));
         assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 0);
+    }
+
+    #[test]
+    fn graph_segment_read_failure_clears_the_previous_verified_page() {
+        let temporary = TempDir::new().unwrap();
+        let bytes = b"authenticated page";
+        let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).unwrap();
+        let filename = format!(
+            "segment-{}.json",
+            sha256_hex_suffix(digest.as_str()).unwrap()
+        );
+        std::fs::write(temporary.path().join(filename), bytes).unwrap();
+        let roots = vec![temporary.path().to_path_buf()];
+        let mut pass = super::GraphSegmentReadPassV1::new(&roots);
+        let request = SealedGenerationSegmentReadV1::Whole {
+            digest: &digest,
+            size_bytes: bytes.len() as u64,
+        };
+        let mut buffer = Vec::new();
+        pass.read(request, &mut buffer).unwrap();
+        assert_eq!(buffer, bytes);
+        assert_eq!(pass.open_attempts, 1);
+
+        // Reject an invalid range *before* reaching the retained file handle.
+        let invalid = SealedGenerationSegmentReadV1::Range {
+            digest: &digest,
+            size_bytes: bytes.len() as u64,
+            offset: bytes.len() as u64,
+            length: 1,
+        };
+        assert!(matches!(
+            pass.read(invalid, &mut buffer),
+            Err(CodeIndexProductionErrorV1::Contract(_))
+        ));
+        assert!(buffer.is_empty(), "a refused page cannot expose prior bytes");
+        assert_eq!(pass.open_attempts, 1);
+
+        pass.read(request, &mut buffer).unwrap();
+        assert_eq!(buffer, bytes);
+        assert!(matches!(
+            pass.read(
+                SealedGenerationSegmentReadV1::Whole {
+                    digest: &digest,
+                    size_bytes: bytes.len() as u64 + 1,
+                },
+                &mut buffer
+            ),
+            Err(CodeIndexProductionErrorV1::Contract(_))
+        ));
+        assert!(buffer.is_empty(), "a mismatched manifest cannot expose prior bytes");
+        assert_eq!(pass.open_attempts, 1);
     }
 
     #[test]
