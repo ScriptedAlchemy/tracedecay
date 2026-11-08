@@ -2146,27 +2146,57 @@ impl DaemonCodeIndexPublicationStoreV1 {
         Ok(Some(pointer))
     }
 
-    fn remember_publication_pointer(&self, pointer: &DurablePublicationPointerV1, bytes: &[u8]) {
+    fn remember_publication_pointer(
+        &self,
+        pointer: &DurablePublicationPointerV1,
+        bytes: &[u8],
+        persisted: &mut File,
+    ) {
         let mut memo = self
             .pointer_memo
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        // The memo and the file it names are one critical section. A publisher
-        // that observed older bytes must not install them over a newer file.
-        match std::fs::read(&self.active_path) {
-            Ok(current) if current == bytes => {
-                let metadata = std::fs::metadata(&self.active_path).ok();
-                *memo = Some(PublicationPointerMemoV1 {
-                    mtime: metadata
-                        .as_ref()
-                        .and_then(|metadata| metadata.modified().ok()),
-                    size: metadata.map_or(0, |metadata| metadata.len()),
-                    digest: Self::state_digest(bytes),
-                    pointer: pointer.clone(),
-                });
+        // The tempfile descriptor survives its atomic rename. Reopen-free
+        // readback authenticates that exact inode, while pathname metadata
+        // prevents memoizing a pointer replaced by another writer.
+        #[cfg(unix)]
+        let metadata = (|| -> std::io::Result<Option<std::fs::Metadata>> {
+            let opened = persisted.metadata()?;
+            let named_before = self.active_path.symlink_metadata()?;
+            if !Self::same_unix_segment_identity(&opened, &named_before) {
+                return Ok(None);
             }
-            Ok(_) => {}
-            Err(_) => *memo = None,
+            persisted.seek(SeekFrom::Start(0))?;
+            let mut current = Vec::new();
+            (&mut *persisted)
+                .take(MAX_DURABLE_PUBLICATION_POINTER_BYTES + 1)
+                .read_to_end(&mut current)?;
+            let after = persisted.metadata()?;
+            let named_after = self.active_path.symlink_metadata()?;
+            Ok((current == bytes
+                && Self::same_unix_segment_identity(&opened, &after)
+                && Self::same_unix_segment_identity(&opened, &named_after))
+                .then_some(named_after))
+        })()
+        .ok()
+        .flatten();
+        #[cfg(not(unix))]
+        let metadata = match std::fs::read(&self.active_path) {
+            Ok(current) if current == bytes => std::fs::metadata(&self.active_path).ok(),
+            _ => None,
+        };
+        #[cfg(not(unix))]
+        let _ = persisted;
+        if let Some(metadata) = metadata {
+            *memo = Some(PublicationPointerMemoV1 {
+                mtime: metadata.modified().ok(),
+                size: metadata.len(),
+                digest: Self::state_digest(bytes),
+                pointer: pointer.clone(),
+            });
+        } else {
+            // Never preserve an older memo after an unverified replacement.
+            *memo = None;
         }
     }
 
@@ -2213,7 +2243,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .map_err(Self::unavailable)?;
         temporary.write_all(bytes).map_err(Self::unavailable)?;
         temporary.as_file().sync_all().map_err(Self::unavailable)?;
-        temporary
+        let mut persisted = temporary
             .persist(&self.active_path)
             .map_err(|error| Self::map_pointer_io(error.error))?;
         Self::sync_directory(
@@ -2221,7 +2251,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 .parent()
                 .ok_or_else(|| Self::unavailable("active pointer has no parent directory"))?,
         )?;
-        self.remember_publication_pointer(pointer, bytes);
+        self.remember_publication_pointer(pointer, bytes, &mut persisted);
         Ok(())
     }
 

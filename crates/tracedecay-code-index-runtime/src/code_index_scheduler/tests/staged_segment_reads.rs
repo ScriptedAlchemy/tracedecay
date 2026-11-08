@@ -1613,3 +1613,90 @@ fn cold_publication_pointer_validation_uses_one_kernel_open_and_recovers_snapsho
         "one-open validation must not alter the durable snapshot"
     );
 }
+
+#[cfg(target_os = "linux")]
+fn observed_named_opens(
+    events: &std::sync::mpsc::Receiver<notify::Result<notify::Event>>,
+    path: &Path,
+) -> usize {
+    let mut opens = 0;
+    while let Ok(event) = events.recv_timeout(Duration::from_millis(250)) {
+        let event = event.expect("kernel file watch event");
+        if event.paths.iter().any(|candidate| candidate == path)
+            && matches!(
+                event.kind,
+                notify::EventKind::Access(notify::event::AccessKind::Open(_))
+            )
+        {
+            opens += 1;
+        }
+    }
+    opens
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn initial_pointer_publication_reuses_persisted_descriptor_without_pathname_open() {
+    use notify::Watcher;
+
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n")]);
+    let source_root = TempDir::new().expect("source store");
+    let generation = source_generation(&fixture, source_root.path());
+    let target_root = TempDir::new().expect("target store");
+    let mut publisher = target_store(target_root.path(), &fixture);
+    let active_path = publisher.active_path.clone();
+
+    // Watch the parent: the final pathname does not exist until the first
+    // publication rename, so it cannot be watched directly beforehand.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut watcher =
+        notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            let _ = sender.send(event);
+        })
+        .expect("native file observer");
+    watcher
+        .watch(
+            active_path.parent().expect("pointer parent"),
+            notify::RecursiveMode::NonRecursive,
+        )
+        .expect("watch publication directory");
+
+    let mut preparation = publisher
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare first generation");
+    let publication = generation
+        .stage_publication(&mut preparation)
+        .expect("stage source snapshot");
+    publisher
+        .commit(&mut preparation, &publication)
+        .expect("publish first generation");
+
+    assert!(active_path.is_file(), "the committed pointer must exist");
+    assert_eq!(
+        observed_named_opens(&receiver, &active_path),
+        0,
+        "memo authentication must reuse the persisted writer, not reopen the pointer"
+    );
+    drop(preparation);
+    drop(publisher);
+
+    // Non-vacuous kernel-observer control: the same directory watch must
+    // record a real pathname open after the publication.
+    drop(File::open(&active_path).expect("control open of persisted pointer"));
+    assert_eq!(
+        observed_named_opens(&receiver, &active_path),
+        1,
+        "watcher must observe a real open of the committed pointer"
+    );
+
+    let cold = target_store(target_root.path(), &fixture);
+    let reloaded = cold
+        .load_active_shared()
+        .expect("load persisted generation")
+        .expect("published generation");
+    assert_eq!(
+        reloaded.snapshot().content_identity,
+        generation.snapshot().content_identity,
+        "open-free memo population must preserve cold snapshot identity"
+    );
+}
