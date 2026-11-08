@@ -56,8 +56,9 @@ use tracedecay_code_index::production::{
     CodeGraphBuildBoundV1, CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1,
     CodeIndexInterruptionV1, CodeIndexPreparationPort, CodeIndexProductionErrorV1,
     CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
-    SEALED_GENERATION_FORMAT_REVISION_V1, SealedGenerationSegmentReadV1,
-    SharedDecodedContentPoolV1, UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
+    SEALED_GENERATION_FORMAT_REVISION_V1, SealedGenerationSegmentPublicationV1,
+    SealedGenerationSegmentReadV1, SharedDecodedContentPoolV1,
+    UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
 };
 
 /// Re-publication stages an already validated decoded generation through the
@@ -83,6 +84,130 @@ fn publish_generation(
         preparation.abort()?;
     }
     result
+}
+
+/// The real preparation's segment reader must reuse handles, not merely
+/// count an unrelated observer or pin a single noninterleaved page.
+#[cfg(unix)]
+#[test]
+fn staged_segment_range_reads_open_once_per_cached_file_and_revalidate_replacements() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn fixture() -> u32 { 7 }\n")]);
+    let source_store = TempDir::new().expect("source store");
+    let generation = {
+        let mut source = scheduler(
+            &fixture,
+            source_store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        );
+        published(source.reconcile_now().expect("source publication"));
+        Arc::clone(&source.latest_complete().expect("decode source").generation)
+    };
+    let target_store = TempDir::new().expect("target store");
+    let mut target = super::super::DaemonCodeIndexPublicationStoreV1::new(
+        target_store.path(),
+        fixture.path(),
+        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+            .expect("sanitizer revision"),
+    )
+    .expect("target publication store");
+    let mut preparation = target
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare target");
+    let contents = (0..9)
+        .map(|index| format!("sealed-staged-segment-{index}-bytes").into_bytes())
+        .collect::<Vec<_>>();
+    let digests = contents
+        .iter()
+        .map(|bytes| {
+            ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes))
+                .expect("canonical digest")
+        })
+        .collect::<Vec<_>>();
+    for (digest, bytes) in digests.iter().zip(&contents) {
+        preparation
+            .write_segment(SealedGenerationSegmentPublicationV1::File { digest, bytes })
+            .expect("write exact staged segment");
+    }
+    let reader = preparation.segment_reader();
+    let mut read = Vec::new();
+    for offset in 0..16 {
+        reader(
+            SealedGenerationSegmentReadV1::Range {
+                digest: &digests[0],
+                size_bytes: contents[0].len() as u64,
+                offset,
+                length: 4,
+            },
+            &mut read,
+        )
+        .expect("read staged segment range");
+        assert_eq!(&read, &contents[0][offset as usize..offset as usize + 4]);
+    }
+    assert_eq!(
+        preparation.staged_segment_read_open_attempts_for_test(),
+        1,
+        "16 overlapping production reads must open the first file once",
+    );
+    for (digest, bytes) in digests.iter().zip(&contents).skip(1) {
+        reader(
+            SealedGenerationSegmentReadV1::Whole {
+                digest,
+                size_bytes: bytes.len() as u64,
+            },
+            &mut read,
+        )
+        .expect("read distinct staged segment");
+        assert_eq!(&read, bytes);
+    }
+    assert_eq!(
+        preparation.staged_segment_read_open_attempts_for_test(),
+        9,
+        "nine genuinely distinct segments must each need a real file open",
+    );
+    reader(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &digests[0],
+            size_bytes: contents[0].len() as u64,
+        },
+        &mut read,
+    )
+    .expect("reopen the evicted first segment");
+    assert_eq!(&read, &contents[0]);
+    assert_eq!(
+        preparation.staged_segment_read_open_attempts_for_test(),
+        10,
+        "an eight-handle bound must evict and reopen the ninth distinct file",
+    );
+
+    let segments_root = code_generation_segments_root(target_store.path());
+    let staging_directory = std::fs::read_dir(segments_root)
+        .expect("staging root")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.is_dir())
+        .expect("one active preparation directory");
+    let suffix = sha256_hex_suffix(digests[0].as_str()).expect("digest suffix");
+    let staged_path = staging_directory.join(format!("segment-{suffix}.json"));
+    let replacement_path = staging_directory.join("replacement.tmp");
+    let replacement = vec![b'Z'; contents[0].len()];
+    std::fs::write(&replacement_path, &replacement).expect("write replacement bytes");
+    std::fs::rename(replacement_path, staged_path).expect("replace the pinned path");
+    reader(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &digests[0],
+            size_bytes: contents[0].len() as u64,
+        },
+        &mut read,
+    )
+    .expect("read current pathname rather than an unlinked handle");
+    assert_eq!(read, replacement, "a stale cached inode must never serve");
+    assert_eq!(
+        preparation.staged_segment_read_open_attempts_for_test(),
+        11,
+        "path replacement must trigger another real file open",
+    );
+    drop(reader);
+    preparation.abort().expect("abort and clean staged files");
 }
 
 #[test]

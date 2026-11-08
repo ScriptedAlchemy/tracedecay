@@ -574,6 +574,12 @@ struct DaemonCodeIndexPreparationFilesV1 {
     // prohibit removing an open file. Retention outlives all staging cleanup.
     segments: StagedGenerationSegmentsV1,
     evidence: TemporaryEvidencePackV1,
+    // Only the open preparation owns these handles. Its retention lease
+    // prevents an authorized sweep from unlinking their sealed paths.
+    #[cfg(unix)]
+    pinned_segment_reads: VecDeque<PinnedPreparationSegmentV1>,
+    #[cfg(unix)]
+    segment_read_open_attempts: u64,
     directory: tempfile::TempDir,
     _retention: CodeGenerationStoreLockV1,
     referenced_segment_bytes: u64,
@@ -602,6 +608,15 @@ impl DaemonCodeIndexPreparationV1 {
         })
     }
 
+    #[cfg(all(test, unix))]
+    pub(super) fn staged_segment_read_open_attempts_for_test(&self) -> u64 {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        match &*state {
+            DaemonCodeIndexPreparationStateV1::Open(files) => files.segment_read_open_attempts,
+            _ => 0,
+        }
+    }
+
     fn invalidate_uncommitted(&self) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if matches!(&*state, DaemonCodeIndexPreparationStateV1::Open(_)) {
@@ -627,10 +642,16 @@ impl DaemonCodeIndexPreparationV1 {
             segments,
             mut evidence,
             _retention,
+            #[cfg(unix)]
+            pinned_segment_reads,
             ..
         } = *files;
         evidence.rollback_unattached(directory.path())?;
         drop(evidence);
+        // Windows cannot unlink an open staging file. Release any read pins
+        // before staged cleanup, even when the preparation is aborted.
+        #[cfg(unix)]
+        drop(pinned_segment_reads);
         drop(segments);
         let result = directory
             .close()
@@ -774,10 +795,10 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
         let state = Arc::clone(&self.state);
         let segments_root = self.segments_root.clone();
         Arc::new(move |request, buffer| {
-            let state = state
+            let mut state = state
                 .lock()
                 .map_err(|_| CodeIndexProductionErrorV1::Publication(Self::closed()))?;
-            match &*state {
+            match &mut *state {
                 DaemonCodeIndexPreparationStateV1::Aborted => {
                     Err(CodeIndexProductionErrorV1::Publication(Self::closed()))
                 }
@@ -799,8 +820,80 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                         )
                     })?;
                     let canonical = segments_root.join(format!("segment-{suffix}.json"));
-                    let path = files.segments.pending.get(&canonical).unwrap_or(&canonical);
-                    DaemonCodeIndexPublicationStoreV1::read_segment_at(path, request, buffer)
+                    let path = files
+                        .segments
+                        .pending
+                        .get(&canonical)
+                        .cloned()
+                        .unwrap_or(canonical);
+                    #[cfg(not(unix))]
+                    {
+                        DaemonCodeIndexPublicationStoreV1::read_segment_at(
+                            &path, request, buffer,
+                        )
+                    }
+                    #[cfg(unix)]
+                    {
+                        // Range reads from the same staged segment can be
+                        // interleaved by the sparse successor. Keep at most
+                        // eight handles, in least-recently-used order.
+                        if let Some(position) = files
+                            .pinned_segment_reads
+                            .iter()
+                            .position(|entry| entry.path == path)
+                        {
+                            let entry = &files.pinned_segment_reads[position];
+                            let unchanged = path
+                                .symlink_metadata()
+                                .ok()
+                                .zip(entry.segment.file.metadata().ok())
+                                .is_some_and(|(named, pinned)| {
+                                    DaemonCodeIndexPublicationStoreV1::same_unix_segment_identity(
+                                        &named, &pinned,
+                                    )
+                                });
+                            let entry = files.pinned_segment_reads.remove(position).ok_or_else(
+                                || {
+                                    CodeIndexProductionErrorV1::Contract(
+                                        "staged segment read cache lost a handle".to_owned(),
+                                    )
+                                },
+                            )?;
+                            if unchanged {
+                                files.pinned_segment_reads.push_back(entry);
+                            }
+                        }
+                        if files
+                            .pinned_segment_reads
+                            .back()
+                            .is_none_or(|entry| entry.path != path)
+                        {
+                            let segment =
+                                DaemonCodeIndexPublicationStoreV1::open_pinned_staged_segment(
+                                    &path, request,
+                                )?;
+                            files.segment_read_open_attempts += 1;
+                            if files.pinned_segment_reads.len()
+                                == MAX_STAGED_SEGMENT_READ_HANDLES
+                            {
+                                files.pinned_segment_reads.pop_front();
+                            }
+                            files.pinned_segment_reads.push_back(PinnedPreparationSegmentV1 {
+                                path,
+                                segment,
+                            });
+                        }
+                        let pinned = files.pinned_segment_reads.back_mut().ok_or_else(|| {
+                            CodeIndexProductionErrorV1::Contract(
+                                "staged segment read cache has no handle".to_owned(),
+                            )
+                        })?;
+                        DaemonCodeIndexPublicationStoreV1::read_pinned_partitioned_segment(
+                            &mut pinned.segment,
+                            request,
+                            buffer,
+                        )
+                    }
                 }
             }
         })
@@ -894,6 +987,16 @@ struct PinnedGenerationSegmentV1 {
     digest: String,
     size_bytes: u64,
     file: File,
+}
+
+// The file count is bounded independently of the number of staged segments.
+#[cfg(unix)]
+const MAX_STAGED_SEGMENT_READ_HANDLES: usize = 8;
+
+#[cfg(unix)]
+struct PinnedPreparationSegmentV1 {
+    path: PathBuf,
+    segment: PinnedGenerationSegmentV1,
 }
 
 impl TemporaryEvidencePackV1 {
@@ -1933,6 +2036,83 @@ impl DaemonCodeIndexPublicationStoreV1 {
         Ok(PinnedGenerationSegmentV1 {
             digest: digest.to_owned(),
             size_bytes: expected_size,
+            file,
+        })
+    }
+
+    #[cfg(unix)]
+    fn same_unix_segment_identity(
+        named: &std::fs::Metadata,
+        pinned: &std::fs::Metadata,
+    ) -> bool {
+        use std::os::unix::fs::MetadataExt;
+
+        named.file_type().is_file()
+            && pinned.is_file()
+            && named.dev() == pinned.dev()
+            && named.ino() == pinned.ino()
+            && named.len() == pinned.len()
+            && named.mtime() == pinned.mtime()
+            && named.mtime_nsec() == pinned.mtime_nsec()
+            && named.ctime() == pinned.ctime()
+            && named.ctime_nsec() == pinned.ctime_nsec()
+    }
+
+    /// One actual file open per cache miss. Do not reopen via Handle::from_path
+    /// on macOS: comparing the Unix inode and change-time metadata before and
+    /// after open proves the same identity without another endpoint scan.
+    #[cfg(unix)]
+    fn open_pinned_staged_segment(
+        path: &Path,
+        request: SealedGenerationSegmentReadV1<'_>,
+    ) -> Result<PinnedGenerationSegmentV1, CodeIndexProductionErrorV1> {
+        let (digest, size_bytes, offset, length) = match request {
+            SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
+                (digest.as_str(), size_bytes, 0, size_bytes)
+            }
+            SealedGenerationSegmentReadV1::Range {
+                digest,
+                size_bytes,
+                offset,
+                length,
+            } => (digest.as_str(), size_bytes, offset, length),
+        };
+        if offset
+            .checked_add(length)
+            .is_none_or(|end| end > size_bytes)
+        {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation segment range exceeds its manifest identity".to_owned(),
+            ));
+        }
+        let named = path.symlink_metadata().map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "staged sealed segment is unavailable: {error}"
+            ))
+        })?;
+        if !named.file_type().is_file() || named.len() != size_bytes {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "staged sealed segment identity does not match its manifest".to_owned(),
+            ));
+        }
+        let file = File::open(path).map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "staged sealed segment cannot be opened: {error}"
+            ))
+        })?;
+        let opened = file.metadata().map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "staged sealed segment metadata cannot be read: {error}"
+            ))
+        })?;
+        if !Self::same_unix_segment_identity(&named, &opened) {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "staged sealed segment was replaced while opening".to_owned(),
+            ));
+        }
+        Ok(PinnedGenerationSegmentV1 {
+            digest: digest.to_owned(),
+            size_bytes,
             file,
         })
     }
@@ -3053,6 +3233,10 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                     directory,
                     segments: StagedGenerationSegmentsV1::new(),
                     evidence,
+                    #[cfg(unix)]
+                    pinned_segment_reads: VecDeque::new(),
+                    #[cfg(unix)]
+                    segment_read_open_attempts: 0,
                     _retention: retention,
                     referenced_segment_bytes: 0,
                     manifest_identity: None,
