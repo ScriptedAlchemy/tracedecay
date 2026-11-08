@@ -3436,6 +3436,23 @@ mod build_tests {
             "the foreign directory must not receive a container or receipt"
         );
         assert!(!directory.exists(), "no generation was installed");
+
+        // Removing the foreign link must restore a successful, verified seal.
+        // A fixture that always refuses to build would not prove the fix.
+        std::fs::remove_file(&staging).unwrap();
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .expect("a normal staging directory must still produce a sealed generation");
+        assert_eq!(store.recovered_digest(), expected.as_str());
+        assert!(
+            directory.join(SEALED_STORE_DATABASE_FILE).is_file(),
+            "valid staging must install a verified sealed container"
+        );
     }
 
     /// The sealed container is written once, complete, after every row has
