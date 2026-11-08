@@ -152,16 +152,19 @@ pub struct ProjectAudit {
 pub(super) struct ProjectFiles {
     root: PathBuf,
     files: Vec<PathBuf>,
+    skipped_nested_repositories: Vec<String>,
 }
 
 impl ProjectFiles {
     fn collect(project_root: &Path, path_policy: &IndexPathPolicyV1) -> Result<Self> {
-        let walk =
-            crate::source_walk::source_walk(project_root, None, path_policy).map_err(|error| {
-                TraceDecayError::Config {
-                    message: format!("source walk rejected its own scope: {}", error.message),
-                }
-            })?;
+        let (walk, diagnostics) = crate::source_walk::source_walk_with_diagnostics(
+            project_root,
+            None,
+            path_policy,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("source walk rejected its own scope: {}", error.message),
+        })?;
         let mut files = Vec::new();
         for entry in walk {
             let Ok(entry) = entry else { continue };
@@ -174,6 +177,7 @@ impl ProjectFiles {
         Ok(Self {
             root: project_root.to_path_buf(),
             files,
+            skipped_nested_repositories: diagnostics.skipped_nested_repositories(),
         })
     }
 
@@ -258,6 +262,32 @@ pub fn audit_project(project_root: &Path, path_policy: &IndexPathPolicyV1) -> Re
     };
     let mut ecosystems = vec![rust, typescript];
     ecosystems.extend(unmodelled_ecosystems(&files));
+    if !files.skipped_nested_repositories.is_empty() {
+        // Preserve existing ecosystem caveats and bound the diagnostic text.
+        // Skipped child repositories are not indexed as parent source.
+        let named = files
+            .skipped_nested_repositories
+            .iter()
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>();
+        let remaining = files.skipped_nested_repositories.len() - named.len();
+        let summary = format!(
+            "Skipped nested repositories outside parent index: {}{}",
+            named.join(", "),
+            if remaining == 0 {
+                String::new()
+            } else {
+                format!(" (and {remaining} more)")
+            }
+        );
+        for ecosystem in &mut ecosystems {
+            ecosystem.note = Some(match ecosystem.note.take() {
+                Some(existing) => format!("{existing} {summary}"),
+                None => summary.clone(),
+            });
+        }
+    }
     Ok(ProjectAudit { ecosystems })
 }
 
@@ -393,6 +423,40 @@ mod tests {
             ecosystem(&audit, "typescript").status.as_str(),
             "not_present"
         );
+    }
+
+    #[test]
+    fn audit_reports_nested_repository_exclusion_without_claiming_child_code() {
+        let root = tempfile::tempdir().expect("project fixture");
+        write(
+            root.path(),
+            "Cargo.toml",
+            "[package]\nname = \"parent\"\nversion = \"0.0.0\"\n",
+        );
+        write(root.path(), "src/lib.rs", "pub fn parent() {}\n");
+        write(root.path(), "app/.git", "gitdir: ../.git/modules/app\n");
+        write(root.path(), "app/src/child.rs", "pub fn child() {}\n");
+        write(root.path(), "unrelated/.git/HEAD", "ref: refs/heads/main\n");
+        write(root.path(), "unrelated/src/foreign.rs", "pub fn foreign() {}\n");
+
+        let audit = audit_project(root.path(), &no_exclusions()).expect("audit");
+        let rust = ecosystem(&audit, "rust");
+        assert_eq!(
+            rust.scanned_file_count, 1,
+            "child repositories are not parent source"
+        );
+        assert!(rust.unmounted.iter().all(|file| {
+            !file.file.starts_with("app/") && !file.file.starts_with("unrelated/")
+        }));
+        let note = rust.note.as_deref().expect("explicit scope diagnostic");
+        assert!(note.contains("Skipped nested repositories"), "{note}");
+        assert!(note.contains("app") && note.contains("unrelated"), "{note}");
+        assert!(audit.ecosystems.iter().all(|ecosystem| {
+            ecosystem
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("Skipped nested repositories"))
+        }));
     }
 
     /// Both modelled ecosystems report in one pass over a polyglot repository.

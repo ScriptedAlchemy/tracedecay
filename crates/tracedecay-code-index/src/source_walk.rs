@@ -9,8 +9,9 @@
 //! walk is therefore public rather than crate-private, the audit in the root
 //! crate reuses this policy instead of restating it.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use ignore::overrides::{Override, OverrideBuilder};
 use ignore::{Walk, WalkBuilder};
@@ -103,11 +104,51 @@ impl PathGlobScope {
     }
 }
 
+/// Diagnostics emitted by the same source walker that enforces the nested
+/// repository boundary. Only directories the walk actually reaches are named.
+#[derive(Clone, Default)]
+pub(crate) struct SourceWalkDiagnostics {
+    skipped_nested_repositories: Arc<Mutex<BTreeSet<String>>>,
+}
+
+impl SourceWalkDiagnostics {
+    pub(crate) fn skipped_nested_repositories(&self) -> Vec<String> {
+        self.skipped_nested_repositories
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect()
+    }
+}
+
 #[tracing::instrument(name = "code_index.capture.source_walk", level = "trace", skip_all)]
 pub fn source_walk(
     project_root: &Path,
     path_glob: Option<&str>,
     path_policy: &IndexPathPolicyV1,
+) -> Result<Walk, SourceWalkError> {
+    source_walk_inner(project_root, path_glob, path_policy, None)
+}
+
+/// Expose excluded nested repository roots without changing source admission.
+/// The unmounted-file audit uses this to avoid falsely implying completeness.
+/// It uses the same traversal rather than an independent repository walker.
+pub(crate) fn source_walk_with_diagnostics(
+    project_root: &Path,
+    path_glob: Option<&str>,
+    path_policy: &IndexPathPolicyV1,
+) -> Result<(Walk, SourceWalkDiagnostics), SourceWalkError> {
+    let diagnostics = SourceWalkDiagnostics::default();
+    let walk = source_walk_inner(project_root, path_glob, path_policy, Some(diagnostics.clone()))?;
+    Ok((walk, diagnostics))
+}
+
+fn source_walk_inner(
+    project_root: &Path,
+    path_glob: Option<&str>,
+    path_policy: &IndexPathPolicyV1,
+    diagnostics: Option<SourceWalkDiagnostics>,
 ) -> Result<Walk, SourceWalkError> {
     let overrides = build_overrides(project_root, path_glob)?;
     let has_positive_override = overrides
@@ -171,6 +212,13 @@ pub fn source_walk(
             // sources. Linked worktrees and nested clones share this boundary.
             // The project root is deliberately exempt at depth zero above.
             if std::fs::symlink_metadata(entry.path().join(".git")).is_ok() {
+                if let Some(diagnostics) = &diagnostics {
+                    diagnostics
+                        .skipped_nested_repositories
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert(relative);
+                }
                 return false;
             }
             !path_policy.excludes_directory(&relative)
@@ -220,7 +268,7 @@ mod tests {
     use tempfile::TempDir;
     use tracedecay_domain::IndexPathPolicyV1;
 
-    use super::source_walk;
+    use super::{source_walk, source_walk_with_diagnostics};
 
     fn walked_files(root: &std::path::Path, path_policy: &IndexPathPolicyV1) -> Vec<PathBuf> {
         let mut files = source_walk(root, None, path_policy)
@@ -434,6 +482,18 @@ mod tests {
         assert!(index.stdout.starts_with(b"160000 "));
         assert!(index.stdout.ends_with(b" 0\tapp\0"));
         assert!(root.join("app/src/feature.rs").is_file());
+
+        let (walk, diagnostics) = source_walk_with_diagnostics(
+            &root,
+            None,
+            &IndexPathPolicyV1::new(vec![], vec![]).unwrap(),
+        )
+        .expect("source walk with nested repository diagnostics");
+        let _visited = walk.map(|entry| entry.expect("source entry")).count();
+        assert_eq!(
+            diagnostics.skipped_nested_repositories(),
+            vec!["app".to_owned()]
+        );
 
         for rule in ["app/**", "app/src/feature.rs", "app/src/fe*.rs"] {
             let policy = IndexPathPolicyV1::new(vec![], vec![rule.into()]).unwrap();
