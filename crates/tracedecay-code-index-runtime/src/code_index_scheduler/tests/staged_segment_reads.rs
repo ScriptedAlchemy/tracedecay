@@ -1199,7 +1199,10 @@ fn staged_existing_segments_reuse_authenticated_inodes_without_reopening() {
     let full_opens = PREPARED_SEGMENT_DIGEST_OPENS
         .with(std::cell::Cell::get)
         .saturating_sub(full_before);
-    assert!(full_opens > 0, "the counter must observe canonical file opens");
+    assert!(
+        full_opens > 0,
+        "the counter must observe canonical file opens"
+    );
     unproven.abort().expect("abort unproven preparation");
 
     let mut staged = target
