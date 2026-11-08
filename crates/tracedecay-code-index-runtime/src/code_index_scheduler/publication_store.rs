@@ -1306,6 +1306,13 @@ impl TemporaryEvidencePackV1 {
         let final_path = root.join(format!("segment-{digest_hex}.json"));
         match final_path.symlink_metadata() {
             Ok(metadata) => {
+                // Reject non-files and mismatched extents before opening the
+                // canonical name: a FIFO must never block digest verification.
+                if !metadata.file_type().is_file() || metadata.len() != segment_size_bytes {
+                    return Err(DaemonCodeIndexPublicationStoreV1::corruption(
+                        "existing sealed evidence pack does not match its content address",
+                    ));
+                }
                 #[cfg(unix)]
                 let actual = DaemonCodeIndexPublicationStoreV1::state_digest_existing_segment(
                     &final_path,
@@ -1313,10 +1320,7 @@ impl TemporaryEvidencePackV1 {
                 )?;
                 #[cfg(not(unix))]
                 let actual = DaemonCodeIndexPublicationStoreV1::state_digest_file(&final_path)?;
-                if !metadata.file_type().is_file()
-                    || metadata.len() != segment_size_bytes
-                    || actual != segment_digest.as_str()
-                {
+                if actual != segment_digest.as_str() {
                     return Err(DaemonCodeIndexPublicationStoreV1::corruption(
                         "existing sealed evidence pack does not match its content address",
                     ));

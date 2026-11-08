@@ -1753,7 +1753,10 @@ fn staged_evidence_pack_writer_authentication_avoids_extra_opens_and_refuses_rep
         );
         (path, witness)
     };
-    assert_eq!(std::fs::read(&path).expect("staged evidence bytes"), bytes);
+    assert_eq!(
+        std::fs::read(&path).expect("staged evidence bytes").as_slice(),
+        &bytes[..]
+    );
     assert_eq!(segment_digest(bytes), digest);
     assert_eq!(
         PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get),
