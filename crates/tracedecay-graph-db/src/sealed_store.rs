@@ -1862,6 +1862,7 @@ fn build_or_open_sealed_store(
     // Idempotent replay: an artifact from an earlier seal of this exact
     // generation is adopted if its receipt binds the same digest. Adoption
     // never enumerates `source`'s rows, so it yields no staging proof.
+    let locator = GenerationLocator::new(identity.projection.clone(), identity.generation.clone());
     match open_sealed_store_checked(
         &directory,
         identity,
@@ -1870,11 +1871,26 @@ fn build_or_open_sealed_store(
         trusted_base.as_ref(),
     ) {
         Ok(Some(store)) => return Ok((store, None)),
-        Ok(None) => {}
-        Err(_) => remove_sealed_directory(&directory),
-    }
-    if directory.exists() {
-        remove_sealed_directory(&directory);
+        Ok(None) => match std::fs::symlink_metadata(&directory) {
+            Ok(_) => {
+                return Err(GraphDbError::unavailable(
+                    "unverified sealed generation occupies the artifact directory",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(sealed_store_io_failure(
+                    "sealed artifact metadata read failed",
+                    error,
+                ));
+            }
+        },
+        Err(GraphDbError::Cancelled) => return Err(GraphDbError::Cancelled),
+        Err(_) => {
+            // A corrupt owned artifact may be rebuilt, but an unknown receipt
+            // (or a replacement directory) never grants deletion authority.
+            retire_sealed_directory_checked(&directory, &locator, Some(expected.as_str()))?;
+        }
     }
     let staging = root.join(format!(
         ".staging-{}",
@@ -1887,6 +1903,15 @@ fn build_or_open_sealed_store(
     // accept a pre-existing staging symlink and write into its foreign target.
     std::fs::create_dir_all(&root)
         .map_err(|error| sealed_store_io_failure("sealed root create failed", error))?;
+    // create_dir_all accepts symlinked directory components. Refuse a
+    // preexisting substituted sealed root before writing staging bytes.
+    let root_metadata = std::fs::symlink_metadata(&root)
+        .map_err(|error| sealed_store_io_failure("sealed root metadata failed", error))?;
+    if !root_metadata.is_dir() {
+        return Err(GraphDbError::unavailable(
+            "sealed root must be a real directory",
+        ));
+    }
     let staging_name = staging
         .file_name()
         .ok_or_else(|| GraphDbError::unavailable("sealed staging name missing"))?;
@@ -3404,6 +3429,101 @@ mod build_tests {
             matches!(proof, Err(GraphDbError::Corrupt { .. })),
             "a copy proof over a corrupt sealed page must be refused as corrupt: {proof:?}"
         );
+    }
+
+    /// An unverified existing generation directory cannot be treated as
+    /// disposable scratch space. Rebuilding is allowed only after its owner
+    /// removes the unknown data.
+    #[test]
+    fn sealed_build_preserves_an_unverified_occupied_generation() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(2, 1);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        let root = sealed_store_root(&database_path);
+        let directory = sealed_generation_directory(&root, &identity.physical_namespace().unwrap());
+        std::fs::create_dir_all(&directory).unwrap();
+        let sentinel = directory.join("foreign-sentinel");
+        std::fs::write(&sentinel, b"not owned").unwrap();
+
+        for foreign_receipt in [false, true] {
+            if foreign_receipt {
+                std::fs::write(directory.join(SEALED_STORE_RECEIPT_FILE), b"invalid receipt")
+                    .unwrap();
+            }
+            let result = build_or_open_sealed_store(
+                SealedRowSource::Manifest(&manifest),
+                &identity,
+                &expected,
+                &database_path,
+                check,
+            );
+            assert!(
+                result.is_err(),
+                "unreceipted or malformed foreign data must refuse rebuilding"
+            );
+            assert_eq!(std::fs::read(&sentinel).unwrap(), b"not owned");
+            assert!(
+                !directory.join(SEALED_STORE_DATABASE_FILE).exists(),
+                "refused rebuilding must never write a container into foreign data"
+            );
+        }
+
+        std::fs::remove_dir_all(&directory).unwrap();
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .expect("clearing the unknown artifact allows a verified sealed build");
+        assert_eq!(store.recovered_digest(), expected.as_str());
+        assert!(directory.join(SEALED_STORE_DATABASE_FILE).is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sealed_build_refuses_a_foreign_root_symlink() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(2, 1);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        let root = sealed_store_root(&database_path);
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::write(foreign.join("sentinel"), b"not owned").unwrap();
+        std::os::unix::fs::symlink(&foreign, &root).unwrap();
+
+        let result = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        );
+        assert!(result.is_err(), "a symlinked sealed root must refuse writes");
+        assert_eq!(std::fs::read(foreign.join("sentinel")).unwrap(), b"not owned");
+        assert_eq!(
+            std::fs::read_dir(&foreign).unwrap().count(),
+            1,
+            "no staged container or receipt may be written into the foreign root"
+        );
+
+        std::fs::remove_file(&root).unwrap();
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .expect("a genuine sealed root still supports building");
+        assert_eq!(store.recovered_digest(), expected.as_str());
     }
 
     /// A leftover staging symlink must not become a writable artifact root.
