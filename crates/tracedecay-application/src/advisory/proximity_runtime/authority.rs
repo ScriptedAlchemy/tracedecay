@@ -1005,6 +1005,38 @@ fn caller_neighborhood(
     Some((callers, tests))
 }
 
+/// Read the two-hop outgoing dependency closure without charging duplicate
+/// seed identities to the graph's batch-wide relation budget. Fail closed if
+/// a batch loses a seed's adjacency rather than turning missing evidence into
+/// a negative relationship result.
+fn dependency_neighborhood(
+    seeds: &[SymbolOccurrenceId],
+    mut read_callees: impl FnMut(&[SymbolOccurrenceId]) -> Option<Vec<Vec<SymbolOccurrenceId>>>,
+) -> Option<BTreeSet<SymbolOccurrenceId>> {
+    let mut frontier = seeds
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut dependencies = BTreeSet::new();
+    for _ in 0..2 {
+        if frontier.is_empty() {
+            break;
+        }
+        let batches = read_callees(&frontier)?;
+        if batches.len() != frontier.len() {
+            return None;
+        }
+        frontier = batches
+            .into_iter()
+            .flatten()
+            .filter(|occurrence| dependencies.insert(occurrence.clone()))
+            .collect();
+    }
+    Some(dependencies)
+}
+
 fn graph_neighborhood(
     graph: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
@@ -1034,27 +1066,27 @@ fn graph_neighborhood(
                     .collect()
             })
     })?;
-    let mut dependencies = BTreeSet::new();
-    let mut frontier = seeds.to_vec();
-    for _ in 0..2 {
-        let edges = graph
+    let dependencies = dependency_neighborhood(seeds, |frontier| {
+        graph
             .callees(
-                &frontier,
+                frontier,
                 &[RelationEdgeKindV1::Calls],
                 100_000,
                 Arc::clone(&cancellation),
             )
-            .ok()?;
-        frontier = edges
-            .into_iter()
-            .flatten()
-            .map(|edge| edge.edge.to_occurrence)
-            .filter(|occurrence| dependencies.insert(occurrence.clone()))
-            .collect();
-        if frontier.is_empty() {
-            break;
-        }
-    }
+            .ok()
+            .map(|batches| {
+                batches
+                    .into_iter()
+                    .map(|edges| {
+                        edges
+                            .into_iter()
+                            .map(|edge| edge.edge.to_occurrence)
+                            .collect()
+                    })
+                    .collect()
+            })
+    })?;
     Some((callers, dependencies, tests))
 }
 
@@ -1359,6 +1391,39 @@ mod tests {
             "duplicate roots must not extend the unique-neighbor budget"
         );
         assert_eq!(duplicate_reads, 3);
+    }
+
+    #[test]
+    fn dependency_neighborhood_deduplicates_seed_reads_and_refuses_missing_adjacency() {
+        let root = SymbolOccurrenceId::new("symbol.root").unwrap();
+        let direct = SymbolOccurrenceId::new("symbol.direct").unwrap();
+        let transitive = SymbolOccurrenceId::new("symbol.transitive").unwrap();
+        let mut reads = 0;
+        let result = dependency_neighborhood(&[root.clone(), root.clone()], |frontier| {
+            reads += 1;
+            assert_eq!(
+                frontier.len(),
+                1,
+                "duplicate seeds must not consume the read budget"
+            );
+            Some(
+                frontier
+                    .iter()
+                    .map(|id| match id.as_str() {
+                        "symbol.root" => vec![direct.clone()],
+                        "symbol.direct" => vec![root.clone(), transitive.clone()],
+                        _ => Vec::new(),
+                    })
+                    .collect(),
+            )
+        })
+        .expect("two complete dependency hops");
+        assert_eq!(reads, 2);
+        assert_eq!(result, BTreeSet::from([root.clone(), direct, transitive]));
+        assert!(
+            dependency_neighborhood(std::slice::from_ref(&root), |_| Some(Vec::new())).is_none(),
+            "truncated seed adjacency cannot prove absence of shared dependencies"
+        );
     }
 
     #[test]
