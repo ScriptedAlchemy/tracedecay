@@ -322,6 +322,9 @@ if __name__ == "__main__":
     summary = {}; allres = {}
     for f in sorted(glob.glob(os.path.join(here, "results", "*.json"))):
         res = json.load(open(f))
+        if (isinstance(res.get("experiment"), dict)
+                and "qualification_manifest_sha256" in res["experiment"]):
+            raise ValueError("held-out results require --qualified MANIFEST RESULT; refuse in-sample scoring")
         if res["config"] in allres:
             raise ValueError("duplicate configuration %r in result files" % res["config"])
         allres[res["config"]] = res

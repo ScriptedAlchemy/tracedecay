@@ -2,6 +2,9 @@
 import copy
 import hashlib
 import json
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -291,6 +294,53 @@ class QualificationTests(unittest.TestCase):
                     self.assertEqual(remaining.call_count, 1)
             completed = here / "results" / "interrupted_B_noul_text.json"
             self.assertEqual(len(json.loads(completed.read_text())["rows"]), 2)
+
+
+    def test_qualified_cli_is_separate_and_historical_cli_refuses_heldout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            for filename in ("score.py", "qualification.py", "common.py"):
+                shutil.copyfile(Path(score.__file__).with_name(filename), here / filename)
+            (here / "results").mkdir()
+            result_path = here / "results" / "qualified.json"
+            result_path.write_text(json.dumps(self.signed_result()))
+            manifest_path = here / "qualification.json"
+            manifest_path.write_bytes(self.manifest_bytes)
+            summary = here / "summary.json"
+            summary.write_bytes(b"existing historical evidence\\n")
+
+            default = subprocess.run(
+                [sys.executable, str(here / "score.py")],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertNotEqual(default.returncode, 0)
+            self.assertIn("refuse in-sample scoring", default.stderr)
+            self.assertEqual(summary.read_bytes(), b"existing historical evidence\\n")
+
+            qualified = subprocess.run(
+                [sys.executable, str(here / "score.py"), "--qualified",
+                 str(manifest_path), str(result_path)],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(qualified.returncode, 0, qualified.stderr)
+            report_path = here / "qualification_summary.json"
+            report = json.loads(report_path.read_text())
+            self.assertTrue(report["qualified_against_frozen_tolerances"])
+            self.assertEqual(report["latency"]["p95_ms"], 20)
+            self.assertEqual(summary.read_bytes(), b"existing historical evidence\\n")
+
+            corrupted = self.signed_result()
+            corrupted["rows"][0]["labels"] = []
+            result_path.write_text(json.dumps(corrupted))
+            previous_report = report_path.read_bytes()
+            rejected = subprocess.run(
+                [sys.executable, str(here / "score.py"), "--qualified",
+                 str(manifest_path), str(result_path)],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("reviewed labels", rejected.stderr)
+            self.assertEqual(report_path.read_bytes(), previous_report)
 
 
 if __name__ == "__main__":
