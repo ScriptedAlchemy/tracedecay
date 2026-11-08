@@ -4,6 +4,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::MetadataExt;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 #[cfg(windows)]
@@ -15,6 +17,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
 };
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "framed_log_batch_tests.rs"]
+mod batch_tests;
 
 #[cfg(test)]
 thread_local! {
@@ -67,23 +73,74 @@ pub fn sync_parent_directory(path: &Path, policy: DirectorySyncPolicy) -> io::Re
     }
 }
 
-/// New files whose contents become durable together, before any is renamed
-/// into place.
+/// New, fully written files whose contents become durable before any is renamed.
+/// Members must remain immutable until publication.
 ///
-/// On Linux each member's writeback starts as soon as it is written, and
-/// [`Self::sync`] then fsyncs the members concurrently. Concurrent fsyncs
-/// share a commit on a journaling filesystem and on ZFS's intent log alike,
-/// but on ZFS one fsync after another pays one intent-log commit each, so a
-/// seal of a hundred segments waited out a hundred commits. The cost stays
-/// proportional to the batch's own bytes. `syncfs(2)` also paid one
-/// commit, but waited for every dirty inode on the filesystem, so a one-file
-/// seal stalled for seconds behind unrelated writers. Other platforms fsync
-/// each file as it is written.
+/// Linux retains at most one concurrency window of duplicated writer handles.
+/// When that window fills, its members are fsynced concurrently before their
+/// handles are released. This preserves grouped log commits without reopening
+/// every pathname through endpoint security or holding a descriptor per segment.
+/// [`Self::sync`] flushes the final window and checks that earlier members still
+/// name the same immutable files. It never flushes unrelated filesystem data.
+/// Other platforms fsync each file as it is written.
 #[derive(Default)]
 pub struct DurableFileBatch {
-    /// Paths rather than open handles, so a large seal holds no descriptors.
     #[cfg(target_os = "linux")]
-    members: Vec<PathBuf>,
+    pending: Vec<PendingDurableFile>,
+    #[cfg(target_os = "linux")]
+    synced: Vec<DurableFileIdentity>,
+}
+
+#[cfg(target_os = "linux")]
+struct PendingDurableFile {
+    identity: DurableFileIdentity,
+    file: File,
+}
+
+#[cfg(target_os = "linux")]
+struct DurableFileIdentity {
+    path: PathBuf,
+    metadata: fs::Metadata,
+}
+
+#[cfg(target_os = "linux")]
+impl DurableFileIdentity {
+    fn validate_metadata(&self, current: &fs::Metadata) -> io::Result<()> {
+        let original = &self.metadata;
+        if !original.file_type().is_file()
+            || !current.file_type().is_file()
+            || original.dev() != current.dev()
+            || original.ino() != current.ino()
+            || original.len() != current.len()
+            || original.mtime() != current.mtime()
+            || original.mtime_nsec() != current.mtime_nsec()
+            || original.ctime() != current.ctime()
+            || original.ctime_nsec() != current.ctime_nsec()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "durable batch member changed after it was written",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_path(&self) -> io::Result<()> {
+        self.validate_metadata(&fs::symlink_metadata(&self.path)?)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl PendingDurableFile {
+    fn sync(&self) -> io::Result<()> {
+        self.identity.validate_path()?;
+        self.identity.validate_metadata(&self.file.metadata()?)?;
+        sync_owned_file(&self.identity.path, &self.file)?;
+        // A replacement or in-place write during the barrier must not be
+        // reported as a successful flush of the originally admitted bytes.
+        self.identity.validate_metadata(&self.file.metadata()?)?;
+        self.identity.validate_path()
+    }
 }
 
 impl DurableFileBatch {
@@ -95,14 +152,31 @@ impl DurableFileBatch {
     pub fn written(&mut self, path: &Path, file: &File) -> io::Result<()> {
         #[cfg(target_os = "linux")]
         {
-            // SAFETY: `file` is an open descriptor for the whole call.
+            if self.pending.len() == DURABLE_BATCH_CONCURRENT_SYNCS {
+                // Keep ownership on failure: no unproven member may move to
+                // the synced set, and no additional descriptor is admitted.
+                self.sync_pending()?;
+                self.synced
+                    .extend(self.pending.drain(..).map(|member| member.identity));
+            }
+            let identity = DurableFileIdentity {
+                path: path.to_path_buf(),
+                metadata: file.metadata()?,
+            };
+            identity.validate_path()?;
+            // Duplication retains the writer's inode without a pathname open.
+            let retained = file.try_clone()?;
+            // SAFETY: `retained` is an open descriptor for the whole call.
             let started = unsafe {
-                libc::sync_file_range(file.as_raw_fd(), 0, 0, libc::SYNC_FILE_RANGE_WRITE)
+                libc::sync_file_range(retained.as_raw_fd(), 0, 0, libc::SYNC_FILE_RANGE_WRITE)
             };
             if started != 0 {
                 return Err(io::Error::last_os_error());
             }
-            self.members.push(path.to_path_buf());
+            self.pending.push(PendingDurableFile {
+                identity,
+                file: retained,
+            });
             Ok(())
         }
         #[cfg(not(target_os = "linux"))]
@@ -111,7 +185,7 @@ impl DurableFileBatch {
         }
     }
 
-    /// Make every member file's contents durable.
+    /// Make every member file's contents durable, refusing changed members.
     #[tracing::instrument(
         name = "private_fs.framed_log.sync_file_batch",
         level = "trace",
@@ -120,32 +194,43 @@ impl DurableFileBatch {
     pub fn sync(&self) -> io::Result<()> {
         #[cfg(target_os = "linux")]
         {
-            let next = std::sync::atomic::AtomicUsize::new(0);
-            let syncer = || -> io::Result<()> {
-                while let Some(member) = self.members.get(next.fetch_add(1, Ordering::Relaxed)) {
-                    sync_file_at(member)?;
-                }
-                Ok(())
-            };
-            let syncers = self.members.len().min(DURABLE_BATCH_CONCURRENT_SYNCS);
-            std::thread::scope(|scope| {
-                let helpers = (1..syncers)
-                    .map(|_| scope.spawn(syncer))
-                    .collect::<Vec<_>>();
-                let mut outcome = syncer();
-                for helper in helpers {
-                    let helped = helper
-                        .join()
-                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-                    outcome = outcome.and(helped);
-                }
-                outcome
-            })
+            // Already-flushed windows need no further opens or barriers, but
+            // missing or substituted names must still refuse publication.
+            for identity in &self.synced {
+                identity.validate_path()?;
+            }
+            self.sync_pending()
         }
         #[cfg(not(target_os = "linux"))]
         {
             Ok(())
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn sync_pending(&self) -> io::Result<()> {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let syncer = || -> io::Result<()> {
+            while let Some(member) = self.pending.get(next.fetch_add(1, Ordering::Relaxed)) {
+                member.sync()?;
+            }
+            Ok(())
+        };
+        let syncers = self.pending.len().min(DURABLE_BATCH_CONCURRENT_SYNCS);
+        std::thread::scope(|scope| {
+            let helpers = (1..syncers)
+                .map(|_| scope.spawn(syncer))
+                .collect::<Vec<_>>();
+            let mut outcome = syncer();
+            for helper in helpers {
+                let helped = match helper.join() {
+                    Ok(helped) => helped,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                };
+                outcome = outcome.and(helped);
+            }
+            outcome
+        })
     }
 }
 
