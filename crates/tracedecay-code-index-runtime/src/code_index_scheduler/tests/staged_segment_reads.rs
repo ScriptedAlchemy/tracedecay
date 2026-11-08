@@ -443,3 +443,79 @@ fn staged_segment_cold_refusals_clear_output_without_poisoning_valid_reads() {
     assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 2);
     preparation.abort().expect("clean up preparation");
 }
+
+#[test]
+fn staged_segment_evicted_path_replacement_poison_without_reopen() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let source_root = TempDir::new().expect("source store");
+    let generation = source_generation(&fixture, source_root.path());
+    let target_root = TempDir::new().expect("target store");
+    let mut target = target_store(target_root.path(), &fixture);
+    let mut preparation = target
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare target");
+    let contents = (0..9)
+        .map(|index| format!("eviction-identity-segment-{index}").into_bytes())
+        .collect::<Vec<_>>();
+    let digests = contents
+        .iter()
+        .map(|bytes| segment_digest(bytes))
+        .collect::<Vec<_>>();
+    for (digest, bytes) in digests.iter().zip(&contents) {
+        preparation
+            .write_segment(SealedGenerationSegmentPublicationV1::File { digest, bytes })
+            .expect("stage sealed segment");
+    }
+    let first_path = staged_path(&preparation, &digests[0]);
+    let reader = preparation.segment_reader();
+    let mut read = Vec::new();
+    for (digest, bytes) in digests.iter().zip(&contents) {
+        reader(
+            SealedGenerationSegmentReadV1::Whole {
+                digest,
+                size_bytes: bytes.len() as u64,
+            },
+            &mut read,
+        )
+        .expect("pin distinct segment");
+        assert_eq!(&read, bytes);
+    }
+    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 9);
+    assert_eq!(
+        pinned_handle_count(&preparation),
+        MAX_STAGED_SEGMENT_READ_HANDLES
+    );
+
+    let replacement_path = first_path.with_extension("eviction-replacement.tmp");
+    std::fs::write(&replacement_path, vec![b'Z'; contents[0].len()])
+        .expect("same-length replacement");
+    std::fs::rename(&replacement_path, &first_path)
+        .expect("replace evicted segment pathname");
+    read.extend_from_slice(b"old data");
+    assert!(matches!(
+        reader(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &digests[0],
+                size_bytes: contents[0].len() as u64,
+            },
+            &mut read,
+        ),
+        Err(CodeIndexProductionErrorV1::Contract(_))
+    ));
+    assert!(read.is_empty(), "replacement cannot expose stale or new bytes");
+    assert_eq!(
+        preparation.staged_segment_read_open_attempts_for_test(),
+        9,
+        "replaced evicted path must be rejected before another File::open"
+    );
+    assert_eq!(pinned_handle_count(&preparation), 0);
+    assert!(matches!(
+        preparation.write_segment(SealedGenerationSegmentPublicationV1::File {
+            digest: &digests[1],
+            bytes: &contents[1],
+        }),
+        Err(CodeIndexPublicationStoreErrorV1::Unavailable(_))
+    ));
+    preparation.abort().expect("remove poisoned staging");
+    assert!(!first_path.exists());
+}

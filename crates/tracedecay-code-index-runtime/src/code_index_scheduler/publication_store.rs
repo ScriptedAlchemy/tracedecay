@@ -584,6 +584,10 @@ struct DaemonCodeIndexPreparationFilesV1 {
     // prevents an authorized sweep from unlinking their sealed paths.
     #[cfg(unix)]
     pinned_segment_reads: VecDeque<PinnedPreparationSegmentV1>,
+    // Eviction limits descriptors but must not discard the identity recorded
+    // on the first open of any sealed pathname in this preparation.
+    #[cfg(unix)]
+    observed_segment_identities: BTreeMap<PathBuf, std::fs::Metadata>,
     #[cfg(unix)]
     segment_read_open_attempts: u64,
     // One changed sealed pathname invalidates the entire transaction. Retrying
@@ -888,6 +892,23 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                             .back()
                             .is_none_or(|entry| entry.path != path)
                         {
+                            // An evicted pathname cannot acquire a new
+                            // identity merely because its handle was closed.
+                            let observed = files.observed_segment_identities.get(&path).cloned();
+                            if let Some(original) = observed.as_ref()
+                                && !path.symlink_metadata().is_ok_and(|current| {
+                                    DaemonCodeIndexPublicationStoreV1::same_unix_segment_identity(
+                                        original, &current,
+                                    )
+                                })
+                            {
+                                files.segment_reads_poisoned = true;
+                                files.pinned_segment_reads.clear();
+                                return Err(CodeIndexProductionErrorV1::Contract(
+                                    "staged sealed segment identity changed after eviction"
+                                        .to_owned(),
+                                ));
+                            }
                             // Evict before opening so even a cache miss never
                             // holds a ninth staged read descriptor.
                             if files.pinned_segment_reads.len() == MAX_STAGED_SEGMENT_READ_HANDLES {
@@ -899,6 +920,22 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                                     request,
                                     &mut files.segment_read_open_attempts,
                                 )?;
+                            if let Some(original) = observed.as_ref() {
+                                if !DaemonCodeIndexPublicationStoreV1::same_unix_segment_identity(
+                                    original,
+                                    &pinned.identity,
+                                ) {
+                                    files.segment_reads_poisoned = true;
+                                    files.pinned_segment_reads.clear();
+                                    return Err(CodeIndexProductionErrorV1::Contract(
+                                        "staged sealed segment identity changed while reopening"
+                                            .to_owned(),
+                                    ));
+                                }
+                            } else {
+                                files.observed_segment_identities
+                                    .insert(path.clone(), pinned.identity.clone());
+                            }
                             files.pinned_segment_reads.push_back(pinned);
                         }
                         let pinned = files.pinned_segment_reads.back_mut().ok_or_else(|| {
@@ -3318,6 +3355,8 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                     evidence,
                     #[cfg(unix)]
                     pinned_segment_reads: VecDeque::new(),
+                    #[cfg(unix)]
+                    observed_segment_identities: BTreeMap::new(),
                     #[cfg(unix)]
                     segment_read_open_attempts: 0,
                     #[cfg(unix)]
