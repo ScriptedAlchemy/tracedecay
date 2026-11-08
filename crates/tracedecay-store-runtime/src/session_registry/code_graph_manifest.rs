@@ -2786,16 +2786,29 @@ mod tests {
         );
         std::fs::write(&changed_path, original_bytes).unwrap();
         std::fs::set_permissions(&changed_path, original_permissions).unwrap();
-        assert_eq!(
-            verify_sealed_generation_source_from_roots(
-                &generations_root,
-                replay_root,
-                &successor_digest,
-                &successor_record,
-                &|| Ok(()),
-            ),
-            Ok(())
+
+        // A failed proof must not evict the last complete source proof.
+        // Rechecking the repaired changed segment is necessary, but rehashing
+        // every untouched inherited segment would make recovery cold again.
+        let recovered_reads = count_proof_reads(&successor_record);
+        assert!(
+            recovered_reads > 0,
+            "recovery must authenticate the restored changed segment"
         );
+        let recovery_cold_reads = count_proof_reads(&VerifiedSealedSegmentsV1::default());
+        if cfg!(unix) {
+            assert!(
+                recovery_cold_reads >= recovered_reads + inherited_files,
+                "a corrupt one-file successor evicted authenticated parent segments: \
+                 cold={recovery_cold_reads}, recovered={recovered_reads}, \
+                 inherited={inherited_files}"
+            );
+        } else {
+            assert_eq!(
+                recovery_cold_reads, recovered_reads,
+                "platforms without reliable fingerprints must rehash every segment"
+            );
+        }
 
         let inherited = successor["generation"]["file_segments"]
             .as_array_mut()
