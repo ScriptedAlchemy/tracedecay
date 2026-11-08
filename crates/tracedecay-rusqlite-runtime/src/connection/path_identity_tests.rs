@@ -438,7 +438,11 @@ fn external_reserved_lock_probe() {
     let Some(path) = env::var_os(RESERVED_LOCK_PROBE_PATH) else {
         return;
     };
-    let file = OpenOptions::new().read(true).write(true).open(path).unwrap();
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
     let mut reservation = libc::flock {
         l_type: libc::F_WRLCK as libc::c_short,
         l_whence: libc::SEEK_SET as libc::c_short,
@@ -508,7 +512,11 @@ fn malformed_existing_store_refusal_keeps_other_sqlite_writer_locks() {
         .unwrap();
     // Retain this descriptor through the original writer's entire lifetime:
     // closing it early would itself discard the POSIX locks under test.
-    let mutation = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+    let mutation = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
     writer
         .execute_batch("BEGIN IMMEDIATE; UPDATE sample SET value = 2;")
         .unwrap();

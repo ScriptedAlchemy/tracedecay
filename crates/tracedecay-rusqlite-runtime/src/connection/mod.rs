@@ -111,8 +111,8 @@ impl OpenedDatabaseFile {
         // locks held by another live SQLite connection in this process.
         // An immutable SQLite reader uses the VFS's lock-aware lifetime and
         // never opens or mutates the unverified WAL/SHM/journal sidecars.
-        let inspection = open_immutable_reader(path)
-            .map_err(|_| OpenedDatabaseFileError::InvalidHeader)?;
+        let inspection =
+            open_immutable_reader(path).map_err(|_| OpenedDatabaseFileError::InvalidHeader)?;
         let _: i64 = inspection
             .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
             .map_err(|_| OpenedDatabaseFileError::InvalidHeader)?;
