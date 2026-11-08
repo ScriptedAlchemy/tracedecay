@@ -1193,6 +1193,8 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
                 .is_ok_and(|path| proof.borrow_mut().already_verified(digest, expected_size, &path))
         },
         |request, buffer| {
+            // Failed pre-I/O checks cannot expose a prior verified component.
+            buffer.clear();
             if let Err(error) = (check)() {
                 if matches!(error, GraphDbError::Cancelled | GraphDbError::DeadlineExceeded) {
                     interruption = Some(error.clone());
@@ -1203,43 +1205,58 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
                     ),
                 );
             }
-            match request {
-                tracedecay_code_index::production::SealedGenerationSegmentReadV1::Whole {
-                    digest,
-                    size_bytes,
-                } => {
-                    let fingerprint = read_fingerprinted_segment(
-                        &segment_path(segments_root, digest)?,
+            let read = (|| -> Result<(), CodeIndexProductionErrorV1> {
+                match request {
+                    tracedecay_code_index::production::SealedGenerationSegmentReadV1::Whole {
+                        digest,
                         size_bytes,
-                        buffer,
-                    )?;
-                    proof.borrow_mut().hashed(digest, fingerprint);
-                    Ok(())
-                }
-                tracedecay_code_index::production::SealedGenerationSegmentReadV1::Range {
-                    ..
-                } => {
-                    if pinned_evidence.is_none() {
-                        let roots = [segments_root.to_path_buf()];
-                        let (root, path_metadata) =
-                            select_partitioned_segment_root(&roots, request)?;
-                        pinned_evidence =
-                            Some(open_partitioned_segment(root, &path_metadata, request, || {})?);
-                        if let Some(barrier) = evidence_barrier.take() {
-                            barrier();
-                        }
+                    } => {
+                        let fingerprint = read_fingerprinted_segment(
+                            &segment_path(segments_root, digest)?,
+                            size_bytes,
+                            buffer,
+                        )?;
+                        proof.borrow_mut().hashed(digest, fingerprint);
+                        Ok(())
                     }
-                    read_pinned_partitioned_segment(
-                        pinned_evidence.as_mut().ok_or_else(|| {
-                            tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
-                                "sealed generation evidence handle was not pinned".to_owned(),
-                            )
-                        })?,
-                        request,
-                        buffer,
-                    )
+                    tracedecay_code_index::production::SealedGenerationSegmentReadV1::Range {
+                        ..
+                    } => {
+                        if pinned_evidence.is_none() {
+                            let roots = [segments_root.to_path_buf()];
+                            let (root, path_metadata) =
+                                select_partitioned_segment_root(&roots, request)?;
+                            pinned_evidence =
+                                Some(open_partitioned_segment(root, &path_metadata, request, || {})?);
+                            if let Some(barrier) = evidence_barrier.take() {
+                                barrier();
+                            }
+                        }
+                        read_pinned_partitioned_segment(
+                            pinned_evidence.as_mut().ok_or_else(|| {
+                                tracedecay_code_index::production::CodeIndexProductionErrorV1::Contract(
+                                    "sealed generation evidence handle was not pinned".to_owned(),
+                                )
+                            })?,
+                            request,
+                            buffer,
+                        )
+                    }
                 }
+            })();
+            // A scanned file open/read may finish after the caller's deadline,
+            // including when its own I/O fails. Preserve the typed interruption.
+            if let Err(error) = (check)() {
+                buffer.clear();
+                if matches!(
+                    error,
+                    GraphDbError::Cancelled | GraphDbError::DeadlineExceeded
+                ) {
+                    interruption = Some(error.clone());
+                }
+                return Err(CodeIndexProductionErrorV1::Contract(error.to_string()));
             }
+            read
         },
     );
     if let Some(interruption) = interruption {
@@ -3463,6 +3480,87 @@ mod tests {
             retired.to_string(),
             "sealed code generation was superseded while it was read; retry against the current seal"
         );
+    }
+
+    #[test]
+    fn failed_seal_evidence_read_preserves_post_io_interruption_and_recovers() {
+        for (label, interruption) in [
+            ("cancel", GraphDbError::Cancelled),
+            ("deadline", GraphDbError::DeadlineExceeded),
+        ] {
+            let fixture = partitioned_seal_fixture(&format!("verify-late-{label}"));
+            let verified = VerifiedSealedSegmentsV1::default();
+            // Prove this is a valid, nonempty production generation before
+            // injecting a real range-read failure on the next fresh proof.
+            verify_checked_seal_bundle(
+                &fixture.pool_manifest,
+                &fixture.segments_root,
+                &fixture.digest,
+                &verified,
+                &|| Ok(()),
+            )
+            .unwrap();
+            let interrupted = AtomicBool::new(false);
+            let late_checks = AtomicUsize::new(0);
+            let barriers = AtomicUsize::new(0);
+            let originals = std::cell::RefCell::new(Vec::<(std::path::PathBuf, Vec<u8>)>::new());
+            SEGMENT_OPENS.with(|opens| opens.set(0));
+            let failure = verify_checked_seal_bundle_with_evidence_barrier(
+                &fixture.pool_manifest,
+                &fixture.segments_root,
+                &fixture.digest,
+                &VerifiedSealedSegmentsV1::default(),
+                &|| {
+                    if interrupted.load(Ordering::SeqCst) {
+                        late_checks.fetch_add(1, Ordering::SeqCst);
+                        Err(interruption.clone())
+                    } else {
+                        Ok(())
+                    }
+                },
+                || {
+                    barriers.fetch_add(1, Ordering::SeqCst);
+                    // The range handle is already open. Truncate the disposable
+                    // fixture's segment files so that the read itself rejects.
+                    for entry in std::fs::read_dir(&fixture.segments_root).unwrap() {
+                        let path = entry.unwrap().path();
+                        if !path
+                            .file_name()
+                            .is_some_and(|name| name.to_string_lossy().starts_with("segment-"))
+                        {
+                            continue;
+                        }
+                        let bytes = std::fs::read(&path).unwrap();
+                        originals.borrow_mut().push((path.clone(), bytes));
+                        std::fs::OpenOptions::new()
+                            .write(true)
+                            .open(&path)
+                            .unwrap()
+                            .set_len(0)
+                            .unwrap();
+                    }
+                    interrupted.store(true, Ordering::SeqCst);
+                },
+            )
+            .unwrap_err();
+            assert_eq!(failure, interruption);
+            assert_eq!(barriers.load(Ordering::SeqCst), 1);
+            assert_eq!(late_checks.load(Ordering::SeqCst), 1);
+            assert!(SEGMENT_OPENS.with(|opens| opens.get()) > 0);
+            assert!(!originals.borrow().is_empty());
+            for (path, bytes) in originals.into_inner() {
+                std::fs::write(path, bytes).unwrap();
+            }
+            // An interrupted proof must not poison the original generation.
+            verify_checked_seal_bundle(
+                &fixture.pool_manifest,
+                &fixture.segments_root,
+                &fixture.digest,
+                &VerifiedSealedSegmentsV1::default(),
+                &|| Ok(()),
+            )
+            .unwrap();
+        }
     }
 
     fn verify_partitioned_with_interruption(
