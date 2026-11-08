@@ -1735,6 +1735,12 @@ impl CodexSource {
                 } else {
                     index + 1
                 };
+                // The hot prefix was already checked earlier in this tick.
+                // Advance the rotating cursor through it without repeating
+                // directory stats or unsettled entry-name fingerprint scans.
+                if index < hot {
+                    continue;
+                }
                 if let Some(directory) = idle.directories.get(index) {
                     if codex_directory_changed(&directory.path, directory.identity)? {
                         changed = true;

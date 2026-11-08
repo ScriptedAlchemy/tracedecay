@@ -2620,6 +2620,62 @@ mod recent_first_discovery_tests {
     }
 
     #[test]
+    fn hot_codex_directory_is_detected_even_when_rotation_starts_on_hot_prefix() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let newest = write_dated_rollout(home, ("2026", "08", "29"), "current");
+        write_dated_rollout(home, ("2026", "08", "01"), "older");
+        let source = CodexSource::with_home(home);
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(8);
+        let mut state = CodexDiscoveryState::default();
+        let mut frontier = CodexDiscoveryFrontier::initial();
+        let mut admitted = BTreeSet::new();
+        for _ in 0..64 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            admitted.extend(pass.report.paths);
+            frontier = pass.next_frontier;
+            if frontier.is_complete() {
+                break;
+            }
+        }
+        assert!(frontier.is_complete(), "the initial corpus must converge");
+        assert!(admitted.contains(&newest));
+
+        let idle = state.idle.as_mut().expect("completed idle authority");
+        let hot_index = idle
+            .directories
+            .iter()
+            .position(|directory| directory.path == newest.parent().unwrap())
+            .expect("newest bucket must be retained");
+        assert!(
+            hot_index < super::super::IDLE_HOT_DIRECTORIES,
+            "the newly changed bucket must be in the hot prefix"
+        );
+        idle.next = hot_index;
+
+        let added = newest.parent().unwrap().join("rollout-after-idle.jsonl");
+        std::fs::write(&added, b"{}").unwrap();
+        spin_until_jsonl_change_settled(&added);
+        let detection = retained_pass(&source, &mut state, bounds, frontier);
+        assert!(
+            !detection.next_frontier.is_complete(),
+            "the hot probe must invalidate a changed bucket before rotation skips its duplicate"
+        );
+
+        frontier = detection.next_frontier;
+        let mut found = detection.report.paths.contains(&added);
+        for _ in 0..64 {
+            let pass = retained_pass(&source, &mut state, bounds, frontier);
+            found |= pass.report.paths.contains(&added);
+            frontier = pass.next_frontier;
+            if found {
+                break;
+            }
+        }
+        assert!(found, "the changed hot bucket must deliver the new rollout");
+    }
+
+    #[test]
     #[cfg(unix)]
     fn unsettled_directory_stat_does_not_change_with_each_sample() {
         let temp = TempDir::new().unwrap();
