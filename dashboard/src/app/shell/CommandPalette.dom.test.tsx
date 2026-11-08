@@ -20,7 +20,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, render, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router';
+import { MemoryRouter, useLocation } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { CommandPalette } from './CommandPalette.tsx';
@@ -110,6 +110,10 @@ function stubListing(payload: ProjectsPayloadV1) {
   );
 }
 
+function PaletteLocation() {
+  return <output data-testid="palette-location">{useLocation().pathname}</output>;
+}
+
 function renderPalette() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return {
@@ -118,6 +122,7 @@ function renderPalette() {
       <QueryClientProvider client={client}>
         <MemoryRouter>
           <CommandPalette open onOpenChange={() => {}} />
+          <PaletteLocation />
         </MemoryRouter>
       </QueryClientProvider>,
     ),
@@ -153,6 +158,24 @@ afterEach(() => {
 });
 
 describe('CommandPalette keyboard operation', () => {
+  it.each([
+    ['code', 'Code'],
+    ['sessions', 'Sessions'],
+    ['knowledge', 'Knowledge'],
+  ])('opens the exact %s workspace instead of a matching task hint', async (query, label) => {
+    const user = userEvent.setup();
+    stubListing(listing([]));
+    const { findByRole, getByTestId } = renderPalette();
+    await findByRole('listbox');
+
+    // Explorer occurs earlier in CHANNELS and mentions each term in its
+    // hint. Enter must still navigate to the exact named workspace.
+    await user.keyboard(query);
+    await waitFor(() => expect(activeOptionLabel()).toBe(label));
+    await user.keyboard('{Enter}');
+    expect(getByTestId('palette-location').textContent).toBe(`/${query}`);
+  });
+
   it('focuses the search box on open, so the first keystroke reaches it', async () => {
     stubListing(listing([]));
     renderPalette();

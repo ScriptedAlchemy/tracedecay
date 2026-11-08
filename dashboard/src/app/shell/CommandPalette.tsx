@@ -113,10 +113,20 @@ export function CommandPalette({
     return [...workspaceEntries, ...projectEntries];
   }, [navigate, onOpenChange, projects.data, scope, selectProject]);
 
-  const filtered = useMemo(
-    () => entries.filter((entry) => paletteMatchesQuery(entry.searchText, query)),
-    [entries, query],
-  );
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    const matchRank = (entry: CommandPaletteRow) => {
+      const label = entry.label.toLowerCase();
+      if (label === needle) return 0;
+      if (label.includes(needle)) return 1;
+      return 2;
+    };
+    // Preserve the rail/project order inside each rank while ensuring that
+    // typing a workspace's exact name selects that workspace on Enter.
+    return entries
+      .filter((entry) => paletteMatchesQuery(entry.searchText, query))
+      .sort((left, right) => matchRank(left) - matchRank(right));
+  }, [entries, query]);
 
   useEffect(() => setActive(0), [query, open]);
   useEffect(() => {
@@ -240,10 +250,12 @@ export function CommandPalette({
                   >
                     {entry.channel ?? ''}
                   </code>
-                  <span className="min-w-0 flex-1 truncate">{entry.label}</span>
-                  <span className="flex shrink-0 items-center gap-2 text-sm text-text-muted">
-                    {entry.hint}
-                    {i === activeIndex ? <CornerDownLeft aria-hidden size={11} /> : null}
+                  <span className="min-w-[5rem] flex-1 truncate">{entry.label}</span>
+                  <span className="flex min-w-0 max-w-[45%] items-center gap-2 text-sm text-text-muted">
+                    <span className="min-w-0 truncate">{entry.hint}</span>
+                    {i === activeIndex ? (
+                      <CornerDownLeft aria-hidden size={11} className="shrink-0" />
+                    ) : null}
                   </span>
                 </li>
               ))
