@@ -3619,8 +3619,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn large_sealed_and_code_index_store_reports_invalid_pointer_as_unavailable() {
+    #[asupersync::test]
+    async fn large_sealed_and_code_index_store_reports_invalid_pointer_as_unavailable() {
         let tmp = tempfile::tempdir().unwrap();
         let profile = tmp.path().join("profile");
         let data_root = profile.join("projects/proj_large");
@@ -3678,5 +3678,24 @@ mod tests {
             Some("generation_retention_plan_unavailable")
         );
         assert_eq!(std::fs::metadata(pointer).unwrap().len(), 2 * MIB);
+
+        // The offline storage-report command follows the full profile census
+        // and registered-project sampling path, not just the targeted route.
+        // It must complete against both large sparse families with complete,
+        // truthful size coverage rather than expanding their file contents.
+        seed_global_db(&profile, &[("proj_large", "/repos/large")]).await;
+        let offline = build_storage_report(&profile).await.unwrap();
+        assert_eq!(offline.stores.len(), 1);
+        assert_eq!(offline.stores[0].kinds.sealed_graph, 70 * SEALED_BYTES);
+        assert!(offline.stores[0].kinds.generation_artifacts >= 15 * GIB);
+        assert_eq!(
+            offline.stores[0].size_coverage.state,
+            StorageReportSizeStateV1::Complete
+        );
+        assert_eq!(
+            offline.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Complete
+        );
+        assert!(!offline.footprint.as_ref().unwrap().truncated);
     }
 }
