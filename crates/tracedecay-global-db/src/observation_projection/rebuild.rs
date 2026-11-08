@@ -2578,8 +2578,8 @@ mod activation_tests {
     use super::{
         REBUILD_PAGE_SIZE, SESSION_MESSAGE_PROJECTOR_VERSION,
         activate_projection_rebuild_transaction, activate_rebuild_sessions,
-        prepare_rebuild_output_activation, reconcile_overlapping_rebuild_sessions,
-        write_staged_message,
+        prepare_rebuild_output_activation, projected_stored_message,
+        reconcile_overlapping_rebuild_sessions, write_staged_message,
     };
     use crate::tests::harness::RegisteredGlobalDbHarness;
     use tracedecay_runtime_core::db::engine::{Executor, params};
