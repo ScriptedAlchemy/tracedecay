@@ -190,6 +190,53 @@ fn rejecting_empty_attachment_does_not_release_another_writer_lock() {
     probe_external_connection(&path, "write", false);
 }
 
+/// SQLite's immutable header inspection during existing-store admission must
+/// not release an unrelated live connection's process-owned POSIX locks.
+/// A separate process is essential: same-process SQLite handles can mask loss.
+#[test]
+fn admitting_initialized_store_keeps_existing_writer_locks() {
+    for journal_mode in ["DELETE", "WAL"] {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("live-existing.db");
+        let writer = Connection::open(&path).expect("initialize existing SQLite file");
+        writer
+            .execute_batch("CREATE TABLE sample(value INTEGER); INSERT INTO sample VALUES (1);")
+            .expect("commit initial sample");
+        writer
+            .pragma_update(None, "journal_mode", journal_mode)
+            .expect("select journal mode");
+        if journal_mode == "WAL" {
+            // Keep the committed schema on the main file for the immutable
+            // inspection: it deliberately does not consume live WAL frames.
+            writer
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                .expect("checkpoint initial schema");
+        }
+        writer
+            .execute_batch("BEGIN IMMEDIATE; UPDATE sample SET value = 2;")
+            .expect("hold writer reservation");
+        probe_external_connection(&path, "write", true);
+
+        // This is the production existing-store admission path, not a
+        // substitute read-only connection opened by the test itself.
+        let opened = OpenedDatabaseFile::pin_initialized(&path)
+            .expect("inspect and pin a fully initialized main database");
+        opened
+            .verify_current_path(&path)
+            .expect("original database remains bound");
+        probe_external_connection(&path, "write", true);
+        probe_external_connection_expectation(&path, "read", "read:1");
+
+        writer.execute_batch("COMMIT").expect("commit update");
+        // The pinned raw descriptor is intentionally closed only after the
+        // writer exits, so its own close cannot independently release locks.
+        drop(writer);
+        opened.release_after_workers_exit();
+        probe_external_connection(&path, "write", false);
+        assert_committed_data(&path);
+    }
+}
+
 #[test]
 fn header_magic_without_a_complete_sqlite_page_is_refused() {
     let temp = TempDir::new().expect("tempdir");
