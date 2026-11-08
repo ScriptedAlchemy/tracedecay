@@ -49,8 +49,16 @@ fn repository_diagnostics_follow_policy_without_crossing_boundaries() {
     let root = tempfile::tempdir().unwrap();
     write(root.path(), "keep.rs", "pub fn parent() {}\n");
     for directory in ["app", "excluded", "node_modules"] {
-        write(root.path(), &format!("{directory}/.git"), "gitdir: foreign\n");
-        write(root.path(), &format!("{directory}/child.rs"), "child source\n");
+        write(
+            root.path(),
+            &format!("{directory}/.git"),
+            "gitdir: foreign\n",
+        );
+        write(
+            root.path(),
+            &format!("{directory}/child.rs"),
+            "child source\n",
+        );
     }
     for (include, expected_note) in [
         (
@@ -67,12 +75,18 @@ fn repository_diagnostics_follow_policy_without_crossing_boundaries() {
             include,
         )
         .unwrap();
-        let (walk, diagnostics) = source_walk_with_diagnostics(root.path(), None, &policy)
-            .expect("source walk");
+        let (walk, diagnostics) =
+            source_walk_with_diagnostics(root.path(), None, &policy).expect("source walk");
         let files = walk
             .map(|entry| entry.expect("source entry"))
             .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
-            .map(|entry| entry.path().strip_prefix(root.path()).unwrap().to_path_buf())
+            .map(|entry| {
+                entry
+                    .path()
+                    .strip_prefix(root.path())
+                    .unwrap()
+                    .to_path_buf()
+            })
             .collect::<Vec<_>>();
         assert_eq!(files, vec![PathBuf::from("keep.rs")]);
         assert_eq!(
