@@ -28,6 +28,10 @@ from qualification import (
     loads_unambiguous_json, validate_manifest,
 )
 
+# A decision response contains only a bounded set of typed answers and usage.
+# Refuse unexpectedly large remote bodies before materializing or parsing them.
+MAX_HTTP_RESPONSE_BYTES = 1024 * 1024
+
 STATES = {
     "A_noul_prompt": prompt_only,
     "B_noul_text": text_window,
@@ -176,7 +180,10 @@ def post(url, body, timeout=1800, bearer_token=None):
     )
     started = time.perf_counter()
     with opener.open(req, timeout=timeout) as response:
-        out = loads_unambiguous_json(response.read())
+        raw = response.read(MAX_HTTP_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_HTTP_RESPONSE_BYTES:
+            raise ValueError("decision HTTP response exceeds bounded byte limit")
+        out = loads_unambiguous_json(raw)
     return out, (time.perf_counter() - started) * 1000
 
 

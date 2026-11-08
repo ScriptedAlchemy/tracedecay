@@ -92,6 +92,50 @@ class RunHttpTest(unittest.TestCase):
                         run_http.post("http://localhost:8009/v1/systemone",
                                       {"state": "test", "questions": {}})
 
+    def test_http_response_limit_reads_only_bounded_bytes_and_accepts_boundary(self):
+        body = b'{"answers":{}}'
+        max_bytes = run_http.MAX_HTTP_RESPONSE_BYTES
+        for size, accepted in ((max_bytes, True), (max_bytes + 1, False)):
+            with self.subTest(size=size):
+                payload = body + b" " * (size - len(body))
+                with patch("urllib.request.build_opener") as opener:
+                    response = opener.return_value.open.return_value
+                    response.read.side_effect = io.BytesIO(payload).read
+                    if accepted:
+                        result, latency = run_http.post(
+                            "http://localhost:8009/v1/systemone",
+                            {"state": "test", "questions": {}},
+                        )
+                        self.assertEqual(result, {"answers": {}})
+                        self.assertGreaterEqual(latency, 0)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "bounded byte limit"):
+                            run_http.post(
+                                "http://localhost:8009/v1/systemone",
+                                {"state": "test", "questions": {}},
+                            )
+                    response.read.assert_called_once_with(max_bytes + 1)
+
+    def test_oversized_response_preserves_resumable_evidence_without_sample(self):
+        sample = self.root / "sample.json"
+        payload = b" " * (run_http.MAX_HTTP_RESPONSE_BYTES + 1)
+        with patch("urllib.request.build_opener") as opener:
+            opener.return_value.open.return_value = io.BytesIO(payload)
+            with self.assertRaisesRegex(ValueError, "bounded byte limit"):
+                self.run_main(("--sample-out", str(sample)))
+        self.assertFalse(sample.exists())
+        self.assertFalse(self.output.exists())
+        self.assertTrue(self.partial.exists())
+        self.assertEqual(len(self.partial.read_text().splitlines()), 1)
+        initial = self.partial.read_bytes()
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main(("--sample-out", str(sample)))
+        self.assertEqual(post.call_count, 2)
+        self.assertTrue(sample.exists())
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+        self.assertFalse(self.partial.exists())
+        self.assertTrue(initial.endswith(b"\\n"))
+
     def test_ambiguous_partial_row_refuses_without_changing_resumable_evidence(self):
         self.interrupt()
         original = self.partial.read_bytes()
