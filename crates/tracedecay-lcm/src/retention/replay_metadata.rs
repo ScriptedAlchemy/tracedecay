@@ -167,7 +167,10 @@ async fn candidates(
             // the verification budget so deferred rows are not JSON-parsed
             // again on the next tick. Individually oversized rows still
             // advance without loading their bodies.
-            if inline && let Some(bytes) = read_bytes && bytes <= MAX_BATCH_BYTES {
+            if inline
+                && let Some(bytes) = read_bytes
+                && bytes <= MAX_BATCH_BYTES
+            {
                 if bytes > read_remaining {
                     break;
                 }

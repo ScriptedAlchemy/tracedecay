@@ -388,10 +388,9 @@ fn record_canonical_body_gc_outcome(
                         ("bodies_scanned", report.bodies_scanned.to_string()),
                         (
                             "elapsed_ms",
-                            report.elapsed_ms.map_or_else(
-                                || "unmeasured".to_owned(),
-                                |value| value.to_string(),
-                            ),
+                            report
+                                .elapsed_ms
+                                .map_or_else(|| "unmeasured".to_owned(), |value| value.to_string()),
                         ),
                         (
                             "candidates_discharged",
@@ -441,10 +440,9 @@ fn record_replay_metadata_outcome(
                         ("rows_scanned", report.rows_scanned.to_string()),
                         (
                             "elapsed_ms",
-                            report.elapsed_ms.map_or_else(
-                                || "unmeasured".to_owned(),
-                                |value| value.to_string(),
-                            ),
+                            report
+                                .elapsed_ms
+                                .map_or_else(|| "unmeasured".to_owned(), |value| value.to_string()),
                         ),
                         (
                             "metadata_bytes_examined",
