@@ -9,7 +9,7 @@ use tracedecay_domain::{
 use tracedecay_runtime_core::db::engine::params;
 
 use super::{RearmedProjectionRetries, rearm_queued_projection_retries};
-use crate::tests::harness::RegisteredGlobalDbHarness;
+use crate::tests::harness::{RegisteredGlobalDbHarness, writer_telemetry};
 
 const FAR_FUTURE_MICROS: i64 = 9_000_000_000_000_000;
 
@@ -162,6 +162,7 @@ async fn rearm_walks_deferred_retries_in_bounded_batches() {
     let harness = RegisteredGlobalDbHarness::open("rearm-bounded-batches").await;
     seed_queue(&harness, 9, 3).await;
     assert_eq!(queue_state(&harness).await, (12, 9, 12));
+    let before = writer_telemetry(&harness.registered).transactions;
 
     let rearmed = rearm_queued_projection_retries(harness.registered.runtime_database(), 4)
         .await
@@ -175,6 +176,12 @@ async fn rearm_walks_deferred_retries_in_bounded_batches() {
         },
         "nine deferred rows re-arm in ceil(9 / 4) statements, never one queue-sized one"
     );
+    let after = writer_telemetry(&harness.registered).transactions;
+    assert_eq!(after.committed_transactions - before.committed_transactions, 3);
+    assert_eq!(
+        after.rolled_back_transactions, before.rolled_back_transactions,
+        "reaching the captured frontier must not open an empty final transaction"
+    );
     assert_eq!(
         queue_state(&harness).await,
         (12, 0, 12),
@@ -186,6 +193,11 @@ async fn rearm_walks_deferred_retries_in_bounded_batches() {
             .unwrap(),
         RearmedProjectionRetries::default(),
         "an armed queue costs no write batches"
+    );
+    assert_eq!(
+        writer_telemetry(&harness.registered).transactions,
+        after,
+        "zero reported batches must also mean zero actual writer transactions"
     );
 }
 
@@ -211,6 +223,7 @@ async fn rearm_ignores_parked_terminal_collisions_without_empty_write_batches() 
     );
     transaction.commit().await.unwrap();
     assert_eq!(queue_state(&harness).await, (12, 9, 12));
+    let before = writer_telemetry(&harness.registered).transactions;
 
     let rearmed = rearm_queued_projection_retries(harness.registered.runtime_database(), 2)
         .await
@@ -223,19 +236,89 @@ async fn rearm_ignores_parked_terminal_collisions_without_empty_write_batches() 
         },
         "parked collisions must not consume re-arm write windows"
     );
+    let after = writer_telemetry(&harness.registered).transactions;
+    assert_eq!(after.committed_transactions - before.committed_transactions, 2);
+    assert_eq!(after.rolled_back_transactions, before.rolled_back_transactions);
     assert_eq!(
         queue_state(&harness).await,
         (12, 6, 12),
         "only retryable deadlines clear; terminal collisions remain parked"
     );
 
+    // Reopen the durable database through real daemon admission. Do not run
+    // background convergence before measuring its retry re-arm directly.
+    let (harness, _convergence) = harness.restart_for_daemon().await;
+    assert_eq!(queue_state(&harness).await, (12, 6, 12));
+    let before = writer_telemetry(&harness.registered).transactions;
+    for _ in 0..2 {
+        assert_eq!(
+            rearm_queued_projection_retries(harness.registered.runtime_database(), 2)
+                .await
+                .unwrap(),
+            RearmedProjectionRetries::default(),
+            "restarts with only terminal collisions cannot schedule empty write batches"
+        );
+        assert_eq!(writer_telemetry(&harness.registered).transactions, before);
+    }
+
+    // An idle observation must not cache away a subsequently deferred row.
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    assert_eq!(
+        transaction
+            .execute(
+                "UPDATE projection_queue SET next_retry_at_micros = ?1
+                 WHERE observation_sequence = 2",
+                params![FAR_FUTURE_MICROS],
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    transaction.commit().await.unwrap();
+    let before = writer_telemetry(&harness.registered).transactions;
     assert_eq!(
         rearm_queued_projection_retries(harness.registered.runtime_database(), 2)
             .await
             .unwrap(),
-        RearmedProjectionRetries::default(),
-        "restarts with only terminal collisions cannot schedule empty write batches"
+        RearmedProjectionRetries {
+            rows: 1,
+            batches: 1,
+        }
     );
+    let after = writer_telemetry(&harness.registered).transactions;
+    assert_eq!(after.committed_transactions - before.committed_transactions, 1);
+    assert_eq!(after.rolled_back_transactions, before.rolled_back_transactions);
+    assert_eq!(queue_state(&harness).await, (12, 6, 12));
+}
+
+#[asupersync::test]
+async fn rearm_rejects_nonpositive_windows_before_acquiring_the_writer() {
+    let harness = RegisteredGlobalDbHarness::open("rearm-invalid-window").await;
+    seed_queue(&harness, 5, 0).await;
+    let before = writer_telemetry(&harness.registered).transactions;
+    for batch_rows in [0, -1] {
+        assert!(
+            rearm_queued_projection_retries(harness.registered.runtime_database(), batch_rows)
+                .await
+                .is_err(),
+            "a nonpositive limit must not silently skip or unbound recovery"
+        );
+        assert_eq!(queue_state(&harness).await, (5, 5, 5));
+        assert_eq!(writer_telemetry(&harness.registered).transactions, before);
+    }
+    assert_eq!(
+        rearm_queued_projection_retries(harness.registered.runtime_database(), 2)
+            .await
+            .unwrap(),
+        RearmedProjectionRetries {
+            rows: 5,
+            batches: 3,
+        }
+    );
+    let after = writer_telemetry(&harness.registered).transactions;
+    assert_eq!(after.committed_transactions - before.committed_transactions, 3);
+    assert_eq!(after.rolled_back_transactions, before.rolled_back_transactions);
+    assert_eq!(queue_state(&harness).await, (5, 0, 5));
 }
 
 #[asupersync::test]

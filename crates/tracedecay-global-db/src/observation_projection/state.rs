@@ -257,17 +257,16 @@ pub(crate) struct RearmedProjectionRetries {
 }
 
 /// A projection retry deadline paces re-attempts within the store mount that
-/// observed the failure. A fresh mount re-arms every queued projection for
-/// immediate replay so restart recovery drains commit-before-ack work instead
-/// of waiting out a dead process's backoff. Attempt counts and last errors
-/// persist, so a projection that fails again resumes its escalating delay from
-/// the recorded attempt history.
+/// observed the failure. A fresh mount re-arms retryable deferred projections
+/// for immediate replay so recovery does not wait out a dead process's backoff.
+/// Attempt counts, last errors, and terminal collision deadlines persist.
 ///
-/// The queue grows with session history, so the re-arm walks it in rowid
-/// order, `batch_rows` deferred rows per short writer transaction: no single
-/// statement or transaction scales with the queue, and foreground writes
-/// interleave between batches. Rows queued after the walk starts belong to
-/// this mount and are left alone.
+/// The reader captures the last retryable row before taking any writer lease.
+/// Already-armed and terminal-only queues therefore need no writer transaction.
+/// Each write window selects and updates at most `batch_rows` eligible rows
+/// under the same writer lease; foreground writes interleave between windows.
+/// Scanning past ineligible rows can still scale with the queue. Rows beyond
+/// the captured frontier are left for a later recovery pass.
 #[tracing::instrument(
     name = "global_db.observation_projection.rearm_retries",
     level = "trace",
@@ -277,20 +276,30 @@ pub(crate) async fn rearm_queued_projection_retries(
     database: &Database,
     batch_rows: i64,
 ) -> ProjectionStoreResult<RearmedProjectionRetries> {
+    if batch_rows <= 0 {
+        return Err(storage_message(
+            "rearm queued projection retries",
+            "projection retry batch size must be positive",
+        ));
+    }
     let mut rearmed = RearmedProjectionRetries::default();
     let Some(last_rowid) = query_optional_i64(
         &database.read_connection(),
-        "SELECT MAX(rowid) FROM projection_queue",
-        params![],
+        "SELECT MAX(rowid) FROM projection_queue
+         WHERE next_retry_at_micros > 0 AND next_retry_at_micros < ?1",
+        params![PROJECTION_TERMINAL_RETRY_MICROS],
     )
     .await?
     else {
         return Ok(rearmed);
     };
     let mut after_rowid = 0_i64;
-    while let Some((batch_end, rows)) =
-        rearm_projection_retry_batch(database, after_rowid, last_rowid, batch_rows).await?
-    {
+    while after_rowid < last_rowid {
+        let Some((batch_end, rows)) =
+            rearm_projection_retry_batch(database, after_rowid, last_rowid, batch_rows).await?
+        else {
+            break;
+        };
         rearmed.rows += rows;
         rearmed.batches += 1;
         after_rowid = batch_end;
@@ -985,7 +994,7 @@ fn output_authority_batch_sql() -> String {
             SELECT provenance.projector_version AS projector_version,
                    provenance.output_provider AS output_provider,
                    provenance.output_message_id AS output_message_id,
-                   MAX(provenance.message_created) AS projector_owned,
+                   MAX(message_created) AS projector_owned,
                    COUNT(*) AS owner_count
             FROM json_each(?2) AS requested
             CROSS JOIN observation_projection_provenance AS provenance
