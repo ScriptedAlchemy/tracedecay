@@ -988,7 +988,18 @@ pub(super) fn resolve_staged_generation(
     let resolution_index = super::resolution_index::seal_resolution_index_charged(
         &facts,
         &mut |workspace| retain_facts(count(phase_base)?.saturating_add(workspace)),
-        &mut *publish,
+        &mut |segment| {
+            publish(segment)?;
+            // An accepted resolution-index segment is genuine staged work,
+            // not a committed native graph page or a status-read heartbeat.
+            resolution_work = resolution_work.saturating_add(1);
+            control.observed_preseal_work(super::CodeIndexPresealWorkV1 {
+                phase: super::CodeIndexPresealWorkPhaseV1::Resolution,
+                completed_items: resolution_work,
+                total_items: None,
+            });
+            Ok(())
+        },
     )?;
     tracing::trace!(
         phase = "resolution_index",

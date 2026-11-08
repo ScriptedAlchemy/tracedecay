@@ -299,6 +299,89 @@ fn differential_counts(language: &str) -> DifferentialCounts {
     counts
 }
 
+/// The actual cold publisher must account for every accepted resolution
+/// index segment, in addition to completed fact, binding, evidence and graph
+/// page work. Decoding the published manifest supplies the physical page count
+/// rather than a test-authored approximation.
+#[test]
+fn cold_resolution_index_publication_advances_actual_work_counts() {
+    #[derive(Default)]
+    struct ResolutionWork(std::sync::Mutex<Vec<u64>>);
+
+    impl CodeIndexExecutionControlV1 for ResolutionWork {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+
+        fn observed_preseal_work(&self, work: CodeIndexPresealWorkV1) {
+            if work.phase == CodeIndexPresealWorkPhaseV1::Resolution {
+                self.0
+                    .lock()
+                    .expect("resolution observations")
+                    .push(work.completed_items);
+            }
+        }
+    }
+
+    let files = vec![
+        (
+            "src/alpha.rs".to_owned(),
+            "pub fn alpha() { crate::beta::beta(); }\n".to_owned(),
+        ),
+        (
+            "src/beta.rs".to_owned(),
+            "pub fn beta() {}\n".to_owned(),
+        ),
+    ];
+    let store = WorkerPublicationStore::default();
+    let mut owner =
+        CodeIndexProductionOwnerV1::new(worker_config(), store.clone()).expect("production owner");
+    let observer = ResolutionWork::default();
+    let published = owner
+        .build_and_publish(fixture_request(&files, None, false, 1_500_000), &observer)
+        .expect("real cold reference resolution");
+    let manifest = super::partitioned_codec::parse_partitioned_manifest(
+        published.manifest_bytes().as_ref(),
+    )
+    .expect("verified published index manifest");
+
+    let index_segments = manifest.resolution_index.segments().count();
+    assert!(
+        index_segments >= 3,
+        "the cold resolution index actually publishes definition, reference and alias segments"
+    );
+    let expected = u64::try_from(
+        files.len() * 2
+            + manifest.file_evidence.len()
+            + manifest.code_graph_pages.len()
+            + index_segments,
+    )
+    .expect("bounded cold resolution work");
+    let observed = observer
+        .0
+        .lock()
+        .expect("resolution observations")
+        .clone();
+    assert_eq!(
+        observed,
+        (1..=expected).collect::<Vec<_>>(),
+        "only accepted fact, binding, evidence, index-segment and graph-page work advances the observed cursor"
+    );
+    assert!(
+        store
+            .decode_active(&CodeIndexGenerationScopeV1::for_snapshot(
+                published.snapshot(),
+            ))
+            .expect("read the committed cold generation")
+            .is_some(),
+        "counted index segments must produce a readable published generation"
+    );
+}
+
 #[test]
 fn rust_edits_seal_over_the_parent_like_a_cold_build() {
     assert_eq!(
