@@ -1066,8 +1066,7 @@ mod tests {
                 CodeIndexIgnoredDependencyRefusalV1::NotIgnored
             ))
         ));
-        let denied_read =
-            read_bounded_admitted_source(&parent, "node_modules/pkg/index.ts", None);
+        let denied_read = read_bounded_admitted_source(&parent, "node_modules/pkg/index.ts", None);
         assert!(matches!(
             denied_read,
             Err(CodeIndexSchedulerErrorV1::IgnoredDependency(
