@@ -2,8 +2,12 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { Command as CommandIcon, CornerDownLeft, Search } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { WORKSPACES } from '../routes';
-import { channelNumber } from '../channels.ts';
+import {
+  CHANNELS,
+  channelNumber,
+  paletteMatchesQuery,
+  workspaceSearchText,
+} from '../channels.ts';
 import { cn } from '../../ui/cn';
 import { useProjectRegistry, projectRegistryPayload } from '../../data/query/projectRegistry.ts';
 import {
@@ -16,6 +20,7 @@ interface CommandPaletteRow {
   id: string;
   label: string;
   hint: string;
+  searchText: string;
   /** The channel number for a workspace row; project rows have none. */
   channel: string | null;
   action: () => void;
@@ -62,13 +67,14 @@ export function CommandPalette({
   const projects = useProjectRegistry({ enabled: open });
 
   const entries = useMemo<CommandPaletteRow[]>(() => {
-    const workspaceEntries = WORKSPACES.map((w) => ({
-      id: `nav:${w.path}`,
-      label: w.label,
-      hint: 'workspace',
-      channel: channelNumber(w.path),
+    const workspaceEntries = CHANNELS.map((channel) => ({
+      id: `nav:${channel.path}`,
+      label: channel.label,
+      hint: channel.taskHint,
+      searchText: workspaceSearchText(channel),
+      channel: channelNumber(channel.path),
       action: () => {
-        navigate(scopedWorkspacePath(scope, w.path));
+        navigate(scopedWorkspacePath(scope, channel.path));
         onOpenChange(false);
       },
     }));
@@ -80,6 +86,7 @@ export function CommandPalette({
               id: `scope:${project.project_id}:${project.canonical_root}`,
               label: project.label,
               hint: `project · ${group.label}`,
+              searchText: project.label.toLowerCase(),
               channel: null,
               action: () => {
                 // The listing already measured `is_active`, against the same
@@ -106,11 +113,10 @@ export function CommandPalette({
     return [...workspaceEntries, ...projectEntries];
   }, [navigate, onOpenChange, projects.data, scope, selectProject]);
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return entries;
-    return entries.filter((entry) => entry.label.toLowerCase().includes(q));
-  }, [entries, query]);
+  const filtered = useMemo(
+    () => entries.filter((entry) => paletteMatchesQuery(entry.searchText, query)),
+    [entries, query],
+  );
 
   useEffect(() => setActive(0), [query, open]);
   useEffect(() => {
