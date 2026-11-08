@@ -599,15 +599,18 @@ async fn batched_projection_resumes_after_restart_without_replaying_parked_or_de
             .to_path_buf();
 
         for (index, record) in records.iter().enumerate() {
-            let expected = (index > 0)
-                .then(|| cursor("session-windowed-restart", index as u64 * 100));
+            let expected =
+                (index > 0).then(|| cursor("session-windowed-restart", index as u64 * 100));
             persist(&store, record.clone(), expected).await;
         }
         store
             .project_observation(records[0].observation_id())
             .await
             .unwrap();
-        assert_eq!(store.projection_checkpoint().await.unwrap().last_sequence(), 1);
+        assert_eq!(
+            store.projection_checkpoint().await.unwrap().last_sequence(),
+            1
+        );
 
         // A terminal collision remains in the queue behind the committed
         // checkpoint, while the next real head is initially ready.
@@ -629,18 +632,25 @@ async fn batched_projection_resumes_after_restart_without_replaying_parked_or_de
         conn.execute(
             "UPDATE projection_queue SET next_retry_at_micros = ?2
              WHERE observation_id = ?1",
-            rusqlite::params![
-                records[3].observation_id().as_str(),
-                i64::MAX - 1
-            ],
+            rusqlite::params![records[3].observation_id().as_str(), i64::MAX - 1],
         )
         .unwrap();
         drop(conn);
 
-        let batch = store.project_queued_observations(32).await.unwrap().unwrap();
+        let batch = store
+            .project_queued_observations(32)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(batch.items.len(), 2, "only sequences 2 and 3 are ready");
-        assert!(batch.has_more, "the deferred sequence 4 must remain pending");
-        assert_eq!(store.projection_checkpoint().await.unwrap().last_sequence(), 3);
+        assert!(
+            batch.has_more,
+            "the deferred sequence 4 must remain pending"
+        );
+        assert_eq!(
+            store.projection_checkpoint().await.unwrap().last_sequence(),
+            3
+        );
         assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 3);
     }
 
@@ -649,10 +659,20 @@ async fn batched_projection_resumes_after_restart_without_replaying_parked_or_de
         let store = runtime
             .observation_store(HostAdmissionScope::Profile)
             .unwrap();
-        let parked = store.project_queued_observations(32).await.unwrap().unwrap();
-        assert!(parked.items.is_empty(), "restart must not replay committed work");
+        let parked = store
+            .project_queued_observations(32)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            parked.items.is_empty(),
+            "restart must not replay committed work"
+        );
         assert!(parked.has_more, "restart must not skip the deferred head");
-        assert_eq!(store.projection_checkpoint().await.unwrap().last_sequence(), 3);
+        assert_eq!(
+            store.projection_checkpoint().await.unwrap().last_sequence(),
+            3
+        );
 
         rusqlite::Connection::open(&database_path)
             .unwrap()
@@ -664,20 +684,44 @@ async fn batched_projection_resumes_after_restart_without_replaying_parked_or_de
             .unwrap();
 
         let first = store.project_queued_observations(1).await.unwrap().unwrap();
-        assert_eq!(first.items.len(), 1, "one-item window must not overrun its bound");
+        assert_eq!(
+            first.items.len(),
+            1,
+            "one-item window must not overrun its bound"
+        );
         assert!(first.has_more);
-        assert_eq!(store.projection_checkpoint().await.unwrap().last_sequence(), 4);
+        assert_eq!(
+            store.projection_checkpoint().await.unwrap().last_sequence(),
+            4
+        );
 
-        let tail = store.project_queued_observations(32).await.unwrap().unwrap();
+        let tail = store
+            .project_queued_observations(32)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(tail.items.len(), 1);
-        assert!(!tail.has_more, "the terminal collision is not runnable backlog");
-        assert_eq!(store.projection_checkpoint().await.unwrap().last_sequence(), 5);
+        assert!(
+            !tail.has_more,
+            "the terminal collision is not runnable backlog"
+        );
+        assert_eq!(
+            store.projection_checkpoint().await.unwrap().last_sequence(),
+            5
+        );
         assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 5);
         assert_eq!(table_count(&tmp, "projection_queue").await, 1);
 
-        let idle = store.project_queued_observations(32).await.unwrap().unwrap();
+        let idle = store
+            .project_queued_observations(32)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(idle.items.is_empty());
         assert!(!idle.has_more);
-        assert_eq!(store.projection_checkpoint().await.unwrap().last_sequence(), 5);
+        assert_eq!(
+            store.projection_checkpoint().await.unwrap().last_sequence(),
+            5
+        );
     }
 }
