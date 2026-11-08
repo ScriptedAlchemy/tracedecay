@@ -50,13 +50,11 @@ where
     if prior_deferrals < MAINTENANCE_WRITER_FAST_DEFERRALS {
         administration.try_with_writer(operation).await
     } else {
-        // A queued writer blocks later store readers behind it. Cancellation
-        // drops the acquisition future and removes the queue entry on shutdown.
-        tokio::select! {
-            biased;
-            () = cancellation.cancelled() => None,
-            outcome = administration.with_writer(operation) => Some(outcome),
-        }
+        // Only cancel the wait: once admitted, journal/retention work must
+        // finish cooperatively rather than be dropped at the writer boundary.
+        administration
+            .with_writer_cancellable_acquisition(cancellation, operation)
+            .await
     }
 }
 
@@ -1719,6 +1717,43 @@ mod tests {
         release_tx.send(()).expect("release held writer");
         writer.await.expect("held writer exits");
         assert_eq!(administration.try_with_writer(|| async { 9_u8 }).await, Some(9));
+    }
+
+    /// Cancellation after writer admission must not drop a running retention
+    /// operation: its blocking/journaled work is responsible for cooperating.
+    #[tokio::test]
+    async fn cancellation_after_writer_admission_preserves_running_work() {
+        use crate::daemon::branch_admin::StoreAdministration;
+        use tracedecay_runtime_core::cancellation::CancellationToken;
+
+        let administration = StoreAdministration::default();
+        let cancellation = CancellationToken::new();
+        let working = administration.clone();
+        let stopping = cancellation.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let work = tokio::spawn(async move {
+            super::admit_retention_writer(
+                &working,
+                &stopping,
+                super::MAINTENANCE_WRITER_FAST_DEFERRALS,
+                move || async move {
+                    entered_tx.send(()).expect("retention entered its critical section");
+                    release_rx.await.expect("retention work released");
+                    43_u8
+                },
+            )
+            .await
+        });
+        entered_rx.await.expect("writer admission succeeded");
+        cancellation.cancel();
+        release_tx.send(()).expect("finish admitted work");
+        assert_eq!(
+            work.await.expect("retention task joins"),
+            Some(43),
+            "shutdown cancellation cannot drop journaled work already admitted"
+        );
+        assert_eq!(administration.try_with_writer(|| async { 44_u8 }).await, Some(44));
     }
 
     #[tokio::test]
