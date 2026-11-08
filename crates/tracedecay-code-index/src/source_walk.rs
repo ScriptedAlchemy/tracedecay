@@ -135,7 +135,9 @@ fn parent_gitlink_paths(project_root: &Path) -> Result<BTreeSet<String>, SourceW
             return Ok(BTreeSet::new());
         }
     };
-    if repository.workdir().and_then(|workdir| workdir.canonicalize().ok())
+    if repository
+        .workdir()
+        .and_then(|workdir| workdir.canonicalize().ok())
         != project_root.canonicalize().ok()
     {
         return Err(SourceWalkError {
@@ -143,10 +145,12 @@ fn parent_gitlink_paths(project_root: &Path) -> Result<BTreeSet<String>, SourceW
             message: "source walk root is not the opened Git worktree".to_owned(),
         });
     }
-    let index = repository.index_or_empty().map_err(|error| SourceWalkError {
-        glob: String::new(),
-        message: format!("cannot inspect parent Git index: {error}"),
-    })?;
+    let index = repository
+        .index_or_empty()
+        .map_err(|error| SourceWalkError {
+            glob: String::new(),
+            message: format!("cannot inspect parent Git index: {error}"),
+        })?;
     let mut paths = BTreeSet::new();
     for entry in index.entries() {
         if entry.mode.is_commit() {
