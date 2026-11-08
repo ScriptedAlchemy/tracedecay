@@ -190,6 +190,9 @@ pub struct CodeIndexBuildProgressSlotStateV1 {
     pub(super) owner_epoch: u64,
     progress_epoch: u64,
     last_progress_micros: Option<i64>,
+    /// The sealed source and reporting incarnation survive a verified
+    /// SQLite staging restart even though its committed counters reset.
+    progress_identity: Option<(u64, u64, String)>,
     snapshot: Option<Arc<CodeIndexBuildProgressV1>>,
 }
 
@@ -200,6 +203,7 @@ impl CodeIndexBuildProgressSlotStateV1 {
         self.generation_id = Some(generation_id);
         self.snapshot = None;
         self.last_progress_micros = None;
+        self.progress_identity = None;
         self.owner_epoch
     }
 
@@ -232,6 +236,17 @@ impl CodeIndexBuildProgressSlotStateV1 {
         {
             return false;
         }
+        // The same scheduler owner may rebuild its SQLite staging file, but
+        // it must not change the sealed source or the report incarnation.
+        // Keep this binding even when begin_staging_attempt clears counters.
+        if let Some((daemon, producer, digest)) = self.progress_identity.as_ref() {
+            if *daemon != snapshot.daemon_incarnation
+                || *producer != snapshot.producer_incarnation
+                || digest != &snapshot.sealed_source_digest
+            {
+                return false;
+            }
+        }
         if let Some(current) = self.snapshot.as_ref() {
             // Concurrent phase/report producers may complete out of order.
             // A delayed report must not undo already committed boundaries or
@@ -254,6 +269,13 @@ impl CodeIndexBuildProgressSlotStateV1 {
             snapshot.last_progress_micros = snapshot.last_progress_micros.max(latest);
         }
         self.last_progress_micros = Some(snapshot.last_progress_micros);
+        if self.progress_identity.is_none() {
+            self.progress_identity = Some((
+                snapshot.daemon_incarnation,
+                snapshot.producer_incarnation,
+                snapshot.sealed_source_digest.clone(),
+            ));
+        }
         self.progress_epoch = self.progress_epoch.saturating_add(1).max(1);
         snapshot.progress_epoch = self.progress_epoch;
 

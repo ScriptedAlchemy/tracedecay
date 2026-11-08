@@ -3157,6 +3157,78 @@ fn a_new_staging_attempt_can_truthfully_restart_committed_progress() {
 }
 
 #[test]
+fn staging_restart_cannot_rebind_the_progress_source_or_incarnation() {
+    let generation = CodeGenerationId::new("generation.report-identity").expect("generation");
+    let mut slot = super::super::CodeIndexBuildProgressSlotStateV1::default();
+    let owner = slot.replace_generation(generation.clone());
+    assert!(slot.publish(
+        &generation,
+        owner,
+        progress_snapshot_for_generation(&generation, 4),
+    ));
+    let accepted = slot.snapshot().expect("first committed report");
+
+    // All three publication identities must be checked independently, not
+    // merely against the generation name in the supplied owner token.
+    for field in ["daemon", "producer", "digest"] {
+        let mut foreign = progress_snapshot_for_generation(&generation, 5);
+        match field {
+            "daemon" => foreign.daemon_incarnation += 1,
+            "producer" => foreign.producer_incarnation += 1,
+            "digest" => foreign.sealed_source_digest =
+                format!("sha256:{}", "b".repeat(64)),
+            _ => unreachable!(),
+        }
+        assert!(
+            !slot.publish(&generation, owner, foreign),
+            "foreign {field} must not replace a committed report"
+        );
+        assert_eq!(
+            slot.snapshot().expect("unchanged committed report").as_ref(),
+            accepted.as_ref()
+        );
+    }
+
+    assert!(slot.begin_staging_attempt(&generation, owner));
+    assert!(slot.snapshot().is_none(), "verified restart clears old counters");
+    for field in ["daemon", "producer", "digest"] {
+        let mut foreign = progress_snapshot_for_generation(&generation, 0);
+        match field {
+            "daemon" => foreign.daemon_incarnation += 1,
+            "producer" => foreign.producer_incarnation += 1,
+            "digest" => foreign.sealed_source_digest =
+                format!("sha256:{}", "b".repeat(64)),
+            _ => unreachable!(),
+        }
+        assert!(
+            !slot.publish(&generation, owner, foreign),
+            "staging reset must retain the {field} identity fence"
+        );
+        assert!(slot.snapshot().is_none(), "foreign report must not seize restart");
+    }
+
+    // A real retry may still reset counters while preserving the identity.
+    assert!(slot.publish(
+        &generation,
+        owner,
+        progress_snapshot_for_generation(&generation, 0),
+    ));
+    let resumed = slot.snapshot().expect("verified restart");
+    assert_eq!(resumed.committed_pages, 0);
+    assert!(resumed.progress_epoch > accepted.progress_epoch);
+
+    // Replacing the scheduler owner permits a genuinely new incarnation.
+    let next_owner = slot.replace_generation(generation.clone());
+    let mut replaced = progress_snapshot_for_generation(&generation, 1);
+    replaced.producer_incarnation += 1;
+    assert!(slot.publish(&generation, next_owner, replaced));
+    assert_eq!(
+        slot.snapshot().expect("replacement owner").producer_incarnation,
+        2
+    );
+}
+
+#[test]
 fn retrying_an_unchanged_phase_does_not_fabricate_status_progress() {
     let fixture = GitFixture::new(&[(
         "src/lib.rs",
