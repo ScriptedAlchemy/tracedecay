@@ -1522,7 +1522,11 @@ mod tests {
             vec![vec![direct.clone()]],
             |frontier| {
                 reads += 1;
-                assert_eq!(frontier, std::slice::from_ref(&direct), "only the second hop is read");
+                assert_eq!(
+                    frontier,
+                    std::slice::from_ref(&direct),
+                    "only the second hop is read"
+                );
                 Some(vec![vec![root.clone(), transitive.clone()]])
             },
         )
