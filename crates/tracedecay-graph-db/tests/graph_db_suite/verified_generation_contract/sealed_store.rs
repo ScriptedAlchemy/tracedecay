@@ -1263,6 +1263,9 @@ fn reopening_the_store_sweeps_staging_left_by_an_interrupted_seal() {
         .map(|entry| entry.path())
         .find(|path| path.join("sealed.json").is_file())
         .expect("the sealed artifact directory must exist");
+    let unrelated = root.join(".staging-notes");
+    std::fs::create_dir(&unrelated).unwrap();
+    std::fs::write(unrelated.join("notes"), b"keep").unwrap();
     let abandoned = [
         root.join(format!(".staging-{}", "c".repeat(64))),
         root.join(format!(
@@ -1287,6 +1290,7 @@ fn reopening_the_store_sweeps_staging_left_by_an_interrupted_seal() {
             &record.publication.key.projection,
         )
         .unwrap();
+    assert_eq!(std::fs::read(unrelated.join("notes")).unwrap(), b"keep");
     for staging in &abandoned {
         assert!(
             !staging.exists(),
@@ -2371,7 +2375,15 @@ fn store_open_sweeps_row_spills_abandoned_by_another_process() {
     let own = format!(".rows-{}-999999", std::process::id());
     std::fs::create_dir_all(root.join(&own)).unwrap();
 
+    let foreign = ".rows-notes";
+    std::fs::create_dir(root.join(foreign)).unwrap();
+    std::fs::write(root.join(foreign).join("notes"), b"keep").unwrap();
     let _registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
 
-    assert_eq!(row_spills(temp.path()), vec![own]);
+    assert_eq!(
+        std::fs::read(root.join(foreign).join("notes")).unwrap(),
+        b"keep"
+    );
+    assert!(root.join(own).is_dir());
+    assert!(!root.join(".rows-4194305-0").exists());
 }

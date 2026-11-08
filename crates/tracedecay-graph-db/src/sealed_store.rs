@@ -579,10 +579,7 @@ pub fn census_sealed_store(
         let path = entry.path();
         let bytes = directory_bytes(&path, &mut counted)?;
         let name = entry.file_name();
-        if name
-            .to_str()
-            .is_some_and(|name| name.starts_with(".staging-"))
-        {
+        if name.to_str().is_some_and(sealed_staging_name) {
             census.abandoned_staging_count += 1;
             census.abandoned_staging_bytes += bytes;
             continue;
@@ -683,6 +680,15 @@ pub(crate) fn discard_superseded_sealed_generations(
     }
 }
 
+fn sealed_staging_name(name: &str) -> bool {
+    name.strip_prefix(".staging-").is_some_and(|suffix| {
+        suffix.len() == 64
+            && suffix
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
+}
+
 /// Removes every `.staging-*` directory a seal left behind under the store's
 /// sealed root.
 ///
@@ -714,7 +720,7 @@ pub(crate) fn sweep_abandoned_sealed_staging(database_path: &Path) {
         let Some(name) = name.to_str() else {
             continue;
         };
-        if !name.starts_with(".staging-") {
+        if !sealed_staging_name(name) {
             continue;
         }
         let path = entry.path();
@@ -755,12 +761,19 @@ pub(crate) fn sweep_abandoned_row_spills(database_path: &Path) {
     let Ok(entries) = std::fs::read_dir(&root) else {
         return;
     };
-    let own = format!("{ROW_SPILL_PREFIX}{}-", std::process::id());
+    let own_pid = std::process::id();
     for entry in entries.flatten() {
         if entry
             .file_name()
             .to_str()
-            .is_some_and(|name| name.starts_with(ROW_SPILL_PREFIX) && !name.starts_with(&own))
+            .and_then(|name| name.strip_prefix(ROW_SPILL_PREFIX))
+            .and_then(|suffix| suffix.split_once('-'))
+            .is_some_and(|(pid, sequence)| {
+                let (Ok(owner), Ok(counter)) = (pid.parse::<u32>(), sequence.parse::<u64>()) else {
+                    return false;
+                };
+                owner != own_pid && owner.to_string() == pid && counter.to_string() == sequence
+            })
         {
             let path = entry.path();
             if let Err(error) =
