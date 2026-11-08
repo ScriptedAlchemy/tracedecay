@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use gix::bstr::ByteSlice;
-use tracedecay_code_index::source_walk::has_nested_repository_ancestor;
+use tracedecay_code_index::source_walk::{has_nested_repository_ancestor, parent_gitlink_paths};
 use tracedecay_runtime_core::git_repository::GIT_STATUS_MODIFICATION_CHECK_THREADS;
 
 /// Failure to classify worktree changes through gix.
@@ -215,6 +215,11 @@ impl WorktreeChangeClassificationV1 {
         // parent directory once rather than probing per source file.
         let mut nested_repository_exclusions = BTreeSet::new();
         if let Some(project_root) = repository.workdir() {
+            // The live walker also denies HEAD gitlinks staged for removal.
+            // Without this check, Git reports their markerless child sources
+            // as untracked, and worktree capture can re-admit those bytes.
+            let parent_gitlinks = parent_gitlink_paths(project_root)
+                .map_err(|error| ClassificationErrorV1::Git(error.message))?;
             let mut checked_parents = BTreeMap::new();
             for path in committed_baseline
                 .iter()
@@ -222,12 +227,20 @@ impl WorktreeChangeClassificationV1 {
             {
                 let relative = Path::new(path);
                 let parent = relative.parent().unwrap_or_else(|| Path::new(""));
-                let excluded = match checked_parents.get(parent) {
-                    Some(excluded) => *excluded,
-                    None => {
-                        let excluded = has_nested_repository_ancestor(project_root, relative)?;
-                        checked_parents.insert(parent.to_path_buf(), excluded);
-                        excluded
+                let excluded = if relative
+                    .ancestors()
+                    .filter_map(Path::to_str)
+                    .any(|ancestor| parent_gitlinks.contains(ancestor))
+                {
+                    true
+                } else {
+                    match checked_parents.get(parent) {
+                        Some(excluded) => *excluded,
+                        None => {
+                            let excluded = has_nested_repository_ancestor(project_root, relative)?;
+                            checked_parents.insert(parent.to_path_buf(), excluded);
+                            excluded
+                        }
                     }
                 };
                 if excluded {
@@ -472,4 +485,61 @@ mod nested_repository_tests {
         assert!(restored.candidate_paths().contains("nested/foreign.rs"));
         assert!(restored.candidate_paths().contains("linked/foreign.rs"));
     }
+
+    #[test]
+    fn staged_gitlink_removal_without_child_marker_does_not_admit_child_sources() {
+        let fixture = tempfile::tempdir().unwrap();
+        let parent = fixture.path().join("parent");
+        let child = fixture.path().join("child");
+        fs::create_dir_all(&parent).unwrap();
+        fs::create_dir_all(&child).unwrap();
+
+        fixture_git(&child, &["init", "-q"]);
+        fs::create_dir_all(child.join("src")).unwrap();
+        fs::write(child.join("src/lib.rs"), "pub fn child() {}\n").unwrap();
+        fixture_git(&child, &["add", "."]);
+        fixture_git(&child, &["commit", "-qm", "child"]);
+
+        fixture_git(&parent, &["init", "-q"]);
+        fs::create_dir_all(parent.join("src")).unwrap();
+        fs::write(parent.join("src/lib.rs"), "pub fn parent() {}\n").unwrap();
+        fixture_git(&parent, &["add", "."]);
+        fixture_git(&parent, &["commit", "-qm", "parent"]);
+        fixture_git(
+            &parent,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                "../child",
+                "app",
+            ],
+        );
+        fixture_git(&parent, &["add", ".gitmodules", "app"]);
+        fixture_git(&parent, &["commit", "-qm", "register submodule"]);
+
+        // Git still records app as a mode-160000 gitlink in HEAD, but
+        // removing the staged gitlink and child marker makes child files
+        // appear untracked to the parent. They must never enter its index.
+        fs::remove_file(parent.join("app/.git")).unwrap();
+        fixture_git(&parent, &["rm", "-q", "--cached", "app"]);
+        assert!(parent.join("app/src/lib.rs").is_file());
+
+        let repository = tracedecay_runtime_core::git_open::open(&parent).unwrap();
+        let classified = WorktreeChangeClassificationV1::classify(&repository).unwrap();
+        assert!(
+            classified
+                .changes()
+                .iter()
+                .any(|change| change.path == "app/src/lib.rs"),
+            "fixture must exercise a child file reported by parent Git status"
+        );
+        assert!(classified.has_changes(), "clean HEAD reuse must be refused");
+        assert!(!classified.candidate_paths().contains("app/src/lib.rs"));
+        assert!(classified.changed_paths().contains("app/src/lib.rs"));
+        assert!(classified.candidate_paths().contains("src/lib.rs"));
+    }
+
 }
