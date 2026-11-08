@@ -249,6 +249,7 @@ class QualificationTests(unittest.TestCase):
                 self.dataset_bytes,
             )
             self.assertEqual(report["latency"]["cases_truncated"], 1)
+            self.assertEqual(report["numeric_truncation_source_evidence"]["measured_cases"], 2)
             self.assertFalse(report["checks"]["untruncated_input_evidence"])
             self.assertFalse(report["qualified_against_frozen_tolerances"])
             self.assertTrue(report["checks"]["reported_input_token_budget"])
@@ -372,7 +373,9 @@ class QualificationTests(unittest.TestCase):
         for value in (None, 1):
             with self.subTest(state_tokens_dropped=value):
                 result = self.signed_result()
-                result["rows"][0]["dropped"] = value
+                result["rows"][0].update(
+                    dropped=value, reported_state_tokens_dropped=value,
+                )
                 report = qualification.qualified_report(
                     result, self.manifest, self.manifest_sha, self.questions, self.dataset_bytes
                 )
@@ -388,6 +391,24 @@ class QualificationTests(unittest.TestCase):
         )
         self.assertTrue(complete["checks"]["untruncated_input_evidence"])
         self.assertTrue(complete["qualified_against_frozen_tolerances"])
+
+    def test_forged_zero_drops_without_server_counter_does_not_qualify(self):
+        result = self.signed_result()
+        del result["rows"][0]["reported_state_tokens_dropped"]
+        report = qualification.qualified_report(
+            result, self.manifest, self.manifest_sha,
+            self.questions, self.dataset_bytes,
+        )
+        # The old aggregate accepted two claimed zeros even though one row
+        # had no original numeric server evidence. That is not measured zero.
+        self.assertEqual(report["latency"]["cases_truncated"], 0)
+        self.assertEqual(report["latency"]["truncation_measured_cases"], 2)
+        self.assertEqual(
+            report["numeric_truncation_source_evidence"],
+            {"measured_cases": 1, "missing_cases": 1},
+        )
+        self.assertFalse(report["checks"]["untruncated_input_evidence"])
+        self.assertFalse(report["qualified_against_frozen_tolerances"])
 
     def test_reviewed_labels_are_not_inferred_from_prediction_or_actions(self):
         for name, mutate, refusal in (
@@ -441,6 +462,7 @@ class QualificationTests(unittest.TestCase):
                 "ms": 10 if case["labels"] else 20,
                 "input_tokens": 64,
                 "dropped": 0,
+                "reported_state_tokens_dropped": 0,
                 "request_sha256": hashlib.sha256(rendered).hexdigest(),
                 "request_size_bytes": len(rendered),
                 "observed_model": "self-reported-test-model",

@@ -212,8 +212,11 @@ abstention, positive-case recall, reconstructed JSON request sizes
 (min/p50/max/total and the frozen byte ceiling), input-token measurement
 coverage, observed peak and over-budget cases, p50/p95 measured end-to-end HTTP
 latency and the predeclared tolerances. A passing report requires every held-out case to
-report measured zero dropped state tokens and a consistent self-reported
-model name. Native Kev's optional truncation receipts use a top-level Boolean
+report measured zero dropped state tokens **backed by original numeric server
+telemetry on every held-out row**, and a consistent self-reported model name.
+An edited/legacy result with `dropped: 0` but no original numeric source
+counter cannot qualify merely because its aggregate looks untruncated.
+Native Kev's optional truncation receipts use a top-level Boolean
 `truncated` and numeric `usage.state_tokens` / `usage.state_tokens_used`,
 not `usage.state_tokens_dropped`. The runner reconstructs their difference
 and rejects inconsistent counts or flags before recording a row. The native

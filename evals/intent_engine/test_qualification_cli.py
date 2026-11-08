@@ -85,9 +85,13 @@ class QualificationCliTests(unittest.TestCase):
              lambda r: r["rows"][0]["probs"].update(impact=0.1)),
             ("slow_response", "p95_ms", lambda r: r["rows"][1].update(ms=21)),
             ("unknown_truncation", "untruncated_input_evidence",
-             lambda r: r["rows"][0].update(dropped=None)),
+             lambda r: r["rows"][0].update(
+                 dropped=None, reported_state_tokens_dropped=None)),
             ("truncated_input", "untruncated_input_evidence",
-             lambda r: r["rows"][0].update(dropped=1)),
+             lambda r: r["rows"][0].update(
+                 dropped=1, reported_state_tokens_dropped=1)),
+            ("forged_zero_without_numeric_source", "untruncated_input_evidence",
+             lambda r: r["rows"][0].pop("reported_state_tokens_dropped")),
             ("unmeasured_input_tokens", "reported_input_token_budget",
              lambda r: r["rows"][0].update(input_tokens=None)),
             ("zero_input_tokens", "reported_input_token_budget",

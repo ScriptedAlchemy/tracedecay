@@ -264,6 +264,19 @@ def dropped_state_tokens(response, usage):
     return dropped
 
 
+def has_numeric_truncation_receipt(row):
+    """A normalized drop count alone is not original server telemetry.
+
+    Native Kev supplies original/used token counts; other servers may emit
+    an explicit dropped-token count. Neither a bare Boolean flag nor a
+    self-authored normalized `dropped` field proves a zero-drop input.
+    """
+    return type(row.get("reported_state_tokens_dropped")) is int or (
+        type(row.get("state_tokens")) is int
+        and type(row.get("state_tokens_used")) is int
+    )
+
+
 def validate_row_truncation(row):
     """Recheck persisted server counters; normalized dropped alone is mutable.
 

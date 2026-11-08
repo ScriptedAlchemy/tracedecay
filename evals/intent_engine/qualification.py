@@ -230,7 +230,10 @@ def holdout_decision_metrics(rows, thresholds):
 def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes):
     """Reproduce qualified predictions from the frozen original dataset."""
     from score import score_config
-    from run_http import STATES, request_bytes, validate_dataset, validate_row_truncation
+    from run_http import (
+        STATES, has_numeric_truncation_receipt, request_bytes, validate_dataset,
+        validate_row_truncation,
+    )
 
     if not isinstance(dataset_bytes, bytes):
         raise ValueError("qualification requires the original dataset bytes")
@@ -274,6 +277,10 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes):
     # consistent even if the result JSON was edited after the HTTP response.
     for row in rows:
         validate_row_truncation(row)
+    # Normalized dropped=0 can be forged or survive an older partial log with
+    # no original numeric server counters. Such a log may be scored, but it
+    # cannot establish that the model evaluated an untruncated input.
+    source_truncation_cases = sum(has_numeric_truncation_receipt(row) for row in rows)
     # Reconstruct real HTTP request bytes: self-consistent metadata hashes
     # alone cannot prove the frozen prompts were used.
     renderer = STATES.get(experiment.get("config"))
@@ -348,6 +355,7 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes):
     complete_input_evidence = (
         latency["truncation_measured_cases"] == len(rows)
         and latency["cases_truncated"] == 0
+        and source_truncation_cases == len(rows)
     )
     checks = {
         "none_false_hint_rate": rates["none_false_hint_rate"] <= tolerances["max_none_false_hint_rate"],
@@ -386,6 +394,10 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes):
             "frozen_limit": validated["max_input_tokens"],
         },
         "latency": latency,
+        "numeric_truncation_source_evidence": {
+            "measured_cases": source_truncation_cases,
+            "missing_cases": len(rows) - source_truncation_cases,
+        },
         "checks": checks,
         "qualified_against_frozen_tolerances": all(checks.values()),
         "limits": "Reviewer and serving/model identities and token counts are self-reported, not authenticated or checkpoint-attested; task effectiveness and canonical Scout transcript parity are not proven.",
