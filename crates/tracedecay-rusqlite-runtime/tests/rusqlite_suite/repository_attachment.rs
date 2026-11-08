@@ -25,6 +25,16 @@ use tracedecay_store::{
 
 use tracedecay_domain::test_fixtures::id;
 
+/// Existing-attachment fixtures must contain a real SQLite header. Merely
+/// opening and closing a new SQLite pathname leaves a zero-byte file, which
+/// safe admission correctly treats as incomplete initialization.
+fn initialized_existing_file(path: &std::path::Path) {
+    Connection::open(path)
+        .unwrap()
+        .execute_batch("PRAGMA user_version = 0")
+        .unwrap();
+}
+
 fn binding() -> StoreRuntimeBindingV1 {
     serde_json::from_value(serde_json::json!({
         "shard_id": StoreShardIdV1::project(
@@ -110,7 +120,7 @@ fn health_request(
 fn repository_factory_attaches_writer_and_reserved_reader_runtime() {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("project.db");
-    Connection::open(&path).unwrap();
+    initialized_existing_file(&path);
     let path = path.canonicalize().unwrap();
     let binding = binding();
     let locator = VerifiedStoreLocatorV1::new(
@@ -148,7 +158,7 @@ fn repository_factory_attaches_writer_and_reserved_reader_runtime() {
 fn a_typed_read_awaited_on_a_native_worker_parks_no_native_thread() {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("sessions.db");
-    Connection::open(&path).unwrap();
+    initialized_existing_file(&path);
     let path = path.canonicalize().unwrap();
     let binding = binding();
     let locator = VerifiedStoreLocatorV1::new(
@@ -206,7 +216,7 @@ fn a_typed_read_awaited_on_a_native_worker_parks_no_native_thread() {
 fn temporal_health_dispatch_uses_the_reserved_reader_lane() {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("sessions.db");
-    Connection::open(&path).unwrap();
+    initialized_existing_file(&path);
     let path = path.canonicalize().unwrap();
     let binding = binding();
     let locator = VerifiedStoreLocatorV1::new(
@@ -239,7 +249,7 @@ fn temporal_health_dispatch_uses_the_reserved_reader_lane() {
 fn at_least_reads_refuse_coverage_without_a_committed_watermark() {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("sessions.db");
-    Connection::open(&path).unwrap();
+    initialized_existing_file(&path);
     let path = path.canonicalize().unwrap();
     let binding = binding();
     let locator = VerifiedStoreLocatorV1::new(

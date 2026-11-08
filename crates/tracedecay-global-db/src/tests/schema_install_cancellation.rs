@@ -42,7 +42,12 @@ impl EmptyStore {
         .unwrap();
         let path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::File::create(&path).unwrap();
+        // Exercise an initialized SQLite database with no application schema.
+        // A zero-byte placeholder is an incomplete store, not an attachable DB.
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch("PRAGMA user_version = 0")
+            .unwrap();
         Self {
             path,
             _scope: scope,
