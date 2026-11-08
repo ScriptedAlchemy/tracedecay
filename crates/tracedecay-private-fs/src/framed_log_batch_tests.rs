@@ -214,10 +214,7 @@ fn durable_batch_refuses_same_inode_mutation_after_early_flush() {
     }
     let path = root.path().join("segment-0.tmp");
     let before = fs::metadata(&path).expect("original metadata");
-    let mut writer = File::options()
-        .write(true)
-        .open(&path)
-        .expect("same inode");
+    let mut writer = File::options().write(true).open(&path).expect("same inode");
     writer
         .write_all(b"changed segment!")
         .expect("same-length mutation");
