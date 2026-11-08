@@ -1737,11 +1737,20 @@ impl DaemonCodeIndexPublicationStoreV1 {
                     }
                     after
                 };
+                #[cfg(not(unix))]
+                let original = file.metadata().map_err(Self::unavailable)?;
                 staged
                     .durable
-                    .written(&temporary_path, &file)
+                    .written_with_identity(&temporary_path, &file, &original)
                     .map_err(Self::unavailable)?;
-                #[cfg(unix)]
+                // On Linux the batch performed its final identity checks
+                // before enrolling the member. No fallible post-admission
+                // check may remove its pathname while retaining its handle.
+                #[cfg(target_os = "linux")]
+                {
+                    Ok(Some(original))
+                }
+                #[cfg(all(unix, not(target_os = "linux")))]
                 {
                     let after = file.metadata().map_err(Self::unavailable)?;
                     if !Self::same_unix_segment_identity(&original, &after) {

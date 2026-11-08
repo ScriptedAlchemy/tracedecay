@@ -237,6 +237,69 @@ fn durable_batch_refuses_same_inode_mutation_after_early_flush() {
     );
 }
 
+#[test]
+fn durable_batch_refuses_a_changed_authenticated_writer_before_admission_and_recovers() {
+    let root = tempfile::tempdir().expect("batch root");
+    let mut batch = DurableFileBatch::new();
+    for index in 0..DURABLE_BATCH_CONCURRENT_SYNCS {
+        write_member(&mut batch, root.path(), index);
+    }
+
+    let next = root.path().join("next.tmp");
+    let mut writer = File::create(&next).expect("candidate writer");
+    writer.write_all(b"next segment").expect("candidate bytes");
+    let authenticated = writer.metadata().expect("authenticated inode");
+    writer
+        .set_modified(authenticated.modified().expect("mtime") + Duration::from_secs(2))
+        .expect("change metadata after authentication");
+    #[cfg(feature = "test-helpers")]
+    let barriers = sync_latency::inject(root.path(), Duration::ZERO);
+
+    assert_eq!(
+        batch
+            .written_with_identity(&next, &writer, &authenticated)
+            .expect_err("stale authentication must refuse admission")
+            .kind(),
+        ErrorKind::InvalidData
+    );
+    #[cfg(feature = "test-helpers")]
+    assert_eq!(
+        barriers.syncs(),
+        0,
+        "invalid next member must not flush the healthy 32-member window"
+    );
+    assert_eq!(batch.pending.len(), DURABLE_BATCH_CONCURRENT_SYNCS);
+    assert_eq!(batch.synced.len(), 0);
+    drop(writer);
+    fs::remove_file(&next).expect("discard rejected temporary");
+
+    // A new writer for the same name can be admitted because the rejected
+    // inode was never registered in the batch.
+    let mut retry = File::create(&next).expect("retry writer");
+    retry.write_all(b"next segment").expect("retry bytes");
+    let retry_identity = retry.metadata().expect("retry identity");
+    batch
+        .written_with_identity(&next, &retry, &retry_identity)
+        .expect("admit the replacement writer");
+    #[cfg(feature = "test-helpers")]
+    assert_eq!(
+        barriers.syncs(),
+        u64::try_from(DURABLE_BATCH_CONCURRENT_SYNCS).expect("window size"),
+        "the 32 accepted members need real barriers before their handles release"
+    );
+    assert_eq!(batch.pending.len(), 1);
+    assert_eq!(batch.synced.len(), DURABLE_BATCH_CONCURRENT_SYNCS);
+    drop(retry);
+    batch.sync().expect("flush the replacement member");
+    #[cfg(feature = "test-helpers")]
+    assert_eq!(
+        barriers.syncs(),
+        u64::try_from(DURABLE_BATCH_CONCURRENT_SYNCS + 1).expect("total count"),
+        "retry must not skip or duplicate durability barriers"
+    );
+    assert_eq!(fs::read(&next).expect("read back retry"), b"next segment");
+}
+
 #[cfg(feature = "test-helpers")]
 #[test]
 fn durable_batch_invalid_next_member_does_not_flush_a_full_window() {

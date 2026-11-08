@@ -150,12 +150,26 @@ impl DurableFileBatch {
 
     /// Record one fully written member file, created at `path`.
     pub fn written(&mut self, path: &Path, file: &File) -> io::Result<()> {
+        let observed = file.metadata()?;
+        self.written_with_identity(path, file, &observed)
+    }
+
+    /// Record the exact inode and metadata that the caller already authenticated
+    /// through its writer. A changed member must fail before admission, not
+    /// leave a stale handle in a later durability window.
+    pub fn written_with_identity(
+        &mut self,
+        path: &Path,
+        file: &File,
+        authenticated: &fs::Metadata,
+    ) -> io::Result<()> {
         #[cfg(target_os = "linux")]
         {
             let identity = DurableFileIdentity {
                 path: path.to_path_buf(),
-                metadata: file.metadata()?,
+                metadata: authenticated.clone(),
             };
+            identity.validate_metadata(&file.metadata()?)?;
             // An invalid incoming member must not force a full, otherwise
             // healthy window to fsync before its admission is rejected.
             identity.validate_path()?;
@@ -179,6 +193,11 @@ impl DurableFileBatch {
             if started != 0 {
                 return Err(io::Error::last_os_error());
             }
+            // This is the last fallible check before admission. There must
+            // be no caller-side validation that could delete a registered
+            // member after a successful return.
+            identity.validate_metadata(&retained.metadata()?)?;
+            identity.validate_path()?;
             self.pending.push(PendingDurableFile {
                 identity,
                 file: retained,
@@ -187,6 +206,7 @@ impl DurableFileBatch {
         }
         #[cfg(not(target_os = "linux"))]
         {
+            let _ = authenticated;
             sync_owned_file(path, file)
         }
     }
