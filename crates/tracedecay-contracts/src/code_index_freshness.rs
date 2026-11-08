@@ -122,12 +122,13 @@ pub struct CodeIndexBuildProgressV1 {
     pub blocked_reason: Option<CodeIndexBuildBlockedReasonV1>,
 }
 
-/// Observed capture/parse work before a sealed generation exists.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// Observed capture, parse, and source-reference resolution before sealing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CodeIndexPresealWorkPhaseV1 {
     Capture,
     ParseEvidence,
+    Resolution,
 }
 
 /// Independently owned attempt work, not committed text or graph pages.

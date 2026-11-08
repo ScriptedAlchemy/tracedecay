@@ -433,8 +433,12 @@ fn a_restored_parent_and_the_edit_over_it_resolve_nothing_whole() {
             .decode_active(&scope)
             .expect("the edit restores")
             .expect("an active edit");
-        let full_resolution = resolve_cross_file_references_charged(&edited.files, &mut |_| Ok(()))
-            .expect("whole reference resolution");
+        let full_resolution = resolve_cross_file_references_charged(
+            &edited.files,
+            &mut |_| Ok(()),
+            None,
+        )
+        .expect("whole reference resolution");
         let (full_edges, _) =
             edge_evidence(&edited.files, full_resolution.edges).expect("whole edge evidence");
         assert_eq!(

@@ -629,13 +629,7 @@ impl FirstGenerationWorkMarker {
                     return None;
                 }
                 if owner == prior_owner {
-                    if matches!(
-                        (prior_phase, phase),
-                        (
-                            CodeIndexPresealWorkPhaseV1::ParseEvidence,
-                            CodeIndexPresealWorkPhaseV1::Capture
-                        )
-                    )
+                    if phase < prior_phase
                         || (phase == prior_phase && completed < prior_completed)
                     {
                         return None;
@@ -846,6 +840,9 @@ fn preseal_progress_summary(
         }
         tracedecay_contracts::code_index_freshness::CodeIndexPresealWorkPhaseV1::ParseEvidence => {
             "parsing"
+        }
+        tracedecay_contracts::code_index_freshness::CodeIndexPresealWorkPhaseV1::Resolution => {
+            "resolving references"
         }
     };
     let total = progress

@@ -687,6 +687,10 @@ pub(super) fn resolve_staged_generation(
     let mut coverage = super::helpers::coverage_summary(snapshot, &[]);
     let mut source_total_bytes = 0_u64;
     let mut symbol_count = 0_u64;
+    // Counts completed, separately typed pre-seal resolution units. The
+    // denominator is intentionally absent: decoded facts, bound references,
+    // file evidence and graph-page staging are distinct kinds of work.
+    let mut resolution_work = 0_u64;
     let facts_loaded = (|| -> Result<(), CodeIndexProductionErrorV1> {
         for descriptor in &ordered {
             super::lexical_page_source::checkpoint(control)?;
@@ -755,6 +759,12 @@ pub(super) fn resolve_staged_generation(
             }
             facts.push(compact);
             retain_facts(settled)?;
+            resolution_work = resolution_work.saturating_add(1);
+            control.observed_preseal_work(super::CodeIndexPresealWorkV1 {
+                phase: super::CodeIndexPresealWorkPhaseV1::Resolution,
+                completed_items: resolution_work,
+                total_items: None,
+            });
         }
         Ok(())
     })();
@@ -777,9 +787,18 @@ pub(super) fn resolve_staged_generation(
         retained_facts_bytes = facts_bytes,
         "cold resolution phase started"
     );
-    let resolved = super::helpers::resolve_cross_file_references_charged(&facts, &mut |bytes| {
-        retain_facts(count(facts_bytes)?.saturating_add(bytes))
-    })?;
+    let resolved = super::helpers::resolve_cross_file_references_charged(
+        &facts,
+        &mut |bytes| retain_facts(count(facts_bytes)?.saturating_add(bytes)),
+        Some(&mut || {
+            resolution_work = resolution_work.saturating_add(1);
+            control.observed_preseal_work(super::CodeIndexPresealWorkV1 {
+                phase: super::CodeIndexPresealWorkPhaseV1::Resolution,
+                completed_items: resolution_work,
+                total_items: None,
+            });
+        }),
+    )?;
     let super::helpers::CrossFileResolutionV1 {
         mut edges,
         gaps,
@@ -943,6 +962,12 @@ pub(super) fn resolve_staged_generation(
                 bytes: &bytes,
             })?;
             file_evidence.push(descriptor);
+            resolution_work = resolution_work.saturating_add(1);
+            control.observed_preseal_work(super::CodeIndexPresealWorkV1 {
+                phase: super::CodeIndexPresealWorkPhaseV1::Resolution,
+                completed_items: resolution_work,
+                total_items: None,
+            });
             Ok(())
         },
     )?;
@@ -1091,6 +1116,12 @@ pub(super) fn resolve_staged_generation(
         &mut |page| {
             super::lexical_page_source::checkpoint(control)?;
             code_graph_pages.push(publish_code_graph_page(page, &BTreeSet::new(), publish)?);
+            resolution_work = resolution_work.saturating_add(1);
+            control.observed_preseal_work(super::CodeIndexPresealWorkV1 {
+                phase: super::CodeIndexPresealWorkPhaseV1::Resolution,
+                completed_items: resolution_work,
+                total_items: None,
+            });
             if code_graph_pages.len().is_power_of_two() {
                 tracing::trace!(
                     phase = "graph",

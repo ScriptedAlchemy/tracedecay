@@ -69,6 +69,7 @@ fn preseal_phase_label(phase: CodeIndexPresealWorkPhaseV1) -> &'static str {
     match phase {
         CodeIndexPresealWorkPhaseV1::Capture => "capture",
         CodeIndexPresealWorkPhaseV1::ParseEvidence => "parse_evidence",
+        CodeIndexPresealWorkPhaseV1::Resolution => "resolution",
     }
 }
 

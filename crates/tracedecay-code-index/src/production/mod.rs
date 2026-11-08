@@ -282,8 +282,8 @@ pub struct CodeIndexCapturedFileV1 {
     pub sensitivity_level: SensitivityLevelV1,
 }
 
-/// Successful pre-seal work observed before a generation ID/digest exists.
-/// Neither event represents a durable text or native graph commit.
+/// Successful pre-seal capture, parse, or resolution work before a generation seals.
+/// These observations never represent durable text or native graph commits.
 pub use tracedecay_contracts::code_index_freshness::CodeIndexPresealWorkPhaseV1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

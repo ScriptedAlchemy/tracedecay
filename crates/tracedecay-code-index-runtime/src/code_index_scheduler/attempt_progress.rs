@@ -1,5 +1,5 @@
 //! Separately typed progress authority before immutable generation sealing.
-//! A real capture/parse callback is the only source of work or timestamps.
+//! Real capture, parse, and resolution callbacks alone advance the work clock.
 
 use std::sync::{Arc, PoisonError, RwLock};
 
@@ -71,7 +71,19 @@ impl CodeIndexBuildAttemptSlotStateV1 {
             return false;
         };
         let new_phase = current.phase != work.phase;
-        if (new_phase && work.phase != CodeIndexPresealWorkPhaseV1::ParseEvidence)
+        // Each phase owns different physical units. Admit only its real next
+        // stage; an earlier delayed callback must not roll resolution back.
+        if (new_phase
+            && !matches!(
+                (current.phase, work.phase),
+                (
+                    CodeIndexPresealWorkPhaseV1::Capture,
+                    CodeIndexPresealWorkPhaseV1::ParseEvidence
+                ) | (
+                    CodeIndexPresealWorkPhaseV1::ParseEvidence,
+                    CodeIndexPresealWorkPhaseV1::Resolution
+                )
+            ))
             || (!new_phase && work.completed_items <= current.completed_items)
         {
             return false;
@@ -173,6 +185,57 @@ mod tests {
         assert_eq!(ended.last_progress_micros, Some(100));
         assert!(!slot.observe(id, work(CodeIndexPresealWorkPhaseV1::ParseEvidence, 2, Some(3)), 200));
         assert_eq!(slot.snapshot().unwrap(), ended);
+    }
+
+    #[test]
+    fn resolution_carries_real_work_without_accepting_stale_parser_reports() {
+        let mut slot = CodeIndexBuildAttemptSlotStateV1::default();
+        let attempt = slot.begin(4, 7);
+        assert!(slot.observe(
+            attempt,
+            work(CodeIndexPresealWorkPhaseV1::Capture, 2, Some(2)),
+            100,
+        ));
+        assert!(slot.observe(
+            attempt,
+            work(CodeIndexPresealWorkPhaseV1::ParseEvidence, 2, Some(2)),
+            200,
+        ));
+        let parsed = slot.snapshot().unwrap();
+        assert!(slot.observe(
+            attempt,
+            work(CodeIndexPresealWorkPhaseV1::Resolution, 1, None),
+            300,
+        ));
+        let resolved = slot.snapshot().unwrap();
+        assert_eq!(resolved.phase, CodeIndexPresealWorkPhaseV1::Resolution);
+        assert_eq!(resolved.completed_items, 1);
+        assert_eq!(resolved.total_items, None);
+        assert!(resolved.progress_epoch > parsed.progress_epoch);
+        assert_eq!(resolved.last_progress_micros, Some(300));
+        assert!(!slot.observe(
+            attempt,
+            work(CodeIndexPresealWorkPhaseV1::ParseEvidence, 3, Some(3)),
+            900,
+        ));
+        assert!(!slot.observe(
+            attempt,
+            work(CodeIndexPresealWorkPhaseV1::Resolution, 1, None),
+            901,
+        ));
+        assert_eq!(slot.snapshot().unwrap(), resolved);
+        assert!(slot.observe(
+            attempt,
+            work(CodeIndexPresealWorkPhaseV1::Resolution, 2, None),
+            400,
+        ));
+        assert_eq!(slot.snapshot().unwrap().last_progress_micros, Some(400));
+        slot.finish(attempt);
+        assert!(!slot.observe(
+            attempt,
+            work(CodeIndexPresealWorkPhaseV1::Resolution, 3, None),
+            999,
+        ));
     }
 
     #[test]

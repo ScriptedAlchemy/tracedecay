@@ -126,12 +126,21 @@ fn cold_build_reports_actual_preseal_capture_and_parser_evidence() {
     assert!(!observed.active, "a finished attempt cannot appear stalled");
     assert_eq!(
         observed.phase,
-        tracedecay_code_index::production::CodeIndexPresealWorkPhaseV1::ParseEvidence
+        tracedecay_code_index::production::CodeIndexPresealWorkPhaseV1::Resolution
     );
-    assert_eq!(observed.completed_items, 2);
-    assert_eq!(observed.total_items, Some(2));
+    assert!(
+        observed.completed_items >= 2,
+        "real cold resolution must process both files"
+    );
+    assert_eq!(
+        observed.total_items, None,
+        "heterogeneous resolution work has no denominator"
+    );
     assert!(observed.last_progress_micros.is_some_and(|at| at > 0));
-    assert!(observed.progress_epoch >= 5, "two captures and two parses plus start");
+    assert!(
+        observed.progress_epoch >= 7,
+        "two captures, two parser-backed files, two resolution facts and attempt start"
+    );
 }
 
 /// A restart's retained-source verification is real work and must report
