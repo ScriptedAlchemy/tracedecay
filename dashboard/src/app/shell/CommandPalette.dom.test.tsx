@@ -189,6 +189,45 @@ describe('CommandPalette keyboard operation', () => {
     expect(getByTestId('palette-location').textContent).toBe(original);
   });
 
+  it.each([
+    [
+      '/loom?scope=project-1&loomRenderer=strata&session=run-4',
+      'Loom',
+      '/loom?scope=project-1&loomRenderer=strata&session=run-4&scopeLabel=Alpha',
+    ],
+    [
+      '/brain?scope=project-1&scopeLabel=OldName&field=sigma&node=node-3',
+      'Brain',
+      '/brain?scope=project-1&scopeLabel=Alpha&field=sigma&node=node-3',
+    ],
+  ])('reconciles the label in %s without dropping its selected view', async (url, label, expected) => {
+    const user = userEvent.setup();
+    useScope.getState().selectProject('project-1', 'Alpha', 'active');
+    stubListing(listing([]));
+    const { findByRole, getByTestId } = renderPalette(url);
+    await findByRole('listbox');
+
+    await user.keyboard(label);
+    await waitFor(() => expect(activeOptionLabel()).toBe(label));
+    await user.keyboard('{Enter}');
+    expect(getByTestId('palette-location').textContent).toBe(expected);
+  });
+
+  it('does not retain another project\'s view when switching to the selected scope', async () => {
+    const user = userEvent.setup();
+    useScope.getState().selectProject('project-1', 'Alpha', 'active');
+    stubListing(listing([]));
+    const { findByRole, getByTestId } = renderPalette(
+      '/loom?scope=project-2&scopeLabel=Beta&loomRenderer=rails',
+    );
+    await findByRole('listbox');
+
+    await user.keyboard('loom{Enter}');
+    expect(getByTestId('palette-location').textContent).toBe(
+      '/loom?scope=project-1&scopeLabel=Alpha',
+    );
+  });
+
   it('does not carry a workspace view into a different workspace', async () => {
     const user = userEvent.setup();
     stubListing(listing([]));
