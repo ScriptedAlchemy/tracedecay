@@ -1537,6 +1537,24 @@ fn copy_sqlite_family_at_generation(
     destination: &Path,
     generation: &tracedecay_runtime_core::sqlite_read_snapshot::SourceGeneration,
 ) -> std::io::Result<()> {
+    // A rollback-mode writer may spill uncommitted pages into the main file
+    // while their undo records remain in -journal. Copying main/WAL/SHM alone
+    // can report those uncommitted rows as registered projects. Refuse the
+    // incomplete family rather than returning false retention authority.
+    let journal_path = sqlite_family_member(source, "-journal");
+    match std::fs::symlink_metadata(&journal_path) {
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "SQLite report source has rollback journal '{}'; main/WAL/SHM snapshot is unsafe",
+                    journal_path.display()
+                ),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
     // Refuse nonregular and linked source members before copying any bytes.
     // Path::is_file() follows symlinks, potentially copying an arbitrarily
     // large foreign file into the report's temporary SQLite snapshot.
@@ -2628,6 +2646,86 @@ mod tests {
             error.to_string().contains("symbolic link"),
             "the error must name the profile registry's disallowed link: {error}"
         );
+    }
+
+    #[test]
+    fn registry_snapshot_refuses_rollback_journal_and_recovers_after_rollback() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let registry = temporary.path().join(GLOBAL_DB_FILENAME);
+        let writer = rusqlite::Connection::open(&registry).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode = DELETE;
+                 CREATE TABLE code_projects (
+                     project_id TEXT PRIMARY KEY, canonical_root TEXT NOT NULL
+                 );
+                 INSERT INTO code_projects VALUES ('proj_committed', '/repos/committed');
+                 BEGIN IMMEDIATE;
+                 UPDATE code_projects SET canonical_root = '/repos/uncommitted'
+                 WHERE project_id = 'proj_committed';",
+            )
+            .unwrap();
+        let journal = sqlite_family_member(&registry, "-journal");
+        assert!(journal.is_file(), "the uncommitted update needs an undo journal");
+
+        let destination = temporary.path().join("snapshot.db");
+        let error = copy_sqlite_family(&registry, &destination)
+            .expect_err("a main-only snapshot must not read uncommitted rollback pages");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("rollback journal"), "{error}");
+        assert!(!destination.exists(), "refusal must happen before any copy");
+
+        writer.execute_batch("ROLLBACK").unwrap();
+        drop(writer);
+        assert!(!journal.exists(), "DELETE-mode rollback removes the journal");
+        copy_sqlite_family(&registry, &destination).unwrap();
+        let snapshot = rusqlite::Connection::open(&destination).unwrap();
+        let root: String = snapshot
+            .query_row(
+                "SELECT canonical_root FROM code_projects WHERE project_id = 'proj_committed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(root, "/repos/committed");
+    }
+
+    #[asupersync::test]
+    async fn offline_report_refuses_rollback_journal_instead_of_misclassifying_stores() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let profile_root = temporary.path().join("profile");
+        let project = profile_root.join("projects/proj_committed");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("sessions.db"), b"retained session").unwrap();
+        let registry = profile_root.join(GLOBAL_DB_FILENAME);
+        let writer = rusqlite::Connection::open(&registry).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode = DELETE;
+                 CREATE TABLE code_projects (
+                     project_id TEXT PRIMARY KEY, canonical_root TEXT NOT NULL
+                 );
+                 INSERT INTO code_projects VALUES ('proj_committed', '/repos/committed');
+                 BEGIN IMMEDIATE;
+                 UPDATE code_projects SET canonical_root = '/repos/uncommitted'
+                 WHERE project_id = 'proj_committed';",
+            )
+            .unwrap();
+        assert!(sqlite_family_member(&registry, "-journal").is_file());
+
+        let error = build_storage_report(&profile_root)
+            .await
+            .expect_err("an active rollback journal must not become registration truth");
+        assert!(matches!(&error, TraceDecayError::Database { .. }), "{error}");
+        assert!(error.to_string().contains("rollback journal"), "{error}");
+
+        writer.execute_batch("ROLLBACK").unwrap();
+        drop(writer);
+        let report = build_storage_report(&profile_root).await.unwrap();
+        assert_eq!(report.stores.len(), 1);
+        assert_eq!(report.stores[0].project_id, "proj_committed");
+        assert_eq!(report.stores[0].canonical_root, "/repos/committed");
+        assert_eq!(report.unregistered_dir_count, 0);
     }
 
     #[cfg(unix)]
