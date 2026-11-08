@@ -286,6 +286,8 @@ pub(crate) async fn rearm_queued_projection_retries(
     let now = tracedecay_contracts::clock::now_micros().0;
     let Some(last_rowid) = query_optional_i64(
         &database.read_connection(),
+        // qpsg-exempt: the fixed terminal sentinel anchors index eligibility;
+        // the dynamic due-time bound further narrows eligible retry rows.
         "SELECT MAX(rowid) FROM projection_queue
          WHERE next_retry_at_micros > ?1 AND next_retry_at_micros < 9223372036854775807",
         params![now],
@@ -330,6 +332,8 @@ async fn rearm_projection_retry_batch(
         .map_err(|error| storage(OPERATION, error))?;
     let Some(batch_end) = query_optional_i64(
         &transaction,
+        // qpsg-exempt: the fixed terminal sentinel keeps the eligible-row
+        // partial-index predicate explicit; the due-time bound is additional.
         "SELECT MAX(rowid) FROM (
             SELECT rowid FROM projection_queue
             WHERE rowid > ?1 AND rowid <= ?2
@@ -349,6 +353,8 @@ async fn rearm_projection_retry_batch(
     };
     let rows = transaction
         .execute(
+            // qpsg-exempt: the literal terminal sentinel remains in WHERE;
+            // the bound deadline excludes already-due rows during restart.
             "UPDATE projection_queue SET next_retry_at_micros = 0
              WHERE rowid > ?1 AND rowid <= ?2
                AND next_retry_at_micros > ?3
