@@ -229,6 +229,7 @@ impl WorktreeChangeClassificationV1 {
                 let parent = relative.parent().unwrap_or_else(|| Path::new(""));
                 let excluded = if relative
                     .ancestors()
+                    .skip(1)
                     .filter_map(Path::to_str)
                     .any(|ancestor| parent_gitlinks.contains(ancestor))
                 {
@@ -520,6 +521,13 @@ mod nested_repository_tests {
         fixture_git(&parent, &["add", ".gitmodules", "app"]);
         fixture_git(&parent, &["commit", "-qm", "register submodule"]);
 
+        // A registered, clean gitlink is not itself a source file or a
+        // dirty nested descendant. It must not defeat clean HEAD reuse.
+        let clean_repository = tracedecay_runtime_core::git_open::open(&parent).unwrap();
+        let clean = WorktreeChangeClassificationV1::classify(&clean_repository).unwrap();
+        assert!(!clean.has_changes());
+        assert!(clean.candidate_paths().contains("src/lib.rs"));
+
         // Git still records app as a mode-160000 gitlink in HEAD, but
         // removing the staged gitlink and child marker makes child files
         // appear untracked to the parent. They must never enter its index.
@@ -541,5 +549,4 @@ mod nested_repository_tests {
         assert!(classified.changed_paths().contains("app/src/lib.rs"));
         assert!(classified.candidate_paths().contains("src/lib.rs"));
     }
-
 }
