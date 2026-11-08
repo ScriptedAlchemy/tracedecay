@@ -74,7 +74,11 @@ export function CodeIndexPipeline({
       ) : null}
       {progress.length === 0 ? (
         worktrees.some((worktree) => worktree.restore_progress != null) ? null : (
-          <p className="mt-2 text-body text-text-muted">no active code-index build</p>
+          <p className="mt-2 text-body text-text-muted">
+            {worktrees.some((worktree) => worktree.rebuild_in_flight)
+              ? 'code-index build in progress; progress not yet reported'
+              : 'no active code-index build'}
+          </p>
         )
       ) : (
         <div className="mt-2 flex flex-col gap-2">
@@ -217,6 +221,9 @@ function CodeIndexBuildCard({ progress }: { progress: CodeIndexBuildProgressV1 }
   );
 }
 
+// Serving readiness can describe the previous generation while its successor
+// is still capturing sources, or while a lexical artifact is being restored.
+// Neither operation is required to have a committed build-progress report yet.
 export function hasActiveCodeIndexBuild(
   result: EnvelopeResult<CodeIndexFreshnessPayloadV1> | undefined,
 ): boolean {
@@ -224,7 +231,10 @@ export function hasActiveCodeIndexBuild(
     result?.outcome === 'envelope' &&
     (result.envelope.domain_state !== 'ready' ||
       result.envelope.payload.worktrees.some(
-        (worktree) => worktree.progress != null && worktree.progress.phase !== 'ready',
+        (worktree) =>
+          worktree.rebuild_in_flight ||
+          worktree.restore_progress != null ||
+          (worktree.progress != null && worktree.progress.phase !== 'ready'),
       ))
   );
 }
