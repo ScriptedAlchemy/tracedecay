@@ -189,6 +189,7 @@ pub struct CodeIndexBuildProgressSlotStateV1 {
     generation_id: Option<CodeGenerationId>,
     pub(super) owner_epoch: u64,
     progress_epoch: u64,
+    last_progress_micros: Option<i64>,
     snapshot: Option<Arc<CodeIndexBuildProgressV1>>,
 }
 
@@ -198,6 +199,7 @@ impl CodeIndexBuildProgressSlotStateV1 {
         self.progress_epoch = self.progress_epoch.saturating_add(1).max(1);
         self.generation_id = Some(generation_id);
         self.snapshot = None;
+        self.last_progress_micros = None;
         self.owner_epoch
     }
 
@@ -244,15 +246,14 @@ impl CodeIndexBuildProgressSlotStateV1 {
                 return false;
             }
         }
-        // A progress producer can timestamp its snapshot before another
-        // producer publishes. Preserve the most recent observed timestamp
-        // even when the later lock acquisition delivers an older sample.
-        // Replacing the generation clears the snapshot and starts a new owner.
-        if let Some(current) = self.snapshot.as_ref() {
-            snapshot.last_progress_micros = snapshot
-                .last_progress_micros
-                .max(current.last_progress_micros);
+        // The next producer may have assembled its report before an earlier
+        // producer acquired the lock. Keep the owner's latest observed time
+        // even across a verified staging restart (which clears the snapshot).
+        // Replacing the owner clears this timestamp authority.
+        if let Some(latest) = self.last_progress_micros {
+            snapshot.last_progress_micros = snapshot.last_progress_micros.max(latest);
         }
+        self.last_progress_micros = Some(snapshot.last_progress_micros);
         self.progress_epoch = self.progress_epoch.saturating_add(1).max(1);
         snapshot.progress_epoch = self.progress_epoch;
 

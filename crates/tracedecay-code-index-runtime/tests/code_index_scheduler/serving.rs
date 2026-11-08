@@ -3128,12 +3128,18 @@ fn a_new_staging_attempt_can_truthfully_restart_committed_progress() {
     // the slot, rejecting counter regressions would leave status frozen.
     assert!(slot.begin_staging_attempt(&generation, owner));
     let mut restarted = progress_snapshot_for_generation(&generation, 0);
-    restarted.last_progress_micros = 600;
+    // A wall-clock adjustment or delayed sample must not rewind the
+    // timestamp even though a verified new staging attempt reset its counts.
+    restarted.last_progress_micros = 400;
     restarted.phase = CodeIndexBuildPhaseV1::SourceScan;
     assert!(slot.publish(&generation, owner, restarted));
     let restarted = slot.snapshot().expect("new staging attempt");
     assert_eq!(restarted.committed_pages, 0);
     assert_eq!(restarted.phase, CodeIndexBuildPhaseV1::SourceScan);
+    assert_eq!(
+        restarted.last_progress_micros, 500,
+        "staging restart must not rewind the same owner's last progress timestamp"
+    );
     assert!(
         restarted.progress_epoch > old_epoch,
         "a new verified staging attempt must produce a newer report epoch"
