@@ -648,8 +648,8 @@ impl DaemonCodeIndexPreparationV1 {
         } = *files;
         evidence.rollback_unattached(directory.path())?;
         drop(evidence);
-        // Windows cannot unlink an open staging file. Release any read pins
-        // before staged cleanup, even when the preparation is aborted.
+        // Release pinned descriptors before staged cleanup so a failed
+        // preparation cannot retain unlinked sealed content.
         #[cfg(unix)]
         drop(pinned_segment_reads);
         drop(segments);
@@ -859,6 +859,16 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                             })?;
                             if unchanged {
                                 files.pinned_segment_reads.push_back(entry);
+                            } else {
+                                // A sealed content-addressed path must not be
+                                // replaced during one preparation. Reopening it
+                                // could return bytes that do not match the
+                                // manifest's digest, even with the same size.
+                                buffer.clear();
+                                return Err(CodeIndexProductionErrorV1::Contract(
+                                    "staged sealed segment identity changed while pinned"
+                                        .to_owned(),
+                                ));
                             }
                         }
                         if files

@@ -149,6 +149,24 @@ fn staged_segment_range_reads_open_once_per_cached_file_and_revalidate_replaceme
         1,
         "16 overlapping production reads must open the first file once",
     );
+    let invalid_range = reader(
+        SealedGenerationSegmentReadV1::Range {
+            digest: &digests[0],
+            size_bytes: contents[0].len() as u64,
+            offset: contents[0].len() as u64 - 1,
+            length: 2,
+        },
+        &mut read,
+    );
+    assert!(
+        matches!(invalid_range, Err(CodeIndexProductionErrorV1::Contract(_))),
+        "a range outside the sealed extent must be refused",
+    );
+    assert_eq!(
+        preparation.staged_segment_read_open_attempts_for_test(),
+        1,
+        "rejecting a bad range must not reopen the pinned file",
+    );
     for (digest, bytes) in digests.iter().zip(&contents).skip(1) {
         reader(
             SealedGenerationSegmentReadV1::Whole {
@@ -185,7 +203,15 @@ fn staged_segment_range_reads_open_once_per_cached_file_and_revalidate_replaceme
         .expect("staging root")
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .find(|path| path.is_dir())
+        .find(|path| {
+            path.is_dir()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.starts_with(CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1)
+                    })
+        })
         .expect("one active preparation directory");
     let suffix = sha256_hex_suffix(digests[0].as_str()).expect("digest suffix");
     let staged_path = staging_directory.join(format!("segment-{suffix}.json"));
@@ -193,22 +219,29 @@ fn staged_segment_range_reads_open_once_per_cached_file_and_revalidate_replaceme
     let replacement = vec![b'Z'; contents[0].len()];
     std::fs::write(&replacement_path, &replacement).expect("write replacement bytes");
     std::fs::rename(replacement_path, staged_path).expect("replace the pinned path");
-    reader(
+    let replaced = reader(
         SealedGenerationSegmentReadV1::Whole {
             digest: &digests[0],
             size_bytes: contents[0].len() as u64,
         },
         &mut read,
-    )
-    .expect("read current pathname rather than an unlinked handle");
-    assert_eq!(read, replacement, "a stale cached inode must never serve");
+    );
+    assert!(
+        matches!(replaced, Err(CodeIndexProductionErrorV1::Contract(_))),
+        "a changed sealed pathname must be refused, not silently reread",
+    );
+    assert!(read.is_empty(), "a refused read must not expose prior bytes");
     assert_eq!(
         preparation.staged_segment_read_open_attempts_for_test(),
-        11,
-        "path replacement must trigger another real file open",
+        10,
+        "refusing a replaced pinned file must not open untrusted bytes",
     );
     drop(reader);
     preparation.abort().expect("abort and clean staged files");
+    assert!(
+        !staged_path.exists(),
+        "an aborted preparation must remove a replaced staged segment",
+    );
 }
 
 #[test]
