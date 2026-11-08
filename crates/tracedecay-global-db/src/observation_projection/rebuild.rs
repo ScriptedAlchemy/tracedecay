@@ -220,15 +220,19 @@ pub async fn project_queued_observations(
     if max == 0 {
         return Ok(ProjectionDrainBatch::default());
     }
-    // An idle drain needs no writer lease. This constant-work existence probe
-    // deliberately does not scan for a ready head: large queues of terminal
-    // collisions must not add a second ordered scan to active write windows.
-    // The transaction below remains the authority for concurrent admissions
-    // and enforces ordering after taking the writer lease.
+    // Terminal-collision rows can remain parked indefinitely. Probe for any
+    // nonterminal work before taking a writer lease so idle polls never rewrite
+    // a terminal-only queue. The deadline performance index makes this a
+    // bounded lookup on converged stores; the writer still verifies ordered
+    // readiness after concurrent admissions race this read-only hint.
     {
         let reader = database.read_connection();
         let mut rows = reader
-            .query("SELECT 1 FROM projection_queue LIMIT 1", ())
+            .query(
+                "SELECT 1 FROM projection_queue
+                 WHERE next_retry_at_micros < ?1 LIMIT 1",
+                params![PROJECTION_TERMINAL_RETRY_MICROS],
+            )
             .await
             .map_err(|error| storage("probe empty projection queue", error))?;
         if rows

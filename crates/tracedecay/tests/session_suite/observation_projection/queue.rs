@@ -712,17 +712,45 @@ async fn batched_projection_resumes_after_restart_without_replaying_parked_or_de
         assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 5);
         assert_eq!(table_count(&tmp, "projection_queue").await, 1);
 
-        let idle = store
-            .project_queued_observations(32)
-            .await
-            .unwrap()
-            .unwrap();
+        // A terminal-only queue may survive indefinitely; it must not take
+        // a writer lease while another service holds the same database writer.
+        let writer = rusqlite::Connection::open(&database_path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let idle = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            store.project_queued_observations(32),
+        )
+        .await
+        .expect("a terminal-only queue cannot acquire the writer")
+        .unwrap()
+        .unwrap();
+        writer.execute_batch("ROLLBACK").unwrap();
         assert!(idle.items.is_empty());
         assert!(!idle.has_more);
         assert_eq!(
             store.projection_checkpoint().await.unwrap().last_sequence(),
             5
         );
+
+        // The skip is not cached: a later admission still advances the
+        // durable checkpoint past the parked terminal collision.
+        persist(
+            &store,
+            observation(
+                "session-windowed-restart",
+                500,
+                600,
+                "receipt.windowed.5",
+                conversational_payload("message-windowed-5", "post-terminal admission"),
+            ),
+            Some(cursor("session-windowed-restart", 500)),
+        )
+        .await;
+        let resumed = store.project_queued_observations(32).await.unwrap().unwrap();
+        assert_eq!(resumed.items.len(), 1);
+        assert!(!resumed.has_more);
+        assert_eq!(store.projection_checkpoint().await.unwrap().last_sequence(), 6);
+        assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 6);
     }
 }
 
