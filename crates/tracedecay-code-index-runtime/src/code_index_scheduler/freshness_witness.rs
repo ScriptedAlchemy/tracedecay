@@ -1137,11 +1137,7 @@ mod tracked_parent_boundary_tests {
         std::fs::create_dir_all(parent.join("ignored")).unwrap();
         std::fs::write(parent.join(".gitignore"), "ignored/\n").unwrap();
         std::fs::write(parent.join("parent.rs"), "pub fn parent() {}\n").unwrap();
-        std::fs::write(
-            parent.join("ignored/ordinary.rs"),
-            "pub fn ordinary() {}\n",
-        )
-        .unwrap();
+        std::fs::write(parent.join("ignored/ordinary.rs"), "pub fn ordinary() {}\n").unwrap();
         git(&parent, &["add", ".gitignore", "parent.rs"]);
         git(&parent, &["commit", "-qm", "parent"]);
         git(
