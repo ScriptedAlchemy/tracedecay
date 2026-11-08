@@ -260,8 +260,9 @@ pub(crate) struct RearmedProjectionRetries {
 /// for immediate replay so recovery does not wait out a dead process's backoff.
 /// Attempt counts, last errors, and terminal collision deadlines persist.
 ///
-/// The reader captures the last retryable row before taking any writer lease.
-/// Already-armed and terminal-only queues therefore need no writer transaction.
+/// The reader captures the last still-deferred row before taking any writer
+/// lease. Already-due, already-armed, and terminal-only queues need no writer
+/// transaction; expired deadlines remain eligible for ordinary projection.
 /// Each write window selects and updates at most `batch_rows` eligible rows
 /// under the same writer lease; foreground writes interleave between windows.
 /// Scanning past ineligible rows can still scale with the queue. Rows beyond
@@ -282,11 +283,12 @@ pub(crate) async fn rearm_queued_projection_retries(
         ));
     }
     let mut rearmed = RearmedProjectionRetries::default();
+    let now = tracedecay_contracts::clock::now_micros().0;
     let Some(last_rowid) = query_optional_i64(
         &database.read_connection(),
         "SELECT MAX(rowid) FROM projection_queue
-         WHERE next_retry_at_micros > 0 AND next_retry_at_micros < 9223372036854775807",
-        (),
+         WHERE next_retry_at_micros > ?1 AND next_retry_at_micros < 9223372036854775807",
+        params![now],
     )
     .await?
     else {
@@ -295,7 +297,7 @@ pub(crate) async fn rearm_queued_projection_retries(
     let mut after_rowid = 0_i64;
     while after_rowid < last_rowid {
         let Some((batch_end, rows)) =
-            rearm_projection_retry_batch(database, after_rowid, last_rowid, batch_rows).await?
+            rearm_projection_retry_batch(database, after_rowid, last_rowid, batch_rows, now).await?
         else {
             break;
         };
@@ -306,7 +308,7 @@ pub(crate) async fn rearm_queued_projection_retries(
     Ok(rearmed)
 }
 
-/// Re-arms the next `batch_rows` deferred rows after `after_rowid` in one
+/// Re-arms the next `batch_rows` not-yet-due rows after `after_rowid` in one
 /// writer transaction and returns the last rowid it covered.
 #[tracing::instrument(
     name = "global_db.observation_projection.rearm_retries.batch",
@@ -318,6 +320,7 @@ async fn rearm_projection_retry_batch(
     after_rowid: i64,
     last_rowid: i64,
     batch_rows: i64,
+    now_micros: i64,
 ) -> ProjectionStoreResult<Option<(i64, u64)>> {
     const OPERATION: &str = "rearm queued projection retries";
     let transaction = database
@@ -329,11 +332,11 @@ async fn rearm_projection_retry_batch(
         "SELECT MAX(rowid) FROM (
             SELECT rowid FROM projection_queue
             WHERE rowid > ?1 AND rowid <= ?2
-              AND next_retry_at_micros > 0
+              AND next_retry_at_micros > ?4
               AND next_retry_at_micros < 9223372036854775807
             ORDER BY rowid LIMIT ?3
          )",
-        params![after_rowid, last_rowid, batch_rows],
+        params![after_rowid, last_rowid, batch_rows, now_micros],
     )
     .await?
     else {
@@ -347,9 +350,9 @@ async fn rearm_projection_retry_batch(
         .execute(
             "UPDATE projection_queue SET next_retry_at_micros = 0
              WHERE rowid > ?1 AND rowid <= ?2
-               AND next_retry_at_micros > 0
+               AND next_retry_at_micros > ?3
                AND next_retry_at_micros < 9223372036854775807",
-            params![after_rowid, batch_end],
+            params![after_rowid, batch_end, now_micros],
         )
         .await
         .map_err(|error| storage(OPERATION, error))?;

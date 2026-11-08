@@ -205,6 +205,113 @@ async fn rearm_walks_deferred_retries_in_bounded_batches() {
 }
 
 #[asupersync::test]
+async fn expired_retry_deadlines_survive_restarts_without_rearm_writes() {
+    let harness = RegisteredGlobalDbHarness::open("rearm-expired-deadlines").await;
+    seed_queue(&harness, 8, 0).await;
+
+    // These positive deadlines have already elapsed. Normal projection may
+    // consume them directly; a restart must not rewrite the entire overdue
+    // queue just to change each deadline to zero.
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    assert_eq!(
+        transaction
+            .execute("UPDATE projection_queue SET next_retry_at_micros = 1", ())
+            .await
+            .unwrap(),
+        8
+    );
+    transaction.commit().await.unwrap();
+
+    let (harness, _convergence) = harness.restart_for_daemon().await;
+    let before = writer_telemetry(&harness.registered).transactions;
+    for _ in 0..2 {
+        assert_eq!(
+            rearm_queued_projection_retries(harness.registered.runtime_database(), 2)
+                .await
+                .unwrap(),
+            RearmedProjectionRetries::default(),
+            "expired retries already admit projection and need no restart writes"
+        );
+        assert_eq!(
+            writer_telemetry(&harness.registered).transactions,
+            before,
+            "an overdue-only queue must not acquire any SQLite writer"
+        );
+    }
+    assert_eq!(queue_state(&harness).await, (8, 8, 8));
+
+    // Interleave actual deferred retries and a terminal collision. Each
+    // bounded transaction must touch just its one deferred row, preserving
+    // the other deadlines and the retry history.
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    assert_eq!(
+        transaction
+            .execute(
+                "UPDATE projection_queue SET next_retry_at_micros = ?1
+                 WHERE observation_sequence IN (2, 6)",
+                params![FAR_FUTURE_MICROS],
+            )
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        transaction
+            .execute(
+                "UPDATE projection_queue SET next_retry_at_micros = ?1
+                 WHERE observation_sequence = 4",
+                params![i64::MAX],
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    transaction.commit().await.unwrap();
+
+    let before = writer_telemetry(&harness.registered).transactions;
+    assert_eq!(
+        rearm_queued_projection_retries(harness.registered.runtime_database(), 1)
+            .await
+            .unwrap(),
+        RearmedProjectionRetries {
+            rows: 2,
+            batches: 2,
+        }
+    );
+    let after = writer_telemetry(&harness.registered).transactions;
+    assert_eq!(after.committed_transactions - before.committed_transactions, 2);
+    assert_eq!(after.rolled_back_transactions, before.rolled_back_transactions);
+    assert_eq!(queue_state(&harness).await, (8, 6, 8));
+
+    let snapshot = harness.registered.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT observation_sequence, next_retry_at_micros
+             FROM projection_queue ORDER BY observation_sequence",
+            (),
+        )
+        .await
+        .unwrap();
+    for sequence in 1..=8_i64 {
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<i64>(0).unwrap(), sequence);
+        let deadline = row.get::<i64>(1).unwrap();
+        assert_eq!(
+            deadline,
+            if sequence == 4 {
+                i64::MAX
+            } else if sequence == 2 || sequence == 6 {
+                0
+            } else {
+                1
+            },
+            "rearm must not rewrite expired or terminal deadlines"
+        );
+    }
+    assert!(rows.next().await.unwrap().is_none());
+}
+
+#[asupersync::test]
 async fn rearm_ignores_parked_terminal_collisions_without_empty_write_batches() {
     let harness = RegisteredGlobalDbHarness::open("rearm-terminal-collisions").await;
     seed_queue(&harness, 9, 3).await;
