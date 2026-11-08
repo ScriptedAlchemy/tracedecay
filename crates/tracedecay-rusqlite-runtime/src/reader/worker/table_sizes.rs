@@ -1,40 +1,51 @@
-//! Payload census on the reader's existing snapshot, without a page-sized sorter.
+//! Payload census on the reader's existing snapshot, with one page walk.
 
-use rusqlite::Connection;
+use std::collections::BTreeMap;
+
+use rusqlite::{Connection, types::Type};
 
 use super::TableSizeTelemetrySample;
 
-/// Aggregate one table at a time. Joining every `dbstat` page before `GROUP BY`
-/// materializes a temporary sorter proportional to the database's page count,
-/// just to return one row per table. This correlated aggregate streams the pages
-/// into one `SUM` and sorts only the completed table totals.
+/// Initialize every user table (including empty and rootless tables) from
+/// schema, then visit the dbstat pages exactly once. The prior correlated SUM
+/// re-walked the virtual table for each schema table; many-table profiles spent
+/// their measurement deadline repeating a census even without a page sorter.
 ///
-/// Keep `dbstat` in page mode: `SQLite` can observe interruption between pages,
-/// rather than spending an entire large btree inside one aggregate-mode step.
-/// Payload bytes deliberately exclude indexes, free pages and WAL/SHM files;
-/// the separate store/profile footprint owns those physical-size measurements.
+/// Page-mode dbstat preserves the reader's interrupt checks between pages.
+/// Index and free-page bytes are not table payload; the separate footprint
+/// census measures all physical database/WAL/SHM bytes.
 pub(super) fn read(connection: &Connection) -> rusqlite::Result<Vec<TableSizeTelemetrySample>> {
-    // LIKE treats the underscore as a wildcard and hides ordinary tables
-    // such as `sqlitemessages`; only the literal `sqlite_` prefix is internal.
-    let mut statement = connection.prepare_cached(
-        "SELECT schema_entry.name, \
-                (SELECT COALESCE(SUM(payload), 0) FROM dbstat \
-                 WHERE name = schema_entry.name) \
-         FROM sqlite_schema AS schema_entry \
-         WHERE schema_entry.type = 'table' \
-           AND schema_entry.name NOT GLOB 'sqlite_*' \
-         ORDER BY schema_entry.name",
-    )?;
-    statement
-        .query_map([], |row| {
-            let bytes = row.get::<_, i64>(1)?;
-            Ok(TableSizeTelemetrySample {
-                table_name: row.get(0)?,
-                bytes: u64::try_from(bytes)
-                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(1, bytes))?,
-            })
-        })?
-        .collect()
+    let mut totals = BTreeMap::<String, u64>::new();
+    {
+        let mut statement = connection.prepare_cached(
+            "SELECT name FROM sqlite_schema \
+             WHERE type = 'table' AND name NOT GLOB 'sqlite_*'",
+        )?;
+        for name in statement.query_map([], |row| row.get::<_, String>(0))? {
+            totals.insert(name?, 0);
+        }
+    }
+
+    let mut statement = connection.prepare_cached("SELECT name, payload FROM dbstat")?;
+    let mut pages = statement.query([])?;
+    while let Some(page) = pages.next()? {
+        let name = page.get_ref(0)?.as_str().map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
+        })?;
+        if let Some(total) = totals.get_mut(name) {
+            let signed_payload = page.get::<_, i64>(1)?;
+            let payload = u64::try_from(signed_payload).map_err(|_| {
+                rusqlite::Error::IntegralValueOutOfRange(1, signed_payload)
+            })?;
+            *total = total
+                .checked_add(payload)
+                .ok_or(rusqlite::Error::IntegralValueOutOfRange(1, i64::MAX))?;
+        }
+    }
+    Ok(totals
+        .into_iter()
+        .map(|(table_name, bytes)| TableSizeTelemetrySample { table_name, bytes })
+        .collect())
 }
 
 #[cfg(test)]
@@ -229,6 +240,31 @@ mod tests {
         assert!(
             streamed_steps < grouped_steps / 2,
             "page sorting consumed the census budget: streamed={streamed_steps}, grouped={grouped_steps}"
+        );
+    }
+
+    #[test]
+    fn many_tables_do_not_repeat_the_full_page_census_per_table() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = Connection::open(directory.path().join("many-tables.db")).unwrap();
+        for index in 0..36 {
+            connection
+                .execute_batch(&format!(
+                    "CREATE TABLE t{index}(body BLOB);
+                     INSERT INTO t{index} VALUES(zeroblob(32768));"
+                ))
+                .unwrap();
+        }
+
+        let (expected, grouped_steps) = measure_vm(&connection, || reference(&connection));
+        let (actual, single_pass_steps) = measure_vm(&connection, || read(&connection).unwrap());
+        assert_eq!(actual, expected);
+        assert_eq!(actual.len(), 36);
+        assert!(actual.iter().all(|sample| sample.bytes >= 32768));
+        assert!(single_pass_steps > 0);
+        assert!(
+            single_pass_steps < grouped_steps / 3,
+            "many-table payload census repeated work: single_pass={single_pass_steps}, grouped={grouped_steps}"
         );
     }
 
