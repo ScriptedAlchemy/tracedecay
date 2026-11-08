@@ -965,7 +965,10 @@ fn caller_neighborhood(
         return None;
     }
     let mut seen = seeds.iter().cloned().collect::<BTreeSet<_>>();
-    let mut frontier = seeds.to_vec();
+    // Duplicate seed identities must neither consume extra caller reads nor
+    // grant extra traversal budget for unrelated neighbors.
+    let seed_count = seen.len();
+    let mut frontier = seen.iter().cloned().collect::<Vec<_>>();
     let mut callers = BTreeSet::new();
     let mut tests = BTreeSet::new();
     for depth in 1..=3 {
@@ -982,7 +985,7 @@ fn caller_neighborhood(
             if !seen.insert(occurrence.clone()) {
                 continue;
             }
-            if seen.len().saturating_sub(seeds.len()) > max_symbols {
+            if seen.len() - seed_count > max_symbols {
                 return None;
             }
             if depth <= 2 {
@@ -1333,6 +1336,29 @@ mod tests {
             caller_neighborhood(std::slice::from_ref(&root), 10, |_| Some(Vec::new())).is_none(),
             "incomplete per-seed evidence is refused"
         );
+
+        let repeated_roots = [root.clone(), root.clone()];
+        let mut duplicate_reads = 0;
+        assert!(
+            caller_neighborhood(&repeated_roots, 2, |frontier| {
+                assert_eq!(frontier.len(), 1, "each unique seed is read once");
+                duplicate_reads += 1;
+                Some(
+                    frontier
+                        .iter()
+                        .map(|id| match id.as_str() {
+                            "symbol.root" => vec![node("symbol.first")],
+                            "symbol.first" => vec![node("symbol.second")],
+                            "symbol.second" => vec![node("symbol.third")],
+                            _ => Vec::new(),
+                        })
+                        .collect(),
+                )
+            })
+            .is_none(),
+            "duplicate roots must not extend the unique-neighbor budget"
+        );
+        assert_eq!(duplicate_reads, 3);
     }
 
     #[test]
