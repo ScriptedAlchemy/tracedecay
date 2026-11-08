@@ -1511,7 +1511,9 @@ fn user_sessions_family_bytes(profile_root: &Path) -> u64 {
 
 fn database_family_bytes(database_path: &Path) -> u64 {
     let mut total_bytes = 0u64;
-    for suffix in ["", "-wal", "-shm"] {
+    // PERSIST rollback journals remain allocated after a committed transaction;
+    // TRUNCATE journals are zero-length. Both are physical family bytes.
+    for suffix in ["", "-wal", "-shm", "-journal"] {
         // Physical profile bytes must not include a symlink's foreign target.
         // The full-profile walk separately marks a linked member unavailable.
         if let Ok(metadata) = std::fs::symlink_metadata(sqlite_family_member(database_path, suffix))
@@ -2658,6 +2660,53 @@ mod tests {
                 ("projects/proj_ghost", ProjectRootStateV1::Unregistered),
             ])
         );
+    }
+
+    #[asupersync::test]
+    async fn committed_persist_journal_is_charged_to_user_sessions_family() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let profile_root = temporary.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let database = profile_root.join(USER_SESSIONS_DB_FILENAME);
+        let writer = rusqlite::Connection::open(&database).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode = PERSIST;
+                 CREATE TABLE receipts(payload BLOB NOT NULL);
+                 INSERT INTO receipts VALUES (zeroblob(262144));",
+            )
+            .unwrap();
+
+        let journal = sqlite_family_member(&database, "-journal");
+        let main_bytes = std::fs::metadata(&database).unwrap().len();
+        let journal_bytes = std::fs::metadata(&journal).unwrap().len();
+        assert!(journal_bytes > 0, "PERSIST must retain a committed journal");
+        let retained_header = std::fs::read(&journal).unwrap();
+        assert_eq!(
+            &retained_header[..28],
+            &[0u8; 28],
+            "the retained journal must be committed, not active"
+        );
+
+        let report = build_storage_report(&profile_root).await.unwrap();
+        assert_eq!(report.user_sessions_db_bytes, main_bytes + journal_bytes);
+        let footprint = report.full_profile_size.unwrap();
+        assert_eq!(footprint.total_bytes, main_bytes + journal_bytes);
+        assert_eq!(footprint.state, ProfileTotalCoverageStateV1::Complete);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_rollback_journal_does_not_charge_foreign_storage() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let database = temporary.path().join("owned.db");
+        std::fs::write(&database, b"owned").unwrap();
+        let foreign = temporary.path().join("foreign.bin");
+        std::fs::write(&foreign, vec![0u8; 1024 * 1024]).unwrap();
+        let journal = sqlite_family_member(&database, "-journal");
+        std::os::unix::fs::symlink(&foreign, &journal).unwrap();
+
+        assert_eq!(database_family_bytes(&database), 5);
     }
 
     #[cfg(unix)]
