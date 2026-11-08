@@ -933,3 +933,67 @@ async fn empty_projection_drain_does_not_wait_for_an_unrelated_writer() {
     assert!(!after.has_more);
     assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 1);
 }
+
+#[tokio::test]
+async fn active_rebuild_keeps_projection_pending_without_acquiring_writer() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime.database_path(HostAdmissionScope::Profile).unwrap();
+    persist(
+        &store,
+        observation(
+            "session-rebuild-gate",
+            0,
+            100,
+            "receipt.rebuild-gate",
+            conversational_payload("message-rebuild-gate", "project after rebuild"),
+        ),
+        None,
+    )
+    .await;
+
+    let writer = rusqlite::Connection::open(database_path).unwrap();
+    writer
+        .execute(
+            "INSERT INTO observation_projection_rebuilds
+                (projector_version, generation, frontier_sequence, state)
+             VALUES (?1, 'rebuild-gate-generation', 1, 'building')",
+            rusqlite::params![tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION],
+        )
+        .unwrap();
+
+    // A live rebuild fences ordinary projection, so an empty drain should
+    // return pending without waiting for a separate SQLite writer reservation.
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    for _ in 0..2 {
+        let deferred = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            store.project_queued_observations(32),
+        )
+        .await
+        .expect("an active rebuild must not acquire the projection writer")
+        .unwrap()
+        .unwrap();
+        assert!(deferred.items.is_empty());
+        assert!(deferred.has_more, "the observation remains queued");
+    }
+    writer.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 0);
+
+    // Clearing the durable rebuild fence must expose the original queued
+    // observation on the next poll without a cached negative gate.
+    writer
+        .execute(
+            "DELETE FROM observation_projection_rebuilds WHERE projector_version = ?1",
+            rusqlite::params![tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION],
+        )
+        .unwrap();
+    let resumed = store.project_queued_observations(1).await.unwrap().unwrap();
+    assert_eq!(resumed.items.len(), 1);
+    assert!(!resumed.has_more);
+    assert_eq!(store.projection_checkpoint().await.unwrap().last_sequence(), 1);
+    assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 1);
+}

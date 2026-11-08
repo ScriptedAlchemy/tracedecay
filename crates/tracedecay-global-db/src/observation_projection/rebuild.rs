@@ -230,10 +230,13 @@ pub async fn project_queued_observations(
         let mut rows = reader
             .query(
                 // The fixed terminal sentinel matches the partial index predicate.
-                "SELECT next_retry_at_micros FROM projection_queue
+                "SELECT next_retry_at_micros,
+                        EXISTS(SELECT 1 FROM observation_projection_rebuilds
+                               WHERE projector_version = ?1)
+                 FROM projection_queue
                  WHERE next_retry_at_micros < 9223372036854775807
                  ORDER BY observation_sequence LIMIT 1",
-                (),
+                params![SESSION_MESSAGE_PROJECTOR_VERSION],
             )
             .await
             .map_err(|error| storage("probe ready projection queue", error))?;
@@ -247,7 +250,14 @@ pub async fn project_queued_observations(
         let deadline = head
             .get::<i64>(0)
             .map_err(|error| storage("decode projection head deadline", error))?;
-        if deadline > tracedecay_contracts::clock::now_micros().0 {
+        // An active generation rebuild suppresses ordinary projection.
+        // Do not acquire a writer only to discover that suppression again;
+        // the next poll rechecks both the rebuild and the ordered queue head.
+        let rebuild_active = head
+            .get::<i64>(1)
+            .map_err(|error| storage("decode projection rebuild gate", error))?
+            != 0;
+        if rebuild_active || deadline > tracedecay_contracts::clock::now_micros().0 {
             return Ok(ProjectionDrainBatch {
                 items: Vec::new(),
                 has_more: true,
