@@ -134,6 +134,47 @@ fn cold_build_reports_actual_preseal_capture_and_parser_evidence() {
     assert!(observed.progress_epoch >= 5, "two captures and two parses plus start");
 }
 
+/// A restart's retained-source verification is real work and must report
+/// capture without inventing a sealed generation or a polling heartbeat.
+#[test]
+fn retained_restart_capture_publishes_and_fences_preseal_attempt() {
+    let fixture = GitFixture::new(&[
+        ("src/a.rs", "pub fn a() -> u32 { 1 }\n"),
+        ("src/b.rs", "pub fn b() -> u32 { 2 }\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let pool = Arc::new(SharedCodeIndexBytePoolV1::default());
+    {
+        let mut initial = scheduler(&fixture, store.path().to_path_buf(), Arc::clone(&pool));
+        published(initial.reconcile_now().expect("initial generation"));
+    }
+    let reopened = scheduler(&fixture, store.path().to_path_buf(), pool);
+    let slot = reopened.preseal_attempt_progress_slot();
+    assert!(
+        slot.read().unwrap().snapshot().is_none(),
+        "reopening must not fabricate a live pre-seal attempt"
+    );
+    let capture = reopened
+        .capture_retained_reconcile_attempt()
+        .expect("retained capture succeeds")
+        .expect("the retained capture has a live owner");
+    let observed = slot.read().unwrap().snapshot().expect("real retained work");
+    assert!(observed.active);
+    assert_eq!(
+        observed.phase,
+        tracedecay_code_index::production::CodeIndexPresealWorkPhaseV1::Capture
+    );
+    assert!(observed.completed_items >= 2, "two files were actually captured");
+    assert!(observed.progress_epoch > 1);
+    assert!(observed.last_progress_micros.is_some_and(|at| at > 0));
+    drop(capture);
+    let finished = slot.read().unwrap().snapshot().expect("finished attempt");
+    assert!(!finished.active, "dropping the retained owner fences callbacks");
+    assert_eq!(finished.completed_items, observed.completed_items);
+    assert_eq!(finished.last_progress_micros, observed.last_progress_micros);
+    assert!(finished.progress_epoch > observed.progress_epoch);
+}
+
 #[test]
 fn unchanged_mixed_roster_restart_retains_generation_pointer_and_artifact() {
     let fixture = GitFixture::new(MIXED_SOURCE_ROSTER);

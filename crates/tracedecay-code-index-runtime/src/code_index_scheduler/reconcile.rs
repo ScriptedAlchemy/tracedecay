@@ -153,6 +153,9 @@ pub(super) struct RetainedReconcileCaptureV1 {
     captured: CapturedSnapshotV1,
     drained_hints: DrainedPendingHintsV1,
     control: DaemonCodeIndexControlV1,
+    // Keep this guard alive through retained parsing and publication. Any
+    // cancellation, early return, or unwind closes the exact attempt.
+    _attempt: CodeIndexPresealAttemptGuardV1,
     git_metadata: identity::GitMetadataFingerprintV1,
     stat_signature: Option<String>,
 }
@@ -2122,6 +2125,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             captured,
             drained_hints,
             control,
+            _attempt,
             git_metadata,
             stat_signature,
         } = capture;
@@ -2349,7 +2353,15 @@ impl CodeIndexWorktreeSchedulerV1 {
     pub(super) fn capture_retained_reconcile_attempt(
         &self,
     ) -> Result<Option<RetainedReconcileCaptureV1>, CodeIndexSchedulerErrorV1> {
-        let control = self.reconcile_control();
+        // A retained generation still scans the source. Changed files may
+        // proceed into a real parser-backed publish; share one attempt
+        // authority across both rather than running an unobserved capture.
+        let attempt = CodeIndexPresealAttemptGuardV1::begin(
+            Arc::clone(&self.preseal_attempt_progress),
+            self.progress_daemon_incarnation,
+            self.progress_producer_incarnation,
+        );
+        let control = self.reconcile_control().with_preseal_observer(attempt.observer());
         let captured = self
             .capture_authoritative_snapshot_without_active_generation_reuse(Some(&control))
             .map_err(|error| prefer_resident_memory_refusal(&control, error))?;
@@ -2370,6 +2382,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             captured,
             drained_hints,
             control,
+            _attempt: attempt,
             git_metadata,
             stat_signature,
         }))
@@ -2385,6 +2398,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             mut captured,
             drained_hints,
             control,
+            _attempt,
             git_metadata,
             stat_signature,
         } = capture;
