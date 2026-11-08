@@ -26,20 +26,22 @@ use tracedecay_maintenance::tick::{
 };
 use tracedecay_runtime_core::storage::{RESPONSE_HANDLES_DIRECTORY, profile_sharded_data_root};
 
-use super::branch_admin::StoreAdministration;
+use super::branch_admin::{StoreAdministration, store_maintenance_writer_scope};
 use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
 use tracedecay_domain::process_heap::request_idle_thread_collection_v1;
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_runtime_core::native_runtime::{self, NativeTask, TimeoutError};
+use tracedecay_store_runtime::WriterScope;
 const MAINTENANCE_STORE_PAGE_LIMIT: usize = 8;
 const REGISTERED_PROJECT_PAGE_LIMIT: usize = 64;
-/// Fast probes preserve low-latency work. After two refusals, join Tokio's
-/// fair writer queue so a stream of store-scoped readers cannot starve GC.
+/// Fast probes preserve low-latency work. After two store-local refusals,
+/// queue behind that store's writers without stalling independent projects.
 const MAINTENANCE_WRITER_FAST_DEFERRALS: u8 = 2;
 
 async fn admit_retention_writer<Operation, OperationFuture, Output>(
     administration: &StoreAdministration,
     cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
+    scope: WriterScope,
     prior_deferrals: u8,
     operation: Operation,
 ) -> Option<Output>
@@ -53,12 +55,12 @@ where
         return None;
     }
     if prior_deferrals < MAINTENANCE_WRITER_FAST_DEFERRALS {
-        administration.try_with_writer(operation).await
+        administration.try_with_writer_in(scope, operation).await
     } else {
         // Only cancel the wait: once admitted, journal/retention work must
         // finish cooperatively rather than be dropped at the writer boundary.
         administration
-            .with_writer_cancellable_acquisition(cancellation, operation)
+            .with_writer_cancellable_acquisition(cancellation, scope, operation)
             .await
     }
 }
@@ -690,7 +692,10 @@ impl Default for MaintenanceCoordinator {
 /// retirements. A store unmounted since the listing is skipped.
 enum MaintenanceStoreWork {
     Session(PathBuf),
-    Graph(PathBuf),
+    Graph {
+        database_path: PathBuf,
+        data_root: PathBuf,
+    },
     /// The code-index scopes of a registered project that no mounted graph
     /// owns; its database is never opened by this unit.
     Registered(RegisteredProjectStoreV1),
@@ -699,8 +704,19 @@ enum MaintenanceStoreWork {
 impl MaintenanceStoreWork {
     fn database_path(&self) -> Option<&Path> {
         match self {
-            Self::Session(database_path) | Self::Graph(database_path) => Some(database_path),
+            Self::Session(database_path) | Self::Graph { database_path, .. } => Some(database_path),
             Self::Registered(_) => None,
+        }
+    }
+
+    fn writer_scope(&self) -> WriterScope {
+        match self {
+            // Session-wide administration has no independently proven canonical
+            // store gate. Keep its global probe nonqueued rather than blocking
+            // unrelated project opens behind a potentially long session pass.
+            Self::Session(_) => WriterScope::Daemon,
+            Self::Graph { data_root, .. } => store_maintenance_writer_scope(data_root),
+            Self::Registered(store) => store_maintenance_writer_scope(&store.data_root),
         }
     }
 }
@@ -1081,7 +1097,10 @@ impl MaintenanceCoordinator {
         for graph in &project_graphs {
             work.push((
                 graph.key.clone(),
-                MaintenanceStoreWork::Graph(graph.database_path.clone()),
+                MaintenanceStoreWork::Graph {
+                    database_path: graph.database_path.clone(),
+                    data_root: graph.data_root.clone(),
+                },
             ));
         }
         for (project_id, store) in registered_projects {
@@ -1122,7 +1141,7 @@ impl MaintenanceCoordinator {
                 .collect::<BTreeSet<_>>();
             scan_data_roots.extend(work.iter().filter_map(|(_, unit)| match unit {
                 MaintenanceStoreWork::Registered(store) => Some(store.data_root.clone()),
-                MaintenanceStoreWork::Session(_) | MaintenanceStoreWork::Graph(_) => None,
+                MaintenanceStoreWork::Session(_) | MaintenanceStoreWork::Graph { .. } => None,
             }));
             maintenance_observations.retain_text_artifact_scan_projects(&scan_data_roots);
         }
@@ -1161,16 +1180,24 @@ impl MaintenanceCoordinator {
                 outcome = MaintenanceTickOutcome::Retry;
                 break;
             }
-            let prior_deferrals = self
-                .writer_deferrals
-                .lock()
-                .await
-                .get(&keys[index])
-                .copied()
-                .unwrap_or(0);
+            let scope = work[index].1.writer_scope();
+            // Only store-local scopes may queue. A queued global writer would
+            // block every unrelated project while one long sync holds a read gate.
+            let local = !matches!(&scope, WriterScope::Daemon);
+            let prior_deferrals = if local {
+                self.writer_deferrals
+                    .lock()
+                    .await
+                    .get(&keys[index])
+                    .copied()
+                    .unwrap_or(0)
+            } else {
+                0
+            };
             let admitted = admit_retention_writer(
                 administration,
                 &self.cancellation,
+                scope,
                 prior_deferrals,
                 || async {
                     let Ok(_clients) = administration.maintenance_store_clients().try_lock() else {
@@ -1193,7 +1220,7 @@ impl MaintenanceCoordinator {
                                 run_registered_store_retention(&database, retention).await
                             }
                         }
-                        MaintenanceStoreWork::Graph(_) => {
+                        MaintenanceStoreWork::Graph { .. } => {
                             let Some(graph) = administration
                                 .mounted_project_graphs()
                                 .await
@@ -1231,7 +1258,7 @@ impl MaintenanceCoordinator {
                 let mut deferrals = self.writer_deferrals.lock().await;
                 if admitted.is_some() {
                     deferrals.remove(&keys[index]);
-                } else if !self.cancellation.is_cancelled() {
+                } else if local && !self.cancellation.is_cancelled() {
                     deferrals.insert(keys[index].clone(), prior_deferrals.saturating_add(1));
                 }
             }
@@ -1602,9 +1629,9 @@ mod tests {
     use tracedecay_runtime_core::cancellation::CancellationToken;
     use tracedecay_runtime_core::native_runtime;
 
-    /// Hold an unrelated store writer across two failed fast probes. The third
-    /// retention attempt must queue behind it and complete even as more store
-    /// writers arrive, rather than repeatedly taking non-queued snapshots.
+    /// Hold a writer for the target store across two failed fast probes.
+    /// The third retention attempt joins its local queue; independent project
+    /// opens must remain admitted while that writer is still active.
     #[tokio::test]
     async fn retention_queues_after_bounded_writer_deferrals() {
         let administration = StoreAdministration::default();
@@ -1614,7 +1641,7 @@ mod tests {
         let holder = tokio::spawn(async move {
             holding_admin
                 .with_writer_in(
-                    WriterScope::store("/unrelated-store", StoreWriterClass::Content),
+                    WriterScope::store("/retained-store", StoreWriterClass::Content),
                     move || async move {
                         entered_tx.send(()).expect("store writer entered");
                         release_rx.await.expect("store writer released");
@@ -1624,21 +1651,25 @@ mod tests {
         });
         entered_rx
             .await
-            .expect("writer acquired its shared daemon gate");
+            .expect("writer acquired its store gate");
         let cancellation = CancellationToken::new();
         for refused in 0..super::MAINTENANCE_WRITER_FAST_DEFERRALS {
             assert_eq!(
-                super::admit_retention_writer(&administration, &cancellation, refused, || async {
-                    41_u8
-                })
+                super::admit_retention_writer(
+                    &administration,
+                    &cancellation,
+                    WriterScope::maintenance("/retained-store"),
+                    refused,
+                    || async { 41_u8 },
+                )
                 .await,
                 None,
-                "a store writer blocks the non-queued daemon probe"
+                "a store writer blocks the nonqueued store-local probe"
             );
         }
 
         // Establish ongoing writer activity before queueing the exclusive
-        // maintenance request. A fair queued writer blocks later readers;
+        // maintenance request. A fair queued maintenance writer blocks later readers of that store;
         // waiting for their progress before releasing the holder deadlocks.
         let competing_admin = administration.clone();
         let writer_entries = Arc::new(AtomicUsize::new(0));
@@ -1669,6 +1700,7 @@ mod tests {
         let queued = super::admit_retention_writer(
             &administration,
             &cancellation,
+            WriterScope::maintenance("/retained-store"),
             super::MAINTENANCE_WRITER_FAST_DEFERRALS,
             || async { 42_u8 },
         );
@@ -1682,7 +1714,7 @@ mod tests {
         })
         .await;
         let later_writer = administration.with_writer_in(
-            WriterScope::store("/later-store", StoreWriterClass::Content),
+            WriterScope::store("/retained-store", StoreWriterClass::Owner),
             || async { 43_u8 },
         );
         tokio::pin!(later_writer);
@@ -1695,6 +1727,17 @@ mod tests {
         })
         .await;
 
+        // An independent store must still open while maintenance is queued.
+        let independent = administration.with_writer_in(
+            WriterScope::store("/independent-store", StoreWriterClass::Owner),
+            || async { 44_u8 },
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), independent)
+                .await
+                .expect("unrelated project open must not stall behind queued maintenance"),
+            44
+        );
         let before_release = writer_entries.load(Ordering::SeqCst);
         release_tx.send(()).expect("release the original writer");
         assert_eq!(
@@ -1735,6 +1778,7 @@ mod tests {
                 super::admit_retention_writer(
                     &administration,
                     &cancellation,
+                    WriterScope::maintenance("/held-store"),
                     prior_deferrals,
                     || {
                         constructed.fetch_add(1, Ordering::SeqCst);
@@ -1779,6 +1823,7 @@ mod tests {
         let waiting = super::admit_retention_writer(
             &administration,
             &cancellation,
+            WriterScope::maintenance("/held-store"),
             super::MAINTENANCE_WRITER_FAST_DEFERRALS,
             || {
                 constructed.fetch_add(1, Ordering::SeqCst);
@@ -1837,6 +1882,7 @@ mod tests {
             super::admit_retention_writer(
                 &working,
                 &stopping,
+                WriterScope::maintenance("/retention-store"),
                 super::MAINTENANCE_WRITER_FAST_DEFERRALS,
                 move || async move {
                     entered_tx
@@ -2132,19 +2178,23 @@ mod tests {
         );
         drop(release);
 
-        // A long-lived, unrelated content writer holds the daemon read gate.
+        // A long-lived writer for this project holds the store-local read gate.
         // Two real retention ticks must defer, and the next must queue rather
         // than missing the same writer again. The fixture's six on-disk
         // generations make forward progress observable through actual GC.
         let (writer_started, writer_entered) = tokio::sync::oneshot::channel();
         let (release_writer, writer_released) = tokio::sync::oneshot::channel();
         let holding_admin = administration.clone();
+        let retained_data_root = tracedecay_runtime_core::storage::profile_sharded_data_root(
+            &profile_root,
+            &project.project_id,
+        );
         let writer = NativeTask::spawn(async move {
             holding_admin
                 .with_writer_in(
-                    crate::daemon::branch_admin::WriterScope::store(
-                        "/unrelated-project",
-                        crate::daemon::branch_admin::StoreWriterClass::Content,
+                    crate::daemon::branch_admin::store_writer_scope(
+                        &retained_data_root,
+                        StoreWriterClass::Content,
                     ),
                     move || async move {
                         writer_started.send(()).expect("writer admitted");
@@ -2156,7 +2206,7 @@ mod tests {
         .expect("start competing store writer");
         writer_entered
             .await
-            .expect("unrelated store writer owns shared gate");
+            .expect("project content writer owns shared store gate");
         for _ in 0..super::MAINTENANCE_WRITER_FAST_DEFERRALS {
             let deferred = coordinator
                 .run_tick(

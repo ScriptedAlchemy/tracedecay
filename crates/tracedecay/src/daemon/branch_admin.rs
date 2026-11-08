@@ -125,6 +125,16 @@ pub(super) fn store_writer_scope(data_root: &Path, class: StoreWriterClass) -> W
     }
 }
 
+/// Resolves maintenance to the same canonical store gate as logical writers.
+/// A missing or unresolvable store refuses isolation by falling back to daemon
+/// administration rather than silently splitting the writer identity.
+pub(super) fn store_maintenance_writer_scope(data_root: &Path) -> WriterScope {
+    match authority::canonical_identity_path(data_root) {
+        Ok(canonical) => WriterScope::maintenance(canonical),
+        Err(_) => WriterScope::Daemon,
+    }
+}
+
 /// Owner-lane scope for one registered database owner.
 ///
 /// [`StoreOwnerKey::store_root`](tracedecay_session_runtime::StoreOwnerKey) is already the
@@ -1923,20 +1933,20 @@ impl StoreAdministration {
         operation().await
     }
 
-    /// Cancellation applies only while queued for daemon-wide writer admission.
+    /// Cancellation applies only while queued for writer admission.
     /// Once the guard is acquired, the operation must finish cooperatively:
     /// dropping an in-flight journal/retention future would abandon physical
     /// blocking work whose client survives the daemon's shutdown join.
     pub(super) async fn with_writer_cancellable_acquisition<Operation, OperationFuture, Output>(
         &self,
         cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
+        scope: WriterScope,
         operation: Operation,
     ) -> Option<Output>
     where
         Operation: FnOnce() -> OperationFuture,
         OperationFuture: Future<Output = Output>,
     {
-        let scope = WriterScope::Daemon;
         let _writer = tokio::select! {
             biased;
             () = cancellation.cancelled() => return None,
@@ -1955,10 +1965,20 @@ impl StoreAdministration {
         Operation: FnOnce() -> OperationFuture,
         OperationFuture: Future<Output = Output>,
     {
-        let writer = self.gate.try_acquire(&WriterScope::Daemon)?;
-        let output = operation().await;
-        drop(writer);
-        Some(output)
+        self.try_with_writer_in(WriterScope::Daemon, operation).await
+    }
+
+    pub(super) async fn try_with_writer_in<Operation, OperationFuture, Output>(
+        &self,
+        scope: WriterScope,
+        operation: Operation,
+    ) -> Option<Output>
+    where
+        Operation: FnOnce() -> OperationFuture,
+        OperationFuture: Future<Output = Output>,
+    {
+        let _writer = self.gate.try_acquire(&scope)?;
+        Some(operation().await)
     }
 
     /// Resolves the authenticated client's project layout and runs destructive

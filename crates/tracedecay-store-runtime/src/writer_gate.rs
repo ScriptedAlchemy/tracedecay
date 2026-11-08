@@ -15,9 +15,10 @@
 //! # The lock hierarchy
 //!
 //! ```text
-//! daemon: RwLock          Daemon scope = write, Store scope = read
-//!   ├── owner:  Mutex
-//!   └── content: Mutex
+//! daemon: RwLock       Daemon scope = write, store scopes = read
+//!   └── store: RwLock  Maintenance = write, owner/content = read
+//!       ├── owner: Mutex
+//!       └── content: Mutex
 //! ```
 //!
 //! Every acquisition takes these in exactly that order, so no lock-order
@@ -66,6 +67,8 @@ pub enum WriterScope {
         data_root: PathBuf,
         class: StoreWriterClass,
     },
+    /// Fair exclusive maintenance for one store, without blocking unrelated stores.
+    StoreMaintenance { data_root: PathBuf },
 }
 
 impl WriterScope {
@@ -79,6 +82,15 @@ impl WriterScope {
             class,
         }
     }
+
+    /// Same canonical store identity as [`Self::store`], with exclusive admission
+    /// only against this store's owner and content operations.
+    #[must_use]
+    pub fn maintenance(data_root: impl Into<PathBuf>) -> Self {
+        Self::StoreMaintenance {
+            data_root: data_root.into(),
+        }
+    }
 }
 
 /// The logical lanes of one store family. Held by `Arc` from the registry and by
@@ -86,6 +98,7 @@ impl WriterScope {
 /// its weak entry.
 #[derive(Default)]
 struct StoreGate {
+    maintenance: Arc<RwLock<()>>,
     owner: Arc<Mutex<()>>,
     content: Arc<Mutex<()>>,
 }
@@ -105,6 +118,7 @@ impl StoreGate {
 /// exist to pin the guards.
 pub struct WriterAdmissionGuard {
     _class: Option<OwnedMutexGuard<()>>,
+    _maintenance: Option<StoreMaintenanceGuard>,
     _daemon: DaemonGuard,
     /// Keeps the store's gate alive for as long as it is held, so a registry
     /// prune between acquisition and release cannot hand a second acquirer a
@@ -116,6 +130,13 @@ pub struct WriterAdmissionGuard {
 /// dropping this value, never by reading it.
 #[allow(dead_code)]
 enum DaemonGuard {
+    Shared(OwnedRwLockReadGuard<()>),
+    Exclusive(OwnedRwLockWriteGuard<()>),
+}
+
+/// Store-local readers and the queued exclusive retention guard.
+#[allow(dead_code)]
+enum StoreMaintenanceGuard {
     Shared(OwnedRwLockReadGuard<()>),
     Exclusive(OwnedRwLockWriteGuard<()>),
 }
@@ -173,6 +194,7 @@ impl StoreWriterGates {
         match scope {
             WriterScope::Daemon => WriterAdmissionGuard {
                 _class: None,
+                _maintenance: None,
                 _daemon: DaemonGuard::Exclusive(
                     tracing::Instrument::instrument(
                         Arc::clone(&self.daemon).write_owned(),
@@ -189,6 +211,11 @@ impl StoreWriterGates {
                 )
                 .await;
                 let gate = self.store_gate(data_root);
+                let maintenance = tracing::Instrument::instrument(
+                    Arc::clone(&gate.maintenance).read_owned(),
+                    tracing::trace_span!("daemon.writer_gate.acquire.store_read"),
+                )
+                .await;
                 let class_guard = tracing::Instrument::instrument(
                     gate.class_mutex(*class).lock_owned(),
                     tracing::trace_span!("daemon.writer_gate.acquire.class"),
@@ -196,6 +223,26 @@ impl StoreWriterGates {
                 .await;
                 WriterAdmissionGuard {
                     _class: Some(class_guard),
+                    _maintenance: Some(StoreMaintenanceGuard::Shared(maintenance)),
+                    _daemon: DaemonGuard::Shared(daemon),
+                    _gate: Some(gate),
+                }
+            }
+            WriterScope::StoreMaintenance { data_root } => {
+                let daemon = tracing::Instrument::instrument(
+                    Arc::clone(&self.daemon).read_owned(),
+                    tracing::trace_span!("daemon.writer_gate.acquire.store"),
+                )
+                .await;
+                let gate = self.store_gate(data_root);
+                let maintenance = tracing::Instrument::instrument(
+                    Arc::clone(&gate.maintenance).write_owned(),
+                    tracing::trace_span!("daemon.writer_gate.acquire.store_maintenance"),
+                )
+                .await;
+                WriterAdmissionGuard {
+                    _class: None,
+                    _maintenance: Some(StoreMaintenanceGuard::Exclusive(maintenance)),
                     _daemon: DaemonGuard::Shared(daemon),
                     _gate: Some(gate),
                 }
@@ -209,15 +256,29 @@ impl StoreWriterGates {
         match scope {
             WriterScope::Daemon => Some(WriterAdmissionGuard {
                 _class: None,
+                _maintenance: None,
                 _daemon: DaemonGuard::Exclusive(Arc::clone(&self.daemon).try_write_owned().ok()?),
                 _gate: None,
             }),
             WriterScope::Store { data_root, class } => {
                 let daemon = Arc::clone(&self.daemon).try_read_owned().ok()?;
                 let gate = self.store_gate(data_root);
+                let maintenance = Arc::clone(&gate.maintenance).try_read_owned().ok()?;
                 let class_guard = gate.class_mutex(*class).try_lock_owned().ok()?;
                 Some(WriterAdmissionGuard {
                     _class: Some(class_guard),
+                    _maintenance: Some(StoreMaintenanceGuard::Shared(maintenance)),
+                    _daemon: DaemonGuard::Shared(daemon),
+                    _gate: Some(gate),
+                })
+            }
+            WriterScope::StoreMaintenance { data_root } => {
+                let daemon = Arc::clone(&self.daemon).try_read_owned().ok()?;
+                let gate = self.store_gate(data_root);
+                let maintenance = Arc::clone(&gate.maintenance).try_write_owned().ok()?;
+                Some(WriterAdmissionGuard {
+                    _class: None,
+                    _maintenance: Some(StoreMaintenanceGuard::Exclusive(maintenance)),
                     _daemon: DaemonGuard::Shared(daemon),
                     _gate: Some(gate),
                 })
@@ -228,6 +289,8 @@ impl StoreWriterGates {
 
 #[cfg(test)]
 mod tests {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
     use std::time::Duration;
 
     use super::*;
@@ -320,6 +383,54 @@ mod tests {
             gates.try_acquire(&WriterScope::Daemon).is_some(),
             "daemon administration is admitted once the store writer releases"
         );
+    }
+
+    #[tokio::test]
+    async fn queued_store_maintenance_preserves_other_project_admission() {
+        let gates = StoreWriterGates::default();
+        let held = gates.acquire(&store("/a", StoreWriterClass::Content)).await;
+        let maintenance_scope = WriterScope::maintenance("/a");
+        let queued = gates.acquire(&maintenance_scope);
+        tokio::pin!(queued);
+        poll_fn(|cx| {
+            assert!(queued.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+
+        let following = gates.acquire(&store("/a", StoreWriterClass::Owner));
+        tokio::pin!(following);
+        poll_fn(|cx| {
+            assert!(
+                following.as_mut().poll(cx).is_pending(),
+                "same-store operations wait behind queued maintenance"
+            );
+            Poll::Ready(())
+        })
+        .await;
+
+        assert!(
+            gates
+                .try_acquire(&store("/b", StoreWriterClass::Owner))
+                .is_some(),
+            "an unrelated project can open while maintenance queues behind a long sync"
+        );
+        drop(held);
+        let admitted = tokio::time::timeout(Duration::from_secs(5), &mut queued)
+            .await
+            .expect("queued maintenance acquires when its own store is free");
+        assert!(
+            gates
+                .try_acquire(&store("/a", StoreWriterClass::Content))
+                .is_none(),
+            "admitted maintenance excludes writes to its own store"
+        );
+        drop(admitted);
+        let follower = tokio::time::timeout(Duration::from_secs(5), &mut following)
+            .await
+            .expect("same-store owner resumes after maintenance");
+        drop(follower);
+        assert!(gates.try_acquire(&maintenance_scope).is_some());
     }
 
     #[tokio::test]
