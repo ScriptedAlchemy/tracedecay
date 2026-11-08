@@ -2475,6 +2475,9 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
     if skip_empty_initialization
         && had_expected_cursor
         && previous_generation == Some(generation)
+        && expected_cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.position() == raw.start_offset)
         && !raw.replacement_generation
         && raw.start_offset == raw.read_through
         && raw.frames.is_empty()
