@@ -2904,7 +2904,11 @@ mod receipt_budget_tests {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(
                 dir.join(SEALED_STORE_RECEIPT_FILE),
-                receipt(GraphFormatVersion::current().get(), &name, &format!("g{index}")),
+                receipt(
+                    GraphFormatVersion::current().get(),
+                    &name,
+                    &format!("g{index}"),
+                ),
             )
             .unwrap();
             std::fs::File::create(dir.join(SEALED_STORE_DATABASE_FILE))
