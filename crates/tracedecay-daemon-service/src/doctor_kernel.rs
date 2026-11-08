@@ -676,11 +676,7 @@ async fn profile_footprint_read(
 #[cfg(test)]
 mod profile_footprint_tests {
     use std::collections::BTreeMap;
-    use std::path::Path;
-
-    use tracedecay_contracts::doctor::{
-        DoctorEvidenceStateV1, DoctorStorageFamilyReadV1,
-    };
+    use tracedecay_contracts::doctor::{DoctorEvidenceStateV1, DoctorStorageFamilyReadV1};
     use tracedecay_maintenance::retention::footprint::{
         ProfileFamilyV1, ProjectRootStateV1, footprint_findings,
     };
@@ -760,9 +756,10 @@ mod profile_footprint_tests {
             state_for_store(&unregistered),
             ProjectRootStateV1::Unregistered
         );
+        let deleted_root = temp.path().join("deleted-worktree");
         let registered = BTreeMap::from([(
             "proj_growing".to_owned(),
-            temp.path().join("deleted-worktree").display().to_string(),
+            deleted_root.display().to_string(),
         )]);
         let missing =
             profile_footprint_from_registered_roots(&profile_root, Some(&registered), &overrides);
@@ -775,9 +772,9 @@ mod profile_footprint_tests {
                 .and_then(|entry| entry.project.as_ref())
                 .and_then(|project| project.registered_root.as_ref())
                 .map(String::as_str),
-            Some(temp.path().join("deleted-worktree").to_str().unwrap())
+            deleted_root.to_str()
         );
-        assert!(Path::new(&registered["proj_growing"]).exists() == false);
+        assert!(!deleted_root.exists());
     }
 }
 
