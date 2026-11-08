@@ -1287,13 +1287,6 @@ impl RetainedCodeGraphRuntimeV1 {
         level = "trace",
         skip_all
     )]
-    pub fn publish_verified_snapshot(
-        &self,
-        request_cancelled: Arc<AtomicBool>,
-    ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
-        self.publish_verified_snapshot_with_admission(request_cancelled, None, None)
-    }
-
     fn publish_verified_snapshot_with_admission(
         &self,
         request_cancelled: Arc<AtomicBool>,
