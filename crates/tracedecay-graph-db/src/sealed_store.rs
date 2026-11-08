@@ -1976,6 +1976,21 @@ fn build_sealed_container(
                         &physical_namespace,
                         &mut sealed,
                         check,
+                        &|boundary| {
+                            // Direct sealing bypasses native staging pages.
+                            // Report each real row-window boundary while the
+                            // compact container is being assembled, but do
+                            // NOT count it as a committed native page/segment.
+                            tracing::info!(
+                                event = "graph_native_compact_rows_encoded",
+                                generation = %identity.generation,
+                                kind = boundary.kind.as_str(),
+                                completed_rows = boundary.completed_rows,
+                                total_rows = boundary.total_rows,
+                                durable = false,
+                                "native compact builder accepted a row window"
+                            );
+                        },
                     )?;
                     Ok((counts.0, counts.1, BTreeMap::new()))
                 }
@@ -2039,6 +2054,29 @@ fn build_sealed_container(
     Ok((entity_count, relation_count))
 }
 
+/// An accepted in-memory row window, not a durable graph page or segment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeCompactEncodeKindV1 {
+    Entities,
+    Relations,
+}
+
+impl NativeCompactEncodeKindV1 {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Entities => "entities",
+            Self::Relations => "relations",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NativeCompactEncodeBoundaryV1 {
+    kind: NativeCompactEncodeKindV1,
+    completed_rows: usize,
+    total_rows: usize,
+}
+
 /// Pushes a dependency-free generation's rows straight from its verified
 /// manifest: the entities in identity order, then the relations in identity
 /// order, each endpoint resolved by binary search over the entity identities.
@@ -2055,6 +2093,7 @@ fn push_manifest_rows(
     physical_namespace: &GraphNamespace,
     sealed: &mut SealedCompactRows,
     check: &dyn Fn() -> Result<(), GraphDbError>,
+    observe: &dyn Fn(NativeCompactEncodeBoundaryV1),
 ) -> Result<(usize, usize), GraphDbError> {
     if !identity.dependencies.is_empty() {
         return Err(GraphDbError::invalid(
@@ -2100,6 +2139,13 @@ fn push_manifest_rows(
                         });
                     }
                 }
+                // This is actual accepted native builder work. The final
+                // compact container is not yet written, installed or verified.
+                observe(NativeCompactEncodeBoundaryV1 {
+                    kind: NativeCompactEncodeKindV1::Entities,
+                    completed_rows: start.saturating_add(window.len()),
+                    total_rows: entities.len(),
+                });
             }
             Ok::<(), GraphDbError>(())
         }
@@ -2161,6 +2207,11 @@ fn push_manifest_rows(
                 for (prepared, endpoints) in prepared {
                     sealed.push_prepared_relation(prepared, endpoints[0], endpoints[1])?;
                 }
+                observe(NativeCompactEncodeBoundaryV1 {
+                    kind: NativeCompactEncodeKindV1::Relations,
+                    completed_rows: start.saturating_add(window.len()),
+                    total_rows: relations.len(),
+                });
             }
             Ok::<(), GraphDbError>(())
         }
@@ -2889,6 +2940,89 @@ mod build_tests {
             left,
             vec![std::ffi::OsString::from(SEALED_STORE_DATABASE_FILE)]
         );
+    }
+
+    /// Cold dependency-free graph publication uses this writer rather than
+    /// native stage pages. Require real intermediate row boundaries, with a
+    /// final count equal to the input and no forged completed relation window.
+    #[test]
+    fn direct_compact_encoding_reports_only_accepted_row_windows() {
+        use std::sync::Mutex;
+
+        use super::{
+            NativeCompactEncodeBoundaryV1, NativeCompactEncodeKindV1, SealedCompactRows,
+            push_manifest_rows,
+        };
+
+        let fixture = manifest(1_101, 1_143);
+        let identity = fixture.identity();
+        let namespace = identity.physical_namespace().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let rows = Mutex::new(Vec::<NativeCompactEncodeBoundaryV1>::new());
+        let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let counts = pool
+            .install(|| {
+                let mut writer = SealedCompactRows::new(staging.path())?;
+                push_manifest_rows(
+                    &fixture,
+                    &identity,
+                    &namespace,
+                    &mut writer,
+                    &|| Ok(()),
+                    &|boundary| rows.lock().unwrap().push(boundary),
+                )
+            })
+            .expect("encode real manifest rows");
+        assert_eq!(counts, (1_101, 1_143));
+        let recorded = rows.into_inner().unwrap();
+        let entities: Vec<_> = recorded
+            .iter()
+            .filter(|event| event.kind == NativeCompactEncodeKindV1::Entities)
+            .collect();
+        let relations: Vec<_> = recorded
+            .iter()
+            .filter(|event| event.kind == NativeCompactEncodeKindV1::Relations)
+            .collect();
+        assert!(entities.len() >= 2, "must record multiple real entity windows");
+        assert!(relations.len() >= 2, "must record multiple real relation windows");
+        for (events, total) in [(entities, 1_101), (relations, 1_143)] {
+            let mut prior = 0;
+            for event in events {
+                assert_eq!(event.total_rows, total);
+                assert!(event.completed_rows > prior, "no retry heartbeat");
+                assert!(event.completed_rows <= total);
+                prior = event.completed_rows;
+            }
+            assert_eq!(prior, total, "the final observed window must be complete");
+        }
+
+        // A real cancellation midway through the second entity window must
+        // not report the failed window, any relations, or a full generation.
+        let failed = Mutex::new(Vec::<NativeCompactEncodeBoundaryV1>::new());
+        let calls = AtomicUsize::new(0);
+        let staging = tempfile::tempdir().unwrap();
+        let result = pool.install(|| {
+            let mut writer = SealedCompactRows::new(staging.path())?;
+            push_manifest_rows(
+                &fixture,
+                &identity,
+                &namespace,
+                &mut writer,
+                &|| {
+                    if calls.fetch_add(1, Ordering::AcqRel) >= 550 {
+                        return Err(GraphDbError::Cancelled);
+                    }
+                    Ok(())
+                },
+                &|boundary| failed.lock().unwrap().push(boundary),
+            )
+        });
+        assert!(matches!(result, Err(GraphDbError::Cancelled)));
+        let failed = failed.into_inner().unwrap();
+        assert_eq!(failed.len(), 1, "only the first complete window advanced");
+        assert_eq!(failed[0].kind, NativeCompactEncodeKindV1::Entities);
+        assert_eq!(failed[0].completed_rows, 512);
+        assert_eq!(failed[0].total_rows, 1_101);
     }
 
     /// A reopened sealed generation serves its rows in place: opening it
