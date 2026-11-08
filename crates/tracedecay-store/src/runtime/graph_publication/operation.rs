@@ -1,4 +1,7 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use thiserror::Error;
 
@@ -25,10 +28,41 @@ pub enum GraphPublicationStoreErrorV1 {
 
 pub type GraphPublicationStoreResultV1<T> = Result<T, GraphPublicationStoreErrorV1>;
 
+/// A real graph writer event. Encoding is never a durable page/segment;
+/// applied stage pages and verified installed segments are durable boundaries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphNativeWorkKindV1 {
+    Entities,
+    Relations,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphNativeWorkV1 {
+    CompactRowsEncoded {
+        kind: GraphNativeWorkKindV1,
+        completed_rows: u64,
+        total_rows: u64,
+    },
+    StagePageApplied {
+        ordinal: u64,
+        kind: GraphNativeWorkKindV1,
+        mutations: u64,
+        live_bytes: u64,
+    },
+    CompactSegmentVerified {
+        entities: u64,
+        relations: u64,
+        canonical_bytes: u64,
+    },
+}
+
+pub type GraphNativeWorkObserverV1 = Arc<dyn Fn(GraphNativeWorkV1) + Send + Sync>;
+
 /// Existing caller-owned cancellation and monotonic deadline authority.
 pub struct GraphPublicationOperationContextV1<'a> {
     probe: &'a dyn RuntimeRequestProbeV1,
     commit_started: AtomicBool,
+    native_work_observer: Option<GraphNativeWorkObserverV1>,
 }
 
 impl<'a> GraphPublicationOperationContextV1<'a> {
@@ -50,7 +84,20 @@ impl<'a> GraphPublicationOperationContextV1<'a> {
         Ok(Self {
             probe,
             commit_started: AtomicBool::new(false),
+            native_work_observer: None,
         })
+    }
+
+    #[must_use]
+    pub fn with_native_work_observer(mut self, observer: GraphNativeWorkObserverV1) -> Self {
+        self.native_work_observer = Some(observer);
+        self
+    }
+
+    pub fn observe_native_work(&self, work: GraphNativeWorkV1) {
+        if let Some(observer) = &self.native_work_observer {
+            observer(work);
+        }
     }
 
     pub fn interruption(&self) -> Option<RuntimeInterruptionV1> {
@@ -72,6 +119,7 @@ impl<'a> GraphPublicationOperationContextV1<'a> {
         Self {
             probe: self.probe,
             commit_started: AtomicBool::new(false),
+            native_work_observer: self.native_work_observer.clone(),
         }
     }
 

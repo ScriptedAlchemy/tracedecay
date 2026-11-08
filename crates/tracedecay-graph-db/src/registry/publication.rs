@@ -1478,6 +1478,7 @@ impl GraphDbRegistry {
         let database = operation.database().clone();
         database.record_memory_checkpoint(crate::observe::GrafeoMemoryPhase::PublishStart);
         let check = || operation.check(self, context);
+        let native_work = |work| context.observe_native_work(work);
         let replay = authority
             .replay(publication_key, context)
             .map_err(GraphDbError::from)?;
@@ -1705,10 +1706,11 @@ impl GraphDbRegistry {
                                 BTreeMap::new(),
                             );
                             database.remember_sealed_only_generation(&repair_lease)?;
-                            database.apply_generation_unverified_with_digest_observed(
+                            database.apply_generation_unverified_with_digest_and_work(
                                 manifest.into_manifest(&repair_check)?,
                                 sealed_digest,
                                 &repair_check,
+                                Some(&native_work),
                             )?;
                             database.reopen_and_verify_existing_generation(
                                 &identity,
@@ -1762,10 +1764,11 @@ impl GraphDbRegistry {
                                 (commit, sealed_digest.clone())
                             } else {
                                 let staged = database
-                                    .apply_generation_unverified_with_digest_observed(
+                                    .apply_generation_unverified_with_digest_and_work(
                                         manifest.into_manifest(&check)?,
                                         sealed_digest,
                                         &check,
+                                        Some(&native_work),
                                     )?;
                                 match staged {
                                     GenerationStageOutcome::Applied(commit) => {
@@ -1910,10 +1913,11 @@ impl GraphDbRegistry {
                         Ok((commit, sealed_digest.clone()))
                     }
                     Ok(None) => {
-                        let staged = database.apply_generation_unverified_with_digest_observed(
+                        let staged = database.apply_generation_unverified_with_digest_and_work(
                             manifest.into_manifest(&check)?,
                             sealed_digest,
                             &check,
+                            Some(&native_work),
                         )?;
                         let commit = staged.commit();
                         database

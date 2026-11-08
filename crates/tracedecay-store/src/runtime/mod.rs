@@ -34,6 +34,7 @@ pub use graph_publication::{
     GraphDependencyGenerationIdentityV1, GraphGenerationIdV1, GraphNamespaceV1,
     GraphPendingReplayDiscardOutcomeV1, GraphPendingReplayDiscardV1, GraphProjectionIdV1,
     GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1,
+    GraphNativeWorkKindV1, GraphNativeWorkObserverV1, GraphNativeWorkV1,
     GraphPublicationKeyV1, GraphPublicationOperationContextV1,
     GraphPublicationProjectionPageRequestV1, GraphPublicationProjectionPageV1,
     GraphPublicationReplayCursorV1, GraphPublicationReplayLookupV1,

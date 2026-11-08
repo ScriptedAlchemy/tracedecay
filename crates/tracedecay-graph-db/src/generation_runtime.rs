@@ -8,7 +8,9 @@ use std::vec::IntoIter;
 
 use grafeo_core::graph::Direction;
 use parking_lot::RwLockWriteGuard as ParkingRwLockWriteGuard;
-use tracedecay_store::runtime::GraphRecoveredGenerationDigestV1;
+use tracedecay_store::runtime::{
+    GraphNativeWorkKindV1, GraphNativeWorkV1, GraphRecoveredGenerationDigestV1,
+};
 
 use crate::generation::verify_recovered_generation;
 use crate::lease::{
@@ -181,6 +183,7 @@ struct GenerationStagePlan<'a> {
     context: &'a GenerationStageContext,
     pages: &'a [GenerationStagePage],
     restaging_sealed_only: bool,
+    observe: Option<&'a dyn Fn(GraphNativeWorkV1)>,
 }
 
 /// CPU-only page batch, built outside the exclusive snapshot gate so the next
@@ -608,6 +611,18 @@ impl GraphDb {
         expected: &GraphRecoveredGenerationDigestV1,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GenerationStageOutcome, GraphDbError> {
+        self.apply_generation_unverified_with_digest_and_work(manifest, expected, check, None)
+    }
+
+    /// Observable native stage work is emitted only after the real page
+    /// transaction and matching receipt have settled, never on read/replay.
+    pub(crate) fn apply_generation_unverified_with_digest_and_work(
+        &self,
+        manifest: Arc<GraphGenerationManifest>,
+        expected: &GraphRecoveredGenerationDigestV1,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+        observe: Option<&dyn Fn(GraphNativeWorkV1)>,
+    ) -> Result<GenerationStageOutcome, GraphDbError> {
         check()?;
         manifest.validate_checked(check)?;
         let identity = manifest.identity();
@@ -651,6 +666,7 @@ impl GraphDb {
             context: &context,
             pages: &pages,
             restaging_sealed_only,
+            observe,
         };
         match Arc::try_unwrap(manifest) {
             Ok(mut manifest) => {
@@ -782,6 +798,7 @@ impl GraphDb {
             context,
             pages,
             restaging_sealed_only,
+            observe,
         } = plan;
         let mut prepared_next = None;
         for (index, page) in pages.iter().enumerate() {
@@ -822,7 +839,7 @@ impl GraphDb {
                                 )
                             })
                         });
-                self.apply_prepared_generation_stage_page(
+                let (_, outcome) = self.apply_prepared_generation_stage_page(
                     Some(manifest),
                     identity,
                     expected,
@@ -832,6 +849,19 @@ impl GraphDb {
                     current,
                     check,
                 )?;
+                if let (GenerationStagePageCommitV1::Applied, Some(observer)) =
+                    (outcome, observe)
+                {
+                    observer(GraphNativeWorkV1::StagePageApplied {
+                        ordinal: u64::try_from(page.ordinal).unwrap_or(u64::MAX),
+                        kind: match page.kind {
+                            GenerationStagePageKind::Entities => GraphNativeWorkKindV1::Entities,
+                            GenerationStagePageKind::Relations => GraphNativeWorkKindV1::Relations,
+                        },
+                        mutations: u64::try_from(page.mutation_count()).unwrap_or(u64::MAX),
+                        live_bytes: u64::try_from(page.live_bytes()).unwrap_or(u64::MAX),
+                    });
+                }
                 // This is the exact cancellation boundary: the page transaction
                 // and receipt are durable, while no verified lease/head exists.
                 check()?;
@@ -869,6 +899,7 @@ impl GraphDb {
             context,
             pages,
             restaging_sealed_only,
+            observe,
         } = plan;
         let mut rows = OwnedGenerationStageRows::new(entities, relations);
         let Some(first_page) = pages.first() else {
@@ -931,7 +962,7 @@ impl GraphDb {
                         ));
                     }
                 };
-                self.apply_prepared_generation_stage_page(
+                let (_, outcome) = self.apply_prepared_generation_stage_page(
                     None,
                     identity,
                     expected,
@@ -941,6 +972,19 @@ impl GraphDb {
                     current.take(),
                     check,
                 )?;
+                if let (GenerationStagePageCommitV1::Applied, Some(observer)) =
+                    (outcome, observe)
+                {
+                    observer(GraphNativeWorkV1::StagePageApplied {
+                        ordinal: u64::try_from(page.ordinal).unwrap_or(u64::MAX),
+                        kind: match page.kind {
+                            GenerationStagePageKind::Entities => GraphNativeWorkKindV1::Entities,
+                            GenerationStagePageKind::Relations => GraphNativeWorkKindV1::Relations,
+                        },
+                        mutations: u64::try_from(page.mutation_count()).unwrap_or(u64::MAX),
+                        live_bytes: u64::try_from(page.live_bytes()).unwrap_or(u64::MAX),
+                    });
+                }
                 check()?;
                 successor_handle
                     .map(|handle| {
@@ -3757,6 +3801,41 @@ mod tests {
             "page_construct pages={} serial={serial_ms:?} parallel={parallel_ms:?}",
             pages.len()
         );
+    }
+
+    #[test]
+    fn native_stage_observer_reports_applied_pages_not_replayed_receipts() {
+        let manifest = large_manifest("native-stage-observer");
+        let expected = sealed_digest(&manifest);
+        let pages = generation_stage_pages(&manifest).expect("nonempty native pages");
+        assert!(!pages.is_empty());
+        let temp = TempDir::new().expect("persistent native graph store");
+        let (owner, db) = persistent_database(&temp);
+        let observed = std::sync::Mutex::new(Vec::new());
+        let observe = |event| observed.lock().unwrap().push(event);
+        let result = db
+            .apply_generation_unverified_with_digest_and_work(
+                Arc::new(manifest),
+                &expected,
+                &|| Ok(()),
+                Some(&observe),
+            )
+            .expect("real native stage");
+        assert!(matches!(result, super::GenerationStageOutcome::Applied(_)));
+        let observations = observed.lock().unwrap().clone();
+        assert!(
+            !observations.is_empty(),
+            "a real native stage with rows must report committed work"
+        );
+        assert!(observations.iter().all(|event| matches!(
+            event,
+            GraphNativeWorkV1::StagePageApplied {
+                mutations: 1..,
+                live_bytes: 1..,
+                ..
+            }
+        )));
+        owner.close().expect("close native graph store");
     }
 
     #[test]
