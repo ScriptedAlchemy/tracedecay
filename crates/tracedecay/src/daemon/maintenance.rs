@@ -47,6 +47,11 @@ where
     Operation: FnOnce() -> OperationFuture,
     OperationFuture: Future<Output = Output>,
 {
+    // Shutdown observed before admission must not start another retention
+    // unit, even when a fast probe could acquire the writer gate immediately.
+    if cancellation.is_cancelled() {
+        return None;
+    }
     if prior_deferrals < MAINTENANCE_WRITER_FAST_DEFERRALS {
         administration.try_with_writer(operation).await
     } else {
@@ -1581,25 +1586,27 @@ pub(super) fn retention_maintenance_enabled(
 
 #[cfg(test)]
 mod tests {
+    use std::future::{Future, poll_fn};
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Condvar, Mutex as StdMutex};
+    use std::task::Poll;
     use std::time::Duration;
 
     use tokio::sync::Notify;
 
     use super::{MaintenanceCoordinator, NativeTask, run_resident_memory_sampler_loop};
+    use crate::daemon::branch_admin::{StoreAdministration, StoreWriterClass, WriterScope};
     use tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry;
     use tracedecay_maintenance::tick::{MaintenanceContinuation, MaintenanceTickOutcome};
+    use tracedecay_runtime_core::cancellation::CancellationToken;
+    use tracedecay_runtime_core::native_runtime;
 
     /// Hold an unrelated store writer across two failed fast probes. The third
     /// retention attempt must queue behind it and complete even as more store
     /// writers arrive, rather than repeatedly taking non-queued snapshots.
     #[tokio::test]
     async fn retention_queues_after_bounded_writer_deferrals() {
-        use crate::daemon::branch_admin::{StoreAdministration, StoreWriterClass, WriterScope};
-        use tracedecay_runtime_core::cancellation::CancellationToken;
-
         let administration = StoreAdministration::default();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -1615,7 +1622,9 @@ mod tests {
                 )
                 .await;
         });
-        entered_rx.await.expect("writer acquired its shared daemon gate");
+        entered_rx
+            .await
+            .expect("writer acquired its shared daemon gate");
         let cancellation = CancellationToken::new();
         for refused in 0..super::MAINTENANCE_WRITER_FAST_DEFERRALS {
             assert_eq!(
@@ -1628,6 +1637,35 @@ mod tests {
             );
         }
 
+        // Establish ongoing writer activity before queueing the exclusive
+        // maintenance request. A fair queued writer blocks later readers;
+        // waiting for their progress before releasing the holder deadlocks.
+        let competing_admin = administration.clone();
+        let writer_entries = Arc::new(AtomicUsize::new(0));
+        let entries = Arc::clone(&writer_entries);
+        let stop_churn = CancellationToken::new();
+        let stop = stop_churn.clone();
+        let competitors = tokio::spawn(async move {
+            while !stop.is_cancelled() {
+                competing_admin
+                    .with_writer_in(
+                        WriterScope::store("/another-store", StoreWriterClass::Content),
+                        || async {
+                            entries.fetch_add(1, Ordering::SeqCst);
+                            tokio::task::yield_now().await;
+                        },
+                    )
+                    .await;
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while writer_entries.load(Ordering::SeqCst) < 4 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("unrelated writers churn before retention queues");
+
         let queued = super::admit_retention_writer(
             &administration,
             &cancellation,
@@ -1635,45 +1673,29 @@ mod tests {
             || async { 42_u8 },
         );
         tokio::pin!(queued);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(30), &mut queued)
-                .await
-                .is_err(),
-            "the maintenance operation waits behind an existing writer"
-        );
-
-        // Keep unrelated content writers churning until *after* the queued
-        // retention operation completes. A finite burst that happens to stop
-        // before retention runs would not prove progress under sustained load.
-        let competing_admin = administration.clone();
-        let completed_writers = Arc::new(AtomicUsize::new(0));
-        let completed = Arc::clone(&completed_writers);
-        let stop_churn = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let stop = Arc::clone(&stop_churn);
-        let competitors = tokio::spawn(async move {
-            while !stop.load(Ordering::SeqCst) {
-                competing_admin
-                    .with_writer_in(
-                        WriterScope::store("/another-store", StoreWriterClass::Content),
-                        || {
-                            let completed = Arc::clone(&completed);
-                            async move {
-                                completed.fetch_add(1, Ordering::SeqCst);
-                                tokio::task::yield_now().await;
-                            }
-                        },
-                    )
-                    .await;
-            }
-        });
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while completed_writers.load(Ordering::SeqCst) < 4 {
-                tokio::task::yield_now().await;
-            }
+        poll_fn(|cx| {
+            assert!(
+                queued.as_mut().poll(cx).is_pending(),
+                "the retention request must queue behind the held writer"
+            );
+            Poll::Ready(())
         })
-        .await
-        .expect("unrelated writers churn before original writer releases");
-        let before_release = completed_writers.load(Ordering::SeqCst);
+        .await;
+        let later_writer = administration.with_writer_in(
+            WriterScope::store("/later-store", StoreWriterClass::Content),
+            || async { 43_u8 },
+        );
+        tokio::pin!(later_writer);
+        poll_fn(|cx| {
+            assert!(
+                later_writer.as_mut().poll(cx).is_pending(),
+                "a later store writer must not overtake queued retention"
+            );
+            Poll::Ready(())
+        })
+        .await;
+
+        let before_release = writer_entries.load(Ordering::SeqCst);
         release_tx.send(()).expect("release the original writer");
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(5), &mut queued)
@@ -1681,26 +1703,59 @@ mod tests {
                 .expect("queued retention is admitted despite competing writers"),
             Some(42)
         );
-        // A succeeding write proves the churn remained live *through* the
-        // retention admission; it is stopped only after that observation.
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), &mut later_writer)
+                .await
+                .expect("later writer resumes after retention"),
+            43
+        );
+        // Keep the churn alive through retention and observe a subsequent
+        // acquisition before stopping it: a finite burst is not this proof.
         tokio::time::timeout(Duration::from_secs(5), async {
-            while completed_writers.load(Ordering::SeqCst) <= before_release {
+            while writer_entries.load(Ordering::SeqCst) <= before_release {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .expect("unrelated writers resume after maintenance admission");
-        stop_churn.store(true, Ordering::SeqCst);
+        stop_churn.cancel();
         holder.await.expect("first writer finishes");
         competitors.await.expect("unrelated writer churn finishes");
-        assert!(completed_writers.load(Ordering::SeqCst) > before_release);
+        assert!(writer_entries.load(Ordering::SeqCst) > before_release);
+    }
+
+    #[tokio::test]
+    async fn cancelled_retention_never_constructs_work_before_admission() {
+        let administration = StoreAdministration::default();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let constructed = AtomicUsize::new(0);
+        for prior_deferrals in 0..=super::MAINTENANCE_WRITER_FAST_DEFERRALS {
+            assert_eq!(
+                super::admit_retention_writer(
+                    &administration,
+                    &cancellation,
+                    prior_deferrals,
+                    || {
+                        constructed.fetch_add(1, Ordering::SeqCst);
+                        std::future::ready(7_u8)
+                    },
+                )
+                .await,
+                None,
+                "cancelled retention must refuse even an uncontended fast probe"
+            );
+        }
+        assert_eq!(constructed.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            administration.try_with_writer(|| async { 9_u8 }).await,
+            Some(9),
+            "refused work leaves the writer gate available"
+        );
     }
 
     #[tokio::test]
     async fn cancelled_queued_retention_releases_its_writer_place() {
-        use crate::daemon::branch_admin::{StoreAdministration, StoreWriterClass, WriterScope};
-        use tracedecay_runtime_core::cancellation::CancellationToken;
-
         let administration = StoreAdministration::default();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -1716,20 +1771,36 @@ mod tests {
                 )
                 .await;
         });
-        entered_rx.await.expect("writer holds shared daemon admission");
+        entered_rx
+            .await
+            .expect("writer holds shared daemon admission");
         let cancellation = CancellationToken::new();
+        let constructed = AtomicUsize::new(0);
         let waiting = super::admit_retention_writer(
             &administration,
             &cancellation,
             super::MAINTENANCE_WRITER_FAST_DEFERRALS,
-            || async { 7_u8 },
+            || {
+                constructed.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(7_u8)
+            },
         );
         tokio::pin!(waiting);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(30), &mut waiting)
-                .await
-                .is_err()
+        poll_fn(|cx| {
+            assert!(waiting.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let follower = administration.with_writer_in(
+            WriterScope::store("/follower-store", StoreWriterClass::Content),
+            || async { 8_u8 },
         );
+        tokio::pin!(follower);
+        poll_fn(|cx| {
+            assert!(follower.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
         cancellation.cancel();
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(2), &mut waiting)
@@ -1737,18 +1808,25 @@ mod tests {
                 .expect("cancelled acquisition completes"),
             None
         );
+        assert_eq!(constructed.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), &mut follower)
+                .await
+                .expect("cancellation removes the queued writer before the holder exits"),
+            8
+        );
         release_tx.send(()).expect("release held writer");
         writer.await.expect("held writer exits");
-        assert_eq!(administration.try_with_writer(|| async { 9_u8 }).await, Some(9));
+        assert_eq!(
+            administration.try_with_writer(|| async { 9_u8 }).await,
+            Some(9)
+        );
     }
 
     /// Cancellation after writer admission must not drop a running retention
     /// operation: its blocking/journaled work is responsible for cooperating.
     #[tokio::test]
     async fn cancellation_after_writer_admission_preserves_running_work() {
-        use crate::daemon::branch_admin::StoreAdministration;
-        use tracedecay_runtime_core::cancellation::CancellationToken;
-
         let administration = StoreAdministration::default();
         let cancellation = CancellationToken::new();
         let working = administration.clone();
@@ -1761,7 +1839,9 @@ mod tests {
                 &stopping,
                 super::MAINTENANCE_WRITER_FAST_DEFERRALS,
                 move || async move {
-                    entered_tx.send(()).expect("retention entered its critical section");
+                    entered_tx
+                        .send(())
+                        .expect("retention entered its critical section");
                     release_rx.await.expect("retention work released");
                     43_u8
                 },
@@ -1770,13 +1850,21 @@ mod tests {
         });
         entered_rx.await.expect("writer admission succeeded");
         cancellation.cancel();
+        assert_eq!(
+            administration.try_with_writer(|| async { 44_u8 }).await,
+            None,
+            "admitted work retains exclusion until it finishes"
+        );
         release_tx.send(()).expect("finish admitted work");
         assert_eq!(
             work.await.expect("retention task joins"),
             Some(43),
             "shutdown cancellation cannot drop journaled work already admitted"
         );
-        assert_eq!(administration.try_with_writer(|| async { 44_u8 }).await, Some(44));
+        assert_eq!(
+            administration.try_with_writer(|| async { 44_u8 }).await,
+            Some(44)
+        );
     }
 
     #[tokio::test]
@@ -2066,7 +2154,9 @@ mod tests {
                 .await;
         })
         .expect("start competing store writer");
-        writer_entered.await.expect("unrelated store writer owns shared gate");
+        writer_entered
+            .await
+            .expect("unrelated store writer owns shared gate");
         for _ in 0..super::MAINTENANCE_WRITER_FAST_DEFERRALS {
             let deferred = coordinator
                 .run_tick(
@@ -2080,7 +2170,11 @@ mod tests {
                 )
                 .await;
             assert_eq!(deferred, MaintenanceTickOutcome::Retry);
-            assert_eq!(generation_files(), 6, "fast probe must not collect under a writer");
+            assert_eq!(
+                generation_files(),
+                6,
+                "fast probe must not collect under a writer"
+            );
         }
 
         let release_after_queue = std::thread::spawn(move || {
@@ -2100,7 +2194,10 @@ mod tests {
             .await;
         release_after_queue.join().expect("writer release thread");
         assert!(
-            matches!(writer.wait().await, native_runtime::NativeTaskOutcome::Completed(())),
+            matches!(
+                writer.wait().await,
+                native_runtime::NativeTaskOutcome::Completed(())
+            ),
             "competing writer must complete normally"
         );
         assert_eq!(
