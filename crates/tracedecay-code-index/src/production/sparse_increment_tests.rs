@@ -343,7 +343,8 @@ fn a_comment_beside_same_named_symbols_decodes_only_what_it_reaches() {
         callers: &'a [(String, String)],
     ) -> Vec<(&'a str, &'a str, &'a str)> {
         let mut tree = rust_tree(util, MAIN);
-        tree[0].2 = "pub mod main;\npub mod util;\npub mod other;\n";
+        tree[0].2 = "pub mod consumer;\npub mod util;\npub mod other;\n";
+        tree[1].0 = "src/consumer.rs";
         tree.push(("src/other.rs", RUST, other));
         tree.extend(
             callers
@@ -409,7 +410,7 @@ fn a_comment_beside_same_named_symbols_decodes_only_what_it_reaches() {
         .iter()
         .map(|(_, digest)| store.segment_reads(digest))
         .collect::<Vec<_>>();
-    let dependent_evidence = evidence_of("src/main.rs");
+    let dependent_evidence = evidence_of("src/consumer.rs");
     let dependent_reads_before = store.segment_reads(&dependent_evidence);
 
     let sparse = publish(

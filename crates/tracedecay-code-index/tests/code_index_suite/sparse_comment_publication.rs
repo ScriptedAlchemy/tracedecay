@@ -24,7 +24,7 @@ use crate::{
 
 fn tree_request(util: &str, sealed_at: i64, phase: &str) -> CodeIndexBuildRequestV1 {
     let root = concat!(
-        "pub mod main;\npub mod util;\npub mod other;\npub mod sibling;\n",
+        "pub mod consumer;\npub mod util;\npub mod other;\npub mod sibling;\n",
         "pub mod caller0;\npub mod caller1;\npub mod caller2;\npub mod caller3;\n",
     );
     let mut request = request_with_source(
@@ -37,7 +37,7 @@ fn tree_request(util: &str, sealed_at: i64, phase: &str) -> CodeIndexBuildReques
     let mut sources = vec![
         ("src/lib.rs".to_owned(), root.to_owned()),
         (
-            "src/main.rs".to_owned(),
+            "src/consumer.rs".to_owned(),
             "pub fn run() -> u32 { crate::util::helper() + crate::util::extra() }\n".to_owned(),
         ),
         (
@@ -167,7 +167,7 @@ fn comment_successor_skips_unrelated_evidence_and_publishes_the_cold_chunk_delta
             (digest, reads)
         })
         .collect::<Vec<_>>();
-    let dependent = evidence_digest("src/main.rs");
+    let dependent = evidence_digest("src/consumer.rs");
     let dependent_reads = store.segment_reads(&dependent);
     let edited = format!("{util}// comment only\n");
     let cold_request = tree_request(&edited, 1_200_000, "after");
@@ -226,18 +226,40 @@ fn comment_successor_skips_unrelated_evidence_and_publishes_the_cold_chunk_delta
     assert_eq!(changes.added_or_changed, expected_delta.added_or_changed);
     assert_eq!(changes.deleted, expected_delta.deleted);
     assert_eq!(changes.reused_count, expected_delta.reused_count);
-    assert_eq!(changes.reused_digest, expected_delta.reused_digest);
+    let parent_replay = &parent
+        .manifest()
+        .source_commitments
+        .as_ref()
+        .expect("parent sealed its source")
+        .full_replay_digest;
+    let expected_reuse = tracedecay_domain::code_reused_partition_arc_share_digest(
+        parent_replay,
+        &parent.manifest().generation_id,
+        &sparse.manifest().generation_id,
+        expected_delta.reused_count,
+    )
+    .expect("sparse reuse binds the parent to the cold delta's unchanged chunks");
+    assert_eq!(changes.reused_digest, expected_reuse);
+    let corpus = |generation: &CodeIndexPublishedGenerationV1| {
+        generation
+            .chunks()
+            .chunks()
+            .iter()
+            .map(|chunk| (chunk.id.clone(), chunk.content_digest.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(corpus(&after), corpus(&expected));
     assert_eq!(after.edges(), expected.edges());
 
     let old_helper = symbol(&before, "src/util.rs::helper");
     let helper = symbol(&after, "src/util.rs::helper");
     let old_other = symbol(&before, "src/util.rs::extra");
     let other = symbol(&after, "src/util.rs::extra");
-    let run = symbol(&after, "src/main.rs::run");
+    let run = symbol(&after, "src/consumer.rs::run");
     let sibling = symbol(&after, "src/sibling.rs::second_caller");
     assert_ne!(old_helper, helper, "comment edit re-keys its target");
     assert_ne!(old_other, other);
-    assert_eq!(run, symbol(&before, "src/main.rs::run"));
+    assert_eq!(run, symbol(&before, "src/consumer.rs::run"));
     assert_eq!(sibling, symbol(&before, "src/sibling.rs::second_caller"));
     for (from, to) in [(&run, &helper), (&run, &other), (&sibling, &helper)] {
         assert_eq!(
