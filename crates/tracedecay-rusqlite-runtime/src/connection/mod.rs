@@ -17,6 +17,7 @@ use std::{
 use rusqlite::{
     Connection, OpenFlags, Transaction,
     config::DbConfig,
+    ffi,
     hooks::{AuthAction, AuthContext, Authorization},
     limits::Limit,
 };
@@ -1007,7 +1008,6 @@ fn live_wal_has_store_schema(path: &Path) -> bool {
     {
         return false;
     }
-    use rusqlite::ffi;
     let mut file: *mut ffi::sqlite3_file = std::ptr::null_mut();
     // SAFETY: the read transaction keeps the main file and mapped WAL index
     // live. FILE_POINTER borrows the connection's file; xShmMap inspects page
