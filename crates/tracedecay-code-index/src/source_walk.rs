@@ -104,21 +104,72 @@ impl PathGlobScope {
     }
 }
 
+const MAX_REPOSITORY_NAMES: usize = 8;
+const MAX_REPOSITORY_PATH_CHARS: usize = 160;
+
 /// Diagnostics emitted by the same source walker that enforces the nested
-/// repository boundary. Only directories the walk actually reaches are named.
+/// repository boundary. Only directories within the walk's policy are named.
 #[derive(Clone, Default)]
 pub(crate) struct SourceWalkDiagnostics {
-    skipped_nested_repositories: Arc<Mutex<BTreeSet<String>>>,
+    skipped_nested_repositories: Arc<Mutex<NestedRepositorySummary>>,
+}
+
+#[derive(Default)]
+struct NestedRepositorySummary {
+    total: usize,
+    names: BTreeSet<String>,
 }
 
 impl SourceWalkDiagnostics {
-    pub(crate) fn skipped_nested_repositories(&self) -> Vec<String> {
-        self.skipped_nested_repositories
+    fn record_skipped_nested_repository(&self, relative: String) {
+        let mut summary = self
+            .skipped_nested_repositories
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .unwrap_or_else(PoisonError::into_inner);
+        // A pruned directory is visited once. Keep only the smallest names,
+        // independent of filesystem iteration order, rather than collecting
+        // every path and truncating only after the walk has finished.
+        summary.total += 1;
+        summary.names.insert(relative);
+        if summary.names.len() > MAX_REPOSITORY_NAMES {
+            let _ = summary.names.pop_last();
+        }
+    }
+
+    pub(crate) fn skipped_nested_repositories_note(&self) -> Option<String> {
+        let summary = self
+            .skipped_nested_repositories
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if summary.total == 0 {
+            return None;
+        }
+        let names = summary
+            .names
             .iter()
-            .cloned()
-            .collect()
+            .map(|path| {
+                // Bound by characters before escaping, so truncation cannot
+                // split UTF-8 or an escape. Quoting prevents a filename from
+                // injecting new lines or delimiters into an agent's report.
+                let mut chars = path.chars();
+                let prefix = chars
+                    .by_ref()
+                    .take(MAX_REPOSITORY_PATH_CHARS)
+                    .collect::<String>();
+                let suffix = if chars.next().is_some() { "…" } else { "" };
+                format!("{prefix:?}{suffix}")
+            })
+            .collect::<Vec<_>>();
+        let remaining = summary.total - summary.names.len();
+        let suffix = if remaining == 0 {
+            String::new()
+        } else {
+            format!(" (and {remaining} more)")
+        };
+        Some(format!(
+            "Skipped nested repositories outside parent index: {}{suffix}",
+            names.join(", ")
+        ))
     }
 }
 
@@ -211,6 +262,11 @@ fn source_walk_inner(
             if !is_dir {
                 return !path_policy.excludes(&relative);
             }
+            // Excluded directories are outside this audit, not missing source
+            // caused by the repository boundary. Do not probe or name them.
+            if path_policy.excludes_directory(&relative) {
+                return false;
+            }
             // Includes select paths, not repository authority. A parent
             // gitlink does not capture the child's files or prove their
             // freshness, so even registered submodules remain separate
@@ -218,15 +274,11 @@ fn source_walk_inner(
             // The project root is deliberately exempt at depth zero above.
             if std::fs::symlink_metadata(entry.path().join(".git")).is_ok() {
                 if let Some(diagnostics) = &diagnostics {
-                    diagnostics
-                        .skipped_nested_repositories
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .insert(relative);
+                    diagnostics.record_skipped_nested_repository(relative);
                 }
                 return false;
             }
-            !path_policy.excludes_directory(&relative)
+            true
         });
     if let Some(overrides) = overrides {
         builder.overrides(overrides);
@@ -264,6 +316,9 @@ fn build_overrides(
         _ => Ok(None),
     }
 }
+
+#[cfg(test)]
+mod nested_repository_tests;
 
 #[cfg(test)]
 mod tests {
@@ -496,8 +551,8 @@ mod tests {
         .expect("source walk with nested repository diagnostics");
         let _visited = walk.map(|entry| entry.expect("source entry")).count();
         assert_eq!(
-            diagnostics.skipped_nested_repositories(),
-            vec!["app".to_owned()]
+            diagnostics.skipped_nested_repositories_note().as_deref(),
+            Some("Skipped nested repositories outside parent index: \"app\"")
         );
 
         for rule in ["app/**", "app/src/feature.rs", "app/src/fe*.rs"] {

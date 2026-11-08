@@ -152,7 +152,7 @@ pub struct ProjectAudit {
 pub(super) struct ProjectFiles {
     root: PathBuf,
     files: Vec<PathBuf>,
-    skipped_nested_repositories: Vec<String>,
+    nested_repository_note: Option<String>,
 }
 
 impl ProjectFiles {
@@ -164,7 +164,10 @@ impl ProjectFiles {
                 })?;
         let mut files = Vec::new();
         for entry in walk {
-            let Ok(entry) = entry else { continue };
+            let entry = entry.map_err(|error| TraceDecayError::File {
+                message: format!("source walk did not complete: {error}"),
+                path: project_root.display().to_string(),
+            })?;
             if !entry.file_type().is_some_and(|kind| kind.is_file()) {
                 continue;
             }
@@ -174,7 +177,7 @@ impl ProjectFiles {
         Ok(Self {
             root: project_root.to_path_buf(),
             files,
-            skipped_nested_repositories: diagnostics.skipped_nested_repositories(),
+            nested_repository_note: diagnostics.skipped_nested_repositories_note(),
         })
     }
 
@@ -259,25 +262,7 @@ pub fn audit_project(project_root: &Path, path_policy: &IndexPathPolicyV1) -> Re
     };
     let mut ecosystems = vec![rust, typescript];
     ecosystems.extend(unmodelled_ecosystems(&files));
-    if !files.skipped_nested_repositories.is_empty() {
-        // Preserve existing ecosystem caveats and bound the diagnostic text.
-        // Skipped child repositories are not indexed as parent source.
-        let named = files
-            .skipped_nested_repositories
-            .iter()
-            .take(8)
-            .cloned()
-            .collect::<Vec<_>>();
-        let remaining = files.skipped_nested_repositories.len() - named.len();
-        let summary = format!(
-            "Skipped nested repositories outside parent index: {}{}",
-            named.join(", "),
-            if remaining == 0 {
-                String::new()
-            } else {
-                format!(" (and {remaining} more)")
-            }
-        );
+    if let Some(summary) = &files.nested_repository_note {
         for ecosystem in &mut ecosystems {
             ecosystem.note = Some(match ecosystem.note.take() {
                 Some(existing) => format!("{existing} {summary}"),
