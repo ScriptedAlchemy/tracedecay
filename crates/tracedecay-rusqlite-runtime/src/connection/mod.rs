@@ -1,5 +1,7 @@
 #[cfg(unix)]
 use std::ffi::CString;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 use std::{
     fmt,
     fs::{File, OpenOptions},
@@ -442,7 +444,6 @@ fn reserve_new_sidecar(path: &Path) -> io::Result<File> {
     options.read(true).write(true).create_new(true);
     #[cfg(windows)]
     {
-        use std::os::windows::fs::OpenOptionsExt;
         options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
     }
     options.open(path)
