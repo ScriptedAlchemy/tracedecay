@@ -656,6 +656,32 @@ fn verified_immutable_reader_never_binds_transient_b_to_restored_a_identity() {
     }
 }
 
+#[test]
+fn header_only_existing_store_preserves_ambiguous_sidecars() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("existing.db");
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch("PRAGMA journal_mode=WAL")
+        .unwrap();
+    let member = super::sidecar_path(&path, "-journal");
+    std::fs::write(&member, b"unclaimed state").unwrap();
+    assert!(matches!(
+        OpenedDatabaseFile::pin_initialized(&path),
+        Err(OpenedDatabaseFileError::IncompleteInitialization)
+    ));
+    assert_eq!(std::fs::read(&member).unwrap(), b"unclaimed state");
+    std::fs::remove_file(&member).unwrap();
+    let database = Connection::open(&path).unwrap();
+    database
+        .execute_batch(
+            "CREATE TABLE existing_data(value INTEGER); INSERT INTO existing_data VALUES (7)",
+        )
+        .unwrap();
+    drop(database);
+    OpenedDatabaseFile::pin_initialized(&path).unwrap();
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_pinned_file_blocks_replacement_until_authority_closes() {

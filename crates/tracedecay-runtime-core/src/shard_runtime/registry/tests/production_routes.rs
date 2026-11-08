@@ -543,6 +543,72 @@ async fn writable_existing_open_refuses_tampered_final_shape_before_publication(
 }
 
 #[asupersync::test]
+async fn cancelled_schema_publication_retries_with_the_final_store() {
+    let root = TempDir::new().unwrap();
+    let path = root.path().canonicalize().unwrap().join("remote.db");
+    let authority =
+        crate::db::DatabaseAuthority::acquire_test(&path, "retry remote initialization").unwrap();
+    let shard = StoreShardIdV1::remote_node(
+        id::<BrainId>("brain.registry"),
+        id::<UserProfileId>("profile.registry"),
+        id::<BrainNodeId>("node.remote"),
+    );
+    let binding = StoreRuntimeBindingV1::new(
+        shard.clone(),
+        incarnation(),
+        StoreAuthorityEpochV1::new(1).unwrap(),
+    );
+    let verified = VerifiedStoreLocatorV1::new(
+        shard,
+        incarnation(),
+        canonical_store_locator_digest(&path).unwrap(),
+    );
+    let locator = RuntimeLocatorRecord::new(
+        StoreRuntimeKey::from_binding(&binding),
+        ResolvedStoreLocator::prospective(verified, path.clone()),
+    );
+    let request = |cancellation| {
+        ShardRuntimeBuildRequest::new(
+            binding.clone(),
+            locator.clone(),
+            StoreRuntimeOpenMode::Initialize,
+            StoreRuntimeAccessMode::ReadWrite,
+            Some(authority.clone()),
+            cancellation,
+        )
+    };
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert!(matches!(
+        LifecycleShardRuntimePublisher
+            .publish(request(cancelled))
+            .await,
+        Err(StoreRuntimeRegistryFailure::OpenCancelled { .. })
+    ));
+    assert!(!path.exists());
+    let published = LifecycleShardRuntimePublisher
+        .publish(request(CancellationToken::new()))
+        .await
+        .unwrap();
+    let reader =
+        Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let count: i64 = reader
+        .query_row("SELECT COUNT(*) FROM remote_node_identity", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(
+        reader
+            .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    drop(reader);
+    drop(published);
+}
+
+#[asupersync::test]
 async fn remote_node_initialization_installs_only_the_final_registered_schema() {
     let root = TempDir::new().unwrap();
     let profile_path = root.path().join("profile.db");

@@ -86,14 +86,8 @@ impl OpenedDatabaseFile {
         Self::adopt(file)
     }
 
-    /// Refuse unfinished stores before SQLite opens their WAL/SHM/journal.
-    /// A rejected new-basename reservation intentionally leaves the newly
-    /// created database in place so no pathname-based rollback can delete a
-    /// foreign replacement. That zero-length database must never become an
-    /// ordinary existing attachment on retry: SQLite would initialize it and
-    /// overwrite precisely the occupied sidecar that caused the refusal.
-    /// Read the magic through the existing pin; opening a second descriptor
-    /// here could discard another connection's POSIX locks on Unix.
+    /// Inspect the immutable main before a read-only or writable SQLite
+    /// worker can open any ambiguous sidecar of an interrupted initialization.
     pub(crate) fn pin_initialized(path: &Path) -> Result<Self, OpenedDatabaseFileError> {
         // A failed header read would drop a freshly opened raw descriptor,
         // releasing unrelated process-owned SQLite locks on Unix. Reject
@@ -117,11 +111,26 @@ impl OpenedDatabaseFile {
         // never opens or mutates the unverified WAL/SHM/journal sidecars.
         let inspection =
             open_immutable_reader(path).map_err(|_| OpenedDatabaseFileError::InvalidHeader)?;
-        let _: i64 = inspection
-            .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
+        let initialized: bool = inspection
+            .query_row(
+                "SELECT (SELECT application_id FROM pragma_application_id) = ?1 OR EXISTS(
+                 SELECT 1 FROM sqlite_schema WHERE type = 'table'
+                 AND name NOT GLOB 'sqlite_*' AND name NOT GLOB 'td_runtime_*'
+             )",
+                [crate::schema_version::REGISTERED_STORE_APPLICATION_ID],
+                |row| row.get(0),
+            )
             .map_err(|_| OpenedDatabaseFileError::InvalidHeader)?;
         drop(inspection);
-        // A valid main-file schema is necessary, not proof of sidecar ownership.
+        if !initialized {
+            for suffix in ["-wal", "-shm", "-journal"] {
+                match std::fs::symlink_metadata(sidecar_path(path, suffix)) {
+                    Ok(_) => return Err(OpenedDatabaseFileError::IncompleteInitialization),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(_) => return Err(OpenedDatabaseFileError::Inspect),
+                }
+            }
+        }
         Self::pin(path)
     }
 
@@ -369,6 +378,7 @@ pub enum OpenedDatabaseFileError {
     Create,
     Reserve,
     InvalidHeader,
+    IncompleteInitialization,
     Open,
     Inspect,
     NotFile,
@@ -384,6 +394,9 @@ impl fmt::Display for OpenedDatabaseFileError {
         let message = match self {
             Self::Create => "could not create the canonical SQLite file",
             Self::Reserve => "could not exclusively reserve the new SQLite sidecar namespace",
+            Self::IncompleteInitialization => {
+                "SQLite main has no published schema and its sidecar ownership is ambiguous"
+            }
             Self::InvalidHeader => {
                 "existing SQLite file has no valid database header; refusing sidecar access"
             }

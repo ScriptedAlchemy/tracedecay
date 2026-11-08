@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,6 +17,7 @@ use tracedecay_store::{
     StoreShardScopeV1, VerifiedStoreLocatorV1,
 };
 
+use super::initialization::InitializationDirectory;
 use super::{
     PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot, PhysicalWriterRuntimeSnapshot,
     PublishedShardRuntime, StoreRuntimeAccessMode, StoreRuntimeKey, StoreRuntimeOpenMode,
@@ -141,24 +142,118 @@ impl ShardRuntimePublisher for LifecycleShardRuntimePublisher {
                     operation: "publish physical registered runtime",
                 },
             )?;
-            // Attaching opens the file and parks its thread until the writer
-            // and readers have opened it on the storage pool.
-            let attach_request = request.clone();
-            let physical =
-                crate::native_runtime::spawn_blocking(move || {
-                    LifecycleShardRuntimeAttachment::new(RepositoryPhysicalAttachmentFactory)
-                        .attach(&executor, &attach_request, AdmissionConfigV1::default())
-                })
-                .await
-                .map_err(|message| {
-                    StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                        operation: "attach rusqlite repository runtime",
-                        message,
-                    }
-                })??;
-            publish_lifecycle_runtime(request, runtime, physical).await
+            let published_identity = if request.locator.is_prospective() {
+                Some(initialize_staged_runtime(&executor, &request).await?)
+            } else {
+                None
+            };
+            let attachment = attach_runtime(&executor, &request, None, published_identity).await?;
+            publish_lifecycle_runtime(request, runtime, attachment).await
         })
     }
+}
+
+fn physical_failure(
+    operation: &'static str,
+    error: impl std::fmt::Display,
+) -> StoreRuntimeRegistryFailure {
+    StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+        operation,
+        message: error.to_string(),
+    }
+}
+
+async fn attach_runtime(
+    executor: &RuntimeHandle,
+    request: &ShardRuntimeBuildRequest,
+    staging: Option<Arc<InitializationDirectory>>,
+    published_identity: Option<u64>,
+) -> Result<LifecyclePhysicalAttachment, StoreRuntimeRegistryFailure> {
+    let executor = executor.clone();
+    let request = request.clone();
+    crate::native_runtime::spawn_blocking(move || {
+        const OPERATION: &str = "attach published SQLite generation";
+        if let Some(expected) = published_identity {
+            let current = crate::db::sqlite_generation_identity(request.locator.path())
+                .map_err(|error| physical_failure(OPERATION, error))?;
+            if current != expected {
+                return Err(physical_failure(
+                    OPERATION,
+                    "published database identity changed",
+                ));
+            }
+        }
+        let attachment = LifecycleShardRuntimeAttachment::new(RepositoryPhysicalAttachmentFactory)
+            .attach(&executor, &request, staging, AdmissionConfigV1::default())?;
+        if published_identity
+            .is_some_and(|expected| expected != attachment.0.opened_file_identity())
+        {
+            attachment
+                .0
+                .drain()
+                .and_then(|()| attachment.0.close_and_join())
+                .map_err(|error| physical_failure(OPERATION, error))?;
+            return Err(physical_failure(
+                OPERATION,
+                "published database changed during attachment",
+            ));
+        }
+        Ok(attachment)
+    })
+    .await
+    .map_err(|error| physical_failure("attach SQLite runtime", error))?
+}
+
+async fn initialize_staged_runtime(
+    executor: &RuntimeHandle,
+    request: &ShardRuntimeBuildRequest,
+) -> Result<u64, StoreRuntimeRegistryFailure> {
+    const OPERATION: &str = "publish initialized SQLite family";
+    let authority = request
+        .database_authority
+        .as_ref()
+        .ok_or_else(|| physical_failure(OPERATION, "missing database authority"))?;
+    if request.mode != StoreRuntimeOpenMode::Initialize
+        || authority.canonical_database_path() != request.locator.path()
+    {
+        return Err(physical_failure(
+            OPERATION,
+            "initialization does not own this destination",
+        ));
+    }
+    authority
+        .require_active_write_scope(OPERATION)
+        .map_err(|error| physical_failure(OPERATION, error))?;
+    let destination = request.locator.path().to_owned();
+    let stage = crate::native_runtime::spawn_blocking(move || {
+        InitializationDirectory::begin(destination).map(Arc::new)
+    })
+    .await
+    .map_err(|error| physical_failure(OPERATION, error))?
+    .map_err(|error| physical_failure(OPERATION, error))?;
+    let path = stage.database();
+    let attachment = attach_runtime(executor, request, Some(stage.clone()), None).await?;
+    let identity = attachment.0.opened_file_identity();
+    let schema =
+        install_final_schema_before_publication(request, attachment.as_physical(), &path).await;
+    attachment
+        .close(schema.is_ok())
+        .await
+        .map_err(|error| physical_failure(OPERATION, error))?;
+    schema?;
+    authority
+        .require_active_write_scope(OPERATION)
+        .map_err(|error| physical_failure(OPERATION, error))?;
+    if request.open_cancellation.is_cancelled() {
+        return Err(StoreRuntimeRegistryFailure::OpenCancelled {
+            key: Box::new(StoreRuntimeKey::from_binding(&request.binding)),
+        });
+    }
+    crate::native_runtime::spawn_blocking(move || stage.publish())
+        .await
+        .map_err(|error| physical_failure(OPERATION, error))?
+        .map_err(|error| physical_failure(OPERATION, error))?;
+    Ok(identity)
 }
 
 async fn publish_lifecycle_runtime(
@@ -167,10 +262,15 @@ async fn publish_lifecycle_runtime(
     attachment: LifecyclePhysicalAttachment,
 ) -> Result<PublishedShardRuntime, StoreRuntimeRegistryFailure> {
     if request.mode == StoreRuntimeOpenMode::Initialize
-        && let Err(error) =
-            install_final_schema_before_publication(&request, attachment.as_physical()).await
+        && !request.locator.is_prospective()
+        && let Err(error) = install_final_schema_before_publication(
+            &request,
+            attachment.as_physical(),
+            request.locator.path(),
+        )
+        .await
     {
-        let _ = attachment.abort(request.locator.is_prospective()).await;
+        let _ = attachment.close(false).await;
         return Err(error);
     }
     if request.mode == StoreRuntimeOpenMode::Existing
@@ -179,7 +279,7 @@ async fn publish_lifecycle_runtime(
             verify_final_schema_before_existing_publication(&request, attachment.as_physical())
                 .await
     {
-        let _ = attachment.abort(request.locator.is_prospective()).await;
+        let _ = attachment.close(false).await;
         return Err(error);
     }
     if request.mode == StoreRuntimeOpenMode::Existing
@@ -190,29 +290,17 @@ async fn publish_lifecycle_runtime(
     {
         // This failed attachment must finish closing before the registry can
         // retry at a new epoch.
-        attachment
-            .abort(request.locator.is_prospective())
-            .await
-            .map_err(
-                |message| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                    operation: "close runtime after writer authority refusal",
-                    message,
-                },
-            )?;
+        attachment.close(false).await.map_err(|message| {
+            StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "close runtime after writer authority refusal",
+                message,
+            }
+        })?;
         return Err(error);
     }
     if let Err(error) = runtime.transition(RuntimeMaintenanceStateV1::Ready) {
-        let _ = attachment.abort(request.locator.is_prospective()).await;
+        let _ = attachment.close(false).await;
         return Err(runtime_lifecycle_failure(error));
-    }
-    if request.locator.is_prospective()
-        && let Err(error) = attachment.commit_initialization()
-    {
-        let _ = attachment.abort(true).await;
-        return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-            operation: "commit initialized SQLite runtime",
-            message: error,
-        });
     }
     Ok(PublishedShardRuntime::new(runtime, attachment.into_box()))
 }
@@ -297,7 +385,10 @@ async fn verify_final_schema_before_existing_publication(
         })
 }
 
-struct LifecyclePhysicalAttachment(RepositoryRuntimePhysicalAttachment);
+struct LifecyclePhysicalAttachment(
+    RepositoryRuntimePhysicalAttachment,
+    Option<Arc<InitializationDirectory>>,
+);
 
 struct LifecycleShardRuntimeAttachment {
     repository: RepositoryPhysicalAttachmentFactory,
@@ -312,20 +403,19 @@ impl LifecycleShardRuntimeAttachment {
         &self,
         runtime: &RuntimeHandle,
         request: &ShardRuntimeBuildRequest,
+        staging: Option<Arc<InitializationDirectory>>,
         admission: AdmissionConfigV1,
     ) -> Result<LifecyclePhysicalAttachment, StoreRuntimeRegistryFailure> {
-        if request.locator.is_prospective() && request.mode != StoreRuntimeOpenMode::Initialize {
-            return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation: "open prospective SQLite runtime",
-                message: "prospective locators require explicit initialization".to_owned(),
-            });
+        if staging.is_none() {
+            InitializationDirectory::recover_published(request.locator.path())
+                .map_err(|error| physical_failure("recover initialized SQLite family", error))?;
         }
-        let attachment = if request.locator.is_prospective() {
+        let attachment = if let Some(stage) = &staging {
             self.repository.initialize(
                 runtime,
                 request.binding.clone(),
                 request.locator.verified().clone(),
-                request.locator.path().to_path_buf(),
+                stage.database(),
                 admission,
             )
         } else if request.access == StoreRuntimeAccessMode::ReadOnly {
@@ -348,7 +438,7 @@ impl LifecycleShardRuntimeAttachment {
             operation: "attach rusqlite repository runtime",
             message: error.to_string(),
         })?;
-        Ok(LifecyclePhysicalAttachment(attachment))
+        Ok(LifecyclePhysicalAttachment(attachment, staging))
     }
 }
 
@@ -357,20 +447,19 @@ impl LifecyclePhysicalAttachment {
         &self.0
     }
 
-    fn commit_initialization(&self) -> Result<(), String> {
-        self.0.commit_initialization()
-    }
-
     /// Closes an attachment that will not be published. Joining its writer
     /// and readers parks the calling thread.
-    async fn abort(self, created: bool) -> Result<(), String> {
+    async fn close(self, completed_schema: bool) -> Result<(), String> {
         crate::native_runtime::spawn_blocking(move || {
-            if created {
-                self.0.abort_initialization()
-            } else {
-                self.0.drain()?;
-                self.0.close_and_join()
+            let stage = self.1;
+            if stage.is_some() {
+                if !completed_schema {
+                    return self.0.abort_initialization();
+                }
+                self.0.commit_initialization()?;
             }
+            self.0.drain()?;
+            self.0.close_and_join()
         })
         .await
         .and_then(|closed| closed)
@@ -428,6 +517,7 @@ async fn authorized_schema_connection(
     request: &ShardRuntimeBuildRequest,
     attachment: &dyn PhysicalRuntimeAttachment,
     operation: &'static str,
+    physical_path: &Path,
 ) -> Result<crate::db::engine::Connection, StoreRuntimeRegistryFailure> {
     let authority = request.database_authority.clone().ok_or_else(|| {
         StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
@@ -462,7 +552,7 @@ async fn authorized_schema_connection(
         });
     }
     let authority = InitializingSchemaAuthority {
-        canonical_path: authority.canonical_database_path().to_path_buf(),
+        canonical_path: physical_path.to_path_buf(),
         authority,
         opened_file_identity,
     };
@@ -478,11 +568,13 @@ async fn authorized_schema_connection(
 async fn install_final_schema_before_publication(
     request: &ShardRuntimeBuildRequest,
     attachment: &dyn PhysicalRuntimeAttachment,
+    physical_path: &Path,
 ) -> Result<(), StoreRuntimeRegistryFailure> {
     let connection = authorized_schema_connection(
         request,
         attachment,
         "install final schema for initialized SQLite runtime",
+        physical_path,
     )
     .await?;
     match &request.binding.shard_id.scope {
