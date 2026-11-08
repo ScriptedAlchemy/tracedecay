@@ -631,6 +631,13 @@ fn entry_statement(entry: &ProfileFootprintEntryV1) -> String {
     // Place the recovery command before the potentially long registered root
     // so Doctor's bounded statement never truncates the actionable command.
     let reclaim = registered_project_reclaim_hint(entry).unwrap_or_default();
+    // The measured bytes and bound follow this subject. A very long physical
+    // path must not crowd those numbers out of Doctor's bounded statement.
+    let root = if !reclaim.is_empty() && root.len() > 96 {
+        " (registered root omitted from bounded diagnostic)".to_owned()
+    } else {
+        root
+    };
     format!(
         "{label} {}{reclaim}{root}{breakdown}{}",
         entry.key,
@@ -1026,7 +1033,7 @@ mod tests {
             ("projects/proj_live".to_owned(), 1024),
             ("projects/proj_stray".to_owned(), 1),
         ]);
-        let over = census_profile_footprint(&fixture.profile, &fixture.registered, &overrides);
+        let mut over = census_profile_footprint(&fixture.profile, &fixture.registered, &overrides);
         let over_findings = findings(&over);
         let live = &over_findings["projects/proj_live"];
         assert_eq!(live.finding().state(), DoctorEvidenceStateV1::Degraded);
@@ -1055,6 +1062,29 @@ mod tests {
                 .contains("projects forget"),
             "a profile total does not identify a reclaimable project"
         );
+
+        let long_root = "nested-repository/".repeat(70);
+        let registered = over
+            .entries
+            .iter_mut()
+            .find(|entry| entry.key == "projects/proj_live")
+            .expect("registered footprint");
+        registered
+            .project
+            .as_mut()
+            .expect("registered project")
+            .registered_root = Some(long_root);
+        let bounded = findings(&over);
+        let bounded_statement = bounded["projects/proj_live"].finding().coverage().statement();
+        assert!(
+            bounded_statement.contains("tracedecay --dry-run projects forget proj_live"),
+            "{bounded_statement}"
+        );
+        assert!(
+            bounded_statement.contains(" of 1.0 KB bound"),
+            "over-budget bytes and limit must survive a long repository path: {bounded_statement}"
+        );
+        assert!(bounded_statement.contains("registered root omitted"));
 
         let normal =
             census_profile_footprint(&fixture.profile, &fixture.registered, &BTreeMap::new());
