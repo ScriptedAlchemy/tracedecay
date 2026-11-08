@@ -1649,9 +1649,7 @@ mod tests {
                 )
                 .await;
         });
-        entered_rx
-            .await
-            .expect("writer acquired its store gate");
+        entered_rx.await.expect("writer acquired its store gate");
         let cancellation = CancellationToken::new();
         for refused in 0..super::MAINTENANCE_WRITER_FAST_DEFERRALS {
             assert_eq!(

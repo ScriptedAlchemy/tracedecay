@@ -1965,7 +1965,8 @@ impl StoreAdministration {
         Operation: FnOnce() -> OperationFuture,
         OperationFuture: Future<Output = Output>,
     {
-        self.try_with_writer_in(WriterScope::Daemon, operation).await
+        self.try_with_writer_in(WriterScope::Daemon, operation)
+            .await
     }
 
     pub(super) async fn try_with_writer_in<Operation, OperationFuture, Output>(
