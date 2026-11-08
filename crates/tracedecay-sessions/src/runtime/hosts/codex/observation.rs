@@ -45,6 +45,8 @@ use tracedecay_runtime_core::resident_memory::ProcessSharedMemoryReservationV1;
 #[cfg(test)]
 mod meta_cache_tests;
 #[cfg(test)]
+mod reoffer_tests;
+#[cfg(test)]
 mod retired_source_tests;
 #[cfg(test)]
 mod rollout_source_tests;
