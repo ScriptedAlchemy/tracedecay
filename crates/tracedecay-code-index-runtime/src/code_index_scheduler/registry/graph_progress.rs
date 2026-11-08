@@ -89,9 +89,19 @@ impl CodeIndexNativeGraphProgressSlotStateV1 {
                 kind,
                 completed_rows,
                 total_rows,
+                total_relations,
             } => {
                 if completed_rows == 0 || completed_rows > total_rows
                     || next.committed_compact_segments != 0
+                {
+                    return false;
+                }
+                // The manifest already authenticates the relation count,
+                // including zero, while entity windows are still being encoded.
+                // Never treat an unknown relation bound as completed work.
+                if next.total_relations.is_some_and(|known| known != total_relations)
+                    || (kind == GraphNativeWorkKindV1::Relations
+                        && total_rows != total_relations)
                 {
                     return false;
                 }
@@ -113,6 +123,7 @@ impl CodeIndexNativeGraphProgressSlotStateV1 {
                 }
                 *completed = completed_rows;
                 *total = Some(total_rows);
+                next.total_relations = Some(total_relations);
                 next.phase = Some(CodeIndexNativeGraphPhaseV1::CompactEncoding);
             }
             GraphNativeWorkV1::StagePageApplied {
@@ -222,22 +233,44 @@ mod tests {
         let initial = slot.read().unwrap().snapshot().unwrap();
         assert_eq!(initial.last_progress_micros, None);
         observer(GraphNativeWorkV1::CompactRowsEncoded {
-            kind: GraphNativeWorkKindV1::Entities, completed_rows: 512, total_rows: 1101,
+            kind: GraphNativeWorkKindV1::Entities,
+            completed_rows: 512,
+            total_rows: 1101,
+            total_relations: 1143,
         });
         let encoded = slot.read().unwrap().snapshot().unwrap();
         assert_eq!(encoded.encoded_entities, 512);
+        assert_eq!(encoded.total_relations, Some(1143));
+        assert_eq!(encoded.encoded_relations, 0);
         assert_eq!(encoded.committed_stage_pages, 0);
         assert_eq!(encoded.committed_compact_segments, 0);
         assert!(encoded.last_progress_micros.is_some());
         observer(GraphNativeWorkV1::CompactRowsEncoded {
-            kind: GraphNativeWorkKindV1::Entities, completed_rows: 512, total_rows: 1101,
+            kind: GraphNativeWorkKindV1::Entities,
+            completed_rows: 512,
+            total_rows: 1101,
+            total_relations: 1143,
         });
         assert_eq!(slot.read().unwrap().snapshot().unwrap(), encoded);
         observer(GraphNativeWorkV1::CompactRowsEncoded {
-            kind: GraphNativeWorkKindV1::Relations, completed_rows: 143, total_rows: 1143,
+            kind: GraphNativeWorkKindV1::Relations,
+            completed_rows: 143,
+            total_rows: 1143,
+            total_relations: 1143,
         });
         let parsed = slot.read().unwrap().snapshot().unwrap();
         assert!(parsed.progress_epoch > encoded.progress_epoch);
+        observer(GraphNativeWorkV1::CompactRowsEncoded {
+            kind: GraphNativeWorkKindV1::Relations,
+            completed_rows: 200,
+            total_rows: 1143,
+            total_relations: 9000,
+        });
+        assert_eq!(
+            slot.read().unwrap().snapshot().unwrap(),
+            parsed,
+            "changing the sealed relation bound cannot renew progress"
+        );
         observer(GraphNativeWorkV1::StagePageApplied {
             ordinal: 0, kind: GraphNativeWorkKindV1::Entities, mutations: 36, live_bytes: 4096,
         });

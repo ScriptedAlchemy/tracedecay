@@ -503,7 +503,7 @@ impl FirstGenerationWorkMarker {
             // final write a stall merely because the last encode clock froze.
             let encoding_finished = graph.phase == Some(CodeIndexNativeGraphPhaseV1::CompactEncoding)
                 && graph.total_entities == Some(graph.encoded_entities)
-                && graph.total_relations.is_none_or(|total| total == graph.encoded_relations);
+                && graph.total_relations.is_some_and(|total| total == graph.encoded_relations);
             if encoding_finished
                 || graph.phase == Some(CodeIndexNativeGraphPhaseV1::CompactSegmentVerified)
             {
@@ -1515,8 +1515,9 @@ mod daemon_precondition_tests {
         worktree.native_graph_progress = Some(graph.clone());
         assert!(super::FirstGenerationWorkMarker::of(Some(&worktree)).is_some());
         graph.encoded_entities = 1024;
-        // Zero relations cannot emit a positive row window. The writer is
-        // about to perform its single non-progress-reporting compact write.
+        graph.total_relations = Some(0);
+        // The manifest declared zero relations, so completed entity encoding
+        // really does precede the uninstrumented final container write.
         worktree.native_graph_progress = Some(graph.clone());
         assert_eq!(super::FirstGenerationWorkMarker::of(Some(&worktree)), None);
         graph.phase = Some(CodeIndexNativeGraphPhaseV1::CompactSegmentVerified);
@@ -1524,6 +1525,56 @@ mod daemon_precondition_tests {
         graph.committed_compact_bytes = 50_000;
         worktree.native_graph_progress = Some(graph);
         assert_eq!(super::FirstGenerationWorkMarker::of(Some(&worktree)), None);
+    }
+
+    /// A completed entity stream is not an encoding-complete proof when the
+    /// immutable manifest still has relations. Waiting must expose a stalled
+    /// first relation window instead of silently dropping its work marker.
+    #[test]
+    fn completed_entities_cannot_hide_a_stalled_relation_encoder() {
+        let mut worktree = building(true);
+        worktree.progress = Some(CodeIndexBuildProgressV1 {
+            phase: CodeIndexBuildPhaseV1::GraphPublication,
+            ..progress(6_136, None)
+        });
+        let mut graph =
+            tracedecay_contracts::code_index_freshness::CodeIndexNativeGraphProgressV1 {
+                generation_id: "generation.v1.first".to_owned(),
+                sealed_graph_digest: "sha256:sealed".to_owned(),
+                daemon_incarnation: 3,
+                producer_incarnation: 5,
+                attempt_sequence: 3,
+                progress_epoch: 4,
+                phase: Some(CodeIndexNativeGraphPhaseV1::CompactEncoding),
+                encoded_entities: 1_024,
+                total_entities: Some(1_024),
+                encoded_relations: 0,
+                total_relations: Some(10_000),
+                committed_stage_pages: 0,
+                committed_stage_mutations: 0,
+                committed_stage_bytes: 0,
+                committed_compact_segments: 0,
+                committed_compact_bytes: 0,
+                last_progress_micros: Some(1_000),
+                active: true,
+            };
+        worktree.native_graph_progress = Some(graph.clone());
+        let marker = super::FirstGenerationWorkMarker::of(Some(&worktree));
+        assert!(marker.is_some(), "a pending relation stream is still observable work");
+        let now = Instant::now();
+        let mut window = super::FirstGenerationProgressWindow::new(Duration::from_secs(120));
+        assert!(!window.observe(marker.clone(), now));
+        assert!(!window.observe(marker.clone(), now + Duration::from_secs(119)));
+        assert!(window.observe(marker, now + Duration::from_secs(120)));
+
+        graph.encoded_relations = 10_000;
+        graph.progress_epoch += 1;
+        worktree.native_graph_progress = Some(graph);
+        assert_eq!(
+            super::FirstGenerationWorkMarker::of(Some(&worktree)),
+            None,
+            "only both completed streams may enter the uninstrumented final write"
+        );
     }
 
     fn progress(

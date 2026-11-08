@@ -42,6 +42,9 @@ pub enum GraphNativeWorkV1 {
         kind: GraphNativeWorkKindV1,
         completed_rows: u64,
         total_rows: u64,
+        /// The sealed manifest's relation bound is known before any relation
+        /// window completes. Zero is distinct from a bound not yet reported.
+        total_relations: u64,
     },
     StagePageApplied {
         ordinal: u64,

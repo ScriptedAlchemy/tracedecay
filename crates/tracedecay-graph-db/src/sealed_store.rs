@@ -2044,6 +2044,8 @@ fn build_sealed_container_with_work(
                                         .unwrap_or(u64::MAX),
                                     total_rows: u64::try_from(boundary.total_rows)
                                         .unwrap_or(u64::MAX),
+                                    total_relations: u64::try_from(manifest.relations.len())
+                                        .unwrap_or(u64::MAX),
                                 });
                             }
                         },
@@ -3361,6 +3363,7 @@ mod build_tests {
                 kind: GraphNativeWorkKindV1::Entities,
                 completed_rows: 7,
                 total_rows: 7,
+                total_relations: 9,
             }
         )));
         assert!(events.iter().any(|event| matches!(
@@ -3369,6 +3372,7 @@ mod build_tests {
                 kind: GraphNativeWorkKindV1::Relations,
                 completed_rows: 9,
                 total_rows: 9,
+                total_relations: 9,
             }
         )));
         assert!(events.iter().any(|event| matches!(
