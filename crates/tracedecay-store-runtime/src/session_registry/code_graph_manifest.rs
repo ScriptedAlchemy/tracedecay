@@ -2674,9 +2674,62 @@ mod tests {
             &std::fs::read(fixture.scope_root.join("active-code-generation-v1.json")).unwrap(),
         )
         .unwrap();
+        let successor_digest =
+            SealedGraphStateDigest::try_from(pointer.state_digest.clone()).unwrap();
         let successor_path = generations_root.join(pointer.generation_file);
         let mut successor: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&successor_path).unwrap()).unwrap();
+
+        // A real one-file successor inherits unchanged source segments.
+        // Count production proof read callbacks rather than elapsed time:
+        // re-verifying the whole generation must fail even with warm OS caches.
+        let parent_file_digests = first_manifest["generation"]["file_segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|segment| segment["segment_digest"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        let inherited_files = successor["generation"]["file_segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|segment| {
+                parent_file_digests.contains(segment["segment_digest"].as_str().unwrap())
+            })
+            .count();
+        assert!(inherited_files > 0, "a one-file edit must retain sealed files");
+        let count_proof_reads = |record: &VerifiedSealedSegmentsV1| {
+            let reads = AtomicUsize::new(0);
+            assert_eq!(
+                verify_sealed_generation_source_from_roots(
+                    &generations_root,
+                    replay_root,
+                    &successor_digest,
+                    record,
+                    &|| {
+                        reads.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    },
+                ),
+                Ok(())
+            );
+            reads.load(Ordering::SeqCst)
+        };
+        let cold_reads = count_proof_reads(&VerifiedSealedSegmentsV1::default());
+        let warm_reads = count_proof_reads(&verified);
+        if cfg!(unix) {
+            assert!(
+                cold_reads >= warm_reads + inherited_files,
+                "a one-file successor still re-verified inherited files: \
+                 cold={cold_reads}, warm={warm_reads}, inherited={inherited_files}"
+            );
+        } else {
+            assert_eq!(
+                cold_reads, warm_reads,
+                "without reliable file fingerprints both passes must read all segments"
+            );
+        }
+
         let inherited = successor["generation"]["file_segments"]
             .as_array_mut()
             .unwrap()
