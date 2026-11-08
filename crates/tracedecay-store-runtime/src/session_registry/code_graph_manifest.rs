@@ -2745,7 +2745,10 @@ mod tests {
             })
             .expect("a one-file successor must seal a changed file");
         let changed_digest = tracedecay_domain::ManifestDigest::new(
-            changed_segment["segment_digest"].as_str().unwrap().to_owned(),
+            changed_segment["segment_digest"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
         )
         .unwrap();
         let changed_path = super::segment_path(&fixture.segments_root, &changed_digest).unwrap();
