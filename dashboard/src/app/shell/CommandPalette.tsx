@@ -146,7 +146,7 @@ export function CommandPalette({
    * inert. Clamped on read rather than corrected in an effect, so there is no
    * render in which the index is out of range.
    */
-  const activeIndex = filtered.length === 0 ? 0 : Math.min(active, filtered.length - 1);
+  const activeIndex = filtered.length === 0 ? 0 : Math.max(0, Math.min(active, filtered.length - 1));
   const activeEntry = filtered[activeIndex];
 
   const listRef = useRef<HTMLUListElement>(null);
@@ -170,7 +170,9 @@ export function CommandPalette({
       e.preventDefault();
       // From the clamped index, so a shrunk list steps from its last real row
       // rather than from a stale index further down.
-      setActive(Math.min(activeIndex + 1, filtered.length - 1));
+      // An empty result set has no final row. Setting -1 here would leave
+      // a newly fetched matching project invisible to Enter and screen readers.
+      if (filtered.length > 0) setActive(Math.min(activeIndex + 1, filtered.length - 1));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       setActive(Math.max(activeIndex - 1, 0));

@@ -359,6 +359,39 @@ describe('CommandPalette long and shrinking lists', () => {
     expect(active?.getAttribute('aria-selected')).toBe('true');
   });
 
+  it('keeps keyboard activation when a project appears after an empty search', async () => {
+    const user = userEvent.setup();
+    stubListing(listing([]));
+    const { findByRole, getByTestId, client } = renderPalette();
+    await findByRole('listbox');
+
+    await user.keyboard('RareProject');
+    await waitFor(() => expect(activeOptionLabel()).toBe('(nothing is announced as active)'));
+    await user.keyboard('{ArrowDown}');
+
+    // The registry can finish a new read without the user typing again.
+    // Before the fix ArrowDown wrote -1 while results were empty; the matching
+    // row then existed but lacked an active IDREF and Enter could not select it.
+    act(() => {
+      client.setQueryData([...projectRegistryListKey, UNSCOPED_CACHE_KEY], {
+        outcome: 'envelope',
+        envelope: fixtureEnvelope(listing([registryEntry('proj-new', 'RareProject', true)])),
+      });
+    });
+    await waitFor(() => expect(activeOptionLabel()).toBe('RareProject'));
+    const id = combobox().getAttribute('aria-activedescendant');
+    expect(id).toBeTruthy();
+    expect(document.getElementById(id!)?.getAttribute('aria-selected')).toBe('true');
+
+    await user.keyboard('{Enter}');
+    expect(useScope.getState().scope).toMatchObject({
+      kind: 'project',
+      projectId: 'proj-new',
+      activation: 'active',
+    });
+    expect(getByTestId('palette-location').textContent).toBe('/brain');
+  });
+
   it('clamps the active row when the listing shrinks, and Enter still fires', async () => {
     const user = userEvent.setup();
     stubListing(listing(MANY));
