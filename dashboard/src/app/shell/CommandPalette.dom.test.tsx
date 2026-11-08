@@ -229,6 +229,29 @@ describe('CommandPalette keyboard operation', () => {
     );
   });
 
+  it.each([
+    [
+      '/?scopeLabel=Ghost&field=sigma&node=node-3#selection',
+      'Brain',
+      '/?field=sigma&node=node-3#selection',
+    ],
+    [
+      '/Loom/?scopeLabel=Ghost&loomRenderer=strata&session=run-4#replay',
+      'Loom',
+      '/Loom/?loomRenderer=strata&session=run-4#replay',
+    ],
+  ])('removes a stray label from %s without resetting the view', async (url, label, expected) => {
+    const user = userEvent.setup();
+    stubListing(listing([]));
+    const { findByRole, getByTestId } = renderPalette(url);
+    await findByRole('listbox');
+
+    await user.keyboard(label);
+    await waitFor(() => expect(activeOptionLabel()).toBe(label));
+    await user.keyboard('{Enter}');
+    expect(getByTestId('palette-location').textContent).toBe(expected);
+  });
+
   it('does not carry a workspace view into a different workspace', async () => {
     const user = userEvent.setup();
     stubListing(listing([]));

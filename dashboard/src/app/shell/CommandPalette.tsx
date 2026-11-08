@@ -86,7 +86,7 @@ export function CommandPalette({
         // is the admitted scope ID; a missing/stale label must not erase the
         // selected renderer, replay window, or entity in that same project.
         const sameScope = scope.kind === 'all'
-          ? !params.has('scope') && !params.has('scopeLabel')
+          ? !params.has('scope')
           : params.get('scope') === scope.projectId;
         // The index route mounts Brain too. Reopening it through the palette
         // must preserve field=sigma and entity selection just like /brain.
@@ -94,10 +94,15 @@ export function CommandPalette({
           (channel.path === 'brain' && location.pathname === '/');
         if (!sameWorkspace || !sameScope) {
           navigate(scopedWorkspacePath(scope, channel.path));
-        } else if (scope.kind === 'project' && params.get('scopeLabel') !== scope.label) {
-          // Correct the unverified label in place, without carrying it forward
-          // as an authority or clearing workspace-owned query parameters.
-          params.set('scopeLabel', scope.label);
+        } else if (
+          (scope.kind === 'all' && params.has('scopeLabel')) ||
+          (scope.kind === 'project' && params.get('scopeLabel') !== scope.label)
+        ) {
+          // A scopeLabel without a scope ID is not a project selection. Remove
+          // its unverified claim without resetting the current view or entity.
+          // For a real project, refresh only the display label.
+          if (scope.kind === 'project') params.set('scopeLabel', scope.label);
+          else params.delete('scopeLabel');
           navigate(
             { pathname: location.pathname, search: `?${params.toString()}`, hash: location.hash },
             { replace: true },
