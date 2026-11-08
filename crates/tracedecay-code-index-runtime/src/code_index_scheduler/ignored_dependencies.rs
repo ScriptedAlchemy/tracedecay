@@ -14,6 +14,7 @@ use tracedecay_code_index::production::{
     CodeIndexInterruptionV1, CodeIndexProductionErrorV1,
     MAX_IGNORED_DEPENDENCY_ENTRYPOINT_BYTES_V1,
 };
+use tracedecay_code_index::source_walk::parent_gitlink_paths;
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1;
 use tracedecay_domain::{CodeGenerationId, SanitizerDispositionV1};
@@ -861,15 +862,15 @@ fn prove_gix_ignored(root: &Path, logical_path: &str) -> Result<(), CodeIndexSch
     {
         return Err(CodeIndexIgnoredDependencyRefusalV1::NotIgnored.into());
     }
-    // A registered parent gitlink is still tracked source when the child
-    // checkout loses its .git marker. Ignore rules may match its descendants,
-    // but that cannot authorize indexing those descendants as dependencies.
+    // Admission and live source walks share the union of staged and HEAD
+    // gitlinks: staging a removal cannot grant trust over the child checkout.
+    let parent_gitlinks = parent_gitlink_paths(root)
+        .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.message))?;
     let mut ancestor = Path::new(logical_path).parent();
     while let Some(relative) = ancestor {
         if relative
             .to_str()
-            .and_then(|path| index.entry_by_path(path.as_bytes().as_bstr()))
-            .is_some_and(|entry| entry.mode.is_commit())
+            .is_some_and(|path| parent_gitlinks.contains(path))
         {
             return Err(CodeIndexIgnoredDependencyRefusalV1::NotIgnored.into());
         }
@@ -1038,6 +1039,37 @@ mod tests {
         let admitted = read_bounded_admitted_source(&parent, "node_modules/pkg/index.ts", None);
         assert!(matches!(
             admitted,
+            Err(CodeIndexSchedulerErrorV1::IgnoredDependency(
+                CodeIndexIgnoredDependencyRefusalV1::NotIgnored
+            ))
+        ));
+
+        // Removing the staged gitlink does not authorize the child while
+        // the parent HEAD still owns the repository boundary.
+        fixture_git(&parent, &["add", ".gitmodules", ".gitignore"]);
+        fixture_git(&parent, &["commit", "-qm", "parent with submodule"]);
+        fixture_git(&parent, &["rm", "--cached", "-f", "node_modules/pkg"]);
+        assert!(
+            fixture_git(&parent, &["ls-files", "--stage", "--", "node_modules/pkg"])
+                .stdout
+                .is_empty()
+        );
+        assert!(
+            fixture_git(&parent, &["ls-tree", "HEAD", "--", "node_modules/pkg"])
+                .stdout
+                .starts_with(b"160000 commit ")
+        );
+        let denied = prove_gix_ignored(&parent, "node_modules/pkg/index.ts");
+        assert!(matches!(
+            denied,
+            Err(CodeIndexSchedulerErrorV1::IgnoredDependency(
+                CodeIndexIgnoredDependencyRefusalV1::NotIgnored
+            ))
+        ));
+        let denied_read =
+            read_bounded_admitted_source(&parent, "node_modules/pkg/index.ts", None);
+        assert!(matches!(
+            denied_read,
             Err(CodeIndexSchedulerErrorV1::IgnoredDependency(
                 CodeIndexIgnoredDependencyRefusalV1::NotIgnored
             ))

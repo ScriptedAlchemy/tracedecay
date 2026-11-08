@@ -119,7 +119,7 @@ fn nested_repository_marker(directory: &Path) -> std::io::Result<bool> {
 /// checkout's .git marker has been removed. A gitlink is a repository boundary,
 /// not an ordinary directory the live source walker can authenticate.
 /// This is deny-only; it never enables submodule admission.
-fn parent_gitlink_paths(project_root: &Path) -> Result<BTreeSet<String>, SourceWalkError> {
+pub fn parent_gitlink_paths(project_root: &Path) -> Result<BTreeSet<String>, SourceWalkError> {
     let marker = project_root.join(".git");
     let repository = match tracedecay_runtime_core::git_open::open(project_root) {
         Ok(repository) => repository,
