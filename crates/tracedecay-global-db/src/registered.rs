@@ -124,6 +124,10 @@ impl From<Option<RefusedAuthorityV1>> for SessionAuthorityV1 {
     }
 }
 
+// Short-lived store owners have no periodic daemon compactor. Keep their
+// one admission reclaim bounded; daemon admission performs no foreground reclaim.
+const SHORT_LIVED_RECLAIM_PAGES: u64 = 4096;
+
 /// The sole map owner for one registered global-database publication.
 ///
 /// It can issue independently counted client leases, but cannot be cloned or
@@ -213,6 +217,16 @@ impl RegisteredGlobalDbOwnerV1 {
             }
             RegisteredSchemaAttachmentV1::SessionsRefused(refused) => Some(refused),
         };
+        // A short-lived client has no later daemon maintenance turn. Reclaim
+        // pages released by earlier writes after schema convergence, without
+        // introducing the same foreground work into daemon admission. Refused
+        // authorities remain byte-preserving until their typed reset.
+        if refused_authority.is_none() {
+            registered
+                .database
+                .run_incremental_vacuum(SHORT_LIVED_RECLAIM_PAGES)
+                .await?;
+        }
         drop(registered);
         Ok(Self {
             database,
