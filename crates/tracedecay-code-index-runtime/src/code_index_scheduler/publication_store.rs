@@ -845,9 +845,7 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                         .unwrap_or(canonical);
                     #[cfg(not(unix))]
                     {
-                        DaemonCodeIndexPublicationStoreV1::read_segment_at(
-                            &path, request, buffer,
-                        )
+                        DaemonCodeIndexPublicationStoreV1::read_segment_at(&path, request, buffer)
                     }
                     #[cfg(unix)]
                     {
@@ -869,11 +867,12 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                                         &named, &pinned,
                                     )
                                 });
-                            let entry = files.pinned_segment_reads.remove(position).ok_or_else(|| {
-                                CodeIndexProductionErrorV1::Contract(
-                                    "staged segment read cache lost a handle".to_owned(),
-                                )
-                            })?;
+                            let entry =
+                                files.pinned_segment_reads.remove(position).ok_or_else(|| {
+                                    CodeIndexProductionErrorV1::Contract(
+                                        "staged segment read cache lost a handle".to_owned(),
+                                    )
+                                })?;
                             if unchanged {
                                 files.pinned_segment_reads.push_back(entry);
                             } else {
@@ -900,15 +899,12 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                                     request,
                                     &mut files.segment_read_open_attempts,
                                 )?;
-                            if files.pinned_segment_reads.len()
-                                == MAX_STAGED_SEGMENT_READ_HANDLES
-                            {
+                            if files.pinned_segment_reads.len() == MAX_STAGED_SEGMENT_READ_HANDLES {
                                 files.pinned_segment_reads.pop_front();
                             }
-                            files.pinned_segment_reads.push_back(PinnedPreparationSegmentV1 {
-                                path,
-                                segment,
-                            });
+                            files
+                                .pinned_segment_reads
+                                .push_back(PinnedPreparationSegmentV1 { path, segment });
                         }
                         let pinned = files.pinned_segment_reads.back_mut().ok_or_else(|| {
                             CodeIndexProductionErrorV1::Contract(
@@ -2071,10 +2067,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             })?;
             file_identity == path_identity
         };
-        if !file_metadata.is_file()
-            || file_metadata.len() != expected_size
-            || !same_identity
-        {
+        if !file_metadata.is_file() || file_metadata.len() != expected_size || !same_identity {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "sealed generation segment identity changed while it was opened".to_owned(),
             ));
@@ -2087,10 +2080,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
     }
 
     #[cfg(unix)]
-    fn same_unix_segment_identity(
-        named: &std::fs::Metadata,
-        pinned: &std::fs::Metadata,
-    ) -> bool {
+    fn same_unix_segment_identity(named: &std::fs::Metadata, pinned: &std::fs::Metadata) -> bool {
         use std::os::unix::fs::MetadataExt;
 
         named.file_type().is_file()

@@ -52,6 +52,8 @@ use crate::code_index_scheduler::{
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1,
     CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
 };
+#[cfg(unix)]
+use tracedecay_code_index::production::SealedGenerationSegmentPublicationV1;
 use tracedecay_code_index::production::{
     CodeGraphBuildBoundV1, CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1,
     CodeIndexInterruptionV1, CodeIndexPreparationPort, CodeIndexProductionErrorV1,
@@ -59,8 +61,6 @@ use tracedecay_code_index::production::{
     SEALED_GENERATION_FORMAT_REVISION_V1, SealedGenerationSegmentReadV1,
     SharedDecodedContentPoolV1, UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
 };
-#[cfg(unix)]
-use tracedecay_code_index::production::SealedGenerationSegmentPublicationV1;
 
 /// Re-publication stages an already validated decoded generation through the
 /// same target writer; failures retain the port's exact typed refusal.
@@ -120,8 +120,7 @@ fn staged_segment_range_reads_open_once_per_cached_file_and_revalidate_replaceme
     let digests = contents
         .iter()
         .map(|bytes| {
-            ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes))
-                .expect("canonical digest")
+            ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).expect("canonical digest")
         })
         .collect::<Vec<_>>();
     for (digest, bytes) in digests.iter().zip(&contents) {
@@ -162,7 +161,10 @@ fn staged_segment_range_reads_open_once_per_cached_file_and_revalidate_replaceme
         matches!(invalid_range, Err(CodeIndexProductionErrorV1::Contract(_))),
         "a range outside the sealed extent must be refused",
     );
-    assert!(read.is_empty(), "an invalid range must not expose stale read bytes");
+    assert!(
+        read.is_empty(),
+        "an invalid range must not expose stale read bytes"
+    );
     assert_eq!(
         preparation.staged_segment_read_open_attempts_for_test(),
         1,
@@ -231,7 +233,10 @@ fn staged_segment_range_reads_open_once_per_cached_file_and_revalidate_replaceme
         matches!(replaced, Err(CodeIndexProductionErrorV1::Contract(_))),
         "a changed sealed pathname must be refused, not silently reread",
     );
-    assert!(read.is_empty(), "a refused read must not expose prior bytes");
+    assert!(
+        read.is_empty(),
+        "a refused read must not expose prior bytes"
+    );
     assert_eq!(
         preparation.staged_segment_read_open_attempts_for_test(),
         10,
@@ -246,21 +251,29 @@ fn staged_segment_range_reads_open_once_per_cached_file_and_revalidate_replaceme
         },
         &mut read,
     );
-    assert!(matches!(retry, Err(CodeIndexProductionErrorV1::Contract(_))));
-    assert!(read.is_empty(), "a poisoned preparation must remain closed to reads");
+    assert!(matches!(
+        retry,
+        Err(CodeIndexProductionErrorV1::Contract(_))
+    ));
+    assert!(
+        read.is_empty(),
+        "a poisoned preparation must remain closed to reads"
+    );
     assert_eq!(
         preparation.staged_segment_read_open_attempts_for_test(),
         10,
         "poisoned staged segment must not be reopened after identity refusal",
     );
-    let write_after_poison = preparation.write_segment(
-        SealedGenerationSegmentPublicationV1::File {
+    let write_after_poison =
+        preparation.write_segment(SealedGenerationSegmentPublicationV1::File {
             digest: &digests[1],
             bytes: &contents[1],
-        },
-    );
+        });
     assert!(
-        matches!(write_after_poison, Err(CodeIndexPublicationStoreErrorV1::Unavailable(_))),
+        matches!(
+            write_after_poison,
+            Err(CodeIndexPublicationStoreErrorV1::Unavailable(_))
+        ),
         "a poisoned preparation must refuse further writes as well as reads",
     );
     drop(reader);
