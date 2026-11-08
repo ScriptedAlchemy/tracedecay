@@ -45,6 +45,8 @@ use tracedecay_runtime_core::resident_memory::ProcessSharedMemoryReservationV1;
 #[cfg(test)]
 mod meta_cache_tests;
 #[cfg(test)]
+mod reoffer_tests;
+#[cfg(test)]
 mod retired_source_tests;
 #[cfg(test)]
 mod rollout_source_tests;
@@ -403,6 +405,11 @@ impl CodexObservationAdmission<'_> {
     /// Prepare this bounded page's context and scope decisions on the blocking
     /// pool. The page owns its reservation throughout preparation; only these
     /// decisions, not filesystem work, are used by frame callbacks and retries.
+    #[tracing::instrument(
+        name = "sessions.observation.codex.resolve_scope",
+        level = "trace",
+        skip_all
+    )]
     async fn resolve_scope(
         &self,
         matchers: &ProjectRootMatcherCache,
@@ -410,6 +417,19 @@ impl CodexObservationAdmission<'_> {
         meta: &super::CodexMeta,
         scan: JsonlObservationScan,
     ) -> TranscriptIngestResult<(CodexAdmissionState, u64)> {
+        // Only native frames consume scope verdicts. An exhausted source must
+        // still finish canonical cursor/rewrite processing, but resolving Git
+        // identities (and dispatching blocking work) cannot affect that result.
+        // Do not cache a verdict here: a later append must resolve live scope.
+        if scan.frame_bytes().next().is_none() {
+            return Ok((
+                CodexAdmissionState {
+                    context: CodexContextState::from_meta(meta),
+                    scope_verdicts: Arc::new(HashMap::new()),
+                },
+                0,
+            ));
+        }
         let roots = self.scope_roots();
         let profile = crate::runtime::transcript_source_profile();
         let matchers = matchers.clone();
