@@ -614,6 +614,31 @@ fn soft_budget_findings(
     storage_family_read(findings)
 }
 
+/// A failed registry listing must not hide the physical profile footprint.
+/// An unknown registry is not an empty registry: orphan classifications require
+/// proven registration state, but file sizes and their bounds do not.
+fn profile_footprint_from_registered_roots(
+    profile_root: &Path,
+    registered_roots: Option<&std::collections::BTreeMap<String, String>>,
+    overrides: &std::collections::BTreeMap<String, u64>,
+) -> tracedecay_maintenance::retention::footprint::ProfileFootprintV1 {
+    use tracedecay_maintenance::retention::footprint::{
+        ProjectRootStateV1, census_profile_footprint,
+    };
+
+    let empty_roots = std::collections::BTreeMap::new();
+    let mut footprint =
+        census_profile_footprint(profile_root, registered_roots.unwrap_or(&empty_roots), overrides);
+    if registered_roots.is_none() {
+        for entry in &mut footprint.entries {
+            if let Some(project) = entry.project.as_mut() {
+                project.state = ProjectRootStateV1::Unverifiable;
+            }
+        }
+    }
+    footprint
+}
+
 /// Size every store family under the profile against its bound. Registered
 /// project roots name each project store's root and whether it still exists.
 #[tracing::instrument(name = "daemon.doctor.profile_footprint", level = "trace", skip_all)]
@@ -625,17 +650,19 @@ async fn profile_footprint_read(
     let registered = registry
         .list_code_projects(usize::MAX)
         .await
-        .ok()?
-        .into_iter()
-        .map(|project| (project.project_id, project.canonical_root))
-        .collect::<std::collections::BTreeMap<_, _>>();
+        .ok()
+        .map(|projects| {
+            projects
+                .into_iter()
+                .map(|project| (project.project_id, project.canonical_root))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        });
     let overrides = retention.store_soft_budgets_bytes.clone();
     let profile_root = profile_root.to_path_buf();
     tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-        use tracedecay_maintenance::retention::footprint::{
-            census_profile_footprint, census_sqlite_temp_spill,
-        };
-        let mut footprint = census_profile_footprint(&profile_root, &registered, &overrides);
+        use tracedecay_maintenance::retention::footprint::census_sqlite_temp_spill;
+        let mut footprint =
+            profile_footprint_from_registered_roots(&profile_root, registered.as_ref(), &overrides);
         footprint.entries.extend(census_sqlite_temp_spill(
             Path::new("/proc/self/fd"),
             &overrides,
@@ -644,6 +671,114 @@ async fn profile_footprint_read(
     })
     .await
     .ok()
+}
+
+#[cfg(test)]
+mod profile_footprint_tests {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    use tracedecay_contracts::doctor::{
+        DoctorEvidenceStateV1, DoctorStorageFamilyReadV1,
+    };
+    use tracedecay_maintenance::retention::footprint::{
+        ProfileFamilyV1, ProjectRootStateV1, footprint_findings,
+    };
+
+    use super::profile_footprint_from_registered_roots;
+
+    fn state_for_store(
+        profile: &tracedecay_maintenance::retention::footprint::ProfileFootprintV1,
+    ) -> ProjectRootStateV1 {
+        profile
+            .entries
+            .iter()
+            .find(|entry| entry.key == "projects/proj_growing")
+            .and_then(|entry| entry.project.as_ref())
+            .expect("measured project store")
+            .state
+    }
+
+    #[test]
+    fn unreadable_registry_cannot_hide_large_profile_or_mislabel_orphans() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile_root = temp.path().join("profile");
+        let store_root = profile_root.join("projects/proj_growing");
+        std::fs::create_dir_all(&store_root).unwrap();
+        std::fs::create_dir_all(profile_root.join("lcm-payloads")).unwrap();
+        std::fs::write(store_root.join("tracedecay.db-wal"), vec![0; 4096]).unwrap();
+        std::fs::write(profile_root.join("lcm-payloads/blob"), vec![0; 2048]).unwrap();
+
+        let overrides = BTreeMap::from([
+            ("projects/proj_growing".to_owned(), 1024),
+            ("profile".to_owned(), 1024),
+        ]);
+        // None is a failed registry read, not a successful empty listing.
+        let unknown = profile_footprint_from_registered_roots(&profile_root, None, &overrides);
+        assert_eq!(unknown.total_bytes, 6144);
+        assert_eq!(state_for_store(&unknown), ProjectRootStateV1::Unverifiable);
+        let project = unknown
+            .entries
+            .iter()
+            .find(|entry| entry.key == "projects/proj_growing")
+            .unwrap();
+        assert_eq!(project.family, ProfileFamilyV1::ProjectStore);
+        assert_eq!(project.bytes, 4096);
+        assert_eq!(project.bound_bytes, 1024);
+        assert_eq!(project.project.as_ref().unwrap().registered_root, None);
+
+        let DoctorStorageFamilyReadV1::Observed { findings } = footprint_findings(&unknown) else {
+            panic!("physical footprint must remain observable without a registry");
+        };
+        let named = findings
+            .into_iter()
+            .map(|finding| {
+                (
+                    finding.finding().evidence()[0]
+                        .reference()
+                        .as_str()
+                        .to_owned(),
+                    finding.finding().state(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            named.get("projects/proj_growing"),
+            Some(&DoctorEvidenceStateV1::Degraded)
+        );
+        assert_eq!(
+            named.get("profile"),
+            Some(&DoctorEvidenceStateV1::Degraded)
+        );
+
+        // Distinguish failed enumeration from an authoritative empty registry,
+        // and from a registered root whose filesystem directory was deleted.
+        let empty = BTreeMap::new();
+        let unregistered =
+            profile_footprint_from_registered_roots(&profile_root, Some(&empty), &overrides);
+        assert_eq!(
+            state_for_store(&unregistered),
+            ProjectRootStateV1::Unregistered
+        );
+        let registered = BTreeMap::from([(
+            "proj_growing".to_owned(),
+            temp.path().join("deleted-worktree").display().to_string(),
+        )]);
+        let missing =
+            profile_footprint_from_registered_roots(&profile_root, Some(&registered), &overrides);
+        assert_eq!(state_for_store(&missing), ProjectRootStateV1::Missing);
+        assert_eq!(
+            missing
+                .entries
+                .iter()
+                .find(|entry| entry.key == "projects/proj_growing")
+                .and_then(|entry| entry.project.as_ref())
+                .and_then(|project| project.registered_root.as_ref())
+                .map(String::as_str),
+            Some(temp.path().join("deleted-worktree").to_str().unwrap())
+        );
+        assert!(Path::new(&registered["proj_growing"]).exists() == false);
+    }
 }
 
 /// The generations the retention pass protects: the one the mounted scheduler
