@@ -1177,7 +1177,11 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
                     ..
                 } => {
                     if pinned_evidence.is_none() {
-                        pinned_evidence = Some(open_partitioned_segment(segments_root, request)?);
+                        let roots = [segments_root.to_path_buf()];
+                        let (root, path_metadata) =
+                            select_partitioned_segment_root(&roots, request)?;
+                        pinned_evidence =
+                            Some(open_partitioned_segment(root, &path_metadata, request)?);
                         if let Some(barrier) = evidence_barrier.take() {
                             barrier();
                         }
@@ -1548,7 +1552,9 @@ mod tests {
     use sha2::{Digest, Sha256};
     use tempfile::TempDir;
     use tracedecay_code_index::graph_projection::build_sealed_code_graph_rows;
-    use tracedecay_code_index::production::SealedGenerationSegmentReadV1;
+    use tracedecay_code_index::production::{
+        CodeIndexProductionErrorV1, SealedGenerationSegmentReadV1,
+    };
     use tracedecay_code_index_retention::code_index_generations::{
         DurablePublicationPointerV1, acquire_code_generation_store_lock,
         code_generation_segments_root,
