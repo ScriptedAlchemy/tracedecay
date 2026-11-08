@@ -374,16 +374,39 @@ fn policy_requires_an_existing_database() {
 }
 
 #[test]
-fn create_new_pins_and_discards_the_exact_database() {
+fn create_new_reserves_the_full_sqlite_basename_without_unverified_cleanup() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("fresh.db");
-
     let created = OpenedDatabaseFile::create_new(&path).unwrap();
     assert!(path.is_file());
     assert_ne!(created.identity(), 0);
-    created.discard_created(&path).unwrap();
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let sidecar = sidecar_path(&path, suffix);
+        assert_eq!(std::fs::metadata(&sidecar).unwrap().len(), 0);
+    }
+    drop(created);
+    // Dropping a reservation must not unlink mutable names. In particular, a
+    // foreign process may have substituted an unrelated inode since creation.
+    assert!(path.is_file());
+    for suffix in ["-wal", "-shm", "-journal"] {
+        assert!(sidecar_path(&path, suffix).is_file());
+    }
+}
 
-    assert!(!path.exists());
+#[test]
+fn create_new_refuses_existing_sidecar_members_without_touching_their_bytes() {
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fresh.db");
+        let foreign = sidecar_path(&path, suffix);
+        let bytes = format!("foreign SQLite {suffix} bytes");
+        std::fs::write(&foreign, bytes.as_bytes()).unwrap();
+        assert!(matches!(
+            OpenedDatabaseFile::create_new(&path),
+            Err(OpenedDatabaseFileError::Reserve)
+        ));
+        assert_eq!(std::fs::read(&foreign).unwrap(), bytes.as_bytes());
+    }
 }
 
 #[test]
@@ -582,7 +605,7 @@ fn windows_pinned_file_blocks_replacement_until_authority_closes() {
 
 #[cfg(windows)]
 #[test]
-fn windows_discard_created_removes_the_complete_sqlite_family() {
+fn windows_dropping_reservations_preserves_sidecars_written_after_creation() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("fresh.db");
     let created = OpenedDatabaseFile::create_new(&path).unwrap();
@@ -592,13 +615,13 @@ fn windows_discard_created_removes_the_complete_sqlite_family() {
         sidecar_path(&path, "-journal"),
     ];
     for sidecar in &sidecars {
-        std::fs::write(sidecar, b"sidecar").unwrap();
+        std::fs::write(sidecar, b"foreign sidecar").unwrap();
     }
-
-    created.discard_created(&path).unwrap();
-
-    assert!(!path.exists());
-    assert!(sidecars.iter().all(|sidecar| !sidecar.exists()));
+    drop(created);
+    assert!(path.is_file());
+    for sidecar in &sidecars {
+        assert_eq!(std::fs::read(sidecar).unwrap(), b"foreign sidecar");
+    }
 }
 
 /// `sqlite_host_path` shortens a verbatim *disk* path so SQLite's win32 VFS

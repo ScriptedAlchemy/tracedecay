@@ -69,6 +69,10 @@ pub(crate) struct OpenedDatabaseFile {
     /// descriptor and closing a clone while SQLite holds POSIX locks would
     /// release locks belonging to other live connections to the same inode.
     file: Arc<Mutex<Option<File>>>,
+    // Exclusive reservations for a *new* basename. Hold the descriptors until
+    // all SQLite workers exit: closing an unrelated fd during a live SQLite
+    // transaction can release process-owned POSIX locks.
+    created_sidecars: Option<Arc<Mutex<Option<[File; 3]>>>>,
     identity: u64,
 }
 
@@ -80,7 +84,22 @@ impl OpenedDatabaseFile {
 
     pub(crate) fn create_new(path: &Path) -> Result<Self, OpenedDatabaseFileError> {
         let file = create_pinned_database(path).map_err(|_| OpenedDatabaseFileError::Create)?;
-        Self::adopt(file)
+        // O_EXCL on the database alone does not own SQLite's basename:
+        // SQLite may overwrite an orphan WAL/SHM/journal even on its first
+        // successful open. O_EXCL-reserve every sibling before handing the
+        // database to SQLite; never truncate an existing member or symlink.
+        // A failed reservation deliberately leaves prior creations untouched:
+        // pathname-based rollback could unlink an entry replaced by another
+        // process. An incomplete namespace needs explicit reconciliation.
+        let mut opened = Self::adopt(file)?;
+        let wal = reserve_new_sidecar(&sidecar_path(path, "-wal"))
+            .map_err(|_| OpenedDatabaseFileError::Reserve)?;
+        let shm = reserve_new_sidecar(&sidecar_path(path, "-shm"))
+            .map_err(|_| OpenedDatabaseFileError::Reserve)?;
+        let journal = reserve_new_sidecar(&sidecar_path(path, "-journal"))
+            .map_err(|_| OpenedDatabaseFileError::Reserve)?;
+        opened.created_sidecars = Some(Arc::new(Mutex::new(Some([wal, shm, journal]))));
+        Ok(opened)
     }
 
     /// Takes ownership of an already-open handle and records its identity.
@@ -94,6 +113,7 @@ impl OpenedDatabaseFile {
         let identity = opened_file_identity(&file)?;
         Ok(Self {
             file: Arc::new(Mutex::new(Some(file))),
+            created_sidecars: None,
             identity,
         })
     }
@@ -105,6 +125,12 @@ impl OpenedDatabaseFile {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
+        if let Some(sidecars) = &self.created_sidecars {
+            sidecars
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+        }
     }
 
     pub(crate) const fn identity(&self) -> u64 {
@@ -130,6 +156,7 @@ impl OpenedDatabaseFile {
         self.with_file(|_| ())?;
         Ok(Self {
             file: Arc::clone(&self.file),
+            created_sidecars: self.created_sidecars.as_ref().map(Arc::clone),
             identity: self.identity,
         })
     }
@@ -274,24 +301,6 @@ impl OpenedDatabaseFile {
         Ok(())
     }
 
-    pub(crate) fn discard_created(self, path: &Path) -> Result<(), OpenedDatabaseFileError> {
-        self.verify_current_path(path)?;
-        let Self { file, .. } = self;
-        drop(file);
-        for candidate in [
-            sidecar_path(path, "-wal"),
-            sidecar_path(path, "-shm"),
-            sidecar_path(path, "-journal"),
-            path.to_path_buf(),
-        ] {
-            match std::fs::remove_file(candidate) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(_) => return Err(OpenedDatabaseFileError::Remove),
-            }
-        }
-        Ok(())
-    }
 }
 
 /// Check a live SQLite worker's physical file without opening and closing a
@@ -316,13 +325,13 @@ pub(crate) fn live_path_identity(path: &Path) -> Result<u64, OpenedDatabaseFileE
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OpenedDatabaseFileError {
     Create,
+    Reserve,
     Open,
     Inspect,
     NotFile,
     #[cfg(windows)]
     Identify,
     Replaced,
-    Remove,
     #[cfg(not(any(unix, windows)))]
     Unsupported,
 }
@@ -331,13 +340,13 @@ impl fmt::Display for OpenedDatabaseFileError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::Create => "could not create the canonical SQLite file",
+            Self::Reserve => "could not exclusively reserve the new SQLite sidecar namespace",
             Self::Open => "could not open the verified SQLite file",
             Self::Inspect => "could not inspect the verified SQLite file descriptor",
             Self::NotFile => "verified SQLite locator is not a regular file",
             #[cfg(windows)]
             Self::Identify => "could not identify the verified SQLite file descriptor",
             Self::Replaced => "verified SQLite file was replaced while opening workers",
-            Self::Remove => "could not remove an uncommitted canonical SQLite file",
             #[cfg(not(any(unix, windows)))]
             Self::Unsupported => "SQLite file identity is unsupported on this platform",
         };
@@ -383,6 +392,22 @@ fn create_pinned_database(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
+/// SQLite is allowed to delete or recreate an owned journal/sidecar. Its
+/// namespace reservation is exclusive at creation, but its file handle must
+/// not prevent SQLite's own cleanup on Windows.
+fn reserve_new_sidecar(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    }
+    options.open(path)
+}
+
+#[cfg(windows)]
+const FILE_SHARE_DELETE: u32 = 0x0000_0004;
 #[cfg(windows)]
 const FILE_SHARE_READ: u32 = 0x0000_0001;
 #[cfg(windows)]

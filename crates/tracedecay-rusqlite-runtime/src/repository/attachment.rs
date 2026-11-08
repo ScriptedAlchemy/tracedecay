@@ -341,9 +341,18 @@ fn repository_start_failure(
     created: bool,
     failure: RepositoryAttachmentStartError,
 ) -> RepositoryAttachmentStartError {
-    if created && let Err(error) = opened_database.discard_created(database_path) {
-        return RepositoryAttachmentStartError::Identity(error);
+    if created {
+        // No portable syscall atomically unlinks a pathname *only if* it still
+        // identifies our inode. Even a second identity check followed by an
+        // unlink can destroy a concurrent replacement, including WAL/SHM and
+        // rollback journal files. Preserve the failed store for explicit
+        // reconciliation instead of deleting unknown operator bytes.
+        tracing::warn!(
+            path = %database_path.display(),
+            "failed SQLite initialization preserved its database and sidecars"
+        );
     }
+    drop(opened_database);
     failure
 }
 
@@ -1024,6 +1033,98 @@ mod tests {
         connection
             .execute("INSERT INTO identity_probe (value) VALUES (?)", [value])
             .unwrap();
+    }
+
+    #[test]
+    fn failed_initialization_preserves_created_database_and_sidecars() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("failed.db");
+        let opened = OpenedDatabaseFile::create_new(&path).unwrap();
+        let error = repository_start_failure(
+            opened,
+            &path,
+            true,
+            RepositoryAttachmentStartError::Identity(OpenedDatabaseFileError::Inspect),
+        );
+        assert!(matches!(
+            error,
+            RepositoryAttachmentStartError::Identity(OpenedDatabaseFileError::Inspect)
+        ));
+        assert!(path.is_file());
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            assert!(std::path::Path::new(&sidecar).is_file());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_initialization_foreign_replacement_child() {
+        let Some(path) = std::env::var_os("TRACEDECAY_FAILED_SQLITE_REPLACEMENT") else {
+            return;
+        };
+        let path = std::path::PathBuf::from(path);
+        fs::rename(&path, path.with_extension("owned")).unwrap();
+        fs::write(&path, b"foreign database").unwrap();
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            let sidecar = std::path::PathBuf::from(sidecar);
+            let mut displaced = sidecar.as_os_str().to_os_string();
+            displaced.push(".owned");
+            fs::rename(&sidecar, std::path::PathBuf::from(displaced)).unwrap();
+            fs::write(&sidecar, format!("foreign {suffix}")).unwrap();
+        }
+        println!("foreign-sqlite-replacement-complete");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_initialization_cannot_delete_foreign_cross_process_replacements() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("failed.db");
+        let opened = OpenedDatabaseFile::create_new(&path).unwrap();
+        let (_, module) = module_path!().split_once("::").unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("{module}::failed_initialization_foreign_replacement_child"),
+                "--nocapture",
+            ])
+            .env("TRACEDECAY_FAILED_SQLITE_REPLACEMENT", &path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .contains("foreign-sqlite-replacement-complete"),
+            "separate-process filesystem replacement failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let error = repository_start_failure(
+            opened,
+            &path,
+            true,
+            RepositoryAttachmentStartError::Identity(OpenedDatabaseFileError::Inspect),
+        );
+        assert!(matches!(
+            error,
+            RepositoryAttachmentStartError::Identity(OpenedDatabaseFileError::Inspect)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"foreign database");
+        assert!(path.with_extension("owned").is_file());
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            let sidecar = std::path::PathBuf::from(sidecar);
+            assert_eq!(fs::read(&sidecar).unwrap(), format!("foreign {suffix}").as_bytes());
+            let mut displaced = sidecar.as_os_str().to_os_string();
+            displaced.push(".owned");
+            assert!(std::path::Path::new(&displaced).is_file());
+        }
     }
 
     /// Unix-only: on Windows the writer's pin denies the swap-back rename
