@@ -307,9 +307,16 @@ def score_config(res, fixed_t=None, cats=CATS):
 if __name__ == "__main__":
     here = os.path.dirname(os.path.abspath(__file__))
     if len(sys.argv) > 1:
-        if (sys.argv[1] != "--qualified" or len(sys.argv) not in (5, 7)
-                or (len(sys.argv) == 7 and sys.argv[5] != "--questions-file")):
-            raise ValueError("usage: score.py [--qualified MANIFEST DATASET RESULT [--questions-file FILE]]")
+        usage = ("usage: score.py [--qualified MANIFEST DATASET RESULT "
+                 "[--questions-file FILE] [--captured-requests FILE]]")
+        if sys.argv[1] != "--qualified" or len(sys.argv) < 5 or len(sys.argv[5:]) % 2:
+            raise ValueError(usage)
+        options = {}
+        for index in range(5, len(sys.argv), 2):
+            flag = sys.argv[index]
+            if flag not in ("--questions-file", "--captured-requests") or flag in options:
+                raise ValueError(usage)
+            options[flag] = sys.argv[index + 1]
         from qualification import load_manifest, load_questions, loads_unambiguous_json, qualified_report
         from common import noul_questions
         manifest, manifest_sha = load_manifest(sys.argv[2])
@@ -317,8 +324,14 @@ if __name__ == "__main__":
             dataset_bytes = source.read()
         with open(sys.argv[4], encoding="utf-8") as source:
             result = loads_unambiguous_json(source.read())
-        questions = load_questions(sys.argv[6]) if len(sys.argv) == 7 else noul_questions()
-        report = qualified_report(result, manifest, manifest_sha, questions, dataset_bytes)
+        questions = load_questions(options["--questions-file"]) if "--questions-file" in options else noul_questions()
+        captured_requests_bytes = None
+        if "--captured-requests" in options:
+            with open(options["--captured-requests"], "rb") as source:
+                captured_requests_bytes = source.read()
+        report = qualified_report(
+            result, manifest, manifest_sha, questions, dataset_bytes, captured_requests_bytes,
+        )
         publish_summary(os.path.join(here, "qualification_summary.json"), report)
         print(json.dumps(report, indent=2, allow_nan=False))
         # A completed evaluation is not necessarily a qualified model. Keep

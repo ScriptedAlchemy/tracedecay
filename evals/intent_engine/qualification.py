@@ -29,6 +29,39 @@ def loads_unambiguous_json(raw):
                       parse_constant=reject_nonfinite)
 
 
+CAPTURED_SCOUT_CONFIG = "S_scout_captured"
+
+
+def captured_request_bodies(raw, case_ids, questions, requested_model, max_bytes):
+    """Replay exact, operator-supplied Scout HTTP request bytes without rendering.
+
+    Captures are declarations until independently exported from a digest-checked
+    owning transcript window. This method does not attest their origin.
+    """
+    records = loads_unambiguous_json(raw)
+    if (not isinstance(records, list) or len(records) != len(case_ids)
+            or not all(isinstance(record, dict)
+                       and set(record) == {"id", "body"} for record in records)
+            or [record["id"] for record in records] != list(case_ids)):
+        raise ValueError("captured Scout requests must cover held-out cases in order")
+    expected_keys = {"state", "questions"} | ({"model"} if requested_model is not None else set())
+    bodies = {}
+    for record in records:
+        if not isinstance(record["body"], str):
+            raise ValueError(f"captured request {record['id']} must be JSON text")
+        encoded = record["body"].encode("utf-8")
+        if len(encoded) > max_bytes:
+            raise ValueError(f"captured request {record['id']} exceeds frozen request byte limit")
+        request = loads_unambiguous_json(encoded)
+        if (not isinstance(request, dict) or set(request) != expected_keys
+                or not isinstance(request["state"], str) or not request["state"].strip()
+                or request["questions"] != questions
+                or (requested_model is not None and request.get("model") != requested_model)):
+            raise ValueError(f"captured Scout request {record['id']} differs from frozen Noul contract")
+        bodies[record["id"]] = encoded
+    return bodies
+
+
 def load_questions(path):
     """Read a frozen Noul question vocabulary supplied by the settings owner.
 
@@ -118,6 +151,13 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
         value = arm[field]
         if not isinstance(value, str) or not _DIGEST.fullmatch(value):
             raise ValueError(f"qualification HTTP arm has invalid {field}")
+
+    captured_sha = manifest.get("captured_requests_sha256")
+    if arm["config"] == CAPTURED_SCOUT_CONFIG:
+        if not isinstance(captured_sha, str) or not _DIGEST.fullmatch(captured_sha):
+            raise ValueError("qualification requires a frozen captured Scout request file")
+    elif captured_sha is not None:
+        raise ValueError("only captured Scout arms may declare captured request evidence")
 
     request_limit = manifest.get("max_request_bytes")
     if (isinstance(request_limit, bool) or not isinstance(request_limit, int)
@@ -237,6 +277,7 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
         "heldout_ids": heldout,
         "holdout_requests_sha256": frozen_requests,
         "arm": arm,
+        "captured_requests_sha256": captured_sha,
         "max_request_bytes": request_limit,
         "max_input_tokens": token_limit,
         "thresholds": thresholds,
@@ -273,7 +314,7 @@ def holdout_decision_metrics(rows, thresholds):
     }
 
 
-def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes):
+def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes, captured_requests_bytes=None):
     """Reproduce qualified predictions from the frozen original dataset."""
     from score import score_config
     from run_http import (
@@ -331,16 +372,32 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes):
     source_truncation_cases = sum(has_numeric_truncation_receipt(row) for row in rows)
     # Reconstruct real HTTP request bytes: self-consistent metadata hashes
     # alone cannot prove the frozen prompts were used.
-    renderer = STATES.get(experiment.get("config"))
-    if renderer is None:
-        raise ValueError("qualification has an unsupported request renderer")
+    captured = None
+    if arm["config"] == CAPTURED_SCOUT_CONFIG:
+        if (not isinstance(captured_requests_bytes, bytes)
+                or sha256_bytes(captured_requests_bytes) != validated["captured_requests_sha256"]):
+            raise ValueError("qualification requires the original frozen Scout request capture")
+        captured = captured_request_bodies(
+            captured_requests_bytes, validated["heldout_ids"], questions,
+            arm["requested_model"], validated["max_request_bytes"],
+        )
+        renderer = None
+    else:
+        if captured_requests_bytes is not None:
+            raise ValueError("historical renderers cannot import Scout request captures")
+        renderer = STATES.get(experiment.get("config"))
+        if renderer is None:
+            raise ValueError("qualification has an unsupported request renderer")
     case_map = {case["id"]: case for case in cases}
     request_sizes = []
     for row in rows:
-        body = {"state": renderer(case_map[row["id"]]), "questions": questions}
-        if experiment.get("requested_model"):
-            body["model"] = experiment["requested_model"]
-        rendered = request_bytes(body)
+        if captured is not None:
+            rendered = captured[row["id"]]
+        else:
+            body = {"state": renderer(case_map[row["id"]]), "questions": questions}
+            if experiment.get("requested_model"):
+                body["model"] = experiment["requested_model"]
+            rendered = request_bytes(body)
         if row.get("request_sha256") != sha256_bytes(rendered):
             raise ValueError(
                 f"qualification request fingerprint disagrees with frozen renderer for {row['id']}"

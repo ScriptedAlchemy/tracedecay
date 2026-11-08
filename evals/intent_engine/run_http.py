@@ -23,7 +23,10 @@ from urllib.parse import urlsplit
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from common import calibrated, noul_questions, prompt_only, text_window
-from qualification import load_manifest, load_questions, loads_unambiguous_json, validate_manifest
+from qualification import (
+    CAPTURED_SCOUT_CONFIG, captured_request_bodies, load_manifest, load_questions,
+    loads_unambiguous_json, validate_manifest,
+)
 
 STATES = {
     "A_noul_prompt": prompt_only,
@@ -39,7 +42,9 @@ def digest(value):
 
 
 def request_bytes(body):
-    # Preserve question and request-field order in both HTTP and resume evidence.
+    # Never reserialize a Rust-produced Scout request through Python's encoder.
+    if isinstance(body, bytes):
+        return body
     return json.dumps(body, allow_nan=False).encode("utf-8")
 
 
@@ -490,12 +495,13 @@ def main(argv=None):
     ap.add_argument("--dataset", help="original JSON cases; frozen digest recorded in each run")
     ap.add_argument("--qualification-manifest", help="freeze reviewed held-out labels, groups, thresholds and tolerances")
     ap.add_argument("--questions-file", help="declared typed Noul questions; qualified runs only, requires separate runtime provenance")
+    ap.add_argument("--captured-requests", help="frozen verbatim Scout HTTP requests, captured qualification arm only")
     ap.add_argument("--send-model")
     ap.add_argument("--bearer-token-env", metavar="NAME",
                     help="name of an environment variable holding a bearer token (never recorded)")
     ap.add_argument("--sample-out", help="write the first raw response here")
     ap.add_argument("--noul-temperature", type=float, help="client calibration temperature; raw probabilities are retained")
-    ap.add_argument("configs", nargs="+", choices=tuple(STATES))
+    ap.add_argument("configs", nargs="+", choices=(*STATES, CAPTURED_SCOUT_CONFIG))
     args = ap.parse_args(argv)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.tag):
         raise ValueError("--tag must be a filename component starting with a letter or digit")
@@ -514,9 +520,14 @@ def main(argv=None):
     dataset_sha = hashlib.sha256(dataset_bytes).hexdigest()
     if args.questions_file and not args.qualification_manifest:
         raise ValueError("--questions-file requires --qualification-manifest")
+    if args.captured_requests and not args.qualification_manifest:
+        raise ValueError("--captured-requests requires --qualification-manifest")
+    if CAPTURED_SCOUT_CONFIG in args.configs and not args.qualification_manifest:
+        raise ValueError("captured Scout requests require frozen qualification")
     questions = load_questions(args.questions_file) if args.questions_file else noul_questions()
     case_ids = validate_dataset(dataset, questions)
     qualification_sha = None
+    captured = None
     if args.qualification_manifest:
         if args.subset:
             raise ValueError("qualification selects its own frozen holdout; --subset is not allowed")
@@ -530,6 +541,17 @@ def main(argv=None):
                 or hashlib.sha256(args.url.encode("utf-8")).hexdigest() != arm["endpoint_sha256"]
                 or digest(server_config) != arm["server_config_sha256"]):
             raise ValueError("qualification HTTP arm differs from frozen manifest")
+        if (arm["config"] == CAPTURED_SCOUT_CONFIG) != bool(args.captured_requests):
+            raise ValueError("captured Scout arms require --captured-requests and no historical renderer")
+        if args.captured_requests:
+            with open(args.captured_requests, "rb") as source:
+                capture_bytes = source.read()
+            if hashlib.sha256(capture_bytes).hexdigest() != qualified["captured_requests_sha256"]:
+                raise ValueError("captured Scout request evidence differs from frozen manifest")
+            captured = captured_request_bodies(
+                capture_bytes, qualified["heldout_ids"], questions,
+                args.send_model, qualified["max_request_bytes"],
+            )
         keep = set(qualified["heldout_ids"])
         dataset = [case for case in dataset if case["id"] in keep]
     if args.subset:
@@ -547,13 +569,16 @@ def main(argv=None):
     if qualification_sha is not None:
         # Bound and verify precommitted request bodies before opening any
         # output. A stable config name does not imply a stable renderer.
-        renderer = STATES[qualified["arm"]["config"]]
+        renderer = STATES.get(qualified["arm"]["config"])
         rendered_requests = []
         for case in dataset:
-            body = {"state": renderer(case), "questions": questions}
-            if args.send_model:
-                body["model"] = args.send_model
-            encoded = request_bytes(body)
+            if captured is not None:
+                encoded = captured[case["id"]]
+            else:
+                body = {"state": renderer(case), "questions": questions}
+                if args.send_model:
+                    body["model"] = args.send_model
+                encoded = request_bytes(body)
             if len(encoded) > qualified["max_request_bytes"]:
                 raise ValueError(f"qualification case {case['id']} exceeds frozen request byte limit")
             rendered_requests.append([case["id"], hashlib.sha256(encoded).hexdigest()])
@@ -570,9 +595,12 @@ def main(argv=None):
             require_exclusive_publication(os.path.dirname(os.path.abspath(args.sample_out)))
         requests = {}
         for case in dataset:
-            body = {"state": STATES[cfg](case), "questions": questions}
-            if args.send_model:
-                body["model"] = args.send_model
+            if captured is not None:
+                body = captured[case["id"]]
+            else:
+                body = {"state": STATES[cfg](case), "questions": questions}
+                if args.send_model:
+                    body["model"] = args.send_model
             requests[case["id"]] = (body, hashlib.sha256(request_bytes(body)).hexdigest())
         identity = {
             "version": 2,
@@ -677,9 +705,13 @@ def main(argv=None):
                 # that a later valid retry mistakes for a completed capture.
                 serialized_row = serialize_result(row, questions, args.noul_temperature)
                 if args.sample_out and not os.path.exists(args.sample_out):
-                    serialized_sample = json.dumps(
-                        {"request": body, "response": response}, indent=1, allow_nan=False
-                    )
+                    sample = {
+                        "request": loads_unambiguous_json(body) if isinstance(body, bytes) else body,
+                        "response": response,
+                    }
+                    if isinstance(body, bytes):
+                        sample["request_json"] = body.decode("utf-8")
+                    serialized_sample = json.dumps(sample, indent=1, allow_nan=False)
                     publish_sample(args.sample_out, serialized_sample)
                 partial.write(serialized_row + "\n")
                 partial.flush()

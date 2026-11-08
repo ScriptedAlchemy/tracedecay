@@ -1481,5 +1481,150 @@ class QualificationTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, expected):
                         qualification.load_questions(path)
 
+    def captured_scout_fixture(self):
+        # The fixture deliberately uses Rust-style compact JSON and a request
+        # field order different from the historical Python renderer.
+        records = []
+        for case in self.dataset[2:]:
+            body = {"questions": self.questions, "state": "User: " + case["current_prompt"]}
+            records.append({
+                "id": case["id"],
+                "body": json.dumps(body, ensure_ascii=False, separators=(",", ":")),
+            })
+        capture_bytes = json.dumps(records, ensure_ascii=False).encode("utf-8")
+        manifest = copy.deepcopy(self.manifest)
+        manifest["arm"]["config"] = qualification.CAPTURED_SCOUT_CONFIG
+        manifest["captured_requests_sha256"] = qualification.sha256_bytes(capture_bytes)
+        manifest["holdout_requests_sha256"] = score.evidence_digest([
+            [record["id"], hashlib.sha256(record["body"].encode("utf-8")).hexdigest()]
+            for record in records
+        ])
+        return capture_bytes, manifest
+
+    def test_captured_scout_requests_replay_exact_bytes_and_score(self):
+        # This proves a captured arm is byte-exact, not that the synthetic
+        # fixture came from real Scout or that its labels were reviewed.
+        capture_bytes, manifest = self.captured_scout_fixture()
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            (here / "dataset.json").write_bytes(self.dataset_bytes)
+            (here / "manifest.json").write_text(json.dumps(manifest))
+            (here / "captured.json").write_bytes(capture_bytes)
+            (here / "server.json").write_text(json.dumps(self.server_config))
+            transmitted = []
+
+            def inference(_url, body):
+                self.assertIsInstance(body, bytes, "must not reserialize the Rust request")
+                transmitted.append(body)
+                request = qualification.loads_unambiguous_json(body)
+                probability = 0.9 if "What changes?" in request["state"] else 0.1
+                return ({
+                    "model": "reported-scout-fixture",
+                    "answers": {
+                        key: {"noul": probability if key == "impact" else 0.1}
+                        for key in self.questions
+                    },
+                    "usage": {"input_tokens": 42, "state_tokens_dropped": 0},
+                }, 5.0)
+
+            args = [
+                "--url", self.endpoint, "--tag", "captured",
+                "--server-config", str(here / "server.json"),
+                "--qualification-manifest", str(here / "manifest.json"),
+                "--captured-requests", str(here / "captured.json"),
+                qualification.CAPTURED_SCOUT_CONFIG,
+            ]
+            with patch.object(run_http, "HERE", str(here)):
+                with patch.object(run_http, "post", side_effect=inference) as post:
+                    run_http.main(args)
+                self.assertEqual(post.call_count, 2, "only frozen heldout cases may be inferred")
+                expected = [
+                    record["body"].encode("utf-8")
+                    for record in qualification.loads_unambiguous_json(capture_bytes)
+                ]
+                self.assertEqual(transmitted, expected)
+                result = json.loads((here / "results" /
+                                    "captured_S_scout_captured.json").read_text())
+                report = qualification.qualified_report(
+                    result, manifest, qualification.sha256_bytes(
+                        (here / "manifest.json").read_bytes()),
+                    self.questions, self.dataset_bytes, capture_bytes,
+                )
+                self.assertTrue(report["qualified_against_frozen_tolerances"])
+                self.assertEqual(report["cases"], 2)
+                self.assertEqual([row["request_size_bytes"] for row in result["rows"]],
+                                 [len(body) for body in expected])
+                with self.assertRaisesRegex(ValueError, "original frozen Scout request capture"):
+                    qualification.qualified_report(
+                        result, manifest, qualification.sha256_bytes(
+                            (here / "manifest.json").read_bytes()),
+                        self.questions, self.dataset_bytes,
+                    )
+                altered = capture_bytes.replace(b"What changes?", b"What changed?")
+                with self.assertRaisesRegex(ValueError, "original frozen Scout request capture"):
+                    qualification.qualified_report(
+                        result, manifest, qualification.sha256_bytes(
+                            (here / "manifest.json").read_bytes()),
+                        self.questions, self.dataset_bytes, altered,
+                    )
+
+    def test_capture_drift_and_invalid_contract_refuse_before_network(self):
+        capture_bytes, manifest = self.captured_scout_fixture()
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            (here / "dataset.json").write_bytes(self.dataset_bytes)
+            (here / "manifest.json").write_text(json.dumps(manifest))
+            (here / "captured.json").write_bytes(capture_bytes)
+            (here / "server.json").write_text(json.dumps(self.server_config))
+            args = [
+                "--url", self.endpoint, "--tag", "capture-refusal",
+                "--server-config", str(here / "server.json"),
+                "--qualification-manifest", str(here / "manifest.json"),
+                "--captured-requests", str(here / "captured.json"),
+                qualification.CAPTURED_SCOUT_CONFIG,
+            ]
+            records = qualification.loads_unambiguous_json(capture_bytes)
+            invalid = []
+            reordered = copy.deepcopy(records)
+            reordered.reverse()
+            invalid.append(("ordering", reordered))
+            injected = copy.deepcopy(records)
+            injected[0]["body"] = injected[0]["body"].replace(
+                '"type":"noul"', '"type":"choice"', 1
+            )
+            invalid.append(("question contract", injected))
+            extra = copy.deepcopy(records)
+            extra[0]["body"] = extra[0]["body"].replace(
+                '{"questions":', '{"debug":"injected","questions":', 1
+            )
+            invalid.append(("extra request field", extra))
+            for name, changed in invalid:
+                with self.subTest(name=name):
+                    changed_bytes = json.dumps(changed, ensure_ascii=False).encode("utf-8")
+                    with self.assertRaises(ValueError):
+                        qualification.captured_request_bodies(
+                            changed_bytes, ["holdout-positive", "holdout-negative"],
+                            self.questions, None, manifest["max_request_bytes"],
+                        )
+            for name, changed in [
+                ("changed text", capture_bytes.replace(b"What changes?", b"What changed?")),
+                ("unexpected case", json.dumps(records[:-1]).encode("utf-8")),
+            ]:
+                with self.subTest(name=name):
+                    (here / "captured.json").write_bytes(changed)
+                    with patch.object(run_http, "HERE", str(here)):
+                        with patch.object(run_http, "post") as post:
+                            with self.assertRaises(ValueError):
+                                run_http.main(args)
+                            post.assert_not_called()
+                    self.assertFalse((here / "results" /
+                                      "capture-refusal_S_scout_captured.json.partial").exists())
+            (here / "captured.json").write_bytes(capture_bytes)
+            with patch.object(run_http, "HERE", str(here)):
+                with patch.object(run_http, "post") as post:
+                    with self.assertRaisesRegex(ValueError, "--captured-requests"):
+                        run_http.main(args[:-3] + [qualification.CAPTURED_SCOUT_CONFIG])
+                    post.assert_not_called()
+
 if __name__ == "__main__":
     unittest.main()

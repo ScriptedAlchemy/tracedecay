@@ -278,3 +278,54 @@ actual configured Scout questions, settings digest, window renderer or
 rehydrated transcript were used. Obtain that evidence from the production
 settings and owning transcript authority before making any application
 replacement decision. The runner itself does not export canonical Scout data.
+
+## Captured Scout request arm (qualified only)
+
+The historical `A/B/B2` renderers do **not** reproduce production Scout
+requests. A separately captured, byte-exact request file can now be evaluated
+without rewriting those requests in Python. This is a new arm,
+`S_scout_captured`, not a historical benchmark result.
+
+Use a JSON array containing **only the ordered held-out cases**, each with
+`{"id":"case-id","body":"<complete JSON HTTP request as a string>"}`.
+The inner `body` string must be the literal UTF-8 JSON that the runtime sent:
+`{"state": "...", "questions": {"intent": {"type": "noul",
+"instructions": "..."}}}` with optional `"model"` if the frozen model
+selector is non-null. Keep its exact byte encoding, escapes, whitespace and
+field order: the evaluator sends those bytes directly instead of generating
+new ones with the historical renderer.
+
+The manifest must set `arm.config` to `S_scout_captured`,
+`captured_requests_sha256` to the SHA-256 of the entire **original capture
+file**, and `holdout_requests_sha256` to the existing ordered
+`[[case_id, sha256(inner_body_bytes)], ...]` commitment. Other manifest
+identity, split, serving, calibration, token-budget, and tolerance constraints
+are unchanged. For example:
+
+```sh
+python evals/intent_engine/run_http.py \
+  --url https://private-model-host.example/v1/systemone \
+  --tag scout-capture-1 \
+  --server-config /path/to/serving.json \
+  --qualification-manifest /path/to/manifest.json \
+  --questions-file /path/to/frozen-questions.json \
+  --captured-requests /path/to/scout-requests.json \
+  S_scout_captured
+
+python evals/intent_engine/score.py --qualified \
+  /path/to/manifest.json /path/to/original-dataset.json \
+  evals/intent_engine/results/scout-capture-1_S_scout_captured.json \
+  --questions-file /path/to/frozen-questions.json \
+  --captured-requests /path/to/scout-requests.json
+```
+
+Both the runner and independent scorer refuse altered capture bytes, missing
+or reordered held-out cases, invalid Noul questions, differing model selectors,
+extra request keys, request-size violations, or a capture attached to an
+historical renderer. A capture is an **operator-supplied input**, not proof that
+its bytes came from Scout. The owning transcript's original store-id bounds,
+canonical window digest, production settings, real question instructions, and
+actual request serialization must still be independently verified by the
+missing Scout exporter. Do not claim production parity, real Kev inference,
+reviewed labels, or a replacement result merely because a captured-arm
+fixture passes tests.

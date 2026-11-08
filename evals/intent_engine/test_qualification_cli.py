@@ -47,6 +47,54 @@ class QualificationCliTests(unittest.TestCase):
         self.assertFalse((self.root / "summary.json").exists())
         return report
 
+    def test_captured_arm_cli_requires_original_request_bytes(self):
+        # Synthetic captured requests demonstrate byte-identity enforcement,
+        # not production Scout provenance or real Kev qualification.
+        capture_bytes, manifest = self.fixture.captured_scout_fixture()
+        manifest_bytes = json.dumps(manifest).encode("utf-8")
+        (self.root / "manifest.json").write_bytes(manifest_bytes)
+        (self.root / "captured.json").write_bytes(capture_bytes)
+        records = fixtures.qualification.loads_unambiguous_json(capture_bytes)
+        result = self.fixture.signed_result()
+        for row, record in zip(result["rows"], records, strict=True):
+            raw = record["body"].encode("utf-8")
+            row["request_sha256"] = fixtures.qualification.sha256_bytes(raw)
+            row["request_size_bytes"] = len(raw)
+        experiment = result["experiment"]
+        experiment["config"] = fixtures.qualification.CAPTURED_SCOUT_CONFIG
+        experiment["requests_sha256"] = fixtures.score.evidence_digest([
+            [row["id"], row["request_sha256"]] for row in result["rows"]
+        ])
+        experiment["qualification_manifest_sha256"] = (
+            fixtures.qualification.sha256_bytes(manifest_bytes)
+        )
+        result["config"] = "trial_S_scout_captured"
+        result["experiment_sha256"] = fixtures.score.evidence_digest(experiment)
+        (self.root / "result.json").write_text(json.dumps(result), encoding="utf-8")
+        argv = [
+            sys.executable, str(self.root / "score.py"), "--qualified",
+            str(self.root / "manifest.json"), str(self.root / "dataset.json"),
+            str(self.root / "result.json"),
+        ]
+        missing = subprocess.run(argv, cwd=self.root, capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("original frozen Scout request capture", missing.stderr)
+        self.assertFalse((self.root / "qualification_summary.json").exists())
+
+        complete = argv + ["--captured-requests", str(self.root / "captured.json")]
+        passing = subprocess.run(complete, cwd=self.root, capture_output=True, text=True, timeout=30)
+        self.assertEqual(passing.returncode, 0, passing.stderr)
+        report = self.published_report(passing)
+        self.assertTrue(report["qualified_against_frozen_tolerances"])
+        frozen_report = (self.root / "qualification_summary.json").read_bytes()
+        (self.root / "captured.json").write_bytes(
+            capture_bytes.replace(b"What changes?", b"What changed?")
+        )
+        rejected = subprocess.run(complete, cwd=self.root, capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("original frozen Scout request capture", rejected.stderr)
+        self.assertEqual((self.root / "qualification_summary.json").read_bytes(), frozen_report)
+
     def test_duplicate_result_keys_cannot_publish_a_passing_report(self):
         valid = self.fixture.signed_result()
         raw = json.dumps(valid, allow_nan=False)
