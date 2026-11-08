@@ -135,7 +135,12 @@ positive number matching the runner's `--noul-temperature` argument. This
 client-side calibration must be frozen alongside the thresholds: changing it
 after seeing holdout predictions would select a new effective decision boundary
 without changing the threshold manifest. Include
-`thresholds` with one frozen probability threshold per requested question and
+a required `max_request_bytes` positive integer upper bound on the exact UTF-8
+JSON request body. This precommitted byte limit is **not** the model's
+validated 8,192-token context limit: byte counts and token counts are different.
+The runner refuses oversized requests before any result file or model call;
+qualification independently reconstructs and verifies the byte count of every
+held-out request. Include `thresholds` with one frozen probability threshold per requested question and
 `error_tolerances` with all four numbers:
 `max_none_false_hint_rate` (0–1), `max_unwanted_hint_rate` (0–1),
 `min_positive_case_recall` (0–1), and `max_p95_ms` (nonnegative milliseconds).
@@ -178,7 +183,8 @@ bazel test //evals/intent_engine:qualification_test --test_output=errors
 This writes `evals/intent_engine/qualification_summary.json` separately from
 the historical `summary.json`, and reports only **frozen-threshold** held-out
 false hints, all-case unwanted suggestions, missed positive cases, coverage,
-abstention, positive-case recall, p50/p95 measured end-to-end HTTP latency and
+abstention, positive-case recall, reconstructed JSON request sizes
+(min/p50/max/total and the frozen byte ceiling), p50/p95 measured end-to-end HTTP latency and
 the predeclared tolerances. A passing report requires every held-out case to
 report measured zero dropped state tokens. Missing truncation telemetry is
 unknown, and a response measured after truncated input cannot prove the full

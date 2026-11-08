@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import re
+import statistics
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -55,6 +56,11 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
         value = arm[field]
         if not isinstance(value, str) or not _DIGEST.fullmatch(value):
             raise ValueError(f"qualification HTTP arm has invalid {field}")
+
+    request_limit = manifest.get("max_request_bytes")
+    if (isinstance(request_limit, bool) or not isinstance(request_limit, int)
+            or request_limit <= 0):
+        raise ValueError("qualification requires a positive integer max_request_bytes")
 
     thresholds = manifest.get("thresholds")
     if not isinstance(thresholds, dict) or set(thresholds) != set(questions):
@@ -164,6 +170,7 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
     return {
         "heldout_ids": heldout,
         "arm": arm,
+        "max_request_bytes": request_limit,
         "thresholds": thresholds,
         "noul_temperature": client_temperature,
         "error_tolerances": tolerances,
@@ -247,15 +254,24 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes):
     if renderer is None:
         raise ValueError("qualification has an unsupported request renderer")
     case_map = {case["id"]: case for case in cases}
+    request_sizes = []
     for row in rows:
         body = {"state": renderer(case_map[row["id"]]), "questions": questions}
         if experiment.get("requested_model"):
             body["model"] = experiment["requested_model"]
-        expected = sha256_bytes(request_bytes(body))
-        if row.get("request_sha256") != expected:
+        rendered = request_bytes(body)
+        if row.get("request_sha256") != sha256_bytes(rendered):
             raise ValueError(
                 f"qualification request fingerprint disagrees with frozen renderer for {row['id']}"
             )
+        size = len(rendered)
+        if size > validated["max_request_bytes"]:
+            raise ValueError(f"qualification case {row['id']} exceeds frozen request byte limit")
+        recorded_size = row.get("request_size_bytes")
+        if (isinstance(recorded_size, bool) or not isinstance(recorded_size, int)
+                or recorded_size != size):
+            raise ValueError(f"qualification request byte count disagrees for {row['id']}")
+        request_sizes.append(size)
 
     if ("noul_temperature" not in experiment
             or experiment["noul_temperature"] != validated["noul_temperature"]):
@@ -298,6 +314,13 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes):
         "tolerances": tolerances,
         "fixed_threshold_metrics": fixed,
         "holdout_decisions": decisions,
+        "request_size_bytes": {
+            "min": min(request_sizes),
+            "p50": statistics.median(request_sizes),
+            "max": max(request_sizes),
+            "total": sum(request_sizes),
+            "frozen_limit": validated["max_request_bytes"],
+        },
         "latency": latency,
         "checks": checks,
         "qualified_against_frozen_tolerances": all(checks.values()),

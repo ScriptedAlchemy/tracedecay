@@ -329,6 +329,10 @@ def resume_rows(partial, header, cases, requests, questions, temperature):
                 or row.get("labels") != case["labels"]
                 or row.get("context_needed") != case["context_needed"]):
             raise ValueError(f"partial output has mismatched case evidence for {case_id}")
+        if ("qualification_manifest_sha256" in header["experiment"]
+                and (isinstance(row.get("request_size_bytes"), bool)
+                     or row.get("request_size_bytes") != len(request_bytes(requests[case_id][0])))):
+            raise ValueError(f"partial output has mismatched request byte count for {case_id}")
         serialize_result(row, questions, temperature)
         done[case_id] = row
     return done
@@ -427,6 +431,15 @@ def main(argv=None):
     if not dataset:
         raise ValueError("the experiment must contain at least one case")
     cases = {case["id"]: case for case in dataset}
+    if qualification_sha is not None:
+        # Bound exact JSON requests before creating result files or calling the model.
+        renderer = STATES[qualified["arm"]["config"]]
+        for case in dataset:
+            body = {"state": renderer(case), "questions": questions}
+            if args.send_model:
+                body["model"] = args.send_model
+            if len(request_bytes(body)) > qualified["max_request_bytes"]:
+                raise ValueError(f"qualification case {case['id']} exceeds frozen request byte limit")
     os.makedirs(os.path.join(HERE, "results"), exist_ok=True)
     for cfg in args.configs:
         name = f"{args.tag}_{cfg}"
@@ -499,6 +512,7 @@ def main(argv=None):
                     raise ValueError("response usage must be an object or null")
                 row = {
                     "id": case["id"], "request_sha256": request_sha,
+                    "request_size_bytes": len(request_bytes(body)),
                     "labels": case["labels"], "context_needed": case["context_needed"],
                     "ms": ms, "server_ms": server_ms,
                     "input_tokens": usage.get("input_tokens"),

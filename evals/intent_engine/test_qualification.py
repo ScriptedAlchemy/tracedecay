@@ -62,6 +62,7 @@ class QualificationTests(unittest.TestCase):
                 "server_config_sha256": qualification.sha256_json(self.server_config),
             },
             "noul_temperature": None,
+            "max_request_bytes": 65536,
             "thresholds": {key: 0.6 for key in self.questions},
             "error_tolerances": {
                 "max_none_false_hint_rate": 0.0,
@@ -205,16 +206,18 @@ class QualificationTests(unittest.TestCase):
         rows = []
         for case in self.dataset[2:]:
             probs = {cat: (0.9 if cat in case["labels"] else 0.1) for cat in CATS}
+            rendered = run_http.request_bytes({
+                "state": run_http.STATES["B_noul_text"](case),
+                "questions": self.questions,
+            })
             rows.append({
                 "id": case["id"], "labels": case["labels"],
                 "context_needed": case["context_needed"],
                 "probs": probs,
                 "ms": 10 if case["labels"] else 20,
                 "dropped": 0,
-                "request_sha256": hashlib.sha256(run_http.request_bytes({
-                    "state": run_http.STATES["B_noul_text"](case),
-                    "questions": self.questions,
-                })).hexdigest(),
+                "request_sha256": hashlib.sha256(rendered).hexdigest(),
+                "request_size_bytes": len(rendered),
             })
         experiment = {
             "version": 2,
@@ -250,6 +253,10 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(report["cases"], 2)
         self.assertEqual(report["latency"]["p50_ms"], 15)
         self.assertEqual(report["latency"]["p95_ms"], 20)
+        self.assertEqual(report["request_size_bytes"]["frozen_limit"], 65536)
+        self.assertEqual(report["request_size_bytes"]["total"], sum(
+            row["request_size_bytes"] for row in result["rows"]
+        ))
         self.assertEqual(report["holdout_decisions"]["coverage_rate"], 0.5)
         self.assertEqual(report["holdout_decisions"]["abstention_rate"], 0.5)
         self.assertEqual(report["holdout_decisions"]["unwanted_hint_rate"], 0)
@@ -629,6 +636,67 @@ class QualificationTests(unittest.TestCase):
                         result, self.manifest, self.manifest_sha,
                         self.questions, self.dataset_bytes,
                     )
+
+
+    def test_frozen_request_byte_budget_must_be_positive_integer(self):
+        for budget in (None, 0, -1, True, 0.5, "4096"):
+            with self.subTest(budget=budget):
+                changed = copy.deepcopy(self.manifest)
+                changed["max_request_bytes"] = budget
+                with self.assertRaisesRegex(ValueError, "positive integer max_request_bytes"):
+                    self.valid(changed)
+
+    def test_frozen_request_byte_budget_refuses_before_network(self):
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            (here / "dataset.json").write_bytes(self.dataset_bytes)
+            (here / "server.json").write_text(json.dumps(self.server_config))
+            changed = copy.deepcopy(self.manifest)
+            changed["max_request_bytes"] = 1
+            (here / "manifest.json").write_text(json.dumps(changed))
+            args = [
+                "--url", self.endpoint, "--tag", "oversized",
+                "--server-config", str(here / "server.json"),
+                "--qualification-manifest", str(here / "manifest.json"),
+                "B_noul_text",
+            ]
+            with patch.object(run_http, "HERE", str(here)):
+                with patch.object(run_http, "post") as post:
+                    with self.assertRaisesRegex(ValueError, "exceeds frozen request byte limit"):
+                        run_http.main(args)
+                    post.assert_not_called()
+                self.assertFalse((here / "results").exists())
+
+    def test_qualification_reconstructs_measured_request_sizes(self):
+        original = self.signed_result()
+        report = qualification.qualified_report(
+            original, self.manifest, self.manifest_sha,
+            self.questions, self.dataset_bytes,
+        )
+        self.assertGreater(report["request_size_bytes"]["min"], 0)
+        self.assertEqual(
+            report["request_size_bytes"]["max"],
+            max(row["request_size_bytes"] for row in original["rows"]),
+        )
+        for value in (None, True, original["rows"][0]["request_size_bytes"] + 1):
+            with self.subTest(forged_size=value):
+                forged = copy.deepcopy(original)
+                forged["rows"][0]["request_size_bytes"] = value
+                with self.assertRaisesRegex(ValueError, "request byte count disagrees"):
+                    qualification.qualified_report(
+                        forged, self.manifest, self.manifest_sha,
+                        self.questions, self.dataset_bytes,
+                    )
+        tighter = copy.deepcopy(self.manifest)
+        tighter["max_request_bytes"] = 1
+        tighter_sha = qualification.sha256_json(tighter)
+        forged = copy.deepcopy(original)
+        forged["experiment"]["qualification_manifest_sha256"] = tighter_sha
+        forged["experiment_sha256"] = score.evidence_digest(forged["experiment"])
+        with self.assertRaisesRegex(ValueError, "exceeds frozen request byte limit"):
+            qualification.qualified_report(
+                forged, tighter, tighter_sha, self.questions, self.dataset_bytes,
+            )
 
 if __name__ == "__main__":
     unittest.main()
