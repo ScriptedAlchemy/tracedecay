@@ -398,7 +398,8 @@ mod tests {
         })
         .await;
 
-        let following = gates.acquire(&store("/a", StoreWriterClass::Owner));
+        let following_scope = store("/a", StoreWriterClass::Owner);
+        let following = gates.acquire(&following_scope);
         tokio::pin!(following);
         poll_fn(|cx| {
             assert!(
