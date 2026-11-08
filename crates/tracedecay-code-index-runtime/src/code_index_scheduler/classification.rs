@@ -396,8 +396,7 @@ mod nested_repository_tests {
     use super::WorktreeChangeClassificationV1;
 
     fn fixture_git(root: &Path, args: &[&str]) {
-        let program =
-            tracedecay_runtime_core::git::try_git_program().expect("fixture Git program");
+        let program = tracedecay_runtime_core::git::try_git_program().expect("fixture Git program");
         let mut command = Command::new(program);
         command.current_dir(root);
         for (key, _) in std::env::vars_os() {
@@ -459,7 +458,10 @@ mod nested_repository_tests {
         assert!(candidates.contains("src/keep.rs"));
         assert!(!candidates.contains("nested/foreign.rs"));
         assert!(!candidates.contains("linked/foreign.rs"));
-        assert!(hidden.has_changes(), "a clean HEAD-tree capture is now unsafe");
+        assert!(
+            hidden.has_changes(),
+            "a clean HEAD-tree capture is now unsafe"
+        );
         assert!(hidden.changed_paths().contains("nested/foreign.rs"));
         assert!(hidden.changed_paths().contains("linked/foreign.rs"));
 

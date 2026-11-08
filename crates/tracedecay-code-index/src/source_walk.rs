@@ -379,15 +379,17 @@ mod tests {
     use tempfile::TempDir;
     use tracedecay_domain::IndexPathPolicyV1;
 
-    use super::{
-        has_nested_repository_ancestor, source_walk, source_walk_with_diagnostics,
-    };
+    use super::{has_nested_repository_ancestor, source_walk, source_walk_with_diagnostics};
 
     #[test]
     fn nested_repository_boundary_excludes_parent_markers_and_path_escape() {
         let root = TempDir::new().unwrap();
         fs::create_dir_all(root.path().join("parent/nested/.git")).unwrap();
-        fs::write(root.path().join("parent/nested/.git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(
+            root.path().join("parent/nested/.git/HEAD"),
+            "ref: refs/heads/main\n",
+        )
+        .unwrap();
         assert!(
             !has_nested_repository_ancestor(root.path(), std::path::Path::new("parent/source.rs"))
                 .unwrap()
