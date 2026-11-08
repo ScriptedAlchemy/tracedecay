@@ -1231,7 +1231,8 @@ mod recent_first_discovery_tests {
         CodexDiscoverySourceKey, CodexDiscoveryState, CodexExactSessionPathAuthority,
         CodexIndexedPath, CodexReplayIndex, EXACT_HOOK_DISCOVERY_UNITS_PER_CALL,
         IDLE_FULL_VALIDATION_CYCLES, MAX_EXACT_HOOK_SESSION_REQUESTS,
-        MAX_EXACT_HOOK_SOURCE_AUTHORITIES, MAX_SCAN_DEPTH, indexed_replay_pass,
+        MAX_EXACT_HOOK_SOURCE_AUTHORITIES, MAX_SCAN_DEPTH, codex_directory_changed,
+        codex_directory_witness, directory_stat_witness, indexed_replay_pass,
         replay_index_entries_visited_for_test, reset_replay_index_entries_visited_for_test,
     };
     use crate::runtime::ingest::quarantine::SourceSweep;
@@ -2613,6 +2614,34 @@ mod recent_first_discovery_tests {
         assert!(
             rediscovered,
             "bounded idle authority must eventually validate files outside its active window"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn settled_codex_bucket_skips_name_scans_and_detects_new_rollouts() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let historical = write_dated_rollout(home, ("2025", "11", "01"), "settled");
+        let bucket = historical.parent().unwrap();
+
+        // The rollout fixture waits for the native change-time witness to
+        // settle, so the parent directory is also outside that time quantum.
+        assert!(
+            directory_stat_witness(bucket).unwrap().unwrap().settled,
+            "historical directory must have a settled change-time witness"
+        );
+        let witness = codex_directory_witness(bucket).unwrap().unwrap();
+        assert!(
+            witness.entries.is_none(),
+            "a settled historical bucket must not enumerate names twice"
+        );
+        assert!(!codex_directory_changed(bucket, Some(witness)).unwrap());
+
+        std::fs::write(bucket.join("rollout-new.jsonl"), b"{}\n").unwrap();
+        assert!(
+            codex_directory_changed(bucket, Some(witness)).unwrap(),
+            "a new rollout must invalidate the cheap settled-directory witness"
         );
     }
 

@@ -1056,7 +1056,7 @@ struct CodexDirectoryResume {
 #[derive(Clone, Copy)]
 struct CodexDirectoryWitness {
     stat: [u8; 32],
-    entries: [u8; 32],
+    entries: Option<[u8; 32]>,
 }
 
 #[derive(Clone)]
@@ -2578,11 +2578,18 @@ fn codex_directory_changed(
     let Some(stored) = stored else {
         return Ok(true);
     };
-    // An unsettled stat proves nothing either way; the entry names do.
+    // A settled stat is sufficient to test unchanged history without
+    // rescanning every entry in its directory merely to retain a witness.
     if current.settled {
         return Ok(current.stat != stored.stat);
     }
-    Ok(directory_entry_fingerprint(path)? != stored.entries)
+    // An older settled directory did not need an entry-name witness.
+    // If its stat becomes unsettled, conservatively revalidate it rather
+    // than assuming that newly added rollouts were already discovered.
+    let Some(entries) = stored.entries else {
+        return Ok(true);
+    };
+    Ok(directory_entry_fingerprint(path)? != entries)
 }
 
 fn codex_directory_witness(path: &Path) -> TranscriptIngestResult<Option<CodexDirectoryWitness>> {
@@ -2591,7 +2598,14 @@ fn codex_directory_witness(path: &Path) -> TranscriptIngestResult<Option<CodexDi
     };
     Ok(Some(CodexDirectoryWitness {
         stat: current.stat,
-        entries: directory_entry_fingerprint(path)?,
+        // In the settled case, a later stat comparison proves stability.
+        // Avoid eagerly listing and sorting all historical rollout names;
+        // an entry-name witness is needed only for a coarse-clock window.
+        entries: if current.settled {
+            None
+        } else {
+            Some(directory_entry_fingerprint(path)?)
+        },
     }))
 }
 
