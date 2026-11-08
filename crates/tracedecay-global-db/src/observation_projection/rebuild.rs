@@ -220,28 +220,37 @@ pub async fn project_queued_observations(
     if max == 0 {
         return Ok(ProjectionDrainBatch::default());
     }
-    // Terminal-collision rows can remain parked indefinitely. Probe for any
-    // nonterminal work before taking a writer lease so idle polls never rewrite
-    // a terminal-only queue. The deadline performance index makes this a
-    // bounded lookup on converged stores; the writer still verifies ordered
-    // readiness after concurrent admissions race this read-only hint.
+    // The deadline index proves when no nonterminal row is due without
+    // taking a writer lease. A deferred-only queue is pending work, but must
+    // not burn an empty write transaction on every poll while its retry clock
+    // runs. When anything is due, the writer remains authoritative for
+    // sequence order, rebuild fences, and concurrent admissions.
     {
         let reader = database.read_connection();
         let mut rows = reader
             .query(
-                "SELECT 1 FROM projection_queue
-                 WHERE next_retry_at_micros < ?1 LIMIT 1",
+                "SELECT next_retry_at_micros FROM projection_queue
+                 WHERE next_retry_at_micros < ?1
+                 ORDER BY next_retry_at_micros LIMIT 1",
                 params![PROJECTION_TERMINAL_RETRY_MICROS],
             )
             .await
-            .map_err(|error| storage("probe empty projection queue", error))?;
-        if rows
+            .map_err(|error| storage("probe ready projection queue", error))?;
+        let earliest = rows
             .next()
             .await
-            .map_err(|error| storage("probe empty projection queue", error))?
-            .is_none()
-        {
+            .map_err(|error| storage("probe ready projection queue", error))?;
+        let Some(earliest) = earliest else {
             return Ok(ProjectionDrainBatch::default());
+        };
+        let deadline = earliest
+            .get::<i64>(0)
+            .map_err(|error| storage("decode earliest projection deadline", error))?;
+        if deadline > tracedecay_contracts::clock::now_micros().0 {
+            return Ok(ProjectionDrainBatch {
+                items: Vec::new(),
+                has_more: true,
+            });
         }
     }
     let transaction = database

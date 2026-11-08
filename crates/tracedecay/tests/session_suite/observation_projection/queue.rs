@@ -755,6 +755,119 @@ async fn batched_projection_resumes_after_restart_without_replaying_parked_or_de
 }
 
 #[tokio::test]
+async fn deferred_only_reopened_queue_skips_writer_until_retry_is_due() {
+    let tmp = TempDir::new().unwrap();
+    let database_path;
+    let first = observation(
+        "session-deferred-only",
+        0,
+        100,
+        "receipt.deferred-only-first",
+        conversational_payload("message-deferred-only-first", "first deferred-only canary"),
+    );
+    let second = observation(
+        "session-deferred-only",
+        100,
+        200,
+        "receipt.deferred-only-second",
+        conversational_payload("message-deferred-only-second", "second deferred-only canary"),
+    );
+    {
+        let runtime = profile_runtime(&tmp).await;
+        let store = runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
+        database_path = runtime
+            .database_path(HostAdmissionScope::Profile)
+            .unwrap()
+            .to_path_buf();
+        persist(&store, first.clone(), None).await;
+        persist(
+            &store,
+            second.clone(),
+            Some(cursor("session-deferred-only", 100)),
+        )
+        .await;
+        store
+            .project_observation(first.observation_id())
+            .await
+            .unwrap();
+
+        // Keep a terminal collision and a deferred sequence, with no ready
+        // work. Both survive the restart; neither should require a writer.
+        let connection = rusqlite::Connection::open(&database_path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO projection_queue (observation_id, observation_sequence)
+                 VALUES (?1, 1)",
+                rusqlite::params![first.observation_id().as_str()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE projection_queue SET next_retry_at_micros = ?2
+                 WHERE observation_id = ?1",
+                rusqlite::params![first.observation_id().as_str(), i64::MAX],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE projection_queue SET next_retry_at_micros = ?2
+                 WHERE observation_id = ?1",
+                rusqlite::params![second.observation_id().as_str(), i64::MAX - 1],
+            )
+            .unwrap();
+    }
+
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let writer = rusqlite::Connection::open(&database_path).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    for _ in 0..2 {
+        let deferred = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            store.project_queued_observations(32),
+        )
+        .await
+        .expect("deferred-only projection must not acquire the writer")
+        .unwrap()
+        .unwrap();
+        assert!(deferred.items.is_empty());
+        assert!(deferred.has_more, "the deferred head remains pending");
+    }
+    writer.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(
+        store.projection_checkpoint().await.unwrap().last_sequence(),
+        1
+    );
+    assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 1);
+
+    // Skipping the writer must never cache a negative readiness decision.
+    rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .execute(
+            "UPDATE projection_queue SET next_retry_at_micros = 0
+             WHERE observation_id = ?1",
+            rusqlite::params![second.observation_id().as_str()],
+        )
+        .unwrap();
+    let resumed = store
+        .project_queued_observations(1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resumed.items.len(), 1);
+    assert!(!resumed.has_more, "the remaining row is terminal");
+    assert_eq!(
+        store.projection_checkpoint().await.unwrap().last_sequence(),
+        2
+    );
+    assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 2);
+}
+
+#[tokio::test]
 async fn empty_projection_drain_does_not_wait_for_an_unrelated_writer() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
