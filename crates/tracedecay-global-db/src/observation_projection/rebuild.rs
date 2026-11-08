@@ -2806,7 +2806,8 @@ mod activation_tests {
             text: "overwritten body".to_owned(),
             ..foreign.clone()
         };
-        write_staged_message(&transaction, GENERATION, &changed)
+        let changed_stored = projected_stored_message(&changed).unwrap();
+        write_staged_message(&transaction, GENERATION, &changed_stored)
             .await
             .unwrap();
         // Schema initialization and other writer operations can already
@@ -2836,7 +2837,8 @@ mod activation_tests {
 
         // Matching foreign bodies are compatible; rejecting every unowned row
         // would also avoid spills, but would break legitimate rebuilds.
-        write_staged_message(&transaction, GENERATION, &foreign)
+        let compatible_stored = projected_stored_message(&foreign).unwrap();
+        write_staged_message(&transaction, GENERATION, &compatible_stored)
             .await
             .unwrap();
         prepare_rebuild_output_activation(&transaction, GENERATION)
@@ -2847,7 +2849,8 @@ mod activation_tests {
             message_id: "message.not-created".to_owned(),
             ..foreign.clone()
         };
-        write_staged_message(&transaction, GENERATION, &missing)
+        let missing_stored = projected_stored_message(&missing).unwrap();
+        write_staged_message(&transaction, GENERATION, &missing_stored)
             .await
             .unwrap();
         let error = prepare_rebuild_output_activation(&transaction, GENERATION)
