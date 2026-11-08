@@ -239,3 +239,20 @@ alone demonstrate task success, ignored/acted outcomes, cold/warm cost, native
 runtime renderer/settings parity or a real Kev checkpoint. All those require
 canonical transcript export, independent review, real host inference and
 application-specific trials before any replacement or merge decision.
+
+## Declared question vocabulary (qualification only)
+
+The historical benchmark uses nine fixed categories. A frozen held-out run
+can instead use `--questions-file /path/to/questions.json` alongside
+`--qualification-manifest`. The JSON object maps each configured key to
+`{"type":"noul","instructions":"..."}`; the manifest's `questions_sha256`
+must pin the exact question object. Score with
+`score.py --qualified MANIFEST DATASET RESULT --questions-file FILE`.
+Both commands reject changed or non-Noul instructions; historical scoring
+retains its original nine-category behavior.
+
+**Not runtime parity:** An operator-supplied file does not establish that the
+actual configured Scout questions, settings digest, window renderer or
+rehydrated transcript were used. Obtain that evidence from the production
+settings and owning transcript authority before making any application
+replacement decision. The runner itself does not export canonical Scout data.

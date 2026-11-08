@@ -29,6 +29,33 @@ def loads_unambiguous_json(raw):
                       parse_constant=reject_nonfinite)
 
 
+def load_questions(path):
+    """Read a frozen Noul question vocabulary supplied by the settings owner.
+
+    A question file is only a declared contract. Its provenance and the Scout
+    renderer/window digest must be established separately before runtime parity.
+    """
+    with open(path, "rb") as source:
+        questions = loads_unambiguous_json(source.read())
+    return validate_questions(questions)
+
+
+def validate_questions(questions):
+    if not isinstance(questions, dict) or not questions:
+        raise ValueError("qualification requires a nonempty Noul question vocabulary")
+    for key, question in questions.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError("qualification question keys must be nonempty strings")
+        if (not isinstance(question, dict)
+                or set(question) != {"type", "instructions"}
+                or question["type"] != "noul"
+                or not isinstance(question["instructions"], str)
+                or not question["instructions"].strip()
+                or len(question["instructions"].encode("utf-8")) > 512):
+            raise ValueError(f"qualification question {key!r} must be a bounded Noul instruction")
+    return questions
+
+
 def sha256_bytes(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -55,6 +82,7 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
         raise ValueError("invalid qualification dataset digest")
     if manifest.get("dataset_sha256") != dataset_sha:
         raise ValueError("qualification dataset digest mismatch")
+    validate_questions(questions)
     if manifest.get("questions_sha256") != sha256_json(questions):
         raise ValueError("qualification question vocabulary or instruction mismatch")
 
@@ -324,7 +352,7 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes):
              or reported_model == arm["requested_model"])
     )
 
-    scores = score_config(result, fixed_t=validated["thresholds"])
+    scores = score_config(result, fixed_t=validated["thresholds"], cats=tuple(questions))
     fixed = scores["fixed"]["all"]
     latency = scores["latency"]
     decisions = holdout_decision_metrics(rows, validated["thresholds"])

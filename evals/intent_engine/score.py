@@ -26,11 +26,11 @@ def publish_summary(path, summary):
             os.unlink(staged)
 
 
-def validate_rows(rows, config):
+def validate_rows(rows, config, cats=CATS):
     """Refuse invalid measured evidence before any threshold or AUC arithmetic."""
     if not isinstance(rows, list) or not rows:
         raise ValueError("configuration %r has no rows to score" % config)
-    categories = set(CATS)
+    categories = set(cats)
     seen = set()
     for row in rows:
         if not isinstance(row, dict):
@@ -172,7 +172,7 @@ def case_metrics(rows, ths):
     none_rows = [r for r in rows if not r["labels"]]
     none_fh = 0
     for r in rows:
-        fired = {c for c in CATS if r["probs"][c] >= ths[c]}
+        fired = {c for c in ths if r["probs"][c] >= ths[c]}
         exact += fired == set(r["labels"])
         passing = [(r["probs"][c] - ths[c], c) for c in fired]
         pick = max(passing)[1] if passing else None
@@ -225,13 +225,13 @@ def lat(rows):
         result[f"{field}_measured_cases"] = len(values)
     return result
 
-def score_config(res, fixed_t=None):
+def score_config(res, fixed_t=None, cats=CATS):
     if "experiment" in res:
         experiment = res["experiment"]
         if not isinstance(experiment, dict) or experiment.get("version") != 2:
             raise ValueError("HTTP result telemetry version is unsupported; rerun with a new tag")
     rows = res["rows"]
-    validate_rows(rows, res.get("config"))
+    validate_rows(rows, res.get("config"), cats)
     validate_calibration(res, rows)
     validate_http_provenance(res, rows)
     choices = ["choice" in row for row in rows]
@@ -239,7 +239,7 @@ def score_config(res, fixed_t=None):
         raise ValueError("configuration %r has incomplete choice coverage" % res.get("config"))
     ctx = [r for r in rows if r["context_needed"]]; nctx = [r for r in rows if not r["context_needed"]]
     per = {}
-    for c in CATS:
+    for c in cats:
         pos = [r["probs"][c] for r in rows if c in r["labels"]]
         neg = [r["probs"][c] for r in rows if c not in r["labels"]]
         sweep = {str(t): prf(rows, c, t) for t in TH}
@@ -249,7 +249,7 @@ def score_config(res, fixed_t=None):
             "sweep": sweep, "best_t": best, "best_f1": sweep[str(best)]["f1"]}
     # A singleton has no training rows after holding out its only case.
     loo_cases = len(rows) if len(rows) > 1 else 0
-    for c in CATS:
+    for c in cats:
         if not loo_cases:
             per[c].update(loo_f1=None, loo_p=None, loo_r=None)
             continue
@@ -278,19 +278,19 @@ def score_config(res, fixed_t=None):
         per[c]["loo_p"] = tp / (tp + fp) if tp + fp else None
         per[c]["loo_r"] = tp / (tp + fn) if tp + fn else None
     out = {"per_cat": per, "loo_evaluated_cases": loo_cases,
-           "macro_loo_f1": statistics.mean(per[c]["loo_f1"] or 0 for c in CATS) if loo_cases else None}
-    for name, t in [("t0.5", {c: 0.5 for c in CATS}), ("t0.6", {c: 0.6 for c in CATS}),
-                    ("t0.7", {c: 0.7 for c in CATS}),
-                    ("best_t_in_sample", {c: per[c]["best_t"] for c in CATS})] + ([("fixed", fixed_t)] if fixed_t else []):
-        mf = statistics.mean(prf(rows, c, t[c])["f1"] or 0 for c in CATS)
+           "macro_loo_f1": statistics.mean(per[c]["loo_f1"] or 0 for c in cats) if loo_cases else None}
+    for name, t in [("t0.5", {c: 0.5 for c in cats}), ("t0.6", {c: 0.6 for c in cats}),
+                    ("t0.7", {c: 0.7 for c in cats}),
+                    ("best_t_in_sample", {c: per[c]["best_t"] for c in cats})] + ([("fixed", fixed_t)] if fixed_t else []):
+        mf = statistics.mean(prf(rows, c, t[c])["f1"] or 0 for c in cats)
         out[name] = {"macro_f1": mf,
-                     "macro_f1_ctx": statistics.mean(prf(ctx, c, t[c])["f1"] or 0 for c in CATS) if ctx else None,
+                     "macro_f1_ctx": statistics.mean(prf(ctx, c, t[c])["f1"] or 0 for c in cats) if ctx else None,
                      "all": case_metrics(rows, t), "ctx": case_metrics(ctx, t), "no_ctx": case_metrics(nctx, t)}
-    out["macro_auc"] = mean_defined(per[c]["auc"] for c in CATS)
-    out["macro_auc_ctx"] = mean_defined(per[c]["auc_ctx"] for c in CATS)
-    out["macro_auc_n_categories"] = sum(per[c]["auc"] is not None for c in CATS)
-    out["macro_auc_ctx_n_categories"] = sum(per[c]["auc_ctx"] is not None for c in CATS)
-    out["reliability"] = reliability(rows)
+    out["macro_auc"] = mean_defined(per[c]["auc"] for c in cats)
+    out["macro_auc_ctx"] = mean_defined(per[c]["auc_ctx"] for c in cats)
+    out["macro_auc_n_categories"] = sum(per[c]["auc"] is not None for c in cats)
+    out["macro_auc_ctx_n_categories"] = sum(per[c]["auc_ctx"] is not None for c in cats)
+    out["reliability"] = reliability(rows, cats)
     out["latency"] = lat(rows)
     if all(choices):
         def ch(rs):
@@ -301,22 +301,24 @@ def score_config(res, fixed_t=None):
         out["choice_argmax_per_cat"] = {c: {
             "tp": sum(r["choice"] == c and c in r["labels"] for r in rows),
             "fp": sum(r["choice"] == c and c not in r["labels"] for r in rows),
-            "fn": sum(r["choice"] != c and c in r["labels"] for r in rows)} for c in CATS}
+            "fn": sum(r["choice"] != c and c in r["labels"] for r in rows)} for c in cats}
     return out
 
 if __name__ == "__main__":
     here = os.path.dirname(os.path.abspath(__file__))
     if len(sys.argv) > 1:
-        if len(sys.argv) != 5 or sys.argv[1] != "--qualified":
-            raise ValueError("usage: score.py [--qualified MANIFEST DATASET RESULT]")
-        from qualification import load_manifest, loads_unambiguous_json, qualified_report
+        if (sys.argv[1] != "--qualified" or len(sys.argv) not in (5, 7)
+                or (len(sys.argv) == 7 and sys.argv[5] != "--questions-file")):
+            raise ValueError("usage: score.py [--qualified MANIFEST DATASET RESULT [--questions-file FILE]]")
+        from qualification import load_manifest, load_questions, loads_unambiguous_json, qualified_report
         from common import noul_questions
         manifest, manifest_sha = load_manifest(sys.argv[2])
         with open(sys.argv[3], "rb") as source:
             dataset_bytes = source.read()
         with open(sys.argv[4], encoding="utf-8") as source:
             result = loads_unambiguous_json(source.read())
-        report = qualified_report(result, manifest, manifest_sha, noul_questions(), dataset_bytes)
+        questions = load_questions(sys.argv[6]) if len(sys.argv) == 7 else noul_questions()
+        report = qualified_report(result, manifest, manifest_sha, questions, dataset_bytes)
         publish_summary(os.path.join(here, "qualification_summary.json"), report)
         print(json.dumps(report, indent=2, allow_nan=False))
         # A completed evaluation is not necessarily a qualified model. Keep

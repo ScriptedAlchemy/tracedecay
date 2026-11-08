@@ -23,7 +23,7 @@ from urllib.parse import urlsplit
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from common import calibrated, noul_questions, prompt_only, text_window
-from qualification import load_manifest, loads_unambiguous_json, validate_manifest
+from qualification import load_manifest, load_questions, loads_unambiguous_json, validate_manifest
 
 STATES = {
     "A_noul_prompt": prompt_only,
@@ -485,6 +485,7 @@ def main(argv=None):
     ap.add_argument("--subset")
     ap.add_argument("--dataset", help="original JSON cases; frozen digest recorded in each run")
     ap.add_argument("--qualification-manifest", help="freeze reviewed held-out labels, groups, thresholds and tolerances")
+    ap.add_argument("--questions-file", help="declared typed Noul questions; qualified runs only, requires separate runtime provenance")
     ap.add_argument("--send-model")
     ap.add_argument("--bearer-token-env", metavar="NAME",
                     help="name of an environment variable holding a bearer token (never recorded)")
@@ -507,7 +508,9 @@ def main(argv=None):
         dataset_bytes = source.read()
     dataset = loads_unambiguous_json(dataset_bytes)
     dataset_sha = hashlib.sha256(dataset_bytes).hexdigest()
-    questions = noul_questions()
+    if args.questions_file and not args.qualification_manifest:
+        raise ValueError("--questions-file requires --qualification-manifest")
+    questions = load_questions(args.questions_file) if args.questions_file else noul_questions()
     case_ids = validate_dataset(dataset, questions)
     qualification_sha = None
     if args.qualification_manifest:

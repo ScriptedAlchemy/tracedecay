@@ -1270,5 +1270,98 @@ class QualificationTests(unittest.TestCase):
                 forged, tighter, tighter_sha, self.questions, self.dataset_bytes,
             )
 
+
+    def test_frozen_ten_question_vocabulary_runs_and_scores_without_historical_categories(self):
+        # This fixture exercises a declared ten-question contract; it is not a
+        # canonical Scout export and never claims Kev inference or parity.
+        questions = {
+            key: value for key, value in self.questions.items()
+            if key != "refactor_edit"
+        }
+        questions["atomic_edit"] = {
+            "type": "noul", "instructions": "Is the user requesting a mechanical edit?"
+        }
+        questions["build_diagnostics"] = {
+            "type": "noul", "instructions": "Does the user need a build error fixed?"
+        }
+        self.assertEqual(len(questions), 10)
+        manifest = copy.deepcopy(self.manifest)
+        manifest["questions_sha256"] = qualification.sha256_json(questions)
+        manifest["thresholds"] = {key: 0.6 for key in questions}
+        manifest_sha = qualification.sha256_bytes(json.dumps(manifest).encode())
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            (here / "dataset.json").write_bytes(self.dataset_bytes)
+            (here / "manifest.json").write_text(json.dumps(manifest))
+            (here / "questions.json").write_text(json.dumps(questions))
+            (here / "server.json").write_text(json.dumps(self.server_config))
+
+            def inference(_url, body):
+                self.assertEqual(set(body["questions"]), set(questions))
+                probability = 0.9 if "What changes?" in body["state"] else 0.1
+                return ({
+                    "model": "kev-declared",
+                    "answers": {
+                        key: {"noul": probability if key == "impact" else 0.1}
+                        for key in body["questions"]
+                    },
+                    "usage": {"input_tokens": 42, "state_tokens_dropped": 0},
+                    "latency_ms": 5.0,
+                }, 5.0)
+
+            args = [
+                "--url", self.endpoint, "--tag", "ten-questions",
+                "--server-config", str(here / "server.json"),
+                "--qualification-manifest", str(here / "manifest.json"),
+                "--questions-file", str(here / "questions.json"),
+                "B_noul_text",
+            ]
+            with patch.object(run_http, "HERE", str(here)):
+                with patch.object(run_http, "post", side_effect=inference) as post:
+                    run_http.main(args)
+                self.assertEqual(post.call_count, 2)
+                output = here / "results" / "ten-questions_B_noul_text.json"
+                result = json.loads(output.read_text())
+                report = qualification.qualified_report(
+                    result, manifest, manifest_sha, questions, self.dataset_bytes,
+                )
+                self.assertTrue(report["qualified_against_frozen_tolerances"])
+                self.assertEqual(report["cases"], 2)
+                self.assertEqual(len(score.score_config(
+                    result, fixed_t=manifest["thresholds"], cats=tuple(questions)
+                )["per_cat"]), 10)
+                self.assertEqual(set(report["thresholds"]), set(questions))
+                self.assertNotIn("refactor_edit", report["thresholds"])
+                # The default historical vocabulary must not certify ten questions.
+                with self.assertRaisesRegex(ValueError, "question vocabulary"):
+                    qualification.qualified_report(
+                        result, manifest, manifest_sha,
+                        self.questions, self.dataset_bytes,
+                    )
+                altered = copy.deepcopy(questions)
+                altered["atomic_edit"]["instructions"] = "A changed instruction"
+                (here / "questions.json").write_text(json.dumps(altered))
+                args[3] = "another-tag"
+                with patch.object(run_http, "post") as blocked:
+                    with self.assertRaisesRegex(ValueError, "question vocabulary"):
+                        run_http.main(args)
+                    blocked.assert_not_called()
+                self.assertFalse((here / "results" / "another-tag_B_noul_text.json.partial").exists())
+
+    def test_qualified_question_files_refuse_non_noul_or_ambiguous_vocabulary(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "questions.json"
+            for body, expected in (
+                ('{"q": {"type": "choice", "instructions": "Pick"}}', "Noul"),
+                ('{"q": {"type": "noul", "instructions": ""}}', "Noul"),
+                ('{"q": {"type": "noul", "instructions": "Good"}, '
+                 '"q": {"type": "noul", "instructions": "Good"}}', "duplicate JSON"),
+                ('{"q": {"type": "noul", "instructions": "Good", "extra": 1}}', "Noul"),
+            ):
+                with self.subTest(body=body):
+                    path.write_text(body)
+                    with self.assertRaisesRegex(ValueError, expected):
+                        qualification.load_questions(path)
+
 if __name__ == "__main__":
     unittest.main()
