@@ -44,7 +44,6 @@
 //! digest before the store serves a read.
 
 use std::collections::{BTreeMap, HashMap};
-use std::io::Read;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -209,28 +208,18 @@ const SEALED_COPY_GUARD_CHUNK_ROWS: usize = 4096;
 
 const SEALED_STORE_RECEIPT_VERSION: u32 = 1;
 /// Identity metadata, never an unbounded content read.
-const MAX_SEALED_RECEIPT_BYTES: u64 = 64 * 1024;
+const MAX_SEALED_RECEIPT_BYTES: usize = 64 * 1024;
 
 fn read_sealed_receipt_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
-    let file = std::fs::File::open(path)?;
-    let too_large = || {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "sealed generation receipt exceeds its size bound",
-        )
-    };
-    if file.metadata()?.len() > MAX_SEALED_RECEIPT_BYTES {
-        return Err(too_large());
+    // The shared reader opens without following a final symlink, rejects FIFOs
+    // and other nonregular files, and checks size against the same held handle.
+    match tracedecay_private_fs::framed_log::read_bounded(path, MAX_SEALED_RECEIPT_BYTES)? {
+        Some(bytes) => Ok(bytes),
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "sealed generation receipt is missing",
+        )),
     }
-    // Even if a concurrent writer grows the file after the metadata check,
-    // one byte past the limit is enough to refuse without allocating its body.
-    let mut bounded = file.take(MAX_SEALED_RECEIPT_BYTES + 1);
-    let mut bytes = Vec::new();
-    bounded.read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_SEALED_RECEIPT_BYTES {
-        return Err(too_large());
-    }
-    Ok(bytes)
 }
 
 pub(crate) const SEALED_STORE_DATABASE_FILE: &str = "generation.grafeo";
@@ -2830,7 +2819,7 @@ mod receipt_budget_tests {
         std::fs::write(&receipt_path, &normal).unwrap();
         assert_eq!(read_sealed_receipt_bytes(&receipt_path).unwrap(), normal);
 
-        let oversized = [normal, vec![b' '; MAX_SEALED_RECEIPT_BYTES as usize]].concat();
+        let oversized = [normal, vec![b' '; MAX_SEALED_RECEIPT_BYTES]].concat();
         assert!(serde_json::from_slice::<SealedStoreReceiptV1>(&oversized).is_ok());
         std::fs::write(&receipt_path, oversized).unwrap();
         assert_eq!(
@@ -2870,7 +2859,7 @@ mod receipt_budget_tests {
         );
         let padded = [
             receipt(current - 1, &"d".repeat(64), "padded"),
-            vec![b' '; MAX_SEALED_RECEIPT_BYTES as usize],
+            vec![b' '; MAX_SEALED_RECEIPT_BYTES],
         ]
         .concat();
         let oversized = generation(&root, 'd', &padded);
@@ -2878,6 +2867,23 @@ mod receipt_budget_tests {
         std::fs::create_dir_all(&missing).unwrap();
         let unrelated = root.join("unrelated.txt");
         std::fs::write(&unrelated, b"foreign").unwrap();
+        // A symlink to a syntactically valid old receipt must never confer
+        // deletion authority over the directory that holds the link.
+        #[cfg(unix)]
+        let linked_receipt = {
+            let directory = root.join("1".repeat(64));
+            std::fs::create_dir_all(&directory).unwrap();
+            let foreign = temp.path().join("foreign-receipt.json");
+            std::fs::write(
+                &foreign,
+                receipt(current - 1, &"1".repeat(64), "foreign"),
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(&foreign, directory.join(SEALED_STORE_RECEIPT_FILE))
+                .unwrap();
+            std::fs::write(directory.join("sentinel"), b"unowned").unwrap();
+            (directory, foreign)
+        };
         for dir in [&old, &live, &invalid, &oversized, &missing, &future] {
             std::fs::write(dir.join("sentinel"), b"owned").unwrap();
         }
@@ -2888,6 +2894,20 @@ mod receipt_budget_tests {
             assert_eq!(std::fs::read(dir.join("sentinel")).unwrap(), b"owned");
         }
         assert_eq!(std::fs::read(&unrelated).unwrap(), b"foreign");
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                std::fs::read(linked_receipt.0.join("sentinel")).unwrap(),
+                b"unowned"
+            );
+            assert!(linked_receipt.1.is_file());
+            assert_eq!(
+                read_sealed_receipt_bytes(&linked_receipt.0.join(SEALED_STORE_RECEIPT_FILE))
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+        }
     }
 
     #[cfg(unix)]
