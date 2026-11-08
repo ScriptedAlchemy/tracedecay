@@ -363,8 +363,8 @@ async fn ready_projection_window(
 async fn projection_queue_has_items(conn: &impl QueryExecutor) -> ProjectionStoreResult<bool> {
     let mut rows = conn
         .query(
-            "SELECT 1 FROM projection_queue WHERE next_retry_at_micros < ?1 LIMIT 1",
-            params![PROJECTION_TERMINAL_RETRY_MICROS],
+            "SELECT 1 FROM projection_queue WHERE next_retry_at_micros < 9223372036854775807 LIMIT 1",
+            (),
         )
         .await
         .map_err(|error| storage("probe projection queue", error))?;
@@ -1112,9 +1112,9 @@ async fn activate_projection_rebuild_transaction(
     transaction
         .execute(
             "DELETE FROM projection_queue
-             WHERE observation_sequence <= ?1 AND next_retry_at_micros < ?2
+             WHERE observation_sequence <= ?1 AND next_retry_at_micros < 9223372036854775807
                AND revival_generation IS NULL",
-            params![job.frontier, PROJECTION_TERMINAL_RETRY_MICROS],
+            params![job.frontier],
         )
         .await
         .map_err(|error| storage("consume rebuilt projection queue", error))?;

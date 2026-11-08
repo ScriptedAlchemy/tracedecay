@@ -860,6 +860,10 @@ async fn deferred_only_reopened_queue_skips_writer_until_retry_is_due() {
         assert!(deferred.items.is_empty());
         assert!(deferred.has_more, "the deferred head remains pending");
     }
+    assert!(
+        store.next_queued_observation().await.unwrap().is_none(),
+        "the later due row must not bypass a deferred sequence head"
+    );
     writer.execute_batch("ROLLBACK").unwrap();
     assert_eq!(
         store.projection_checkpoint().await.unwrap().last_sequence(),
@@ -876,6 +880,11 @@ async fn deferred_only_reopened_queue_skips_writer_until_retry_is_due() {
             rusqlite::params![second.observation_id().as_str()],
         )
         .unwrap();
+    assert_eq!(
+        store.next_queued_observation().await.unwrap(),
+        Some(second.observation_id()),
+        "the released sequence head must be the next queued observation"
+    );
     let resumed = store.project_queued_observations(1).await.unwrap().unwrap();
     assert_eq!(
         resumed.items.len(),

@@ -16,7 +16,7 @@ use tracedecay_store::{
     AnchoredObservationWrite, CanonicalBodyError, CursorAdvanceLedgerDisagreementV1,
     CursorAdvanceLedgerIdentityV1, LOAD_CANONICAL_BODY_SQL, ObservationCoverageReason,
     ObservationCursorAdvance, ObservationReadOperationV1, ObservationReadResultV1,
-    PROJECTION_TERMINAL_RETRY_MICROS, ProjectionRebuildProgressV1, ProjectionRebuildStateV1,
+    ProjectionRebuildProgressV1, ProjectionRebuildStateV1,
     ProjectionSkipReason, SESSION_MESSAGE_PROJECTOR_VERSION, UPSERT_CANONICAL_BODY_SQL,
     parse_stored_observation, slim_stored_json,
 };
@@ -333,27 +333,22 @@ impl ObservationExecutor {
                 Ok(ObservationReadResultV1::Replay(observations))
             }
             ObservationReadOperationV1::NextQueuedProjection { now_micros } => {
+                // Read the first nonterminal head through the stable
+                // partial index. A deferred head fences later due rows.
                 let observation_id = snapshot
                     .query_row_cached(
-                        "SELECT observation_id FROM projection_queue
-                         WHERE next_retry_at_micros <= ?2
-                           AND observation_sequence = (
-                             SELECT MIN(observation_sequence) FROM projection_queue
-                             WHERE next_retry_at_micros < ?3
-                           )
+                        "SELECT observation_id, next_retry_at_micros FROM projection_queue
+                         WHERE next_retry_at_micros < 9223372036854775807
                            AND NOT EXISTS (
-                           SELECT 1 FROM observation_projection_rebuilds
-                           WHERE projector_version = ?1
-                         )
-                         LIMIT 1",
-                        (
-                            SESSION_MESSAGE_PROJECTOR_VERSION,
-                            now_micros,
-                            PROJECTION_TERMINAL_RETRY_MICROS,
-                        ),
-                        |row| row.get::<_, String>(0),
+                               SELECT 1 FROM observation_projection_rebuilds
+                               WHERE projector_version = ?1
+                           )
+                         ORDER BY observation_sequence LIMIT 1",
+                        [SESSION_MESSAGE_PROJECTOR_VERSION],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
                     )
                     .optional()?
+                    .and_then(|(id, deadline)| (deadline <= *now_micros).then_some(id))
                     .map(CanonicalObservationIdV1::new)
                     .transpose()
                     .map_err(invalid)?;

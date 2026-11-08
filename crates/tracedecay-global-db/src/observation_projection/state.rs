@@ -7,8 +7,7 @@ use tracedecay_domain::{
     CanonicalObservationIdV1, DurableObservationV1, ObservationSourceGenerationV1, PayloadDigestV1,
 };
 use tracedecay_store::{
-    EDITED_FILES_KEY, ObservationProjection, PROJECTION_TERMINAL_RETRY_MICROS,
-    ProjectionCheckpoint, ProjectionStoreError, ProjectionStoreResult,
+    EDITED_FILES_KEY, ObservationProjection, ProjectionCheckpoint, ProjectionStoreError, ProjectionStoreResult,
     SESSION_MESSAGE_PROJECTOR_VERSION, SPAWNED_SESSIONS_KEY, SessionMessageProjection,
     SessionMessageRecord, SessionRecord, message_output_digest,
 };
@@ -286,8 +285,8 @@ pub(crate) async fn rearm_queued_projection_retries(
     let Some(last_rowid) = query_optional_i64(
         &database.read_connection(),
         "SELECT MAX(rowid) FROM projection_queue
-         WHERE next_retry_at_micros > 0 AND next_retry_at_micros < ?1",
-        params![PROJECTION_TERMINAL_RETRY_MICROS],
+         WHERE next_retry_at_micros > 0 AND next_retry_at_micros < 9223372036854775807",
+        (),
     )
     .await?
     else {
@@ -331,15 +330,10 @@ async fn rearm_projection_retry_batch(
             SELECT rowid FROM projection_queue
             WHERE rowid > ?1 AND rowid <= ?2
               AND next_retry_at_micros > 0
-              AND next_retry_at_micros < ?3
-            ORDER BY rowid LIMIT ?4
+              AND next_retry_at_micros < 9223372036854775807
+            ORDER BY rowid LIMIT ?3
          )",
-        params![
-            after_rowid,
-            last_rowid,
-            PROJECTION_TERMINAL_RETRY_MICROS,
-            batch_rows
-        ],
+        params![after_rowid, last_rowid, batch_rows],
     )
     .await?
     else {
@@ -354,8 +348,8 @@ async fn rearm_projection_retry_batch(
             "UPDATE projection_queue SET next_retry_at_micros = 0
              WHERE rowid > ?1 AND rowid <= ?2
                AND next_retry_at_micros > 0
-               AND next_retry_at_micros < ?3",
-            params![after_rowid, batch_end, PROJECTION_TERMINAL_RETRY_MICROS],
+               AND next_retry_at_micros < 9223372036854775807",
+            params![after_rowid, batch_end],
         )
         .await
         .map_err(|error| storage(OPERATION, error))?;
