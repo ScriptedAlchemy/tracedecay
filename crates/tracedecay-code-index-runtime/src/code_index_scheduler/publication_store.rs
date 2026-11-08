@@ -1046,6 +1046,32 @@ impl StagedGenerationSegmentsV1 {
         self.pending.contains_key(final_path)
     }
 
+    // A concurrent publisher can create the final name after our missing-path
+    // probe. Never replace an immutable content-addressed segment in that gap.
+    fn publish_missing_segment(
+        temporary: &Path,
+        final_path: &Path,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        match tracedecay_private_fs::framed_log::rename_noreplace(temporary, final_path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let metadata = final_path
+                    .symlink_metadata()
+                    .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+                if !metadata.file_type().is_file()
+                    || !DaemonCodeIndexPublicationStoreV1::files_equal(final_path, temporary)?
+                {
+                    return Err(DaemonCodeIndexPublicationStoreV1::corruption(
+                        "concurrently published sealed segment does not match its content address",
+                    ));
+                }
+                std::fs::remove_file(temporary)
+                    .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)
+            }
+            Err(error) => Err(DaemonCodeIndexPublicationStoreV1::unavailable(error)),
+        }
+    }
+
     /// Flush every staged segment once, then name each. A retry resumes the
     /// remaining names without trying to sync paths already renamed.
     fn publish(&mut self) -> Result<(), CodeIndexPublicationStoreErrorV1> {
@@ -1073,8 +1099,7 @@ impl StagedGenerationSegmentsV1 {
                         .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    std::fs::rename(&temporary, &final_path)
-                        .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+                    Self::publish_missing_segment(&temporary, &final_path)?;
                 }
                 Err(error) => return Err(DaemonCodeIndexPublicationStoreV1::unavailable(error)),
             }

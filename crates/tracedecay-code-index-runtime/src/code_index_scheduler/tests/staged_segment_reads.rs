@@ -727,3 +727,52 @@ fn staged_segment_rejected_reads_preserve_full_cache_and_recency() {
     assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 10);
     preparation.abort().expect("clean up staged cache fixture");
 }
+
+#[test]
+fn staged_segment_publish_never_overwrites_a_concurrent_canonical_name() {
+    let root = TempDir::new().expect("sealed segment race fixture");
+    let canonical = root.path().join("segment-content-address.json");
+    let temporary = root.path().join("staged-segment.json");
+    let original = b"sealed-original";
+    let changed = b"sealed-modified";
+    assert_eq!(original.len(), changed.len());
+
+    // Exercise the actual production helper after the missing-path probe,
+    // with a conflicting canonical name created in the race window.
+    std::fs::write(&canonical, original).expect("competing canonical bytes");
+    std::fs::write(&temporary, changed).expect("staged bytes");
+    assert!(
+        super::StagedGenerationSegmentsV1::publish_missing_segment(&temporary, &canonical)
+            .is_err(),
+        "a race must refuse, not replace a different immutable segment"
+    );
+    assert_eq!(
+        std::fs::read(&canonical).expect("preserved competing segment"),
+        original
+    );
+    assert_eq!(
+        std::fs::read(&temporary).expect("staged bytes retained on refusal"),
+        changed
+    );
+
+    // When the competing publisher installed identical bytes, deduplication
+    // may finish without another publication or destroying canonical bytes.
+    std::fs::write(&temporary, original).expect("identical staged bytes");
+    super::StagedGenerationSegmentsV1::publish_missing_segment(&temporary, &canonical)
+        .expect("identical concurrent publication is safe to deduplicate");
+    assert!(!temporary.exists());
+    assert_eq!(
+        std::fs::read(&canonical).expect("canonical name retained"),
+        original
+    );
+
+    std::fs::remove_file(&canonical).expect("vacate canonical name");
+    std::fs::write(&temporary, changed).expect("new staged segment");
+    super::StagedGenerationSegmentsV1::publish_missing_segment(&temporary, &canonical)
+        .expect("missing canonical name accepts one atomic publication");
+    assert!(!temporary.exists());
+    assert_eq!(
+        std::fs::read(&canonical).expect("new published bytes"),
+        changed
+    );
+}
