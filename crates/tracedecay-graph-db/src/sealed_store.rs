@@ -44,6 +44,7 @@
 //! digest before the store serves a read.
 
 use std::collections::{BTreeMap, HashMap};
+use std::io::Read;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -112,7 +113,7 @@ pub(crate) fn open_direct_sealed_generation(
         sealed_generation_directory(&sealed_store_root(database_path), &physical_namespace);
     let receipt_path = directory.join(SEALED_STORE_RECEIPT_FILE);
     let sealed_path = directory.join(SEALED_STORE_DATABASE_FILE);
-    let receipt_bytes = match std::fs::read(&receipt_path) {
+    let receipt_bytes = match read_sealed_receipt_bytes(&receipt_path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(sealed_store_io_failure("receipt read failed", error)),
@@ -207,6 +208,31 @@ pub(crate) fn open_direct_sealed_generation(
 const SEALED_COPY_GUARD_CHUNK_ROWS: usize = 4096;
 
 const SEALED_STORE_RECEIPT_VERSION: u32 = 1;
+/// Identity metadata, never an unbounded content read.
+const MAX_SEALED_RECEIPT_BYTES: u64 = 64 * 1024;
+
+fn read_sealed_receipt_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    let too_large = || {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "sealed generation receipt exceeds its size bound",
+        )
+    };
+    if file.metadata()?.len() > MAX_SEALED_RECEIPT_BYTES {
+        return Err(too_large());
+    }
+    // Even if a concurrent writer grows the file after the metadata check,
+    // one byte past the limit is enough to refuse without allocating its body.
+    let mut bounded = file.take(MAX_SEALED_RECEIPT_BYTES + 1);
+    let mut bytes = Vec::new();
+    bounded.read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_SEALED_RECEIPT_BYTES {
+        return Err(too_large());
+    }
+    Ok(bytes)
+}
+
 pub(crate) const SEALED_STORE_DATABASE_FILE: &str = "generation.grafeo";
 const SEALED_STORE_RECEIPT_FILE: &str = "sealed.json";
 /// Digest recorded only after a successful post-reopen proof. A `sealed.json`
@@ -566,7 +592,7 @@ pub fn census_sealed_store(
             census.abandoned_staging_bytes += bytes;
             continue;
         }
-        let receipt = std::fs::read(path.join(SEALED_STORE_RECEIPT_FILE))
+        let receipt = read_sealed_receipt_bytes(&path.join(SEALED_STORE_RECEIPT_FILE))
             .ok()
             .and_then(|bytes| serde_json::from_slice::<SealedStoreReceiptV1>(&bytes).ok());
         let Some(receipt) = receipt else {
@@ -640,11 +666,42 @@ pub(crate) fn discard_superseded_sealed_generations(
         {
             continue;
         }
-        let current = load_sealed_store_receipt(&path)
-            .ok()
-            .flatten()
-            .is_some_and(|receipt| receipt.graph_format == GraphFormatVersion::current().get());
-        if !current {
+        if !entry
+            .file_type()
+            .map_err(|error| sealed_store_io_failure("sealed entry type failed", error))?
+            .is_dir()
+        {
+            continue;
+        }
+        // An unreadable, absent, oversized, or malformed receipt is not
+        // ownership evidence. Preserve it and continue with other children.
+        let receipt = match load_sealed_store_receipt(&path) {
+            Ok(Some(receipt)) => receipt,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %path.display(),
+                    "sealed generation with unverified receipt was preserved"
+                );
+                continue;
+            }
+        };
+        let name = entry.file_name();
+        let recognized = name.to_str().is_some_and(|name| {
+            name.len() == 64
+                && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && receipt.physical_namespace == format!("generation:{name}")
+        });
+        let recognized_form = match receipt.form.as_str() {
+            SEALED_STORE_FORM_COMPACT => receipt.base.is_none(),
+            SEALED_STORE_FORM_LAYERED => receipt.base.is_some(),
+            _ => false,
+        };
+        if !recognized || !recognized_form || receipt.version != SEALED_STORE_RECEIPT_VERSION {
+            continue;
+        }
+        if receipt.graph_format != GraphFormatVersion::current().get() {
             match std::fs::remove_dir_all(&path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -2426,7 +2483,7 @@ fn load_sealed_store_receipt(
     directory: &Path,
 ) -> Result<Option<SealedStoreReceiptV1>, GraphDbError> {
     let receipt_path = directory.join(SEALED_STORE_RECEIPT_FILE);
-    let receipt_bytes = match std::fs::read(&receipt_path) {
+    let receipt_bytes = match read_sealed_receipt_bytes(&receipt_path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(sealed_store_io_failure("receipt read failed", error)),
@@ -2728,6 +2785,134 @@ pub(crate) fn sealed_copy_proof(
         canonical_bytes,
     );
     Ok(canonical_bytes)
+}
+
+#[cfg(test)]
+mod receipt_budget_tests {
+    use std::collections::BTreeSet;
+    use std::path::Path;
+
+    use super::*;
+
+    fn receipt(format: u32, name: &str, generation: &str) -> Vec<u8> {
+        serde_json::to_vec(&SealedStoreReceiptV1 {
+            version: SEALED_STORE_RECEIPT_VERSION,
+            form: SEALED_STORE_FORM_COMPACT.to_owned(),
+            namespace: "test".to_owned(),
+            projection: "code".to_owned(),
+            generation: generation.to_owned(),
+            physical_namespace: format!("generation:{name}"),
+            recovered_digest: "digest".to_owned(),
+            entities: 0,
+            relations: 0,
+            graph_format: format,
+            row_sum: None,
+            base: None,
+            source_generation: None,
+            watermark: None,
+        })
+        .unwrap()
+    }
+
+    fn generation(root: &Path, digit: char, contents: &[u8]) -> PathBuf {
+        let directory = root.join(digit.to_string().repeat(64));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join(SEALED_STORE_RECEIPT_FILE), contents).unwrap();
+        directory
+    }
+
+    #[test]
+    fn sealed_receipt_reads_bound_memory_even_for_json_padded_beyond_the_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let receipt_path = temp.path().join(SEALED_STORE_RECEIPT_FILE);
+        let normal = receipt(GraphFormatVersion::current().get(), &"a".repeat(64), "head");
+        std::fs::write(&receipt_path, &normal).unwrap();
+        assert_eq!(read_sealed_receipt_bytes(&receipt_path).unwrap(), normal);
+
+        let oversized = [normal, vec![b' '; MAX_SEALED_RECEIPT_BYTES as usize]].concat();
+        assert!(serde_json::from_slice::<SealedStoreReceiptV1>(&oversized).is_ok());
+        std::fs::write(&receipt_path, oversized).unwrap();
+        assert_eq!(
+            read_sealed_receipt_bytes(&receipt_path).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        // On Unix this is sparse, so the multi-gigabyte bound is exercised
+        // without allocating a multi-gigabyte test artifact.
+        #[cfg(unix)]
+        {
+            std::fs::File::create(&receipt_path)
+                .unwrap()
+                .set_len(15 * 1024 * 1024 * 1024)
+                .unwrap();
+            assert_eq!(
+                read_sealed_receipt_bytes(&receipt_path).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidData
+            );
+        }
+    }
+
+    #[test]
+    fn obsolete_format_cleanup_keeps_unknown_receipts_and_other_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("graph.grafeo");
+        let root = sealed_store_root(&database);
+        std::fs::create_dir_all(&root).unwrap();
+        let current = GraphFormatVersion::current().get();
+        assert!(current > 0);
+        let old = generation(&root, 'a', &receipt(current - 1, &"a".repeat(64), "old"));
+        let live = generation(&root, 'b', &receipt(current, &"b".repeat(64), "live"));
+        let invalid = generation(&root, 'c', b"not a receipt");
+        let padded = [
+            receipt(current - 1, &"d".repeat(64), "padded"),
+            vec![b' '; MAX_SEALED_RECEIPT_BYTES as usize],
+        ]
+        .concat();
+        let oversized = generation(&root, 'd', &padded);
+        let missing = root.join("e".repeat(64));
+        std::fs::create_dir_all(&missing).unwrap();
+        let unrelated = root.join("unrelated.txt");
+        std::fs::write(&unrelated, b"foreign").unwrap();
+        for dir in [&old, &live, &invalid, &oversized, &missing] {
+            std::fs::write(dir.join("sentinel"), b"owned").unwrap();
+        }
+
+        discard_superseded_sealed_generations(&database).unwrap();
+        assert!(!old.exists(), "verified old-format receipt is reclaimable");
+        for dir in [&live, &invalid, &oversized, &missing] {
+            assert_eq!(std::fs::read(dir.join("sentinel")).unwrap(), b"owned");
+        }
+        assert_eq!(std::fs::read(&unrelated).unwrap(), b"foreign");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn census_handles_seventy_large_sparse_generations_without_loading_containers() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("graph.grafeo");
+        let root = sealed_store_root(&database);
+        std::fs::create_dir_all(&root).unwrap();
+        const FILE_BYTES: u64 = 220 * 1024 * 1024;
+        for index in 0..70 {
+            let name = format!("{index:064x}");
+            let dir = root.join(&name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(SEALED_STORE_RECEIPT_FILE),
+                receipt(GraphFormatVersion::current().get(), &name, &format!("g{index}")),
+            )
+            .unwrap();
+            std::fs::File::create(dir.join(SEALED_STORE_DATABASE_FILE))
+                .unwrap()
+                .set_len(FILE_BYTES)
+                .unwrap();
+        }
+        let census = census_sealed_store(&database, &BTreeSet::from(["g69".to_owned()])).unwrap();
+        assert_eq!(census.head_count, 1);
+        assert_eq!(census.superseded_count, 69);
+        assert_eq!(census.unrecognized_count, 0);
+        assert!(census.head_bytes >= FILE_BYTES);
+        assert!(census.superseded_bytes >= 69 * FILE_BYTES);
+    }
 }
 
 #[cfg(test)]
