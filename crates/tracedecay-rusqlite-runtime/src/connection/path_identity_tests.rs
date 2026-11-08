@@ -157,6 +157,30 @@ fn worker_identity_checks_keep_cross_process_writer_exclusion() {
     );
 }
 
+/// A zero-byte existing SQLite file may belong to a live connection holding
+/// a rollback writer reservation. Rejecting that unfinished attachment must
+/// not open and close a second raw descriptor and unlock the other writer.
+#[test]
+fn rejecting_empty_attachment_does_not_release_another_writer_lock() {
+    let temp = TempDir::new().expect("tempdir");
+    let path = temp.path().join("empty-locked.db");
+    let writer = Connection::open(&path).expect("open SQLite connection");
+    writer
+        .execute_batch("BEGIN IMMEDIATE")
+        .expect("reserve the SQLite writer lock without initializing pages");
+    assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+    probe_external_connection(&path, "write", true);
+
+    assert!(matches!(
+        OpenedDatabaseFile::pin_initialized(&path),
+        Err(OpenedDatabaseFileError::InvalidHeader)
+    ));
+    probe_external_connection(&path, "write", true);
+
+    writer.execute_batch("ROLLBACK").expect("release writer reservation");
+    probe_external_connection(&path, "write", false);
+}
+
 #[test]
 fn path_checks_preserve_rollback_writer_lock() {
     let temp = TempDir::new().expect("tempdir");
