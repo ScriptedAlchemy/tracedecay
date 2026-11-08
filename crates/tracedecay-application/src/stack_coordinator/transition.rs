@@ -1,6 +1,3 @@
-use std::collections::BTreeMap;
-use std::sync::Mutex;
-
 use serde::{Deserialize, Serialize};
 use tracedecay_contracts::{
     CancellationSignal, NativeIntegrationPreflightOutcomeV1, NativeIntegrationPreflightRequestV1,
@@ -389,17 +386,16 @@ pub(super) fn drift_trace_id(
 }
 
 pub(super) fn update_drift_intervals(
-    intervals: &Mutex<BTreeMap<ManifestDigest, Vec<DriftInterval>>>,
+    active: &mut Vec<DriftInterval>,
     scope_digest: &ManifestDigest,
     current_kinds: Vec<StackDriftKindV1>,
     observed_at: UtcMicros,
 ) -> Result<Vec<GitHubStackDriftObservationV1>, GitHubStackCoordinatorErrorV1> {
-    let mut by_scope = intervals
-        .lock()
-        .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?;
-    let active = by_scope.entry(scope_digest.clone()).or_default();
+    // Compute the complete next state before replacing the scope's intervals.
+    // An identity failure must not publish half of a transition.
+    let mut next = active.clone();
     let mut observations = Vec::new();
-    for interval in active
+    for interval in next
         .iter()
         .filter(|interval| !current_kinds.contains(&interval.kind))
     {
@@ -409,27 +405,28 @@ pub(super) fn update_drift_intervals(
             observed_at,
         ));
     }
-    active.retain(|interval| current_kinds.contains(&interval.kind));
+    next.retain(|interval| current_kinds.contains(&interval.kind));
     for kind in current_kinds {
-        let index = active.iter().position(|interval| interval.kind == kind);
+        let index = next.iter().position(|interval| interval.kind == kind);
         if index.is_none() {
-            active.push(DriftInterval {
+            next.push(DriftInterval {
                 kind,
                 trace_id: drift_trace_id(scope_digest, kind, observed_at)?,
                 first_observed_at: observed_at,
             });
         }
         observations.push(drift_observation(
-            &active[index.unwrap_or(active.len() - 1)],
+            &next[index.unwrap_or(next.len() - 1)],
             IntervalStateV1::Open,
             observed_at,
         ));
     }
+    *active = next;
     Ok(observations)
 }
 
 pub(super) fn restore_open_drift_interval(
-    intervals: &Mutex<BTreeMap<ManifestDigest, Vec<DriftInterval>>>,
+    active: &mut Vec<DriftInterval>,
     scope: &ResolvedScope,
     observation: &GitHubStackDriftObservationV1,
 ) -> Result<(), GitHubStackCoordinatorErrorV1> {
@@ -454,10 +451,6 @@ pub(super) fn restore_open_drift_interval(
         trace_id: observation.trace_id.clone(),
         first_observed_at,
     };
-    let mut by_scope = intervals
-        .lock()
-        .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?;
-    let active = by_scope.entry(scope.scope_digest.clone()).or_default();
     if let Some(existing) = active
         .iter_mut()
         .find(|existing| existing.kind == interval.kind)

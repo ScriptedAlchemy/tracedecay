@@ -4,7 +4,7 @@
 mod preflight_tests;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Barrier, Mutex};
 
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::configuration::GitHubStackedPullRequestPolicyV1;
@@ -409,6 +409,86 @@ fn mounted_provider_observation_reports_pr_tip_merge_base_and_ci_drift() {
             && event.drift.terminal_micros == Some(3)
             && event.validate(&exact_scope.scope_digest).is_ok()
     }));
+}
+
+#[test]
+fn concurrent_identical_provider_publications_have_one_drift_transition() {
+    let coordinator = Arc::new(DaemonGitHubStackCoordinatorV1::default());
+    let exact_scope = scope(94);
+    let provider = ProviderId::new("provider.github").unwrap();
+    coordinator
+        .register_scope(
+            &exact_scope,
+            GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
+        )
+        .unwrap();
+    coordinator
+        .observe_provider(
+            exact_scope.clone(),
+            provider.clone(),
+            GitHubStackProviderOutcomeV1::Enabled(enabled_snapshot(&exact_scope)),
+            provider_source_binding(&exact_scope, true),
+            UtcMicros(1),
+        )
+        .unwrap();
+
+    let mut changed = enabled_snapshot(&exact_scope);
+    changed.response_digest = digest('f');
+    changed.final_target_commit_id = CommitId::new("commit.main.changed").unwrap();
+    let barrier = Arc::new(Barrier::new(24));
+    let observations = std::thread::scope(|threads| {
+        let joins = (0..24)
+            .map(|_| {
+                let coordinator = Arc::clone(&coordinator);
+                let exact_scope = exact_scope.clone();
+                let provider = provider.clone();
+                let changed = changed.clone();
+                let barrier = Arc::clone(&barrier);
+                threads.spawn(move || {
+                    barrier.wait();
+                    coordinator
+                        .observe_provider(
+                            exact_scope.clone(),
+                            provider,
+                            GitHubStackProviderOutcomeV1::Enabled(changed),
+                            provider_source_binding(&exact_scope, true),
+                            UtcMicros(2),
+                        )
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        joins
+            .into_iter()
+            .map(|join| join.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        observations
+            .iter()
+            .filter(|observation| observation.transitions.contains(&StackSignalKindV1::StackTipDrift))
+            .count(),
+        1,
+        "one changed head must produce one transition, even with concurrent publishers"
+    );
+    assert_eq!(
+        observations
+            .iter()
+            .flat_map(|observation| &observation.drift_observations)
+            .filter(|event| {
+                event.drift.kind == tracedecay_domain::StackDriftKindV1::BaseAdvanced
+                    && event.drift.state == tracedecay_domain::IntervalStateV1::Open
+            })
+            .count(),
+        1,
+        "only the winning transition may open a base-advance interval"
+    );
+    assert!(
+        observations.iter().all(|observation| observation
+            .drift_observations
+            .iter()
+            .all(|event| event.validate(&exact_scope.scope_digest).is_ok()))
+    );
 }
 
 #[tokio::test]

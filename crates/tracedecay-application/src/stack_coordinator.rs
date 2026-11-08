@@ -197,10 +197,17 @@ pub enum StackCoordinatorErrorV1 {
     Invalid(String),
 }
 
+/// The latest observation and its open drift intervals must advance together.
+#[derive(Default)]
+struct ScopeObservationState {
+    current: Option<GitHubStackObservationV1>,
+    drift_intervals: Vec<DriftInterval>,
+}
+
 #[derive(Default)]
 pub struct DaemonGitHubStackCoordinatorV1 {
     policies: Mutex<BTreeMap<ManifestDigest, GitHubStackedPullRequestPolicyV1>>,
-    observations: Mutex<BTreeMap<ManifestDigest, GitHubStackObservationV1>>,
+    observation_states: Mutex<BTreeMap<ManifestDigest, ScopeObservationState>>,
     circuit_policies: Mutex<BTreeMap<ManifestDigest, StackCircuitPolicyV1>>,
     /// Held across the append so a duplicate debounced signal racing the
     /// first one cannot append twice.
@@ -209,7 +216,6 @@ pub struct DaemonGitHubStackCoordinatorV1 {
     >,
     circuits: Mutex<BTreeMap<CircuitKey, Circuit>>,
     preflights: Mutex<PreflightState>,
-    drift_intervals: Mutex<BTreeMap<ManifestDigest, Vec<DriftInterval>>>,
 }
 
 impl DaemonGitHubStackCoordinatorV1 {
@@ -256,10 +262,11 @@ impl DaemonGitHubStackCoordinatorV1 {
         };
         if state == GitHubStackCapabilityStateV1::Unavailable
             && let Some(provider_observation) = self
-                .observations
+                .observation_states
                 .lock()
                 .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?
                 .get(&scope.scope_digest)
+                .and_then(|state| state.current.as_ref())
                 .filter(|observation| {
                     matches!(
                         observation.capability.state,
@@ -288,6 +295,7 @@ impl DaemonGitHubStackCoordinatorV1 {
                 source_binding: &source_binding,
             },
             observed_at,
+            true,
         )
     }
 
@@ -326,6 +334,7 @@ impl DaemonGitHubStackCoordinatorV1 {
                 source_binding: &source_binding,
             },
             observed_at,
+            false,
         )
     }
 
@@ -348,7 +357,16 @@ impl DaemonGitHubStackCoordinatorV1 {
         scope: &ResolvedScope,
         observation: &GitHubStackDriftObservationV1,
     ) -> Result<(), GitHubStackCoordinatorErrorV1> {
-        transition::restore_open_drift_interval(&self.drift_intervals, scope, observation)
+        let mut states = self
+            .observation_states
+            .lock()
+            .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?;
+        // Validation is part of the transition; no persisted record is changed on refusal.
+        transition::restore_open_drift_interval(
+            &mut states.entry(scope.scope_digest.clone()).or_default().drift_intervals,
+            scope,
+            observation,
+        )
     }
 
     #[tracing::instrument(name = "usecases.stack.enqueue", level = "trace", skip_all)]
@@ -608,6 +626,7 @@ impl DaemonGitHubStackCoordinatorV1 {
         state: GitHubStackCapabilityStateV1,
         material: GitHubStackObservationMaterial<'_>,
         observed_at: UtcMicros,
+        preserve_provider_state: bool,
     ) -> Result<GitHubStackObservationV1, GitHubStackCoordinatorErrorV1> {
         scope
             .validate()
@@ -689,16 +708,30 @@ impl DaemonGitHubStackCoordinatorV1 {
             })
             .transpose()
             .map_err(|_| GitHubStackCoordinatorErrorV1::InvalidProviderObservation)?;
-        let previous = self
-            .observations
+        // Serialize comparison, interval update, and snapshot publication under
+        // one scope-state transition. No network or storage I/O occurs while held.
+        let mut states = self
+            .observation_states
             .lock()
-            .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?
-            .get(&scope.scope_digest)
-            .and_then(|observation| observation.snapshot.as_ref())
-            .cloned();
-        let (transitions, drift_kinds) = stack_drift(previous.as_ref(), snapshot.as_ref());
+            .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?;
+        let state = states.entry(scope.scope_digest.clone()).or_default();
+        // An unavailable policy observation prepared before a real provider
+        // result must not overwrite a newly published enabled/degraded result.
+        if preserve_provider_state
+            && let Some(previous) = state.current.as_ref().filter(|observation| {
+                matches!(
+                    observation.capability.state,
+                    GitHubStackCapabilityStateV1::Enabled
+                        | GitHubStackCapabilityStateV1::Degraded
+                )
+            })
+        {
+            return Ok(previous.clone());
+        }
+        let previous = state.current.as_ref().and_then(|observation| observation.snapshot.as_ref());
+        let (transitions, drift_kinds) = stack_drift(previous, snapshot.as_ref());
         let drift_observations = transition::update_drift_intervals(
-            &self.drift_intervals,
+            &mut state.drift_intervals,
             &scope.scope_digest,
             drift_kinds,
             observed_at,
@@ -713,10 +746,7 @@ impl DaemonGitHubStackCoordinatorV1 {
             transitions,
             drift_observations,
         };
-        self.observations
-            .lock()
-            .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?
-            .insert(scope.scope_digest, observation.clone());
+        state.current = Some(observation.clone());
         Ok(observation)
     }
 }
