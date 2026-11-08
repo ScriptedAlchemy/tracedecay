@@ -671,6 +671,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let generation_recovery = opened.generation_recovery();
         let active_generation_encoded_bytes = opened.active_generation_encoded_bytes();
         let build_progress = opened.build_progress_slot();
+        let preseal_attempt_progress = opened.preseal_attempt_progress_slot();
         let historical_generation_owner = opened.historical_generation_owner();
         let source_freshness = opened.freshness_fence();
         let last_reconciled_at_micros = opened.last_reconciled_at_micros_slot();
@@ -4080,6 +4081,7 @@ impl CodeIndexSchedulerRegistryV1 {
             generation_recovery,
             serving_source_witness,
             build_progress,
+            preseal_attempt_progress,
             serving_generation_epoch,
             serving_generation_changed,
             serving_generation_installation,

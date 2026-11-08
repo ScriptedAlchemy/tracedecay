@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 
 use tracedecay_contracts::code_index_freshness::{
     CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1, CodeIndexFreshnessPayloadV1,
-    CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
+    CodeIndexPresealWorkPhaseV1, CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_contracts::retrieval::{
     CodeGraphReadFreshnessV1, PrimitiveFreshnessStateV1, PrimitiveIndexingStateV1,
@@ -62,6 +62,13 @@ fn phase_label(phase: CodeIndexBuildPhaseV1) -> &'static str {
         CodeIndexBuildPhaseV1::Verification => "verification",
         CodeIndexBuildPhaseV1::GraphPublication => "graph_publication",
         CodeIndexBuildPhaseV1::Ready => "ready",
+    }
+}
+
+fn preseal_phase_label(phase: CodeIndexPresealWorkPhaseV1) -> &'static str {
+    match phase {
+        CodeIndexPresealWorkPhaseV1::Capture => "capture",
+        CodeIndexPresealWorkPhaseV1::ParseEvidence => "parse_evidence",
     }
 }
 
@@ -212,6 +219,26 @@ pub(super) fn search_freshness(
         if let Some(hints) = state.hook_hint_count.filter(|count| *count > 0) {
             let _ = write!(summary, " pending_hook_hints={hints}");
         }
+        if let Some(attempt) = &state.preseal_attempt {
+            let _ = write!(
+                summary,
+                " preseal_phase={} preseal_owner={}:{}:{} preseal_epoch={} \
+                 preseal_completed={} preseal_total={} preseal_last_progress_micros={} \
+                 preseal_active={}",
+                preseal_phase_label(attempt.phase),
+                attempt.daemon_incarnation,
+                attempt.producer_incarnation,
+                attempt.attempt_sequence,
+                attempt.progress_epoch,
+                attempt.completed_items,
+                attempt.total_items.map_or_else(|| "unknown".to_owned(), |n| n.to_string()),
+                attempt.last_progress_micros.map_or_else(
+                    || "unreported".to_owned(),
+                    |micros| micros.to_string()
+                ),
+                attempt.active,
+            );
+        }
         if let Some(progress) = &state.progress {
             // Keep the producer's identity and clock. Reading a response is
             // not work, and an epoch is comparable only within its owner.
@@ -238,9 +265,13 @@ pub(super) fn search_freshness(
                 progress.blocked_reason.map_or("none", blocked_reason_label)
             );
         } else if state.rebuild_in_flight {
-            // No sealed progress report exists during an initial capture.
-            // Do not fabricate a generation, count, clock, or running verdict.
-            summary.push_str(" progress=unreported");
+            if state.preseal_attempt.as_ref().is_some_and(|attempt| {
+                attempt.active && attempt.last_progress_micros.is_some()
+            }) {
+                summary.push_str(" progress=preseal");
+            } else {
+                summary.push_str(" progress=unreported");
+            }
         }
     }
     if !stale_lanes.is_empty() {
@@ -487,6 +518,38 @@ mod tests {
         );
         assert_eq!(indexing.reason.as_deref(), Some("generation_unavailable"));
         assert_eq!(indexing.stale_lanes.len(), 0);
+    }
+
+    #[test]
+    fn observed_preseal_progress_is_not_an_invented_generation() {
+        let state = CodeIndexWorktreeFreshnessV1 {
+            rebuild_in_flight: true,
+            preseal_attempt: Some(
+                tracedecay_contracts::code_index_freshness::CodeIndexPresealAttemptProgressV1 {
+                    daemon_incarnation: 4,
+                    producer_incarnation: 9,
+                    attempt_sequence: 3,
+                    progress_epoch: 14,
+                    phase: CodeIndexPresealWorkPhaseV1::Capture,
+                    completed_items: 24,
+                    total_items: Some(100),
+                    last_progress_micros: Some(1_234_567),
+                    active: true,
+                },
+            ),
+            ..CodeIndexWorktreeFreshnessV1::default()
+        };
+        let rendered = freshness_lines(&search_freshness(
+            ServedGenerationV1::Unavailable { reason: "generation_unavailable" },
+            &CodeIndexSearchCoverageV1::unavailable("generation_rebuilding"),
+            &WorktreeFreshnessSourceV1::Worktree(Box::new(state)),
+        ));
+        assert!(rendered.contains("preseal_phase=capture preseal_owner=4:9:3"));
+        assert!(rendered.contains("preseal_epoch=14 preseal_completed=24"));
+        assert!(rendered.contains("preseal_total=100 preseal_last_progress_micros=1234567"));
+        assert!(rendered.contains("preseal_active=true progress=preseal"));
+        assert!(!rendered.contains("progress_generation="));
+        assert!(!rendered.contains("committed_text_pages="));
     }
 
     #[test]

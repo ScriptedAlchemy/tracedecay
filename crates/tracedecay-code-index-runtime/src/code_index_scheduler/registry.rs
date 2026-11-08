@@ -843,6 +843,7 @@ pub struct MountedCodeIndexWorktreeV1 {
     /// Immutable progress snapshot independently readable while the scheduler
     /// owns a long reconcile or text-artifact transaction.
     pub build_progress: super::CodeIndexBuildProgressSlotV1,
+    preseal_attempt_progress: super::attempt_progress::CodeIndexBuildAttemptSlotV1,
     /// Monotonic replacement epoch for the serving slot. It invalidates a
     /// branch-publication token even if a future worker re-seats an equal id.
     serving_generation_epoch: Arc<AtomicU64>,
@@ -919,6 +920,7 @@ const _: fn(&MountedCodeIndexWorktreeV1) = |value| {
         generation_recovery,
         serving_source_witness,
         build_progress,
+        preseal_attempt_progress,
         serving_generation_epoch,
         serving_generation_changed,
         serving_generation_installation,
@@ -957,6 +959,7 @@ const _: fn(&MountedCodeIndexWorktreeV1) = |value| {
     assert_send_sync(generation_recovery);
     assert_send_sync(serving_source_witness);
     assert_send_sync(build_progress);
+    assert_send_sync(preseal_attempt_progress);
     assert_send_sync(serving_generation_epoch);
     assert_send_sync(serving_generation_changed);
     assert_send_sync(serving_generation_installation);

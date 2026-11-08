@@ -202,6 +202,7 @@ mod tests {
                     coverage: CodeIndexFreshnessCoverageV1::Complete,
                     omitted_sources: None,
                     progress: None,
+                    preseal_attempt: None,
                     restore_progress: None,
                     parked: None,
                     generation_recovery: None,

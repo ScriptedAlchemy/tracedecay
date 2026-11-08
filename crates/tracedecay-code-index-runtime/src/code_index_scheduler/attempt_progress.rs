@@ -4,6 +4,7 @@
 use std::sync::{Arc, PoisonError, RwLock};
 
 use tracedecay_code_index::production::{CodeIndexPresealWorkPhaseV1, CodeIndexPresealWorkV1};
+use tracedecay_contracts::code_index_freshness::CodeIndexPresealAttemptProgressV1;
 use tracedecay_contracts::now_micros;
 
 pub(crate) type CodeIndexBuildAttemptSlotV1 = Arc<RwLock<CodeIndexBuildAttemptSlotStateV1>>;
@@ -13,22 +14,6 @@ struct CodeIndexBuildAttemptIdentityV1 {
     daemon_incarnation: u64,
     producer_incarnation: u64,
     sequence: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CodeIndexPresealAttemptProgressV1 {
-    pub daemon_incarnation: u64,
-    pub producer_incarnation: u64,
-    pub attempt_sequence: u64,
-    pub progress_epoch: u64,
-    pub phase: CodeIndexPresealWorkPhaseV1,
-    /// Accepted candidate decisions or parser-backed materializations.
-    /// Resets only when the actual producer transitions to parser evidence.
-    pub completed_items: u64,
-    pub total_items: Option<u64>,
-    /// None until actual work finishes; polling cannot update this value.
-    pub last_progress_micros: Option<i64>,
-    pub active: bool,
 }
 
 #[derive(Default)]

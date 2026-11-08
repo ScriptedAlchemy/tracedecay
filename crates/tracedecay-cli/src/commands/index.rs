@@ -372,11 +372,14 @@ where
             Some(StatusCodeIndexFreshnessV1::Unavailable { reason }) => Err(reason),
             None => Err("status omitted code_index_freshness".to_owned()),
         };
-        let progress = worktree
-            .as_ref()
-            .ok()
-            .and_then(|worktree| worktree.progress.as_ref())
-            .map(build_progress_summary);
+        let progress = worktree.as_ref().ok().and_then(|worktree| {
+            worktree
+                .preseal_attempt
+                .as_ref()
+                .filter(|attempt| attempt.active)
+                .map(preseal_progress_summary)
+                .or_else(|| worktree.progress.as_ref().map(build_progress_summary))
+        });
         let progress_suffix = progress
             .as_deref()
             .map(|progress| format!(" ({progress})"))
@@ -475,6 +478,34 @@ impl std::fmt::Display for FirstGenerationStall {
             Self::Blocked(reason) => write!(formatter, "the build is blocked ({reason:?})"),
         }
     }
+}
+
+fn preseal_progress_summary(
+    progress: &tracedecay_contracts::code_index_freshness::CodeIndexPresealAttemptProgressV1,
+) -> String {
+    let phase = match progress.phase {
+        tracedecay_contracts::code_index_freshness::CodeIndexPresealWorkPhaseV1::Capture => {
+            "capturing"
+        }
+        tracedecay_contracts::code_index_freshness::CodeIndexPresealWorkPhaseV1::ParseEvidence => {
+            "parsing"
+        }
+    };
+    let total = progress
+        .total_items
+        .map_or_else(|| "unknown".to_owned(), |total| total.to_string());
+    format!(
+        "{phase} {}/{} items, attempt={}:{}:{} epoch={} last_work_micros={}",
+        progress.completed_items,
+        total,
+        progress.daemon_incarnation,
+        progress.producer_incarnation,
+        progress.attempt_sequence,
+        progress.progress_epoch,
+        progress
+            .last_progress_micros
+            .map_or_else(|| "unreported".to_owned(), |micros| micros.to_string()),
+    )
 }
 
 fn build_progress_summary(progress: &CodeIndexBuildProgressV1) -> String {
@@ -730,6 +761,25 @@ mod daemon_precondition_tests {
             coverage: ladder.coverage,
             ..CodeIndexWorktreeFreshnessV1::default()
         }
+    }
+
+    #[test]
+    fn init_wait_preseal_summary_does_not_report_sealed_work() {
+        let attempt = tracedecay_contracts::code_index_freshness::CodeIndexPresealAttemptProgressV1 {
+            daemon_incarnation: 2,
+            producer_incarnation: 5,
+            attempt_sequence: 6,
+            progress_epoch: 11,
+            phase: tracedecay_contracts::code_index_freshness::CodeIndexPresealWorkPhaseV1::Capture,
+            completed_items: 16,
+            total_items: None,
+            last_progress_micros: Some(123),
+            active: true,
+        };
+        assert_eq!(
+            super::preseal_progress_summary(&attempt),
+            "capturing 16/unknown items, attempt=2:5:6 epoch=11 last_work_micros=123"
+        );
     }
 
     fn progress(

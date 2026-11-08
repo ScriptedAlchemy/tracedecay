@@ -284,13 +284,7 @@ pub struct CodeIndexCapturedFileV1 {
 
 /// Successful pre-seal work observed before a generation ID/digest exists.
 /// Neither event represents a durable text or native graph commit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CodeIndexPresealWorkPhaseV1 {
-    Capture,
-    /// Parser evidence was materialized or authenticated for reuse, not
-    /// necessarily newly parsed (a retained parent may supply the evidence).
-    ParseEvidence,
-}
+pub use tracedecay_contracts::code_index_freshness::CodeIndexPresealWorkPhaseV1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CodeIndexPresealWorkV1 {
