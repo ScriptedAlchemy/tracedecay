@@ -92,7 +92,6 @@ async fn body_exists(conn: &(impl QueryExecutor + ?Sized), hash: &str) -> bool {
     .is_some()
 }
 
-
 async fn candidate_count(conn: &(impl QueryExecutor + ?Sized)) -> i64 {
     let mut rows = conn
         .query("SELECT COUNT(*) FROM canonical_body_gc_candidates", ())
