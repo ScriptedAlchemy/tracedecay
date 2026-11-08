@@ -1577,12 +1577,11 @@ fn cold_publication_pointer_validation_uses_one_kernel_open_and_recovers_snapsho
 
     let cold = target_store(target_root.path(), &fixture);
     let (sender, receiver) = std::sync::mpsc::channel();
-    let mut watcher = notify::recommended_watcher(
-        move |event: notify::Result<notify::Event>| {
+    let mut watcher =
+        notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
             let _ = sender.send(event);
-        },
-    )
-    .expect("native file observer");
+        })
+        .expect("native file observer");
     watcher
         .watch(&cold.active_path, notify::RecursiveMode::NonRecursive)
         .expect("watch the exact publication pointer");
