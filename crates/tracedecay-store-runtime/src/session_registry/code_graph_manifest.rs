@@ -864,19 +864,27 @@ impl<'a> GraphSegmentReadPassV1<'a> {
                 Err(error) => Err(error),
             };
             self.open_wall_time += started.elapsed();
-            let pinned = opened?;
-            if self.pinned.len() == MAX_GRAPH_SEGMENT_OPEN_HANDLES {
-                self.pinned.pop_front();
-            }
-            self.pinned.push_back(pinned);
+            return self.read_and_pin(opened?, request, buffer);
         }
-        let pinned = self.pinned.back_mut().ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed graph segment handle was not pinned".to_owned(),
-            )
-        })?;
+    }
+
+    /// A cold handle only earns a cache slot after its first range was read.
+    /// Endpoint-scanned files can disappear or truncate after `File::open`;
+    /// a failed first read must not evict an already usable segment.
+    fn read_and_pin(
+        &mut self,
+        mut opened: PinnedPartitionedSegmentV1,
+        request: SealedGenerationSegmentReadV1<'_>,
+        buffer: &mut Vec<u8>,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        buffer.clear();
         self.reads += 1;
-        read_pinned_partitioned_segment(pinned, request, buffer)
+        read_pinned_partitioned_segment(&mut opened, request, buffer)?;
+        if self.pinned.len() == MAX_GRAPH_SEGMENT_OPEN_HANDLES {
+            self.pinned.pop_front();
+        }
+        self.pinned.push_back(opened);
+        Ok(())
     }
 }
 
@@ -2886,6 +2894,99 @@ mod tests {
         assert_eq!(bytes.as_slice(), retained.as_slice());
         assert_eq!(pass.open_attempts, segments.len() + 1);
         assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), segments.len() + 1);
+    }
+
+    #[test]
+    fn graph_segment_failed_cold_read_preserves_healthy_cache_and_recovers() {
+        let temporary = TempDir::new().unwrap();
+        let roots = vec![temporary.path().to_path_buf()];
+        let segments = (0..=super::MAX_GRAPH_SEGMENT_OPEN_HANDLES)
+            .map(|index| {
+                let bytes = format!("sealed cold page {index}").into_bytes();
+                let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(&bytes)).unwrap();
+                let path = temporary.path().join(format!(
+                    "segment-{}.json",
+                    sha256_hex_suffix(digest.as_str()).unwrap()
+                ));
+                std::fs::write(&path, &bytes).unwrap();
+                (digest, bytes, path)
+            })
+            .collect::<Vec<_>>();
+        let mut pass = super::GraphSegmentReadPassV1::new(&roots);
+        let mut buffer = Vec::new();
+        SEGMENT_OPENS.with(|opens| opens.set(0));
+        for (digest, bytes, _) in segments.iter().take(super::MAX_GRAPH_SEGMENT_OPEN_HANDLES) {
+            pass.read(
+                SealedGenerationSegmentReadV1::Whole {
+                    digest,
+                    size_bytes: bytes.len() as u64,
+                },
+                &mut buffer,
+            )
+            .unwrap();
+            assert_eq!(&buffer, bytes);
+        }
+        let original_lru = pass
+            .pinned
+            .iter()
+            .map(|segment| segment.digest.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(original_lru.len(), super::MAX_GRAPH_SEGMENT_OPEN_HANDLES);
+        let initial_opens = pass.open_attempts;
+        assert!(initial_opens > 0);
+
+        // Open the next real file through the production cold-open path, then
+        // invalidate it before its first read. This deterministically exercises
+        // the post-open error that endpoint scanning can expose.
+        let (digest, bytes, path) = &segments[super::MAX_GRAPH_SEGMENT_OPEN_HANDLES];
+        let request = SealedGenerationSegmentReadV1::Whole {
+            digest,
+            size_bytes: bytes.len() as u64,
+        };
+        let (root, metadata) = super::select_partitioned_segment_root(&roots, request).unwrap();
+        let opened = super::open_partitioned_segment(root, &metadata, request, || {}).unwrap();
+        let opens_after_candidate = SEGMENT_OPENS.with(|opens| opens.get());
+        assert!(opens_after_candidate > initial_opens);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_len(0)
+            .unwrap();
+        buffer.extend_from_slice(b"stale");
+        assert!(matches!(
+            pass.read_and_pin(opened, request, &mut buffer),
+            Err(CodeIndexProductionErrorV1::Contract(_))
+        ));
+        assert!(buffer.is_empty());
+        assert_eq!(
+            pass.pinned
+                .iter()
+                .map(|segment| segment.digest.clone())
+                .collect::<Vec<_>>(),
+            original_lru,
+            "a failed first read must retain all eight healthy handles in LRU order"
+        );
+
+        let (oldest_digest, oldest_bytes, _) = &segments[0];
+        pass.read(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: oldest_digest,
+                size_bytes: oldest_bytes.len() as u64,
+            },
+            &mut buffer,
+        )
+        .unwrap();
+        assert_eq!(&buffer, oldest_bytes);
+        assert_eq!(pass.open_attempts, initial_opens);
+        assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), opens_after_candidate);
+
+        // Recovery must read the exact restored candidate, then admit it.
+        std::fs::write(path, bytes).unwrap();
+        pass.read(request, &mut buffer).unwrap();
+        assert_eq!(&buffer, bytes);
+        assert_eq!(pass.open_attempts, initial_opens + 1);
+        assert_eq!(pass.pinned.len(), super::MAX_GRAPH_SEGMENT_OPEN_HANDLES);
     }
 
     #[test]
