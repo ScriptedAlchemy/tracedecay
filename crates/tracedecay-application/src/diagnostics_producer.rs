@@ -18,6 +18,7 @@
 //! clean page nothing checked.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 
@@ -85,10 +86,53 @@ enum ProjectResult {
         /// Logical paths of the program files the check read; `None` when its
         /// build-info named none inside the project root.
         program: Option<BTreeSet<String>>,
+        compiler_revision: Option<[u8; 32]>,
     },
     Failed {
         reason: String,
+        compiler_revision: Option<[u8; 32]>,
     },
+}
+
+impl ProjectResult {
+    fn compiler_revision(&self) -> Option<[u8; 32]> {
+        match self {
+            Self::Checked { compiler_revision, .. } | Self::Failed { compiler_revision, .. } => {
+                *compiler_revision
+            }
+        }
+    }
+}
+
+/// The installed compiler is outside the indexed file set. Unchanged sources
+/// do not authorize reusing a check across a TypeScript package/launcher swap.
+/// Unknown, malformed or oversized toolchain evidence forces a fresh check.
+fn installed_compiler_revision(compiler: &Path) -> Option<[u8; 32]> {
+    const MAX_EVIDENCE_BYTES: u64 = 1024 * 1024;
+    fn read_bounded(path: &Path) -> Option<Vec<u8>> {
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .ok()?
+            .take(MAX_EVIDENCE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        (bytes.len() as u64 <= MAX_EVIDENCE_BYTES).then_some(bytes)
+    }
+
+    let manifest = read_bounded(&compiler.parent()?.parent()?.join("typescript/package.json"))?;
+    let package: serde_json::Value = serde_json::from_slice(&manifest).ok()?;
+    if package.get("name")?.as_str()? != "typescript"
+        || package.get("version")?.as_str()?.is_empty()
+    {
+        return None;
+    }
+    let launcher = read_bounded(compiler)?;
+    let mut hasher = Sha256::new();
+    hasher.update((manifest.len() as u64).to_le_bytes());
+    hasher.update(&manifest);
+    hasher.update((launcher.len() as u64).to_le_bytes());
+    hasher.update(&launcher);
+    Some(hasher.finalize().into())
 }
 
 /// Publishes the merged findings of each project's own TypeScript compiler as
@@ -128,17 +172,23 @@ pub async fn run_typescript_producer_v1(
         .map(|previous| changed_paths(previous, &files));
     let mut results = BTreeMap::new();
     let mut stale = Vec::new();
+    let mut compiler_revisions = BTreeMap::new();
     for project in projects {
         let Some(compiler) = &project.compiler else {
             continue;
         };
+        let revision = *compiler_revisions
+            .entry(compiler.clone())
+            .or_insert_with(|| installed_compiler_revision(compiler));
         match (state.projects.get(&project.tsconfig), &changed) {
             (Some(previous), Some(changed))
-                if !needs_check(project_root, &project.tsconfig, previous, changed) =>
+                if revision.is_some()
+                    && previous.compiler_revision() == revision
+                    && !needs_check(project_root, &project.tsconfig, previous, changed) =>
             {
                 results.insert(project.tsconfig.clone(), previous.clone());
             }
-            _ => stale.push((project.tsconfig.clone(), compiler.clone())),
+            _ => stale.push((project.tsconfig.clone(), compiler.clone(), revision)),
         }
     }
     let reused = results.len();
@@ -154,7 +204,7 @@ pub async fn run_typescript_producer_v1(
                 parsed.extend(reported.iter().cloned());
                 TypeScriptProjectCheckV1::Checked
             }
-            ProjectResult::Failed { reason } => {
+            ProjectResult::Failed { reason, .. } => {
                 failures.push(reason.clone());
                 TypeScriptProjectCheckV1::Failed {
                     reason: reason.clone(),
@@ -279,7 +329,7 @@ fn needs_check(
 async fn check_projects(
     project_root: &Path,
     build_info_dir: &Path,
-    stale: Vec<(PathBuf, PathBuf)>,
+    stale: Vec<(PathBuf, PathBuf, Option<[u8; 32]>)>,
     admission: &TypeScriptCompilerAdmission,
 ) -> BTreeMap<PathBuf, ProjectResult> {
     if stale.is_empty() {
@@ -296,18 +346,19 @@ async fn check_projects(
         );
         return stale
             .into_iter()
-            .map(|(tsconfig, _)| {
+            .map(|(tsconfig, _, compiler_revision)| {
                 (
                     tsconfig,
                     ProjectResult::Failed {
                         reason: reason.clone(),
+                        compiler_revision,
                     },
                 )
             })
             .collect();
     }
     futures_util::stream::iter(stale)
-        .map(|(tsconfig, compiler)| {
+        .map(|(tsconfig, compiler, compiler_revision)| {
             let build_info = build_info_dir.join(build_info_file_name(&tsconfig));
             let root = project_root.to_path_buf();
             async move {
@@ -324,9 +375,11 @@ async fn check_projects(
                         Ok(reported) => ProjectResult::Checked {
                             reported: reported.into_iter().map(compiler_diagnostic).collect(),
                             program: program_paths(&root, &build_info),
+                            compiler_revision,
                         },
                         Err(error) => ProjectResult::Failed {
                             reason: error.to_string(),
+                            compiler_revision,
                         },
                     }
                 };
@@ -335,6 +388,7 @@ async fn check_projects(
                     .await
                     .unwrap_or_else(|_| ProjectResult::Failed {
                         reason: "the TypeScript check panicked".to_owned(),
+                        compiler_revision,
                     });
                 (tsconfig, result)
             }
@@ -601,6 +655,13 @@ mod tests {
             let log = temp.path().join("tsc.log");
             let bin = root.join("node_modules/.bin");
             std::fs::create_dir_all(&bin).expect("bin");
+            std::fs::create_dir_all(root.join("node_modules/typescript"))
+                .expect("installed TypeScript package");
+            std::fs::write(
+                root.join("node_modules/typescript/package.json"),
+                r#"{"name":"typescript","version":"5.9.3"}"#,
+            )
+            .expect("installed TypeScript manifest");
             write_executable_script(
                 &bin.join("tsc"),
                 format!(
@@ -781,6 +842,65 @@ mod tests {
             published("generation.producer.4", 1, 2)
         );
         assert_eq!(fixture.checked(), ["broken"]);
+    }
+
+    /// TypeScript is installed outside the indexed sources, so upgrading the
+    /// compiler must invalidate clean reuse even when no source digest changes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compiler_upgrade_or_missing_evidence_rechecks_unchanged_sources() {
+        let fixture = ProducerFixture::new();
+        let mut state = TypeScriptProducerStateV1::new(
+            TypeScriptProducerStatusHandleV1::default(),
+            admission(),
+        );
+        let manifest = fixture.root.join("node_modules/typescript/package.json");
+
+        fixture.run("generation.compiler.1", &mut state).await;
+        assert_eq!(fixture.checked(), ["app", "broken", "lib"]);
+        fixture.run("generation.compiler.2", &mut state).await;
+        assert_eq!(fixture.checked(), Vec::<String>::new());
+
+        std::fs::write(&manifest, r#"{"name":"typescript","version":"5.10.0"}"#)
+            .expect("upgrade compiler");
+        fixture.run("generation.compiler.3", &mut state).await;
+        assert_eq!(
+            fixture.checked(),
+            ["app", "broken", "lib"],
+            "a TypeScript version change must not reuse earlier compiler evidence"
+        );
+        fixture.run("generation.compiler.4", &mut state).await;
+        assert_eq!(fixture.checked(), Vec::<String>::new());
+
+        std::fs::write(&manifest, "{ malformed").expect("corrupt manifest");
+        fixture.run("generation.compiler.5", &mut state).await;
+        assert_eq!(
+            fixture.checked(),
+            ["app", "broken", "lib"],
+            "unknown installed compiler evidence must not authorize clean reuse"
+        );
+        std::fs::remove_file(&manifest).expect("remove manifest");
+        fixture.run("generation.compiler.6", &mut state).await;
+        assert_eq!(fixture.checked(), ["app", "broken", "lib"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn compiler_launcher_replacement_invalidates_reuse() {
+        let fixture = ProducerFixture::new();
+        let mut state = TypeScriptProducerStateV1::new(
+            TypeScriptProducerStatusHandleV1::default(),
+            admission(),
+        );
+        fixture.run("generation.compiler.1", &mut state).await;
+        assert_eq!(fixture.checked(), ["app", "broken", "lib"]);
+        let compiler = fixture.root.join("node_modules/.bin/tsc");
+        let mut script = std::fs::read_to_string(&compiler).expect("existing compiler");
+        script.push_str("\n# replacement launcher\n");
+        std::fs::write(&compiler, script).expect("replace launcher");
+
+        fixture.run("generation.compiler.2", &mut state).await;
+        assert_eq!(fixture.checked(), ["app", "broken", "lib"]);
     }
 
     /// A producer run reports to the handle of the owner it was built for. A
