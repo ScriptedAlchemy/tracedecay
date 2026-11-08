@@ -49,7 +49,7 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
             raise ValueError("qualification thresholds must be finite probabilities")
 
     tolerances = manifest.get("error_tolerances")
-    required = ("max_none_false_hint_rate", "min_positive_case_recall", "max_p95_ms")
+    required = ("max_none_false_hint_rate", "max_unwanted_hint_rate", "min_positive_case_recall", "max_p95_ms")
     if not isinstance(tolerances, dict) or set(tolerances) != set(required):
         raise ValueError("qualification tolerances must be frozen before inference")
     for key in required:
@@ -107,7 +107,7 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
                     or recorded.get("context_needed") != annotation["verified_context_needed"]):
                 raise ValueError(f"qualification {case_id} disagrees with the dataset")
         projects[split].add(annotation["project_id"])
-        sessions[split].add((annotation["project_id"], annotation["session_id"]))
+        sessions[split].add(annotation["session_id"])
         if split == "holdout":
             heldout.append(case_id)
             positive += bool(labels)
@@ -129,6 +129,32 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
         "error_tolerances": tolerances,
         "annotations": {a["id"]: a for a in annotations},
         "application": application,
+    }
+
+
+def holdout_decision_metrics(rows, thresholds):
+    """Count unwanted suggestions even when another hint on the same case is correct.
+
+    False hints on negative-only cases are not the full false-positive budget:
+    a positive case can still receive an incorrect additional suggestion.
+    """
+    hinted = unwanted = missed_positive = positive = 0
+    for row in rows:
+        labels = set(row["labels"])
+        fired = {key for key in thresholds if row["probs"][key] >= thresholds[key]}
+        hinted += bool(fired)
+        unwanted += bool(fired - labels)
+        positive += bool(labels)
+        missed_positive += bool(labels and not (fired & labels))
+    return {
+        "hinted_cases": hinted,
+        "abstained_cases": len(rows) - hinted,
+        "coverage_rate": hinted / len(rows),
+        "abstention_rate": (len(rows) - hinted) / len(rows),
+        "unwanted_hint_cases": unwanted,
+        "unwanted_hint_rate": unwanted / len(rows),
+        "missed_positive_cases": missed_positive,
+        "missed_positive_rate": missed_positive / positive if positive else None,
     }
 
 
@@ -188,18 +214,29 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes):
     scores = score_config(result, fixed_t=validated["thresholds"])
     fixed = scores["fixed"]["all"]
     latency = scores["latency"]
+    decisions = holdout_decision_metrics(rows, validated["thresholds"])
     tolerances = validated["error_tolerances"]
     rates = {
         "none_false_hint_rate": fixed["none_false_hint_rate"],
+        "unwanted_hint_rate": decisions["unwanted_hint_rate"],
         "positive_case_recall": fixed["pos_cases_with_a_correct_hint"],
         "p95_ms": latency["p95_ms"],
     }
     if any(value is None for value in rates.values()):
         raise ValueError("qualification cannot pass with unmeasured error or latency evidence")
+    # A successful HTTP call can conceal server-side truncation. Such a score
+    # cannot prove that the model saw the frozen full input. Unknown telemetry
+    # is not a measured zero, even when every prediction happens to be correct.
+    complete_input_evidence = (
+        latency["truncation_measured_cases"] == len(rows)
+        and latency["cases_truncated"] == 0
+    )
     checks = {
         "none_false_hint_rate": rates["none_false_hint_rate"] <= tolerances["max_none_false_hint_rate"],
+        "unwanted_hint_rate": rates["unwanted_hint_rate"] <= tolerances["max_unwanted_hint_rate"],
         "positive_case_recall": rates["positive_case_recall"] >= tolerances["min_positive_case_recall"],
         "p95_ms": rates["p95_ms"] <= tolerances["max_p95_ms"],
+        "untruncated_input_evidence": complete_input_evidence,
     }
     return {
         "application": validated["application"],
@@ -210,6 +247,7 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes):
         "thresholds": validated["thresholds"],
         "tolerances": tolerances,
         "fixed_threshold_metrics": fixed,
+        "holdout_decisions": decisions,
         "latency": latency,
         "checks": checks,
         "qualified_against_frozen_tolerances": all(checks.values()),

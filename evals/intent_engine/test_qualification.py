@@ -50,6 +50,7 @@ class QualificationTests(unittest.TestCase):
             "thresholds": {key: 0.6 for key in self.questions},
             "error_tolerances": {
                 "max_none_false_hint_rate": 0.0,
+                "max_unwanted_hint_rate": 0.0,
                 "min_positive_case_recall": 1.0,
                 "max_p95_ms": 20.0,
             },
@@ -81,6 +82,49 @@ class QualificationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "leaks project/session"):
                     self.valid(changed)
 
+    def test_reused_session_id_under_different_project_is_not_independent(self):
+        changed = copy.deepcopy(self.manifest)
+        changed["annotations"][2]["session_id"] = "session-a"
+        # Changing the project label must not conceal a shared session.
+        self.assertNotEqual(changed["annotations"][2]["project_id"], "project-a")
+        with self.assertRaisesRegex(ValueError, "leaks project/session"):
+            self.valid(changed)
+
+    def test_unwanted_hints_on_positive_cases_are_not_hidden_by_recall(self):
+        result = self.signed_result()
+        result["rows"][0]["probs"]["call_graph"] = 0.99
+        report = qualification.qualified_report(
+            result, self.manifest, self.manifest_sha, self.questions, self.dataset_bytes
+        )
+        self.assertEqual(report["fixed_threshold_metrics"]["none_false_hint_rate"], 0)
+        self.assertEqual(report["fixed_threshold_metrics"]["pos_cases_with_a_correct_hint"], 1)
+        self.assertEqual(report["holdout_decisions"]["unwanted_hint_cases"], 1)
+        self.assertEqual(report["holdout_decisions"]["unwanted_hint_rate"], 0.5)
+        self.assertEqual(report["holdout_decisions"]["abstention_rate"], 0.5)
+        self.assertFalse(report["checks"]["unwanted_hint_rate"])
+        self.assertFalse(report["qualified_against_frozen_tolerances"])
+
+    def test_missing_or_dropped_server_tokens_cannot_qualify(self):
+        for value in (None, 1):
+            with self.subTest(state_tokens_dropped=value):
+                result = self.signed_result()
+                result["rows"][0]["dropped"] = value
+                report = qualification.qualified_report(
+                    result, self.manifest, self.manifest_sha, self.questions, self.dataset_bytes
+                )
+                self.assertFalse(report["checks"]["untruncated_input_evidence"])
+                self.assertFalse(report["qualified_against_frozen_tolerances"])
+                self.assertEqual(
+                    report["latency"]["truncation_measured_cases"],
+                    1 if value is None else 2,
+                )
+        complete = qualification.qualified_report(
+            self.signed_result(), self.manifest, self.manifest_sha,
+            self.questions, self.dataset_bytes,
+        )
+        self.assertTrue(complete["checks"]["untruncated_input_evidence"])
+        self.assertTrue(complete["qualified_against_frozen_tolerances"])
+
     def test_reviewed_labels_are_not_inferred_from_prediction_or_actions(self):
         for name, mutate, refusal in (
             ("self_label", lambda m: m["annotations"][2].update(reviewer="case-creator"), "self-labelled"),
@@ -105,6 +149,7 @@ class QualificationTests(unittest.TestCase):
             ("threshold", lambda m: m["thresholds"].pop("impact"), "thresholds"),
             ("nonfinite", lambda m: m["thresholds"].update(impact=float("nan")), "finite"),
             ("unfrozen_tolerance", lambda m: m["error_tolerances"].pop("max_p95_ms"), "tolerances"),
+            ("unfrozen_unwanted", lambda m: m["error_tolerances"].pop("max_unwanted_hint_rate"), "tolerances"),
             ("dataset", lambda m: m.update(dataset_sha256="f" * 64), "dataset digest mismatch"),
         ):
             with self.subTest(name=name):
@@ -122,6 +167,7 @@ class QualificationTests(unittest.TestCase):
                 "context_needed": case["context_needed"],
                 "probs": probs,
                 "ms": 10 if case["labels"] else 20,
+                "dropped": 0,
                 "request_sha256": hashlib.sha256(run_http.request_bytes({
                     "state": run_http.STATES["B_noul_text"](case),
                     "questions": self.questions,
@@ -163,6 +209,10 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(report["cases"], 2)
         self.assertEqual(report["latency"]["p50_ms"], 15)
         self.assertEqual(report["latency"]["p95_ms"], 20)
+        self.assertEqual(report["holdout_decisions"]["coverage_rate"], 0.5)
+        self.assertEqual(report["holdout_decisions"]["abstention_rate"], 0.5)
+        self.assertEqual(report["holdout_decisions"]["unwanted_hint_rate"], 0)
+        self.assertTrue(report["checks"]["untruncated_input_evidence"])
         self.assertEqual(report["fixed_threshold_metrics"]["none_false_hint_rate"], 0)
         self.assertEqual(report["fixed_threshold_metrics"]["pos_cases_with_a_correct_hint"], 1)
 

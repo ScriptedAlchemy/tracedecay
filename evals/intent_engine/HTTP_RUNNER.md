@@ -121,9 +121,12 @@ Create a separate JSON annotation manifest **before running inference** with
 `qualification.sha256_json(common.noul_questions())` of the runner's exact
 question dictionary. This last digest must change with question text. Include
 `thresholds` with one frozen probability threshold per requested question and
-`error_tolerances` with all three numbers:
-`max_none_false_hint_rate` (0–1), `min_positive_case_recall` (0–1) and
-`max_p95_ms` (nonnegative milliseconds).
+`error_tolerances` with all four numbers:
+`max_none_false_hint_rate` (0–1), `max_unwanted_hint_rate` (0–1),
+`min_positive_case_recall` (0–1), and `max_p95_ms` (nonnegative milliseconds).
+The unwanted-hint budget counts an incorrect extra suggestion on a positive
+case, even if another correct suggestion made its recall appear successful.
+These tolerances must be frozen before examining the held-out results.
 
 The `annotations` array must cover every case in the original dataset, in
 that dataset's order. Each annotation has `id`, `split` (`tune` or
@@ -154,8 +157,12 @@ bazel test //evals/intent_engine:qualification_test --test_output=errors
 
 This writes `evals/intent_engine/qualification_summary.json` separately from
 the historical `summary.json`, and reports only **frozen-threshold** held-out
-false hints, positive-case recall, p50/p95 measured end-to-end HTTP latency and
-the predeclared tolerances. Scoring reads the original frozen case bytes,
+false hints, all-case unwanted suggestions, missed positive cases, coverage,
+abstention, positive-case recall, p50/p95 measured end-to-end HTTP latency and
+the predeclared tolerances. A passing report requires every held-out case to
+report measured zero dropped state tokens. Missing truncation telemetry is
+unknown, and a response measured after truncated input cannot prove the full
+frozen request was evaluated; the measurements remain in the failing report. Scoring reads the original frozen case bytes,
 checks all reviewed labels/splits against them and recreates each HTTP
 request fingerprint with the runner's own renderer. Self-consistent result
 hashes alone do not prove the submitted inputs. It deliberately does not publish optimized
