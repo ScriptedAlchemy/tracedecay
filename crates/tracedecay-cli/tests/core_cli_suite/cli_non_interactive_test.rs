@@ -664,12 +664,18 @@ fn git_sync_failure(message: &str, output: &Output) -> String {
     )
 }
 
-fn assert_mounted_git_sync(output: &Output, dry_run: bool) {
+fn assert_mounted_git_sync(output: &Output, dry_run: bool, daemon_log: &Path) {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "sessions git-sync should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "sessions git-sync should succeed\nstdout:\n{stdout}\nstderr:\n{stderr}\ntopology diagnostics:\n{}",
+        std::fs::read_to_string(daemon_log)
+            .expect("read isolated daemon log")
+            .lines()
+            .filter(|line| line.contains("git_topology_publication_unavailable"))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
     assert!(
         stdout.starts_with("session git sync completed (session-sync."),
@@ -723,10 +729,13 @@ fn sessions_git_sync_on_a_cold_daemon_waits_for_the_project_mount() {
     let hold = canonical_temp_path(home.path()).join("hold-after-core-publish");
     std::fs::write(&hold, b"hold").unwrap();
     let entered = PathBuf::from(format!("{}.entered", hold.display()));
-    let _daemon = crate::common::spawn_tracedecay_daemon_with(home.path(), {
+    let daemon_log = home.path().join("git-sync-daemon.log");
+    let _daemon = crate::common::spawn_tracedecay_daemon_logged(home.path(), &daemon_log, {
         let hold = hold.clone();
         move |command| {
-            command.env("TRACEDECAY_TEST_HOLD_AFTER_CORE_PUBLISH", &hold);
+            command
+                .env("TRACEDECAY_TEST_HOLD_AFTER_CORE_PUBLISH", &hold)
+                .env("RUST_LOG", "warn");
         }
     });
 
@@ -775,11 +784,16 @@ fn sessions_git_sync_on_a_cold_daemon_waits_for_the_project_mount() {
     assert_mounted_git_sync(
         &wait_for_git_sync(&mut child, &mut stdout, &mut stderr),
         true,
+        &daemon_log,
     );
 
     let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
     command.args(["sessions", "git-sync"]);
-    assert_mounted_git_sync(&run_with_timeout(command, cli_timeout()), false);
+    assert_mounted_git_sync(
+        &run_with_timeout(command, cli_timeout()),
+        false,
+        &daemon_log,
+    );
 }
 
 fn dashboard_session_authority(capabilities_url: &str) -> String {
