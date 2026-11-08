@@ -838,10 +838,7 @@ const MAX_GRAPH_RELATION_SEEDS: usize = 32;
 
 fn relation_seeds(ids: &BTreeSet<SymbolOccurrenceId>) -> (Vec<SymbolOccurrenceId>, bool) {
     (
-        ids.iter()
-            .take(MAX_GRAPH_RELATION_SEEDS)
-            .cloned()
-            .collect(),
+        ids.iter().take(MAX_GRAPH_RELATION_SEEDS).cloned().collect(),
         ids.len() > MAX_GRAPH_RELATION_SEEDS,
     )
 }
@@ -934,11 +931,21 @@ fn graph_relation(
     // Reuse those generation-pinned batches for transitive discovery.
     let left_first_hop = left_edges
         .into_iter()
-        .map(|edges| edges.into_iter().map(|edge| edge.edge.to_occurrence).collect())
+        .map(|edges| {
+            edges
+                .into_iter()
+                .map(|edge| edge.edge.to_occurrence)
+                .collect()
+        })
         .collect();
     let right_first_hop = right_edges
         .into_iter()
-        .map(|edges| edges.into_iter().map(|edge| edge.edge.to_occurrence).collect())
+        .map(|edges| {
+            edges
+                .into_iter()
+                .map(|edge| edge.edge.to_occurrence)
+                .collect()
+        })
         .collect();
     // Evaluate bounded caller evidence before any outgoing second-hop work.
     // A proven shared caller must survive an unrelated dependency budget refusal.
@@ -1494,7 +1501,10 @@ mod tests {
             .collect::<BTreeSet<_>>();
         let (seeds, truncated) = relation_seeds(&symbols);
         assert_eq!(seeds.len(), MAX_GRAPH_RELATION_SEEDS);
-        assert!(truncated, "skipped graph nodes make a negative hint inconclusive");
+        assert!(
+            truncated,
+            "skipped graph nodes make a negative hint inconclusive"
+        );
         assert!(!seeds.contains(&SymbolOccurrenceId::new("symbol.32").unwrap()));
         let (complete_seeds, incomplete) = relation_seeds(&seeds.iter().cloned().collect());
         assert!(!incomplete);
@@ -1518,7 +1528,10 @@ mod tests {
         )
         .expect("two complete dependency hops");
         assert_eq!(reads, 1, "the first direct-edge read is reused");
-        assert_eq!(result, BTreeSet::from([root.clone(), direct.clone(), transitive]));
+        assert_eq!(
+            result,
+            BTreeSet::from([root.clone(), direct.clone(), transitive])
+        );
 
         assert!(
             dependency_neighborhood(std::slice::from_ref(&root), Vec::new(), |_| {
@@ -1528,11 +1541,9 @@ mod tests {
             "missing direct adjacency cannot prove absence of relationships"
         );
         assert!(
-            dependency_neighborhood(
-                std::slice::from_ref(&root),
-                vec![vec![direct]],
-                |_| Some(Vec::new())
-            )
+            dependency_neighborhood(std::slice::from_ref(&root), vec![vec![direct]], |_| Some(
+                Vec::new()
+            ))
             .is_none(),
             "missing second-hop adjacency cannot prove absence of relationships"
         );
@@ -1607,12 +1618,11 @@ mod tests {
         assert!(empty.1.is_empty());
 
         let root = SymbolOccurrenceId::new("symbol.root").unwrap();
-        let dependencies = dependency_neighborhood(
-            std::slice::from_ref(&root),
-            vec![Vec::new()],
-            |_| panic!("empty first-hop adjacency requires no second-hop read"),
-        )
-        .expect("empty dependency closure is complete");
+        let dependencies =
+            dependency_neighborhood(std::slice::from_ref(&root), vec![Vec::new()], |_| {
+                panic!("empty first-hop adjacency requires no second-hop read")
+            })
+            .expect("empty dependency closure is complete");
         assert!(dependencies.is_empty());
     }
 
@@ -1756,8 +1766,12 @@ mod tests {
         let (relation, partial) = graph_relation_neighborhood_with_reads(
             std::slice::from_ref(&left),
             std::slice::from_ref(&right),
-            vec![vec![SymbolOccurrenceId::new("symbol.left-dependency").unwrap()]],
-            vec![vec![SymbolOccurrenceId::new("symbol.right-dependency").unwrap()]],
+            vec![vec![
+                SymbolOccurrenceId::new("symbol.left-dependency").unwrap(),
+            ]],
+            vec![vec![
+                SymbolOccurrenceId::new("symbol.right-dependency").unwrap(),
+            ]],
             |frontier| {
                 caller_reads += 1;
                 Some(
@@ -1774,7 +1788,10 @@ mod tests {
             |_| panic!("shared caller must not be erased by an unused dependency read"),
         );
         let relation = relation.expect("proven shared caller must survive");
-        assert_eq!(relation.warning_class, ProximityWarningClassV1::SharedCaller);
+        assert_eq!(
+            relation.warning_class,
+            ProximityWarningClassV1::SharedCaller
+        );
         assert_eq!(
             relation.kinds,
             vec![ProximityRelationPathKindV1::TransitiveCaller]
@@ -1792,8 +1809,12 @@ mod tests {
         let (relation, partial) = graph_relation_neighborhood_with_reads(
             std::slice::from_ref(&left),
             std::slice::from_ref(&right),
-            vec![vec![SymbolOccurrenceId::new("symbol.left-dependency").unwrap()]],
-            vec![vec![SymbolOccurrenceId::new("symbol.right-dependency").unwrap()]],
+            vec![vec![
+                SymbolOccurrenceId::new("symbol.left-dependency").unwrap(),
+            ]],
+            vec![vec![
+                SymbolOccurrenceId::new("symbol.right-dependency").unwrap(),
+            ]],
             |frontier| Some(vec![Vec::new(); frontier.len()]),
             |frontier| {
                 outgoing_reads += 1;
@@ -1811,7 +1832,10 @@ mod tests {
             },
         );
         let relation = relation.expect("real two-hop dependency is preserved");
-        assert_eq!(relation.warning_class, ProximityWarningClassV1::SharedDependency);
+        assert_eq!(
+            relation.warning_class,
+            ProximityWarningClassV1::SharedDependency
+        );
         assert_eq!(
             relation.kinds,
             vec![ProximityRelationPathKindV1::TransitiveDependency]
