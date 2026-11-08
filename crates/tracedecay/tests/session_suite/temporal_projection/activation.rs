@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tracedecay_session_runtime::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
@@ -325,19 +325,31 @@ async fn activation_is_pinned_to_the_generation_the_refresh_extends() {
     );
 }
 
-#[derive(Default)]
 struct GatedHistory {
     entered: tokio::sync::Notify,
-    release: OnceLock<()>,
+    release: tokio::sync::watch::Sender<bool>,
+}
+
+impl Default for GatedHistory {
+    fn default() -> Self {
+        Self {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::watch::Sender::new(false),
+        }
+    }
 }
 
 impl SessionHistoricalIngestor for GatedHistory {
     fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
+        let mut release = self.release.subscribe();
         Box::pin(async move {
             self.entered.notify_one();
-            // Both readers must register before the native worker can capture
-            // the superseded candidate. A yielding history pass serves live joins.
-            self.release.wait();
+            // The watch latch preserves release even when it precedes this poll,
+            // while yielding the native worker to concurrent live projection.
+            release
+                .wait_for(|released| *released)
+                .await
+                .expect("history release sender remains open");
             SessionHistoricalIngestOutcome::Complete.into()
         })
     }
@@ -347,7 +359,7 @@ impl SessionHistoricalIngestor for GatedHistory {
     }
 
     fn cancel(&self) {
-        let _ = self.release.set(());
+        let _ = self.release.send_replace(true);
     }
 }
 
@@ -411,7 +423,7 @@ async fn reset_requested_during_a_refresh_supersedes_its_candidate() {
         .await,
         (true, true)
     );
-    history.release.set(()).unwrap();
+    assert!(!history.release.send_replace(true));
     assert_eq!(
         tokio::join!(named_join, aggregate_join),
         (false, false),
