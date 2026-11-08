@@ -1642,11 +1642,16 @@ mod tests {
             "the maintenance operation waits behind an existing writer"
         );
 
+        // Keep unrelated content writers churning until *after* the queued
+        // retention operation completes. A finite burst that happens to stop
+        // before retention runs would not prove progress under sustained load.
         let competing_admin = administration.clone();
         let completed_writers = Arc::new(AtomicUsize::new(0));
         let completed = Arc::clone(&completed_writers);
+        let stop_churn = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop = Arc::clone(&stop_churn);
         let competitors = tokio::spawn(async move {
-            for _ in 0..64 {
+            while !stop.load(Ordering::SeqCst) {
                 competing_admin
                     .with_writer_in(
                         WriterScope::store("/another-store", StoreWriterClass::Content),
@@ -1661,6 +1666,14 @@ mod tests {
                     .await;
             }
         });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while completed_writers.load(Ordering::SeqCst) < 4 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("unrelated writers churn before original writer releases");
+        let before_release = completed_writers.load(Ordering::SeqCst);
         release_tx.send(()).expect("release the original writer");
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(5), &mut queued)
@@ -1668,9 +1681,19 @@ mod tests {
                 .expect("queued retention is admitted despite competing writers"),
             Some(42)
         );
+        // A succeeding write proves the churn remained live *through* the
+        // retention admission; it is stopped only after that observation.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while completed_writers.load(Ordering::SeqCst) <= before_release {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("unrelated writers resume after maintenance admission");
+        stop_churn.store(true, Ordering::SeqCst);
         holder.await.expect("first writer finishes");
-        competitors.await.expect("subsequent store writers finish");
-        assert_eq!(completed_writers.load(Ordering::SeqCst), 64);
+        competitors.await.expect("unrelated writer churn finishes");
+        assert!(completed_writers.load(Ordering::SeqCst) > before_release);
     }
 
     #[tokio::test]
