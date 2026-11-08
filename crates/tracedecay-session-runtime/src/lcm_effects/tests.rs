@@ -2451,9 +2451,9 @@ async fn malformed_relation_receipt_is_permanent_without_starving_summary_work()
     assert!(!deferred.has_more);
     assert!(deferred.next_retry_at_unix_seconds.is_some());
 
-    // Two durable receipts becoming due at once must be offered in distinct
-    // bounded pages. A one-row LIMIT used to hide the second due receipt
-    // even though the scheduler depended on has_more to resume promptly.
+    // Preserve one-sentinel-row pagination after the idle eligibility probe:
+    // two durable due receipts must be recovered in distinct bounded pages,
+    // with has_more advertising the unprocessed second receipt.
     let transaction = db.begin_write_transaction().await.unwrap();
     let changed = transaction
         .execute(
