@@ -440,7 +440,10 @@ describe('CommandPalette long and shrinking lists', () => {
       projectId: 'proj-new',
       activation: 'active',
     });
-    expect(getByTestId('palette-location').textContent).toBe('/brain');
+    // Project activation is a scoped navigation, not a plain workspace visit.
+    expect(getByTestId('palette-location').textContent).toBe(
+      '/brain?scope=proj-new&scopeLabel=RareProject',
+    );
   });
 
   it('clamps the active row when the listing shrinks, and Enter still fires', async () => {
