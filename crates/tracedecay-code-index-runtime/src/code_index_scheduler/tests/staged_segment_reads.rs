@@ -1387,10 +1387,7 @@ fn failed_durability_admission_cannot_leave_a_publishable_segment() {
 
     let first_path = staged_path(&preparation, &digests[0]);
     let prior = first_path.symlink_metadata().expect("first member metadata");
-    let mut writer = File::options()
-        .write(true)
-        .open(&first_path)
-        .expect("mutate same inode");
+    let mut writer = File::options().write(true).open(&first_path).expect("mutate same inode");
     writer
         .write_all(&vec![b'X'; contents[0].len()])
         .expect("same-length mutation");
