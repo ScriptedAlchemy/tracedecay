@@ -29,7 +29,8 @@ pub(super) fn read(connection: &Connection) -> rusqlite::Result<Vec<TableSizeTel
     let mut statement = connection.prepare_cached("SELECT name, payload FROM dbstat")?;
     let mut pages = statement.query([])?;
     while let Some(page) = pages.next()? {
-        let name = page.get_ref(0)?.as_str().map_err(|error| {
+        let name_value = page.get_ref(0)?;
+        let name = name_value.as_str().map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
         })?;
         if let Some(total) = totals.get_mut(name) {
