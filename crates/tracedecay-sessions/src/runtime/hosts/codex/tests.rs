@@ -1233,8 +1233,8 @@ mod recent_first_discovery_tests {
         IDLE_FULL_VALIDATION_CYCLES, MAX_EXACT_HOOK_SESSION_REQUESTS,
         MAX_EXACT_HOOK_SOURCE_AUTHORITIES, MAX_SCAN_DEPTH, codex_directory_changed,
         codex_directory_witness, directory_entry_fingerprint, directory_stat_witness,
-        indexed_replay_pass,
-        replay_index_entries_visited_for_test, reset_replay_index_entries_visited_for_test,
+        indexed_replay_pass, replay_index_entries_visited_for_test,
+        reset_replay_index_entries_visited_for_test,
     };
     use crate::runtime::ingest::quarantine::SourceSweep;
     use crate::runtime::jsonl_observation_admission::{
