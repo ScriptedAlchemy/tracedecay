@@ -1567,7 +1567,7 @@ fn copy_sqlite_family_at_generation(
     }
     copy_sqlite_members_nofollow(source, destination, &members)?;
     let journal_after = inspect_inert_rollback_journal(source)?;
-    if !rollback_journal_unchanged(&journal_before, &journal_after) {
+    if !rollback_journal_unchanged(journal_before.as_ref(), journal_after.as_ref()) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "SQLite report rollback journal changed while copying registry",
@@ -1641,8 +1641,8 @@ fn inspect_inert_rollback_journal(source: &Path) -> std::io::Result<Option<std::
 }
 
 fn rollback_journal_unchanged(
-    before: &Option<std::fs::Metadata>,
-    after: &Option<std::fs::Metadata>,
+    before: Option<&std::fs::Metadata>,
+    after: Option<&std::fs::Metadata>,
 ) -> bool {
     match (before, after) {
         (None, None) => true,
@@ -1707,7 +1707,7 @@ fn copy_sqlite_members_nofollow(
                 "SQLite member has no filename",
             )
         })?;
-        let mut input = directory.open_with(name, &options)?.into_std();
+        let input = directory.open_with(name, &options)?.into_std();
         if !matches_checked_sqlite_member(checked, &input.metadata()?) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
