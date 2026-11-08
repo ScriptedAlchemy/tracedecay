@@ -253,6 +253,12 @@ def dropped_state_tokens(response, usage):
         if value is not None and (type(value) is not int or value < 0):
             raise ValueError("invalid truncation state-token count")
 
+    # A directly reported drop count cannot exceed the original state.
+    # Without this check, a malformed server can claim more dropped tokens
+    # than were ever sent and still leave a self-consistent evidence row.
+    if direct is not None and original is not None and direct > original:
+        raise ValueError("invalid truncation: dropped state tokens exceed original")
+
     derived = None
     if original is not None and used is not None:
         if used > original:
@@ -296,6 +302,19 @@ def validate_row_truncation(row):
     semantics. New rows retain the supplied counts/flags for independent
     qualification and exact partial-resume validation.
     """
+    # Kev's total input count includes every state token the model actually
+    # consumed, even when some original state tokens were truncated. A low
+    # reported input count cannot establish context fit if the used-state
+    # counter already exceeds it. Check fresh, resumed and scored rows alike.
+    original = row.get("state_tokens")
+    dropped = row.get("dropped")
+    used = row.get("state_tokens_used")
+    if used is None and type(original) is int and type(dropped) is int:
+        used = original - dropped
+    input_tokens = row.get("input_tokens")
+    if type(input_tokens) is int and type(used) is int and used > input_tokens:
+        raise ValueError("inconsistent usage: used state tokens exceed total input tokens")
+
     native_fields = ("state_tokens_used", "reported_state_tokens_dropped",
                      "truncated", "usage_truncated")
     if not any(field in row for field in native_fields):

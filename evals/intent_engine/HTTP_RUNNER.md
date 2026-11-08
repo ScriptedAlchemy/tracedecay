@@ -86,6 +86,14 @@ Each result records `usage.input_tokens` as `input_tokens`,
 `dropped`. These are distinct server measurements; total input tokens are never
 substituted for state tokens. Omitted or null telemetry stays JSON `null`.
 Reported zeroes stay zero, and reported counts must be nonnegative integers.
+Impossible cross-counter evidence is refused before a fresh row is appended,
+before an interrupted log is resumed, and by the independent scorer: dropped
+state tokens may not exceed the original state count, and the number of state
+tokens actually consumed may not exceed the server's total input-token count.
+When no explicit consumed-state count exists, an original-minus-dropped count
+is checked where both measurements are present. These checks catch
+contradictory self-reports; they do not authenticate the server or replace
+independently verified token accounting.
 
 `score.py` computes token statistics only from measured cases and reports
 `input_tokens_measured_cases`, `state_tokens_measured_cases`, and

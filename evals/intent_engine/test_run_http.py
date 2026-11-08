@@ -437,6 +437,65 @@ class RunHttpTest(unittest.TestCase):
         self.assertEqual(timing["truncation_measured_cases"], 2)
         self.assertEqual(timing["cases_truncated"], 1)
 
+    def test_inconsistent_state_usage_is_rejected_before_resume_or_new_append(self):
+        self.interrupt()
+        header, row = self.partial.read_text().splitlines()
+        forged = json.loads(row)
+        forged.update(
+            input_tokens=1, state_tokens=32, state_tokens_used=32, dropped=0,
+        )
+        self.partial.write_text(header + "\n" + json.dumps(forged) + "\n")
+        before = self.partial.read_bytes()
+        with patch.object(run_http, "post") as post:
+            with self.assertRaisesRegex(ValueError, "used state tokens exceed total input tokens"):
+                self.run_main()
+            post.assert_not_called()
+        self.assertEqual(self.partial.read_bytes(), before)
+        self.assertFalse(self.output.exists())
+
+        # The same impossible values in a fresh server response must not
+        # append a row or poison the original interrupted evidence.
+        valid, elapsed = self.response("", {"questions": run_http.noul_questions()})
+        impossible = copy.deepcopy(valid)
+        impossible["usage"] = {
+            "input_tokens": 1, "state_tokens": 32, "state_tokens_used": 32,
+        }
+        impossible["truncated"] = False
+        # Restore a genuine first row before exercising the new response.
+        self.partial.write_text(header + "\n" + row + "\n")
+        genuine_prefix = self.partial.read_bytes()
+        with patch.object(run_http, "post", return_value=(impossible, elapsed)) as post:
+            with self.assertRaisesRegex(ValueError, "used state tokens exceed total input tokens"):
+                self.run_main()
+            post.assert_called_once()
+        self.assertEqual(self.partial.read_bytes(), genuine_prefix)
+        self.assertFalse(self.output.exists())
+
+        with patch.object(run_http, "post", return_value=(valid, elapsed)) as post:
+            self.run_main()
+            post.assert_called_once()
+        self.assertTrue(self.output.exists())
+        self.assertFalse(self.partial.exists())
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+
+    def test_dropped_count_exceeding_original_state_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "dropped state tokens exceed original"):
+            run_http.dropped_state_tokens(
+                {}, {"state_tokens": 3, "state_tokens_dropped": 4},
+            )
+        self.interrupt()
+        before = self.partial.read_bytes()
+        impossible, elapsed = self.response("", {"questions": run_http.noul_questions()})
+        impossible["usage"] = {
+            "input_tokens": 12, "state_tokens": 3, "state_tokens_dropped": 4,
+        }
+        with patch.object(run_http, "post", return_value=(impossible, elapsed)) as post:
+            with self.assertRaisesRegex(ValueError, "dropped state tokens exceed original"):
+                self.run_main()
+            post.assert_called_once()
+        self.assertEqual(self.partial.read_bytes(), before)
+        self.assertFalse(self.output.exists())
+
     def test_missing_usage_survives_resume_and_scoring(self):
         response, elapsed = self.response("", {"questions": run_http.noul_questions()})
         response["usage"] = None

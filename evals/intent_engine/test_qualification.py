@@ -374,6 +374,36 @@ class QualificationTests(unittest.TestCase):
                     (here / "results" / "native-partial_B_noul_text.json").exists()
                 )
 
+    def test_impossible_token_counters_cannot_qualify_even_with_rehashed_evidence(self):
+        control = qualification.qualified_report(
+            self.signed_result(), self.manifest, self.manifest_sha,
+            self.questions, self.dataset_bytes,
+        )
+        self.assertTrue(control["qualified_against_frozen_tolerances"])
+        # The old scorer accepted input_tokens=1 as proof of context fit
+        # even when Kev reported using 32 state tokens on that request.
+        forged = self.signed_result()
+        forged["rows"][0].update(
+            input_tokens=1, state_tokens=32, state_tokens_used=32, dropped=0,
+        )
+        with self.assertRaisesRegex(ValueError, "used state tokens exceed total input tokens"):
+            qualification.qualified_report(
+                forged, self.manifest, self.manifest_sha,
+                self.questions, self.dataset_bytes,
+            )
+
+        # A second contradictory server receipt also cannot be interpreted
+        # as a legitimate, zero-truncation or measured-drop result.
+        forged = self.signed_result()
+        forged["rows"][0].update(
+            state_tokens=3, reported_state_tokens_dropped=4, dropped=4,
+        )
+        with self.assertRaisesRegex(ValueError, "dropped state tokens exceed original"):
+            qualification.qualified_report(
+                forged, self.manifest, self.manifest_sha,
+                self.questions, self.dataset_bytes,
+            )
+
     def test_boolean_truncation_without_counts_is_unknown(self):
         self.assertIsNone(run_http.dropped_state_tokens({"truncated": False}, {}))
         self.assertIsNone(run_http.dropped_state_tokens({"truncated": True}, {}))
