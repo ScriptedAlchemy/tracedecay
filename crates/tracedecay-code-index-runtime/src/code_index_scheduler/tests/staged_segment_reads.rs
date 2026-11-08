@@ -1565,7 +1565,6 @@ fn observed_pointer_opens(
 #[cfg(target_os = "linux")]
 #[test]
 fn publication_pointer_cas_reads_exact_bytes_with_one_kernel_open() {
-
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 3 }\n")]);
     let source_root = TempDir::new().expect("source store");
     let generation = source_generation(&fixture, source_root.path());
@@ -1694,7 +1693,6 @@ fn cached_publication_pointer_refuses_equal_byte_symlink_and_recovers_snapshot()
 #[cfg(target_os = "linux")]
 #[test]
 fn cold_publication_pointer_validation_uses_one_kernel_open_and_recovers_snapshot() {
-
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let source_root = TempDir::new().expect("source store");
     let generation = source_generation(&fixture, source_root.path());
@@ -1776,7 +1774,6 @@ fn observed_named_opens(
 #[cfg(target_os = "linux")]
 #[test]
 fn initial_pointer_publication_reuses_persisted_descriptor_without_pathname_open() {
-
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n")]);
     let source_root = TempDir::new().expect("source store");
     let generation = source_generation(&fixture, source_root.path());
