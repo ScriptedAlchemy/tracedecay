@@ -452,7 +452,20 @@ fn with_verified_segments<T>(
             }
             return Err(CodeIndexProductionErrorV1::Contract(error.to_string()));
         }
-        segments.read(request, buffer)
+        let read = segments.read(request, buffer);
+        // An endpoint-scanned open or read can outlive the caller's budget.
+        // Recheck even on I/O failure so an interruption is not corruption.
+        if let Err(error) = (check)() {
+            buffer.clear();
+            if matches!(
+                error,
+                GraphDbError::Cancelled | GraphDbError::DeadlineExceeded
+            ) {
+                interruption = Some(error.clone());
+            }
+            return Err(CodeIndexProductionErrorV1::Contract(error.to_string()));
+        }
+        read
     };
     let built = build(&mut read_segment);
     tracing::info!(
@@ -2310,7 +2323,7 @@ mod tests {
             let checks = AtomicUsize::new(0);
             assert_eq!(
                 read_after_unlink(&|| {
-                    if checks.fetch_add(1, Ordering::SeqCst) == 0 {
+                    if checks.fetch_add(1, Ordering::SeqCst) < 2 {
                         Ok(())
                     } else {
                         Err(interruption.clone())
@@ -2434,21 +2447,24 @@ mod tests {
             size_bytes: bytes.len() as u64,
         };
         let checks = AtomicUsize::new(0);
+        let cancelled = AtomicBool::new(false);
         SEGMENT_OPENS.with(|opens| opens.set(0));
         let result = with_verified_segments(
             &digest,
             &routes,
             &|| {
-                if checks.fetch_add(1, Ordering::SeqCst) == 0 {
-                    Ok(())
-                } else {
+                checks.fetch_add(1, Ordering::SeqCst);
+                if cancelled.load(Ordering::SeqCst) {
                     Err(GraphDbError::Cancelled)
+                } else {
+                    Ok(())
                 }
             },
             |read| {
                 let mut buffer = Vec::new();
                 read(request, &mut buffer)?;
                 assert_eq!(buffer, bytes);
+                cancelled.store(true, Ordering::SeqCst);
                 assert!(matches!(
                     read(request, &mut buffer),
                     Err(CodeIndexProductionErrorV1::Contract(_))
@@ -2461,7 +2477,120 @@ mod tests {
             },
         );
         assert_eq!(result.unwrap_err(), GraphDbError::Cancelled);
-        assert_eq!(checks.load(Ordering::SeqCst), 2);
+        assert_eq!(checks.load(Ordering::SeqCst), 3);
+        assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 1);
+    }
+
+    #[test]
+    fn graph_segment_pass_preserves_interruption_after_io() {
+        let temporary = TempDir::new().unwrap();
+        let bytes = b"authenticated bytes from a completed segment read";
+        let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).unwrap();
+        let path = temporary.path().join(format!(
+            "segment-{}.json",
+            sha256_hex_suffix(digest.as_str()).unwrap()
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        let routes = SealRoutes {
+            seal_paths: vec![path],
+            segment_roots: vec![temporary.path().to_path_buf()],
+        };
+        let request = SealedGenerationSegmentReadV1::Whole {
+            digest: &digest,
+            size_bytes: bytes.len() as u64,
+        };
+        for interruption in [GraphDbError::Cancelled, GraphDbError::DeadlineExceeded] {
+            let checks = AtomicUsize::new(0);
+            SEGMENT_OPENS.with(|opens| opens.set(0));
+            let result = with_verified_segments(
+                &digest,
+                &routes,
+                &|| {
+                    checks.fetch_add(1, Ordering::SeqCst);
+                    if SEGMENT_OPENS.with(|opens| opens.get()) == 0 {
+                        Ok(())
+                    } else {
+                        Err(interruption.clone())
+                    }
+                },
+                |read| {
+                    let mut buffer = b"previous page".to_vec();
+                    assert!(matches!(
+                        read(request, &mut buffer),
+                        Err(CodeIndexProductionErrorV1::Contract(_))
+                    ));
+                    assert!(buffer.is_empty(), "late segment bytes must not escape");
+                    // Even a builder that handled the source error cannot
+                    // turn an observed interruption into a successful pass.
+                    Ok(())
+                },
+            );
+            assert_eq!(result.unwrap_err(), interruption);
+            assert_eq!(checks.load(Ordering::SeqCst), 2);
+            assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 1);
+        }
+        SEGMENT_OPENS.with(|opens| opens.set(0));
+        with_verified_segments(&digest, &routes, &|| Ok(()), |read| {
+            let mut buffer = Vec::new();
+            read(request, &mut buffer)?;
+            assert_eq!(buffer, bytes);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 1);
+    }
+
+    #[test]
+    fn graph_segment_failed_read_preserves_post_io_deadline() {
+        let temporary = TempDir::new().unwrap();
+        let bytes = b"authenticated segment before truncation";
+        let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).unwrap();
+        let path = temporary.path().join(format!(
+            "segment-{}.json",
+            sha256_hex_suffix(digest.as_str()).unwrap()
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        let routes = SealRoutes {
+            seal_paths: vec![path.clone()],
+            segment_roots: vec![temporary.path().to_path_buf()],
+        };
+        let request = SealedGenerationSegmentReadV1::Whole {
+            digest: &digest,
+            size_bytes: bytes.len() as u64,
+        };
+        let truncated = AtomicBool::new(false);
+        let checks_after_truncation = AtomicUsize::new(0);
+        SEGMENT_OPENS.with(|opens| opens.set(0));
+        let result = with_verified_segments(
+            &digest,
+            &routes,
+            &|| {
+                if truncated.load(Ordering::SeqCst)
+                    && checks_after_truncation.fetch_add(1, Ordering::SeqCst) > 0
+                {
+                    Err(GraphDbError::DeadlineExceeded)
+                } else {
+                    Ok(())
+                }
+            },
+            |read| {
+                let mut buffer = Vec::new();
+                read(request, &mut buffer)?;
+                assert_eq!(buffer, bytes);
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_len(0)
+                    .unwrap();
+                truncated.store(true, Ordering::SeqCst);
+                read(request, &mut buffer).unwrap_err();
+                assert!(buffer.is_empty());
+                Ok(())
+            },
+        );
+        assert_eq!(result.unwrap_err(), GraphDbError::DeadlineExceeded);
+        assert_eq!(checks_after_truncation.load(Ordering::SeqCst), 2);
         assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 1);
     }
 
