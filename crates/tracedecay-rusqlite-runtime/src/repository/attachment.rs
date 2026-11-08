@@ -1256,6 +1256,42 @@ mod tests {
     }
 
     #[test]
+    fn truncated_existing_sqlite_refuses_before_touching_sidecars() {
+        let binding = binding();
+        for size in [513_usize, 1025] {
+            for suffix in ["-wal", "-shm", "-journal"] {
+                let directory = TempDir::new().unwrap();
+                let path = directory.path().join("sessions.db");
+                let mut bytes = vec![0_u8; size];
+                bytes[..16].copy_from_slice(b"SQLite format 3\0");
+                fs::write(&path, &bytes).unwrap();
+
+                let mut sidecar = path.as_os_str().to_os_string();
+                sidecar.push(suffix);
+                let sidecar = PathBuf::from(sidecar);
+                let sentinel = format!("foreign {suffix} bytes");
+                fs::write(&sidecar, sentinel.as_bytes()).unwrap();
+
+                let result = RepositoryPhysicalAttachmentFactory.attach(
+                    &native_runtime(),
+                    binding.clone(),
+                    locator(&binding),
+                    path.clone(),
+                    AdmissionConfigV1::default(),
+                );
+                assert!(matches!(
+                    result,
+                    Err(RepositoryAttachmentStartError::Identity(
+                        OpenedDatabaseFileError::InvalidHeader
+                    ))
+                ));
+                assert_eq!(fs::read(&path).unwrap(), bytes);
+                assert_eq!(fs::read(&sidecar).unwrap(), sentinel.as_bytes());
+            }
+        }
+    }
+
+    #[test]
     fn failed_initialization_preserves_created_database_and_sidecars() {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("failed.db");

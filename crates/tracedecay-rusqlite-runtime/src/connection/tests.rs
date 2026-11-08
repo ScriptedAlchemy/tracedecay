@@ -437,6 +437,17 @@ fn failed_sidecar_reservation_cannot_be_reopened_as_existing_sqlite() {
 #[test]
 fn existing_sqlite_admission_requires_a_completed_header() {
     let directory = tempfile::tempdir().unwrap();
+    for size in [513_usize, 1023, 1025] {
+        let path = directory.path().join(format!("truncated-{size}.db"));
+        let mut bytes = vec![0_u8; size];
+        bytes[..16].copy_from_slice(b"SQLite format 3\0");
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(matches!(
+            OpenedDatabaseFile::pin_initialized(&path),
+            Err(OpenedDatabaseFileError::InvalidHeader)
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
     let path = directory.path().join("sessions.db");
     std::fs::write(&path, b"invalid database, not SQLite").unwrap();
     assert!(matches!(

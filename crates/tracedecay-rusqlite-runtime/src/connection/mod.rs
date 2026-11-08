@@ -91,21 +91,18 @@ impl OpenedDatabaseFile {
     /// Read the magic through the existing pin; opening a second descriptor
     /// here could discard another connection's POSIX locks on Unix.
     pub(crate) fn pin_initialized(path: &Path) -> Result<Self, OpenedDatabaseFileError> {
-        // A failed header read would drop a freshly opened raw descriptor.
-        // On Unix that close can release a different live SQLite connection's
-        // process-owned locks, even when that connection still has a transaction.
-        // Refuse an obviously unfinished empty/short database by metadata
-        // alone, before opening a descriptor. This does not establish that a
-        // longer, header-bearing store completed initialization.
-        #[cfg(unix)]
+        // A failed header read would drop a freshly opened raw descriptor,
+        // releasing unrelated process-owned SQLite locks on Unix. Reject
+        // obviously truncated stores without opening another descriptor.
+        // All SQLite page sizes are multiples of 512, and a complete
+        // database contains an integral number of pages. This is only a
+        // necessary condition; it does not prove initialization completed.
         {
             let metadata = std::fs::metadata(path).map_err(|_| OpenedDatabaseFileError::Open)?;
             if !metadata.is_file() {
                 return Err(OpenedDatabaseFileError::NotFile);
             }
-            // SQLite's smallest initialized database occupies one 512-byte page.
-            // Header magic alone (16 bytes) is not a completed database.
-            if metadata.len() < 512 {
+            if metadata.len() < 512 || metadata.len() % 512 != 0 {
                 return Err(OpenedDatabaseFileError::InvalidHeader);
             }
         }
