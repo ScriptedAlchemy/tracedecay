@@ -1543,7 +1543,7 @@ fn copy_sqlite_family_at_generation(
         let member = sqlite_family_member(source, suffix);
         match std::fs::symlink_metadata(&member) {
             Ok(metadata) if metadata.file_type().is_file() => {
-                members.push((member, suffix));
+                members.push((member, suffix, metadata));
             }
             Ok(_) => {
                 return Err(std::io::Error::new(
@@ -1562,13 +1562,43 @@ fn copy_sqlite_family_at_generation(
     generation.validate()
 }
 
-/// Open the checked member through a held directory, refusing a symlink even
-/// when its name is replaced after the family preflight. A bare fs::copy would
-/// follow that replacement and import foreign bytes into report scratch.
+fn matches_checked_sqlite_member(
+    checked: &std::fs::Metadata,
+    opened: &std::fs::Metadata,
+) -> bool {
+    if !opened.is_file() || checked.len() != opened.len() {
+        return false;
+    }
+    // A no-follow open blocks symlink swaps but not regular-file replacement.
+    // Revalidate the held file's identity before creating any scratch output.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        checked.dev() == opened.dev() && checked.ino() == opened.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        // A size-changing swap is rejected above. On platforms without the
+        // Unix inode API, compare timestamps and let the generation witness
+        // independently reject a changed source after copying.
+        checked
+            .created()
+            .ok()
+            .zip(opened.created().ok())
+            .zip(checked.modified().ok().zip(opened.modified().ok()))
+            .is_some_and(|((created, opened_created), (modified, opened_modified))| {
+                created == opened_created && modified == opened_modified
+            })
+    }
+}
+
+/// Open the checked member through a held directory, refusing symlink or
+/// regular-file replacement after preflight. A pathname copy would import
+/// unrelated bytes into report scratch even if later validation rejected it.
 fn copy_sqlite_members_nofollow(
     source: &Path,
     destination: &Path,
-    members: &[(PathBuf, &str)],
+    members: &[(PathBuf, &str, std::fs::Metadata)],
 ) -> std::io::Result<()> {
     let parent = source
         .parent()
@@ -1578,19 +1608,30 @@ fn copy_sqlite_members_nofollow(
     let mut options = cap_std::fs::OpenOptions::new();
     options.read(true);
     options.follow(FollowSymlinks::No);
-    for (member, suffix) in members {
+    for (member, suffix, checked) in members {
         let name = member.file_name().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "SQLite member has no filename")
         })?;
-        let mut input = directory.open_with(name, &options)?;
-        if !input.metadata()?.is_file() {
+        let mut input = directory.open_with(name, &options)?.into_std();
+        if !matches_checked_sqlite_member(checked, &input.metadata()?) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "SQLite report source member is not a regular file",
+                format!(
+                    "SQLite report source member '{}' changed after preflight",
+                    member.display()
+                ),
             ));
         }
         let mut output = std::fs::File::create(sqlite_family_member(destination, suffix))?;
-        std::io::copy(&mut input, &mut output)?;
+        // A live WAL may grow after inspection; do not copy an unbounded tail.
+        let cap = checked.len().saturating_add(1);
+        let copied = std::io::copy(&mut input.take(cap), &mut output)?;
+        if copied != checked.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "SQLite report source member changed size during copy",
+            ));
+        }
     }
     Ok(())
 }
@@ -2635,7 +2676,11 @@ mod tests {
         std::fs::write(&wal, b"original WAL member").unwrap();
         assert!(std::fs::symlink_metadata(&wal).unwrap().file_type().is_file());
         // The production preflight recorded this pathname as a regular file.
-        let checked = vec![(wal.clone(), "-wal")];
+        let checked = vec![(
+            wal.clone(),
+            "-wal",
+            std::fs::symlink_metadata(&wal).unwrap(),
+        )];
         std::fs::remove_file(&wal).unwrap();
         let foreign = temporary.path().join("foreign-data.bin");
         std::fs::write(&foreign, vec![73u8; 4096]).unwrap();
@@ -2649,6 +2694,43 @@ mod tests {
             "a link swapped after preflight cannot be copied into report scratch"
         );
         assert_eq!(std::fs::metadata(&foreign).unwrap().len(), 4096);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registry_snapshot_refuses_regular_member_replacement_before_copying() {
+        for replacement_bytes in [4096_u64, 512 * 1024 * 1024] {
+            let temporary = tempfile::TempDir::new().unwrap();
+            let registry = temporary.path().join(GLOBAL_DB_FILENAME);
+            let wal = sqlite_family_member(&registry, "-wal");
+            std::fs::write(&wal, vec![17u8; 4096]).unwrap();
+            let checked = vec![(
+                wal.clone(),
+                "-wal",
+                std::fs::symlink_metadata(&wal).unwrap(),
+            )];
+
+            // Both files are regular, so a no-follow open still succeeds.
+            // Include a same-sized swap: checking size alone is insufficient.
+            let incoming = temporary.path().join("foreign-regular.bin");
+            std::fs::File::create(&incoming)
+                .unwrap()
+                .set_len(replacement_bytes)
+                .unwrap();
+            std::fs::rename(&incoming, &wal).unwrap();
+            assert!(std::fs::symlink_metadata(&wal).unwrap().file_type().is_file());
+
+            let destination = temporary.path().join("report-snapshot.db");
+            let error = copy_sqlite_members_nofollow(&registry, &destination, &checked)
+                .expect_err("a regular member swapped after preflight must be refused");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains("changed after preflight"), "{error}");
+            assert!(
+                !sqlite_family_member(&destination, "-wal").exists(),
+                "the replacement must be refused before any bytes enter scratch"
+            );
+            assert_eq!(std::fs::metadata(&wal).unwrap().len(), replacement_bytes);
+        }
     }
 
     #[cfg(unix)]
