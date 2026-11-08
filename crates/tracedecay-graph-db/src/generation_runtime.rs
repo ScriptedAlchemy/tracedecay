@@ -4005,8 +4005,13 @@ mod tests {
             .delete_generation_contents(&locator, &|| Ok(()))
             .expect_err("a failed sealed unlink must not complete retention");
         assert!(
-            error.to_string().contains("sealed"),
-            "an unremovable artifact must return an explicit sealed-retirement error: {error}"
+            matches!(
+                &error,
+                GraphDbError::Unavailable { message }
+                    if message.starts_with("sealed generation store sealed directory removal failed:")
+                        || message.starts_with("sealed generation store sealed generation retirement refused:")
+            ),
+            "an unremovable artifact must fail at the sealed-directory unlink boundary: {error}"
         );
         assert_eq!(std::fs::read(&directory).unwrap(), b"not a directory");
         assert!(
