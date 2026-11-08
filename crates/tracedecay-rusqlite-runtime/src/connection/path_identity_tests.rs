@@ -182,6 +182,22 @@ fn rejecting_empty_attachment_does_not_release_another_writer_lock() {
 }
 
 #[test]
+fn header_magic_without_a_complete_sqlite_page_is_refused() {
+    let temp = TempDir::new().expect("tempdir");
+    for length in [16, 100, 511] {
+        let path = temp.path().join(format!("short-{length}.db"));
+        let mut bytes = vec![0_u8; length];
+        bytes[..16].copy_from_slice(b"SQLite format 3\0");
+        fs::write(&path, &bytes).expect("write incomplete SQLite header");
+        assert!(matches!(
+            OpenedDatabaseFile::pin_initialized(&path),
+            Err(OpenedDatabaseFileError::InvalidHeader)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+}
+
+#[test]
 fn path_checks_preserve_rollback_writer_lock() {
     let temp = TempDir::new().expect("tempdir");
     let path = temp.path().join("rollback.db");

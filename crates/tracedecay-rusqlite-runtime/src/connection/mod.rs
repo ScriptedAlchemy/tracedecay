@@ -103,7 +103,9 @@ impl OpenedDatabaseFile {
             if !metadata.is_file() {
                 return Err(OpenedDatabaseFileError::NotFile);
             }
-            if metadata.len() < 16 {
+            // SQLite's smallest initialized database occupies one 512-byte page.
+            // Header magic alone (16 bytes) is not a completed database.
+            if metadata.len() < 512 {
                 return Err(OpenedDatabaseFileError::InvalidHeader);
             }
         }
