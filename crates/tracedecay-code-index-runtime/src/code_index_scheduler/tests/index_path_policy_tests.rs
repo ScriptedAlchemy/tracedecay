@@ -191,3 +191,216 @@ async fn hook_hints_for_excluded_paths_queue_no_work() {
     );
     registry.shutdown().await;
 }
+
+#[test]
+fn submodule_policy_binds_live_graph_and_historical_child_pins_across_restart() {
+    use super::{git_stdout, run_git_in};
+    use crate::code_index_scheduler::{
+        branch_generations::BranchGenerationReadControlV1, git_tree_capture::ExactGitTreeSourceV1,
+    };
+    use tracedecay_code_index::grep_search::{GrepSearchQuery, search_tree_with_cancel};
+    use tracedecay_domain::{CommitId, RefId, RelationEdgeKindV1, RepositoryDirtyStateV1, TreeId};
+
+    let parent = GitFixture::new(&[(
+        "dev/launch.ts",
+        "import { feature } from '../app/lib';\nexport function launch() { return feature(); }\n",
+    )]);
+    let child = GitFixture::new(&[
+        (
+            "lib.ts",
+            "export function feature() { return 'pinned_symbol'; }\n",
+        ),
+        ("gone.ts", "export function gone() {}\n"),
+        ("media.bin", "local binary fixture"),
+        (".gitignore", "*.private.ts\n"),
+    ]);
+    run_git_in(
+        parent.path(),
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            child.path().to_str().unwrap(),
+            "app",
+        ],
+    );
+    run_git_in(parent.path(), &["commit", "-qm", "bind application"]);
+    run_git_in(parent.path(), &["branch", "pinned"]);
+    let pinned = ExactGitTreeSourceV1 {
+        reference: RefId::new("refs/heads/pinned").unwrap(),
+        revision: CommitId::new(git_stdout(parent.path(), &["rev-parse", "HEAD"])).unwrap(),
+        tree: TreeId::new(git_stdout(parent.path(), &["rev-parse", "HEAD^{tree}"])).unwrap(),
+    };
+    let store = TempDir::new().unwrap();
+    let enabled = policy(&[], &[]).with_submodules(true);
+    let grep = |needle: &str, policy: &IndexPathPolicyV1| {
+        search_tree_with_cancel(
+            parent.path(),
+            &GrepSearchQuery {
+                pattern: needle.to_owned(),
+                fixed_strings: true,
+                case_sensitive: true,
+                path_glob: Some("app/**".into()),
+                scope_prefix: None,
+                context_lines: 0,
+                max_results: 8,
+            },
+            policy,
+            || false,
+        )
+        .unwrap()
+        .hits
+        .into_iter()
+        .map(|hit| hit.file.to_string())
+        .collect::<Vec<_>>()
+    };
+    let mut off = start(&parent, store.path(), policy(&[], &[]));
+    off.reconcile_now().unwrap();
+    assert_eq!(indexed_paths(&off), ["dev/launch.ts"]);
+    assert!(grep("pinned_symbol", &policy(&[], &[])).is_empty());
+    drop(off);
+
+    let mut on = start(&parent, store.path(), enabled.clone());
+    on.reconcile_now().unwrap();
+    assert_eq!(
+        indexed_paths(&on),
+        ["app/gone.ts", "app/lib.ts", "dev/launch.ts"]
+    );
+    assert_eq!(grep("pinned_symbol", &enabled), ["app/lib.ts"]);
+    let assert_edge =
+        |generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1| {
+            let symbol = |name: &str| {
+                generation
+                    .symbols()
+                    .symbols
+                    .iter()
+                    .find(|item| item.simple_name == name)
+                    .unwrap()
+                    .occurrence
+                    .clone()
+            };
+            assert!(
+                generation
+                    .edges()
+                    .iter()
+                    .any(|edge| edge.kind == RelationEdgeKindV1::Calls
+                        && edge.from_occurrence == symbol("launch")
+                        && edge.to_occurrence == symbol("feature"))
+            );
+        };
+    assert_edge(on.latest_complete().unwrap().generation());
+    let checkout = parent.path().join("app");
+    std::fs::write(
+        checkout.join("ignored.private.ts"),
+        "const private_marker = 1;",
+    )
+    .unwrap();
+    assert!(grep("private_marker", &enabled).is_empty());
+    std::fs::write(
+        checkout.join("lib.ts"),
+        "export function feature() { return 'successor_symbol'; }\n",
+    )
+    .unwrap();
+    std::fs::remove_file(checkout.join("gone.ts")).unwrap();
+    run_git_in(&checkout, &["add", "-A"]);
+    run_git_in(
+        &checkout,
+        &["commit", "-qm", "move child HEAD independently"],
+    );
+    std::fs::write(
+        checkout.join("pending.ts"),
+        "export function pending() {}\n",
+    )
+    .unwrap();
+    assert!(on.ensure_fresh_for_query().unwrap().is_some());
+    assert_eq!(
+        indexed_paths(&on),
+        ["app/lib.ts", "app/pending.ts", "dev/launch.ts"]
+    );
+    assert_eq!(
+        on.latest_complete()
+            .unwrap()
+            .generation()
+            .repository_parse_identity()
+            .dirty,
+        RepositoryDirtyStateV1::Dirty
+    );
+    assert_eq!(grep("successor_symbol", &enabled), ["app/lib.ts"]);
+    run_git_in(parent.path(), &["submodule", "deinit", "-f", "app"]);
+    assert!(!checkout.join(".git").exists());
+    let historical = on
+        .publish_exact_git_tree_generation(
+            &pinned,
+            &BranchGenerationReadControlV1 {
+                deadline: None,
+                cancellation: None,
+            },
+        )
+        .unwrap();
+    let historical = historical.generation();
+    assert_edge(historical);
+    assert!(
+        !historical
+            .snapshot()
+            .files
+            .iter()
+            .any(|file| file.logical_path == "app/media.bin")
+    );
+    assert!(
+        historical
+            .snapshot()
+            .files
+            .iter()
+            .any(|file| file.logical_path == "app/gone.ts")
+    );
+    assert!(
+        !historical
+            .snapshot()
+            .files
+            .iter()
+            .any(|file| file.logical_path == "app/pending.ts")
+    );
+    let pinned_file = historical
+        .snapshot()
+        .files
+        .iter()
+        .find(|file| file.logical_path == "app/lib.ts")
+        .unwrap();
+    assert_eq!(
+        pinned_file.content_digest,
+        tracedecay_code_index::chunks::content_digest(
+            b"export function feature() { return 'pinned_symbol'; }\n"
+        )
+    );
+    drop(on);
+    let mut off = start(&parent, store.path(), policy(&[], &[]));
+    off.reconcile_now().unwrap();
+    assert_eq!(indexed_paths(&off), ["dev/launch.ts"]);
+}
+
+#[test]
+fn parent_filtered_source_does_not_require_submodule_registration_when_disabled() {
+    use super::run_git_in;
+    use tracedecay_code_index::chunks::content_digest;
+    use tracedecay_domain::LanguageId;
+
+    let source = "pub fn parent() {}\n";
+    let parent = GitFixture::new(&[
+        ("lib.rs", source),
+        (".gitmodules", "[submodule \"child\"]\npath = child\n"),
+    ]);
+    run_git_in(parent.path(), &["config", "core.autocrlf", "true"]);
+    std::fs::write(parent.path().join("lib.rs"), source.replace('\n', "\r\n")).unwrap();
+    std::fs::write(parent.path().join(".gitmodules"), "[unfinished").unwrap();
+    let sealed = super::super::sealed_source_bytes(
+        parent.path(),
+        "lib.rs",
+        &LanguageId::new("rust").unwrap(),
+        false,
+        &content_digest(source.as_bytes()),
+    )
+    .unwrap();
+    assert_eq!(sealed.as_deref(), Some(source.as_bytes()));
+}

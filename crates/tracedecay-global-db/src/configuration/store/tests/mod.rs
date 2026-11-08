@@ -50,13 +50,19 @@ fn incomplete_snapshot_requires_reset_instead_of_default_repair() {
 }
 
 #[asupersync::test]
-async fn linked_worktree_default_converges_into_existing_snapshot() {
+async fn linked_worktree_and_submodule_defaults_converge_into_existing_snapshot() {
     let (_directory, runtime, root) = Box::pin(global_setup()).await;
-    let key = SettingKey::new(SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY).unwrap();
+    let keys = [
+        SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY,
+        tracedecay_domain::configuration::INDEX_INCLUDE_SUBMODULES_SETTING_KEY,
+    ]
+    .map(|name| SettingKey::new(name).unwrap());
     let mut effective_values = root.snapshot.effective_values.clone();
     let mut provenance = root.snapshot.provenance.clone();
-    effective_values.remove(&key);
-    provenance.remove(&key);
+    for key in &keys {
+        effective_values.remove(key);
+        provenance.remove(key);
+    }
     let historical_snapshot = ConfigurationSnapshotV1::new(effective_values, provenance).unwrap();
     let db = runtime
         .registered_database(HostAdmissionScope::Project)
@@ -69,13 +75,18 @@ async fn linked_worktree_default_converges_into_existing_snapshot() {
         )
         .await
         .unwrap();
-    transaction
-        .execute(
-            "DELETE FROM configuration_entries WHERE revision_id = ?1 AND key = ?2",
-            tracedecay_runtime_core::db::engine::params![root.revision_id.as_str(), key.as_str()],
-        )
-        .await
-        .unwrap();
+    for key in &keys {
+        transaction
+            .execute(
+                "DELETE FROM configuration_entries WHERE revision_id = ?1 AND key = ?2",
+                tracedecay_runtime_core::db::engine::params![
+                    root.revision_id.as_str(),
+                    key.as_str()
+                ],
+            )
+            .await
+            .unwrap();
+    }
     point_revision_at_snapshot(&transaction, &root.revision_id, &historical_snapshot).await;
     transaction.commit().await.unwrap();
     let store = GlobalDbConfigurationControlStore::new_registered(db);
@@ -86,11 +97,13 @@ async fn linked_worktree_default_converges_into_existing_snapshot() {
         .unwrap();
 
     assert_ne!(converged.revision_id, root.revision_id);
-    assert_eq!(
-        converged.snapshot.effective_values.get(&key),
-        Some(&ConfigurationValueV1::Boolean(false))
-    );
-    assert!(converged.snapshot.provenance.contains_key(&key));
+    for key in &keys {
+        assert_eq!(
+            converged.snapshot.effective_values.get(key),
+            Some(&ConfigurationValueV1::Boolean(false))
+        );
+        assert!(converged.snapshot.provenance.contains_key(key));
+    }
     validate_snapshot_registry_completeness(&converged.snapshot).unwrap();
 }
 

@@ -13,6 +13,7 @@ pub(super) async fn compute_field_sites(
     graph: &tracedecay_graph_query::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
+    include_submodules: bool,
 ) -> Result<GraphToolCompletionV1> {
     let request: FieldSitesSurfaceRequestV1 =
         decode_primitive_request(&args, "tracedecay_field_sites")?;
@@ -63,6 +64,7 @@ pub(super) async fn compute_field_sites(
 
             let needle = format!(".{field_name}");
             'outer: for file in &files {
+                if tracedecay_code_index::source_walk::is_source_symlink(&project_root,Path::new(file))? { continue; }
                 let abs = project_root.join(file);
                 let Ok(disk_source) = tracedecay_runtime_core::sync::read_source_file(&abs) else {
                     continue;
@@ -76,7 +78,7 @@ pub(super) async fn compute_field_sites(
                 if !disk_source.contains(&needle) {
                     continue;
                 }
-                let source = sealed_field_source(&project_root, file, sealed_files.get(file))?;
+                let source = sealed_field_source(&project_root, file, sealed_files.get(file), include_submodules)?;
                 let masked = path_is_rust(file).then(|| {
                     tracedecay_code_extraction::source_mask::masked_rust_source_with(
                         &source,
@@ -198,6 +200,7 @@ fn sealed_field_source(
     project_root: &Path,
     file: &str,
     sealed: Option<&(LanguageId, ContentDigest)>,
+    include_submodules: bool,
 ) -> Result<String> {
     let Some((language, digest)) = sealed else {
         return Err(TraceDecayError::project_route(
@@ -208,7 +211,7 @@ fn sealed_field_source(
             ),
         ));
     };
-    let bytes = sealed_source_bytes(project_root, file, language, digest)
+    let bytes = sealed_source_bytes(project_root, file, language, include_submodules, digest)
         .map_err(|error| {
             TraceDecayError::project_route(
                 "verified-field-source-unavailable",

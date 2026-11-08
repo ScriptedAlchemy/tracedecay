@@ -9,6 +9,9 @@
 //! walk is therefore public rather than crate-private, the audit in the root
 //! crate reuses this policy instead of restating it.
 
+pub mod classification;
+pub mod submodules;
+
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -16,6 +19,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use ignore::overrides::{Override, OverrideBuilder};
 use ignore::{Walk, WalkBuilder};
 use tracedecay_domain::{IndexPathPolicyV1, forward_slash_path};
+
+pub type SourceWalk = std::iter::Flatten<std::vec::IntoIter<Walk>>;
 
 #[derive(Debug)]
 pub struct SourceWalkError {
@@ -25,6 +30,7 @@ pub struct SourceWalkError {
 
 /// Conservative directory reachability for a positive override. The override
 /// matcher remains authoritative for files, including directory inheritance.
+#[derive(Clone)]
 struct PathGlobScope {
     literal_prefix: PathBuf,
     may_match_descendants: bool,
@@ -340,7 +346,7 @@ pub fn source_walk(
     project_root: &Path,
     path_glob: Option<&str>,
     path_policy: &IndexPathPolicyV1,
-) -> Result<Walk, SourceWalkError> {
+) -> Result<SourceWalk, SourceWalkError> {
     source_walk_inner(project_root, path_glob, path_policy, None)
 }
 
@@ -351,7 +357,7 @@ pub(crate) fn source_walk_with_diagnostics(
     project_root: &Path,
     path_glob: Option<&str>,
     path_policy: &IndexPathPolicyV1,
-) -> Result<(Walk, SourceWalkDiagnostics), SourceWalkError> {
+) -> Result<(SourceWalk, SourceWalkDiagnostics), SourceWalkError> {
     let diagnostics = SourceWalkDiagnostics::default();
     let walk = source_walk_inner(
         project_root,
@@ -367,7 +373,7 @@ fn source_walk_inner(
     path_glob: Option<&str>,
     path_policy: &IndexPathPolicyV1,
     diagnostics: Option<SourceWalkDiagnostics>,
-) -> Result<Walk, SourceWalkError> {
+) -> Result<SourceWalk, SourceWalkError> {
     let overrides = build_overrides(project_root, path_glob)?;
     let has_positive_override = overrides
         .as_ref()
@@ -376,88 +382,163 @@ fn source_walk_inner(
     let path_glob_scope = path_glob.and_then(PathGlobScope::from_path_glob);
     let filter_root = project_root.to_path_buf();
     let path_policy = path_policy.clone();
-    let parent_gitlinks = parent_gitlink_paths(project_root)?;
-
-    let mut builder = WalkBuilder::new(project_root);
-    builder
-        .follow_links(false)
-        .hidden(false)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .add_custom_ignore_filename(".gitignore")
-        .filter_entry(move |entry| {
-            if entry.depth() == 0 {
-                return true;
-            }
-            let segment = entry.file_name().to_string_lossy();
-            if segment == ".git" || segment == ".tracedecay" {
-                return false;
-            }
-            let Ok(relative) = entry.path().strip_prefix(&filter_root) else {
-                return false;
-            };
-            let relative = forward_slash_path(relative);
-            let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
-            if is_dir
-                && path_glob_scope
+    let scoped_policy = {
+        let root = filter_root.clone();
+        let scope = path_glob_scope.clone();
+        move |path: &Path, is_dir: bool| {
+            has_positive_override
+                && (generated_dir_overrides
                     .as_ref()
-                    .is_some_and(|scope| !scope.may_contain_match(&filter_root, entry.path()))
-            {
-                return false;
+                    .is_some_and(|overrides| overrides.matched(path, is_dir).is_whitelist())
+                    || (is_dir
+                        && scope
+                            .as_ref()
+                            .is_some_and(|scope| scope.allows(&root, path))))
+        }
+    };
+    let mut parent_gitlinks = parent_gitlink_paths(project_root)?;
+    let mut authenticated = BTreeSet::new();
+    let mut child_files = BTreeSet::new();
+    if path_policy.includes_submodules() && !parent_gitlinks.is_empty() {
+        let parent = tracedecay_runtime_core::git_open::open(project_root).map_err(|error| {
+            SourceWalkError {
+                glob: String::new(),
+                message: error.to_string(),
             }
-            // An entry the glob names, or a directory it must pass through,
-            // is judged without the generated-directory defaults: the scope
-            // is the operator asking for that noise. Every other exclusion
-            // still applies; only `index.include.v1` lifts those.
-            let explicitly_requested = has_positive_override
-                && (generated_dir_overrides.as_ref().is_some_and(|overrides| {
-                    overrides.matched(entry.path(), is_dir).is_whitelist()
-                }) || (is_dir
-                    && path_glob_scope
-                        .as_ref()
-                        .is_some_and(|scope| scope.allows(&filter_root, entry.path()))));
-            let path_policy = if explicitly_requested {
+        })?;
+        for (path, child) in submodules::live_submodules(&parent)? {
+            let absolute = project_root.join(&path);
+            let policy = if scoped_policy(&absolute, true) {
                 path_policy.without_generated_dir_defaults()
             } else {
                 &path_policy
             };
-            if !is_dir {
-                return !path_policy.excludes(&relative);
+            if policy.excludes_directory(&path)
+                || path_glob_scope
+                    .as_ref()
+                    .is_some_and(|scope| !scope.may_contain_match(project_root, &absolute))
+            {
+                continue;
             }
-            // Excluded directories are outside this audit, not missing source
-            // caused by the repository boundary. Do not probe or name them.
-            if path_policy.excludes_directory(&relative) {
-                return false;
+            let repo =
+                tracedecay_runtime_core::git_open::open(&child.git_dir).map_err(|error| {
+                    SourceWalkError {
+                        glob: String::new(),
+                        message: error.to_string(),
+                    }
+                })?;
+            let inventory = classification::WorktreeChangeClassificationV1::classify(&repo)
+                .map_err(|error| SourceWalkError {
+                    glob: String::new(),
+                    message: error.to_string(),
+                })?;
+            let files = inventory
+                .regular_child_files(&child.worktree)
+                .map_err(|error| SourceWalkError {
+                    glob: String::new(),
+                    message: error.to_string(),
+                })?;
+            child_files.extend(files.into_iter().map(|file| format!("{path}/{file}")));
+            // Only direct registrations belong to this parent.
+            for nested in inventory.gitlink_paths() {
+                parent_gitlinks.insert(format!("{path}/{nested}"));
             }
-            // Includes select paths, not repository authority. A parent
-            // gitlink does not capture the child's files or prove their
-            // freshness, so even registered submodules remain separate
-            // sources. Linked worktrees and nested clones share this boundary.
-            // The project root is deliberately exempt at depth zero above.
-            if parent_gitlinks.contains(&relative) {
+            authenticated.insert(path);
+        }
+    }
+
+    let roots = authenticated
+        .iter()
+        .map(|path| project_root.join(path))
+        .collect::<Vec<_>>();
+    let child_dirs = child_files
+        .iter()
+        .flat_map(|path| Path::new(path).ancestors().skip(1))
+        .map(Path::to_owned)
+        .collect::<BTreeSet<_>>();
+
+    let accept = Arc::new(move |entry: &ignore::DirEntry, in_child: bool| {
+        let segment = entry.file_name().to_string_lossy();
+        if segment == ".git" || segment == ".tracedecay" {
+            return false;
+        }
+        let Ok(relative) = entry.path().strip_prefix(&filter_root) else {
+            return false;
+        };
+        let relative = forward_slash_path(relative);
+        let is_dir = entry.file_type().is_some_and(|kind| kind.is_dir());
+        if is_dir
+            && path_glob_scope
+                .as_ref()
+                .is_some_and(|scope| !scope.may_contain_match(&filter_root, entry.path()))
+        {
+            return false;
+        }
+        // An entry the glob names, or a directory it must pass through,
+        // is judged without the generated-directory defaults: the scope
+        // is the operator asking for that noise. Every other exclusion
+        // still applies; only `index.include.v1` lifts those.
+        let path_policy = if scoped_policy(entry.path(), is_dir) {
+            path_policy.without_generated_dir_defaults()
+        } else {
+            &path_policy
+        };
+        if !is_dir {
+            return !path_policy.excludes(&relative)
+                && (!in_child || child_files.contains(&relative));
+        }
+        // Excluded directories are outside this audit, not missing source
+        // caused by the repository boundary. Do not probe or name them.
+        if path_policy.excludes_directory(&relative) {
+            return false;
+        }
+        // Only an independently bound direct gitlink may cross a checkout boundary.
+        if authenticated.contains(&relative) {
+            return in_child;
+        }
+        if parent_gitlinks.contains(&relative) {
+            if let Some(diagnostics) = &diagnostics {
+                diagnostics.record_skipped_nested_repository(relative);
+            }
+            return false;
+        }
+        match nested_repository_marker(entry.path()) {
+            Ok(true) => {
                 if let Some(diagnostics) = &diagnostics {
                     diagnostics.record_skipped_nested_repository(relative);
                 }
-                return false;
+                false
             }
-            match nested_repository_marker(entry.path()) {
-                Ok(true) => {
-                    if let Some(diagnostics) = &diagnostics {
-                        diagnostics.record_skipped_nested_repository(relative);
-                    }
-                    false
-                }
-                Ok(false) => true,
-                // The walk cannot prove that an unreadable Git marker is
-                // absent. Never admit files across that boundary.
-                Err(_) => false,
+            Ok(false) => !in_child || child_dirs.contains(Path::new(&relative)),
+            // The walk cannot prove that an unreadable Git marker is
+            // absent. Never admit files across that boundary.
+            Err(_) => false,
+        }
+    });
+    let mut builders = vec![(WalkBuilder::new(project_root), false)];
+    builders.extend(roots.into_iter().map(|root| (WalkBuilder::new(root), true)));
+    let walks = builders
+        .into_iter()
+        .map(|(mut builder, in_child)| {
+            // The child Git roster already applied that checkout's ignores, including
+            // tracked exceptions. Running parent ignore rules over it would hide those files.
+            if in_child {
+                builder.standard_filters(false);
+            } else {
+                builder.add_custom_ignore_filename(".gitignore");
             }
-        });
-    if let Some(overrides) = overrides {
-        builder.overrides(overrides);
-    }
-    Ok(builder.build())
+            let accept = Arc::clone(&accept);
+            builder
+                .follow_links(false)
+                .hidden(false)
+                .filter_entry(move |entry| accept(entry, in_child));
+            if let Some(overrides) = &overrides {
+                builder.overrides(overrides.clone());
+            }
+            builder.build()
+        })
+        .collect::<Vec<_>>();
+    Ok(walks.into_iter().flatten())
 }
 
 /// Project-relative path rendered with forward slashes.
@@ -503,7 +584,8 @@ mod tests {
     use tracedecay_domain::IndexPathPolicyV1;
 
     use super::{
-        has_nested_repository_ancestor, is_source_symlink, source_walk, source_walk_with_diagnostics,
+        has_nested_repository_ancestor, is_source_symlink, source_walk,
+        source_walk_with_diagnostics,
     };
 
     #[test]
@@ -808,11 +890,45 @@ mod tests {
             );
         }
 
+        let enabled = IndexPathPolicyV1::new(vec![], vec![])
+            .unwrap()
+            .with_submodules(true);
+        fixture_git(
+            &child,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                root.join("other-worktree").to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        fixture_git(
+            &root,
+            &["clone", "-q", child.to_str().unwrap(), "other-clone"],
+        );
+        let files = walked_files(&root, &enabled);
+        assert!(files.contains(&PathBuf::from("app/src/feature.rs")));
+        assert!(files.iter().all(|path|!path.starts_with("other-worktree") && !path.starts_with("other-clone")));
+        fixture_git(
+            &child,
+            &[
+                "worktree",
+                "remove",
+                root.join("other-worktree").to_str().unwrap(),
+            ],
+        );
+        fs::remove_dir_all(root.join("other-clone")).unwrap();
+        fs::remove_file(root.join(".gitmodules")).unwrap();
+        assert!(!walked_files(&root, &enabled).contains(&PathBuf::from("app/src/feature.rs")));
+        fixture_git(&root, &["checkout", "--", ".gitmodules"]);
         // A missing child .git marker must not turn the parent's stage-0
         // gitlink into ordinary live source under an explicit include.
         fs::remove_file(root.join("app/.git")).expect("remove child gitdir marker");
         assert!(root.join("app/src/feature.rs").is_file());
         let policy = IndexPathPolicyV1::new(vec![], vec!["app/**".into()]).unwrap();
+        assert!(!walked_files(&root, &enabled).contains(&PathBuf::from("app/src/feature.rs")));
         let (walk, diagnostics) =
             source_walk_with_diagnostics(&root, None, &policy).expect("source walk");
         let files = walk

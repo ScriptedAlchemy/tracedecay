@@ -53,6 +53,9 @@ pub struct CodeIndexBuildRequestV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeIndexRepositoryParseIdentityV1 {
+    /// Older sealed generations used the default parent-only roster.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_submodules: bool,
     pub tree: Option<TreeId>,
     pub dirty: RepositoryDirtyStateV1,
 }

@@ -17,10 +17,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use gix::bstr::ByteSlice;
-use tracedecay_code_index::source_walk::{
+use super::{
     has_nested_repository_ancestor, is_source_symlink, parent_gitlink_paths,
+    submodules::live_submodules,
 };
+use gix::bstr::ByteSlice;
 use tracedecay_runtime_core::git_repository::GIT_STATUS_MODIFICATION_CHECK_THREADS;
 
 /// Failure to classify worktree changes through gix.
@@ -100,6 +101,9 @@ pub struct WorktreeChangeClassificationV1 {
     /// or symlinked ancestor. These are tombstones, not indexable candidates.
     nested_repository_exclusions: BTreeSet<String>,
     parent_gitlinks: BTreeSet<String>,
+    /// Direct parent-relative child paths admitted from that checkout's own Git roster.
+    child_sources: BTreeMap<String, String>,
+    child_revision_changed: bool,
 }
 
 impl WorktreeChangeClassificationV1 {
@@ -266,9 +270,93 @@ impl WorktreeChangeClassificationV1 {
         Ok(classification)
     }
 
-    /// Explicitly enrolled files must respect the same Git boundary snapshot
-    /// as ordinary candidates, including a gitlink staged for removal.
-    pub(super) fn beneath_gitlink(&self, path: &Path) -> bool {
+    pub fn for_policy(
+        repository: &gix::Repository,
+        include_submodules: bool,
+    ) -> Result<Self, ClassificationErrorV1> {
+        let mut parent = Self::classify(repository)?;
+        if !include_submodules || parent.parent_gitlinks.is_empty() {
+            return Ok(parent);
+        }
+        let children = live_submodules(repository)
+            .map_err(|error| ClassificationErrorV1::Git(error.message))?;
+        // A missing checkout must not let the clean parent-tree shortcut import children.
+        parent.child_revision_changed = parent
+            .parent_gitlinks
+            .iter()
+            .any(|path| !children.contains_key(path));
+        for (prefix, binding) in children {
+            let child = tracedecay_runtime_core::git_open::open(&binding.git_dir)
+                .map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
+            let child_head = child
+                .head_id()
+                .map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
+            parent.child_revision_changed |= child_head.detach() != binding.pin;
+            let local = Self::classify(&child)?;
+            for path in local.regular_child_files(&binding.worktree)? {
+                let logical = format!("{prefix}/{path}");
+                parent.committed_baseline.insert(logical.clone());
+                parent.child_sources.insert(logical, prefix.clone());
+            }
+            for change in local.changes {
+                let path = format!("{prefix}/{}", change.path);
+                if !change.class.presents_content() || parent.child_sources.contains_key(&path) {
+                    parent.changes.push(ClassifiedChangeV1 {
+                        path,
+                        class: change.class,
+                    });
+                }
+            }
+            parent.nested_repository_exclusions.extend(
+                local
+                    .nested_repository_exclusions
+                    .into_iter()
+                    .map(|path| format!("{prefix}/{path}")),
+            );
+            let qualify = |path: &[u8]| [prefix.as_bytes(), b"/", path].concat();
+            parent
+                .non_utf8_paths
+                .extend(local.non_utf8_paths.into_iter().map(|path| qualify(&path)));
+            parent
+                .non_utf8_changes
+                .extend(local.non_utf8_changes.into_iter().map(|change| {
+                    NonUtf8ClassifiedChangeV1 {
+                        git_path: qualify(&change.git_path),
+                        class: change.class,
+                    }
+                }));
+        }
+        Ok(parent)
+    }
+
+    pub(super) fn regular_child_files(&self, root: &Path) -> std::io::Result<BTreeSet<String>> {
+        let mut files = BTreeSet::new();
+        for path in self.candidate_paths() {
+            if !super::submodules::is_source_location(Path::new(&path)) {
+                continue;
+            }
+            match root.join(&path).symlink_metadata() {
+                Ok(metadata) if metadata.is_file() => {
+                    files.insert(path);
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(files)
+    }
+
+    pub fn child_root(&self, logical_path: &str) -> Option<&str> {
+        self.child_sources.get(logical_path).map(String::as_str)
+    }
+
+    pub(super) fn gitlink_paths(&self) -> &BTreeSet<String> {
+        &self.parent_gitlinks
+    }
+
+    /// Explicit enrollment cannot cross a parent gitlink staged for removal.
+    pub fn beneath_gitlink(&self, path: &Path) -> bool {
         path.ancestors()
             .skip(1)
             .filter_map(Path::to_str)
@@ -315,7 +403,8 @@ impl WorktreeChangeClassificationV1 {
     pub fn has_changes(&self) -> bool {
         !(self.changes().is_empty()
             && self.non_utf8_changes().is_empty()
-            && self.nested_repository_exclusions.is_empty())
+            && self.nested_repository_exclusions.is_empty()
+            && !self.child_revision_changed)
     }
 
     /// Whether any classified change is a merge conflict.
@@ -342,7 +431,7 @@ impl WorktreeChangeClassificationV1 {
     }
 
     /// Paths removed from the present snapshot (staged or unstaged deletions).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn deleted_paths(&self) -> BTreeSet<String> {
         self.changes
             .iter()
@@ -364,7 +453,7 @@ impl WorktreeChangeClassificationV1 {
     }
 
     /// The class recorded for `path`, if any change touched it.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn class_of(&self, path: &str) -> Option<WorktreeChangeClassV1> {
         self.changes
             .iter()
@@ -533,7 +622,10 @@ mod nested_repository_tests {
         );
         symlink("app/src/lib.rs", parent.join("bridge.rs")).unwrap();
         fixture_git(&parent, &["add", ".gitmodules", "app", "bridge.rs"]);
-        fixture_git(&parent, &["commit", "-qm", "registered child and source alias"]);
+        fixture_git(
+            &parent,
+            &["commit", "-qm", "registered child and source alias"],
+        );
         assert_eq!(
             fs::read_to_string(parent.join("bridge.rs")).unwrap(),
             "pub fn child() {}\n",
@@ -550,7 +642,10 @@ mod nested_repository_tests {
         let classified = WorktreeChangeClassificationV1::classify(&repository).unwrap();
         assert!(!classified.candidate_paths().contains("bridge.rs"));
         assert!(classified.changed_paths().contains("bridge.rs"));
-        assert!(classified.has_changes(), "do not reuse HEAD tree source bytes");
+        assert!(
+            classified.has_changes(),
+            "do not reuse HEAD tree source bytes"
+        );
         assert!(!classified.candidate_paths().contains("app/src/lib.rs"));
     }
 

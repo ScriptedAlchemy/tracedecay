@@ -260,7 +260,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     ) -> Result<CodeIndexIgnoredDependencyBuildV1, CodeIndexSchedulerErrorV1> {
         let source_control = self.reconcile_control();
         let began_under = source_control.expected_epoch();
-        let captured_under = super::identity::GitMetadataFingerprintV1::capture(&self.project_root);
+        let captured_under = self.freshness_fence().git_metadata(&self.project_root);
         let _workers = self.ensure_worker_plan()?;
         let _worker_memory = match self.reserve_worker_memory() {
             Ok(reservation) => reservation,

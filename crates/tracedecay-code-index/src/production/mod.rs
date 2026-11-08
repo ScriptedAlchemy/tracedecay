@@ -151,6 +151,7 @@ pub const DAEMON_CODE_INDEX_CHUNKER_REVISION: &str = "chunker.daemon.v5";
 /// Immutable configuration retained by one production index owner.
 #[derive(Clone, Debug)]
 pub struct CodeIndexProductionConfigV1 {
+    pub include_submodules: bool,
     pub project_id: ProjectId,
     pub repository: RepositoryId,
     pub sanitizer_revision: SanitizerRevision,
@@ -192,6 +193,7 @@ pub enum CodeIndexGenerationIncompatibilityV1 {
     SanitizerRevision,
     PolicyRevision,
     MixedPolicyRevisions,
+    SubmodulePolicy,
     ChunkerRevision,
     PrivacyDomain,
     PrivacyKeyEpoch,
@@ -203,6 +205,7 @@ impl CodeIndexGenerationIncompatibilityV1 {
             Self::Project => "project",
             Self::LanguageRevisions => "language_revisions",
             Self::SanitizerRevision => "sanitizer_revision",
+            Self::SubmodulePolicy => "submodule_policy",
             Self::PolicyRevision => "policy_revision",
             Self::MixedPolicyRevisions => "mixed_policy_revisions",
             Self::ChunkerRevision => "chunker_revision",
@@ -226,6 +229,17 @@ pub struct CodeIndexGenerationCompatibilityV1 {
 }
 
 impl CodeIndexGenerationCompatibilityV1 {
+    fn observe_submodule_policy(
+        &mut self,
+        identity: &CodeIndexRepositoryParseIdentityV1,
+        config: &CodeIndexProductionConfigV1,
+    ) {
+        if identity.include_submodules != config.include_submodules {
+            self.incompatibilities
+                .insert(CodeIndexGenerationIncompatibilityV1::SubmodulePolicy);
+        }
+    }
+
     fn for_metadata(
         manifest: &CodeGenerationManifestV1,
         snapshot: &SanitizedCodeSnapshotV1,
@@ -1456,6 +1470,7 @@ impl CodeIndexPublishedGenerationV1 {
             &self.snapshot,
             config,
         );
+        compatibility.observe_submodule_policy(self.repository_parse_identity(), config);
         self.chunk_policy_summary()
             .observe(config, &mut compatibility);
         compatibility
@@ -2364,6 +2379,11 @@ where
         crate::observe::record_generation_state("building");
         crate::observe::record_rebuild_state("unknown");
         lexical_page_source::checkpoint(control)?;
+        if request.repository_parse_identity.include_submodules != self.config.include_submodules {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "snapshot submodule policy differs from owner".to_owned(),
+            ));
+        }
         let ignored_source_roster = IgnoredSourceRosterV1::admit(
             &request.snapshot,
             &request.repository_parse_identity,

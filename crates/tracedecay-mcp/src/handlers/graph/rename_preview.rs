@@ -175,6 +175,7 @@ struct RenameReferenceSiteInput {
 }
 
 struct PreviewFileWalk {
+    include_submodules: bool,
     project_root: PathBuf,
     declaration_line: u32,
     result: RenamePreviewPrimitiveResultV1,
@@ -202,6 +203,19 @@ impl PreviewFileWalk {
             let has_references = reference_inputs
                 .peek()
                 .is_some_and(|input| input.file == file);
+            if tracedecay_code_index::source_walk::is_source_symlink(
+                &self.project_root,
+                std::path::Path::new(&file),
+            )? {
+                if has_references {
+                    return Err(TraceDecayError::project_route(
+                        "verified-reference-source-unavailable",
+                        true,
+                        format!("a source symlink replaced '{file}'"),
+                    ));
+                }
+                continue;
+            }
             let text = match tracedecay_runtime_core::sync::read_source_file(
                 &self.project_root.join(&file),
             ) {
@@ -220,6 +234,7 @@ impl PreviewFileWalk {
                     &self.project_root,
                     &file,
                     language,
+                    self.include_submodules,
                     digest,
                 )
                 .map_err(|error| {
@@ -427,6 +442,7 @@ pub async fn compute_rename_preview(
         freshness: None,
     };
     let walk = PreviewFileWalk {
+        include_submodules: ctx.index_path_policy().includes_submodules(),
         project_root: ctx.project_root().to_path_buf(),
         declaration_line,
         result,

@@ -100,6 +100,7 @@ pub(super) fn request(files: &[(&str, &str, &str)], sealed_at: i64) -> CodeIndex
         invalidations: BTreeSet::new(),
         ignored_source_admissions: Vec::new(),
         repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            include_submodules: false,
             tree: None,
             dirty: tracedecay_domain::RepositoryDirtyStateV1::Dirty,
         },

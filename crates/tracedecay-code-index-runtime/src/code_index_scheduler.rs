@@ -201,7 +201,7 @@ mod activation;
 pub mod branch_generations;
 pub mod branch_publication;
 mod cadence;
-mod classification;
+use tracedecay_code_index::source_walk::classification;
 mod demand_admission;
 mod freshness_witness;
 pub use freshness_witness::sealed_source_bytes;

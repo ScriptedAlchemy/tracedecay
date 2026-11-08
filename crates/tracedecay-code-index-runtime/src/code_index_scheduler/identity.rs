@@ -154,6 +154,11 @@ pub struct GitMetadataFingerprintV1 {
     /// branch switch changes this even when mtime resolution is too coarse to
     /// observe, so content is compared alongside mtimes.
     head_contents: Option<String>,
+    // Include the registered child pin, bound checkout and resolved HEAD in the same
+    // read-admission proof as the parent. A failed probe cannot renew that proof.
+    submodule_refs: Option<String>,
+    submodule_indexes: Option<String>,
+    submodule_probe_failed: bool,
 }
 
 impl GitMetadataFingerprintV1 {
@@ -176,19 +181,60 @@ impl GitMetadataFingerprintV1 {
             packed_refs: mtime(&common_dir.join("packed-refs")),
             refs_heads: refs_heads_signature(&common_dir.join("refs").join("heads")),
             head_contents: std::fs::read_to_string(&head_path).ok(),
+            ..Self::default()
         }
+    }
+
+    pub(super) fn for_policy(project_root: &Path, include_submodules: bool) -> Self {
+        let mut fingerprint = Self::capture(project_root);
+        if include_submodules {
+            let probes = (|| {
+                let parent = tracedecay_runtime_core::git_open::open(project_root).ok()?;
+                let children =
+                    tracedecay_code_index::source_walk::submodules::live_submodules(&parent)
+                        .ok()?;
+                let mut refs = Vec::new();
+                let mut indexes = Vec::new();
+                for (path, binding) in children {
+                    let child = tracedecay_runtime_core::git_open::open(&binding.git_dir).ok()?;
+                    let head = child.head_id().ok()?.detach();
+                    refs.push((
+                        path.clone(),
+                        binding.git_dir,
+                        binding.pin.to_string(),
+                        head.to_string(),
+                    ));
+                    indexes.push((path, mtime(&child.index_path())));
+                }
+                Some((
+                    tracedecay_domain::canonical_sha256(&refs).ok()?,
+                    tracedecay_domain::canonical_sha256(&indexes).ok()?,
+                ))
+            })();
+            match probes {
+                Some((refs, indexes)) => {
+                    fingerprint.submodule_refs = Some(refs.as_str().to_owned());
+                    fingerprint.submodule_indexes = Some(indexes.as_str().to_owned());
+                }
+                None => fingerprint.submodule_probe_failed = true,
+            }
+        }
+        fingerprint
     }
 
     /// Whether the sampled metadata differs from a previously captured value.
     pub fn differs_from(&self, other: &GitMetadataFingerprintV1) -> bool {
-        self != other
+        self.submodule_probe_failed || other.submodule_probe_failed || self != other
     }
 
     /// Whether HEAD and every branch ref are unchanged. The index is excluded:
     /// opening the repository may refresh `.git/index` on its own, while a
     /// commit, checkout, or ref update always moves HEAD or a ref.
     pub fn same_refs_as(&self, other: &GitMetadataFingerprintV1) -> bool {
-        self.head == other.head
+        !self.submodule_probe_failed
+            && !other.submodule_probe_failed
+            && self.submodule_refs == other.submodule_refs
+            && self.head == other.head
             && self.packed_refs == other.packed_refs
             && self.refs_heads == other.refs_heads
             && self.head_contents == other.head_contents
@@ -206,7 +252,7 @@ impl GitMetadataFingerprintV1 {
             time.and_then(|time| time.duration_since(UNIX_EPOCH).ok())
                 .map_or_else(|| "-".to_owned(), |elapsed| elapsed.as_nanos().to_string())
         }
-        format!(
+        let mut signature = format!(
             "head={}|index={}|packed_refs={}|refs_heads={}|head_contents={}",
             render_time(self.head),
             render_time(self.index),
@@ -216,7 +262,13 @@ impl GitMetadataFingerprintV1 {
                 || "-".to_owned(),
                 |value| super::sha256_hex(value.as_bytes())
             ),
-        )
+        );
+        if let (Some(refs), Some(indexes)) = (&self.submodule_refs, &self.submodule_indexes) {
+            signature.push_str(&format!(
+                "|submodule_refs={refs}|submodule_indexes={indexes}"
+            ));
+        }
+        signature
     }
 }
 

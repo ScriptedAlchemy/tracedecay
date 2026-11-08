@@ -825,13 +825,11 @@ fn unfollowable_committed_source_links_are_absent_from_disk_capture() {
     );
 }
 
-/// Git stores a committed source symlink as its target path, while the
-/// worktree reads through it. Sealing the link text from HEAD's tree left the
-/// first post-publication sweep disproving an unchanged checkout, so every
-/// mount rebuilt once and served the rebuild as dirty.
+/// A readable live symlink stays outside the worktree roster. The remaining
+/// files can still establish a current generation without naming the full HEAD tree.
 #[cfg(unix)]
 #[test]
-fn committed_source_symlink_publishes_a_current_clean_generation() {
+fn committed_source_symlink_publishes_current_regular_files_only() {
     let fixture = GitFixture::new(&[
         ("src/lib.rs", "pub mod pricing;\n"),
         ("src/pricing.rs", "pub fn total() -> u64 { 1 }\n"),
@@ -851,16 +849,16 @@ fn committed_source_symlink_publishes_a_current_clean_generation() {
         !scheduler.request_fresh_now_background(),
         "the sweep after publication must find the unchanged checkout current"
     );
+    let latest = scheduler.latest_complete().expect("published generation");
+    let snapshot = latest.generation.snapshot();
+    assert!(snapshot.source_revision.is_none());
     assert_eq!(
-        scheduler
-            .latest_complete()
-            .expect("published generation")
-            .generation
-            .snapshot()
-            .source_revision
-            .as_ref(),
-        scheduler.identity.head_commit(),
-        "a clean checkout's generation must carry HEAD's revision"
+        snapshot
+            .files
+            .iter()
+            .map(|file| file.logical_path.as_str())
+            .collect::<Vec<_>>(),
+        ["src/lib.rs", "src/pricing.rs"]
     );
 }
 

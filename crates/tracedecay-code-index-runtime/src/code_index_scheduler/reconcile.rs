@@ -567,6 +567,7 @@ pub(crate) struct SourceFreshnessFenceV1 {
     source_epoch: Arc<AtomicU64>,
     /// Held only by source sweeps, never across a scheduler pass.
     sweep_cache: Arc<Mutex<SourceSweepCacheV1>>,
+    include_submodules: bool,
     pending_source: Option<Arc<dyn super::CodeIndexSourcePendingReaderV1>>,
 }
 
@@ -590,6 +591,10 @@ pub(super) struct SourceFreshnessFenceStateV1 {
 }
 
 impl SourceFreshnessFenceV1 {
+    pub(super) fn git_metadata(&self, root: &Path) -> identity::GitMetadataFingerprintV1 {
+        identity::GitMetadataFingerprintV1::for_policy(root, self.include_submodules)
+    }
+
     fn unverified(source_epoch: Arc<AtomicU64>, path_policy: IndexPathPolicyV1) -> Self {
         Self {
             state: Arc::new(Mutex::new(SourceFreshnessFenceStateV1 {
@@ -604,6 +609,7 @@ impl SourceFreshnessFenceV1 {
             })),
             last_reconciled_at_micros: Arc::new(AtomicI64::new(0)),
             source_epoch,
+            include_submodules: path_policy.includes_submodules(),
             sweep_cache: Arc::new(Mutex::new(SourceSweepCacheV1::new(path_policy))),
             pending_source: None,
         }
@@ -723,7 +729,8 @@ impl SourceFreshnessFenceV1 {
     pub(super) fn verified_git_metadata_moved(&self, project_root: &Path) -> bool {
         let state = self.snapshot();
         state.verified_against_source
-            && identity::GitMetadataFingerprintV1::capture(project_root)
+            && self
+                .git_metadata(project_root)
                 .differs_from(&state.git_metadata)
     }
 
@@ -760,7 +767,8 @@ impl SourceFreshnessFenceV1 {
         }
         state.verified_against_source
             && self.source_epoch.load(Ordering::Acquire) == state.reconciled_source_epoch
-            && !identity::GitMetadataFingerprintV1::capture(project_root)
+            && !self
+                .git_metadata(project_root)
                 .differs_from(&state.git_metadata)
     }
 
@@ -893,12 +901,13 @@ impl SourceFreshnessFenceV1 {
         &self,
         project_root: &Path,
         manifest: &SourceContentManifestV1,
+        candidate_paths: &BTreeSet<String>,
         shutting_down: &AtomicBool,
     ) -> Result<BTreeSet<String>, CodeIndexSchedulerErrorV1> {
         self.sweep_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .disputed_sources(project_root, manifest, shutting_down)
+            .disputed_sources(project_root, manifest, candidate_paths, shutting_down)
     }
 
     /// Sweep the current witness and report what the sweep had to read.
@@ -916,7 +925,7 @@ impl SourceFreshnessFenceV1 {
         self.sweep_sources(
             project_root,
             &freshness.source_roster,
-            &identity::GitMetadataFingerprintV1::capture(project_root),
+            &self.git_metadata(project_root),
             &witness.content_manifest,
             shutting_down,
         )
@@ -937,7 +946,7 @@ impl SourceFreshnessFenceV1 {
         if !freshness.verified_against_source {
             return FreshnessProbeVerdictV1::Unverified;
         }
-        let git_metadata = identity::GitMetadataFingerprintV1::capture(project_root);
+        let git_metadata = self.git_metadata(project_root);
         if git_metadata.differs_from(&freshness.git_metadata) {
             return FreshnessProbeVerdictV1::Moved;
         }
@@ -1336,6 +1345,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         .with_shutdown_signal(Arc::clone(&shutting_down))
         .with_decoded_content(byte_pool.decoded_content.clone());
         let production_config = CodeIndexProductionConfigV1 {
+            include_submodules: path_policy.includes_submodules(),
             project_id: project_id.clone(),
             repository: repository_id.clone(),
             sanitizer_revision,
@@ -1996,7 +2006,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         {
             return Ok(None);
         }
-        let metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
+        let metadata = self.freshness_fence.git_metadata(&self.project_root);
         if witness.git_metadata_signature != metadata.stable_signature() {
             return Ok(None);
         }
@@ -2052,7 +2062,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         if witness.generation_id != pointer.generation_id {
             return false;
         }
-        let metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
+        let metadata = self.freshness_fence.git_metadata(&self.project_root);
         if witness.git_metadata_signature != metadata.stable_signature() {
             return false;
         }
@@ -2234,7 +2244,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             ));
         }
         self.identity = resolved;
-        let sampled_metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
+        let sampled_metadata = self.freshness_fence.git_metadata(&self.project_root);
         let Some(sampled_sweep) = self.worktree_stat_sweep().ok() else {
             return Ok(None);
         };
@@ -2343,7 +2353,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         let captured = self
             .capture_authoritative_snapshot_without_active_generation_reuse(Some(&control))
             .map_err(|error| prefer_resident_memory_refusal(&control, error))?;
-        let git_metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
+        let git_metadata = self.freshness_fence.git_metadata(&self.project_root);
         let stat_signature = self.worktree_stat_signature().ok();
         let drained_hints = {
             let mut hints = self
@@ -2927,7 +2937,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         // bound to; a HEAD move under the same worktree is allowed and simply
         // records a new source revision, so the served generation is never
         // mis-attributed across identities.
-        let captured_under = identity::GitMetadataFingerprintV1::capture(&self.project_root);
+        let captured_under = self.freshness_fence.git_metadata(&self.project_root);
         let resolved = identity::IndexingIdentityV1::resolve(&self.project_root)
             .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
         if !resolved.authorizes_reuse_of(&self.identity) {
@@ -3199,7 +3209,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         source_epoch: u64,
         captured_under: &identity::GitMetadataFingerprintV1,
     ) {
-        let sampled = identity::GitMetadataFingerprintV1::capture(&self.project_root);
+        let sampled = self.freshness_fence.git_metadata(&self.project_root);
         let metadata = if sampled.same_refs_as(captured_under) {
             sampled
         } else {
@@ -3318,7 +3328,9 @@ impl CodeIndexWorktreeSchedulerV1 {
         }
         let freshness = self.freshness_fence.snapshot();
         if !freshness.verified_against_source
-            || identity::GitMetadataFingerprintV1::capture(&self.project_root)
+            || self
+                .freshness_fence
+                .git_metadata(&self.project_root)
                 .differs_from(&freshness.git_metadata)
             || freshness.last_reconciled_at.elapsed() >= self.policy.staleness_threshold
         {
@@ -3338,7 +3350,9 @@ impl CodeIndexWorktreeSchedulerV1 {
         }
         let freshness = self.freshness_fence.snapshot();
         if !freshness.verified_against_source
-            || identity::GitMetadataFingerprintV1::capture(&self.project_root)
+            || self
+                .freshness_fence
+                .git_metadata(&self.project_root)
                 .differs_from(&freshness.git_metadata)
         {
             self.request_background_reconcile();
@@ -3364,7 +3378,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             .sweep_sources(
                 &self.project_root,
                 &self.ignored_source_admissions,
-                &identity::GitMetadataFingerprintV1::capture(&self.project_root),
+                &self.freshness_fence.git_metadata(&self.project_root),
                 manifest,
                 &self.shutting_down,
             )
@@ -3376,7 +3390,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     fn source_witness_matches_worktree(&self, freshness: &SourceFreshnessFenceStateV1) -> bool {
         self.freshness_fence.source_witness_matches(
             freshness,
-            &identity::GitMetadataFingerprintV1::capture(&self.project_root),
+            &self.freshness_fence.git_metadata(&self.project_root),
             &self.project_root,
             &self.shutting_down,
         )
@@ -3432,7 +3446,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         // Sample after the walk. `git_open::open` inside the digest comparison can
         // move index metadata; storing the post-walk sample is what keeps the
         // next probe from calling that side effect a new generation.
-        let git_metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
+        let git_metadata = self.freshness_fence.git_metadata(&self.project_root);
         self.freshness_fence.rebind_admission_clock(git_metadata);
         self.freshness_fence
             .source_currency_witness_for(generation_id, snapshot_content_identity)
@@ -3450,7 +3464,11 @@ impl CodeIndexWorktreeSchedulerV1 {
     fn worktree_stat_sweep(
         &self,
     ) -> Result<freshness_witness::WorktreeStatSweepV1, CodeIndexSchedulerErrorV1> {
-        freshness_witness::worktree_stat_sweep(&self.project_root, &self.ignored_source_admissions)
+        freshness_witness::worktree_stat_sweep(
+            &self.project_root,
+            &self.ignored_source_admissions,
+            self.path_policy.includes_submodules(),
+        )
     }
 
     /// Deliver debounced hook hints (exact touched paths) into the incremental
@@ -3495,7 +3513,9 @@ impl CodeIndexWorktreeSchedulerV1 {
             // suppressing cadence on open-time clocks is not.
             return Ok(Some(self.reconcile_now()?));
         }
-        let git_changed = identity::GitMetadataFingerprintV1::capture(&self.project_root)
+        let git_changed = self
+            .freshness_fence
+            .git_metadata(&self.project_root)
             .differs_from(&freshness.git_metadata);
         if git_changed {
             // Tier 1: a git-mediated mutation is authoritative evidence; reconcile.
@@ -3957,7 +3977,28 @@ impl CodeIndexWorktreeSchedulerV1 {
             .ignored_source_admissions
             .iter()
             .any(|admission| admission.logical_path == logical_path);
-        self.capture_admitted_candidate(registry, logical_path, control, explicitly_admitted)
+        let child_root = if self.path_policy.includes_submodules() && !explicitly_admitted {
+            let repository = tracedecay_runtime_core::git_open::open(&self.project_root)
+                .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+            let classification =
+                classification::WorktreeChangeClassificationV1::for_policy(&repository, true)
+                    .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+            if classification.beneath_gitlink(Path::new(logical_path))
+                && classification.child_root(logical_path).is_none()
+            {
+                return Ok(CapturedFileOutcomeV1::Absent);
+            }
+            classification.child_root(logical_path).map(str::to_owned)
+        } else {
+            None
+        };
+        self.capture_admitted_candidate(
+            registry,
+            logical_path,
+            control,
+            explicitly_admitted,
+            child_root.as_deref(),
+        )
     }
 
     fn ignored_admission_paths(&self) -> BTreeSet<&str> {
@@ -3973,20 +4014,41 @@ impl CodeIndexWorktreeSchedulerV1 {
         logical_path: &str,
         control: Option<&dyn CodeIndexExecutionControlV1>,
         explicitly_admitted: bool,
+        child_root: Option<&str>,
     ) -> Result<CapturedFileOutcomeV1, CodeIndexSchedulerErrorV1> {
         // Explicit ignored-source admission cannot cross a nested checkout
         // any more than an ordinary Git candidate or interactive source walk.
-        let relative = std::path::Path::new(logical_path);
+        let relative = Path::new(logical_path);
+        let absolute = self.project_root.join(relative);
+        let (source_root, source_relative) = match child_root {
+            Some(prefix) if !explicitly_admitted => {
+                if !git_tree_capture::is_source_path(registry, logical_path.as_bytes()) {
+                    return Ok(CapturedFileOutcomeV1::Absent);
+                }
+                let root = self.project_root.join(prefix);
+                if root.canonicalize().ok().as_ref() != Some(&root)
+                    || !absolute
+                        .symlink_metadata()
+                        .is_ok_and(|metadata| metadata.is_file())
+                {
+                    return Ok(CapturedFileOutcomeV1::Absent);
+                }
+                let relative = relative.strip_prefix(prefix).map_err(|_| {
+                    CodeIndexSchedulerErrorV1::Git("invalid bound submodule path".into())
+                })?;
+                (root, relative)
+            }
+            _ => (self.project_root.clone(), relative),
+        };
         if tracedecay_code_index::source_walk::has_nested_repository_ancestor(
-            &self.project_root,
-            relative,
+            &source_root,
+            source_relative,
         )? || tracedecay_code_index::source_walk::is_source_symlink(
-            &self.project_root,
-            relative,
+            &source_root,
+            source_relative,
         )? {
             return Ok(CapturedFileOutcomeV1::Absent);
         }
-        let absolute = self.project_root.join(logical_path);
         match absolute.metadata() {
             Ok(metadata) if !metadata.is_file() => return Ok(CapturedFileOutcomeV1::Absent),
             Ok(_) => {}
@@ -4048,8 +4110,11 @@ impl CodeIndexWorktreeSchedulerV1 {
         // Classify committed/staged/unstaged/untracked/deleted/renamed paths
         // truthfully from gix. Deletions drop out of the present candidate set;
         // their tombstones flow through `changed_paths`.
-        let classification = classification::WorktreeChangeClassificationV1::classify(&repository)
-            .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+        let classification = classification::WorktreeChangeClassificationV1::for_policy(
+            &repository,
+            self.path_policy.includes_submodules(),
+        )
+        .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
@@ -4126,6 +4191,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         // assume-unchanged. A sealed row is reused only while its bytes still
         // carry its digest; every row they disprove beyond the visible commit
         // and status deltas is a worktree change stat could not see.
+        let mut candidate_paths = classification.candidate_paths();
         let stat_blind_paths = match reusable_active.as_ref() {
             Some(active) => {
                 let visible = classification.changed_paths();
@@ -4133,6 +4199,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     .disputed_sources(
                         &self.project_root,
                         &SourceContentManifestV1::for_snapshot(active.snapshot()),
+                        &candidate_paths,
                         &self.shutting_down,
                     )?
                     .into_iter()
@@ -4193,7 +4260,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         let source_revision = (self.ignored_source_admissions.is_empty() && !has_changes)
             .then(|| self.identity.head_commit().cloned())
             .flatten();
-        let mut candidate_paths = classification.candidate_paths();
         let mut changed_paths = classification.changed_paths();
         changed_paths.extend(tree_delta);
         changed_paths.extend(stat_blind_paths);
@@ -4274,6 +4340,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                             logical_path,
                             control,
                             admitted_paths.contains(logical_path.as_str()),
+                            classification.child_root(logical_path),
                         )
                     })
                 })
@@ -4364,6 +4431,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             snapshot_content_identity(&files, &sanitization_receipts, &omitted_sources);
         let captured = CapturedSnapshotV1 {
             repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+                include_submodules: self.path_policy.includes_submodules(),
                 tree: self.identity.head_tree().cloned(),
                 dirty,
             },

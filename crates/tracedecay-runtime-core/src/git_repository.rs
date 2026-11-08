@@ -33,7 +33,7 @@ pub use history::{
 pub use native_integration::{
     GitNativeApplyOutcome, GitNativeCandidateTreeV1, GitNativeCandidateTreeVisitError,
     GitNativeIntegrationMode, GitNativePreflight, GitNativePreflightCaptureError,
-    GitNativePreflightDisposition, GitNativeUnsupportedReason,
+    GitNativePreflightDisposition, GitNativeUnsupportedReason, GitTreeSubmodulePins,
 };
 pub use tree_links::resolve_tree_link;
 

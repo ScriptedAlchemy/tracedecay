@@ -22,9 +22,9 @@ use tracedecay_domain::configuration::{
     AUTOMATION_SETTINGS_SETTING_KEY, AutomationSettingsV1, ConfigurationRevisionId,
     ConfigurationSnapshotV1, ConfigurationValueV1, INDEX_EXCLUDE_SETTING_KEY,
     INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
-    INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY,
-    INDEX_TRACK_CALL_SITES_SETTING_KEY, LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY,
-    LcmSummarizerExecutablesV1, SYNC_AUTO_INIT_SETTING_KEY,
+    INDEX_INCLUDE_SUBMODULES_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY,
+    INDEX_NATIVE_GRAPH_ACTIVATION_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
+    LCM_SUMMARIZER_EXECUTABLES_SETTING_KEY, LcmSummarizerExecutablesV1, SYNC_AUTO_INIT_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
     SYNC_AUTO_WATCH_SETTING_KEY, SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
     SYNC_BRANCH_GC_DAYS_SETTING_KEY, SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
@@ -277,7 +277,11 @@ fn runtime_config_from_snapshot(
             required_string_list(snapshot, INDEX_EXCLUDE_SETTING_KEY)?,
             required_string_list(snapshot, INDEX_INCLUDE_SETTING_KEY)?,
         )
-        .map_err(|error| config_error(format!("resolved index path policy is invalid: {error}")))?,
+        .map_err(|error| config_error(format!("resolved index path policy is invalid: {error}")))?
+        .with_submodules(required_bool(
+            snapshot,
+            INDEX_INCLUDE_SUBMODULES_SETTING_KEY,
+        )?),
         max_file_size: required_unsigned(snapshot, INDEX_MAX_FILE_SIZE_SETTING_KEY)?,
         extract_docstrings: required_bool(snapshot, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY)?,
         track_call_sites: required_bool(snapshot, INDEX_TRACK_CALL_SITES_SETTING_KEY)?,
@@ -458,6 +462,28 @@ mod tests {
             TraceDecayError::Config { message } => message,
             other => panic!("expected a typed configuration error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn submodule_policy_is_default_off_and_materializes_the_project_override() {
+        let default =
+            PinnedRuntimeConfiguration::new(target(), revision(), resolved(BTreeMap::new()))
+                .unwrap();
+        assert!(!default.config().index_paths.includes_submodules());
+        let entries = BTreeMap::from([(
+            SettingKey::new(super::INDEX_INCLUDE_SUBMODULES_SETTING_KEY).unwrap(),
+            ConfigurationValueV1::Boolean(true),
+        )]);
+        let configured =
+            PinnedRuntimeConfiguration::new(target(), revision(), resolved(entries)).unwrap();
+        assert!(configured.config().index_paths.includes_submodules());
+        assert!(
+            configured
+                .config()
+                .index_paths
+                .without_generated_dir_defaults()
+                .includes_submodules()
+        );
     }
 
     #[test]

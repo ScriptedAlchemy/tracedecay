@@ -76,10 +76,12 @@ pub struct WorktreeStatSweepV1 {
 pub fn worktree_stat_sweep(
     project_root: &Path,
     ignored_source_admissions: &[CodeIndexIgnoredSourceAdmissionV1],
+    include_submodules: bool,
 ) -> Result<WorktreeStatSweepV1, CodeIndexSchedulerErrorV1> {
     let repository = tracedecay_runtime_core::git_open::open(project_root)
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
-    let candidate_roster = source_candidates(&repository, ignored_source_admissions)?;
+    let candidate_roster =
+        source_candidates(&repository, ignored_source_admissions, include_submodules)?;
     // One sweep span covers the O(candidates) stat walk. Never emit one
     // trace event per file.
     let mut buf = Vec::new();
@@ -120,9 +122,11 @@ struct SourceCandidatesV1 {
 fn source_candidates(
     repository: &gix::Repository,
     ignored_source_admissions: &[CodeIndexIgnoredSourceAdmissionV1],
+    include_submodules: bool,
 ) -> Result<SourceCandidatesV1, CodeIndexSchedulerErrorV1> {
-    let classification = classification::WorktreeChangeClassificationV1::classify(repository)
-        .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+    let classification =
+        classification::WorktreeChangeClassificationV1::for_policy(repository, include_submodules)
+            .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
     let registry = StaticLanguageRegistry::new();
     let admitted_paths = ignored_source_admissions
         .iter()
@@ -647,17 +651,27 @@ impl SourceSweepCacheV1 {
                 let Ok(repository) = tracedecay_runtime_core::git_open::open(project_root) else {
                     return (false, stats);
                 };
-                let evidence = roster_evidence(
-                    &repository,
-                    project_root,
-                    sampled_at,
-                    ignored_source_admissions,
-                );
+                // Parent-only directory evidence cannot vouch for child Git indexes,
+                // refs or untracked entries. Enumerate both Git rosters on every child proof.
+                let evidence = (!self.path_policy.includes_submodules())
+                    .then(|| {
+                        roster_evidence(
+                            &repository,
+                            project_root,
+                            sampled_at,
+                            ignored_source_admissions,
+                        )
+                    })
+                    .flatten();
                 let Ok(SourceCandidatesV1 {
                     candidates,
                     unrepresentable,
                     ..
-                }) = source_candidates(&repository, ignored_source_admissions)
+                }) = source_candidates(
+                    &repository,
+                    ignored_source_admissions,
+                    self.path_policy.includes_submodules(),
+                )
                 else {
                     return (false, stats);
                 };
@@ -735,12 +749,14 @@ impl SourceSweepCacheV1 {
         &mut self,
         project_root: &Path,
         manifest: &SourceContentManifestV1,
+        candidate_paths: &BTreeSet<String>,
         shutting_down: &AtomicBool,
     ) -> Result<BTreeSet<String>, CodeIndexSchedulerErrorV1> {
         let registry = StaticLanguageRegistry::new();
         let candidates = manifest
             .files
             .keys()
+            .filter(|path| candidate_paths.contains(*path))
             .filter_map(|logical_path| source_candidate(&registry, logical_path.clone(), false))
             .collect::<Vec<_>>();
         let present = present_candidates(
@@ -838,7 +854,12 @@ impl SourceSweepCacheV1 {
         if disputed.is_empty() {
             return Ok(disputed);
         }
-        Ok(clean_filter_mismatches(project_root, disputed, manifest))
+        Ok(clean_filter_mismatches(
+            project_root,
+            disputed,
+            manifest,
+            self.path_policy.includes_submodules(),
+        ))
     }
 }
 
@@ -882,10 +903,56 @@ fn clean_filter_mismatches<'a>(
     project_root: &Path,
     disputed: Vec<&'a StatCandidateV1>,
     manifest: &SourceContentManifestV1,
+    include_submodules: bool,
 ) -> Vec<&'a StatCandidateV1> {
     let Ok(repository) = tracedecay_runtime_core::git_open::open(project_root) else {
         return disputed;
     };
+    let mut remaining = disputed;
+    let mut mismatches = Vec::new();
+    if include_submodules {
+        let Ok(children) =
+            tracedecay_code_index::source_walk::submodules::live_submodules(&repository)
+        else {
+            return remaining;
+        };
+        for (prefix, binding) in children {
+            let (local, other): (Vec<_>, Vec<_>) = remaining
+                .into_iter()
+                .partition(|candidate| Path::new(&candidate.logical_path).starts_with(&prefix));
+            remaining = other;
+            if local.is_empty() {
+                continue;
+            }
+            match tracedecay_runtime_core::git_open::open(&binding.git_dir) {
+                Ok(child) => mismatches.extend(filter_mismatches_in_repository(
+                    project_root,
+                    &child,
+                    Path::new(&prefix),
+                    local,
+                    manifest,
+                )),
+                Err(_) => mismatches.extend(local),
+            }
+        }
+    }
+    mismatches.extend(filter_mismatches_in_repository(
+        project_root,
+        &repository,
+        Path::new(""),
+        remaining,
+        manifest,
+    ));
+    mismatches
+}
+
+fn filter_mismatches_in_repository<'a>(
+    project_root: &Path,
+    repository: &gix::Repository,
+    prefix: &Path,
+    disputed: Vec<&'a StatCandidateV1>,
+    manifest: &SourceContentManifestV1,
+) -> Vec<&'a StatCandidateV1> {
     let Ok((mut pipeline, index)) = repository.filter_pipeline(None) else {
         return disputed;
     };
@@ -895,15 +962,17 @@ fn clean_filter_mismatches<'a>(
             let Some(expected) = manifest.files.get(&candidate.logical_path) else {
                 return true;
             };
+            let Ok(rela_path) = Path::new(&candidate.logical_path).strip_prefix(prefix) else {
+                return true;
+            };
             if candidate.explicitly_admitted
                 || index
-                    .entry_by_path(BStr::new(candidate.logical_path.as_str()))
+                    .entry_by_path(BStr::new(rela_path.as_os_str().as_encoded_bytes()))
                     .is_none()
             {
                 return true;
             }
-            let rela_path = Path::new(&candidate.logical_path);
-            let Ok(file) = std::fs::File::open(project_root.join(rela_path)) else {
+            let Ok(file) = std::fs::File::open(project_root.join(&candidate.logical_path)) else {
                 return true;
             };
             let Ok(mut converted) = pipeline.convert_to_git(file, rela_path, &index) else {
@@ -930,8 +999,13 @@ pub fn sealed_source_bytes(
     project_root: &Path,
     logical_path: &str,
     language: &LanguageId,
+    include_submodules: bool,
     sealed: &ContentDigest,
 ) -> Result<Option<Vec<u8>>, CodeIndexSchedulerErrorV1> {
+    if tracedecay_code_index::source_walk::is_source_symlink(project_root, Path::new(logical_path))?
+    {
+        return Ok(None);
+    }
     let raw =
         ignored_dependencies::read_bounded_snapshot_source(&project_root.join(logical_path), None)?;
     let (sanitized, _, _) = privacy::sanitize_code_file(language, &raw)?;
@@ -942,15 +1016,35 @@ pub fn sealed_source_bytes(
     // hoist them into a caller-held reader if a caller ever needs hundreds.
     let repository = tracedecay_runtime_core::git_open::open(project_root)
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+    let mut repository = repository;
+    let mut relative = Path::new(logical_path);
+    if include_submodules {
+        let children = tracedecay_code_index::source_walk::submodules::live_submodules(&repository)
+            .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.message))?;
+        if let Some((prefix, binding)) = children
+            .iter()
+            .find(|(prefix, _)| relative.starts_with(prefix))
+        {
+            let child_path = relative
+                .strip_prefix(prefix)
+                .map_err(|_| CodeIndexSchedulerErrorV1::Git("invalid child filter path".into()))?;
+            repository = tracedecay_runtime_core::git_open::open(&binding.git_dir)
+                .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+            relative = child_path;
+        }
+    }
     let (mut pipeline, index) = repository
         .filter_pipeline(None)
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
-    if index.entry_by_path(BStr::new(logical_path)).is_none() {
+    if index
+        .entry_by_path(BStr::new(relative.as_os_str().as_encoded_bytes()))
+        .is_none()
+    {
         return Ok(None);
     }
     let mut filtered = Vec::new();
     pipeline
-        .convert_to_git(raw.as_slice(), Path::new(logical_path), &index)
+        .convert_to_git(raw.as_slice(), relative, &index)
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?
         .read_to_end(&mut filtered)?;
     let (sanitized, _, _) = privacy::sanitize_code_file(language, &filtered)?;
@@ -1175,7 +1269,7 @@ mod tracked_parent_boundary_tests {
                 logical_path: "ignored/ordinary.rs".to_owned(),
             },
         ];
-        let candidates = source_candidates(&repository, &admitted).unwrap();
+        let candidates = source_candidates(&repository, &admitted, false).unwrap();
         let paths = candidates
             .candidates
             .iter()

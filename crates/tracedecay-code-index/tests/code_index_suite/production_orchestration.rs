@@ -277,6 +277,7 @@ impl CodeIndexExecutionControlV1 for MutableCancellationControl {
 
 pub(super) fn config() -> CodeIndexProductionConfigV1 {
     CodeIndexProductionConfigV1 {
+        include_submodules: false,
         project_id: id::<ProjectId>("project.production"),
         repository: id::<RepositoryId>("repository.production"),
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.v1"),
@@ -319,6 +320,7 @@ fn request_in_scope(
     request.snapshot.worktree = worktree.map(id::<WorktreeId>);
     request.snapshot.source_revision = Some(id::<CommitId>(source_revision));
     request.repository_parse_identity = CodeIndexRepositoryParseIdentityV1 {
+        include_submodules: false,
         tree: Some(id::<TreeId>(&format!("tree.{source_revision}"))),
         dirty: RepositoryDirtyStateV1::Dirty,
     };
@@ -365,6 +367,7 @@ fn request_at_path(
         invalidations: BTreeSet::new(),
         ignored_source_admissions: Vec::new(),
         repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            include_submodules: false,
             tree: None,
             dirty: RepositoryDirtyStateV1::Dirty,
         },
@@ -1033,6 +1036,7 @@ fn resumed_parse_quanta_publish_the_same_complete_generation() {
         invalidations: BTreeSet::new(),
         ignored_source_admissions: Vec::new(),
         repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            include_submodules: false,
             tree: None,
             dirty: RepositoryDirtyStateV1::Dirty,
         },
@@ -3003,6 +3007,7 @@ fn partitioned_request(
         invalidations: BTreeSet::new(),
         ignored_source_admissions: Vec::new(),
         repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            include_submodules: false,
             tree: None,
             dirty: RepositoryDirtyStateV1::Dirty,
         },
