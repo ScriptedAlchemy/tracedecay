@@ -3148,7 +3148,9 @@ fn delayed_progress_cannot_undo_committed_boundaries_or_ready() {
             "delayed {counter} cannot overwrite committed progress"
         );
         assert_eq!(
-            slot.snapshot().expect("progress after stale report").as_ref(),
+            slot.snapshot()
+                .expect("progress after stale report")
+                .as_ref(),
             accepted.as_ref(),
             "refusing stale {counter} must preserve the epoch and last progress time"
         );
@@ -3158,7 +3160,9 @@ fn delayed_progress_cannot_undo_committed_boundaries_or_ready() {
     wrong_generation.generation_id = "generation.foreign".to_owned();
     assert!(!slot.publish(&generation, owner, wrong_generation));
     assert_eq!(
-        slot.snapshot().expect("correct generation still owns progress").as_ref(),
+        slot.snapshot()
+            .expect("correct generation still owns progress")
+            .as_ref(),
         accepted.as_ref()
     );
 
@@ -3201,7 +3205,10 @@ fn a_new_staging_attempt_can_truthfully_restart_committed_progress() {
     let mut old = progress_snapshot_for_generation(&generation, 12);
     old.last_progress_micros = 500;
     assert!(slot.publish(&generation, owner, old));
-    let old_epoch = slot.snapshot().expect("first staging attempt").progress_epoch;
+    let old_epoch = slot
+        .snapshot()
+        .expect("first staging attempt")
+        .progress_epoch;
 
     // Missing/incompatible SQLite staging is a verified new build attempt,
     // not a delayed report from an older commit boundary. Without resetting
@@ -3233,7 +3240,10 @@ fn a_new_staging_attempt_can_truthfully_restart_committed_progress() {
     let foreign = CodeGenerationId::new("generation.foreign-stage").expect("foreign");
     assert!(!slot.begin_staging_attempt(&foreign, owner));
     assert!(!slot.begin_staging_attempt(&generation, owner + 1));
-    assert_eq!(slot.snapshot().expect("unchanged latest").committed_pages, 2);
+    assert_eq!(
+        slot.snapshot().expect("unchanged latest").committed_pages,
+        2
+    );
 }
 
 #[test]
@@ -3255,8 +3265,7 @@ fn staging_restart_cannot_rebind_the_progress_source_or_incarnation() {
         match field {
             "daemon" => foreign.daemon_incarnation += 1,
             "producer" => foreign.producer_incarnation += 1,
-            "digest" => foreign.sealed_source_digest =
-                format!("sha256:{}", "b".repeat(64)),
+            "digest" => foreign.sealed_source_digest = format!("sha256:{}", "b".repeat(64)),
             _ => unreachable!(),
         }
         assert!(
@@ -3264,27 +3273,34 @@ fn staging_restart_cannot_rebind_the_progress_source_or_incarnation() {
             "foreign {field} must not replace a committed report"
         );
         assert_eq!(
-            slot.snapshot().expect("unchanged committed report").as_ref(),
+            slot.snapshot()
+                .expect("unchanged committed report")
+                .as_ref(),
             accepted.as_ref()
         );
     }
 
     assert!(slot.begin_staging_attempt(&generation, owner));
-    assert!(slot.snapshot().is_none(), "verified restart clears old counters");
+    assert!(
+        slot.snapshot().is_none(),
+        "verified restart clears old counters"
+    );
     for field in ["daemon", "producer", "digest"] {
         let mut foreign = progress_snapshot_for_generation(&generation, 0);
         match field {
             "daemon" => foreign.daemon_incarnation += 1,
             "producer" => foreign.producer_incarnation += 1,
-            "digest" => foreign.sealed_source_digest =
-                format!("sha256:{}", "b".repeat(64)),
+            "digest" => foreign.sealed_source_digest = format!("sha256:{}", "b".repeat(64)),
             _ => unreachable!(),
         }
         assert!(
             !slot.publish(&generation, owner, foreign),
             "staging reset must retain the {field} identity fence"
         );
-        assert!(slot.snapshot().is_none(), "foreign report must not seize restart");
+        assert!(
+            slot.snapshot().is_none(),
+            "foreign report must not seize restart"
+        );
     }
 
     // A real retry may still reset counters while preserving the identity.
@@ -3303,7 +3319,9 @@ fn staging_restart_cannot_rebind_the_progress_source_or_incarnation() {
     replaced.producer_incarnation += 1;
     assert!(slot.publish(&generation, next_owner, replaced));
     assert_eq!(
-        slot.snapshot().expect("replacement owner").producer_incarnation,
+        slot.snapshot()
+            .expect("replacement owner")
+            .producer_incarnation,
         2
     );
 }
@@ -3323,7 +3341,9 @@ fn retrying_an_unchanged_phase_does_not_fabricate_status_progress() {
     published(scheduler.reconcile_now().expect("publish"));
     let latest = scheduler.latest_complete().expect("latest generation");
     assert!(
-        !latest.advance_text_serving(0).expect("open text projection"),
+        !latest
+            .advance_text_serving(0)
+            .expect("open text projection"),
         "a zero-work admission must leave the projection pending"
     );
     let before = build_progress_snapshot(&scheduler);
@@ -3362,10 +3382,16 @@ fn retrying_an_unchanged_phase_does_not_fabricate_status_progress() {
     );
     let unchanged = build_progress_snapshot(&scheduler);
     assert_eq!(unchanged.progress_epoch, transitioned.progress_epoch);
-    assert_eq!(unchanged.last_progress_micros, transitioned.last_progress_micros);
+    assert_eq!(
+        unchanged.last_progress_micros,
+        transitioned.last_progress_micros
+    );
 
     let mut advances = 0;
-    while !latest.advance_text_serving(8).expect("resume durable text build") {
+    while !latest
+        .advance_text_serving(8)
+        .expect("resume durable text build")
+    {
         advances += 1;
         assert!(advances < 1_000, "text build failed to finish");
     }
