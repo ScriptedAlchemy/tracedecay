@@ -940,44 +940,17 @@ fn graph_relation(
         .into_iter()
         .map(|edges| edges.into_iter().map(|edge| edge.edge.to_occurrence).collect())
         .collect();
-    let Some((left_callers, left_dependencies, left_tests)) =
-        graph_neighborhood(graph, Arc::clone(&cancellation), &left_seeds, left_first_hop)
-    else {
-        return (None, true);
-    };
-    let Some((right_callers, right_dependencies, right_tests)) =
-        graph_neighborhood(graph, cancellation, &right_seeds, right_first_hop)
-    else {
-        return (None, true);
-    };
-    if !left_callers.is_disjoint(&right_callers) {
-        return (
-            Some(GraphRelation {
-                warning_class: ProximityWarningClassV1::SharedCaller,
-                kinds: vec![ProximityRelationPathKindV1::TransitiveCaller],
-            }),
-            incomplete_seed_coverage,
-        );
-    }
-    if !left_dependencies.is_disjoint(&right_dependencies) {
-        return (
-            Some(GraphRelation {
-                warning_class: ProximityWarningClassV1::SharedDependency,
-                kinds: vec![ProximityRelationPathKindV1::TransitiveDependency],
-            }),
-            incomplete_seed_coverage,
-        );
-    }
-    if !left_tests.is_disjoint(&right_tests) {
-        return (
-            Some(GraphRelation {
-                warning_class: ProximityWarningClassV1::SharedTest,
-                kinds: vec![ProximityRelationPathKindV1::AffectedTest],
-            }),
-            incomplete_seed_coverage,
-        );
-    }
-    (None, incomplete_seed_coverage)
+    // Evaluate bounded caller evidence before any outgoing second-hop work.
+    // A proven shared caller must survive an unrelated dependency budget refusal.
+    let (relation, partial) = graph_relation_neighborhood(
+        graph,
+        cancellation,
+        &left_seeds,
+        &right_seeds,
+        left_first_hop,
+        right_first_hop,
+    );
+    (relation, incomplete_seed_coverage || partial)
 }
 
 /// Collect only the bounded incoming caller closure needed for qualitative
@@ -1071,58 +1044,119 @@ fn dependency_neighborhood(
     Some(dependencies)
 }
 
-fn graph_neighborhood(
+fn graph_relation_neighborhood(
     graph: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
-    seeds: &[SymbolOccurrenceId],
-    first_hop: Vec<Vec<SymbolOccurrenceId>>,
-) -> Option<(
-    BTreeSet<SymbolOccurrenceId>,
-    BTreeSet<SymbolOccurrenceId>,
-    BTreeSet<SymbolOccurrenceId>,
-)> {
-    // The former graph.impact() created a complete impact report, then kept
-    // only depth-2 callers and test identities. Read those actual caller
-    // edges directly and refuse incomplete closures instead of accepting
-    // impact.complete=false as if the relationship were known absent.
-    let (callers, tests) = caller_neighborhood(seeds, 100_000, |frontier| {
-        graph
-            .callers(
-                frontier,
-                &[RelationEdgeKindV1::Calls],
-                100_000,
-                Arc::clone(&cancellation),
-            )
-            .ok()
-            .map(|batches| {
-                batches
-                    .into_iter()
-                    .map(|edges| edges.into_iter().map(|edge| edge.neighbor).collect())
-                    .collect()
-            })
-    })?;
-    let dependencies = dependency_neighborhood(seeds, first_hop, |frontier| {
-        graph
-            .callees(
-                frontier,
-                &[RelationEdgeKindV1::Calls],
-                100_000,
-                Arc::clone(&cancellation),
-            )
-            .ok()
-            .map(|batches| {
-                batches
-                    .into_iter()
-                    .map(|edges| {
-                        edges
-                            .into_iter()
-                            .map(|edge| edge.edge.to_occurrence)
-                            .collect()
-                    })
-                    .collect()
-            })
-    })?;
-    Some((callers, dependencies, tests))
+    left_seeds: &[SymbolOccurrenceId],
+    right_seeds: &[SymbolOccurrenceId],
+    left_first_hop: Vec<Vec<SymbolOccurrenceId>>,
+    right_first_hop: Vec<Vec<SymbolOccurrenceId>>,
+) -> (Option<GraphRelation>, bool) {
+    graph_relation_neighborhood_with_reads(
+        left_seeds,
+        right_seeds,
+        left_first_hop,
+        right_first_hop,
+        |frontier| {
+            graph
+                .callers(
+                    frontier,
+                    &[RelationEdgeKindV1::Calls],
+                    100_000,
+                    Arc::clone(&cancellation),
+                )
+                .ok()
+                .map(|batches| {
+                    batches
+                        .into_iter()
+                        .map(|edges| edges.into_iter().map(|edge| edge.neighbor).collect())
+                        .collect()
+                })
+        },
+        |frontier| {
+            graph
+                .callees(
+                    frontier,
+                    &[RelationEdgeKindV1::Calls],
+                    100_000,
+                    Arc::clone(&cancellation),
+                )
+                .ok()
+                .map(|batches| {
+                    batches
+                        .into_iter()
+                        .map(|edges| {
+                            edges
+                                .into_iter()
+                                .map(|edge| edge.edge.to_occurrence)
+                                .collect()
+                        })
+                        .collect()
+                })
+        },
+    )
+}
+
+/// Use the incoming adjacency to establish a higher-precedence shared caller
+/// before reading lower-precedence outgoing dependencies. The supplied first
+/// hops have already passed the direct-adjacency completeness checks.
+fn graph_relation_neighborhood_with_reads(
+    left_seeds: &[SymbolOccurrenceId],
+    right_seeds: &[SymbolOccurrenceId],
+    left_first_hop: Vec<Vec<SymbolOccurrenceId>>,
+    right_first_hop: Vec<Vec<SymbolOccurrenceId>>,
+    mut read_callers: impl FnMut(&[SymbolOccurrenceId]) -> Option<Vec<Vec<CodeGraphSymbolSummaryV1>>>,
+    mut read_callees: impl FnMut(&[SymbolOccurrenceId]) -> Option<Vec<Vec<SymbolOccurrenceId>>>,
+) -> (Option<GraphRelation>, bool) {
+    let Some((left_callers, left_tests)) =
+        caller_neighborhood(left_seeds, 100_000, &mut read_callers)
+    else {
+        return (None, true);
+    };
+    let Some((right_callers, right_tests)) =
+        caller_neighborhood(right_seeds, 100_000, &mut read_callers)
+    else {
+        return (None, true);
+    };
+    if !left_callers.is_disjoint(&right_callers) {
+        return (
+            Some(GraphRelation {
+                warning_class: ProximityWarningClassV1::SharedCaller,
+                kinds: vec![ProximityRelationPathKindV1::TransitiveCaller],
+            }),
+            false,
+        );
+    }
+
+    let Some(left_dependencies) =
+        dependency_neighborhood(left_seeds, left_first_hop, &mut read_callees)
+    else {
+        return (None, true);
+    };
+    let Some(right_dependencies) =
+        dependency_neighborhood(right_seeds, right_first_hop, &mut read_callees)
+    else {
+        return (None, true);
+    };
+    if !left_dependencies.is_disjoint(&right_dependencies) {
+        return (
+            Some(GraphRelation {
+                warning_class: ProximityWarningClassV1::SharedDependency,
+                kinds: vec![ProximityRelationPathKindV1::TransitiveDependency],
+            }),
+            false,
+        );
+    }
+    if !left_tests.is_disjoint(&right_tests) {
+        return (
+            Some(GraphRelation {
+                warning_class: ProximityWarningClassV1::SharedTest,
+                kinds: vec![ProximityRelationPathKindV1::AffectedTest],
+            }),
+            false,
+        );
+    }
+    (None, false)
 }
 
 fn exact_graph_address(
@@ -1615,6 +1649,83 @@ mod tests {
         )
         .expect("supplied adjacency completely covers the seed cycle");
         assert_eq!(result, BTreeSet::from([first, second]));
+    }
+
+    #[test]
+    fn shared_caller_does_not_read_discarded_dependency_hops() {
+        let left = SymbolOccurrenceId::new("symbol.left").unwrap();
+        let right = SymbolOccurrenceId::new("symbol.right").unwrap();
+        let span = SourceSpan {
+            start_byte: 0,
+            end_byte: 1,
+        };
+        let common = callable("symbol.shared-caller", span);
+        let mut caller_reads = 0;
+        let (relation, partial) = graph_relation_neighborhood_with_reads(
+            std::slice::from_ref(&left),
+            std::slice::from_ref(&right),
+            vec![vec![SymbolOccurrenceId::new("symbol.left-dependency").unwrap()]],
+            vec![vec![SymbolOccurrenceId::new("symbol.right-dependency").unwrap()]],
+            |frontier| {
+                caller_reads += 1;
+                Some(
+                    frontier
+                        .iter()
+                        .map(|seed| match seed.as_str() {
+                            "symbol.left" | "symbol.right" => vec![common.clone()],
+                            "symbol.shared-caller" => Vec::new(),
+                            _ => panic!("unexpected caller frontier"),
+                        })
+                        .collect(),
+                )
+            },
+            |_| panic!("shared caller must not be erased by an unused dependency read"),
+        );
+        let relation = relation.expect("proven shared caller must survive");
+        assert_eq!(relation.warning_class, ProximityWarningClassV1::SharedCaller);
+        assert_eq!(
+            relation.kinds,
+            vec![ProximityRelationPathKindV1::TransitiveCaller]
+        );
+        assert!(!partial);
+        assert_eq!(caller_reads, 4, "both incoming closures are fully read");
+    }
+
+    #[test]
+    fn unmatched_callers_still_read_two_hop_shared_dependencies() {
+        let left = SymbolOccurrenceId::new("symbol.left").unwrap();
+        let right = SymbolOccurrenceId::new("symbol.right").unwrap();
+        let common = SymbolOccurrenceId::new("symbol.common").unwrap();
+        let mut outgoing_reads = 0;
+        let (relation, partial) = graph_relation_neighborhood_with_reads(
+            std::slice::from_ref(&left),
+            std::slice::from_ref(&right),
+            vec![vec![SymbolOccurrenceId::new("symbol.left-dependency").unwrap()]],
+            vec![vec![SymbolOccurrenceId::new("symbol.right-dependency").unwrap()]],
+            |frontier| Some(vec![Vec::new(); frontier.len()]),
+            |frontier| {
+                outgoing_reads += 1;
+                Some(
+                    frontier
+                        .iter()
+                        .map(|seed| match seed.as_str() {
+                            "symbol.left-dependency" | "symbol.right-dependency" => {
+                                vec![common.clone()]
+                            }
+                            _ => panic!("first-hop adjacency must be reused"),
+                        })
+                        .collect(),
+                )
+            },
+        );
+        let relation = relation.expect("real two-hop dependency is preserved");
+        assert_eq!(relation.warning_class, ProximityWarningClassV1::SharedDependency);
+        assert_eq!(
+            relation.kinds,
+            vec![ProximityRelationPathKindV1::TransitiveDependency]
+        );
+        assert!(!partial);
+        assert_eq!(outgoing_reads, 2, "one extra read per side");
     }
 
     #[test]
