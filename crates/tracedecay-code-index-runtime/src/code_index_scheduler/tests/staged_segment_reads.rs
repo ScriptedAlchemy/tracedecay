@@ -237,7 +237,7 @@ fn staged_segment_range_reads_open_once_per_cached_file_and_revalidate_replaceme
         ),
         Err(CodeIndexProductionErrorV1::Publication(_))
     ));
-    assert!(read.is_empty());
+    assert_eq!(read, [] as [u8; 0]);
 }
 
 #[test]
@@ -331,7 +331,7 @@ fn staged_segment_in_place_mutation_poison_survives_restoration_and_refuses_comm
         ),
         Err(CodeIndexProductionErrorV1::Contract(_))
     ));
-    assert!(read.is_empty());
+    assert_eq!(read, [] as [u8; 0]);
     assert_eq!(
         preparation.staged_segment_read_open_attempts_for_test(),
         opens_before + 1

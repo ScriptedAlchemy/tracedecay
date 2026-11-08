@@ -2159,7 +2159,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             && named.ctime_nsec() == pinned.ctime_nsec()
     }
 
-    /// One actual file open per cache miss. Do not reopen via Handle::from_path
+    /// One actual file open per cache miss. Do not reopen via `Handle::from_path`
     /// on macOS: comparing the Unix inode and change-time metadata before and
     /// after open proves the same identity without another endpoint scan.
     #[cfg(unix)]
