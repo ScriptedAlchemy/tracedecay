@@ -177,7 +177,10 @@ async fn rearm_walks_deferred_retries_in_bounded_batches() {
         "nine deferred rows re-arm in ceil(9 / 4) statements, never one queue-sized one"
     );
     let after = writer_telemetry(&harness.registered).transactions;
-    assert_eq!(after.committed_transactions - before.committed_transactions, 3);
+    assert_eq!(
+        after.committed_transactions - before.committed_transactions,
+        3
+    );
     assert_eq!(
         after.rolled_back_transactions, before.rolled_back_transactions,
         "reaching the captured frontier must not open an empty final transaction"
@@ -237,8 +240,14 @@ async fn rearm_ignores_parked_terminal_collisions_without_empty_write_batches() 
         "parked collisions must not consume re-arm write windows"
     );
     let after = writer_telemetry(&harness.registered).transactions;
-    assert_eq!(after.committed_transactions - before.committed_transactions, 2);
-    assert_eq!(after.rolled_back_transactions, before.rolled_back_transactions);
+    assert_eq!(
+        after.committed_transactions - before.committed_transactions,
+        2
+    );
+    assert_eq!(
+        after.rolled_back_transactions,
+        before.rolled_back_transactions
+    );
     assert_eq!(
         queue_state(&harness).await,
         (12, 6, 12),
@@ -286,8 +295,14 @@ async fn rearm_ignores_parked_terminal_collisions_without_empty_write_batches() 
         }
     );
     let after = writer_telemetry(&harness.registered).transactions;
-    assert_eq!(after.committed_transactions - before.committed_transactions, 1);
-    assert_eq!(after.rolled_back_transactions, before.rolled_back_transactions);
+    assert_eq!(
+        after.committed_transactions - before.committed_transactions,
+        1
+    );
+    assert_eq!(
+        after.rolled_back_transactions,
+        before.rolled_back_transactions
+    );
     assert_eq!(queue_state(&harness).await, (12, 6, 12));
 }
 
@@ -316,8 +331,14 @@ async fn rearm_rejects_nonpositive_windows_before_acquiring_the_writer() {
         }
     );
     let after = writer_telemetry(&harness.registered).transactions;
-    assert_eq!(after.committed_transactions - before.committed_transactions, 3);
-    assert_eq!(after.rolled_back_transactions, before.rolled_back_transactions);
+    assert_eq!(
+        after.committed_transactions - before.committed_transactions,
+        3
+    );
+    assert_eq!(
+        after.rolled_back_transactions,
+        before.rolled_back_transactions
+    );
     assert_eq!(queue_state(&harness).await, (5, 0, 5));
 }
 

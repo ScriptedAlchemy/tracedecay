@@ -746,10 +746,17 @@ async fn batched_projection_resumes_after_restart_without_replaying_parked_or_de
             Some(cursor("session-windowed-restart", 500)),
         )
         .await;
-        let resumed = store.project_queued_observations(32).await.unwrap().unwrap();
+        let resumed = store
+            .project_queued_observations(32)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(resumed.items.len(), 1);
         assert!(!resumed.has_more);
-        assert_eq!(store.projection_checkpoint().await.unwrap().last_sequence(), 6);
+        assert_eq!(
+            store.projection_checkpoint().await.unwrap().last_sequence(),
+            6
+        );
         assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 6);
     }
 }
@@ -770,7 +777,10 @@ async fn deferred_only_reopened_queue_skips_writer_until_retry_is_due() {
         100,
         200,
         "receipt.deferred-only-second",
-        conversational_payload("message-deferred-only-second", "second deferred-only canary"),
+        conversational_payload(
+            "message-deferred-only-second",
+            "second deferred-only canary",
+        ),
     );
     let third = observation(
         "session-deferred-only",
@@ -866,13 +876,16 @@ async fn deferred_only_reopened_queue_skips_writer_until_retry_is_due() {
             rusqlite::params![second.observation_id().as_str()],
         )
         .unwrap();
-    let resumed = store
-        .project_queued_observations(1)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(resumed.items.len(), 1, "the one-item window cannot skip ahead");
-    assert!(resumed.has_more, "the later ready sequence still needs projection");
+    let resumed = store.project_queued_observations(1).await.unwrap().unwrap();
+    assert_eq!(
+        resumed.items.len(),
+        1,
+        "the one-item window cannot skip ahead"
+    );
+    assert!(
+        resumed.has_more,
+        "the later ready sequence still needs projection"
+    );
     assert_eq!(
         store.projection_checkpoint().await.unwrap().last_sequence(),
         2
@@ -994,6 +1007,9 @@ async fn active_rebuild_keeps_projection_pending_without_acquiring_writer() {
     let resumed = store.project_queued_observations(1).await.unwrap().unwrap();
     assert_eq!(resumed.items.len(), 1);
     assert!(!resumed.has_more);
-    assert_eq!(store.projection_checkpoint().await.unwrap().last_sequence(), 1);
+    assert_eq!(
+        store.projection_checkpoint().await.unwrap().last_sequence(),
+        1
+    );
     assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 1);
 }
