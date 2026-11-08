@@ -1674,16 +1674,46 @@ impl DaemonCodeIndexPublicationStoreV1 {
 
     fn state_digest_file(path: &Path) -> Result<String, CodeIndexPublicationStoreErrorV1> {
         let mut file = File::open(path).map_err(Self::unavailable)?;
+        Self::state_digest_reader(&mut file)
+    }
+
+    fn state_digest_reader(
+        reader: &mut impl Read,
+    ) -> Result<String, CodeIndexPublicationStoreErrorV1> {
         let mut hasher = Sha256::new();
         let mut buffer = vec![0_u8; DURABLE_GENERATION_IO_CHUNK_BYTES_V1];
         loop {
-            let read = file.read(&mut buffer).map_err(Self::unavailable)?;
+            let read = reader.read(&mut buffer).map_err(Self::unavailable)?;
             if read == 0 {
                 break;
             }
             hasher.update(&buffer[..read]);
         }
         Ok(encode_tagged_lowercase_hex("sha256:", &hasher.finalize()))
+    }
+
+    // A canonical generation is immutable. Persisting with replacement would
+    // overwrite a competing publication that wins after the missing-path probe.
+    fn publish_missing_generation_manifest(
+        temporary: tempfile::NamedTempFile,
+        final_path: &Path,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        match temporary.persist_noclobber(final_path) {
+            Ok(_) => Ok(()),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let temporary = error.file;
+                let metadata = final_path.symlink_metadata().map_err(Self::unavailable)?;
+                if !metadata.file_type().is_file()
+                    || !Self::files_equal(final_path, temporary.path())?
+                {
+                    return Err(Self::corruption(
+                        "concurrently published generation does not match its content address",
+                    ));
+                }
+                temporary.close().map_err(Self::unavailable)
+            }
+            Err(error) => Err(Self::unavailable(error.error)),
+        }
     }
 
     fn files_equal(left: &Path, right: &Path) -> Result<bool, CodeIndexPublicationStoreErrorV1> {
@@ -3668,7 +3698,19 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let state_digest = {
             let _span =
                 tracing::trace_span!("code_index.generation.publish.state_digest").entered();
-            Self::state_digest_file(temporary.path())?
+            // Read back the fsynced bytes through the writer's existing handle.
+            // A second pathname open is unnecessary and expensive under EDR.
+            temporary
+                .as_file_mut()
+                .seek(SeekFrom::Start(0))
+                .map_err(Self::unavailable)?;
+            let digest = Self::state_digest_reader(temporary.as_file_mut())?;
+            if digest != Self::state_digest(manifest_bytes) {
+                return Err(Self::corruption(
+                    "staged generation bytes changed after serialization",
+                ));
+            }
+            digest
         };
         let suffix = sha256_hex_suffix(&state_digest)
             .ok_or_else(|| Self::unavailable("sealed generation digest is not sha256"))?;
@@ -3688,11 +3730,9 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 temporary.close().map_err(Self::unavailable)?;
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // The manifest is immutable once named. Failure cleanup never
-                // deletes a canonical name another scope may have attached.
-                temporary
-                    .persist(&generation_path)
-                    .map_err(|error| Self::unavailable(error.error))?;
+                // A concurrent publisher can win after the missing-path probe.
+                // Never replace its immutable generation, even transiently.
+                Self::publish_missing_generation_manifest(temporary, &generation_path)?;
             }
             Err(error) => return Err(Self::unavailable(error)),
         }

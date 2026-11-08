@@ -810,3 +810,75 @@ fn prepared_generation_rechecks_directory_identity_without_reopening_paths() {
         .expect("restoring original inode restores the exact identity");
     preparation.abort().expect("release owned preparation");
 }
+
+#[test]
+fn generation_manifest_publication_preserves_concurrent_canonical_bytes() {
+    let root = TempDir::new().expect("generation publication fixture");
+    let good = b"generation-one";
+    let other = b"generation-two";
+    assert_eq!(good.len(), other.len());
+    let suffix = sha256_hex_suffix(segment_digest(good).as_str()).expect("generation suffix");
+    let canonical = root.path().join(format!("generation-{suffix}.json"));
+    let stage = |bytes: &[u8]| {
+        let mut temporary = tempfile::Builder::new()
+            .prefix(".generation-publication-")
+            .tempfile_in(root.path())
+            .expect("stage generation");
+        temporary.write_all(bytes).expect("write staged manifest");
+        temporary.as_file().sync_all().expect("durable staged manifest");
+        temporary
+    };
+
+    // The competing pathname appears after the publisher's missing-path
+    // observation. A same-length conflict must not replace it.
+    std::fs::write(&canonical, good).expect("competing generation");
+    assert!(
+        DaemonCodeIndexPublicationStoreV1::publish_missing_generation_manifest(
+            stage(other),
+            &canonical,
+        )
+        .is_err(),
+        "conflicting concurrent generation must refuse publication"
+    );
+    assert_eq!(
+        std::fs::read(&canonical).expect("competing generation retained"),
+        good
+    );
+    assert_eq!(
+        std::fs::read_dir(root.path())
+            .expect("generation directory")
+            .count(),
+        1,
+        "refused publication must clean its staging file"
+    );
+
+    // A second publisher with identical content may safely deduplicate.
+    DaemonCodeIndexPublicationStoreV1::publish_missing_generation_manifest(
+        stage(good),
+        &canonical,
+    )
+    .expect("identical immutable generation deduplicates");
+    assert_eq!(std::fs::read(&canonical).expect("original content"), good);
+    assert_eq!(
+        std::fs::read_dir(root.path())
+            .expect("generation directory")
+            .count(),
+        1,
+        "deduplicated publication must not retain staging"
+    );
+
+    std::fs::remove_file(&canonical).expect("vacate immutable name");
+    DaemonCodeIndexPublicationStoreV1::publish_missing_generation_manifest(
+        stage(good),
+        &canonical,
+    )
+    .expect("publish new immutable name");
+    assert_eq!(std::fs::read(&canonical).expect("new generation bytes"), good);
+    assert_eq!(
+        std::fs::read_dir(root.path())
+            .expect("generation directory")
+            .count(),
+        1,
+        "successful publication must consume staging"
+    );
+}
