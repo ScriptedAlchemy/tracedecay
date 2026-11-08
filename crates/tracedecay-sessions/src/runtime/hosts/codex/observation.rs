@@ -772,6 +772,7 @@ async fn admit_codex_jsonl_page(
     .with_max_new_bytes(max_new_bytes)
     .with_persisted_cursor_update(PersistedCursorUpdate::Replace)
     .with_lazy_shared_frame_preparation()
+    .with_skip_empty_initialization()
     .with_cancellation(cancellation.clone());
     if let Some(max_frames) = max_frames {
         request = request.with_max_frames(max_frames);

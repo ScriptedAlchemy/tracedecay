@@ -1971,6 +1971,51 @@ async fn a_refusal_memo_cannot_authorize_uncovered_bytes_or_hide_an_in_place_rew
     }
 }
 
+/// Other providers may use their initializer to verify proof even with zero
+/// frames. Default behavior therefore continues invoking it and preserves a
+/// refusal before the pending-rewrite completion check.
+#[tokio::test]
+async fn unchanged_noop_does_not_skip_initialization_without_provider_opt_in() {
+    let (_temp, path, len) = rollout_fixture();
+    let spy = SeamSpyAdmission::default();
+    let first =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("initial admission");
+    assert_eq!(first.covered_through, len);
+    spy.rewrites.lock().unwrap().clear();
+    let original_cursor = stored_cursor(&spy).await;
+
+    let request = super::JsonlObservationAdmissionRequest::new(
+        "codex",
+        &path,
+        &spy,
+        crate::runtime::hosts::codex::codex_observation_source_v2(SESSION_ID).unwrap(),
+        ObservationScopeV1::Profile,
+        RetentionClass::new("test").unwrap(),
+    );
+    let mut initialized = false;
+    let error = super::admit_jsonl_observations(
+        request,
+        async |_| {
+            initialized = true;
+            Err::<(), TranscriptIngestError>(TranscriptIngestError::InvalidFrameState {
+                provider: "codex",
+            })
+        },
+        |(), _, _, _, _, _| panic!("empty page cannot normalize a frame"),
+    )
+    .await
+    .expect_err("without opt-in the initializer must still validate an empty page");
+    assert!(initialized);
+    assert!(matches!(
+        error,
+        TranscriptIngestError::InvalidFrameState { provider: "codex" }
+    ));
+    assert_eq!(stored_cursor(&spy).await, original_cursor);
+    assert!(spy.rewrites.lock().unwrap().is_empty());
+}
+
 /// A durable unchanged cursor must not pay for a second provider-scope
 /// initialization on every discovery re-offer. Rewrite completion remains
 /// authoritative even when no frames were read, and the next append must
@@ -2000,7 +2045,8 @@ async fn unchanged_codex_reoffers_skip_empty_initializer_but_complete_rewrites()
             RetentionClass::new("test").unwrap(),
         )
         .with_persisted_cursor_update(super::PersistedCursorUpdate::Replace)
-        .with_lazy_shared_frame_preparation();
+        .with_lazy_shared_frame_preparation()
+        .with_skip_empty_initialization();
         let mut initialized = false;
         let idle = super::admit_jsonl_observations(
             request,
