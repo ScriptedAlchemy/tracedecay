@@ -50,10 +50,10 @@ def publish_sample(path, serialized):
     linking the completed file keeps the original exclusive-create behavior.
     """
     directory = os.path.dirname(os.path.abspath(path))
-    # mkstemp forces mode 0600. Match open(path, "x") by applying the
-    # process umask at creation without changing the process-wide umask.
+    # Samples include the raw request, potentially containing Scout session
+    # transcripts. The caller's umask must not make that evidence public.
     staged = os.path.join(directory, f".noul-sample-{secrets.token_hex(16)}")
-    descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as output:
             output.write(serialized)
@@ -111,7 +111,7 @@ def publish_final_result(path, document):
     serialized = json.dumps(document, indent=1, allow_nan=False)
     directory = os.path.dirname(os.path.abspath(path))
     staged = os.path.join(directory, f".noul-result-{secrets.token_hex(16)}")
-    descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as output:
             output.write(serialized)
@@ -376,6 +376,10 @@ def lock_partial_writer(partial, path):
     opened = os.fstat(partial.fileno())
     if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
         raise ValueError(f"partial output was replaced or redirected: {path}")
+    # Older interrupted logs may predate private evidence permissions.
+    # Tighten the opened, locked inode before reading or continuing inference.
+    if os.name == "posix" and stat.S_IMODE(opened.st_mode) & 0o077:
+        os.fchmod(partial.fileno(), stat.S_IMODE(opened.st_mode) & 0o700)
     partial.seek(0)
 
 
@@ -592,7 +596,14 @@ def main(argv=None):
         header = {"experiment": identity, "experiment_sha256": digest(identity)}
         partial_path = path + ".partial"
         try:
-            partial = open(partial_path, "x+", encoding="utf-8")
+            # Default umask 022 (or an explicit umask 000) must not expose
+            # result labels, cases or response telemetry to other users.
+            descriptor = os.open(partial_path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                partial = os.fdopen(descriptor, "r+", encoding="utf-8")
+            except BaseException:
+                os.close(descriptor)
+                raise
             created = True
         except FileExistsError:
             partial = open_partial_for_resume(partial_path)

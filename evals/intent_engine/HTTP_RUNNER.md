@@ -40,6 +40,13 @@ provenance, **not remote attestation**: update it whenever the deployment change
 The optional `--noul-temperature` is a separate client-side calibration step;
 it must be finite and strictly positive.
 
+New raw-response samples, resumable `.partial` logs and completed result
+files are created owner-readable/writable only (mode 0600 on POSIX), even
+under a permissive process umask. A safely locked, older permissive partial
+has its group/other permissions removed on resume without changing evidence
+bytes. Samples can contain the full model input, including private session
+content: do not put them on a shared filesystem with weaker access semantics.
+
 The existing `.partial` log starts with the experiment identity. This binds the
 whole dataset hash, selected case IDs and order, the original labels and
 context-needed annotations, the exact rendered HTTP request bytes for each

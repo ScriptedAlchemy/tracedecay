@@ -933,16 +933,42 @@ class RunHttpTest(unittest.TestCase):
         self.assertEqual(list(self.root.glob(".noul-sample-*")), [])
 
     @unittest.skipUnless(os.name == "posix", "POSIX umask semantics")
-    def test_published_sample_matches_normal_exclusive_creation_mode(self):
+    def test_private_samples_and_results_ignore_permissive_umask(self):
         sample = self.root / "first-response.json"
-        previous_umask = os.umask(0o022)
+        previous_umask = os.umask(0)
         try:
             with patch.object(run_http, "post", side_effect=self.response):
                 self.run_main(["--sample-out", str(sample)])
         finally:
             os.umask(previous_umask)
-        self.assertEqual(stat.S_IMODE(sample.stat().st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE(sample.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(self.output.stat().st_mode), 0o600)
         self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX file permissions")
+    def test_private_partial_creation_and_tightening_on_resume(self):
+        previous_umask = os.umask(0)
+        try:
+            self.interrupt()
+            self.assertEqual(stat.S_IMODE(self.partial.stat().st_mode), 0o600)
+            # A partial written by the previous evaluator may have been
+            # group/world-readable. Preserve its bytes and resume safely.
+            frozen_bytes = self.partial.read_bytes()
+            os.chmod(self.partial, 0o666)
+
+            def assert_private_before_network(url, body):
+                self.assertEqual(stat.S_IMODE(self.partial.stat().st_mode), 0o600)
+                self.assertEqual(self.partial.read_bytes(), frozen_bytes)
+                return self.response(url, body)
+
+            with patch.object(run_http, "post", side_effect=assert_private_before_network) as post:
+                self.run_main()
+            post.assert_called_once()
+            self.assertFalse(self.partial.exists())
+            self.assertEqual(stat.S_IMODE(self.output.stat().st_mode), 0o600)
+            self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+        finally:
+            os.umask(previous_umask)
 
     def test_calibration_remains_finite_at_extreme_positive_temperatures(self):
         for temperature in (1e-300, 1.0, 1e300):
