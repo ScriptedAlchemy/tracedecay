@@ -2809,6 +2809,22 @@ mod activation_tests {
         write_staged_message(&transaction, GENERATION, &changed)
             .await
             .unwrap();
+        // Schema initialization and other writer operations can already
+        // allocate TEMP pages. The preflight must not grow that allocation,
+        // regardless of unrelated TEMP storage already held by this connection.
+        let mut baseline_pages = transaction
+            .query("PRAGMA temp.page_count", ())
+            .await
+            .unwrap();
+        let baseline_page_count = baseline_pages
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap();
+        drop(baseline_pages);
+
         let error = prepare_rebuild_output_activation(&transaction, GENERATION)
             .await
             .unwrap_err();
@@ -2858,16 +2874,17 @@ mod activation_tests {
         drop(rows);
 
         // A dropped TEMP b-tree can disappear from sqlite_temp_master while
-        // its pages remain allocated on this writer. Measure actual SQLite
-        // TEMP database pages too, not just the surviving schema.
+        // its pages remain allocated on this writer. Compare page counts on
+        // this same long-lived connection before and after repeated preflight
+        // calls; requiring an absolute zero would conflate earlier storage.
         let mut pages = transaction
             .query("PRAGMA temp.page_count", ())
             .await
             .unwrap();
         assert_eq!(
             pages.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-            0,
-            "preflight must not allocate TEMP b-tree pages on the long-lived writer"
+            baseline_page_count,
+            "repeated preflight checks must not grow SQLite TEMP database pages"
         );
         drop(pages);
 
