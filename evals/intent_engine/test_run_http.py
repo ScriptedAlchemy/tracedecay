@@ -99,7 +99,9 @@ class RunHttpTest(unittest.TestCase):
             with self.subTest(size=size):
                 payload = body + b" " * (size - len(body))
                 with patch("urllib.request.build_opener") as opener:
-                    response = opener.return_value.open.return_value
+                    # The HTTP body is read from the context manager's
+                    # entered stream, not the mock returned by opener.open().
+                    response = opener.return_value.open.return_value.__enter__.return_value
                     response.read.side_effect = io.BytesIO(payload).read
                     if accepted:
                         result, latency = run_http.post(
