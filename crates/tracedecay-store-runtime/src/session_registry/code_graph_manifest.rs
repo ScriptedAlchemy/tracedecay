@@ -331,6 +331,12 @@ fn with_verified_seal_from_roots<T>(
                 // names the authoritative copy.
                 return match read(pool, expected_digest, check) {
                     Ok(value) => Ok(value),
+                    // A late endpoint-scanned fallback may cross the deadline
+                    // after the canonical copy failed. Do not misreport that
+                    // interruption as the earlier source corruption.
+                    Err(error @ (GraphDbError::Cancelled | GraphDbError::DeadlineExceeded)) => {
+                        Err(error)
+                    }
                     Err(_) => Err(canonical_error),
                 };
             }
@@ -1927,6 +1933,55 @@ mod tests {
             .unwrap_err(),
             GraphDbError::DeadlineExceeded
         );
+    }
+
+    #[test]
+    fn retained_seal_fallback_preserves_late_interruption_after_real_reads() {
+        let temp = TempDir::new().unwrap();
+        let canonical = temp.path().join("canonical-seal");
+        let pool = temp.path().join("retained-seal");
+        let expected = b"nonempty retained seal bytes";
+        let digest = hex::encode(Sha256::digest(expected));
+        std::fs::write(&canonical, b"corrupt canonical bytes").unwrap();
+        std::fs::write(&pool, expected).unwrap();
+
+        // Prove that fallback is otherwise usable: the canonical mismatch
+        // alone must not prevent an intact retained copy from being read.
+        assert_eq!(
+            super::with_verified_seal_from_roots(
+                &canonical,
+                &pool,
+                &digest,
+                &|| Ok(()),
+                read_verified_seal_manifest,
+            )
+            .unwrap(),
+            expected,
+        );
+
+        for interruption in [GraphDbError::Cancelled, GraphDbError::DeadlineExceeded] {
+            let probes = AtomicUsize::new(0);
+            let error = super::with_verified_seal_from_roots(
+                &canonical,
+                &pool,
+                &digest,
+                &|| {
+                    if probes.fetch_add(1, Ordering::SeqCst) >= 2 {
+                        Err(interruption.clone())
+                    } else {
+                        Ok(())
+                    }
+                },
+                read_verified_seal_manifest,
+            )
+            .unwrap_err();
+            assert_eq!(error, interruption);
+            assert_eq!(
+                probes.load(Ordering::SeqCst),
+                3,
+                "the retained copy must complete its real read before the late interruption",
+            );
+        }
     }
 
     #[test]
