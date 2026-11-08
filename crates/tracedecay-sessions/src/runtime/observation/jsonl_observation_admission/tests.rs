@@ -2031,7 +2031,10 @@ async fn unchanged_codex_reoffers_skip_empty_initializer_but_complete_rewrites()
     assert_eq!(first.covered_through, len);
     let previous = stored_cursor(&spy).await.expect("durable cursor");
     let original_rows = spy.inner.observations().len();
-    assert!(original_rows > 0, "the cold pass must admit actual evidence");
+    assert!(
+        original_rows > 0,
+        "the cold pass must admit actual evidence"
+    );
     let original_captures = spy.capture_count();
     spy.rewrites.lock().unwrap().clear();
 
@@ -2065,12 +2068,17 @@ async fn unchanged_codex_reoffers_skip_empty_initializer_but_complete_rewrites()
         assert_eq!(idle.frames_persisted, 0);
         assert_eq!(idle.covered_through, len);
     }
-    let completions = spy.rewrites.lock().unwrap();
-    assert_eq!(completions.len(), 16, "no-op re-offers must still check durable rewrites");
-    assert!(completions.iter().all(|call| {
-        matches!(call, RewriteCall::Complete(generation) if *generation == previous.generation())
-    }));
-    drop(completions);
+    {
+        let completions = spy.rewrites.lock().unwrap();
+        assert_eq!(
+            completions.len(),
+            16,
+            "no-op re-offers must still check durable rewrites"
+        );
+        assert!(completions.iter().all(|call| {
+            matches!(call, RewriteCall::Complete(generation) if *generation == previous.generation())
+        }));
+    }
     assert_eq!(spy.inner.observations().len(), original_rows);
     assert_eq!(spy.capture_count(), original_captures);
     assert_eq!(stored_cursor(&spy).await, Some(previous));
