@@ -991,7 +991,9 @@ fn read_pinned_partitioned_segment(
         )
     })?;
     read_segment_range(&mut pinned.file, offset, length, buffer).map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!("sealed generation segment read failed: {error}"))
+        CodeIndexProductionErrorV1::Contract(format!(
+            "sealed generation segment read failed: {error}"
+        ))
     })
 }
 
