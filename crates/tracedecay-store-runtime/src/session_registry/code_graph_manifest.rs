@@ -1947,17 +1947,15 @@ mod tests {
 
         // Prove that fallback is otherwise usable: the canonical mismatch
         // alone must not prevent an intact retained copy from being read.
-        assert_eq!(
-            super::with_verified_seal_from_roots(
-                &canonical,
-                &pool,
-                &digest,
-                &|| Ok(()),
-                read_verified_seal_manifest,
-            )
-            .unwrap(),
-            expected,
-        );
+        let recovered = super::with_verified_seal_from_roots(
+            &canonical,
+            &pool,
+            &digest,
+            &|| Ok(()),
+            read_verified_seal_manifest,
+        )
+        .unwrap();
+        assert_eq!(recovered.as_slice(), &expected[..]);
 
         for interruption in [GraphDbError::Cancelled, GraphDbError::DeadlineExceeded] {
             let probes = AtomicUsize::new(0);
