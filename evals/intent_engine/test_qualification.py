@@ -384,6 +384,10 @@ class QualificationTests(unittest.TestCase):
                 run_http.main(args)
             self.assertEqual(len(calls), 2, "must exclude training/tune cases from inference")
             result = json.loads((here / "results" / "frozen_B_noul_text.json").read_text())
+            self.assertEqual(
+                [row["request_size_bytes"] for row in result["rows"]],
+                [len(run_http.request_bytes(body)) for body in calls],
+            )
             self.assertEqual([r["id"] for r in result["rows"]], [
                 "holdout-positive", "holdout-negative"
             ])
@@ -450,6 +454,17 @@ class QualificationTests(unittest.TestCase):
                 frozen_bytes = partial.read_bytes()
                 self.assertEqual(len(frozen_bytes.splitlines()), 2,
                                  "first accepted prediction must be durably resumable")
+                header_line, row_line = frozen_bytes.splitlines()
+                falsified = json.loads(row_line)
+                falsified["request_size_bytes"] += 1
+                corrupted_bytes = header_line + b"\n" + json.dumps(falsified).encode("utf-8") + b"\n"
+                partial.write_bytes(corrupted_bytes)
+                with patch.object(run_http, "post") as blocked:
+                    with self.assertRaisesRegex(ValueError, "mismatched request byte count"):
+                        run_http.main(args)
+                    blocked.assert_not_called()
+                self.assertEqual(partial.read_bytes(), corrupted_bytes)
+                partial.write_bytes(frozen_bytes)
                 changed = copy.deepcopy(self.manifest)
                 changed["error_tolerances"]["max_p95_ms"] = 21.0
                 manifest_path.write_text(json.dumps(changed))
