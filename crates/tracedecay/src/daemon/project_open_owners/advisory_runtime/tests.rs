@@ -34,7 +34,10 @@ async fn local_advisory_feedback_does_not_poll_remote_refresh() {
         forbidden_ci,
     )
     .await;
-    assert!(github.is_none(), "local feedback must not request GitHub refresh");
+    assert!(
+        github.is_none(),
+        "local feedback must not request GitHub refresh"
+    );
     assert!(matches!(
         ci,
         ProductionCiFailureDiscoveryOutcomeV1::Unavailable
@@ -80,7 +83,9 @@ async fn explicit_advisory_refresh_waits_for_its_own_remote_discovery() {
         Some(github_request.clone()),
         true,
         async move {
-            started_tx.send(()).expect("reader still owns the admission barrier");
+            started_tx
+                .send(())
+                .expect("reader still owns the admission barrier");
             release_rx.await.expect("explicit discovery must settle")
         },
     ));

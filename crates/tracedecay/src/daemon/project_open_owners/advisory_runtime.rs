@@ -306,13 +306,14 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
         // Construct the discovery future without polling it on editor or hook
         // paths. A pending/denied remote provider cannot consume local feedback's
         // deadline or cancel its independently authorized diagnostics.
-        let github_request = self.github_review_read.clone().map(
-            |(pull_request_id, operation)| GitHubReviewReadRequestV1 {
+        let github_request = self
+            .github_review_read
+            .clone()
+            .map(|(pull_request_id, operation)| GitHubReviewReadRequestV1 {
                 operation,
                 scope: self.feedback_scope.clone(),
                 pull_request_id,
-            },
-        );
+            });
         let (github, ci) = advisory_remote_requests(
             remote_mode,
             github_request,
@@ -350,40 +351,40 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
                 );
                 LspRuntimeFailure::new("feedback-cycle-advisory-operation")
             })?;
-        let outcome =
-            pin.registration
-                .runtime()
-                .run_once(
-                    &invocation.context,
-                    AdvisoryCycleControl {
-                        operation,
-                        deadline,
+        let outcome = pin
+            .registration
+            .runtime()
+            .run_once(
+                &invocation.context,
+                AdvisoryCycleControl {
+                    operation,
+                    deadline,
+                },
+                AdvisoryCycleRequest {
+                    feedback: invocation.request,
+                    github,
+                    ci,
+                    proximity: Some(ProximityEvaluationRequestV1 {
+                        scope: self.feedback_scope.clone(),
+                        observed_at,
+                    }),
+                    validity: tracedecay_contracts::AdvisoryFindingValidityWindowV1 {
+                        valid_at: observed_at,
+                        expires_at,
                     },
-                    AdvisoryCycleRequest {
-                        feedback: invocation.request,
-                        github,
-                        ci,
-                        proximity: Some(ProximityEvaluationRequestV1 {
-                            scope: self.feedback_scope.clone(),
-                            observed_at,
-                        }),
-                        validity: tracedecay_contracts::AdvisoryFindingValidityWindowV1 {
-                            valid_at: observed_at,
-                            expires_at,
-                        },
-                    },
-                )
-                .await
-                .map_err(|error| {
-                    tracing::warn!(
-                        target: "tracedecay::feedback_advisory_cycle",
-                        project_id = self.feedback_scope.project_id.as_str(),
-                        worktree_id = self.feedback_scope.worktree_id.as_str(),
-                        ?error,
-                        "advisory feedback cycle execution failed"
-                    );
-                    LspRuntimeFailure::new(error.lsp_failure_class())
-                })?;
+                },
+            )
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    target: "tracedecay::feedback_advisory_cycle",
+                    project_id = self.feedback_scope.project_id.as_str(),
+                    worktree_id = self.feedback_scope.worktree_id.as_str(),
+                    ?error,
+                    "advisory feedback cycle execution failed"
+                );
+                LspRuntimeFailure::new(error.lsp_failure_class())
+            })?;
         if outcome.publication().is_some() {
             self.deliver_completed_publication(&pin.registration, &outcome);
         }
