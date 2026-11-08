@@ -955,6 +955,8 @@ mod tests {
     use std::path::Path;
     use std::process::{Command, Output};
 
+    use tracedecay_runtime_core::path_safety::canonical_existing_identity;
+
     use super::{
         CodeIndexIgnoredDependencyRefusalV1, CodeIndexSchedulerErrorV1, prove_gix_ignored,
         read_bounded_admitted_source,
@@ -998,6 +1000,7 @@ mod tests {
         let child = fixture.path().join("child");
         fs::create_dir_all(&parent).unwrap();
         fs::create_dir_all(&child).unwrap();
+        let parent = canonical_existing_identity(&parent).expect("canonical project root");
 
         fixture_git(&child, &["init", "-q"]);
         fs::write(child.join("index.ts"), "export type Child = number;\n").unwrap();
@@ -1037,12 +1040,15 @@ mod tests {
             ))
         ));
         let admitted = read_bounded_admitted_source(&parent, "node_modules/pkg/index.ts", None);
-        assert!(matches!(
-            admitted,
-            Err(CodeIndexSchedulerErrorV1::IgnoredDependency(
-                CodeIndexIgnoredDependencyRefusalV1::NotIgnored
-            ))
-        ));
+        assert!(
+            matches!(
+                admitted,
+                Err(CodeIndexSchedulerErrorV1::IgnoredDependency(
+                    CodeIndexIgnoredDependencyRefusalV1::NotIgnored
+                ))
+            ),
+            "unexpected source admission: {admitted:?}"
+        );
 
         // Removing the staged gitlink does not authorize the child while
         // the parent HEAD still owns the repository boundary.
