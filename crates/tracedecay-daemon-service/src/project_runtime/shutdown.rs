@@ -368,12 +368,21 @@ async fn shut_down_advisory(runtimes: &BTreeMap<PathBuf, ProjectRuntime>) -> Vec
 }
 
 async fn shut_down_feedback(runtimes: &BTreeMap<PathBuf, ProjectRuntime>) -> Vec<String> {
+    // Start every project's terminal write before joining its independent
+    // database worker. All joins share the daemon shutdown deadline.
+    let drains: Vec<_> = runtimes
+        .iter()
+        .filter_map(|(project_root, runtime)| {
+            let feedback = runtime.feedback.as_ref()?;
+            Some((
+                project_root,
+                feedback.runtime().close_and_drain_observations(),
+            ))
+        })
+        .collect();
     let mut lost_work = Vec::new();
-    for (project_root, runtime) in runtimes {
-        let Some(feedback) = runtime.feedback.as_ref() else {
-            continue;
-        };
-        if let Err(error) = feedback.runtime().close_and_drain_observations().await {
+    for (project_root, drain) in drains {
+        if let Err(error) = drain.await {
             lost_work.push(format!(
                 "{}: feedback observations: {error}",
                 project_root.display()
