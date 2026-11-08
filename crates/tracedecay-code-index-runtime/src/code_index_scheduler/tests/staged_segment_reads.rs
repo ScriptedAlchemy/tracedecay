@@ -613,10 +613,9 @@ fn staged_preparation_exact_segment_bytes_commit_and_reload() {
     );
 }
 
-
 #[test]
-fn committed_whole_segment_read_authenticates_bytes_without_another_open() {
-    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\\n")]);
+fn committed_whole_segment_read_refuses_same_length_corruption() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let source_root = TempDir::new().expect("source store");
     let generation = source_generation(&fixture, source_root.path());
     let target_root = TempDir::new().expect("target store");
