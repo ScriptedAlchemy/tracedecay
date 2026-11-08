@@ -1891,11 +1891,18 @@ fn staged_evidence_pack_writer_authentication_avoids_extra_opens_and_refuses_rep
             "a same-byte, different-inode evidence pack must not be published"
         );
         assert!(
-            files.segments.pending.values().any(|pending| pending == &path),
+            files
+                .segments
+                .pending
+                .values()
+                .any(|pending| pending == &path),
             "rejected pack remains under private temporary ownership"
         );
     }
-    assert!(!canonical.exists(), "refused pack must not gain a canonical name");
+    assert!(
+        !canonical.exists(),
+        "refused pack must not gain a canonical name"
+    );
     assert_eq!(
         PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get),
         opens_before_refusal,

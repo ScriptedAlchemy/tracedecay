@@ -2056,7 +2056,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
     // rather than making an independent endpoint-scanned pathname open.
     fn read_publication_pointer_with_bytes(
         &self,
-    ) -> Result<Option<(DurablePublicationPointerV1, Vec<u8>)>, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<Option<(DurablePublicationPointerV1, Vec<u8>)>, CodeIndexPublicationStoreErrorV1>
+    {
         let metadata = match std::fs::metadata(&self.active_path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
