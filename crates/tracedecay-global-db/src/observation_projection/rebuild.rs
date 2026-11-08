@@ -2861,7 +2861,12 @@ mod activation_tests {
             .await
             .unwrap();
         assert_eq!(
-            rows.next().await.unwrap().unwrap().get::<String>(0).unwrap(),
+            rows.next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<String>(0)
+                .unwrap(),
             foreign.text,
             "a denied activation must not change a protected durable body"
         );
@@ -2872,7 +2877,13 @@ mod activation_tests {
             .await
             .unwrap();
         assert_eq!(
-            integrity.next().await.unwrap().unwrap().get::<String>(0).unwrap(),
+            integrity
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<String>(0)
+                .unwrap(),
             "ok",
             "the real registered SQLite store must remain structurally sound"
         );
