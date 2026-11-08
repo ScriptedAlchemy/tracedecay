@@ -1043,12 +1043,8 @@ fn dependency_neighborhood(
     first_hop: Vec<Vec<SymbolOccurrenceId>>,
     mut read_callees: impl FnMut(&[SymbolOccurrenceId]) -> Option<Vec<Vec<SymbolOccurrenceId>>>,
 ) -> Option<BTreeSet<SymbolOccurrenceId>> {
-    let mut frontier = seeds
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+    let seed_ids = seeds.iter().cloned().collect::<BTreeSet<_>>();
+    let mut frontier = seed_ids.iter().cloned().collect::<Vec<_>>();
     let mut dependencies = BTreeSet::new();
     let mut first_hop = Some(first_hop);
     for _ in 0..2 {
@@ -1066,7 +1062,10 @@ fn dependency_neighborhood(
         frontier = batches
             .into_iter()
             .flatten()
+            // Seed adjacency was already read in the first batch. A cycle back
+            // to any root still contributes evidence, but needs no second read.
             .filter(|occurrence| dependencies.insert(occurrence.clone()))
+            .filter(|occurrence| !seed_ids.contains(occurrence))
             .collect();
     }
     Some(dependencies)
@@ -1578,6 +1577,44 @@ mod tests {
         )
         .expect("empty dependency closure is complete");
         assert!(dependencies.is_empty());
+    }
+
+    #[test]
+    fn dependency_neighborhood_reuses_adjacency_between_distinct_seeds() {
+        let first = SymbolOccurrenceId::new("symbol.first").unwrap();
+        let second = SymbolOccurrenceId::new("symbol.second").unwrap();
+        let direct = SymbolOccurrenceId::new("symbol.direct").unwrap();
+        let transitive = SymbolOccurrenceId::new("symbol.transitive").unwrap();
+        let mut reads = 0;
+        let result = dependency_neighborhood(
+            &[first.clone(), second.clone()],
+            vec![vec![second.clone()], vec![direct.clone()]],
+            |frontier| {
+                reads += 1;
+                assert_eq!(
+                    frontier,
+                    std::slice::from_ref(&direct),
+                    "seed adjacency is already supplied by the first hop"
+                );
+                Some(vec![vec![first.clone(), transitive.clone()]])
+            },
+        )
+        .expect("overlapping roots retain two-hop evidence");
+        assert_eq!(reads, 1);
+        assert_eq!(result, BTreeSet::from([first, second, direct, transitive]));
+    }
+
+    #[test]
+    fn dependency_neighborhood_preserves_seed_cycles_without_extra_reads() {
+        let first = SymbolOccurrenceId::new("symbol.first").unwrap();
+        let second = SymbolOccurrenceId::new("symbol.second").unwrap();
+        let result = dependency_neighborhood(
+            &[first.clone(), second.clone()],
+            vec![vec![first.clone(), second.clone()], vec![first.clone()]],
+            |_| panic!("seed cycles must not issue another adjacency read"),
+        )
+        .expect("supplied adjacency completely covers the seed cycle");
+        assert_eq!(result, BTreeSet::from([first, second]));
     }
 
     #[test]
