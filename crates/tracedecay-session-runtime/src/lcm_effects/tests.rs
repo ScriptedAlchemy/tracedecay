@@ -91,6 +91,26 @@ fn compression_request(session_id: &str) -> LcmCompressionRequest {
     }
 }
 
+#[tokio::test]
+async fn a_queued_compression_honors_cancellation_without_blocking_other_sessions() {
+    let harness = RegisteredGlobalDbHarness::open("lcm-session-compression-turn").await;
+    let signal = CancellationSignal::active("queued-compression").unwrap();
+    let owner = DaemonLcmEffectService::new(harness.registered.clone(), None, None, None);
+    let caller = DaemonLcmEffectService::new(harness.registered.clone(), None, Some(&signal), None);
+    let first = compression_request("first-session");
+    let _held = owner.compression_turn(&first).await.unwrap();
+    let waiting = caller.compress(first);
+    tokio::pin!(waiting);
+    assert!(futures_util::poll!(&mut waiting).is_pending());
+
+    let _independent = owner
+        .compression_turn(&compression_request("other-session"))
+        .await
+        .unwrap();
+    signal.cancel(UtcMicros(1));
+    assert!(matches!(waiting.await, Err(LcmError::Cancelled)));
+}
+
 fn provided_summary(summary_text: impl Into<String>) -> LcmSummarizerMode {
     LcmSummarizerMode::Provided {
         summary_text: summary_text.into(),
