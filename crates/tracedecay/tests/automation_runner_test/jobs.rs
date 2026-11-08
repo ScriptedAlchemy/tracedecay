@@ -86,6 +86,7 @@ fn enabled_job_config() -> AutomationSettingsV1 {
 struct ContentBackend {
     calls: AtomicUsize,
     content: &'static str,
+    executable: Option<std::path::PathBuf>,
 }
 
 impl ContentBackend {
@@ -93,7 +94,13 @@ impl ContentBackend {
         Self {
             calls: AtomicUsize::new(0),
             content,
+            executable: None,
         }
+    }
+
+    fn with_executable(mut self, executable: &Path) -> Self {
+        self.executable = Some(executable.to_path_buf());
+        self
     }
 
     fn calls(&self) -> usize {
@@ -126,7 +133,7 @@ impl AgentTaskBackend for ContentBackend {
     }
 
     fn executable(&self) -> Option<&std::path::Path> {
-        None
+        self.executable.as_deref()
     }
 }
 
@@ -988,6 +995,10 @@ async fn scheduler_trigger_skips_repeat_and_respects_lock_discipline() {
     let mut job = sample_job("sched-job");
     job.schedule = Some("manual".to_string());
     let config = enabled_job_config();
+    // Reach the schedule gate with a bound identity, not the earlier
+    // backend-unconfigured refusal. This gate never invokes the backend.
+    let executable = tempfile::NamedTempFile::new().unwrap();
+    let backend = ContentBackend::new("unused").with_executable(executable.path());
 
     // Manual schedule: every scheduler tick of the same occurrence reaches
     // the prefilter, which records the skip once.
@@ -996,7 +1007,7 @@ async fn scheduler_trigger_skips_repeat_and_respects_lock_discipline() {
         let run = evaluate_and_record_scheduler_skip(
             &dashboard_root,
             &config,
-            None,
+            backend.executable(),
             &job,
             "sched-occurrence",
             None,
@@ -1019,7 +1030,7 @@ async fn scheduler_trigger_skips_repeat_and_respects_lock_discipline() {
     let repeated = evaluate_and_record_scheduler_skip(
         &dashboard_root,
         &config,
-        None,
+        backend.executable(),
         &job,
         "sched-occurrence",
         None,
@@ -1030,6 +1041,76 @@ async fn scheduler_trigger_skips_repeat_and_respects_lock_discipline() {
     assert_eq!(
         repeated.ledger_record, records[0],
         "an immediate repeat skip must return the exact durable prior row"
+    );
+    assert_eq!(backend.calls(), 0);
+}
+
+#[tokio::test]
+async fn scheduler_prefilter_rejects_unconfigured_backend_and_recovers_without_effect() {
+    let temp = tempdir().unwrap();
+    let dashboard_root = temp.path().join("dashboard");
+    let job = sample_job("backend-recovery");
+    let config = enabled_job_config();
+    let occurrence = "backend-recovery-occurrence";
+    let backend = ContentBackend::new("unused");
+
+    let first = evaluate_and_record_scheduler_skip(
+        &dashboard_root,
+        &config,
+        backend.executable(),
+        &job,
+        occurrence,
+        None,
+    )
+    .await
+    .unwrap()
+    .expect("a due job still requires a configured backend");
+    assert_eq!(first.report["reason"], json!("backend_unconfigured"));
+    assert_eq!(first.ledger_record.status, AutomationRunStatus::Skipped);
+    assert_ne!(first.run_id, occurrence);
+    let repeated = evaluate_and_record_scheduler_skip(
+        &dashboard_root,
+        &config,
+        backend.executable(),
+        &job,
+        occurrence,
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(repeated.ledger_record, first.ledger_record);
+
+    let executable = tempfile::NamedTempFile::new().unwrap();
+    let backend = backend.with_executable(executable.path());
+    assert!(
+        evaluate_and_record_scheduler_skip(
+            &dashboard_root,
+            &config,
+            backend.executable(),
+            &job,
+            occurrence,
+            None,
+        )
+        .await
+        .unwrap()
+        .is_none(),
+        "binding the backend must admit the same due occurrence without cooldown"
+    );
+    assert_eq!(backend.calls(), 0);
+    assert_eq!(
+        load_run_records(&dashboard_root, 10).await.unwrap(),
+        vec![first.ledger_record],
+        "advisory admission must not append an effectful terminal"
+    );
+    assert!(
+        tracedecay_automation_runtime::automation::run_ledger::find_run_record_exact_bounded(
+            &dashboard_root,
+            occurrence,
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
 }
 
@@ -1206,15 +1287,22 @@ async fn scheduler_prefilter_live_lock_wins_over_not_due_summary() {
 
     let config = enabled_job_config();
     let occurrence = "locked-prefilter-occurrence";
-    let prefilter =
-        evaluate_and_record_scheduler_skip(&dashboard_root, &config, None, &job, occurrence, None)
-            .await
-            .unwrap()
-            .expect("the live job lock must produce a diagnostic");
+    let executable = tempfile::NamedTempFile::new().unwrap();
+    let backend = ContentBackend::new("unused").with_executable(executable.path());
+    let prefilter = evaluate_and_record_scheduler_skip(
+        &dashboard_root,
+        &config,
+        backend.executable(),
+        &job,
+        occurrence,
+        None,
+    )
+    .await
+    .unwrap()
+    .expect("the live job lock must produce a diagnostic");
     assert_eq!(prefilter.report["reason"], json!("scheduler_lock_active"));
     assert_ne!(prefilter.run_id, occurrence);
 
-    let backend = ContentBackend::new("unused");
     let admitted_job = tracedecay_automation_runtime::automation::jobs::admit_job(&job).unwrap();
     let retained = run_user_job_with_backend_for_retained_settlement(
         &dashboard_root,
@@ -1262,12 +1350,21 @@ async fn retained_scheduler_runner_reacquires_after_due_prefilter() {
     job.schedule = Some("every 1h".to_owned());
     let config = enabled_job_config();
     let occurrence = "prefilter-gap-occurrence";
+    let executable = tempfile::NamedTempFile::new().unwrap();
+    let backend = ContentBackend::new("unused").with_executable(executable.path());
 
     assert!(
-        evaluate_and_record_scheduler_skip(&dashboard_root, &config, None, &job, occurrence, None)
-            .await
-            .unwrap()
-            .is_none(),
+        evaluate_and_record_scheduler_skip(
+            &dashboard_root,
+            &config,
+            backend.executable(),
+            &job,
+            occurrence,
+            None,
+        )
+        .await
+        .unwrap()
+        .is_none(),
         "a new interval job is advisory-due before effect admission"
     );
     let _raced_in =
@@ -1276,7 +1373,6 @@ async fn retained_scheduler_runner_reacquires_after_due_prefilter() {
             .unwrap()
             .expect("the advisory prefilter must release its reservation lock");
 
-    let backend = ContentBackend::new("unused");
     let admitted_job = tracedecay_automation_runtime::automation::jobs::admit_job(&job).unwrap();
     let retained = run_user_job_with_backend_for_retained_settlement(
         &dashboard_root,
