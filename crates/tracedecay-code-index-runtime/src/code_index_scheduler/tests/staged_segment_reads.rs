@@ -594,7 +594,11 @@ fn staged_preparation_exact_segment_bytes_commit_and_reload() {
     );
     drop(reader);
     drop(preparation);
-    let reloaded = target
+    // A new store has no decoded-generation or active-manifest memo from the
+    // publisher; this must really reconstruct the snapshot from durable bytes.
+    drop(target);
+    let cold_store = target_store(target_root.path(), &fixture);
+    let reloaded = cold_store
         .load_active_shared()
         .expect("decode committed generation")
         .expect("active durable generation");
@@ -607,6 +611,80 @@ fn staged_preparation_exact_segment_bytes_commit_and_reload() {
         generation.snapshot().content_identity,
         "a cold durable read must recover the exact published snapshot identity"
     );
+}
+
+
+#[test]
+fn committed_whole_segment_read_authenticates_bytes_without_another_open() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\\n")]);
+    let source_root = TempDir::new().expect("source store");
+    let generation = source_generation(&fixture, source_root.path());
+    let target_root = TempDir::new().expect("target store");
+    let mut target = target_store(target_root.path(), &fixture);
+    let mut preparation = target
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare target");
+    let publication = generation
+        .stage_publication(&mut preparation)
+        .expect("stage real generation");
+    target
+        .commit(&mut preparation, &publication)
+        .expect("commit real generation");
+    drop(preparation);
+    drop(target);
+
+    let cold = target_store(target_root.path(), &fixture);
+    let identity = CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+        publication.manifest_bytes().as_ref(),
+    )
+    .expect("parse real manifest")
+    .expect("partitioned generation")
+    .into_iter()
+    .find(|segment| segment.size_bytes > 4)
+    .expect("nonempty addressed segment");
+    let request = SealedGenerationSegmentReadV1::Whole {
+        digest: &identity.digest,
+        size_bytes: identity.size_bytes,
+    };
+    let mut bytes = Vec::new();
+    cold.read_partitioned_segment(request, &mut bytes)
+        .expect("cold valid whole-segment read");
+    assert_eq!(segment_digest(&bytes), identity.digest);
+    let mut range = Vec::new();
+    cold.read_partitioned_segment(
+        SealedGenerationSegmentReadV1::Range {
+            digest: &identity.digest,
+            size_bytes: identity.size_bytes,
+            offset: 1,
+            length: 3,
+        },
+        &mut range,
+    )
+    .expect("valid range still returns exact bytes");
+    assert_eq!(range.as_slice(), &bytes[1..4]);
+
+    // Keep the inode and extent: size/path checks alone accept this corruption.
+    let segment_path = cold.segments_root.join(format!(
+        "segment-{}.json",
+        sha256_hex_suffix(identity.digest.as_str()).expect("digest suffix")
+    ));
+    let original = segment_path.symlink_metadata().expect("original segment");
+    let mut corrupt = vec![b'X'; bytes.len()];
+    if corrupt == bytes {
+        corrupt[0] ^= 1;
+    }
+    std::fs::write(&segment_path, &corrupt).expect("mutate same inode");
+    let changed = segment_path.symlink_metadata().expect("mutated segment");
+    assert_eq!(
+        (original.dev(), original.ino(), original.len()),
+        (changed.dev(), changed.ino(), changed.len())
+    );
+    let mut reused = b"stale output".to_vec();
+    assert!(matches!(
+        cold.read_partitioned_segment(request, &mut reused),
+        Err(CodeIndexProductionErrorV1::Contract(_))
+    ));
+    assert_eq!(reused, [] as [u8; 0], "corrupt bytes must not escape");
 }
 
 #[test]

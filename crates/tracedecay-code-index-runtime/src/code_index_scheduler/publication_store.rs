@@ -2143,16 +2143,16 @@ impl DaemonCodeIndexPublicationStoreV1 {
         buffer: &mut Vec<u8>,
     ) -> Result<(), CodeIndexProductionErrorV1> {
         buffer.clear();
-        let (_digest, expected_size, offset, length) = match request {
+        let (digest, expected_size, offset, length, whole) = match request {
             SealedGenerationSegmentReadV1::Whole { digest, size_bytes } => {
-                (digest, size_bytes, 0, size_bytes)
+                (digest, size_bytes, 0, size_bytes, true)
             }
             SealedGenerationSegmentReadV1::Range {
                 digest,
                 size_bytes,
                 offset,
                 length,
-            } => (digest, size_bytes, offset, length),
+            } => (digest, size_bytes, offset, length, false),
         };
         if offset
             .checked_add(length)
@@ -2178,17 +2178,49 @@ impl DaemonCodeIndexPublicationStoreV1 {
             )
         })?;
         buffer.resize(length, 0);
-        File::open(path)
-            .and_then(|mut file| {
-                file.seek(SeekFrom::Start(offset))?;
-                file.read_exact(buffer)
-            })
-            .map_err(|error| {
-                buffer.clear();
-                CodeIndexProductionErrorV1::Contract(format!(
-                    "sealed generation segment read failed: {error}"
-                ))
-            })
+        let read = (|| -> std::io::Result<()> {
+            let mut file = File::open(path)?;
+            #[cfg(unix)]
+            {
+                let opened = file.metadata()?;
+                if !Self::same_unix_segment_identity(&metadata, &opened) {
+                    return Err(std::io::Error::other(
+                        "sealed segment pathname changed while opening",
+                    ));
+                }
+            }
+            file.seek(SeekFrom::Start(offset))?;
+            file.read_exact(buffer)?;
+            #[cfg(unix)]
+            {
+                let opened = file.metadata()?;
+                let named = path.symlink_metadata()?;
+                if !Self::same_unix_segment_identity(&metadata, &opened)
+                    || !Self::same_unix_segment_identity(&metadata, &named)
+                {
+                    return Err(std::io::Error::other(
+                        "sealed segment pathname or bytes changed during read",
+                    ));
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = read {
+            buffer.clear();
+            return Err(CodeIndexProductionErrorV1::Contract(format!(
+                "sealed generation segment read failed: {error}"
+            )));
+        }
+        // A full segment has its content address available without another
+        // pathname open. Never return same-length corrupt bytes to a caller.
+        // Range callers retain their existing per-page digest authority.
+        if whole && Self::state_digest(buffer) != digest.as_str() {
+            buffer.clear();
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation segment does not match its content address".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     fn open_pinned_partitioned_segment(
