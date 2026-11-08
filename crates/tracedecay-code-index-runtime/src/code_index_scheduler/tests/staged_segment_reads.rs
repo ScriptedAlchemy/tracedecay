@@ -489,8 +489,7 @@ fn staged_segment_evicted_path_replacement_poison_without_reopen() {
     let replacement_path = first_path.with_extension("eviction-replacement.tmp");
     std::fs::write(&replacement_path, vec![b'Z'; contents[0].len()])
         .expect("same-length replacement");
-    std::fs::rename(&replacement_path, &first_path)
-        .expect("replace evicted segment pathname");
+    std::fs::rename(&replacement_path, &first_path).expect("replace evicted segment pathname");
     read.extend_from_slice(b"old data");
     assert!(matches!(
         reader(
@@ -502,7 +501,10 @@ fn staged_segment_evicted_path_replacement_poison_without_reopen() {
         ),
         Err(CodeIndexProductionErrorV1::Contract(_))
     ));
-    assert!(read.is_empty(), "replacement cannot expose stale or new bytes");
+    assert!(
+        read.is_empty(),
+        "replacement cannot expose stale or new bytes"
+    );
     assert_eq!(
         preparation.staged_segment_read_open_attempts_for_test(),
         9,
@@ -591,7 +593,10 @@ fn staged_preparation_exact_segment_bytes_commit_and_reload() {
         .load_active_shared()
         .expect("decode committed generation")
         .expect("active durable generation");
-    assert_eq!(reloaded.manifest().generation_id, generation.manifest().generation_id);
+    assert_eq!(
+        reloaded.manifest().generation_id,
+        generation.manifest().generation_id
+    );
     assert_eq!(
         reloaded.snapshot().content_identity,
         generation.snapshot().content_identity,

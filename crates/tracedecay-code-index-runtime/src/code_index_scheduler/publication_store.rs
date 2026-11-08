@@ -159,10 +159,7 @@ impl SharedCodeIndexBytePoolV1 {
     #[cfg(test)]
     pub(super) fn stats(&self) -> CodeIndexBytePoolStatsV1 {
         let physical_artifacts = self.physical_artifacts.stats();
-        let bytes = self
-            .bytes
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let bytes = self.bytes.lock().unwrap_or_else(PoisonError::into_inner);
         CodeIndexBytePoolStatsV1 {
             parse_chunk_inserted: physical_artifacts.inserted,
             parse_chunk_reused: physical_artifacts.reused,
@@ -869,11 +866,12 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                             .position(|entry| entry.path == path)
                         {
                             let unchanged = files.pinned_segment_reads[position].unchanged();
-                            let entry = files.pinned_segment_reads.remove(position).ok_or_else(|| {
-                                CodeIndexProductionErrorV1::Contract(
-                                    "staged segment read cache lost a handle".to_owned(),
-                                )
-                            })?;
+                            let entry =
+                                files.pinned_segment_reads.remove(position).ok_or_else(|| {
+                                    CodeIndexProductionErrorV1::Contract(
+                                        "staged segment read cache lost a handle".to_owned(),
+                                    )
+                                })?;
                             if unchanged {
                                 files.pinned_segment_reads.push_back(entry);
                             } else {
@@ -933,7 +931,8 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                                     ));
                                 }
                             } else {
-                                files.observed_segment_identities
+                                files
+                                    .observed_segment_identities
                                     .insert(path.clone(), pinned.identity.clone());
                             }
                             files.pinned_segment_reads.push_back(pinned);
@@ -1077,11 +1076,13 @@ impl PinnedPreparationSegmentV1 {
             .ok()
             .zip(self.segment.file.metadata().ok())
             .is_some_and(|(named, pinned)| {
-                DaemonCodeIndexPublicationStoreV1::same_unix_segment_identity(&self.identity, &named)
-                    && DaemonCodeIndexPublicationStoreV1::same_unix_segment_identity(
-                        &self.identity,
-                        &pinned,
-                    )
+                DaemonCodeIndexPublicationStoreV1::same_unix_segment_identity(
+                    &self.identity,
+                    &named,
+                ) && DaemonCodeIndexPublicationStoreV1::same_unix_segment_identity(
+                    &self.identity,
+                    &pinned,
+                )
             })
     }
 }
