@@ -317,12 +317,19 @@ export function useExplorerController(): ExplorerController {
     runResult?.outcome === 'envelope' && runResult.envelope.payload.request.query === submitted
       ? runResult.envelope.payload
       : undefined;
+  const currentRunId = run?.run_id;
+  const currentRunState = run?.state;
   useEffect(() => {
     // A completed read no longer needs an explicit cancel on unmount/reset.
-    if (run !== undefined && runIsTerminal(run.state) && acceptedRun.current?.id === run.run_id) {
+    if (
+      currentRunId !== undefined &&
+      currentRunState !== undefined &&
+      runIsTerminal(currentRunState) &&
+      acceptedRun.current?.id === currentRunId
+    ) {
       acceptedRun.current = null;
     }
-  }, [run?.run_id, run?.state]);
+  }, [currentRunId, currentRunState]);
 
   const graphBrowse = useEnvelope(
     ['explorer', 'graph-overview'],
