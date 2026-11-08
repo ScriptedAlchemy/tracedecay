@@ -9,8 +9,7 @@ use tracedecay_code_index::{
     incremental::plan_chunk_increment,
     production::{
         CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionErrorV1,
-        CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1,
-        MemorySealedPublicationStoreV1,
+        CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1, MemorySealedPublicationStoreV1,
     },
 };
 use tracedecay_domain::{
