@@ -111,24 +111,24 @@ impl OpenedDatabaseFile {
         // never opens or mutates the unverified WAL/SHM/journal sidecars.
         let inspection =
             open_immutable_reader(path).map_err(|_| OpenedDatabaseFileError::InvalidHeader)?;
-        let initialized: bool = inspection
-            .query_row(
-                "SELECT (SELECT application_id FROM pragma_application_id) = ?1 OR EXISTS(
-                 SELECT 1 FROM sqlite_schema WHERE type = 'table'
-                 AND name NOT GLOB 'sqlite_*' AND name NOT GLOB 'td_runtime_*'
-             )",
-                [crate::schema_version::REGISTERED_STORE_APPLICATION_ID],
-                |row| row.get(0),
-            )
-            .map_err(|_| OpenedDatabaseFileError::InvalidHeader)?;
+        let initialized =
+            has_store_schema(&inspection).map_err(|_| OpenedDatabaseFileError::InvalidHeader)?;
         drop(inspection);
         if !initialized {
-            for suffix in ["-wal", "-shm", "-journal"] {
-                match std::fs::symlink_metadata(sidecar_path(path, suffix)) {
-                    Ok(_) => return Err(OpenedDatabaseFileError::IncompleteInitialization),
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(_) => return Err(OpenedDatabaseFileError::Inspect),
-                }
+            let sidecar = |suffix| match std::fs::symlink_metadata(sidecar_path(path, suffix)) {
+                Ok(meta) => Ok(Some(meta)),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(_) => Err(OpenedDatabaseFileError::Inspect),
+            };
+            match (sidecar("-wal")?, sidecar("-shm")?, sidecar("-journal")?) {
+                (None, None, None) => {}
+                (Some(wal), Some(shm), None)
+                    if wal.is_file()
+                        && wal.len() > 0
+                        && shm.is_file()
+                        && shm.len() > 0
+                        && live_wal_has_store_schema(path) => {}
+                _ => return Err(OpenedDatabaseFileError::IncompleteInitialization),
             }
         }
         Self::pin(path)
@@ -923,7 +923,7 @@ pub fn open_immutable_reader(path: &Path) -> Result<Connection, ConnectionPolicy
     {
         let _span = tracing::trace_span!("rusqlite.connection.open_immutable").entered();
         {
-            let uri = immutable_health_uri(&sqlite_host_path(path))?;
+            let uri = read_only_uri(&sqlite_host_path(path), "immutable=1")?;
             let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
                 | OpenFlags::SQLITE_OPEN_URI
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX
@@ -974,7 +974,70 @@ fn open_verified_reader(
     })
 }
 
-fn immutable_health_uri(path: &Path) -> Result<String, ConnectionPolicyError> {
+fn has_store_schema(connection: &Connection) -> rusqlite::Result<bool> {
+    connection.query_row(
+        "SELECT (SELECT application_id FROM pragma_application_id) = ?1 OR EXISTS(
+             SELECT 1 FROM sqlite_schema WHERE type = 'table'
+             AND name NOT GLOB 'sqlite_*' AND name NOT GLOB 'td_runtime_*'
+         )",
+        [crate::schema_version::REGISTERED_STORE_APPLICATION_ID],
+        |row| row.get(0),
+    )
+}
+
+/// A legacy store's first schema commit can still be in its live WAL.
+/// Ask SQLite to read that commit using the existing shared index. A read-only
+/// VFS can also recover a disconnected WAL into a *heap* index, which cannot
+/// establish that the adjacent SHM belongs to this active database.
+fn live_wal_has_store_schema(path: &Path) -> bool {
+    let Ok(uri) = read_only_uri(&sqlite_host_path(path), "readonly_shm=1") else {
+        return false;
+    };
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_URI
+        | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
+    let Ok(connection) = Connection::open_with_flags(uri, flags) else {
+        return false;
+    };
+    if connection
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+        .is_err()
+        || connection.execute_batch("BEGIN").is_err()
+        || !matches!(has_store_schema(&connection), Ok(true))
+    {
+        return false;
+    }
+    use rusqlite::ffi;
+    let mut file: *mut ffi::sqlite3_file = std::ptr::null_mut();
+    // SAFETY: the read transaction keeps the main file and mapped WAL index
+    // live. FILE_POINTER borrows the connection's file; xShmMap inspects page
+    // zero with SQLite's WAL-index page size and extension disabled.
+    unsafe {
+        if ffi::sqlite3_file_control(
+            connection.handle(),
+            c"main".as_ptr(),
+            ffi::SQLITE_FCNTL_FILE_POINTER,
+            (&raw mut file).cast(),
+        ) != ffi::SQLITE_OK
+        {
+            return false;
+        }
+        let Some(methods) = file.as_ref().and_then(|file| file.pMethods.as_ref()) else {
+            return false;
+        };
+        if methods.iVersion < 2 {
+            return false;
+        }
+        let Some(map) = methods.xShmMap else {
+            return false;
+        };
+        let mut region = std::ptr::null_mut();
+        let rc = map(file, 0, 32 * 1024, 0, &mut region);
+        matches!(rc, ffi::SQLITE_OK | ffi::SQLITE_READONLY) && !region.is_null()
+    }
+}
+
+fn read_only_uri(path: &Path, options: &str) -> Result<String, ConnectionPolicyError> {
     #[cfg(unix)]
     let raw = {
         use std::os::unix::ffi::OsStrExt;
@@ -1003,7 +1066,7 @@ fn immutable_health_uri(path: &Path) -> Result<String, ConnectionPolicyError> {
             }
         }
     }
-    Ok(format!("file:{encoded}?immutable=1&mode=ro"))
+    Ok(format!("file:{encoded}?mode=ro&{options}"))
 }
 
 fn apply_pragmas(

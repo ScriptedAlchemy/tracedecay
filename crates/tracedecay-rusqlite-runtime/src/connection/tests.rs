@@ -500,6 +500,50 @@ fn create_new_refuses_to_replace_an_existing_database() {
     ));
 }
 
+#[test]
+fn legacy_first_schema_in_disconnected_wal_preserves_unclaimed_members() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.db");
+    let wal = sidecar_path(&path, "-wal");
+    let shm = sidecar_path(&path, "-shm");
+    {
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+            .unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=WAL; CREATE TABLE probe(value); INSERT INTO probe VALUES (7)",
+            )
+            .unwrap();
+    }
+    let main_bytes = std::fs::read(&path).unwrap();
+    let wal_bytes = std::fs::read(&wal).unwrap();
+    let shm_bytes = std::fs::read(&shm).unwrap();
+    assert!(!wal_bytes.is_empty());
+    assert!(matches!(
+        OpenedDatabaseFile::pin_initialized(&path),
+        Err(OpenedDatabaseFileError::IncompleteInitialization)
+    ));
+    assert_eq!(std::fs::read(&shm).unwrap(), shm_bytes);
+    std::fs::remove_file(&shm).unwrap();
+    assert!(matches!(
+        OpenedDatabaseFile::pin_initialized(&path),
+        Err(OpenedDatabaseFileError::IncompleteInitialization)
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), main_bytes);
+    assert_eq!(std::fs::read(&wal).unwrap(), wal_bytes);
+    assert!(!shm.exists());
+    // The owner can still run ordinary SQLite recovery on its own database.
+    let writer = Connection::open(&path).unwrap();
+    assert_eq!(
+        writer.query_row("SELECT value FROM probe", [], |row| row.get::<_, i64>(0)),
+        Ok(7)
+    );
+    drop(writer);
+    OpenedDatabaseFile::pin_initialized(&path).unwrap();
+}
+
 #[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
 #[test]
 fn worker_open_path_stays_on_the_pinned_file_across_an_a_b_a_swap() {
