@@ -207,8 +207,25 @@ impl CodeIndexBuildProgressSlotStateV1 {
         owner_epoch: u64,
         mut snapshot: CodeIndexBuildProgressV1,
     ) -> bool {
-        if self.generation_id.as_ref() != Some(generation_id) || self.owner_epoch != owner_epoch {
+        if self.generation_id.as_ref() != Some(generation_id)
+            || self.owner_epoch != owner_epoch
+            || snapshot.generation_id != generation_id.as_str()
+        {
             return false;
+        }
+        if let Some(current) = self.snapshot.as_ref() {
+            // Concurrent phase/report producers may complete out of order.
+            // A delayed report must not undo already committed boundaries or
+            // withdraw a ready text owner from the same generation.
+            if snapshot.committed_pages < current.committed_pages
+                || snapshot.committed_chunks < current.committed_chunks
+                || snapshot.committed_imports < current.committed_imports
+                || snapshot.committed_payload_bytes < current.committed_payload_bytes
+                || (current.phase == CodeIndexBuildPhaseV1::Ready
+                    && snapshot.phase != CodeIndexBuildPhaseV1::Ready)
+            {
+                return false;
+            }
         }
         // A progress producer can timestamp its snapshot before another
         // producer publishes. Preserve the most recent observed timestamp
@@ -233,6 +250,9 @@ impl CodeIndexBuildProgressSlotStateV1 {
         else {
             return;
         };
+        if snapshot.blocked_reason == Some(reason) {
+            return;
+        }
         let mut snapshot = snapshot.as_ref().clone();
         snapshot.blocked_reason = Some(reason);
         let _ = self.publish(&generation_id, self.owner_epoch, snapshot);
@@ -252,6 +272,7 @@ impl CodeIndexBuildProgressSlotStateV1 {
             return false;
         };
         if current.phase == CodeIndexBuildPhaseV1::Ready
+            || current.blocked_reason == Some(reason)
             || expected_progress_epoch.is_some_and(|epoch| current.progress_epoch != epoch)
         {
             return false;

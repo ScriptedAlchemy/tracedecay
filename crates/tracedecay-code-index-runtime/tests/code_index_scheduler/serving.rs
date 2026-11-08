@@ -3042,6 +3042,117 @@ fn progress_timestamp_never_regresses_within_one_owner() {
 }
 
 #[test]
+fn delayed_progress_cannot_undo_committed_boundaries_or_ready() {
+    let generation = CodeGenerationId::new("generation.stale-progress").expect("generation");
+    let mut slot = super::super::CodeIndexBuildProgressSlotStateV1::default();
+    let owner = slot.replace_generation(generation.clone());
+
+    let mut committed = progress_snapshot_for_generation(&generation, 6);
+    committed.committed_imports = 3;
+    committed.last_progress_micros = 600;
+    assert!(slot.publish(&generation, owner, committed));
+    let accepted = slot.snapshot().expect("accepted committed progress");
+
+    for counter in ["pages", "chunks", "imports", "payload"] {
+        let mut delayed = accepted.as_ref().clone();
+        delayed.last_progress_micros = 700;
+        match counter {
+            "pages" => delayed.committed_pages -= 1,
+            "chunks" => delayed.committed_chunks -= 1,
+            "imports" => delayed.committed_imports -= 1,
+            "payload" => delayed.committed_payload_bytes -= 1,
+            _ => unreachable!(),
+        }
+        assert!(
+            !slot.publish(&generation, owner, delayed),
+            "delayed {counter} cannot overwrite committed progress"
+        );
+        assert_eq!(
+            slot.snapshot().expect("progress after stale report").as_ref(),
+            accepted.as_ref(),
+            "refusing stale {counter} must preserve the epoch and last progress time"
+        );
+    }
+
+    let mut wrong_generation = accepted.as_ref().clone();
+    wrong_generation.generation_id = "generation.foreign".to_owned();
+    assert!(!slot.publish(&generation, owner, wrong_generation));
+    assert_eq!(
+        slot.snapshot().expect("correct generation still owns progress").as_ref(),
+        accepted.as_ref()
+    );
+
+    let mut ready = progress_snapshot_for_generation(&generation, 7);
+    ready.committed_imports = 3;
+    ready.phase = CodeIndexBuildPhaseV1::Ready;
+    ready.last_progress_micros = 650;
+    assert!(slot.publish(&generation, owner, ready));
+    let settled = slot.snapshot().expect("ready progress");
+
+    let mut late_build = settled.as_ref().clone();
+    late_build.phase = CodeIndexBuildPhaseV1::BulkCommit;
+    late_build.last_progress_micros = 700;
+    assert!(!slot.publish(&generation, owner, late_build));
+    assert_eq!(
+        slot.snapshot().expect("ready progress remains").as_ref(),
+        settled.as_ref(),
+        "a delayed build phase must not withdraw ready"
+    );
+
+    // A remounted owner starts a new committed sequence even when its
+    // generation identity is the same. The old owner must stay fenced off.
+    let replacement_owner = slot.replace_generation(generation.clone());
+    let fresh = progress_snapshot_for_generation(&generation, 1);
+    assert!(slot.publish(&generation, replacement_owner, fresh));
+    assert_eq!(slot.snapshot().expect("new owner").committed_pages, 1);
+    assert!(!slot.publish(
+        &generation,
+        owner,
+        progress_snapshot_for_generation(&generation, 99)
+    ));
+}
+
+#[test]
+fn repeated_blocked_reason_is_not_reported_as_new_progress() {
+    let generation = CodeGenerationId::new("generation.blocked-report").expect("generation");
+    let mut slot = super::super::CodeIndexBuildProgressSlotStateV1::default();
+    let owner = slot.replace_generation(generation.clone());
+    assert!(slot.publish(
+        &generation,
+        owner,
+        progress_snapshot_for_generation(&generation, 2)
+    ));
+    slot.block_current(CodeIndexBuildBlockedReasonV1::ResidentMemory);
+    let first = slot.snapshot().expect("first refusal");
+    assert_eq!(
+        first.blocked_reason,
+        Some(CodeIndexBuildBlockedReasonV1::ResidentMemory)
+    );
+
+    slot.block_current(CodeIndexBuildBlockedReasonV1::ResidentMemory);
+    assert!(!slot.block_owned_text(
+        &generation,
+        owner,
+        CodeIndexBuildBlockedReasonV1::ResidentMemory,
+        Some(first.progress_epoch)
+    ));
+    assert_eq!(
+        slot.snapshot().expect("repeated refusal").progress_epoch,
+        first.progress_epoch,
+        "retries without a new refusal or committed work must not inflate the observation epoch"
+    );
+
+    let mut committed = progress_snapshot_for_generation(&generation, 3);
+    committed.last_progress_micros = first.last_progress_micros + 1;
+    assert!(slot.publish(&generation, owner, committed));
+    assert_eq!(
+        slot.snapshot().expect("committed progress").blocked_reason,
+        None,
+        "durable progress clears the previous blocked verdict"
+    );
+}
+
+#[test]
 fn progress_owner_epoch_rejects_original_a_after_a_b_a_replacement() {
     let generation_a = CodeGenerationId::new("generation.progress-a").expect("generation A");
     let generation_b = CodeGenerationId::new("generation.progress-b").expect("generation B");
