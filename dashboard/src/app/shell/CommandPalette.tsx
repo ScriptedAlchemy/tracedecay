@@ -1,7 +1,7 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command as CommandIcon, CornerDownLeft, Search } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router';
+import { useLocation, useNavigate } from 'react-router';
 import {
   CHANNELS,
   channelNumber,
@@ -54,6 +54,7 @@ export function CommandPalette({
   onOpenChange: (open: boolean) => void;
 }) {
   const navigate = useNavigate();
+  const location = useLocation();
   const scope = useScope((state) => state.scope);
   const selectProject = useScope((s) => s.selectProject);
   const [query, setQuery] = useState('');
@@ -74,7 +75,15 @@ export function CommandPalette({
       searchText: workspaceSearchText(channel),
       channel: channelNumber(channel.path),
       action: () => {
-        navigate(scopedWorkspacePath(scope, channel.path));
+        // Reselecting this workspace is not a renderer or selection reset.
+        // Only an actual workspace/scope transition replaces view-owned state.
+        const params = new URLSearchParams(location.search);
+        const sameScope = scope.kind === 'all'
+          ? !params.has('scope') && !params.has('scopeLabel')
+          : params.get('scope') === scope.projectId && params.get('scopeLabel') === scope.label;
+        if (location.pathname !== `/${channel.path}` || !sameScope) {
+          navigate(scopedWorkspacePath(scope, channel.path));
+        }
         onOpenChange(false);
       },
     }));
@@ -111,7 +120,7 @@ export function CommandPalette({
           )
         : [];
     return [...workspaceEntries, ...projectEntries];
-  }, [navigate, onOpenChange, projects.data, scope, selectProject]);
+  }, [navigate, location.pathname, location.search, onOpenChange, projects.data, scope, selectProject]);
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();

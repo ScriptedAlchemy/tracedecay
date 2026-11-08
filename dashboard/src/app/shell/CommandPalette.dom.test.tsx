@@ -111,16 +111,17 @@ function stubListing(payload: ProjectsPayloadV1) {
 }
 
 function PaletteLocation() {
-  return <output data-testid="palette-location">{useLocation().pathname}</output>;
+  const location = useLocation();
+  return <output data-testid="palette-location">{location.pathname}{location.search}</output>;
 }
 
-function renderPalette() {
+function renderPalette(initialEntry = '/') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return {
     client,
     ...render(
       <QueryClientProvider client={client}>
-        <MemoryRouter>
+        <MemoryRouter initialEntries={[initialEntry]}>
           <CommandPalette open onOpenChange={() => {}} />
           <PaletteLocation />
         </MemoryRouter>
@@ -158,6 +159,56 @@ afterEach(() => {
 });
 
 describe('CommandPalette keyboard operation', () => {
+  it.each([
+    ['/loom?loomRenderer=rails&session=run-7', 'Loom'],
+    ['/brain?field=sigma&node=node-3', 'Brain'],
+    ['/code?render=relief&symbol=symbol-2', 'Code'],
+  ])('reselects %s without resetting its active view', async (entry, label) => {
+    const user = userEvent.setup();
+    stubListing(listing([]));
+    const { findByRole, getByTestId } = renderPalette(entry);
+    await findByRole('listbox');
+
+    await user.keyboard(label);
+    await waitFor(() => expect(activeOptionLabel()).toBe(label));
+    await user.keyboard('{Enter}');
+
+    expect(getByTestId('palette-location').textContent).toBe(entry);
+  });
+
+  it('keeps the selected-project view only for the same scoped route', async () => {
+    const user = userEvent.setup();
+    useScope.getState().selectProject('project-1', 'Alpha', 'active');
+    stubListing(listing([]));
+    const original = '/loom?scope=project-1&scopeLabel=Alpha&loomRenderer=strata';
+    const { findByRole, getByTestId } = renderPalette(original);
+    await findByRole('listbox');
+
+    await user.keyboard('loom{Enter}');
+    expect(getByTestId('palette-location').textContent).toBe(original);
+  });
+
+  it('does not carry a workspace view into a different workspace', async () => {
+    const user = userEvent.setup();
+    stubListing(listing([]));
+    const { findByRole, getByTestId } = renderPalette('/loom?loomRenderer=rails');
+    await findByRole('listbox');
+
+    await user.keyboard('code{Enter}');
+    expect(getByTestId('palette-location').textContent).toBe('/code');
+  });
+
+  it('updates project scope rather than retaining an unscoped view', async () => {
+    const user = userEvent.setup();
+    useScope.getState().selectProject('project-1', 'Alpha', 'active');
+    stubListing(listing([]));
+    const { findByRole, getByTestId } = renderPalette('/loom?loomRenderer=rails');
+    await findByRole('listbox');
+
+    await user.keyboard('loom{Enter}');
+    expect(getByTestId('palette-location').textContent).toBe('/loom?scope=project-1&scopeLabel=Alpha');
+  });
+
   it.each([
     ['code', 'Code'],
     ['sessions', 'Sessions'],
