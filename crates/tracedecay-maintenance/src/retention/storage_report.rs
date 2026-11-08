@@ -2506,7 +2506,10 @@ mod tests {
         std::fs::create_dir_all(&profile_root).unwrap();
         let registry = profile_root.join(GLOBAL_DB_FILENAME);
         std::os::unix::fs::symlink(foreign_root.join(GLOBAL_DB_FILENAME), &registry).unwrap();
-        assert!(registry.is_file(), "the old path probe follows the foreign registry");
+        assert!(
+            registry.is_file(),
+            "the old path probe follows the foreign registry"
+        );
 
         let error = build_storage_report(&profile_root)
             .await
