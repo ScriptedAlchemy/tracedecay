@@ -506,3 +506,52 @@ async fn nonpositive_legacy_owner_ids_cannot_be_skipped_by_bootstrap() {
         );
     }
 }
+
+#[asupersync::test]
+async fn zero_delete_pages_discharge_distinct_candidates_and_quiesce() {
+    let store = Store::open().await;
+    for ordinal in 0..52 {
+        let body =
+            StoredCanonicalBody::pack(format!("still referenced {ordinal}").as_bytes()).unwrap();
+        insert_body(store.conn(), &body).await;
+        store
+            .conn()
+            .execute(
+                "INSERT INTO lcm_raw_messages(storage_kind, content, content_hash)
+                 VALUES ('inline', NULL, ?1)",
+                params![body.content_hash.as_str()],
+            )
+            .await
+            .unwrap();
+    }
+    store.install().await;
+
+    let mut discharged_pages = Vec::new();
+    for _ in 0..16 {
+        let report = store.tick(48).await;
+        assert_eq!(report.bodies_deleted, 0, "referenced bodies stay live");
+        if report.candidates_discharged > 0 {
+            assert_eq!(report.candidates_discharged, report.bodies_scanned);
+            discharged_pages.push(report.candidates_discharged);
+        }
+        if !report.has_more {
+            break;
+        }
+    }
+    assert_eq!(discharged_pages, vec![48, 4]);
+    assert!(!has_candidates(store.conn()).await.unwrap());
+    assert_eq!(
+        store.tick(48).await,
+        CanonicalBodyGcReport {
+            bootstrap_complete: true,
+            ..CanonicalBodyGcReport::default()
+        }
+    );
+    let mut rows = store
+        .conn()
+        .query("SELECT COUNT(*) FROM session_canonical_bodies", ())
+        .await
+        .unwrap();
+    let count: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
+    assert_eq!(count, 52);
+}

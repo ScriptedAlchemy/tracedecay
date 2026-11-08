@@ -386,6 +386,10 @@ fn record_canonical_body_gc_outcome(
                     &[
                         ("roots_scanned", report.roots_scanned.to_string()),
                         ("bodies_scanned", report.bodies_scanned.to_string()),
+                        (
+                            "candidates_discharged",
+                            report.candidates_discharged.to_string(),
+                        ),
                         ("bodies_deleted", report.bodies_deleted.to_string()),
                         (
                             "stored_bytes_deleted",
@@ -428,6 +432,20 @@ fn record_replay_metadata_outcome(
                     "retention_replay_metadata",
                     &[
                         ("rows_scanned", report.rows_scanned.to_string()),
+                        (
+                            "frontier_before",
+                            report.frontier_before.map_or_else(
+                                || "not_scanned".to_owned(),
+                                |value| value.to_string(),
+                            ),
+                        ),
+                        (
+                            "frontier_after",
+                            report.frontier_after.map_or_else(
+                                || "not_scanned".to_owned(),
+                                |value| value.to_string(),
+                            ),
+                        ),
                         ("rows_compacted", report.rows_compacted.to_string()),
                         ("rows_skipped", report.rows_skipped.to_string()),
                         (
