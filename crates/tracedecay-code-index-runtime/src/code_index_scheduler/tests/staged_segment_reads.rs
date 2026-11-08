@@ -742,7 +742,7 @@ fn staged_segment_publish_never_overwrites_a_concurrent_canonical_name() {
     std::fs::write(&canonical, original).expect("competing canonical bytes");
     std::fs::write(&temporary, changed).expect("staged bytes");
     assert!(
-        super::StagedGenerationSegmentsV1::publish_missing_segment(&temporary, &canonical)
+        super::StagedGenerationSegmentsV1::publish_missing_immutable_file(&temporary, &canonical)
             .is_err(),
         "a race must refuse, not replace a different immutable segment"
     );
@@ -758,7 +758,7 @@ fn staged_segment_publish_never_overwrites_a_concurrent_canonical_name() {
     // When the competing publisher installed identical bytes, deduplication
     // may finish without another publication or destroying canonical bytes.
     std::fs::write(&temporary, original).expect("identical staged bytes");
-    super::StagedGenerationSegmentsV1::publish_missing_segment(&temporary, &canonical)
+    super::StagedGenerationSegmentsV1::publish_missing_immutable_file(&temporary, &canonical)
         .expect("identical concurrent publication is safe to deduplicate");
     assert!(!temporary.exists());
     assert_eq!(
@@ -768,7 +768,7 @@ fn staged_segment_publish_never_overwrites_a_concurrent_canonical_name() {
 
     std::fs::remove_file(&canonical).expect("vacate canonical name");
     std::fs::write(&temporary, changed).expect("new staged segment");
-    super::StagedGenerationSegmentsV1::publish_missing_segment(&temporary, &canonical)
+    super::StagedGenerationSegmentsV1::publish_missing_immutable_file(&temporary, &canonical)
         .expect("missing canonical name accepts one atomic publication");
     assert!(!temporary.exists());
     assert_eq!(

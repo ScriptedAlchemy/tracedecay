@@ -1082,8 +1082,8 @@ impl StagedGenerationSegmentsV1 {
     }
 
     // A concurrent publisher can create the final name after our missing-path
-    // probe. Never replace an immutable content-addressed segment in that gap.
-    fn publish_missing_segment(
+    // probe. Never replace an immutable content-addressed file in that gap.
+    fn publish_missing_immutable_file(
         temporary: &Path,
         final_path: &Path,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
@@ -1097,7 +1097,7 @@ impl StagedGenerationSegmentsV1 {
                     || !DaemonCodeIndexPublicationStoreV1::files_equal(final_path, temporary)?
                 {
                     return Err(DaemonCodeIndexPublicationStoreV1::corruption(
-                        "concurrently published sealed segment does not match its content address",
+                        "concurrently published immutable code-index file does not match its content address",
                     ));
                 }
                 std::fs::remove_file(temporary)
@@ -1134,7 +1134,7 @@ impl StagedGenerationSegmentsV1 {
                         .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    Self::publish_missing_segment(&temporary, &final_path)?;
+                    Self::publish_missing_immutable_file(&temporary, &final_path)?;
                 }
                 Err(error) => return Err(DaemonCodeIndexPublicationStoreV1::unavailable(error)),
             }
@@ -1692,28 +1692,15 @@ impl DaemonCodeIndexPublicationStoreV1 {
         Ok(encode_tagged_lowercase_hex("sha256:", &hasher.finalize()))
     }
 
-    // A canonical generation is immutable. Persisting with replacement would
-    // overwrite a competing publication that wins after the missing-path probe.
+    // A canonical generation is immutable. Close the staging descriptor and
+    // use the same atomic no-replace authority as sealed segments: tempfile's
+    // no-clobber persist may leave two hard links after an interrupted publish.
     fn publish_missing_generation_manifest(
         temporary: tempfile::NamedTempFile,
         final_path: &Path,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        match temporary.persist_noclobber(final_path) {
-            Ok(_) => Ok(()),
-            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let temporary = error.file;
-                let metadata = final_path.symlink_metadata().map_err(Self::unavailable)?;
-                if !metadata.file_type().is_file()
-                    || !Self::files_equal(final_path, temporary.path())?
-                {
-                    return Err(Self::corruption(
-                        "concurrently published generation does not match its content address",
-                    ));
-                }
-                temporary.close().map_err(Self::unavailable)
-            }
-            Err(error) => Err(Self::unavailable(error.error)),
-        }
+        let temporary = temporary.into_temp_path();
+        StagedGenerationSegmentsV1::publish_missing_immutable_file(temporary.as_ref(), final_path)
     }
 
     fn files_equal(left: &Path, right: &Path) -> Result<bool, CodeIndexPublicationStoreErrorV1> {
