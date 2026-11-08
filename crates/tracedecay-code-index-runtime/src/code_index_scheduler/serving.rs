@@ -201,6 +201,23 @@ impl CodeIndexBuildProgressSlotStateV1 {
         self.owner_epoch
     }
 
+    /// A discarded or replaced staging file starts a different committed
+    /// sequence, even if the sealed generation and scheduler owner survive.
+    /// Only the head-opening singleflight may reset it, after it has verified
+    /// that a new staging builder was actually created. The next boundary
+    /// keeps the monotonic publication epoch and reports its real counters.
+    pub(super) fn begin_staging_attempt(
+        &mut self,
+        generation_id: &CodeGenerationId,
+        owner_epoch: u64,
+    ) -> bool {
+        if self.generation_id.as_ref() != Some(generation_id) || self.owner_epoch != owner_epoch {
+            return false;
+        }
+        self.snapshot = None;
+        true
+    }
+
     pub(super) fn publish(
         &mut self,
         generation_id: &CodeGenerationId,
@@ -3241,6 +3258,10 @@ impl LatestCodeTextGenerationV1 {
         } else {
             None
         };
+        // A missing/incompatible staging file is a new durable attempt for
+        // this sealed generation. Its committed counters legitimately start
+        // at zero; the old attempt must not fence that fresh boundary.
+        let mut fresh_staging_attempt = resumed.is_none();
         let mut builder = match resumed {
             Some(builder) => builder,
             None => match self.carry_parent_text_artifact(
@@ -3283,6 +3304,7 @@ impl LatestCodeTextGenerationV1 {
                 Err(VerifiedSealedLexicalCursorRestoreErrorV1::IncompatiblePosition) => {
                     drop(builder);
                     store.discard_incompatible_staging(&staging_path, control)?;
+                    fresh_staging_attempt = true;
                     builder = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
                         &staging_path,
                         metadata,
@@ -3309,6 +3331,15 @@ impl LatestCodeTextGenerationV1 {
             staging_path,
             _build_reservation: build_reservation,
         };
+        if fresh_staging_attempt
+            && !self
+                .text_progress_slot
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .begin_staging_attempt(&generation_id, self.text_progress_owner_epoch)
+        {
+            return Err(RetrievalPortError::GenerationMismatch);
+        }
         self.publish_text_progress_boundary(
             &initialized,
             &progress,

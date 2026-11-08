@@ -3113,6 +3113,44 @@ fn delayed_progress_cannot_undo_committed_boundaries_or_ready() {
 }
 
 #[test]
+fn a_new_staging_attempt_can_truthfully_restart_committed_progress() {
+    let generation = CodeGenerationId::new("generation.staging-retry").expect("generation");
+    let mut slot = super::super::CodeIndexBuildProgressSlotStateV1::default();
+    let owner = slot.replace_generation(generation.clone());
+
+    let mut old = progress_snapshot_for_generation(&generation, 12);
+    old.last_progress_micros = 500;
+    assert!(slot.publish(&generation, owner, old));
+    let old_epoch = slot.snapshot().expect("first staging attempt").progress_epoch;
+
+    // Missing/incompatible SQLite staging is a verified new build attempt,
+    // not a delayed report from an older commit boundary. Without resetting
+    // the slot, rejecting counter regressions would leave status frozen.
+    assert!(slot.begin_staging_attempt(&generation, owner));
+    let mut restarted = progress_snapshot_for_generation(&generation, 0);
+    restarted.last_progress_micros = 600;
+    restarted.phase = CodeIndexBuildPhaseV1::SourceScan;
+    assert!(slot.publish(&generation, owner, restarted));
+    let restarted = slot.snapshot().expect("new staging attempt");
+    assert_eq!(restarted.committed_pages, 0);
+    assert_eq!(restarted.phase, CodeIndexBuildPhaseV1::SourceScan);
+    assert!(
+        restarted.progress_epoch > old_epoch,
+        "a new verified staging attempt must produce a newer report epoch"
+    );
+
+    let mut resumed = progress_snapshot_for_generation(&generation, 2);
+    resumed.last_progress_micros = 700;
+    assert!(slot.publish(&generation, owner, resumed));
+    assert_eq!(slot.snapshot().expect("resumed commits").committed_pages, 2);
+
+    let foreign = CodeGenerationId::new("generation.foreign-stage").expect("foreign");
+    assert!(!slot.begin_staging_attempt(&foreign, owner));
+    assert!(!slot.begin_staging_attempt(&generation, owner + 1));
+    assert_eq!(slot.snapshot().expect("unchanged latest").committed_pages, 2);
+}
+
+#[test]
 fn repeated_blocked_reason_is_not_reported_as_new_progress() {
     let generation = CodeGenerationId::new("generation.blocked-report").expect("generation");
     let mut slot = super::super::CodeIndexBuildProgressSlotStateV1::default();
