@@ -1154,8 +1154,8 @@ mod tracked_parent_boundary_tests {
         );
         std::fs::remove_file(&marker).unwrap();
         assert!(
-            cached.holds("unchanged-parent-git", &[]),
-            "the pre-marker evidence should be valid again after removing it"
+            !cached.holds("unchanged-parent-git", &[]),
+            "removing the marker also changes the tracked ancestor directory evidence"
         );
     }
 }
