@@ -852,13 +852,11 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                                         &named, &pinned,
                                     )
                                 });
-                            let entry = files.pinned_segment_reads.remove(position).ok_or_else(
-                                || {
-                                    CodeIndexProductionErrorV1::Contract(
-                                        "staged segment read cache lost a handle".to_owned(),
-                                    )
-                                },
-                            )?;
+                            let entry = files.pinned_segment_reads.remove(position).ok_or_else(|| {
+                                CodeIndexProductionErrorV1::Contract(
+                                    "staged segment read cache lost a handle".to_owned(),
+                                )
+                            })?;
                             if unchanged {
                                 files.pinned_segment_reads.push_back(entry);
                             }
@@ -873,6 +871,11 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                                     &path, request,
                                 )?;
                             files.segment_read_open_attempts += 1;
+                            tracing::trace!(
+                                target: "tracedecay::code_index",
+                                staged_segment_file_open_count = files.segment_read_open_attempts,
+                                "opened staged segment handle after an LRU miss"
+                            );
                             if files.pinned_segment_reads.len()
                                 == MAX_STAGED_SEGMENT_READ_HANDLES
                             {
