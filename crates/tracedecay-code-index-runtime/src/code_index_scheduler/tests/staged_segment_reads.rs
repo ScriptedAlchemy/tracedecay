@@ -519,3 +519,82 @@ fn staged_segment_evicted_path_replacement_poison_without_reopen() {
     preparation.abort().expect("remove poisoned staging");
     assert!(!first_path.exists());
 }
+
+#[test]
+fn staged_preparation_exact_segment_bytes_commit_and_reload() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let source_root = TempDir::new().expect("source store");
+    let generation = source_generation(&fixture, source_root.path());
+    let target_root = TempDir::new().expect("target store");
+    let mut target = target_store(target_root.path(), &fixture);
+    let mut preparation = target
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare target");
+    let publication = generation
+        .stage_publication(&mut preparation)
+        .expect("stage real generation");
+    let identities = CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+        publication.manifest_bytes().as_ref(),
+    )
+    .expect("parse staged segment identities")
+    .expect("current partitioned generation revision");
+    let identity = identities
+        .into_iter()
+        .find(|identity| identity.size_bytes > 4)
+        .expect("real generation must have a nonempty segment");
+
+    let reader = preparation.segment_reader();
+    let initial_opens = preparation.staged_segment_read_open_attempts_for_test();
+    let mut exact = Vec::new();
+    reader(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &identity.digest,
+            size_bytes: identity.size_bytes,
+        },
+        &mut exact,
+    )
+    .expect("read staged sealed whole segment");
+    assert_eq!(
+        segment_digest(&exact),
+        identity.digest,
+        "production reader must return the exact addressed segment"
+    );
+    let mut range = Vec::new();
+    for _ in 0..16 {
+        reader(
+            SealedGenerationSegmentReadV1::Range {
+                digest: &identity.digest,
+                size_bytes: identity.size_bytes,
+                offset: 1,
+                length: 3,
+            },
+            &mut range,
+        )
+        .expect("read repeated byte-exact range");
+        assert_eq!(range.as_slice(), &exact[1..4]);
+    }
+    assert!(
+        preparation.staged_segment_read_open_attempts_for_test() - initial_opens <= 1,
+        "whole and repeated range reads may open the segment only once"
+    );
+    let committed = target
+        .commit(&mut preparation, &publication)
+        .expect("publish the real staged generation");
+    assert_eq!(
+        committed.as_ref(),
+        publication.manifest_bytes().as_ref(),
+        "commit must preserve the staged manifest bytes"
+    );
+    drop(reader);
+    drop(preparation);
+    let reloaded = target
+        .load_active_shared()
+        .expect("decode committed generation")
+        .expect("active durable generation");
+    assert_eq!(reloaded.manifest().generation_id, generation.manifest().generation_id);
+    assert_eq!(
+        reloaded.snapshot().content_identity,
+        generation.snapshot().content_identity,
+        "a cold durable read must recover the exact published snapshot identity"
+    );
+}
