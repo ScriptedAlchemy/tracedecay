@@ -2765,6 +2765,9 @@ mod tests {
             ),
             Ok(())
         );
+        // The check callback also runs for manifest and lifecycle checks,
+        // so a positive count alone does not prove a segment was rehashed.
+        let warmed_reads = count_proof_reads(&successor_record);
         let original_permissions = std::fs::metadata(&changed_path).unwrap().permissions();
         let mut writable_permissions = original_permissions.clone();
         #[allow(clippy::permissions_set_readonly_false)]
@@ -2792,8 +2795,13 @@ mod tests {
         // every untouched inherited segment would make recovery cold again.
         let recovered_reads = count_proof_reads(&successor_record);
         assert!(
-            recovered_reads > 0,
-            "recovery must authenticate the restored changed segment"
+            recovered_reads > warmed_reads,
+            "recovery did not re-authenticate repaired source: warmed={warmed_reads}, recovered={recovered_reads}"
+        );
+        let rewarmed_reads = count_proof_reads(&successor_record);
+        assert_eq!(
+            rewarmed_reads, warmed_reads,
+            "successful recovery must restore the stable warm proof cost"
         );
         let recovery_cold_reads = count_proof_reads(&VerifiedSealedSegmentsV1::default());
         if cfg!(unix) {
