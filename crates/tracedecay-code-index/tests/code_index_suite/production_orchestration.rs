@@ -3480,8 +3480,9 @@ fn partitioned_codec_has_stable_bytes_and_round_trips() {
         .expect("typed evidence descriptor")
         .remove("target_filter")
         .expect("filter must be present");
-    let error = CodeIndexPublishedGenerationV1::partitioned_text_metadata(&reseal_manifest(filterless))
-        .expect_err("a current-revision manifest without a target filter must be refused");
+    let error =
+        CodeIndexPublishedGenerationV1::partitioned_text_metadata(&reseal_manifest(filterless))
+            .expect_err("a current-revision manifest without a target filter must be refused");
     assert!(
         error.to_string().contains("missing field `target_filter`"),
         "filterless manifest reached the wrong refusal: {error}"
