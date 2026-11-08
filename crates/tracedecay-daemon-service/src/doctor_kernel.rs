@@ -626,8 +626,11 @@ fn profile_footprint_from_registered_roots(
     overrides: &BTreeMap<String, u64>,
 ) -> ProfileFootprintV1 {
     let empty_roots = BTreeMap::new();
-    let mut footprint =
-        census_profile_footprint(profile_root, registered_roots.unwrap_or(&empty_roots), overrides);
+    let mut footprint = census_profile_footprint(
+        profile_root,
+        registered_roots.unwrap_or(&empty_roots),
+        overrides,
+    );
     if registered_roots.is_none() {
         for entry in &mut footprint.entries {
             if let Some(project) = entry.project.as_mut() {
@@ -740,10 +743,7 @@ mod profile_footprint_tests {
             named.get("projects/proj_growing"),
             Some(&DoctorEvidenceStateV1::Degraded)
         );
-        assert_eq!(
-            named.get("profile"),
-            Some(&DoctorEvidenceStateV1::Degraded)
-        );
+        assert_eq!(named.get("profile"), Some(&DoctorEvidenceStateV1::Degraded));
 
         // Distinguish failed enumeration from an authoritative empty registry,
         // and from a registered root whose filesystem directory was deleted.
