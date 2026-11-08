@@ -1636,8 +1636,9 @@ mod tests {
         DaemonCodeGraphManifestProviderV1, SEAL_READ_CHECK_BYTES, SEGMENT_OPENS, SealRoutes,
         VerifiedSealedSegmentsV1, open_seal_from_roots, read_verified_seal_manifest,
         spill_sealed_generation_graph_from_roots, validate_sealed_generation_metadata,
-        verify_checked_seal, verify_checked_seal_bundle_with_evidence_barrier,
-        verify_sealed_generation_source_from_roots, with_verified_segments,
+        verify_checked_seal, verify_checked_seal_bundle,
+        verify_checked_seal_bundle_with_evidence_barrier, verify_sealed_generation_source_from_roots,
+        with_verified_segments,
     };
     use tracedecay_code_index_runtime::code_index_scheduler::{
         CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
