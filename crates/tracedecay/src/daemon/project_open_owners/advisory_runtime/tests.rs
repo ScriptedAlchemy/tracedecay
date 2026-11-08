@@ -13,6 +13,89 @@ fn feedback_scope() -> FeedbackScopeV1 {
     }
 }
 
+/// A blocked CI discovery must not even be polled for an editor/hook run.
+/// The matching GitHub request is also excluded from local admission.
+#[tokio::test]
+async fn local_advisory_feedback_does_not_poll_remote_refresh() {
+    let github_request = GitHubReviewReadRequestV1 {
+        operation: GitHubReviewReadOperationV1::RestGetPullRequest,
+        scope: feedback_scope(),
+        pull_request_id: GitHubPullRequestIdV1::new("42").expect("pull request"),
+    };
+    let forbidden_ci = std::future::poll_fn(
+        |_| -> std::task::Poll<ProductionCiFailureDiscoveryOutcomeV1> {
+            panic!("local feedback polled remote CI discovery")
+        },
+    );
+    let (github, ci) = advisory_remote_requests(
+        AdvisoryRemoteReadMode::LocalFeedback,
+        Some(github_request),
+        true,
+        forbidden_ci,
+    )
+    .await;
+    assert!(github.is_none(), "local feedback must not request GitHub refresh");
+    assert!(matches!(
+        ci,
+        ProductionCiFailureDiscoveryOutcomeV1::Unavailable
+    ));
+}
+
+/// A local cycle with no CI binding must not pretend a remote provider exists.
+#[tokio::test]
+async fn local_feedback_without_ci_config_is_not_configured() {
+    let forbidden_ci = std::future::poll_fn(
+        |_| -> std::task::Poll<ProductionCiFailureDiscoveryOutcomeV1> {
+            panic!("unconfigured local feedback polled CI discovery")
+        },
+    );
+    let (github, ci) = advisory_remote_requests(
+        AdvisoryRemoteReadMode::LocalFeedback,
+        None,
+        false,
+        forbidden_ci,
+    )
+    .await;
+    assert!(github.is_none());
+    assert!(matches!(
+        ci,
+        ProductionCiFailureDiscoveryOutcomeV1::NotConfigured
+    ));
+}
+
+/// Explicit advisory demand still owns the remote read and propagates its
+/// terminal result. The barrier proves the operation awaits actual discovery.
+#[tokio::test]
+async fn explicit_advisory_refresh_waits_for_its_own_remote_discovery() {
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_tx, release_rx) =
+        tokio::sync::oneshot::channel::<ProductionCiFailureDiscoveryOutcomeV1>();
+    let github_request = GitHubReviewReadRequestV1 {
+        operation: GitHubReviewReadOperationV1::RestGetPullRequest,
+        scope: feedback_scope(),
+        pull_request_id: GitHubPullRequestIdV1::new("42").expect("pull request"),
+    };
+    let mut refresh = Box::pin(advisory_remote_requests(
+        AdvisoryRemoteReadMode::ExplicitRefresh,
+        Some(github_request.clone()),
+        true,
+        async move {
+            started_tx.send(()).expect("reader still owns the admission barrier");
+            release_rx.await.expect("explicit discovery must settle")
+        },
+    ));
+    tokio::select! {
+        result = &mut refresh => panic!("explicit refresh completed before its remote read: {result:?}"),
+        started = started_rx => started.expect("remote read started"),
+    }
+    release_tx
+        .send(ProductionCiFailureDiscoveryOutcomeV1::Denied)
+        .expect("remote read still awaited");
+    let (github, ci) = refresh.await;
+    assert_eq!(github, Some(github_request));
+    assert!(matches!(ci, ProductionCiFailureDiscoveryOutcomeV1::Denied));
+}
+
 #[test]
 fn hook_notice_registration_is_released_with_the_published_owner() {
     let scope = feedback_scope();
