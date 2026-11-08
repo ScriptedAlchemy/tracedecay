@@ -1068,7 +1068,8 @@ fn generation_manifest_publication_preserves_concurrent_canonical_bytes() {
     let good = b"generation-one";
     let other = b"generation-two";
     assert_eq!(good.len(), other.len());
-    let suffix = sha256_hex_suffix(segment_digest(good).as_str()).expect("generation suffix");
+    let digest = segment_digest(good);
+    let suffix = sha256_hex_suffix(digest.as_str()).expect("generation suffix");
     let canonical = root.path().join(format!("generation-{suffix}.json"));
     let stage = |bytes: &[u8]| {
         let mut temporary = tempfile::Builder::new()
