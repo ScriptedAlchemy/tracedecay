@@ -428,9 +428,11 @@ async fn large_ineligible_metadata_is_bounded_before_eligibility_checks() {
         .map(|(_, message)| message.metadata_json.as_ref().unwrap().len() as u64)
         .sum();
     assert!(total_metadata_bytes > MAX_BATCH_BYTES);
-    assert!(originals.iter().all(|(_, message)| {
-        message.metadata_json.as_ref().unwrap().len() < 1024 * 1024
-    }));
+    assert!(
+        originals
+            .iter()
+            .all(|(_, message)| { message.metadata_json.as_ref().unwrap().len() < 1024 * 1024 })
+    );
 
     let mut after = 0;
     let mut examined = 0;
@@ -520,7 +522,12 @@ async fn oversized_metadata_is_preserved_without_blocking_later_compaction() {
         .await
         .unwrap();
     assert_eq!(
-        rows.next().await.unwrap().unwrap().get::<String>(0).unwrap(),
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
         oversized
     );
     drop(rows);
