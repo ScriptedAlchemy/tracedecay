@@ -139,6 +139,16 @@ def qualified_report(result, manifest, manifest_sha, questions):
     experiment = result.get("experiment")
     if not isinstance(experiment, dict):
         raise ValueError("qualification requires an identity-bound HTTP experiment")
+    server = experiment.get("server_config")
+    if not isinstance(server, dict):
+        raise ValueError("qualification requires a pinned serving declaration")
+    for field in ("checkpoint", "server_revision", "backend", "dtype"):
+        if not isinstance(server.get(field), str) or not server[field].strip():
+            raise ValueError(f"qualification serving declaration lacks {field}")
+    temperature = server.get("temperature")
+    if (isinstance(temperature, bool) or not isinstance(temperature, (int, float))
+            or not math.isfinite(temperature) or temperature < 0):
+        raise ValueError("qualification requires a finite serving temperature")
     if experiment.get("qualification_manifest_sha256") != manifest_sha:
         raise ValueError("qualification experiment is not bound to this frozen manifest")
     validated = validate_manifest(manifest, result.get("dataset_sha256"), questions)

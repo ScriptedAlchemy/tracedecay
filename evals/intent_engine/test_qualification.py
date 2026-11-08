@@ -136,6 +136,11 @@ class QualificationTests(unittest.TestCase):
                 [r["id"], r["request_sha256"]] for r in rows
             ]),
             "noul_temperature": None,
+            "server_config": {
+                "checkpoint": "checkpoint-pinned-by-operator",
+                "server_revision": "immutable-server-revision",
+                "backend": "cpu", "dtype": "float32", "temperature": 2.41,
+            },
             "qualification_manifest_sha256": self.manifest_sha,
         }
         return {
@@ -163,6 +168,22 @@ class QualificationTests(unittest.TestCase):
         # An altered post-run manifest is not a valid requalification.
         with self.assertRaisesRegex(ValueError, "not bound"):
             qualification.qualified_report(result, stricter, qualification.sha256_json(stricter), self.questions)
+
+
+    def test_qualification_requires_complete_serving_identity(self):
+        for field, change in (
+            ("missing_server", lambda r: r["experiment"].pop("server_config")),
+            ("missing_checkpoint", lambda r: r["experiment"]["server_config"].pop("checkpoint")),
+            ("unknown_revision", lambda r: r["experiment"]["server_config"].update(server_revision="")),
+            ("nan_temperature", lambda r: r["experiment"]["server_config"].update(temperature=float("nan"))),
+        ):
+            with self.subTest(field=field):
+                result = self.signed_result()
+                change(result)
+                with self.assertRaisesRegex(ValueError, "serving"):
+                    qualification.qualified_report(
+                        result, self.manifest, self.manifest_sha, self.questions
+                    )
 
     def test_qualified_reporting_refuses_tampered_labels_and_unbound_results(self):
         base = self.signed_result()
