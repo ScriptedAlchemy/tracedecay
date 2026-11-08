@@ -3220,6 +3220,27 @@ fn retrying_an_unchanged_phase_does_not_fabricate_status_progress() {
     let ready = build_progress_snapshot(&scheduler);
     assert_eq!(ready.phase, CodeIndexBuildPhaseV1::Ready);
     assert!(ready.progress_epoch > transitioned.progress_epoch);
+
+    // Ready is the one idempotent-looking phase that may still be a real
+    // state change: success must clear a previously published refusal.
+    scheduler
+        .build_progress_slot()
+        .write()
+        .expect("progress slot")
+        .block_current(CodeIndexBuildBlockedReasonV1::ResidentMemory);
+    let blocked = build_progress_snapshot(&scheduler);
+    assert_eq!(
+        blocked.blocked_reason,
+        Some(CodeIndexBuildBlockedReasonV1::ResidentMemory)
+    );
+    latest.text.publish_text_progress_phase(
+        CodeIndexBuildPhaseV1::Ready,
+        blocked.current_batch_pages,
+        blocked.current_batch_payload_bytes,
+    );
+    let cleared = build_progress_snapshot(&scheduler);
+    assert_eq!(cleared.blocked_reason, None);
+    assert!(cleared.progress_epoch > blocked.progress_epoch);
 }
 
 #[test]

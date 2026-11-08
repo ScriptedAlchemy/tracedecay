@@ -2738,6 +2738,8 @@ impl LatestCodeTextGenerationV1 {
                 if current.phase == phase
                     && current.current_batch_pages == current_batch_pages
                     && current.current_batch_payload_bytes == current_batch_payload_bytes
+                    && !(phase == CodeIndexBuildPhaseV1::Ready
+                        && current.blocked_reason.is_some())
                 {
                     return;
                 }
