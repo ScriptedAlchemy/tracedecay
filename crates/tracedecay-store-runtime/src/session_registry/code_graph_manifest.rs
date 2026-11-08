@@ -436,6 +436,7 @@ fn with_verified_segments<T>(
     ) -> Result<T, SealedCodeGraphRowsError>,
 ) -> Result<T, GraphDbError> {
     let mut interruption = None;
+    let started = std::time::Instant::now();
     let mut segments = GraphSegmentReadPassV1::new(&routes.segment_roots);
     let mut read_segment = |request: SealedGenerationSegmentReadV1<'_>,
                             buffer: &mut Vec<u8>|
@@ -455,7 +456,9 @@ fn with_verified_segments<T>(
     tracing::info!(
         event = "code_graph_segment_read_pass",
         segment_open_attempts = segments.open_attempts,
+        segment_open_wall_seconds = segments.open_wall_time.as_secs_f64(),
         segment_reads = segments.reads,
+        graph_pass_wall_seconds = started.elapsed().as_secs_f64(),
         "finished the pass-scoped sealed graph segment reader"
     );
     drop(segments);
@@ -788,6 +791,7 @@ struct GraphSegmentReadPassV1<'a> {
     /// Least-recently used first; the most recent handle is at the back.
     pinned: VecDeque<PinnedPartitionedSegmentV1>,
     open_attempts: usize,
+    open_wall_time: std::time::Duration,
     reads: usize,
 }
 
@@ -797,6 +801,7 @@ impl<'a> GraphSegmentReadPassV1<'a> {
             roots,
             pinned: VecDeque::new(),
             open_attempts: 0,
+            open_wall_time: std::time::Duration::ZERO,
             reads: 0,
         }
     }
@@ -819,9 +824,19 @@ impl<'a> GraphSegmentReadPassV1<'a> {
             })?;
             self.pinned.push_back(pinned);
         } else {
-            let root = select_partitioned_segment_root(self.roots, request)?;
-            self.open_attempts += 1;
-            let pinned = open_partitioned_segment(root, request)?;
+            // Include route lookup, pathname validation and the actual open.
+            // Endpoint authorization can stall in any of these operations.
+            let started = std::time::Instant::now();
+            let selected = select_partitioned_segment_root(self.roots, request);
+            let opened = match selected {
+                Ok((root, path_metadata)) => {
+                    self.open_attempts += 1;
+                    open_partitioned_segment(root, &path_metadata, request)
+                }
+                Err(error) => Err(error),
+            };
+            self.open_wall_time += started.elapsed();
+            let pinned = opened?;
             if self.pinned.len() == MAX_GRAPH_SEGMENT_OPEN_HANDLES {
                 self.pinned.pop_front();
             }
@@ -866,7 +881,7 @@ fn partitioned_segment_request(
 fn select_partitioned_segment_root<'a>(
     roots: &'a [PathBuf],
     request: tracedecay_code_index::production::SealedGenerationSegmentReadV1<'_>,
-) -> Result<&'a std::path::Path, CodeIndexProductionErrorV1> {
+) -> Result<(&'a std::path::Path, std::fs::Metadata), CodeIndexProductionErrorV1> {
     let (digest, _, _, _) = partitioned_segment_request(request)?;
     let digest = sha256_hex_suffix(digest).ok_or_else(|| {
         CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
@@ -876,7 +891,7 @@ fn select_partitioned_segment_root<'a>(
             .join(format!("segment-{digest}.json"))
             .symlink_metadata()
         {
-            Ok(_) => return Ok(root),
+            Ok(path_metadata) => return Ok((root, path_metadata)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 return Err(CodeIndexProductionErrorV1::Contract(format!(
@@ -893,6 +908,7 @@ fn select_partitioned_segment_root<'a>(
 #[tracing::instrument(name = "code_index.graph.segment.open", level = "trace", skip_all)]
 fn open_partitioned_segment(
     segments_root: &std::path::Path,
+    path_metadata: &std::fs::Metadata,
     request: tracedecay_code_index::production::SealedGenerationSegmentReadV1<'_>,
 ) -> Result<PinnedPartitionedSegmentV1, tracedecay_code_index::production::CodeIndexProductionErrorV1>
 {
@@ -903,11 +919,8 @@ fn open_partitioned_segment(
         CodeIndexProductionErrorV1::Contract("sealed segment digest is not sha256".to_owned())
     })?;
     let path = segments_root.join(format!("segment-{digest_hex}.json"));
-    let path_metadata = path.symlink_metadata().map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!(
-            "sealed generation segment is unavailable: {error}"
-        ))
-    })?;
+    // Route selection already obtained this pathname identity. Re-statting
+    // every graph page repeats an endpoint-scanned filesystem operation.
     if !path_metadata.file_type().is_file() || path_metadata.len() != expected_size {
         return Err(CodeIndexProductionErrorV1::Contract(
             "sealed generation segment identity does not match its manifest".to_owned(),
@@ -925,7 +938,7 @@ fn open_partitioned_segment(
             "sealed generation segment metadata cannot be read: {error}"
         ))
     })?;
-    if !same_file_identity(&path_metadata, &file_metadata) {
+    if !same_file_identity(path_metadata, &file_metadata) {
         return Err(CodeIndexProductionErrorV1::Contract(
             "sealed generation segment identity changed while it was opened".to_owned(),
         ));
@@ -2341,6 +2354,44 @@ mod tests {
             .unwrap_err(),
             GraphDbError::SealSuperseded
         );
+    }
+
+
+    #[test]
+    fn graph_segment_pass_preserves_first_existing_route_identity() {
+        let first = TempDir::new().unwrap();
+        let second = TempDir::new().unwrap();
+        let bytes = b"sealed graph page from a retained route";
+        let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).unwrap();
+        let filename = format!(
+            "segment-{}.json",
+            sha256_hex_suffix(digest.as_str()).unwrap()
+        );
+        std::fs::write(second.path().join(&filename), bytes).unwrap();
+        let roots = vec![first.path().to_path_buf(), second.path().to_path_buf()];
+        let request = SealedGenerationSegmentReadV1::Whole {
+            digest: &digest,
+            size_bytes: bytes.len() as u64,
+        };
+        SEGMENT_OPENS.with(|opens| opens.set(0));
+        let mut pass = super::GraphSegmentReadPassV1::new(&roots);
+        let mut decoded = Vec::new();
+        pass.read(request, &mut decoded).unwrap();
+        assert_eq!(decoded, bytes);
+        assert_eq!(pass.open_attempts, 1);
+        assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 1);
+        assert!(pass.open_wall_time > std::time::Duration::ZERO);
+
+        // A non-file at the first existing route is corrupt, not a reason
+        // to silently fall through to a later apparently valid segment.
+        std::fs::create_dir(first.path().join(&filename)).unwrap();
+        SEGMENT_OPENS.with(|opens| opens.set(0));
+        let mut fresh = super::GraphSegmentReadPassV1::new(&roots);
+        assert!(matches!(
+            fresh.read(request, &mut Vec::new()),
+            Err(CodeIndexProductionErrorV1::Contract(_))
+        ));
+        assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 0);
     }
 
     #[test]
