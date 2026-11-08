@@ -7,9 +7,11 @@
 
 use std::ffi::OsStr;
 use std::io;
+use std::path::Path;
 
-#[cfg(windows)]
 use cap_fs_ext::DirExt;
+#[cfg(windows)]
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 #[cfg(not(windows))]
 use cap_fs_ext::OpenOptionsMaybeDirExt;
 use cap_std::fs::{Dir, File, OpenOptions};
@@ -212,6 +214,114 @@ pub fn sync_directory(directory: &Dir) -> io::Result<()> {
     }
 }
 
+/// Removes only children authorized by a bounded receipt read from the exact
+/// directory handle that will be deleted. The sealed root and each child are
+/// held capabilities: replacing either pathname after receipt validation
+/// cannot redirect recursive removal to a different tree.
+///
+/// The caller must own exclusive store maintenance. Unknown, invalid and
+/// unreadable child receipts preserve their directory; an actual deletion
+/// failure is returned so retirement can retry instead of claiming success.
+pub fn remove_receipted_directories_nofollow(
+    root_path: &Path,
+    receipt_name: &OsStr,
+    maximum: usize,
+    mut authorized: impl FnMut(&OsStr, &[u8]) -> bool,
+) -> io::Result<usize> {
+    // Receipt names are always a single sibling: a slash-bearing name could
+    // otherwise traverse a different directory even with O_NOFOLLOW.
+    let mut receipt_components = Path::new(receipt_name).components();
+    if !matches!(
+        receipt_components.next(),
+        Some(std::path::Component::Normal(_))
+    ) || receipt_components.next().is_some()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "receipt must be a single filename",
+        ));
+    }
+    let parent_path = root_path.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "sealed root has no parent")
+    })?;
+    let root_name = root_path.file_name().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "sealed root has no name")
+    })?;
+    let parent = Dir::open_ambient_dir(parent_path, cap_std::ambient_authority())?;
+    let root = parent.open_dir_nofollow(root_name)?;
+    let mut removed = 0usize;
+    for entry in root.read_dir(".")? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        // Do not trust the DirEntry's former pathname kind after a rename.
+        let child = match root.open_dir_nofollow(&name) {
+            Ok(child) => child,
+            Err(error) => {
+                tracing::warn!(%error, entry = ?name, "sealed child could not be verified");
+                continue;
+            }
+        };
+        let receipt = match read_bounded_child_receipt(&child, receipt_name, maximum) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                tracing::warn!(%error, entry = ?name, "unverified sealed receipt preserved");
+                continue;
+            }
+        };
+        if authorized(&name, &receipt) {
+            remove_open_dir_all_nofollow(child)?;
+            removed = removed.saturating_add(1);
+        }
+    }
+    Ok(removed)
+}
+
+#[cfg(unix)]
+fn read_bounded_child_receipt(
+    directory: &Dir,
+    name: &OsStr,
+    maximum: usize,
+) -> io::Result<Vec<u8>> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let name = CString::new(name.as_bytes()).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidInput, "receipt name contains NUL")
+    })?;
+    // SAFETY: the held directory fd is valid; name is a NUL-terminated
+    // sibling component. O_NOFOLLOW prevents link traversal and O_NONBLOCK
+    // prevents a substituted FIFO from blocking before the regular-file check.
+    let descriptor = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        )
+    };
+    if descriptor < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: openat returned a new owned fd and this File is its sole owner.
+    let file = unsafe { std::fs::File::from_raw_fd(descriptor) };
+    crate::framed_log::read_bounded_open_file(file, maximum)
+}
+
+#[cfg(windows)]
+fn read_bounded_child_receipt(
+    directory: &Dir,
+    name: &OsStr,
+    maximum: usize,
+) -> io::Result<Vec<u8>> {
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let file = directory.open_with(name, &options)?.into_std();
+    crate::framed_log::read_bounded_open_file(file, maximum)
+}
+
 /// Removes the held directory without following child symlinks.
 pub fn remove_open_dir_all_nofollow(directory: Dir) -> io::Result<()> {
     #[cfg(not(windows))]
@@ -371,6 +481,85 @@ mod tests {
             std::fs::read(external.path().join("sentinel")).expect("sentinel survives"),
             b"preserve"
         );
+    }
+
+
+    /// A parent-path swap after receipt validation must not redirect cleanup:
+    /// the already-open child is removed, and matching foreign bytes survive.
+    #[cfg(unix)]
+    #[test]
+    fn verified_cleanup_remains_bound_when_sealed_root_is_substituted() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("graph.sealed");
+        let displaced = temp.path().join("owned-displaced");
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::create_dir_all(foreign.join("a")).unwrap();
+        std::fs::write(root.join("a/sealed.json"), b"owned receipt").unwrap();
+        std::fs::write(root.join("a/owned"), b"owned").unwrap();
+        std::fs::write(foreign.join("a/sentinel"), b"foreign").unwrap();
+
+        let removed = remove_receipted_directories_nofollow(
+            &root,
+            OsStr::new("sealed.json"),
+            1024,
+            |name, bytes| {
+                assert_eq!(name, OsStr::new("a"));
+                assert_eq!(bytes, b"owned receipt");
+                std::fs::rename(&root, &displaced).unwrap();
+                std::os::unix::fs::symlink(&foreign, &root).unwrap();
+                true
+            },
+        )
+        .unwrap();
+        assert_eq!(removed, 1);
+        assert!(!displaced.join("a").exists());
+        assert_eq!(std::fs::read(foreign.join("a/sentinel")).unwrap(), b"foreign");
+    }
+
+    /// The child also remains the exact opened directory when its original
+    /// entry name becomes occupied by an unrelated real directory.
+    #[cfg(unix)]
+    #[test]
+    fn verified_cleanup_does_not_remove_a_replacement_real_child() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("graph.sealed");
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::write(root.join("a/sealed.json"), b"owned receipt").unwrap();
+        let moved = root.join("moved");
+        let removed = remove_receipted_directories_nofollow(
+            &root,
+            OsStr::new("sealed.json"),
+            1024,
+            |_, bytes| {
+                assert_eq!(bytes, b"owned receipt");
+                std::fs::rename(root.join("a"), &moved).unwrap();
+                std::fs::create_dir(root.join("a")).unwrap();
+                std::fs::write(root.join("a/sentinel"), b"foreign").unwrap();
+                true
+            },
+        )
+        .unwrap();
+        assert_eq!(removed, 1);
+        assert!(!moved.exists());
+        assert_eq!(std::fs::read(root.join("a/sentinel")).unwrap(), b"foreign");
+    }
+
+    #[test]
+    fn a_receipt_filename_cannot_escape_its_held_child() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sealed");
+        std::fs::create_dir(&root).unwrap();
+        for receipt in ["../outside", "a/b", "."] {
+            let error = remove_receipted_directories_nofollow(
+                &root,
+                OsStr::new(receipt),
+                512,
+                |_, _| true,
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        }
     }
 
     #[test]

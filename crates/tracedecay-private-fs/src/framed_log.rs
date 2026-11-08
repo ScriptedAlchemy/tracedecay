@@ -278,6 +278,13 @@ pub fn read_bounded(path: &Path, maximum: usize) -> io::Result<Option<Vec<u8>>> 
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
+    read_bounded_open_file(file, maximum).map(Some)
+}
+
+/// Applies the same bounded regular-file proof to a file opened relative to a
+/// held directory capability. The caller supplies a no-follow, nonblocking
+/// handle; this function never resolves another pathname.
+pub(crate) fn read_bounded_open_file(file: File, maximum: usize) -> io::Result<Vec<u8>> {
     let metadata = file.metadata()?;
     if !metadata.file_type().is_file() {
         return Err(io::Error::new(
@@ -300,7 +307,7 @@ pub fn read_bounded(path: &Path, maximum: usize) -> io::Result<Option<Vec<u8>>> 
             "bounded read length mismatch",
         ));
     }
-    Ok(Some(bytes))
+    Ok(bytes)
 }
 
 const TEMPORARY_SUFFIX: &str = ".tmp";

@@ -643,71 +643,40 @@ pub(crate) fn discard_superseded_sealed_generations(
     database_path: &Path,
 ) -> Result<(), GraphDbError> {
     let root = sealed_store_root(database_path);
-    let entries = match std::fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(sealed_store_io_failure("sealed root read failed", error)),
-    };
-    for entry in entries {
-        let entry =
-            entry.map_err(|error| sealed_store_io_failure("sealed root read failed", error))?;
-        let path = entry.path();
-        if entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.starts_with(".staging-"))
-        {
-            continue;
-        }
-        if !entry
-            .file_type()
-            .map_err(|error| sealed_store_io_failure("sealed entry type failed", error))?
-            .is_dir()
-        {
-            continue;
-        }
-        // An unreadable, absent, oversized, or malformed receipt is not
-        // ownership evidence. Preserve it and continue with other children.
-        let receipt = match load_sealed_store_receipt(&path) {
-            Ok(Some(receipt)) => receipt,
-            Ok(None) => continue,
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    path = %path.display(),
-                    "sealed generation with unverified receipt was preserved"
-                );
-                continue;
+    let reclaimed = tracedecay_private_fs::capability_dir::remove_receipted_directories_nofollow(
+        &root,
+        std::ffi::OsStr::new(SEALED_STORE_RECEIPT_FILE),
+        MAX_SEALED_RECEIPT_BYTES,
+        |name, bytes| {
+            let Some(name) = name.to_str() else {
+                return false;
+            };
+            if name.len() != 64 || !name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return false;
             }
-        };
-        let name = entry.file_name();
-        let recognized = name.to_str().is_some_and(|name| {
-            name.len() == 64
-                && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+            let Ok(receipt) = serde_json::from_slice::<SealedStoreReceiptV1>(bytes) else {
+                return false;
+            };
+            let recognized_form = match receipt.form.as_str() {
+                SEALED_STORE_FORM_COMPACT => receipt.base.is_none(),
+                SEALED_STORE_FORM_LAYERED => receipt.base.is_some(),
+                _ => false,
+            };
+            recognized_form
+                && receipt.version == SEALED_STORE_RECEIPT_VERSION
                 && receipt.physical_namespace == format!("generation:{name}")
-        });
-        let recognized_form = match receipt.form.as_str() {
-            SEALED_STORE_FORM_COMPACT => receipt.base.is_none(),
-            SEALED_STORE_FORM_LAYERED => receipt.base.is_some(),
-            _ => false,
-        };
-        if !recognized || !recognized_form || receipt.version != SEALED_STORE_RECEIPT_VERSION {
-            continue;
-        }
-        if receipt.graph_format > 0 && receipt.graph_format < GraphFormatVersion::current().get() {
-            match std::fs::remove_dir_all(&path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(sealed_store_io_failure(
-                        "superseded sealed generation removal failed",
-                        error,
-                    ));
-                }
-            }
-        }
+                && receipt.graph_format > 0
+                && receipt.graph_format < GraphFormatVersion::current().get()
+        },
+    );
+    match reclaimed {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(sealed_store_io_failure(
+            "superseded sealed generation removal failed",
+            error,
+        )),
     }
-    Ok(())
 }
 
 /// Removes every `.staging-*` directory a seal left behind under the store's
