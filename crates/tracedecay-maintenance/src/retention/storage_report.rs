@@ -3693,7 +3693,7 @@ mod tests {
             StorageReportSizeStateV1::Complete
         );
         assert_eq!(
-            offline.full_profile_size().state,
+            offline.full_profile_size.as_ref().unwrap().state,
             ProfileTotalCoverageStateV1::Complete
         );
         assert!(!offline.footprint.as_ref().unwrap().truncated);
