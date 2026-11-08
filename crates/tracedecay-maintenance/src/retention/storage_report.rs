@@ -1537,24 +1537,11 @@ fn copy_sqlite_family_at_generation(
     destination: &Path,
     generation: &tracedecay_runtime_core::sqlite_read_snapshot::SourceGeneration,
 ) -> std::io::Result<()> {
-    // A rollback-mode writer may spill uncommitted pages into the main file
-    // while their undo records remain in -journal. Copying main/WAL/SHM alone
-    // can report those uncommitted rows as registered projects. Refuse the
-    // incomplete family rather than returning false retention authority.
-    let journal_path = sqlite_family_member(source, "-journal");
-    match std::fs::symlink_metadata(&journal_path) {
-        Ok(_) => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "SQLite report source has rollback journal '{}'; main/WAL/SHM snapshot is unsafe",
-                    journal_path.display()
-                ),
-            ));
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
+    // Rollback journals can outlive commits in TRUNCATE and PERSIST mode.
+    // Only an absent, truncated, or explicitly invalidated journal is safe
+    // to omit from a snapshot. Recheck its witness after copying: a writer
+    // must not turn a stable registry into an uncommitted main-file image.
+    let journal_before = inspect_inert_rollback_journal(source)?;
     // Refuse nonregular and linked source members before copying any bytes.
     // Path::is_file() follows symlinks, potentially copying an arbitrarily
     // large foreign file into the report's temporary SQLite snapshot.
@@ -1579,7 +1566,98 @@ fn copy_sqlite_family_at_generation(
         }
     }
     copy_sqlite_members_nofollow(source, destination, &members)?;
+    let journal_after = inspect_inert_rollback_journal(source)?;
+    if !rollback_journal_unchanged(&journal_before, &journal_after) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "SQLite report rollback journal changed while copying registry",
+        ));
+    }
     generation.validate()
+}
+
+fn rollback_journal_uncommitted(path: &Path) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!(
+            "SQLite report source has active or uncertain rollback journal '{}'; main/WAL/SHM snapshot is unsafe",
+            path.display()
+        ),
+    )
+}
+
+/// A committed TRUNCATE journal is empty; PERSIST clears the first 28 header
+/// bytes instead of deleting the file. A zero magic prefix alone is NOT enough:
+/// SQLite may leave those first eight bytes zero during an active transaction,
+/// while the nonce and page/sector fields are already populated.
+fn inspect_inert_rollback_journal(
+    source: &Path,
+) -> std::io::Result<Option<std::fs::Metadata>> {
+    let path = sqlite_family_member(source, "-journal");
+    let checked = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        Ok(_) => return Err(rollback_journal_uncommitted(&path)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if checked.len() == 0 {
+        return Ok(Some(checked));
+    }
+    if checked.len() < 28 {
+        return Err(rollback_journal_uncommitted(&path));
+    }
+
+    let parent = source
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let directory = cap_std::fs::Dir::open_ambient_dir(parent, cap_std::ambient_authority())?;
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true);
+    options.follow(FollowSymlinks::No);
+    let name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "SQLite rollback journal has no filename",
+        )
+    })?;
+    let mut input = directory.open_with(name, &options)?.into_std();
+    let opened = input.metadata()?;
+    if !matches_checked_sqlite_member(&checked, &opened)
+        || checked.modified()? != opened.modified()?
+    {
+        return Err(rollback_journal_uncommitted(&path));
+    }
+    let mut header = [0u8; 28];
+    input.read_exact(&mut header)?;
+    if header != [0u8; 28] {
+        return Err(rollback_journal_uncommitted(&path));
+    }
+    let after_read = input.metadata()?;
+    if !matches_checked_sqlite_member(&checked, &after_read)
+        || checked.modified()? != after_read.modified()?
+    {
+        return Err(rollback_journal_uncommitted(&path));
+    }
+    Ok(Some(checked))
+}
+
+fn rollback_journal_unchanged(
+    before: &Option<std::fs::Metadata>,
+    after: &Option<std::fs::Metadata>,
+) -> bool {
+    match (before, after) {
+        (None, None) => true,
+        (Some(before), Some(after)) => {
+            matches_checked_sqlite_member(before, after)
+                && before
+                    .modified()
+                    .ok()
+                    .zip(after.modified().ok())
+                    .is_some_and(|(left, right)| left == right)
+        }
+        _ => false,
+    }
 }
 
 fn matches_checked_sqlite_member(checked: &std::fs::Metadata, opened: &std::fs::Metadata) -> bool {
@@ -2735,6 +2813,78 @@ mod tests {
         assert_eq!(report.stores[0].project_id, "proj_committed");
         assert_eq!(report.stores[0].canonical_root, "/repos/committed");
         assert_eq!(report.unregistered_dir_count, 0);
+    }
+
+    #[asupersync::test]
+    async fn committed_persist_and_truncate_journals_remain_reportable_but_active_writes_refuse() {
+        for mode in ["PERSIST", "TRUNCATE"] {
+            let temporary = tempfile::TempDir::new().unwrap();
+            let profile_root = temporary.path().join("profile");
+            let project = profile_root.join("projects/proj_committed");
+            std::fs::create_dir_all(&project).unwrap();
+            std::fs::write(project.join("sessions.db"), b"retained session").unwrap();
+
+            let registry = profile_root.join(GLOBAL_DB_FILENAME);
+            let writer = rusqlite::Connection::open(&registry).unwrap();
+            writer
+                .execute_batch(&format!(
+                    "PRAGMA journal_mode = {mode};
+                     CREATE TABLE code_projects (
+                         project_id TEXT PRIMARY KEY, canonical_root TEXT NOT NULL
+                     );
+                     INSERT INTO code_projects VALUES ('proj_committed', '/repos/committed');"
+                ))
+                .unwrap();
+            let journal = sqlite_family_member(&registry, "-journal");
+            let journal_bytes = std::fs::metadata(&journal).unwrap().len();
+            if mode == "TRUNCATE" {
+                assert_eq!(journal_bytes, 0, "TRUNCATE retains an empty journal");
+            } else {
+                assert!(
+                    journal_bytes >= 28,
+                    "PERSIST retains an invalidated journal"
+                );
+                let mut header = [0u8; 28];
+                std::fs::File::open(&journal)
+                    .unwrap()
+                    .read_exact(&mut header)
+                    .unwrap();
+                assert_eq!(header, [0u8; 28]);
+            }
+
+            let committed = build_storage_report(&profile_root).await.unwrap();
+            assert_eq!(committed.stores.len(), 1);
+            assert_eq!(committed.stores[0].project_id, "proj_committed");
+            assert_eq!(committed.stores[0].canonical_root, "/repos/committed");
+            assert_eq!(committed.unregistered_dir_count, 0);
+
+            writer
+                .execute_batch(
+                    "BEGIN IMMEDIATE;
+                     UPDATE code_projects SET canonical_root = '/repos/uncommitted'
+                     WHERE project_id = 'proj_committed';",
+                )
+                .unwrap();
+            assert!(
+                std::fs::metadata(&journal).unwrap().len() >= 28,
+                "the active rollback transaction must have a journal header"
+            );
+            let error = build_storage_report(&profile_root)
+                .await
+                .expect_err("active rollback journal must not leak uncommitted registrations");
+            assert!(
+                matches!(&error, TraceDecayError::Database { .. }),
+                "report refusal must be a typed storage error: {error}"
+            );
+            assert!(error.to_string().contains("rollback journal"), "{error}");
+
+            writer.execute_batch("ROLLBACK").unwrap();
+            let recovered = build_storage_report(&profile_root).await.unwrap();
+            assert_eq!(recovered.stores.len(), 1);
+            assert_eq!(recovered.stores[0].canonical_root, "/repos/committed");
+            assert_eq!(recovered.unregistered_dir_count, 0);
+            drop(writer);
+        }
     }
 
     #[cfg(unix)]
