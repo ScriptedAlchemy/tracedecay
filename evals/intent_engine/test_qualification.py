@@ -29,6 +29,10 @@ class QualificationTests(unittest.TestCase):
             {"id": "holdout-negative", "labels": [], "context_needed": False,
              "current_prompt": "Show a greeting", "turns": []},
         ]
+        for case in self.dataset:
+            holdout = case["id"].startswith("holdout")
+            case["project_id"] = "project-b" if holdout else "project-a"
+            case["session_id"] = "session-b" if holdout else "session-a"
         self.dataset_bytes = json.dumps(self.dataset).encode("utf-8")
         self.dataset_sha = qualification.sha256_bytes(self.dataset_bytes)
         annotations = []
@@ -71,6 +75,30 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(verified["heldout_ids"], ["holdout-positive", "holdout-negative"])
         self.assertEqual(verified["thresholds"]["impact"], 0.6)
         self.assertEqual(len(verified["annotations"]), 4)
+
+    def test_group_identity_cannot_be_invented_by_the_annotation_manifest(self):
+        for field in ("project_id", "session_id"):
+            with self.subTest(field=field):
+                forged = copy.deepcopy(self.manifest)
+                forged["annotations"][2][field] = "invented-" + field
+                with self.assertRaisesRegex(ValueError, "group identity disagrees with frozen dataset"):
+                    self.valid(forged)
+                missing_source = copy.deepcopy(self.dataset)
+                del missing_source[2][field]
+                with self.assertRaisesRegex(ValueError, "group identity disagrees with frozen dataset"):
+                    self.valid(cases=missing_source)
+
+    def test_self_consistent_rehashed_metadata_cannot_hide_group_forgery(self):
+        forged = copy.deepcopy(self.manifest)
+        forged["annotations"][2]["project_id"] = "invented-independent-project"
+        forged_sha = qualification.sha256_json(forged)
+        result = self.signed_result()
+        result["experiment"]["qualification_manifest_sha256"] = forged_sha
+        result["experiment_sha256"] = score.evidence_digest(result["experiment"])
+        with self.assertRaisesRegex(ValueError, "group identity disagrees with frozen dataset"):
+            qualification.qualified_report(
+                result, forged, forged_sha, self.questions, self.dataset_bytes
+            )
 
     def test_near_neighbor_session_or_project_leak_refuses_entire_split(self):
         for key, value in (("project_id", "project-a"), ("session_id", "session-a")):

@@ -28,8 +28,8 @@ def load_manifest(path):
 def validate_manifest(manifest, dataset_sha, questions, cases=None):
     """Fail closed before an HTTP request or a qualified result is published.
 
-    `cases` is the complete original dataset, not a filtered subset. Scoring
-    passes None because the experiment already binds the dataset's byte digest.
+    `cases` is the complete original dataset, not a filtered subset. Its
+    source-owned grouping identities must match the declared split metadata.
     """
     if not isinstance(manifest, dict) or manifest.get("version") != 1:
         raise ValueError("unsupported qualification manifest version")
@@ -123,6 +123,14 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
         raise ValueError("qualification needs tune and positive/negative holdout cases")
     if projects["tune"] & projects["holdout"] or sessions["tune"] & sessions["holdout"]:
         raise ValueError("qualification leaks project/session groups between splits")
+    if case_map is not None:
+        for annotation in annotations:
+            recorded = case_map[annotation["id"]]
+            if (recorded.get("project_id") != annotation["project_id"]
+                    or recorded.get("session_id") != annotation["session_id"]):
+                raise ValueError(
+                    f"qualification {annotation['id']} group identity disagrees with frozen dataset"
+                )
     return {
         "heldout_ids": heldout,
         "thresholds": thresholds,

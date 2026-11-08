@@ -134,8 +134,11 @@ that dataset's order. Each annotation has `id`, `split` (`tune` or
 `reviewer`, `review_ref`, `verified_labels` and Boolean
 `verified_context_needed`. The independently reviewed labels must exactly
 match the inference dataset. Tune and held-out projects cannot overlap; session
-groups cannot overlap. The held-out group must contain both a positive and a
-negative example. Reviewer identifiers and references are **declarations**,
+groups cannot overlap. The original frozen dataset must also carry each case's
+`project_id` and `session_id`, identical to its reviewed annotation. Inventing
+independent groups solely inside the manifest is refused even if the manifest
+and result hashes are recomputed. The held-out group must contain both a
+positive and a negative example. Reviewer identifiers and references are **declarations**,
 not cryptographic verification of independent label quality. Do not forge them
 from model predictions or adoption events.
 
