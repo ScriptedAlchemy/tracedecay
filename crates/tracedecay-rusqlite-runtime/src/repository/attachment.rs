@@ -54,8 +54,8 @@ impl RepositoryPhysicalAttachmentFactory {
         path: PathBuf,
         admission: AdmissionConfigV1,
     ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
-        let opened_database =
-            OpenedDatabaseFile::pin_initialized(&path).map_err(RepositoryAttachmentStartError::Identity)?;
+        let opened_database = OpenedDatabaseFile::pin_initialized(&path)
+            .map_err(RepositoryAttachmentStartError::Identity)?;
         let reader_locator = ExistingReaderLocator::new(binding.clone(), locator, path.clone())
             .map_err(RepositoryAttachmentStartError::Reader)?;
         let reader_locator = reader_locator.with_opened_database(
@@ -123,8 +123,8 @@ impl RepositoryPhysicalAttachmentFactory {
         admission: AdmissionConfigV1,
         start_hook: &mut dyn FnMut(AttachmentWorkerStartStage),
     ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
-        let opened_database =
-            OpenedDatabaseFile::pin_initialized(&path).map_err(RepositoryAttachmentStartError::Identity)?;
+        let opened_database = OpenedDatabaseFile::pin_initialized(&path)
+            .map_err(RepositoryAttachmentStartError::Identity)?;
         self.attach_opened(
             runtime,
             binding,
@@ -490,6 +490,9 @@ impl RepositoryRuntimePhysicalAttachment {
 
     pub fn commit_initialization(&self) -> Result<(), String> {
         let mut state = self.lock_state();
+        if !state.admission_open || state.closed {
+            return Err("repository initialization is no longer open".to_owned());
+        }
         let opened = state
             .initialization_file
             .as_ref()
@@ -510,9 +513,24 @@ impl RepositoryRuntimePhysicalAttachment {
         let Some(opened) = state.initialization_file.take() else {
             return Ok(());
         };
-        opened
-            .discard_created(&state.database_path)
-            .map_err(|error| error.to_string())
+        // Aborting publication does not prove ownership of any current
+        // pathname. Preserve the database and every sidecar, just as on a
+        // worker-start failure; another process may have replaced them.
+        tracing::warn!(
+            path = %state.database_path.display(),
+            "aborted SQLite initialization preserved its database and sidecars"
+        );
+        if state.file_lost {
+            // Drain can finish while a lost-file worker is still returning.
+            // Reuse the ordinary lost-worker teardown rather than closing a
+            // raw descriptor that could discard that worker's POSIX locks.
+            state.retained_file_pin = Some(opened);
+            drop(state);
+            let _ = self.lost_file_closed();
+        } else {
+            opened.release_after_workers_exit();
+        }
+        Ok(())
     }
 
     pub fn exact_sql_handle(&self) -> Result<ExactSqlHandle, ExactSqlError> {
@@ -1036,6 +1054,205 @@ mod tests {
     }
 
     #[test]
+    fn abort_initialization_preserves_committed_bytes_and_releases_shared_pins() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("aborted.sqlite3");
+        let binding = binding();
+        let attachment = RepositoryPhysicalAttachmentFactory
+            .initialize(
+                &native_runtime(),
+                binding.clone(),
+                locator(&binding),
+                path.clone(),
+                AdmissionConfigV1::default(),
+            )
+            .unwrap();
+        let held_pin = attachment
+            .lock_state()
+            .initialization_file
+            .as_ref()
+            .unwrap()
+            .try_clone()
+            .unwrap();
+        let handle = attachment.exact_sql_handle().unwrap();
+        handle
+            .execute_batch("CREATE TABLE abort_probe (value INTEGER)".to_owned())
+            .unwrap();
+        handle
+            .execute(statement("INSERT INTO abort_probe VALUES (42)", vec![]))
+            .unwrap();
+
+        attachment.abort_initialization().unwrap();
+        assert!(path.is_file(), "abort must not unlink the initialized store");
+        assert!(held_pin.try_clone().is_err());
+        {
+            let state = attachment.lock_state();
+            assert!(state.closed && state.drained);
+            assert!(state.initialization_file.is_none());
+            assert!(state.retained_file_pin.is_none());
+        }
+        assert!(attachment.commit_initialization().is_err());
+        assert_eq!(
+            handle
+                .execute(statement("INSERT INTO abort_probe VALUES (99)", vec![]))
+                .unwrap_err(),
+            ExactSqlError::WriterUnavailable
+        );
+        let reopened = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        assert_eq!(
+            reopened
+                .query_row("SELECT value FROM abort_probe", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            42
+        );
+        assert_eq!(
+            reopened
+                .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+        drop(reopened);
+        let preserved = fs::read(&path).unwrap();
+        attachment.abort_initialization().unwrap();
+        drop(attachment);
+        assert_eq!(fs::read(&path).unwrap(), preserved);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn abort_initialization_preserves_foreign_cross_process_replacements() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("aborted.sqlite3");
+        let binding = binding();
+        let attachment = RepositoryPhysicalAttachmentFactory
+            .initialize(
+                &native_runtime(),
+                binding.clone(),
+                locator(&binding),
+                path.clone(),
+                AdmissionConfigV1::default(),
+            )
+            .unwrap();
+        let held_pin = attachment
+            .lock_state()
+            .initialization_file
+            .as_ref()
+            .unwrap()
+            .try_clone()
+            .unwrap();
+        attachment.drain().unwrap();
+        attachment.close_and_join().unwrap();
+        assert!(attachment.commit_initialization().is_err());
+        let original = fs::read(&path).unwrap();
+        // SQLite has finished with these fixture files. Populate all three
+        // names so the separate process replaces real inodes, not absences.
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            fs::write(std::path::Path::new(&sidecar), b"owned fixture").unwrap();
+        }
+        let (_, module) = module_path!().split_once("::").unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("{module}::failed_initialization_foreign_replacement_child"),
+                "--nocapture",
+            ])
+            .env("TRACEDECAY_FAILED_SQLITE_REPLACEMENT", &path)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success()
+                && stdout.contains("1 passed")
+                && stdout.contains("foreign-sqlite-replacement-complete"),
+            "separate-process replacement failed: {stdout} {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        attachment.abort_initialization().unwrap();
+        assert!(held_pin.try_clone().is_err());
+        attachment.abort_initialization().unwrap();
+        drop(attachment);
+        assert_eq!(fs::read(&path).unwrap(), b"foreign database");
+        assert_eq!(fs::read(path.with_extension("owned")).unwrap(), original);
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            assert_eq!(
+                fs::read(std::path::Path::new(&sidecar)).unwrap(),
+                format!("foreign {suffix}").as_bytes()
+            );
+            sidecar.push(".owned");
+            assert_eq!(
+                fs::read(std::path::Path::new(&sidecar)).unwrap(),
+                b"owned fixture"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn abort_initialization_retains_the_pin_until_a_lost_writer_exits() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("lost-initialization.sqlite3");
+        let binding = binding();
+        let attachment = RepositoryPhysicalAttachmentFactory
+            .initialize(
+                &native_runtime(),
+                binding.clone(),
+                locator(&binding),
+                path.clone(),
+                AdmissionConfigV1::default(),
+            )
+            .unwrap();
+        let held_pin = attachment
+            .lock_state()
+            .initialization_file
+            .as_ref()
+            .unwrap()
+            .try_clone()
+            .unwrap();
+        let (hold, held) = mpsc::channel::<()>();
+        attachment.lock_state().after_lost_notice = Some(Box::new(move || {
+            let _ = held.recv();
+        }));
+        fs::remove_file(&path).unwrap();
+        let deadline = Instant::now() + crate::FILE_PROBE_INTERVAL + Duration::from_secs(10);
+        while !attachment
+            .lock_state()
+            .lost_readers
+            .as_ref()
+            .is_some_and(ReaderPool::workers_exited)
+        {
+            assert!(Instant::now() < deadline, "lost readers never exited");
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(attachment.file_lost());
+        attachment.abort_initialization().unwrap();
+        assert!(attachment.lock_state().initialization_file.is_none());
+        assert!(attachment.lock_state().retained_file_pin.is_some());
+        assert!(held_pin.try_clone().is_ok());
+        assert!(!attachment.lost_file_closed());
+
+        hold.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while attachment.lock_state().retained_file_pin.is_some() {
+            let _ = attachment.snapshot();
+            assert!(Instant::now() < deadline, "lost initialization pin leaked");
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(attachment.lost_file_closed());
+        assert!(held_pin.try_clone().is_err());
+    }
+
+    #[test]
     fn failed_initialization_preserves_created_database_and_sidecars() {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("failed.db");
@@ -1120,7 +1337,10 @@ mod tests {
             let mut sidecar = path.as_os_str().to_os_string();
             sidecar.push(suffix);
             let sidecar = std::path::PathBuf::from(sidecar);
-            assert_eq!(fs::read(&sidecar).unwrap(), format!("foreign {suffix}").as_bytes());
+            assert_eq!(
+                fs::read(&sidecar).unwrap(),
+                format!("foreign {suffix}").as_bytes()
+            );
             let mut displaced = sidecar.as_os_str().to_os_string();
             displaced.push(".owned");
             assert!(std::path::Path::new(&displaced).is_file());
