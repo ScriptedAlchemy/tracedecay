@@ -1868,8 +1868,16 @@ fn build_or_open_sealed_store(
             .and_then(|name| name.to_str())
             .unwrap_or("sealed")
     ));
-    remove_sealed_directory(&staging);
-    std::fs::create_dir_all(&staging)
+    // A failed cleanup must never be followed by create_dir_all: it would
+    // accept a pre-existing staging symlink and write into its foreign target.
+    std::fs::create_dir_all(&root)
+        .map_err(|error| sealed_store_io_failure("sealed root create failed", error))?;
+    let staging_name = staging
+        .file_name()
+        .ok_or_else(|| GraphDbError::unavailable("sealed staging name missing"))?;
+    tracedecay_private_fs::capability_dir::remove_child_directory_nofollow(&root, staging_name)
+        .map_err(|error| sealed_store_io_failure("staging directory cleanup refused", error))?;
+    std::fs::create_dir(&staging)
         .map_err(|error| sealed_store_io_failure("staging directory create failed", error))?;
     let receipt = stage_sealed_artifact(rows, identity, expected, &staging, check)
         .inspect_err(|_| remove_sealed_directory(&staging))?;
@@ -3377,6 +3385,57 @@ mod build_tests {
             matches!(proof, Err(GraphDbError::Corrupt { .. })),
             "a copy proof over a corrupt sealed page must be refused as corrupt: {proof:?}"
         );
+    }
+
+    /// A leftover staging symlink must not become a writable artifact root.
+    /// Refusing it preserves the foreign target rather than following it after
+    /// a best-effort cleanup that did not actually unlink the entry.
+    #[cfg(unix)]
+    #[test]
+    fn sealed_build_refuses_a_foreign_staging_symlink() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(2, 1);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        let root = sealed_store_root(&database_path);
+        let directory =
+            sealed_generation_directory(&root, &identity.physical_namespace().unwrap());
+        let staging = root.join(format!(
+            ".staging-{}",
+            directory.file_name().unwrap().to_str().unwrap()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::write(foreign.join("sentinel"), b"unchanged").unwrap();
+        std::os::unix::fs::symlink(&foreign, &staging).unwrap();
+
+        let result = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        );
+        assert!(result.is_err(), "a symlink must refuse the build");
+        assert!(
+            std::fs::symlink_metadata(&staging)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read(foreign.join("sentinel")).unwrap(),
+            b"unchanged"
+        );
+        assert!(
+            !foreign.join(SEALED_STORE_DATABASE_FILE).exists()
+                && !foreign.join("sealed.json").exists(),
+            "the foreign directory must not receive a container or receipt"
+        );
+        assert!(!directory.exists(), "no generation was installed");
     }
 
     /// The sealed container is written once, complete, after every row has
