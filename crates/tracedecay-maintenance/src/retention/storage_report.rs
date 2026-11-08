@@ -27,6 +27,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
@@ -1573,7 +1575,6 @@ fn matches_checked_sqlite_member(
     // Revalidate the held file's identity before creating any scratch output.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
         checked.dev() == opened.dev() && checked.ino() == opened.ino()
     }
     #[cfg(not(unix))]
