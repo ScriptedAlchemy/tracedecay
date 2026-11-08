@@ -889,7 +889,10 @@ fn repeated_pending_segment_accepts_identical_concurrent_canonical_publication()
     };
     let bytes = std::fs::read(&temporary).expect("staged segment bytes");
     let digest = segment_digest(&bytes);
-    assert!(!canonical.exists(), "the first stage has not named its segment");
+    assert!(
+        !canonical.exists(),
+        "the first stage has not named its segment"
+    );
 
     // A separate publisher wins the canonical name after this preparation
     // writes its own temporary file. It has the same authenticated bytes but
@@ -1297,9 +1300,7 @@ fn repeated_canonical_segment_writes_reuse_witness_and_refuse_replacement() {
     .find(|identity| identity.size_bytes > 0)
     .expect("nonempty canonical segment");
     let suffix = sha256_hex_suffix(identity.digest.as_str()).expect("canonical digest suffix");
-    let canonical = target
-        .segments_root
-        .join(format!("segment-{suffix}.json"));
+    let canonical = target.segments_root.join(format!("segment-{suffix}.json"));
     let bytes = std::fs::read(&canonical).expect("canonical segment");
     assert_eq!(segment_digest(&bytes), identity.digest);
 
@@ -1354,7 +1355,9 @@ fn repeated_canonical_segment_writes_reuse_witness_and_refuse_replacement() {
         1,
         "identity refusal should not reopen a substituted inode"
     );
-    preparation.abort().expect("release repeated-write preparation");
+    preparation
+        .abort()
+        .expect("release repeated-write preparation");
 }
 
 #[cfg(target_os = "linux")]
@@ -1386,8 +1389,13 @@ fn failed_durability_admission_cannot_leave_a_publishable_segment() {
     }
 
     let first_path = staged_path(&preparation, &digests[0]);
-    let prior = first_path.symlink_metadata().expect("first member metadata");
-    let mut writer = File::options().write(true).open(&first_path).expect("mutate same inode");
+    let prior = first_path
+        .symlink_metadata()
+        .expect("first member metadata");
+    let mut writer = File::options()
+        .write(true)
+        .open(&first_path)
+        .expect("mutate same inode");
     writer
         .write_all(&vec![b'X'; contents[0].len()])
         .expect("same-length mutation");
@@ -1402,7 +1410,10 @@ fn failed_durability_admission_cannot_leave_a_publishable_segment() {
             panic!("preparation must be open");
         };
         let suffix = sha256_hex_suffix(digests[32].as_str()).expect("digest suffix");
-        files.directory.path().join(format!("segment-{suffix}.json"))
+        files
+            .directory
+            .path()
+            .join(format!("segment-{suffix}.json"))
     };
     for _ in 0..2 {
         let result = preparation.write_segment(SealedGenerationSegmentPublicationV1::File {
@@ -1422,7 +1433,11 @@ fn failed_durability_admission_cannot_leave_a_publishable_segment() {
             panic!("preparation must remain abortable");
         };
         assert!(
-            !files.segments.pending.values().any(|path| path == &pending_path),
+            !files
+                .segments
+                .pending
+                .values()
+                .any(|path| path == &pending_path),
             "failed durable admission must not be treated as staged"
         );
         assert_eq!(
