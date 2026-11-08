@@ -48,8 +48,7 @@ mod tests {
     // Independent, per-page reference for the previous census. Keeping it in
     // the test also makes the work regression falsifiable on the same SQLite
     // build, without wall-clock thresholds or query-plan string assertions.
-    const GROUPED_CENSUS: &str =
-        "SELECT schema_entry.name, COALESCE(SUM(dbstat.payload), 0) \
+    const GROUPED_CENSUS: &str = "SELECT schema_entry.name, COALESCE(SUM(dbstat.payload), 0) \
          FROM sqlite_schema AS schema_entry \
          LEFT JOIN dbstat ON dbstat.name = schema_entry.name \
          WHERE schema_entry.type = 'table' \
@@ -105,7 +104,9 @@ mod tests {
             )
             .unwrap();
         let result = run();
-        connection.progress_handler(0, None::<fn() -> bool>).unwrap();
+        connection
+            .progress_handler(0, None::<fn() -> bool>)
+            .unwrap();
         (result, steps.load(Ordering::Relaxed))
     }
 
@@ -128,8 +129,7 @@ mod tests {
         assert!(bytes["keyed"] > 32_768);
         assert_eq!(bytes["empty_table"], 0);
         assert_eq!(
-            bytes["page_probe"],
-            0,
+            bytes["page_probe"], 0,
             "rootless tables still have a sample"
         );
         assert!(!bytes.contains_key("event_size"));
@@ -145,9 +145,11 @@ mod tests {
             .unwrap();
         let enlarged = read(&connection).unwrap();
         assert_eq!(enlarged, reference(&connection));
-        assert!(enlarged.iter().any(|sample| {
-            sample.table_name == "events" && sample.bytes > bytes["events"]
-        }));
+        assert!(
+            enlarged
+                .iter()
+                .any(|sample| { sample.table_name == "events" && sample.bytes > bytes["events"] })
+        );
 
         let grown_pages = page_count(&connection);
         connection
@@ -180,11 +182,7 @@ mod tests {
         let (expected, grouped_steps) = measure_vm(&connection, || reference(&connection));
         let (actual, streamed_steps) = measure_vm(&connection, || read(&connection).unwrap());
         assert_eq!(actual, expected);
-        assert!(
-            actual
-                .iter()
-                .any(|sample| sample.bytes > 4 * 1024 * 1024)
-        );
+        assert!(actual.iter().any(|sample| sample.bytes > 4 * 1024 * 1024));
         assert!(streamed_steps > 0);
         assert!(
             streamed_steps < grouped_steps / 2,
@@ -197,7 +195,9 @@ mod tests {
         let (_directory, connection) = fixture();
         connection.progress_handler(100, Some(|| true)).unwrap();
         let interrupted = read(&connection);
-        connection.progress_handler(0, None::<fn() -> bool>).unwrap();
+        connection
+            .progress_handler(0, None::<fn() -> bool>)
+            .unwrap();
         assert!(matches!(
             interrupted,
             Err(rusqlite::Error::SqliteFailure(error, _))
@@ -205,10 +205,6 @@ mod tests {
         ));
         let retried = read(&connection).unwrap();
         assert_eq!(retried, reference(&connection));
-        assert!(
-            retried
-                .iter()
-                .any(|sample| sample.bytes > 4 * 1024 * 1024)
-        );
+        assert!(retried.iter().any(|sample| sample.bytes > 4 * 1024 * 1024));
     }
 }
