@@ -2867,7 +2867,10 @@ mod activation_tests {
         );
         drop(rows);
 
-        let mut integrity = transaction.query("PRAGMA main.integrity_check", ()).await.unwrap();
+        let mut integrity = transaction
+            .query("PRAGMA integrity_check", ())
+            .await
+            .unwrap();
         assert_eq!(
             integrity.next().await.unwrap().unwrap().get::<String>(0).unwrap(),
             "ok",
