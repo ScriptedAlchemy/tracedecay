@@ -186,7 +186,21 @@ fn comment_successor_skips_unrelated_evidence_and_publishes_the_cold_chunk_delta
         .expect("cold chunks define the complete expected delta");
     assert!(!expected_delta.added_or_changed.is_empty());
     assert!(expected_delta.reused_count > 0);
-    assert_eq!(sparse.projection().request().changes, expected_delta);
+    // A cold seal starts at repository sequence one, while a real sparse
+    // successor advances its parent's generation sequence. Their canonical
+    // partitions must agree, but their seal/generation identities must not.
+    let changes = &sparse.projection().request().changes;
+    changes.validate().expect("published chunk delta is canonical");
+    assert_eq!(
+        changes.from_generation.as_ref(),
+        Some(&parent.manifest().generation_id)
+    );
+    assert_eq!(changes.to_generation, sparse.manifest().generation_id);
+    assert_ne!(changes.to_generation, expected_delta.to_generation);
+    assert_eq!(changes.added_or_changed, expected_delta.added_or_changed);
+    assert_eq!(changes.deleted, expected_delta.deleted);
+    assert_eq!(changes.reused_count, expected_delta.reused_count);
+    assert_eq!(changes.reused_digest, expected_delta.reused_digest);
     assert_eq!(after.edges(), expected.edges());
 
     let old_helper = symbol(&before, "helper");
