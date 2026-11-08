@@ -1105,10 +1105,6 @@ pub(crate) async fn start_dashboard_configuration_fixture() -> DashboardFixture 
     start_dashboard_fixture_with_options(false, false, true).await
 }
 
-pub(crate) async fn start_dashboard_retained_memory_fixture() -> DashboardFixture {
-    start_dashboard_fixture_with_options(false, true, true).await
-}
-
 /// Starts a dashboard fixture with a fake `DashboardDeliveryReadPortV1` and
 /// code-index freshness reader mounted, proving the admitted-PR HTTP path
 /// (`GET /api/delivery/inbox`) joins the provider read with an indexed head
