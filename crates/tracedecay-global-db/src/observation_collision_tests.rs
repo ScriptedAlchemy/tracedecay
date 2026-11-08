@@ -491,7 +491,7 @@ fn collision_candidate_at(
     (observation, anchored)
 }
 
-fn collision_candidate(
+pub(super) fn collision_candidate(
     session_id: &SessionId,
     record_id: &str,
     generation: u64,

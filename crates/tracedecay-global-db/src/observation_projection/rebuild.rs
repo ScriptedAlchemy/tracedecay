@@ -2700,28 +2700,157 @@ mod activation_tests {
     }
 
     #[asupersync::test]
-    async fn clearing_projection_does_not_retain_temp_output_tables() {
-        let harness = RegisteredGlobalDbHarness::open("projection-clear-no-temp-cache").await;
-        let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    async fn clearing_projection_preserves_shared_staged_and_preexisting_outputs() {
+        use crate::observation_collision_tests::collision_candidate;
+        use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+        use std::collections::BTreeMap;
+        use tracedecay_domain::SessionId;
+        use tracedecay_runtime_core::db::engine::QueryExecutor;
+        use tracedecay_store::{ObservationProjectionStore, ObservationStore};
 
-        clear_active_projection(&transaction, "generation.no-temp")
+        async fn outputs(
+            conn: &impl QueryExecutor,
+        ) -> BTreeMap<String, (String, String, Option<String>)> {
+            let mut result = BTreeMap::new();
+            let mut rows = conn
+                .query(
+                    "SELECT session_id, message_id, content, location_path FROM lcm_raw_messages",
+                    (),
+                )
+                .await
+                .unwrap();
+            while let Some(row) = rows.next().await.unwrap() {
+                assert!(
+                    result
+                        .insert(
+                            row.get(0).unwrap(),
+                            (
+                                row.get(1).unwrap(),
+                                row.get(2).unwrap(),
+                                row.get(3).unwrap()
+                            )
+                        )
+                        .is_none()
+                );
+            }
+            result
+        }
+        async fn owners(conn: &impl QueryExecutor) -> Vec<(String, String)> {
+            let mut rows = conn.query("SELECT observation_id, projector_version FROM observation_projection_provenance ORDER BY observation_id, projector_version", ()).await.unwrap();
+            let mut result = Vec::new();
+            while let Some(row) = rows.next().await.unwrap() {
+                result.push((row.get(0).unwrap(), row.get(1).unwrap()));
+            }
+            result
+        }
+
+        let temporary = tempfile::tempdir().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(temporary.path())
             .await
             .unwrap();
+        let store = runtime
+            .observation_store(HostAdmissionScope::Profile)
+            .unwrap();
+        let database = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .unwrap();
+        let mut ids = BTreeMap::new();
+        for kind in ["exclusive", "shared", "staged", "existing"] {
+            let session = SessionId::new(kind).unwrap();
+            let (observation, write) = collision_candidate(
+                &session,
+                &format!("record.{kind}"),
+                1,
+                kind,
+                &format!("receipt.{kind}"),
+                None,
+            );
+            store.persist_observation(write).await.unwrap();
+            store
+                .project_observation(observation.observation_id())
+                .await
+                .unwrap();
+            ids.insert(kind, observation.observation_id().as_str().to_owned());
+        }
+        const GENERATION: &str = "generation.clear";
+        let transaction = database.begin_write_transaction().await.unwrap();
+        let first = outputs(&transaction).await;
+        assert_eq!(first.len(), 4);
+        assert_eq!(transaction.execute(
+            "INSERT INTO observation_projection_provenance
+                (projector_version, observation_id, output_ordinal, receipt_id,
+                 output_provider, output_message_id, output_digest, message_created, retrieval_anchor_id)
+             SELECT 'another-projector', observation_id, output_ordinal, receipt_id,
+                    output_provider, output_message_id, output_digest, message_created, retrieval_anchor_id
+               FROM observation_projection_provenance WHERE observation_id = ?1",
+            params![ids["shared"].as_str()]).await.unwrap(), 1);
+        assert_eq!(transaction.execute(
+            "UPDATE observation_projection_provenance SET message_created = 0 WHERE observation_id = ?1",
+            params![ids["existing"].as_str()]).await.unwrap(), 1);
 
-        let mut rows = transaction
-            .query(
-                "SELECT name FROM sqlite_temp_master
-                 WHERE name IN (
-                    'observation_projection_rebuild_retained_outputs',
-                    'observation_projection_rebuild_cleared_outputs'
-                 ) LIMIT 1",
-                (),
-            )
+        let staged_session = SessionRecord {
+            provider: "collision-test".to_owned(),
+            session_id: "staged".to_owned(),
+            ..session(None, None)
+        };
+        stage(&transaction, GENERATION, &staged_session).await;
+        let (message_id, text, _) = &first["staged"];
+        let message = SessionMessageRecord {
+            provider: staged_session.provider,
+            session_id: staged_session.session_id,
+            message_id: message_id.clone(),
+            text: text.clone(),
+            role: "assistant".to_owned(),
+            ordinal: 1,
+            timestamp: None,
+            kind: None,
+            model: None,
+            tool_names: None,
+            source_path: None,
+            source_offset: None,
+            metadata_json: None,
+        };
+        write_staged_message(&transaction, GENERATION, &message)
             .await
             .unwrap();
-        assert!(
-            rows.next().await.unwrap().is_none(),
-            "clearing projector ownership must not leave output TEMP tables on the writer"
+        let initial_owners = owners(&transaction).await;
+        assert_eq!(initial_owners.len(), 5);
+        transaction.commit().await.unwrap();
+
+        let transaction = database.begin_write_transaction().await.unwrap();
+        clear_active_projection(&transaction, GENERATION)
+            .await
+            .unwrap();
+        let mut expected = first.clone();
+        assert!(expected.remove("exclusive").is_some());
+        assert_eq!(outputs(&transaction).await, expected);
+        assert_eq!(
+            owners(&transaction).await,
+            initial_owners
+                .iter()
+                .filter(|(id, _)| id == &ids["shared"])
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+        let mut rows = transaction.query(
+            "SELECT name FROM sqlite_temp_master WHERE name IN
+             ('observation_projection_rebuild_retained_outputs', 'observation_projection_rebuild_cleared_outputs')",
+            ()).await.unwrap();
+        assert!(rows.next().await.unwrap().is_none());
+        drop(rows);
+        transaction.rollback().await.unwrap();
+        let snapshot = database.read_snapshot().await.unwrap();
+        assert_eq!(outputs(&snapshot).await, first);
+        assert_eq!(owners(&snapshot).await, initial_owners);
+        let mut rows = snapshot.query("PRAGMA integrity_check", ()).await.unwrap();
+        assert_eq!(
+            rows.next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<String>(0)
+                .unwrap(),
+            "ok"
         );
     }
 
