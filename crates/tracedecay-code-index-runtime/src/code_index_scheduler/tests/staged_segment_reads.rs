@@ -1577,11 +1577,10 @@ fn cold_publication_pointer_validation_uses_one_kernel_open_and_recovers_snapsho
 
     let cold = target_store(target_root.path(), &fixture);
     let (sender, receiver) = std::sync::mpsc::channel();
-    let mut watcher =
-        notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-            let _ = sender.send(event);
-        })
-        .expect("native file observer");
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        let _ = sender.send(event);
+    })
+    .expect("native file observer");
     watcher
         .watch(&cold.active_path, notify::RecursiveMode::NonRecursive)
         .expect("watch the exact publication pointer");
@@ -1596,7 +1595,10 @@ fn cold_publication_pointer_validation_uses_one_kernel_open_and_recovers_snapsho
         .read_publication_pointer()
         .expect("cold pointer validation")
         .expect("published pointer");
-    assert_eq!(pointer.generation_id, generation.manifest().generation_id.as_str());
+    assert_eq!(
+        pointer.generation_id,
+        generation.manifest().generation_id.as_str()
+    );
     assert_eq!(
         observed_pointer_opens(&receiver),
         1,
@@ -1649,11 +1651,10 @@ fn initial_pointer_publication_reuses_persisted_descriptor_without_pathname_open
     // Watch the parent: the final pathname does not exist until the first
     // publication rename, so it cannot be watched directly beforehand.
     let (sender, receiver) = std::sync::mpsc::channel();
-    let mut watcher =
-        notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-            let _ = sender.send(event);
-        })
-        .expect("native file observer");
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        let _ = sender.send(event);
+    })
+    .expect("native file observer");
     watcher
         .watch(
             active_path.parent().expect("pointer parent"),

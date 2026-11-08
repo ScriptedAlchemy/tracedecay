@@ -2176,7 +2176,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             Ok((current == bytes
                 && Self::same_unix_segment_identity(&opened, &after)
                 && Self::same_unix_segment_identity(&opened, &named_after))
-                .then_some(named_after))
+            .then_some(named_after))
         })()
         .ok()
         .flatten();
