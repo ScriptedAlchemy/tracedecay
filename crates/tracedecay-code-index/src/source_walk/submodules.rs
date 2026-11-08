@@ -1,7 +1,7 @@
 //! A parent gitlink names a commit, not the worktree that may supply its bytes.
 //! Bind the registration, object store, and checkout before crossing that boundary.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 use gix::bstr::ByteSlice;
@@ -20,6 +20,44 @@ pub struct AuthenticatedSubmodule {
     pub worktree: PathBuf,
     pub git_dir: PathBuf,
     pub pin: gix::ObjectId,
+}
+
+pub(super) struct ChildSources {
+    pub files: BTreeSet<String>,
+    pub gitlinks: BTreeSet<String>,
+}
+
+impl AuthenticatedSubmodule {
+    pub(super) fn sources(&self) -> Result<ChildSources, SourceWalkError> {
+        let repository = tracedecay_runtime_core::git_open::open(&self.git_dir).map_err(failure)?;
+        let inventory =
+            super::classification::WorktreeChangeClassificationV1::classify(&repository)
+                .map_err(failure)?;
+        Ok(ChildSources {
+            files: inventory
+                .regular_child_files(&self.worktree)
+                .map_err(failure)?,
+            gitlinks: inventory.gitlink_paths().clone(),
+        })
+    }
+}
+
+pub(super) struct CheckoutBoundaries {
+    pub gitlinks: BTreeSet<String>,
+    pub children: BTreeMap<String, AuthenticatedSubmodule>,
+}
+
+impl CheckoutBoundaries {
+    pub(super) fn open(root: &Path, include_submodules: bool) -> Result<Self, SourceWalkError> {
+        let gitlinks = super::parent_gitlink_paths(root)?;
+        let children = if include_submodules && !gitlinks.is_empty() {
+            let parent = tracedecay_runtime_core::git_open::open(root).map_err(failure)?;
+            live_submodules(&parent)?
+        } else {
+            BTreeMap::new()
+        };
+        Ok(Self { gitlinks, children })
+    }
 }
 
 fn normal_relative(path: &Path) -> bool {
@@ -157,6 +195,77 @@ pub fn live_submodules(
         }
     }
     Ok(children)
+}
+
+/// Batch the same Git inventory for foreground graph readers. A graph path can
+/// outlive its checkout binding, even when a replacement file has equal bytes.
+pub struct LiveSourceBoundaries {
+    project_root: PathBuf,
+    gitlinks: BTreeSet<String>,
+    children: BTreeMap<String, (AuthenticatedSubmodule, BTreeSet<String>)>,
+}
+
+impl LiveSourceBoundaries {
+    pub fn open(root: &Path, include_submodules: bool) -> Result<Self, SourceWalkError> {
+        let boundaries = CheckoutBoundaries::open(root, include_submodules)?;
+        let mut children = BTreeMap::new();
+        for (prefix, child) in boundaries.children {
+            let files = child.sources()?.files;
+            children.insert(prefix, (child, files));
+        }
+        Ok(Self {
+            project_root: root.to_owned(),
+            gitlinks: boundaries.gitlinks,
+            children,
+        })
+    }
+
+    /// The owning checkout and its relative file path, after checking the
+    /// current filesystem boundary before reading any bytes.
+    pub fn resolve<'a, 'p>(
+        &'a self,
+        path: &'p Path,
+    ) -> std::io::Result<Option<(&'a Path, &'p Path)>> {
+        if !is_source_location(path) {
+            return Ok(None);
+        }
+        let mut root = self.project_root.as_path();
+        let mut relative = path;
+        for ancestor in path.ancestors().skip(1).filter_map(Path::to_str) {
+            if !self.gitlinks.contains(ancestor) {
+                continue;
+            }
+            let Some((child, files)) = self.children.get(ancestor) else {
+                return Ok(None);
+            };
+            relative = path.strip_prefix(ancestor).map_err(std::io::Error::other)?;
+            if !relative.to_str().is_some_and(|file| files.contains(file))
+                || child.worktree.canonicalize().ok().as_ref() != Some(&child.worktree)
+            {
+                return Ok(None);
+            }
+            let marker = child.worktree.join(".git");
+            if !marker
+                .symlink_metadata()
+                .is_ok_and(|metadata| metadata.is_file())
+                || gix::discover::path::from_gitdir_file(&marker)
+                    .ok()
+                    .and_then(|target| target.canonicalize().ok())
+                    .as_ref()
+                    != Some(&child.git_dir)
+            {
+                return Ok(None);
+            }
+            root = &child.worktree;
+            break;
+        }
+        if has_nested_repository_ancestor(root, relative)?
+            || super::is_source_symlink(root, relative)?
+        {
+            return Ok(None);
+        }
+        Ok(Some((root, relative)))
+    }
 }
 
 /// Only the selected parent tree may supply historical registrations and pins.

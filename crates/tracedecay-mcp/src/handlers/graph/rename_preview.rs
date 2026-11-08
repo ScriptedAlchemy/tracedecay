@@ -1,12 +1,13 @@
 //! `tracedecay_rename_preview`: what a rename of one symbol would touch.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
+use tracedecay_code_index::source_walk::submodules::LiveSourceBoundaries;
 use tracedecay_code_index_runtime::code_index_scheduler::sealed_source_bytes;
 use tracedecay_contracts::graph_tool::{GraphToolCompletionV1, GraphToolResultV1};
 use tracedecay_contracts::retrieval::{
@@ -198,27 +199,30 @@ impl PreviewFileWalk {
         let mut text_only_matches = HashMap::new();
         // Only the current file's decoded text and line index are resident.
         // Ordinals retain the graph's reference order across the grouped walk.
+        let boundaries = LiveSourceBoundaries::open(&self.project_root, self.include_submodules)
+            .map_err(|error| {
+                TraceDecayError::project_route(
+                    "verified-reference-source-unavailable",
+                    true,
+                    error.message,
+                )
+            })?;
         for file in files {
             self.control.check()?;
             let has_references = reference_inputs
                 .peek()
                 .is_some_and(|input| input.file == file);
-            if tracedecay_code_index::source_walk::is_source_symlink(
-                &self.project_root,
-                std::path::Path::new(&file),
-            )? {
+            let Some((root, relative)) = boundaries.resolve(Path::new(&file))? else {
                 if has_references {
                     return Err(TraceDecayError::project_route(
                         "verified-reference-source-unavailable",
                         true,
-                        format!("a source symlink replaced '{file}'"),
+                        format!("'{file}' is outside the current checkout source boundary"),
                     ));
                 }
                 continue;
-            }
-            let text = match tracedecay_runtime_core::sync::read_source_file(
-                &self.project_root.join(&file),
-            ) {
+            };
+            let text = match tracedecay_runtime_core::sync::read_source_file(&root.join(relative)) {
                 Ok(text) => text,
                 Err(error) if has_references => return Err(error.into()),
                 // Declaration snippets are optional; reference evidence is not.
@@ -231,10 +235,9 @@ impl PreviewFileWalk {
             // after the seal only its current text remains to map against.
             let sealed = match self.sealed_files.get(&file) {
                 Some((language, digest)) => sealed_source_bytes(
-                    &self.project_root,
+                    &boundaries,
                     &file,
                     language,
-                    self.include_submodules,
                     digest,
                 )
                 .map_err(|error| {

@@ -256,6 +256,17 @@ fn submodule_policy_binds_live_graph_and_historical_child_pins_across_restart() 
         .map(|hit| hit.file.to_string())
         .collect::<Vec<_>>()
     };
+    let child_path = std::path::Path::new("app/lib.ts");
+    let direct_reads = |enabled| {
+        tracedecay_code_index::source_walk::submodules::LiveSourceBoundaries::open(
+            parent.path(),
+            enabled,
+        )
+        .unwrap()
+    };
+    assert!(direct_reads(false).resolve(child_path).unwrap().is_none());
+    let active_reads = direct_reads(true);
+    assert!(active_reads.resolve(child_path).unwrap().is_some());
     let mut off = start(&parent, store.path(), policy(&[], &[]));
     off.reconcile_now().unwrap();
     assert_eq!(indexed_paths(&off), ["dev/launch.ts"]);
@@ -330,6 +341,7 @@ fn submodule_policy_binds_live_graph_and_historical_child_pins_across_restart() 
     assert_eq!(grep("successor_symbol", &enabled), ["app/lib.ts"]);
     run_git_in(parent.path(), &["submodule", "deinit", "-f", "app"]);
     assert!(!checkout.join(".git").exists());
+    assert!(active_reads.resolve(child_path).unwrap().is_none());
     let historical = on
         .publish_exact_git_tree_generation(
             &pinned,
@@ -394,11 +406,15 @@ fn parent_filtered_source_does_not_require_submodule_registration_when_disabled(
     run_git_in(parent.path(), &["config", "core.autocrlf", "true"]);
     std::fs::write(parent.path().join("lib.rs"), source.replace('\n', "\r\n")).unwrap();
     std::fs::write(parent.path().join(".gitmodules"), "[unfinished").unwrap();
-    let sealed = super::super::sealed_source_bytes(
+    let boundaries = tracedecay_code_index::source_walk::submodules::LiveSourceBoundaries::open(
         parent.path(),
+        false,
+    )
+    .unwrap();
+    let sealed = super::super::sealed_source_bytes(
+        &boundaries,
         "lib.rs",
         &LanguageId::new("rust").unwrap(),
-        false,
         &content_digest(source.as_bytes()),
     )
     .unwrap();

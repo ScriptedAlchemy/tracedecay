@@ -396,55 +396,37 @@ fn source_walk_inner(
                             .is_some_and(|scope| scope.allows(&root, path))))
         }
     };
-    let mut parent_gitlinks = parent_gitlink_paths(project_root)?;
+    let boundaries =
+        submodules::CheckoutBoundaries::open(project_root, path_policy.includes_submodules())?;
+    let mut parent_gitlinks = boundaries.gitlinks;
     let mut authenticated = BTreeSet::new();
     let mut child_files = BTreeSet::new();
-    if path_policy.includes_submodules() && !parent_gitlinks.is_empty() {
-        let parent = tracedecay_runtime_core::git_open::open(project_root).map_err(|error| {
-            SourceWalkError {
-                glob: String::new(),
-                message: error.to_string(),
-            }
-        })?;
-        for (path, child) in submodules::live_submodules(&parent)? {
-            let absolute = project_root.join(&path);
-            let policy = if scoped_policy(&absolute, true) {
-                path_policy.without_generated_dir_defaults()
-            } else {
-                &path_policy
-            };
-            if policy.excludes_directory(&path)
-                || path_glob_scope
-                    .as_ref()
-                    .is_some_and(|scope| !scope.may_contain_match(project_root, &absolute))
-            {
-                continue;
-            }
-            let repo =
-                tracedecay_runtime_core::git_open::open(&child.git_dir).map_err(|error| {
-                    SourceWalkError {
-                        glob: String::new(),
-                        message: error.to_string(),
-                    }
-                })?;
-            let inventory = classification::WorktreeChangeClassificationV1::classify(&repo)
-                .map_err(|error| SourceWalkError {
-                    glob: String::new(),
-                    message: error.to_string(),
-                })?;
-            let files = inventory
-                .regular_child_files(&child.worktree)
-                .map_err(|error| SourceWalkError {
-                    glob: String::new(),
-                    message: error.to_string(),
-                })?;
-            child_files.extend(files.into_iter().map(|file| format!("{path}/{file}")));
-            // Only direct registrations belong to this parent.
-            for nested in inventory.gitlink_paths() {
-                parent_gitlinks.insert(format!("{path}/{nested}"));
-            }
-            authenticated.insert(path);
+    for (path, child) in boundaries.children {
+        let absolute = project_root.join(&path);
+        let policy = if scoped_policy(&absolute, true) {
+            path_policy.without_generated_dir_defaults()
+        } else {
+            &path_policy
+        };
+        if policy.excludes_directory(&path)
+            || path_glob_scope
+                .as_ref()
+                .is_some_and(|scope| !scope.may_contain_match(project_root, &absolute))
+        {
+            continue;
         }
+        let inventory = child.sources()?;
+        child_files.extend(
+            inventory
+                .files
+                .into_iter()
+                .map(|file| format!("{path}/{file}")),
+        );
+        // Only direct registrations belong to this parent.
+        for nested in inventory.gitlinks {
+            parent_gitlinks.insert(format!("{path}/{nested}"));
+        }
+        authenticated.insert(path);
     }
 
     let roots = authenticated

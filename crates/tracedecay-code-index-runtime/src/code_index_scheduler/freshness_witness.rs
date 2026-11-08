@@ -996,43 +996,21 @@ fn filter_mismatches_in_repository<'a>(
 /// disk first, then through the repository's own filter pipeline, the same
 /// two readings [`clean_filter_mismatches`] accepts as current.
 pub fn sealed_source_bytes(
-    project_root: &Path,
+    boundaries: &tracedecay_code_index::source_walk::submodules::LiveSourceBoundaries,
     logical_path: &str,
     language: &LanguageId,
-    include_submodules: bool,
     sealed: &ContentDigest,
 ) -> Result<Option<Vec<u8>>, CodeIndexSchedulerErrorV1> {
-    if tracedecay_code_index::source_walk::is_source_symlink(project_root, Path::new(logical_path))?
-    {
+    let Some((root, relative)) = boundaries.resolve(Path::new(logical_path))? else {
         return Ok(None);
-    }
-    let raw =
-        ignored_dependencies::read_bounded_snapshot_source(&project_root.join(logical_path), None)?;
+    };
+    let raw = ignored_dependencies::read_bounded_snapshot_source(&root.join(relative), None)?;
     let (sanitized, _, _) = privacy::sanitize_code_file(language, &raw)?;
     if content_digest(&sanitized) == *sealed {
         return Ok(Some(sanitized));
     }
-    // ponytail: one repository open and filter pipeline per filtered file;
-    // hoist them into a caller-held reader if a caller ever needs hundreds.
-    let repository = tracedecay_runtime_core::git_open::open(project_root)
+    let repository = tracedecay_runtime_core::git_open::open(root)
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
-    let mut repository = repository;
-    let mut relative = Path::new(logical_path);
-    if include_submodules {
-        let children = tracedecay_code_index::source_walk::submodules::live_submodules(&repository)
-            .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.message))?;
-        if let Some((prefix, binding)) = children
-            .iter()
-            .find(|(prefix, _)| relative.starts_with(prefix))
-        {
-            let child_path = relative
-                .strip_prefix(prefix)
-                .map_err(|_| CodeIndexSchedulerErrorV1::Git("invalid child filter path".into()))?;
-            repository = tracedecay_runtime_core::git_open::open(&binding.git_dir)
-                .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
-            relative = child_path;
-        }
-    }
     let (mut pipeline, index) = repository
         .filter_pipeline(None)
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
