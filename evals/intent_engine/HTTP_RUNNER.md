@@ -126,9 +126,11 @@ metrics; it cannot reconstruct a canonical Scout transcript or attest a model.
 
 Create a separate JSON annotation manifest **before running inference** with
 `version: 1`, `application`, the SHA-256 of the original dataset file
-(`dataset_sha256`), and `questions_sha256` equal to the canonical
-`qualification.sha256_json(common.noul_questions())` of the runner's exact
-question dictionary. This last digest must change with question text. Include
+(`dataset_sha256`), and `questions_sha256` equal to
+`qualification.sha256_ordered_questions(common.noul_questions())` for the
+runner's exact question dictionary. This digest freezes **question key order
+as emitted in the HTTP body**, as well as question names/instructions; a
+sorted-object digest does not prevent trying reordered held-out arms. Include
 an `arm` object predeclaring exactly one `config` renderer, a nullable
 `requested_model`, `endpoint_sha256` (SHA-256 of the exact URL bytes), and
 `server_config_sha256` (the sorted-JSON digest of the complete serving
@@ -246,7 +248,10 @@ The historical benchmark uses nine fixed categories. A frozen held-out run
 can instead use `--questions-file /path/to/questions.json` alongside
 `--qualification-manifest`. The JSON object maps each configured key to
 `{"type":"noul","instructions":"..."}`; the manifest's `questions_sha256`
-must pin the exact question object. Score with
+must pin the ordered question contract via
+`qualification.sha256_ordered_questions(questions)`. A changed insertion
+order of question keys is a different arm and is refused before inference.
+Score with
 `score.py --qualified MANIFEST DATASET RESULT --questions-file FILE`.
 Both commands reject changed or non-Noul instructions; historical scoring
 retains its original nine-category behavior.

@@ -55,7 +55,7 @@ class QualificationTests(unittest.TestCase):
         self.manifest = {
             "version": 1, "application": "historical-intent-evaluation",
             "dataset_sha256": self.dataset_sha,
-            "questions_sha256": qualification.sha256_json(self.questions),
+            "questions_sha256": qualification.sha256_ordered_questions(self.questions),
             "arm": {
                 "config": "B_noul_text", "requested_model": None,
                 "endpoint_sha256": qualification.sha256_bytes(self.endpoint.encode("utf-8")),
@@ -1271,6 +1271,65 @@ class QualificationTests(unittest.TestCase):
             )
 
 
+    def test_frozen_question_order_refuses_a_second_holdout_arm_before_inference(self):
+        # Sorted-key JSON digests collide across question reordering although
+        # the runner sends dict entries in insertion order. That let the same
+        # frozen manifest authorize multiple held-out request sequences.
+        reordered = dict(reversed(list(self.questions.items())))
+        self.assertEqual(set(reordered), set(self.questions))
+        self.assertEqual(
+            qualification.sha256_json(reordered),
+            qualification.sha256_json(self.questions),
+        )
+        self.assertNotEqual(
+            qualification.sha256_ordered_questions(reordered),
+            qualification.sha256_ordered_questions(self.questions),
+        )
+        # Reordering type/instructions fields within one question does not
+        # change the contract: only actual HTTP question sequence is frozen.
+        equivalent = {
+            key: {"instructions": item["instructions"], "type": item["type"]}
+            for key, item in self.questions.items()
+        }
+        self.assertEqual(
+            qualification.sha256_ordered_questions(equivalent),
+            qualification.sha256_ordered_questions(self.questions),
+        )
+        with self.assertRaisesRegex(ValueError, "question vocabulary or instruction"):
+            qualification.validate_manifest(
+                self.manifest, self.dataset_sha, reordered, self.dataset,
+            )
+
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            (here / "dataset.json").write_bytes(self.dataset_bytes)
+            (here / "manifest.json").write_bytes(self.manifest_bytes)
+            (here / "questions.json").write_text(json.dumps(reordered))
+            (here / "server.json").write_text(json.dumps(self.server_config))
+            with patch.object(run_http, "HERE", str(here)):
+                with patch.object(run_http, "post") as inference:
+                    with self.assertRaisesRegex(ValueError, "question vocabulary or instruction"):
+                        run_http.main([
+                            "--url", self.endpoint, "--tag", "reordered-holdout",
+                            "--dataset", str(here / "dataset.json"),
+                            "--server-config", str(here / "server.json"),
+                            "--qualification-manifest", str(here / "manifest.json"),
+                            "--questions-file", str(here / "questions.json"),
+                            "B_noul_text",
+                        ])
+                    inference.assert_not_called()
+                self.assertFalse(
+                    (here / "results" / "reordered-holdout_B_noul_text.json.partial").exists()
+                )
+
+        # An original run must not be requalified using the altered order,
+        # even though the question set and old sorted-object digest agree.
+        with self.assertRaisesRegex(ValueError, "question vocabulary or instruction"):
+            qualification.qualified_report(
+                self.signed_result(), self.manifest, self.manifest_sha,
+                reordered, self.dataset_bytes,
+            )
+
     def test_frozen_ten_question_vocabulary_runs_and_scores_without_historical_categories(self):
         # This fixture exercises a declared ten-question contract; it is not a
         # canonical Scout export and never claims Kev inference or parity.
@@ -1286,7 +1345,7 @@ class QualificationTests(unittest.TestCase):
         }
         self.assertEqual(len(questions), 10)
         manifest = copy.deepcopy(self.manifest)
-        manifest["questions_sha256"] = qualification.sha256_json(questions)
+        manifest["questions_sha256"] = qualification.sha256_ordered_questions(questions)
         manifest["thresholds"] = {key: 0.6 for key in questions}
         manifest_sha = qualification.sha256_bytes(json.dumps(manifest).encode())
         with tempfile.TemporaryDirectory() as temp:

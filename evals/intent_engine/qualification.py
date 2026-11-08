@@ -64,6 +64,18 @@ def sha256_json(value):
     return sha256_bytes(json.dumps(value, sort_keys=True, allow_nan=False).encode("utf-8"))
 
 
+def sha256_ordered_questions(questions):
+    """Freeze the actual question order sent to the HTTP model.
+
+    Sorted-object digests cannot bind order: two question files with identical
+    keys/instructions but different insertion orders produce different HTTP
+    request bodies and can produce different predictions on the same holdout.
+    Normalize only each question's own field order, not the sequence of keys.
+    """
+    validate_questions(questions)
+    return sha256_json([[key, question] for key, question in questions.items()])
+
+
 def load_manifest(path):
     with open(path, "rb") as source:
         raw = source.read()
@@ -83,7 +95,7 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
     if manifest.get("dataset_sha256") != dataset_sha:
         raise ValueError("qualification dataset digest mismatch")
     validate_questions(questions)
-    if manifest.get("questions_sha256") != sha256_json(questions):
+    if manifest.get("questions_sha256") != sha256_ordered_questions(questions):
         raise ValueError("qualification question vocabulary or instruction mismatch")
 
     # A held-out split is not independent if the evaluator can try multiple
