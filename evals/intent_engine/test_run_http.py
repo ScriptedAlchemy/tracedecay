@@ -129,6 +129,51 @@ class RunHttpTest(unittest.TestCase):
         self.assertFalse(self.partial.exists())
 
 
+    def test_resume_refuses_out_of_order_or_skipped_rows_before_network(self):
+        self.interrupt()
+        original = self.partial.read_bytes()
+        header, first_json = original.decode("utf-8").splitlines()
+        first = json.loads(first_json)
+        second = self.dataset[1]
+        body = {
+            "state": run_http.STATES[self.config](second),
+            "questions": run_http.noul_questions(),
+        }
+        forged_second = {
+            **first,
+            "id": second["id"],
+            "labels": second["labels"],
+            "context_needed": second["context_needed"],
+            "request_sha256": hashlib.sha256(
+                run_http.request_bytes(body)
+            ).hexdigest(),
+        }
+        for name, rows in (
+            ("skipped_first", [forged_second]),
+            ("reversed_prefix", [forged_second, first]),
+        ):
+            with self.subTest(name=name):
+                self.partial.write_text(
+                    header + "\n" + "".join(json.dumps(row) + "\n" for row in rows)
+                )
+                before = self.partial.read_bytes()
+                with patch.object(run_http, "post") as post:
+                    with self.assertRaisesRegex(ValueError, "contiguous prefix"):
+                        self.run_main()
+                    post.assert_not_called()
+                self.assertEqual(self.partial.read_bytes(), before)
+                self.assertFalse(self.output.exists())
+
+        # A genuine interrupted prefix must still be resumable.
+        self.partial.write_bytes(original)
+        with patch.object(run_http, "post", side_effect=self.response) as post:
+            self.run_main()
+        post.assert_called_once()
+        self.assertEqual(
+            [row["id"] for row in json.loads(self.output.read_text())["rows"]],
+            ["first", "second"],
+        )
+
     def test_completed_rows_cannot_be_relabelled_for_scoring(self):
         with patch.object(run_http, "post", side_effect=self.response):
             self.run_main()

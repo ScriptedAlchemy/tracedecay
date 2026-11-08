@@ -310,6 +310,7 @@ def resume_rows(partial, header, cases, requests, questions, temperature):
     if not first.endswith("\n") or json.loads(first) != header:
         raise ValueError("partial output belongs to another or unrecorded experiment; use a new tag")
     done = {}
+    ordered_ids = tuple(cases)
     for line_number, line in enumerate(partial, 2):
         if not line.endswith("\n"):
             raise ValueError(f"partial output has an incomplete row at line {line_number}")
@@ -317,6 +318,12 @@ def resume_rows(partial, header, cases, requests, questions, temperature):
         case_id = row.get("id") if isinstance(row, dict) else None
         if not isinstance(case_id, str) or case_id not in cases or case_id in done:
             raise ValueError(f"partial output has an unknown or duplicate case at line {line_number}")
+        # A real interrupted run appends only a prefix in request order.
+        # Skipped or reordered rows can misrepresent cold/warm inference order.
+        if case_id != ordered_ids[len(done)]:
+            raise ValueError(
+                f"partial output is not a contiguous prefix of frozen case order at line {line_number}"
+            )
         case = cases[case_id]
         if (row.get("request_sha256") != requests[case_id][1]
                 or row.get("labels") != case["labels"]

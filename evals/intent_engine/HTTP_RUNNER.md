@@ -43,8 +43,10 @@ request fingerprint. The endpoint itself is not copied into the identity.
 An interrupted run resumes only with matching identity. Changed questions,
 question order, renderer output, labels, subset contents, or serving settings
 refuse before any HTTP request or append. Headerless old logs, incomplete rows,
-duplicate/foreign cases, and malformed probability maps also refuse; no migration
-or silent salvage is performed. Choose a new tag for another experiment or an
+duplicate/foreign cases, and malformed probability maps also refuse. A resumable
+log must be a contiguous prefix of the frozen case order: a row for a later case
+cannot be used to skip or reorder earlier inference and distort cold/warm timing.
+No migration or silent salvage is performed. Choose a new tag for another experiment or an
 old unidentifiable log. Completed output files are never overwritten.
 
 An exclusive lock on the partial log rejects concurrent writers for the same tag/configuration. Rows are flushed after each response;
