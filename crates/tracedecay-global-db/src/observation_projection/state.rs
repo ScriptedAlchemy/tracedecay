@@ -320,10 +320,17 @@ async fn rearm_projection_retry_batch(
         &transaction,
         "SELECT MAX(rowid) FROM (
             SELECT rowid FROM projection_queue
-            WHERE rowid > ?1 AND rowid <= ?2 AND next_retry_at_micros > 0
-            ORDER BY rowid LIMIT ?3
+            WHERE rowid > ?1 AND rowid <= ?2
+              AND next_retry_at_micros > 0
+              AND next_retry_at_micros < ?3
+            ORDER BY rowid LIMIT ?4
          )",
-        params![after_rowid, last_rowid, batch_rows],
+        params![
+            after_rowid,
+            last_rowid,
+            PROJECTION_TERMINAL_RETRY_MICROS,
+            batch_rows
+        ],
     )
     .await?
     else {

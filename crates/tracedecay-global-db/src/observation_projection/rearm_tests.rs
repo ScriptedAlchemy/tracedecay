@@ -190,6 +190,55 @@ async fn rearm_walks_deferred_retries_in_bounded_batches() {
 }
 
 #[asupersync::test]
+async fn rearm_ignores_parked_terminal_collisions_without_empty_write_batches() {
+    let harness = RegisteredGlobalDbHarness::open("rearm-terminal-collisions").await;
+    seed_queue(&harness, 9, 3).await;
+
+    // Six permanently parked collisions are interleaved with three deferred
+    // retries and three already-due rows. Neither parked nor due entries may
+    // consume a restart re-arm write window.
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    assert_eq!(
+        transaction
+            .execute(
+                "UPDATE projection_queue SET next_retry_at_micros = ?1
+                 WHERE observation_sequence IN (1, 3, 5, 7, 9, 11)",
+                params![i64::MAX],
+            )
+            .await
+            .unwrap(),
+        6
+    );
+    transaction.commit().await.unwrap();
+    assert_eq!(queue_state(&harness).await, (12, 9, 12));
+
+    let rearmed = rearm_queued_projection_retries(harness.registered.runtime_database(), 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        rearmed,
+        RearmedProjectionRetries {
+            rows: 3,
+            batches: 2,
+        },
+        "parked collisions must not consume re-arm write windows"
+    );
+    assert_eq!(
+        queue_state(&harness).await,
+        (12, 6, 12),
+        "only retryable deadlines clear; terminal collisions remain parked"
+    );
+
+    assert_eq!(
+        rearm_queued_projection_retries(harness.registered.runtime_database(), 2)
+            .await
+            .unwrap(),
+        RearmedProjectionRetries::default(),
+        "restarts with only terminal collisions cannot schedule empty write batches"
+    );
+}
+
+#[asupersync::test]
 async fn daemon_admission_defers_rearm_to_background_convergence() {
     let harness = RegisteredGlobalDbHarness::open("rearm-daemon-admission").await;
     seed_queue(&harness, 5, 0).await;
