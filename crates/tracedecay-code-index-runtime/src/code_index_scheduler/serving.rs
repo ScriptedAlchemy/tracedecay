@@ -189,6 +189,7 @@ pub struct CodeIndexBuildProgressSlotStateV1 {
     generation_id: Option<CodeGenerationId>,
     pub(super) owner_epoch: u64,
     progress_epoch: u64,
+    last_progress_micros: Option<i64>,
     snapshot: Option<Arc<CodeIndexBuildProgressV1>>,
 }
 
@@ -198,7 +199,25 @@ impl CodeIndexBuildProgressSlotStateV1 {
         self.progress_epoch = self.progress_epoch.saturating_add(1).max(1);
         self.generation_id = Some(generation_id);
         self.snapshot = None;
+        self.last_progress_micros = None;
         self.owner_epoch
+    }
+
+    /// A discarded or replaced staging file starts a different committed
+    /// sequence, even if the sealed generation and scheduler owner survive.
+    /// Only the head-opening singleflight may reset it, after it has verified
+    /// that a new staging builder was actually created. The next boundary
+    /// keeps the monotonic publication epoch and reports its real counters.
+    pub(super) fn begin_staging_attempt(
+        &mut self,
+        generation_id: &CodeGenerationId,
+        owner_epoch: u64,
+    ) -> bool {
+        if self.generation_id.as_ref() != Some(generation_id) || self.owner_epoch != owner_epoch {
+            return false;
+        }
+        self.snapshot = None;
+        true
     }
 
     pub(super) fn publish(
@@ -207,18 +226,34 @@ impl CodeIndexBuildProgressSlotStateV1 {
         owner_epoch: u64,
         mut snapshot: CodeIndexBuildProgressV1,
     ) -> bool {
-        if self.generation_id.as_ref() != Some(generation_id) || self.owner_epoch != owner_epoch {
+        if self.generation_id.as_ref() != Some(generation_id)
+            || self.owner_epoch != owner_epoch
+            || snapshot.generation_id != generation_id.as_str()
+        {
             return false;
         }
-        // A progress producer can timestamp its snapshot before another
-        // producer publishes. Preserve the most recent observed timestamp
-        // even when the later lock acquisition delivers an older sample.
-        // Replacing the generation clears the snapshot and starts a new owner.
         if let Some(current) = self.snapshot.as_ref() {
-            snapshot.last_progress_micros = snapshot
-                .last_progress_micros
-                .max(current.last_progress_micros);
+            // Concurrent phase/report producers may complete out of order.
+            // A delayed report must not undo already committed boundaries or
+            // withdraw a ready text owner from the same generation.
+            if snapshot.committed_pages < current.committed_pages
+                || snapshot.committed_chunks < current.committed_chunks
+                || snapshot.committed_imports < current.committed_imports
+                || snapshot.committed_payload_bytes < current.committed_payload_bytes
+                || (current.phase == CodeIndexBuildPhaseV1::Ready
+                    && snapshot.phase != CodeIndexBuildPhaseV1::Ready)
+            {
+                return false;
+            }
         }
+        // The next producer may have assembled its report before an earlier
+        // producer acquired the lock. Keep the owner's latest observed time
+        // even across a verified staging restart (which clears the snapshot).
+        // Replacing the owner clears this timestamp authority.
+        if let Some(latest) = self.last_progress_micros {
+            snapshot.last_progress_micros = snapshot.last_progress_micros.max(latest);
+        }
+        self.last_progress_micros = Some(snapshot.last_progress_micros);
         self.progress_epoch = self.progress_epoch.saturating_add(1).max(1);
         snapshot.progress_epoch = self.progress_epoch;
 
@@ -233,6 +268,9 @@ impl CodeIndexBuildProgressSlotStateV1 {
         else {
             return;
         };
+        if snapshot.blocked_reason == Some(reason) {
+            return;
+        }
         let mut snapshot = snapshot.as_ref().clone();
         snapshot.blocked_reason = Some(reason);
         let _ = self.publish(&generation_id, self.owner_epoch, snapshot);
@@ -252,6 +290,7 @@ impl CodeIndexBuildProgressSlotStateV1 {
             return false;
         };
         if current.phase == CodeIndexBuildPhaseV1::Ready
+            || current.blocked_reason == Some(reason)
             || expected_progress_epoch.is_some_and(|epoch| current.progress_epoch != epoch)
         {
             return false;
@@ -2693,6 +2732,17 @@ impl LatestCodeTextGenerationV1 {
                 let Some(current) = slot.snapshot() else {
                     return;
                 };
+                // A retry that re-enters an unchanged phase has not made
+                // progress. Keep the last committed observation epoch and
+                // elapsed sample until a new phase or batch boundary arrives.
+                if current.phase == phase
+                    && current.current_batch_pages == current_batch_pages
+                    && current.current_batch_payload_bytes == current_batch_payload_bytes
+                    && !(phase == CodeIndexBuildPhaseV1::Ready
+                        && current.blocked_reason.is_some())
+                {
+                    return;
+                }
                 let mut snapshot = current.as_ref().clone();
                 snapshot.phase = phase;
                 if !phase_has_file_rate_estimate(phase) {
@@ -3220,6 +3270,10 @@ impl LatestCodeTextGenerationV1 {
         } else {
             None
         };
+        // A missing/incompatible staging file is a new durable attempt for
+        // this sealed generation. Its committed counters legitimately start
+        // at zero; the old attempt must not fence that fresh boundary.
+        let mut fresh_staging_attempt = resumed.is_none();
         let mut builder = match resumed {
             Some(builder) => builder,
             None => match self.carry_parent_text_artifact(
@@ -3262,6 +3316,7 @@ impl LatestCodeTextGenerationV1 {
                 Err(VerifiedSealedLexicalCursorRestoreErrorV1::IncompatiblePosition) => {
                     drop(builder);
                     store.discard_incompatible_staging(&staging_path, control)?;
+                    fresh_staging_attempt = true;
                     builder = CodeLexicalArtifactBuilderV1::create_with_memory_budget(
                         &staging_path,
                         metadata,
@@ -3288,6 +3343,15 @@ impl LatestCodeTextGenerationV1 {
             staging_path,
             _build_reservation: build_reservation,
         };
+        if fresh_staging_attempt
+            && !self
+                .text_progress_slot
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .begin_staging_attempt(&generation_id, self.text_progress_owner_epoch)
+        {
+            return Err(RetrievalPortError::GenerationMismatch);
+        }
         self.publish_text_progress_boundary(
             &initialized,
             &progress,
