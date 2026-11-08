@@ -612,7 +612,10 @@ async fn build_storage_report_with_walk_budget(
         Ok(_) => load_registered_project_rows(profile_root, &global_db_path).await?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(error) => {
-            return Err(report_error("inspect profile registry for storage report", error));
+            return Err(report_error(
+                "inspect profile registry for storage report",
+                error,
+            ));
         }
     };
     // Capture the profile's physical footprint before opening any SQLite
@@ -2460,10 +2463,12 @@ mod tests {
         std::fs::write(project.join("sessions.db"), b"retained sessions").unwrap();
 
         let registry = profile_root.join(GLOBAL_DB_FILENAME);
-        std::os::unix::fs::symlink(temporary.path().join("missing-global.db"), &registry)
-            .unwrap();
+        std::os::unix::fs::symlink(temporary.path().join("missing-global.db"), &registry).unwrap();
         assert!(std::fs::symlink_metadata(&registry).is_ok());
-        assert!(!registry.exists(), "the old existence test silently lost this registry");
+        assert!(
+            !registry.exists(),
+            "the old existence test silently lost this registry"
+        );
 
         let error = build_storage_report(&profile_root)
             .await
