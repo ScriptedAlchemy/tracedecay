@@ -279,8 +279,14 @@ async fn expired_retry_deadlines_survive_restarts_without_rearm_writes() {
         }
     );
     let after = writer_telemetry(&harness.registered).transactions;
-    assert_eq!(after.committed_transactions - before.committed_transactions, 2);
-    assert_eq!(after.rolled_back_transactions, before.rolled_back_transactions);
+    assert_eq!(
+        after.committed_transactions - before.committed_transactions,
+        2
+    );
+    assert_eq!(
+        after.rolled_back_transactions,
+        before.rolled_back_transactions
+    );
     assert_eq!(queue_state(&harness).await, (8, 6, 8));
 
     let snapshot = harness.registered.read_snapshot().await.unwrap();

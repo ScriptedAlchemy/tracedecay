@@ -297,7 +297,8 @@ pub(crate) async fn rearm_queued_projection_retries(
     let mut after_rowid = 0_i64;
     while after_rowid < last_rowid {
         let Some((batch_end, rows)) =
-            rearm_projection_retry_batch(database, after_rowid, last_rowid, batch_rows, now).await?
+            rearm_projection_retry_batch(database, after_rowid, last_rowid, batch_rows, now)
+                .await?
         else {
             break;
         };
