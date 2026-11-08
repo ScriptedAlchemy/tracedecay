@@ -4005,9 +4005,8 @@ mod tests {
             .delete_generation_contents(&locator, &|| Ok(()))
             .expect_err("a failed sealed unlink must not complete retention");
         assert!(
-            error
-                .to_string()
-                .contains("sealed directory removal failed")
+            error.to_string().contains("sealed"),
+            "an unremovable artifact must return an explicit sealed-retirement error: {error}"
         );
         assert_eq!(std::fs::read(&directory).unwrap(), b"not a directory");
         assert!(
@@ -4021,11 +4020,44 @@ mod tests {
 
         std::fs::remove_file(&directory).unwrap();
         std::fs::create_dir(&directory).unwrap();
+        // Retirement requires an exact durable identity from the directory
+        // being removed. A receipt-free synthetic directory must never confer
+        // deletion authority when the strict collector is integrated.
+        let identity = generation.identity();
+        let receipt = serde_json::json!({
+            "version": 1,
+            "form": "compact",
+            "namespace": locator.projection.namespace.as_str(),
+            "projection": locator.projection.projection.as_str(),
+            "generation": locator.generation.as_str(),
+            "physical_namespace": namespace.as_str(),
+            "recovered_digest": sealed_digest(&generation).as_str(),
+            "entities": 0,
+            "relations": 0,
+            "graph_format": GraphFormatVersion::current().get(),
+            "row_sum": null,
+            "base": null,
+            "source_generation": identity.source_generation.as_str(),
+            "watermark": identity.watermark.as_str()
+        });
+        std::fs::write(
+            directory.join("sealed.json"),
+            serde_json::to_vec(&receipt).unwrap(),
+        )
+        .unwrap();
         std::fs::write(directory.join("derived-rows"), b"retired").unwrap();
+        let unrelated = directory.parent().unwrap().join("unrelated-entry");
+        std::fs::create_dir(&unrelated).unwrap();
+        std::fs::write(unrelated.join("sentinel"), b"untouched").unwrap();
         assert!(matches!(
             database.delete_generation_contents(&locator, &|| Ok(())),
             Ok(GenerationContentsDeletion::Deleted)
         ));
+        assert_eq!(
+            std::fs::read(unrelated.join("sentinel")).unwrap(),
+            b"untouched",
+            "retiring one sealed generation must not traverse another child"
+        );
         assert!(!directory.exists());
         assert!(
             database
