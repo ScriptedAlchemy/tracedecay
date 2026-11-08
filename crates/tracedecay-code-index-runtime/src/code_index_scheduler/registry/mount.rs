@@ -2693,7 +2693,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .as_ref()
                         .and_then(|serving| serving.interactive_graph_store().ok());
-                    let graph_attempt = super::graph_progress::CodeIndexNativeGraphProgressGuardV1::begin(
+                    let graph_attempt = super::graph_progress::CodeIndexNativeGraphProgressGuardV1::begin_for_activation(
                         Arc::clone(&worker_native_graph_progress),
                         progress_daemon_incarnation,
                         progress_producer_incarnation,

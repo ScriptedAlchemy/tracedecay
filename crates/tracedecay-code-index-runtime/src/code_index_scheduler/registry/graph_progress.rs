@@ -13,19 +13,27 @@ use tracedecay_store::{
 pub(super) type CodeIndexNativeGraphProgressSlotV1 =
     Arc<RwLock<CodeIndexNativeGraphProgressSlotStateV1>>;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GraphAttemptOwnerV1 {
     daemon: u64,
     producer: u64,
     sequence: u64,
 }
 
-#[derive(Default)]
+#[derive(Clone)]
+struct PendingNativeGraphActivationV1 {
+    owner: GraphAttemptOwnerV1,
+    generation_id: String,
+    sealed_graph_digest: String,
+}
+
+#[derive(Clone, Default)]
 pub(super) struct CodeIndexNativeGraphProgressSlotStateV1 {
     sequence: u64,
     epoch: u64,
     snapshot: Option<CodeIndexNativeGraphProgressV1>,
     last_stage_ordinal: Option<u64>,
+    pending_activation: Option<PendingNativeGraphActivationV1>,
 }
 
 impl CodeIndexNativeGraphProgressSlotStateV1 {
@@ -37,19 +45,65 @@ impl CodeIndexNativeGraphProgressSlotStateV1 {
         sealed_graph_digest: String,
     ) -> GraphAttemptOwnerV1 {
         self.sequence = self.sequence.saturating_add(1).max(1);
-        self.epoch = self.epoch.saturating_add(1).max(1);
-        self.last_stage_ordinal = None;
         let owner = GraphAttemptOwnerV1 {
             daemon,
             producer,
             sequence: self.sequence,
         };
+        self.pending_activation = None;
+        self.start_with_owner(owner, generation_id, sealed_graph_digest);
+        owner
+    }
+
+    /// A serving activation often reopens the graph that the same worker
+    /// already published. Only its first actual native write can replace the
+    /// previous writer's completed report.
+    fn begin_on_first_work(
+        &mut self,
+        daemon: u64,
+        producer: u64,
+        generation_id: String,
+        sealed_graph_digest: String,
+    ) -> GraphAttemptOwnerV1 {
+        let retain_previous = self.snapshot.as_ref().is_some_and(|current| {
+            !current.active
+                && current.daemon_incarnation == daemon
+                && current.producer_incarnation == producer
+                && current.generation_id == generation_id
+                && current.sealed_graph_digest == sealed_graph_digest
+                && current.last_progress_micros.is_some()
+        });
+        if !retain_previous {
+            return self.begin(daemon, producer, generation_id, sealed_graph_digest);
+        }
+        self.sequence = self.sequence.saturating_add(1).max(1);
+        let owner = GraphAttemptOwnerV1 {
+            daemon,
+            producer,
+            sequence: self.sequence,
+        };
+        self.pending_activation = Some(PendingNativeGraphActivationV1 {
+            owner,
+            generation_id,
+            sealed_graph_digest,
+        });
+        owner
+    }
+
+    fn start_with_owner(
+        &mut self,
+        owner: GraphAttemptOwnerV1,
+        generation_id: String,
+        sealed_graph_digest: String,
+    ) {
+        self.epoch = self.epoch.saturating_add(1).max(1);
+        self.last_stage_ordinal = None;
         self.snapshot = Some(CodeIndexNativeGraphProgressV1 {
             generation_id,
             sealed_graph_digest,
-            daemon_incarnation: daemon,
-            producer_incarnation: producer,
-            attempt_sequence: self.sequence,
+            daemon_incarnation: owner.daemon,
+            producer_incarnation: owner.producer,
+            attempt_sequence: owner.sequence,
             progress_epoch: self.epoch,
             phase: None,
             encoded_entities: 0,
@@ -64,11 +118,10 @@ impl CodeIndexNativeGraphProgressSlotStateV1 {
             last_progress_micros: None,
             active: true,
         });
-        owner
     }
 
     fn owns(&self, owner: GraphAttemptOwnerV1) -> bool {
-        self.snapshot.as_ref().is_some_and(|state| {
+        self.sequence == owner.sequence && self.snapshot.as_ref().is_some_and(|state| {
             state.active
                 && state.daemon_incarnation == owner.daemon
                 && state.producer_incarnation == owner.producer
@@ -77,6 +130,26 @@ impl CodeIndexNativeGraphProgressSlotStateV1 {
     }
 
     fn observe(&mut self, owner: GraphAttemptOwnerV1, work: GraphNativeWorkV1, now: i64) -> bool {
+        if let Some(pending) = self.pending_activation.as_ref() {
+            if pending.owner != owner {
+                return false;
+            }
+            // Rejected callbacks cannot erase a prior verified publication.
+            // Stage the new owner and accept the first genuine write atomically.
+            let pending = pending.clone();
+            let mut candidate = self.clone();
+            candidate.pending_activation = None;
+            candidate.start_with_owner(
+                owner,
+                pending.generation_id,
+                pending.sealed_graph_digest,
+            );
+            if !candidate.observe(owner, work, now) {
+                return false;
+            }
+            *self = candidate;
+            return true;
+        }
         if !self.owns(owner) {
             return false;
         }
@@ -167,6 +240,10 @@ impl CodeIndexNativeGraphProgressSlotStateV1 {
     }
 
     fn finish(&mut self, owner: GraphAttemptOwnerV1) {
+        if self.pending_activation.as_ref().is_some_and(|pending| pending.owner == owner) {
+            self.pending_activation = None;
+            return;
+        }
         if !self.owns(owner) {
             return;
         }
@@ -199,6 +276,18 @@ impl CodeIndexNativeGraphProgressGuardV1 {
     ) -> Self {
         let owner = slot.write().unwrap_or_else(PoisonError::into_inner)
             .begin(daemon, producer, generation_id, sealed_graph_digest);
+        Self { slot, owner }
+    }
+
+    pub(super) fn begin_for_activation(
+        slot: CodeIndexNativeGraphProgressSlotV1,
+        daemon: u64,
+        producer: u64,
+        generation_id: String,
+        sealed_graph_digest: String,
+    ) -> Self {
+        let owner = slot.write().unwrap_or_else(PoisonError::into_inner)
+            .begin_on_first_work(daemon, producer, generation_id, sealed_graph_digest);
         Self { slot, owner }
     }
 
@@ -297,6 +386,56 @@ mod tests {
             entities: 1101, relations: 1143, canonical_bytes: 67890,
         });
         assert_eq!(slot.read().unwrap().snapshot().unwrap(), finished);
+    }
+
+    #[test]
+    fn read_only_activation_keeps_verified_native_milestones_until_real_write() {
+        let slot = Arc::new(RwLock::new(CodeIndexNativeGraphProgressSlotStateV1::default()));
+        let publication = CodeIndexNativeGraphProgressGuardV1::begin(
+            Arc::clone(&slot), 3, 8, "generation.a".into(), "digest.a".into(),
+        );
+        publication.observer()(GraphNativeWorkV1::CompactSegmentVerified {
+            entities: 11, relations: 9, canonical_bytes: 4096,
+        });
+        drop(publication);
+        let verified = slot.read().unwrap().snapshot().unwrap();
+        assert_eq!(verified.committed_compact_segments, 1);
+        assert!(!verified.active);
+
+        // The worker publishes from sealed rows, then activates the decoded
+        // serving generation. Reopening its verified head writes no segment.
+        let activation = CodeIndexNativeGraphProgressGuardV1::begin_for_activation(
+            Arc::clone(&slot), 3, 8, "generation.a".into(), "digest.a".into(),
+        );
+        let callback = activation.observer();
+        assert_eq!(slot.read().unwrap().snapshot().unwrap(), verified);
+        callback(GraphNativeWorkV1::CompactSegmentVerified {
+            entities: 0, relations: 0, canonical_bytes: 0,
+        });
+        assert_eq!(slot.read().unwrap().snapshot().unwrap(), verified);
+        drop(activation);
+        assert_eq!(slot.read().unwrap().snapshot().unwrap(), verified);
+        callback(GraphNativeWorkV1::StagePageApplied {
+            ordinal: 0, kind: GraphNativeWorkKindV1::Entities, mutations: 5, live_bytes: 120,
+        });
+        assert_eq!(slot.read().unwrap().snapshot().unwrap(), verified);
+
+        let retry = CodeIndexNativeGraphProgressGuardV1::begin_for_activation(
+            Arc::clone(&slot), 3, 8, "generation.a".into(), "digest.a".into(),
+        );
+        retry.observer()(GraphNativeWorkV1::StagePageApplied {
+            ordinal: 0, kind: GraphNativeWorkKindV1::Entities, mutations: 5, live_bytes: 120,
+        });
+        let restarted = slot.read().unwrap().snapshot().unwrap();
+        assert!(restarted.active);
+        assert!(restarted.progress_epoch > verified.progress_epoch);
+        assert!(restarted.attempt_sequence > verified.attempt_sequence);
+        assert_eq!(restarted.committed_stage_pages, 1);
+        assert_eq!(restarted.committed_compact_segments, 0);
+        assert_eq!(restarted.committed_stage_mutations, 5);
+        assert!(restarted.last_progress_micros.is_some());
+        drop(retry);
+        assert!(!slot.read().unwrap().snapshot().unwrap().active);
     }
 
     #[test]
