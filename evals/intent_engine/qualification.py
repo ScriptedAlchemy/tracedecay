@@ -132,9 +132,18 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
     }
 
 
-def qualified_report(result, manifest, manifest_sha, questions):
-    """Use the existing scorer, but publish only pre-frozen held-out metrics."""
+def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes):
+    """Reproduce qualified predictions from the frozen original dataset."""
     from score import score_config
+    from run_http import STATES, request_bytes, validate_dataset
+
+    if not isinstance(dataset_bytes, bytes):
+        raise ValueError("qualification requires the original dataset bytes")
+    dataset_sha = sha256_bytes(dataset_bytes)
+    if result.get("dataset_sha256") != dataset_sha:
+        raise ValueError("qualification result dataset digest differs from supplied evidence")
+    cases = json.loads(dataset_bytes)
+    validate_dataset(cases, questions)
 
     experiment = result.get("experiment")
     if not isinstance(experiment, dict):
@@ -151,7 +160,7 @@ def qualified_report(result, manifest, manifest_sha, questions):
         raise ValueError("qualification requires a finite serving temperature")
     if experiment.get("qualification_manifest_sha256") != manifest_sha:
         raise ValueError("qualification experiment is not bound to this frozen manifest")
-    validated = validate_manifest(manifest, result.get("dataset_sha256"), questions)
+    validated = validate_manifest(manifest, dataset_sha, questions, cases)
     rows = result.get("rows")
     if not isinstance(rows, list) or [r.get("id") for r in rows if isinstance(r, dict)] != validated["heldout_ids"]:
         raise ValueError("qualification result differs from frozen held-out case order")
@@ -160,6 +169,22 @@ def qualified_report(result, manifest, manifest_sha, questions):
         if (row.get("labels") != annotation["verified_labels"]
                 or row.get("context_needed") != annotation["verified_context_needed"]):
             raise ValueError(f"qualification result {row['id']} does not match reviewed labels")
+    # Reconstruct real HTTP request bytes: self-consistent metadata hashes
+    # alone cannot prove the frozen prompts were used.
+    renderer = STATES.get(experiment.get("config"))
+    if renderer is None:
+        raise ValueError("qualification has an unsupported request renderer")
+    case_map = {case["id"]: case for case in cases}
+    for row in rows:
+        body = {"state": renderer(case_map[row["id"]]), "questions": questions}
+        if experiment.get("requested_model"):
+            body["model"] = experiment["requested_model"]
+        expected = sha256_bytes(request_bytes(body))
+        if row.get("request_sha256") != expected:
+            raise ValueError(
+                f"qualification request fingerprint disagrees with frozen renderer for {row['id']}"
+            )
+
     scores = score_config(result, fixed_t=validated["thresholds"])
     fixed = scores["fixed"]["all"]
     latency = scores["latency"]

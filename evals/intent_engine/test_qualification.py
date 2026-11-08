@@ -122,7 +122,10 @@ class QualificationTests(unittest.TestCase):
                 "context_needed": case["context_needed"],
                 "probs": probs,
                 "ms": 10 if case["labels"] else 20,
-                "request_sha256": hashlib.sha256(case["id"].encode()).hexdigest(),
+                "request_sha256": hashlib.sha256(run_http.request_bytes({
+                    "state": run_http.STATES["B_noul_text"](case),
+                    "questions": self.questions,
+                })).hexdigest(),
             })
         experiment = {
             "version": 2,
@@ -154,7 +157,7 @@ class QualificationTests(unittest.TestCase):
     def test_only_frozen_thresholds_qualify_and_latency_reports_p95(self):
         result = self.signed_result()
         report = qualification.qualified_report(
-            result, self.manifest, self.manifest_sha, self.questions
+            result, self.manifest, self.manifest_sha, self.questions, self.dataset_bytes
         )
         self.assertTrue(report["qualified_against_frozen_tolerances"])
         self.assertEqual(report["cases"], 2)
@@ -167,7 +170,7 @@ class QualificationTests(unittest.TestCase):
         stricter["error_tolerances"]["max_p95_ms"] = 19
         # An altered post-run manifest is not a valid requalification.
         with self.assertRaisesRegex(ValueError, "not bound"):
-            qualification.qualified_report(result, stricter, qualification.sha256_json(stricter), self.questions)
+            qualification.qualified_report(result, stricter, qualification.sha256_json(stricter), self.questions, self.dataset_bytes)
 
 
     def test_qualification_requires_complete_serving_identity(self):
@@ -182,7 +185,7 @@ class QualificationTests(unittest.TestCase):
                 change(result)
                 with self.assertRaisesRegex(ValueError, "serving"):
                     qualification.qualified_report(
-                        result, self.manifest, self.manifest_sha, self.questions
+                        result, self.manifest, self.manifest_sha, self.questions, self.dataset_bytes
                     )
 
     def test_qualified_reporting_refuses_tampered_labels_and_unbound_results(self):
@@ -197,7 +200,7 @@ class QualificationTests(unittest.TestCase):
                 result = copy.deepcopy(base)
                 mutation(result)
                 with self.assertRaisesRegex(ValueError, pattern):
-                    qualification.qualified_report(result, self.manifest, self.manifest_sha, self.questions)
+                    qualification.qualified_report(result, self.manifest, self.manifest_sha, self.questions, self.dataset_bytes)
 
     def test_http_runner_asks_only_pre_frozen_holdout_and_resumes_with_exact_identity(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -320,13 +323,14 @@ class QualificationTests(unittest.TestCase):
     def test_qualified_cli_is_separate_and_historical_cli_refuses_heldout(self):
         with tempfile.TemporaryDirectory() as temp:
             here = Path(temp)
-            for filename in ("score.py", "qualification.py", "common.py"):
+            for filename in ("score.py", "qualification.py", "common.py", "run_http.py"):
                 shutil.copyfile(Path(score.__file__).with_name(filename), here / filename)
             (here / "results").mkdir()
             result_path = here / "results" / "qualified.json"
             result_path.write_text(json.dumps(self.signed_result()))
             manifest_path = here / "qualification.json"
             manifest_path.write_bytes(self.manifest_bytes)
+            (here / "dataset.json").write_bytes(self.dataset_bytes)
             summary = here / "summary.json"
             summary.write_bytes(b"existing historical evidence\\n")
 
@@ -340,7 +344,7 @@ class QualificationTests(unittest.TestCase):
 
             qualified = subprocess.run(
                 [sys.executable, str(here / "score.py"), "--qualified",
-                 str(manifest_path), str(result_path)],
+                 str(manifest_path), str(here / "dataset.json"), str(result_path)],
                 capture_output=True, text=True, check=False,
             )
             self.assertEqual(qualified.returncode, 0, qualified.stderr)
@@ -356,12 +360,67 @@ class QualificationTests(unittest.TestCase):
             previous_report = report_path.read_bytes()
             rejected = subprocess.run(
                 [sys.executable, str(here / "score.py"), "--qualified",
-                 str(manifest_path), str(result_path)],
+                 str(manifest_path), str(here / "dataset.json"), str(result_path)],
                 capture_output=True, text=True, check=False,
             )
             self.assertNotEqual(rejected.returncode, 0)
             self.assertIn("reviewed labels", rejected.stderr)
             self.assertEqual(report_path.read_bytes(), previous_report)
+
+    def test_qualified_requires_original_cases_and_reproducible_requests(self):
+        result = self.signed_result()
+        altered_cases = copy.deepcopy(self.dataset)
+        altered_cases[2]["current_prompt"] = "A different prompt"
+        with self.assertRaisesRegex(ValueError, "dataset digest differs"):
+            qualification.qualified_report(
+                result, self.manifest, self.manifest_sha, self.questions,
+                json.dumps(altered_cases).encode("utf-8"),
+            )
+        # The stored hashes can be re-computed consistently around a forged
+        # request fingerprint; reconstruction from real cases must catch it.
+        altered = copy.deepcopy(result)
+        altered["rows"][0]["request_sha256"] = "f" * 64
+        altered["experiment"]["requests_sha256"] = score.evidence_digest([
+            [row["id"], row["request_sha256"]] for row in altered["rows"]
+        ])
+        altered["experiment_sha256"] = score.evidence_digest(altered["experiment"])
+        with self.assertRaisesRegex(ValueError, "request fingerprint disagrees"):
+            qualification.qualified_report(
+                altered, self.manifest, self.manifest_sha,
+                self.questions, self.dataset_bytes,
+            )
+
+    def test_runner_can_consume_explicit_frozen_input_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            dataset_path = here / "external-cases.json"
+            dataset_path.write_bytes(self.dataset_bytes)
+            (here / "manifest.json").write_bytes(self.manifest_bytes)
+            (here / "server.json").write_text(json.dumps({
+                "checkpoint": "pinned", "server_revision": "r1",
+                "backend": "cpu", "dtype": "float32", "temperature": 2.41,
+            }))
+            answer = {"answers": {
+                key: {"type": "noul", "noul": 0.5} for key in self.questions
+            }}
+            with patch.object(run_http, "HERE", str(here)):
+                with patch.object(run_http, "post", return_value=(answer, 12.0)) as post:
+                    run_http.main([
+                        "--url", "http://127.0.0.1:8009/v1/systemone",
+                        "--tag", "external",
+                        "--server-config", str(here / "server.json"),
+                        "--dataset", str(dataset_path),
+                        "--qualification-manifest", str(here / "manifest.json"),
+                        "B_noul_text",
+                    ])
+                    self.assertEqual(post.call_count, 2)
+            result = json.loads(
+                (here / "results" / "external_B_noul_text.json").read_text()
+            )
+            qualification.qualified_report(
+                result, self.manifest, self.manifest_sha,
+                self.questions, self.dataset_bytes,
+            )
 
 
 if __name__ == "__main__":

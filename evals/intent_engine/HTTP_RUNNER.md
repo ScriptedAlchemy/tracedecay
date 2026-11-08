@@ -137,7 +137,9 @@ not cryptographic verification of independent label quality. Do not forge them
 from model predictions or adoption events.
 
 Run with the pinned remote serving declaration as before, adding
-`--qualification-manifest /path/to/frozen.json`. The runner refuses an
+`--dataset /path/to/original-cases.json` and
+`--qualification-manifest /path/to/frozen.json`. The dataset file's bytes
+are bound to the run and must be supplied again when scoring. The runner refuses an
 additional `--subset`, validates every case and its group before network
 traffic, infers **only the frozen held-out cases**, and binds the raw manifest's
 SHA-256 to the experiment identity and resumable partial log. A changed
@@ -146,14 +148,17 @@ the same manifest:
 
 ```sh
 python evals/intent_engine/score.py --qualified /path/to/frozen.json \
-  evals/intent_engine/results/pinned-run_B_noul_text.json
+  /path/to/original-cases.json evals/intent_engine/results/pinned-run_B_noul_text.json
 bazel test //evals/intent_engine:qualification_test --test_output=errors
 ```
 
 This writes `evals/intent_engine/qualification_summary.json` separately from
 the historical `summary.json`, and reports only **frozen-threshold** held-out
 false hints, positive-case recall, p50/p95 measured end-to-end HTTP latency and
-the predeclared tolerances. It deliberately does not publish optimized
+the predeclared tolerances. Scoring reads the original frozen case bytes,
+checks all reviewed labels/splits against them and recreates each HTTP
+request fingerprint with the runner's own renderer. Self-consistent result
+hashes alone do not prove the submitted inputs. It deliberately does not publish optimized
 in-sample thresholds as qualification. Neither correct answers nor those metrics
 alone demonstrate task success, ignored/acted outcomes, cold/warm cost, native
 runtime renderer/settings parity or a real Kev checkpoint. All those require

@@ -366,6 +366,7 @@ def main(argv=None):
     ap.add_argument("--tag", required=True)
     ap.add_argument("--server-config", required=True, help="JSON file with immutable serving identity; omit credentials")
     ap.add_argument("--subset")
+    ap.add_argument("--dataset", help="original JSON cases; frozen digest recorded in each run")
     ap.add_argument("--qualification-manifest", help="freeze reviewed held-out labels, groups, thresholds and tolerances")
     ap.add_argument("--send-model")
     ap.add_argument("--bearer-token-env", metavar="NAME",
@@ -385,7 +386,7 @@ def main(argv=None):
                     if args.bearer_token_env is not None else None)
     if args.sample_out and os.path.lexists(args.sample_out) and not os.path.isfile(args.sample_out):
         raise ValueError(f"sample path exists but is not a regular file: {args.sample_out}")
-    with open(os.path.join(HERE, "dataset.json"), "rb") as source:
+    with open(args.dataset or os.path.join(HERE, "dataset.json"), "rb") as source:
         dataset_bytes = source.read()
     dataset = json.loads(dataset_bytes)
     dataset_sha = hashlib.sha256(dataset_bytes).hexdigest()
