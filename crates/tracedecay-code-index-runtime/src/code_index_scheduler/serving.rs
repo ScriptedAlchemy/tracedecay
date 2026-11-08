@@ -261,6 +261,27 @@ impl CodeIndexBuildProgressSlotStateV1 {
                 return false;
             }
         }
+        // A new observation must be backed by a changed pipeline boundary,
+        // accepted source work, or a changed refusal. Elapsed time, a rate
+        // resample, or another reading of the same committed cursor is not
+        // progress; renewing its timestamp defeats stall detection.
+        if let Some(current) = self.snapshot.as_ref() {
+            if snapshot.phase == current.phase
+                && snapshot.committed_pages == current.committed_pages
+                && snapshot.committed_chunks == current.committed_chunks
+                && snapshot.committed_imports == current.committed_imports
+                && snapshot.committed_payload_bytes == current.committed_payload_bytes
+                && snapshot.completed_files == current.completed_files
+                && snapshot.total_files == current.total_files
+                && snapshot.completed_lexical_units == current.completed_lexical_units
+                && snapshot.total_lexical_units == current.total_lexical_units
+                && snapshot.current_batch_pages == current.current_batch_pages
+                && snapshot.current_batch_payload_bytes == current.current_batch_payload_bytes
+                && snapshot.blocked_reason == current.blocked_reason
+            {
+                return false;
+            }
+        }
         // The next producer may have assembled its report before an earlier
         // producer acquired the lock. Keep the owner's latest observed time
         // even across a verified staging restart (which clears the snapshot).

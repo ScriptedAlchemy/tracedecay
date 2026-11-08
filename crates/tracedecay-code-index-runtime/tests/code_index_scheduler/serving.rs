@@ -3042,6 +3042,86 @@ fn progress_timestamp_never_regresses_within_one_owner() {
 }
 
 #[test]
+fn unchanged_progress_resampling_cannot_renew_the_work_clock() {
+    let generation = CodeGenerationId::new("generation.idle-report").expect("generation");
+    let mut slot = super::super::CodeIndexBuildProgressSlotStateV1::default();
+    let owner = slot.replace_generation(generation.clone());
+
+    let mut first = progress_snapshot_for_generation(&generation, 3);
+    first.last_progress_micros = 100;
+    assert!(slot.publish(&generation, owner, first));
+    let accepted = slot.snapshot().expect("initial committed progress");
+
+    // Retrying an already committed cursor may resample duration, throughput,
+    // and latency. None proves new work or should revive a stalled generation.
+    let mut idle = accepted.as_ref().clone();
+    idle.elapsed_micros += 1_000;
+    idle.last_progress_micros = 10_000;
+    idle.last_commit_latency_micros = Some(99);
+    idle.files_per_second = Some(12.0);
+    idle.lexical_units_per_second = Some(21.0);
+    idle.estimated_remaining_seconds = Some(5);
+    assert!(!slot.publish(&generation, owner, idle));
+    assert_eq!(
+        slot.snapshot().expect("idle must not publish").as_ref(),
+        accepted.as_ref(),
+        "elapsed time or a new estimate must not refresh a frozen progress epoch"
+    );
+
+    // Authenticated scan work, a phase transition, a durable commit, and a
+    // new refusal are each independently observable progress/state boundaries.
+    let mut scanned = accepted.as_ref().clone();
+    scanned.completed_lexical_units += 1;
+    scanned.last_progress_micros = 200;
+    assert!(slot.publish(&generation, owner, scanned));
+    let scan = slot.snapshot().expect("source scan");
+    assert!(scan.progress_epoch > accepted.progress_epoch);
+    assert_eq!(scan.last_progress_micros, 200);
+
+    let mut phase = scan.as_ref().clone();
+    phase.phase = CodeIndexBuildPhaseV1::IndexBuild;
+    phase.last_progress_micros = 300;
+    assert!(slot.publish(&generation, owner, phase));
+    let phase = slot.snapshot().expect("new phase");
+    assert!(phase.progress_epoch > scan.progress_epoch);
+
+    let mut committed = phase.as_ref().clone();
+    committed.committed_pages += 1;
+    committed.committed_chunks += 1;
+    committed.committed_payload_bytes += 1;
+    committed.completed_files += 1;
+    committed.completed_lexical_units += 1;
+    committed.last_progress_micros = 400;
+    assert!(slot.publish(&generation, owner, committed));
+    let committed = slot.snapshot().expect("new committed page");
+    assert!(committed.progress_epoch > phase.progress_epoch);
+
+    let mut refused = committed.as_ref().clone();
+    refused.blocked_reason = Some(CodeIndexBuildBlockedReasonV1::ResidentMemory);
+    refused.last_progress_micros = 500;
+    assert!(slot.publish(&generation, owner, refused));
+    let blocked = slot.snapshot().expect("new refusal");
+    assert!(blocked.progress_epoch > committed.progress_epoch);
+
+    let mut repeated = blocked.as_ref().clone();
+    repeated.last_progress_micros = 600;
+    assert!(!slot.publish(&generation, owner, repeated));
+    assert_eq!(
+        slot.snapshot().expect("same refusal").as_ref(),
+        blocked.as_ref()
+    );
+
+    let mut recovered = blocked.as_ref().clone();
+    recovered.phase = CodeIndexBuildPhaseV1::Ready;
+    recovered.blocked_reason = None;
+    recovered.last_progress_micros = 700;
+    assert!(slot.publish(&generation, owner, recovered));
+    let ready = slot.snapshot().expect("recovered ready");
+    assert!(ready.progress_epoch > blocked.progress_epoch);
+    assert_eq!(ready.blocked_reason, None);
+}
+
+#[test]
 fn delayed_progress_cannot_undo_committed_boundaries_or_ready() {
     let generation = CodeGenerationId::new("generation.stale-progress").expect("generation");
     let mut slot = super::super::CodeIndexBuildProgressSlotStateV1::default();
