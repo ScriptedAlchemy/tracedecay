@@ -1,0 +1,445 @@
+//! Exercise the production preparation, filesystem writer, and reader together.
+use std::{
+    fs::File,
+    io::Write,
+    os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
+
+use sha2::{Digest, Sha256};
+use tempfile::TempDir;
+use tracedecay_code_index::production::{
+    CodeIndexAtomicPublicationPort, CodeIndexPreparationPort, CodeIndexProductionErrorV1,
+    CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
+    SealedGenerationSegmentPublicationV1, SealedGenerationSegmentReadV1,
+};
+use tracedecay_domain::{ManifestDigest, ProjectId, SanitizerRevision, sha256_hex_suffix};
+
+use super::{
+    DaemonCodeIndexPreparationStateV1, DaemonCodeIndexPreparationV1,
+    DaemonCodeIndexPublicationStoreV1, MAX_STAGED_SEGMENT_READ_HANDLES, SharedCodeIndexBytePoolV1,
+};
+use crate::code_index_scheduler::tests::GitFixture;
+use crate::code_index_scheduler::{CodeIndexReconcileOutcomeV1, CodeIndexWorktreeSchedulerV1};
+
+fn source_generation(
+    fixture: &GitFixture,
+    store_root: &Path,
+) -> Arc<CodeIndexPublishedGenerationV1> {
+    let mut source = CodeIndexWorktreeSchedulerV1::open(
+        ProjectId::new("project.code-index-tests").expect("project identity"),
+        fixture.path(),
+        store_root.to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("source scheduler");
+    assert!(matches!(
+        source.reconcile_now().expect("source publication"),
+        CodeIndexReconcileOutcomeV1::Published(_)
+    ));
+    Arc::clone(&source.latest_complete().expect("decode source").generation)
+}
+
+fn target_store(root: &Path, fixture: &GitFixture) -> DaemonCodeIndexPublicationStoreV1 {
+    DaemonCodeIndexPublicationStoreV1::new(
+        root,
+        fixture.path(),
+        SanitizerRevision::new(tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1)
+            .expect("sanitizer revision"),
+    )
+    .expect("target publication store")
+}
+
+fn segment_digest(bytes: &[u8]) -> ManifestDigest {
+    ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).expect("canonical digest")
+}
+
+fn staged_path(preparation: &DaemonCodeIndexPreparationV1, digest: &ManifestDigest) -> PathBuf {
+    let state = preparation.state.lock().expect("preparation state");
+    let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
+        panic!("preparation must still be open");
+    };
+    let suffix = sha256_hex_suffix(digest.as_str()).expect("digest suffix");
+    let canonical = preparation
+        .segments_root
+        .join(format!("segment-{suffix}.json"));
+    files
+        .segments
+        .pending
+        .get(&canonical)
+        .expect("segment was staged, not published")
+        .clone()
+}
+
+fn pinned_handle_count(preparation: &DaemonCodeIndexPreparationV1) -> usize {
+    let state = preparation.state.lock().expect("preparation state");
+    let DaemonCodeIndexPreparationStateV1::Open(files) = &*state else {
+        panic!("preparation must still be open");
+    };
+    files.pinned_segment_reads.len()
+}
+
+#[test]
+fn staged_segment_range_reads_open_once_per_cached_file_and_revalidate_replacements() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn fixture() -> u32 { 7 }\n")]);
+    let source_root = TempDir::new().expect("source store");
+    let generation = source_generation(&fixture, source_root.path());
+    let target_root = TempDir::new().expect("target store");
+    let mut target = target_store(target_root.path(), &fixture);
+    let mut preparation = target
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare target");
+    let contents = (0..9)
+        .map(|index| format!("sealed-staged-segment-{index}-bytes").into_bytes())
+        .collect::<Vec<_>>();
+    let digests = contents
+        .iter()
+        .map(|bytes| segment_digest(bytes))
+        .collect::<Vec<_>>();
+    for (digest, bytes) in digests.iter().zip(&contents) {
+        preparation
+            .write_segment(SealedGenerationSegmentPublicationV1::File { digest, bytes })
+            .expect("write exact staged segment");
+    }
+    let reader = preparation.segment_reader();
+    let mut read = Vec::new();
+    for offset in 0..16 {
+        reader(
+            SealedGenerationSegmentReadV1::Range {
+                digest: &digests[0],
+                size_bytes: contents[0].len() as u64,
+                offset,
+                length: 4,
+            },
+            &mut read,
+        )
+        .expect("read staged segment range");
+        assert_eq!(&read, &contents[0][offset as usize..offset as usize + 4]);
+    }
+    assert_eq!(
+        preparation.staged_segment_read_open_attempts_for_test(),
+        1,
+        "16 overlapping production reads must open the first file once",
+    );
+    let invalid_range = reader(
+        SealedGenerationSegmentReadV1::Range {
+            digest: &digests[0],
+            size_bytes: contents[0].len() as u64,
+            offset: contents[0].len() as u64 - 1,
+            length: 2,
+        },
+        &mut read,
+    );
+    assert!(matches!(
+        invalid_range,
+        Err(CodeIndexProductionErrorV1::Contract(_))
+    ));
+    assert!(read.is_empty(), "a bad range must not expose stale bytes");
+    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 1);
+
+    // Alternating ranges exercise LRU promotion, not just consecutive reads.
+    for offset in 0..16 {
+        for index in [0, 1] {
+            reader(
+                SealedGenerationSegmentReadV1::Range {
+                    digest: &digests[index],
+                    size_bytes: contents[index].len() as u64,
+                    offset,
+                    length: 4,
+                },
+                &mut read,
+            )
+            .expect("read interleaved staged ranges");
+            assert_eq!(
+                &read,
+                &contents[index][offset as usize..offset as usize + 4]
+            );
+        }
+    }
+    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 2);
+    for (digest, bytes) in digests.iter().zip(&contents).skip(1) {
+        reader(
+            SealedGenerationSegmentReadV1::Whole {
+                digest,
+                size_bytes: bytes.len() as u64,
+            },
+            &mut read,
+        )
+        .expect("read distinct staged segment");
+        assert_eq!(&read, bytes);
+    }
+    assert_eq!(
+        preparation.staged_segment_read_open_attempts_for_test(),
+        9,
+        "nine distinct segments must each need a real file open",
+    );
+    assert_eq!(
+        pinned_handle_count(&preparation),
+        MAX_STAGED_SEGMENT_READ_HANDLES
+    );
+    reader(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &digests[0],
+            size_bytes: contents[0].len() as u64,
+        },
+        &mut read,
+    )
+    .expect("reopen the evicted first segment");
+    assert_eq!(&read, &contents[0]);
+    assert_eq!(
+        preparation.staged_segment_read_open_attempts_for_test(),
+        10,
+        "an eight-handle bound must evict and reopen the ninth distinct file",
+    );
+
+    let path = staged_path(&preparation, &digests[0]);
+    let replacement_path = path.with_extension("replacement.tmp");
+    std::fs::write(&replacement_path, vec![b'Z'; contents[0].len()])
+        .expect("write replacement bytes");
+    std::fs::rename(&replacement_path, &path).expect("replace the pinned path");
+    for _ in 0..2 {
+        read.extend_from_slice(b"stale buffer sentinel");
+        let result = reader(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &digests[0],
+                size_bytes: contents[0].len() as u64,
+            },
+            &mut read,
+        );
+        assert!(matches!(
+            result,
+            Err(CodeIndexProductionErrorV1::Contract(_))
+        ));
+        assert!(read.is_empty(), "replacement and retry must clear output");
+        assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 10);
+    }
+    assert_eq!(pinned_handle_count(&preparation), 0);
+    assert!(matches!(
+        preparation.write_segment(SealedGenerationSegmentPublicationV1::File {
+            digest: &digests[1],
+            bytes: &contents[1],
+        }),
+        Err(CodeIndexPublicationStoreErrorV1::Unavailable(_))
+    ));
+    preparation.abort().expect("abort and clean staged files");
+    assert!(!path.exists(), "abort removes replaced staged files");
+    // An escaped reader must not keep the preparation or its staged bytes live.
+    read.extend_from_slice(b"stale after abort");
+    assert!(matches!(
+        reader(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &digests[0],
+                size_bytes: contents[0].len() as u64,
+            },
+            &mut read,
+        ),
+        Err(CodeIndexProductionErrorV1::Publication(_))
+    ));
+    assert!(read.is_empty());
+}
+
+#[test]
+fn staged_segment_in_place_mutation_poison_survives_restoration_and_refuses_commit() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let source_root = TempDir::new().expect("source store");
+    let generation = source_generation(&fixture, source_root.path());
+    let target_root = TempDir::new().expect("target store");
+    let mut target = target_store(target_root.path(), &fixture);
+    let mut preparation = target
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare target");
+    let publication = generation
+        .stage_publication(&mut preparation)
+        .expect("stage a real valid publication");
+
+    // This auxiliary segment is deliberately outside the valid manifest.
+    // Commit must refuse the poisoned transaction, not just a digest mismatch
+    // discovered while verifying a segment the manifest happens to reference.
+    let bytes = b"original-staged-segment";
+    let digest = segment_digest(bytes);
+    preparation
+        .write_segment(SealedGenerationSegmentPublicationV1::File {
+            digest: &digest,
+            bytes,
+        })
+        .expect("write auxiliary staged segment");
+    let opens_before = preparation.staged_segment_read_open_attempts_for_test();
+    let reader = preparation.segment_reader();
+    let mut read = Vec::new();
+    reader(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &digest,
+            size_bytes: bytes.len() as u64,
+        },
+        &mut read,
+    )
+    .expect("pin original staged bytes");
+    assert_eq!(read.as_slice(), bytes);
+    assert_eq!(
+        preparation.staged_segment_read_open_attempts_for_test(),
+        opens_before + 1
+    );
+    let path = staged_path(&preparation, &digest);
+    let before = path.symlink_metadata().expect("original metadata");
+    let mut writer = File::options()
+        .write(true)
+        .open(&path)
+        .expect("same inode writer");
+    writer
+        .write_all(&vec![b'X'; bytes.len()])
+        .expect("same-length overwrite");
+    // Force a visible timestamp change even on coarse-resolution filesystems.
+    writer
+        .set_modified(before.modified().expect("mtime") + Duration::from_secs(2))
+        .expect("change mtime");
+    drop(writer);
+    let after = path.symlink_metadata().expect("mutated metadata");
+    assert_eq!(
+        (before.dev(), before.ino(), before.len()),
+        (after.dev(), after.ino(), after.len())
+    );
+    assert_ne!(
+        before.modified().expect("old mtime"),
+        after.modified().expect("new mtime")
+    );
+    let result = reader(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &digest,
+            size_bytes: bytes.len() as u64,
+        },
+        &mut read,
+    );
+    assert!(matches!(
+        result,
+        Err(CodeIndexProductionErrorV1::Contract(_))
+    ));
+    assert!(read.is_empty(), "mutated bytes must never escape");
+    assert_eq!(pinned_handle_count(&preparation), 0);
+
+    // Restoration cannot unpoison an already-invalidated transaction.
+    std::fs::write(&path, bytes).expect("restore original bytes");
+    read.extend_from_slice(b"stale after mutation");
+    assert!(matches!(
+        reader(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &digest,
+                size_bytes: bytes.len() as u64,
+            },
+            &mut read,
+        ),
+        Err(CodeIndexProductionErrorV1::Contract(_))
+    ));
+    assert!(read.is_empty());
+    assert_eq!(
+        preparation.staged_segment_read_open_attempts_for_test(),
+        opens_before + 1
+    );
+    assert!(matches!(
+        preparation.write_segment(SealedGenerationSegmentPublicationV1::File {
+            digest: &digest,
+            bytes,
+        }),
+        Err(CodeIndexPublicationStoreErrorV1::Unavailable(detail))
+            if detail.contains("identity was invalidated")
+    ));
+    assert!(matches!(
+        target.commit(&mut preparation, &publication),
+        Err(CodeIndexPublicationStoreErrorV1::Unavailable(detail))
+            if detail.contains("identity was invalidated")
+    ));
+    assert!(
+        target
+            .load_active_manifest()
+            .expect("active manifest probe")
+            .is_none()
+    );
+    preparation.abort().expect("abort poisoned preparation");
+    assert!(!path.exists());
+}
+
+#[test]
+fn staged_segment_cold_refusals_clear_output_without_poisoning_valid_reads() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let source_root = TempDir::new().expect("source store");
+    let generation = source_generation(&fixture, source_root.path());
+    let target_root = TempDir::new().expect("target store");
+    let mut target = target_store(target_root.path(), &fixture);
+    let mut preparation = target
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare target");
+    let first = b"first staged bytes";
+    let cold = b"cold staged bytes";
+    let first_digest = segment_digest(first);
+    let cold_digest = segment_digest(cold);
+    for (digest, bytes) in [
+        (&first_digest, first.as_slice()),
+        (&cold_digest, cold.as_slice()),
+    ] {
+        preparation
+            .write_segment(SealedGenerationSegmentPublicationV1::File { digest, bytes })
+            .expect("stage segment");
+    }
+    let missing_digest = segment_digest(b"never staged");
+    let reader = preparation.segment_reader();
+    let mut read = Vec::new();
+    reader(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &first_digest,
+            size_bytes: first.len() as u64,
+        },
+        &mut read,
+    )
+    .expect("prime buffer and first handle");
+    assert_eq!(read.as_slice(), first);
+    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 1);
+    for request in [
+        SealedGenerationSegmentReadV1::Range {
+            digest: &cold_digest,
+            size_bytes: cold.len() as u64,
+            offset: cold.len() as u64 - 1,
+            length: 2,
+        },
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &cold_digest,
+            size_bytes: cold.len() as u64 + 1,
+        },
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &missing_digest,
+            size_bytes: 12,
+        },
+    ] {
+        read.extend_from_slice(b"stale cold-refusal sentinel");
+        assert!(matches!(
+            reader(request, &mut read),
+            Err(CodeIndexProductionErrorV1::Contract(_))
+        ));
+        assert!(
+            read.is_empty(),
+            "even a refusal before File::open must clear output"
+        );
+        assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 1);
+    }
+    reader(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &first_digest,
+            size_bytes: first.len() as u64,
+        },
+        &mut read,
+    )
+    .expect("invalid requests must not poison an unchanged preparation");
+    assert_eq!(read.as_slice(), first);
+    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 1);
+    reader(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &cold_digest,
+            size_bytes: cold.len() as u64,
+        },
+        &mut read,
+    )
+    .expect("valid cold request still opens its file");
+    assert_eq!(read.as_slice(), cold);
+    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 2);
+    preparation.abort().expect("clean up preparation");
+}
