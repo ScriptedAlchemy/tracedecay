@@ -1312,8 +1312,14 @@ fn staged_existing_segments_reuse_authenticated_inodes_without_reopening() {
             .segments
             .authenticated_segments
             .keys()
-            .next()
-            .expect("previously verified canonical segment")
+            .find(|path| {
+                !files
+                    .segments
+                    .pending
+                    .values()
+                    .any(|pending| pending == *path)
+            })
+            .expect("previously verified canonical segment, not an uncommitted temporary")
             .clone();
         target
             .verify_prepared_segments(files, staged_publication.manifest_bytes().as_ref())
@@ -1797,6 +1803,36 @@ fn staged_evidence_pack_writer_authentication_avoids_extra_opens_and_refuses_rep
             &path.symlink_metadata().expect("replacement inode"),
         ),
         "equal bytes cannot reuse an authenticated inode witness"
+    );
+    // The real publication path must reject the substituted temporary before
+    // it gains a durable canonical name. The evidence writer is already synced
+    // and does not enter the ordinary DurableFileBatch, so its batch sync alone
+    // cannot supply this check.
+    let canonical = target.segments_root.join(format!(
+        "segment-{}.json",
+        sha256_hex_suffix(digest.as_str()).expect("digest suffix")
+    ));
+    assert!(!canonical.exists(), "evidence pack has not been published");
+    let opens_before_refusal = PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get);
+    {
+        let mut state = preparation.state.lock().expect("changed evidence state");
+        let DaemonCodeIndexPreparationStateV1::Open(files) = &mut *state else {
+            panic!("changed evidence preparation must remain open");
+        };
+        assert!(
+            files.segments.publish().is_err(),
+            "a same-byte, different-inode evidence pack must not be published"
+        );
+        assert!(
+            files.segments.pending.values().any(|pending| pending == &path),
+            "rejected pack remains under private temporary ownership"
+        );
+    }
+    assert!(!canonical.exists(), "refused pack must not gain a canonical name");
+    assert_eq!(
+        PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get),
+        opens_before_refusal,
+        "inode refusal must not introduce an extra pathname digest open"
     );
     preparation.abort().expect("release failed preparation");
 }

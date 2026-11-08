@@ -1142,6 +1142,28 @@ impl StagedGenerationSegmentsV1 {
             .first_key_value()
             .map(|(final_path, temporary)| (final_path.clone(), temporary.clone()))
         {
+            // Evidence packs are already fsynced before they enter pending,
+            // so the ordinary writer batch cannot detect a later inode swap.
+            // Bind every pending pathname to the bytes authenticated during
+            // staging before any immutable canonical name is published.
+            #[cfg(unix)]
+            {
+                let original = self.authenticated_segments.get(&temporary).ok_or_else(|| {
+                    DaemonCodeIndexPublicationStoreV1::corruption(
+                        "staged sealed segment lacks its authenticated inode",
+                    )
+                })?;
+                let current = temporary
+                    .symlink_metadata()
+                    .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+                if !DaemonCodeIndexPublicationStoreV1::same_unix_segment_identity(
+                    original, &current,
+                ) {
+                    return Err(DaemonCodeIndexPublicationStoreV1::corruption(
+                        "staged sealed segment changed before immutable publication",
+                    ));
+                }
+            }
             match final_path.symlink_metadata() {
                 Ok(metadata) => {
                     if !metadata.file_type().is_file()
