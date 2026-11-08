@@ -29,6 +29,21 @@ py_test(
 )
 
 py_test(
+    name = "qualification_cli_test",
+    size = "small",
+    srcs = [
+        "common.py",
+        "qualification.py",
+        "run_http.py",
+        "score.py",
+        "test_qualification.py",
+        "test_qualification_cli.py",
+    ],
+    imports = ["."],
+    main = "test_qualification_cli.py",
+)
+
+py_test(
     name = "scoring_test",
     size = "small",
     srcs = [

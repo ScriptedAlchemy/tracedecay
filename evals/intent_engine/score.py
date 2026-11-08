@@ -319,6 +319,12 @@ if __name__ == "__main__":
         report = qualified_report(result, manifest, manifest_sha, noul_questions(), dataset_bytes)
         publish_summary(os.path.join(here, "qualification_summary.json"), report)
         print(json.dumps(report, indent=2, allow_nan=False))
+        # A completed evaluation is not necessarily a qualified model. Keep
+        # the measurements available while failing the calling automation.
+        if not report["qualified_against_frozen_tolerances"]:
+            failed = ", ".join(name for name, passed in report["checks"].items() if not passed)
+            print(f"qualification failed frozen checks: {failed}", file=sys.stderr)
+            sys.exit(1)
         sys.exit(0)
     fixed = json.load(open(os.path.join(here, "fixed_thresholds.json"))) if os.path.exists(os.path.join(here, "fixed_thresholds.json")) else None
     summary = {}; allres = {}
@@ -326,7 +332,7 @@ if __name__ == "__main__":
         res = json.load(open(f))
         if (isinstance(res.get("experiment"), dict)
                 and "qualification_manifest_sha256" in res["experiment"]):
-            raise ValueError("held-out results require --qualified MANIFEST RESULT; refuse in-sample scoring")
+            raise ValueError("held-out results require --qualified MANIFEST DATASET RESULT; refuse in-sample scoring")
         if res["config"] in allres:
             raise ValueError("duplicate configuration %r in result files" % res["config"])
         allres[res["config"]] = res
