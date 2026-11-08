@@ -230,7 +230,9 @@ fn assert_temp_integrity_and_reclamation(temp_store: i64) {
         .expect("release unused scratch without deleting durable data");
     collect_with_cross_thread_frees();
     assert_rows(&connection, "main.durable");
-    connection.close().expect("close the owning SQLite connection");
+    connection
+        .close()
+        .expect("close the owning SQLite connection");
     #[cfg(target_os = "linux")]
     sqlite_spills::assert_reclaimed(&temp_files);
 
@@ -301,9 +303,7 @@ mod sqlite_spills {
             if !target
                 .file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| {
-                    name.starts_with("etilqs_") && name.ends_with(" (deleted)")
-                })
+                .is_some_and(|name| name.starts_with("etilqs_") && name.ends_with(" (deleted)"))
             {
                 continue;
             }

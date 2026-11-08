@@ -3137,7 +3137,10 @@ mod activation_tests {
             )
             .await
             .unwrap();
-        assert_eq!(rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(), 0);
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            0
+        );
         drop(rows);
         let mut rows = snapshot.query("PRAGMA integrity_check", ()).await.unwrap();
         let mut integrity = Vec::new();
@@ -3146,7 +3149,10 @@ mod activation_tests {
         }
         assert_eq!(integrity, vec!["ok".to_owned()]);
         drop(rows);
-        let mut foreign_keys = snapshot.query("PRAGMA foreign_key_check", ()).await.unwrap();
+        let mut foreign_keys = snapshot
+            .query("PRAGMA foreign_key_check", ())
+            .await
+            .unwrap();
         assert!(foreign_keys.next().await.unwrap().is_none());
     }
 
