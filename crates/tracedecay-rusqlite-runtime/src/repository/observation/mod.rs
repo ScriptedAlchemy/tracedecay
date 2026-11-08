@@ -16,9 +16,9 @@ use tracedecay_store::{
     AnchoredObservationWrite, CanonicalBodyError, CursorAdvanceLedgerDisagreementV1,
     CursorAdvanceLedgerIdentityV1, LOAD_CANONICAL_BODY_SQL, ObservationCoverageReason,
     ObservationCursorAdvance, ObservationReadOperationV1, ObservationReadResultV1,
-    ProjectionRebuildProgressV1, ProjectionRebuildStateV1,
-    ProjectionSkipReason, SESSION_MESSAGE_PROJECTOR_VERSION, UPSERT_CANONICAL_BODY_SQL,
-    parse_stored_observation, slim_stored_json,
+    ProjectionRebuildProgressV1, ProjectionRebuildStateV1, ProjectionSkipReason,
+    SESSION_MESSAGE_PROJECTOR_VERSION, UPSERT_CANONICAL_BODY_SQL, parse_stored_observation,
+    slim_stored_json,
 };
 
 use crate::operation::StorageOperationError;

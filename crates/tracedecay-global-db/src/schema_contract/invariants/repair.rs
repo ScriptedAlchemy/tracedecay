@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 use tracedecay_domain::{
     DurableObservationV1, ObservationOrderingDomainV1, ObservationSourceCursorV1,
 };
-use tracedecay_store::observation::ObservationCoverageV1;
 use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION;
+use tracedecay_store::observation::ObservationCoverageV1;
 
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_rusqlite_runtime::repository::observation_cursor_authority::PRUNE_SUPERSEDED_CURSOR_ADVANCES_SQL;
