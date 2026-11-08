@@ -858,6 +858,24 @@ fn retire_sealed_directory_checked(
 /// Staging and invalid-artifact cleanup are best effort. Retiring an accepted
 /// replay instead uses the checked path, so a failed unlink cannot be reported
 /// as a completed retirement and lose its durable retry ownership.
+/// Best-effort disposal after failed adoption/reopen. Only an exact durable
+/// generation receipt authorizes removal; foreign bytes remain for diagnosis.
+fn discard_failed_sealed_adoption(
+    directory: &Path,
+    locator: &GenerationLocator,
+    expected_digest: &str,
+) {
+    if let Err(error) =
+        retire_sealed_directory_checked(directory, locator, Some(expected_digest))
+    {
+        tracing::warn!(
+            %error,
+            path = %directory.display(),
+            "failed sealed adoption left an unverified artifact for inspection"
+        );
+    }
+}
+
 fn remove_sealed_directory(directory: &Path) {
     if let Err(error) = remove_sealed_directory_checked(directory) {
         tracing::warn!(
@@ -1644,10 +1662,16 @@ impl GraphDb {
             Ok(Some(store)) => self.install_sealed_generation_store(locator, store),
             Ok(None) => Ok(()),
             Err(error @ (GraphDbError::Cancelled | GraphDbError::DeadlineExceeded)) => Err(error),
-            Err(_) => {
-                // A stale or corrupt artifact never outranks the verified
-                // staging rows; discard it so a later seal can rebuild.
-                remove_sealed_directory(&directory);
+            Err(error) => {
+                // A failed adoption does not prove this directory belongs to
+                // the generation. Preserve unknown bytes rather than removing
+                // an occupied path without a matching durable receipt.
+                discard_failed_sealed_adoption(&directory, &locator, expected.as_str());
+                tracing::warn!(
+                    %error,
+                    path = %directory.display(),
+                    "sealed adoption failed; serving falls back to staging rows"
+                );
                 Ok(())
             }
         }
@@ -1954,13 +1978,13 @@ fn build_or_open_sealed_store(
             Ok((store, staging_proof))
         }
         Ok(None) => {
-            remove_sealed_directory(&directory);
+            discard_failed_sealed_adoption(&directory, &locator, expected.as_str());
             Err(GraphDbError::unavailable(
                 "sealed generation store disappeared between install and reopen".to_owned(),
             ))
         }
         Err(error) => {
-            remove_sealed_directory(&directory);
+            discard_failed_sealed_adoption(&directory, &locator, expected.as_str());
             Err(error)
         }
     }
@@ -3060,6 +3084,54 @@ mod receipt_budget_tests {
                 std::io::ErrorKind::InvalidInput
             );
         }
+    }
+
+    #[test]
+    fn failed_adoption_cannot_discard_unverified_or_foreign_artifacts() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("graph.grafeo");
+        let root = sealed_store_root(&database);
+        let locator = GenerationLocator::new(
+            GraphProjectionIdentity::new(
+                GraphNamespace::new("test").unwrap(),
+                GraphProjectionId::new("code").unwrap(),
+            ),
+            crate::GraphGenerationId::new("generation:retirement").unwrap(),
+        );
+        let directory =
+            sealed_generation_directory(&root, &locator.physical_namespace().unwrap());
+        std::fs::create_dir_all(&directory).unwrap();
+        let name = directory.file_name().unwrap().to_str().unwrap();
+        let sentinel = directory.join("foreign-sentinel");
+        std::fs::write(&sentinel, b"preserve").unwrap();
+        let sibling = root.join("unrelated");
+        std::fs::create_dir(&sibling).unwrap();
+        std::fs::write(sibling.join("sentinel"), b"other").unwrap();
+
+        // Neither a missing nor a malformed receipt proves ownership.
+        discard_failed_sealed_adoption(&directory, &locator, "digest");
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"preserve");
+        let receipt_path = directory.join(SEALED_STORE_RECEIPT_FILE);
+        std::fs::write(&receipt_path, b"invalid receipt").unwrap();
+        discard_failed_sealed_adoption(&directory, &locator, "digest");
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"preserve");
+
+        // An otherwise recognizable receipt still cannot retire a different
+        // expected digest. The exact matching receipt allows cleanup.
+        std::fs::write(
+            &receipt_path,
+            receipt(
+                GraphFormatVersion::current().get(),
+                name,
+                "generation:retirement",
+            ),
+        )
+        .unwrap();
+        discard_failed_sealed_adoption(&directory, &locator, "other-digest");
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"preserve");
+        discard_failed_sealed_adoption(&directory, &locator, "digest");
+        assert!(!directory.exists(), "owned invalid artifacts can be reclaimed");
+        assert_eq!(std::fs::read(sibling.join("sentinel")).unwrap(), b"other");
     }
 
     #[test]
