@@ -657,10 +657,7 @@ mod tests {
             .unwrap();
         let mut indexes = Vec::new();
         while let Some(row) = rows.next().await.unwrap() {
-            indexes.push((
-                row.get::<String>(0).unwrap(),
-                row.get::<i64>(1).unwrap(),
-            ));
+            indexes.push((row.get::<String>(0).unwrap(), row.get::<i64>(1).unwrap()));
         }
         assert_eq!(
             indexes,
@@ -669,6 +666,36 @@ mod tests {
                 ("idx_projection_queue_retry_deadline".to_owned(), 0),
             ],
             "the registered store must retain both exact queue indexes"
+        );
+    }
+
+
+    #[asupersync::test]
+    async fn registered_projection_queue_rejects_wrong_partial_predicate() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("global.db");
+        drop(open_registered_schema(&path).await.unwrap());
+
+        // IF NOT EXISTS must not make a same-named but incompatible index
+        // look admitted. The narrower predicate cannot serve a queue-head
+        // query that includes every nonterminal retry deadline.
+        let conn = TestConnection::open(&path);
+        conn.execute_batch(
+            "DROP INDEX idx_projection_queue_active_sequence;
+             CREATE INDEX idx_projection_queue_active_sequence
+             ON projection_queue (observation_sequence, next_retry_at_micros)
+             WHERE next_retry_at_micros < 0;",
+        )
+        .await
+        .unwrap();
+        drop(conn);
+
+        let Err(error) = open_registered_schema(&path).await else {
+            panic!("a same-shaped queue index with the wrong predicate must be refused");
+        };
+        assert!(
+            error.to_string().contains("projection_queue"),
+            "schema refusal must identify the incompatible queue index: {error}"
         );
     }
 

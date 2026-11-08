@@ -151,6 +151,24 @@ fn foreign_keys_match(actual: &[ActualForeignKey], contract: &Table) -> bool {
         })
 }
 
+// SQLite's partial-index boolean does not establish which rows the index
+// covers. The queue's ordered-head plan depends on this exact terminal bound;
+// a same-named index with a narrower predicate is not interchangeable.
+fn queue_active_index_predicate_matches(definition_sql: Option<&str>) -> bool {
+    let Some(sql) = definition_sql else {
+        return false;
+    };
+    let sql = sql.to_ascii_lowercase();
+    let Some((_, predicate)) = sql.rsplit_once("where") else {
+        return false;
+    };
+    let predicate = predicate
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace() && *character != ';')
+        .collect::<String>();
+    predicate == "next_retry_at_micros<9223372036854775807"
+}
+
 fn index_matches(actual: &ActualIndex, expected: &Index) -> bool {
     let expected_partial = expected.name.is_some_and(|name| {
         name.eq_ignore_ascii_case("idx_session_temporal_generations_one_active")
@@ -165,6 +183,8 @@ fn index_matches(actual: &ActualIndex, expected: &Index) -> bool {
         || !actual.origin.eq_ignore_ascii_case(expected.origin)
         || actual.partial != expected_partial
         || actual.columns.len() != expected.columns.len()
+        || (expected.name == Some("idx_projection_queue_active_sequence")
+            && !queue_active_index_predicate_matches(actual.definition_sql.as_deref()))
     {
         return false;
     }

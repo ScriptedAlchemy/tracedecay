@@ -40,6 +40,7 @@ pub(super) struct ActualIndex {
     pub(super) unique: bool,
     pub(super) origin: String,
     pub(super) partial: bool,
+    pub(super) definition_sql: Option<String>,
     pub(super) columns: Vec<ActualIndexColumn>,
 }
 
@@ -192,9 +193,12 @@ pub(super) async fn read_table_metadata(
                      JOIN pragma_index_list(requested.table_name) AS p
                  )
                  SELECT headers.table_name, headers.name, headers.\"unique\",
-                        headers.origin, headers.partial, x.cid, x.name, x.desc, x.coll
+                        headers.origin, headers.partial, x.cid, x.name, x.desc, x.coll,
+                        declared.sql
                  FROM headers
                  JOIN pragma_index_xinfo(headers.name) AS x
+                 LEFT JOIN sqlite_schema AS declared
+                   ON declared.type = 'index' AND declared.name = headers.name
                  WHERE x.key = 1
                  ORDER BY headers.table_name, headers.seq, x.seqno"
             ),
@@ -225,6 +229,9 @@ pub(super) async fn read_table_metadata(
             .get::<i64>(4)
             .map_err(|error| global_db_operation_error(OPERATION, error))?
             != 0;
+        let definition_sql = row
+            .get::<Option<String>>(9)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
         if current
             .as_ref()
             .is_some_and(|(current_table, index)| current_table != &table || index.name != name)
@@ -249,6 +256,7 @@ pub(super) async fn read_table_metadata(
                     unique,
                     origin,
                     partial,
+                    definition_sql,
                     columns: Vec::new(),
                 },
             )
