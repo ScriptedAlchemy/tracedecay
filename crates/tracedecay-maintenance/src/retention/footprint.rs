@@ -586,9 +586,8 @@ fn registered_project_reclaim_hint(entry: &ProfileFootprintEntryV1) -> Option<St
     entry.project.as_ref()?.registered_root.as_ref()?;
     let id = entry.key.strip_prefix("projects/").filter(|id| {
         id.starts_with("proj_")
-            && id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            && id.len() > "proj_".len()
+            && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
     })?;
     Some(format!(
         "; if retention stalls, LAST RESORT (DELETES project data): `tracedecay --dry-run projects forget {id}` then `tracedecay --yes projects forget {id}`"
@@ -628,20 +627,40 @@ fn entry_statement(entry: &ProfileFootprintEntryV1) -> String {
                 format_bytes(kinds.graph_replay_pool)
             )
         });
-    // Place the recovery command before the potentially long registered root
-    // so Doctor's bounded statement never truncates the actionable command.
     let reclaim = registered_project_reclaim_hint(entry).unwrap_or_default();
-    // The measured bytes and bound follow this subject. A very long physical
-    // path must not crowd those numbers out of Doctor's bounded statement.
-    let root = if !reclaim.is_empty() && root.len() > 96 {
-        " (registered root omitted from bounded diagnostic)".to_owned()
-    } else {
-        root
+    let floor = floor_note(entry.unavailable_entry_count, false);
+    let render = |root: &str, reclaim: &str| {
+        format!("{label} {}{reclaim}{root}{breakdown}{floor}", entry.key)
     };
+    let fits = |subject: &str| {
+        let statement = footprint_statement(subject, entry.bytes, entry.bound_bytes);
+        super::diagnostics::bounded_statement(&statement) == statement
+    };
+    let detailed = render(&root, &reclaim);
+    if reclaim.is_empty() || fits(&detailed) {
+        return detailed;
+    }
+    // Budget the complete rendered finding, including both commands, the
+    // deletion warning, and the measured overage. A root-length heuristic
+    // does not account for selector length, UTF-8, or the other evidence.
+    let compact = render(
+        " (registered root omitted from bounded diagnostic)",
+        &reclaim,
+    );
+    if fits(&compact) {
+        compact
+    } else {
+        // Never turn a long identity into a truncated destructive command.
+        // Keep the pressure evidence but omit an action that cannot fit whole.
+        render("", "")
+    }
+}
+
+fn footprint_statement(subject: &str, bytes: u64, bound_bytes: u64) -> String {
     format!(
-        "{label} {}{reclaim}{root}{breakdown}{}",
-        entry.key,
-        floor_note(entry.unavailable_entry_count, false)
+        "{subject}: {} of {} bound",
+        format_bytes(bytes),
+        format_bytes(bound_bytes)
     )
 }
 
@@ -668,11 +687,7 @@ fn bounded_finding(
             DoctorCoverageCompletenessV1::Complete,
         )
     };
-    let statement = format!(
-        "{subject}: {} of {} bound",
-        format_bytes(bytes),
-        format_bytes(bound_bytes)
-    );
+    let statement = footprint_statement(subject, bytes, bound_bytes);
     let reference = DoctorEvidenceReferenceV1::new(key.to_owned()).ok()?;
     let evidence = DoctorEvidenceRefV1::new(DoctorFindingFamilyV1::Storage, reference);
     let coverage = DoctorCoverageStatementV1::new(
@@ -1110,6 +1125,76 @@ mod tests {
                 .statement()
                 .contains("projects forget"),
             "within-budget stores must not be offered destructive recovery"
+        );
+    }
+
+    #[test]
+    fn reclaim_guidance_omits_unusable_project_selectors() {
+        let fixture = profile_fixture();
+        for id in [
+            "proj_".to_owned(),
+            "proj_bad;echo".to_owned(),
+            "proj_bad`id".to_owned(),
+            format!("proj_{}", "a".repeat(160)),
+        ] {
+            let key = format!("projects/{id}");
+            let store = fixture.profile.join(&key).join("tracedecay.db");
+            sized(&store, 2048);
+            let registered = BTreeMap::from([(id, fixture.live_root.clone())]);
+            let overrides = BTreeMap::from([(key.clone(), 1)]);
+            let footprint = census_profile_footprint(&fixture.profile, &registered, &overrides);
+            let observed = findings(&footprint);
+            let finding = &observed[&key];
+            assert_eq!(finding.finding().state(), DoctorEvidenceStateV1::Degraded);
+            let statement = finding.finding().coverage().statement();
+            assert!(
+                !statement.contains("projects forget"),
+                "unsafe or incomplete actions must be omitted: {statement}"
+            );
+            assert!(statement.contains(" of 1 B bound"), "{statement}");
+            assert_eq!(
+                std::fs::metadata(&store).expect("unchanged store").len(),
+                2048
+            );
+        }
+    }
+
+    #[test]
+    fn reclaim_guidance_preserves_real_identity_commands_and_large_store_evidence() {
+        let temporary = tempfile::tempdir().expect("large footprint fixture");
+        let profile = temporary.path().join("profile");
+        let id = "proj_0123456789abcdef";
+        let key = format!("projects/{id}");
+        let store = profile.join(&key).join("tracedecay.db");
+        // Sparse metadata-only input: no allocation or read of the 15 GiB body.
+        sized(&store, 15 * GIB);
+        let registered = BTreeMap::from([(id.to_owned(), "界/".repeat(100))]);
+        let footprint = census_profile_footprint(&profile, &registered, &BTreeMap::new());
+        let observed = findings(&footprint);
+        let finding = &observed[&key];
+        assert_eq!(finding.finding().state(), DoctorEvidenceStateV1::Degraded);
+        let statement = finding.finding().coverage().statement();
+        assert!(
+            statement.contains(&format!("`tracedecay --dry-run projects forget {id}`")),
+            "{statement}"
+        );
+        assert!(
+            statement.contains(&format!("`tracedecay --yes projects forget {id}`")),
+            "{statement}"
+        );
+        assert!(statement.contains("DELETES project data"), "{statement}");
+        assert!(statement.contains("registered root omitted"), "{statement}");
+        assert!(
+            statement.ends_with(&format!(
+                "{} of {} bound",
+                format_bytes(15 * GIB),
+                format_bytes(default_bound_bytes(ProfileFamilyV1::ProjectStore))
+            )),
+            "{statement}"
+        );
+        assert_eq!(
+            std::fs::metadata(&store).expect("unchanged store").len(),
+            15 * GIB
         );
     }
 
