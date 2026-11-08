@@ -238,6 +238,28 @@ fn open_root_nofollow(root_path: &Path) -> io::Result<Dir> {
     parent.open_dir_nofollow(root_name)
 }
 
+/// Install a staged generation without replacing even an empty destination
+/// directory. The final component of the sealed root and the staging entry
+/// must be real directories; a link or an occupied generation is not a
+/// recoverable staging collision.
+///
+/// The caller still owns the responsibility for the identity of the store
+/// ancestors, which this pathname API cannot establish.
+pub fn install_child_directory_noreplace_nofollow(
+    root_path: &Path,
+    staging_name: &OsStr,
+    generation_name: &OsStr,
+) -> io::Result<()> {
+    single_component(staging_name)?;
+    single_component(generation_name)?;
+    let root = open_root_nofollow(root_path)?;
+    let staging = root.open_dir_nofollow(staging_name)?;
+    // Reject a linked staging entry, then close the extra directory handle
+    // before publication for platforms that disallow renaming open children.
+    drop(staging);
+    rename_noreplace(&root, staging_name, &root, generation_name)
+}
+
 /// Remove exactly one held child directory without following a substituted
 /// sealed-root or child symlink. Missing entries are idempotent; other failures
 /// remain errors so callers can retain retry ownership.
@@ -488,6 +510,54 @@ mod tests {
 
     fn open(path: &std::path::Path) -> Dir {
         Dir::open_ambient_dir(path, ambient_authority()).expect("open test directory")
+    }
+
+    #[test]
+    fn staged_generation_install_preserves_an_occupied_empty_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sealed");
+        std::fs::create_dir(&root).unwrap();
+        let staged_name = OsStr::new(".staging-generation");
+        let installed_name = OsStr::new("generation");
+        let staged = root.join(staged_name);
+        let installed = root.join(installed_name);
+        std::fs::create_dir(&staged).unwrap();
+        std::fs::write(staged.join("sealed.json"), b"built").unwrap();
+        std::fs::create_dir(&installed).unwrap();
+
+        let result =
+            install_child_directory_noreplace_nofollow(&root, staged_name, installed_name);
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert!(installed.is_dir(), "an empty foreign target is not expendable");
+        assert_eq!(std::fs::read(staged.join("sealed.json")).unwrap(), b"built");
+
+        std::fs::remove_dir(&installed).unwrap();
+        install_child_directory_noreplace_nofollow(&root, staged_name, installed_name).unwrap();
+        assert!(!staged.exists());
+        assert_eq!(std::fs::read(installed.join("sealed.json")).unwrap(), b"built");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_generation_install_refuses_linked_root_and_staging_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let foreign = temp.path().join("foreign");
+        let real = temp.path().join("real");
+        let link = temp.path().join("link");
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(foreign.join("sentinel"), b"preserve").unwrap();
+        std::fs::create_dir(foreign.join("staged")).unwrap();
+        std::os::unix::fs::symlink(&foreign, &link).unwrap();
+        let stage = OsStr::new("staged");
+        let published = OsStr::new("installed");
+        assert!(install_child_directory_noreplace_nofollow(&link, stage, published).is_err());
+
+        std::os::unix::fs::symlink(&foreign, real.join("staged")).unwrap();
+        assert!(install_child_directory_noreplace_nofollow(&real, stage, published).is_err());
+        assert!(!foreign.join("installed").exists());
+        assert!(!real.join("installed").exists());
+        assert_eq!(std::fs::read(foreign.join("sentinel")).unwrap(), b"preserve");
     }
 
     #[test]

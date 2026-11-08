@@ -54,6 +54,7 @@ use grafeo_core::graph::compact::IncrementalCompactStoreBuilder;
 use grafeo_engine::GrafeoDB;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use tracedecay_private_fs::capability_dir::install_child_directory_noreplace_nofollow;
 use tracedecay_store::runtime::GraphRecoveredGenerationDigestV1;
 
 use crate::generation::{
@@ -1948,7 +1949,11 @@ fn build_or_open_sealed_store(
     std::fs::write(staging.join(SEALED_STORE_RECEIPT_FILE), encoded)
         .inspect_err(|_| remove_sealed_directory(&staging))
         .map_err(|error| sealed_store_io_failure("receipt write failed", error))?;
-    if let Err(error) = std::fs::rename(&staging, &directory) {
+    let artifact_name = directory
+        .file_name()
+        .ok_or_else(|| GraphDbError::unavailable("sealed artifact name missing"))?;
+    let install = install_child_directory_noreplace_nofollow(&root, staging_name, artifact_name);
+    if let Err(error) = install {
         remove_sealed_directory(&staging);
         // A concurrent seal of the same generation may have installed the
         // directory first; adopting it below keeps this path idempotent.
