@@ -1,6 +1,7 @@
 //! Project-open composition for the canonical feedback and advisory owners.
 
 use std::fmt::Write as _;
+use std::future::Future;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -151,6 +152,33 @@ struct ProjectOpenAdvisoryCycleExecutionV1 {
     feedback_cycle: Arc<FeedbackCycleRuntime>,
 }
 
+/// Local editor/hook feedback must not wait for remote refresh. The explicit
+/// advisory operation keeps its existing GitHub and CI refresh semantics.
+#[derive(Clone, Copy)]
+enum AdvisoryRemoteReadMode {
+    LocalFeedback,
+    ExplicitRefresh,
+}
+
+async fn advisory_remote_requests<DiscoverCi>(
+    mode: AdvisoryRemoteReadMode,
+    github: Option<GitHubReviewReadRequestV1>,
+    discover_ci: DiscoverCi,
+) -> (
+    Option<GitHubReviewReadRequestV1>,
+    ProductionCiFailureDiscoveryOutcomeV1,
+)
+where
+    DiscoverCi: Future<Output = ProductionCiFailureDiscoveryOutcomeV1>,
+{
+    match mode {
+        AdvisoryRemoteReadMode::LocalFeedback => {
+            (None, ProductionCiFailureDiscoveryOutcomeV1::NotConfigured)
+        }
+        AdvisoryRemoteReadMode::ExplicitRefresh => (github, discover_ci.await),
+    }
+}
+
 #[derive(Clone)]
 struct ProjectOpenFeedbackCyclePinV1 {
     revision_id: ConfigurationRevisionId,
@@ -220,6 +248,7 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
         deadline: MonotonicDeadline,
         agent_stop_gate: bool,
         expected_generation: Option<&tracedecay_domain::CodeGenerationId>,
+        remote_mode: AdvisoryRemoteReadMode,
     ) -> std::result::Result<ProjectOpenAdvisoryCycleExecutionV1, LspRuntimeFailure> {
         let pin = self.producer.feedback_cycle.read().await.clone();
         let lsp_input = pin.runtime.lsp_input();
@@ -242,7 +271,7 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
                 Some(&latest.generation().manifest().generation_id)
                     == invocation.request.input.target.generation_id.as_ref()
             });
-        self.run_cycle_with_invocation(pin, invocation, deadline, agent_stop_gate)
+        self.run_cycle_with_invocation(pin, invocation, deadline, agent_stop_gate, remote_mode)
             .await
     }
 
@@ -252,6 +281,7 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
         mut invocation: FeedbackCycleInvocation,
         deadline: MonotonicDeadline,
         agent_stop_gate: bool,
+        remote_mode: AdvisoryRemoteReadMode,
     ) -> std::result::Result<ProjectOpenAdvisoryCycleExecutionV1, LspRuntimeFailure> {
         if agent_stop_gate {
             invocation.request.input.request.trigger = FeedbackTriggerV1::AgentStopGate;
@@ -265,17 +295,34 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
             .request
             .configuration_digest
             .clone();
-        let ci = match self.ci_discovery_config.as_ref() {
-            Some(config) => {
-                discover_production_ci_failure_request_v1(
-                    &invocation.context,
-                    config,
-                    &self.feedback_scope,
-                )
-                .await
-            }
-            None => ProductionCiFailureDiscoveryOutcomeV1::NotConfigured,
-        };
+        // Construct the discovery future without polling it on editor or hook
+        // paths. A pending/denied remote provider cannot consume local feedback's
+        // deadline or cancel its independently authorized diagnostics.
+        let github_request = self.github_review_read.clone().map(
+            |(pull_request_id, operation)| GitHubReviewReadRequestV1 {
+                operation,
+                scope: self.feedback_scope.clone(),
+                pull_request_id,
+            },
+        );
+        let (github, ci) = advisory_remote_requests(
+            remote_mode,
+            github_request,
+            async {
+                match self.ci_discovery_config.as_ref() {
+                    Some(config) => {
+                        discover_production_ci_failure_request_v1(
+                            &invocation.context,
+                            config,
+                            &self.feedback_scope,
+                        )
+                        .await
+                    }
+                    None => ProductionCiFailureDiscoveryOutcomeV1::NotConfigured,
+                }
+            },
+        )
+        .await;
         let expires_at = UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000));
         let operation = daemon_operation_event_authority()
             .begin(
@@ -305,13 +352,7 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
                     },
                     AdvisoryCycleRequest {
                         feedback: invocation.request,
-                        github: self.github_review_read.clone().map(
-                            |(pull_request_id, operation)| GitHubReviewReadRequestV1 {
-                                operation,
-                                scope: self.feedback_scope.clone(),
-                                pull_request_id,
-                            },
-                        ),
+                        github,
                         ci,
                         proximity: Some(ProximityEvaluationRequestV1 {
                             scope: self.feedback_scope.clone(),
@@ -458,6 +499,7 @@ impl FeedbackCycleRuntimePort for ProjectOpenAdvisoryFeedbackCycleV1 {
                     MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
                     false,
                     None,
+                    AdvisoryRemoteReadMode::LocalFeedback,
                 )
                 .await?;
             Ok(())
@@ -549,6 +591,7 @@ impl DaemonAdvisoryCycleInvocationPort for ProjectOpenAdvisoryFeedbackCycleV1 {
                     monotonic_deadline,
                     false,
                     None,
+                    AdvisoryRemoteReadMode::ExplicitRefresh,
                 )
                 .await
                 .map_err(|failure| {
@@ -1137,6 +1180,7 @@ async fn run_production_hook_cycle(
             MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
             request.trigger == HookOrchestrationTriggerV1::Stop,
             Some(&indexed_generation.metadata().manifest().generation_id),
+            AdvisoryRemoteReadMode::LocalFeedback,
         )
         .await
     {
