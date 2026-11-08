@@ -576,6 +576,25 @@ fn floor_note(unavailable_entry_count: usize, truncated: bool) -> String {
     }
 }
 
+/// Only an enrolled project has a first-party destructive reclaim path.
+/// An unregistered directory or unrelated profile family must never be sent
+/// through `projects forget`; it only accepts registered identities.
+fn registered_project_reclaim_hint(entry: &ProfileFootprintEntryV1) -> Option<String> {
+    if entry.family != ProfileFamilyV1::ProjectStore || entry.bytes <= entry.bound_bytes {
+        return None;
+    }
+    entry.project.as_ref()?.registered_root.as_ref()?;
+    let id = entry.key.strip_prefix("projects/").filter(|id| {
+        id.starts_with("proj_")
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    })?;
+    Some(format!(
+        "; if retention stalls, LAST RESORT (DELETES project data): `tracedecay --dry-run projects forget {id}` then `tracedecay --yes projects forget {id}`"
+    ))
+}
+
 fn entry_statement(entry: &ProfileFootprintEntryV1) -> String {
     let label = match entry.family {
         ProfileFamilyV1::ProjectStore => "project store",
@@ -609,8 +628,11 @@ fn entry_statement(entry: &ProfileFootprintEntryV1) -> String {
                 format_bytes(kinds.graph_replay_pool)
             )
         });
+    // Place the recovery command before the potentially long registered root
+    // so Doctor's bounded statement never truncates the actionable command.
+    let reclaim = registered_project_reclaim_hint(entry).unwrap_or_default();
     format!(
-        "{label} {}{root}{breakdown}{}",
+        "{label} {}{reclaim}{root}{breakdown}{}",
         entry.key,
         floor_note(entry.unavailable_entry_count, false)
     )
@@ -994,6 +1016,53 @@ mod tests {
                 .coverage()
                 .statement()
                 .contains("graph container 5.9 KB, replay pool 400 B")
+        );
+    }
+
+    #[test]
+    fn overbound_project_doctor_names_a_supported_destructive_reclaim_only_for_registered_stores() {
+        let fixture = profile_fixture();
+        let overrides = BTreeMap::from([
+            ("projects/proj_live".to_owned(), 1024),
+            ("projects/proj_stray".to_owned(), 1),
+        ]);
+        let over = census_profile_footprint(&fixture.profile, &fixture.registered, &overrides);
+        let over_findings = findings(&over);
+        let live = &over_findings["projects/proj_live"];
+        assert_eq!(live.finding().state(), DoctorEvidenceStateV1::Degraded);
+        let statement = live.finding().coverage().statement();
+        assert!(statement.contains("tracedecay --dry-run projects forget proj_live"), "{statement}");
+        assert!(statement.contains("tracedecay --yes projects forget proj_live"), "{statement}");
+        assert!(statement.contains("DELETES project data"), "{statement}");
+
+        let unregistered = &over_findings["projects/proj_stray"];
+        assert_eq!(unregistered.finding().state(), DoctorEvidenceStateV1::Degraded);
+        assert!(
+            !unregistered.finding().coverage().statement().contains("projects forget"),
+            "an unregistered directory has no safe project selector"
+        );
+        assert!(
+            !over_findings["profile"]
+                .finding()
+                .coverage()
+                .statement()
+                .contains("projects forget"),
+            "a profile total does not identify a reclaimable project"
+        );
+
+        let normal = census_profile_footprint(&fixture.profile, &fixture.registered, &BTreeMap::new());
+        let healthy = findings(&normal);
+        assert_eq!(
+            healthy["projects/proj_live"].finding().state(),
+            DoctorEvidenceStateV1::HealthyCompleteCoverage
+        );
+        assert!(
+            !healthy["projects/proj_live"]
+                .finding()
+                .coverage()
+                .statement()
+                .contains("projects forget"),
+            "within-budget stores must not be offered destructive recovery"
         );
     }
 
