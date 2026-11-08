@@ -2630,9 +2630,33 @@ fn directory_stat_witness(path: &Path) -> TranscriptIngestResult<Option<Director
     }
     let changed = change_stamp(path, &metadata);
     Ok(Some(DirectoryStatWitness {
-        stat: codex_corpus_identity(path, &metadata, changed)?,
+        stat: codex_directory_stat_identity(path, &metadata, changed)?,
         settled: changed.is_settled(),
     }))
+}
+
+// An unsettled ChangeStamp has a different random sample token on *every*
+// stat, even when the directory has not changed. That token is appropriate
+// for file-content authority, but would make an unchanged hot Codex directory
+// look modified on every idle poll, restarting the whole discovery sweep.
+// For directory change detection only, retain the native change-time value
+// instead. Equality is not proof of stability while unsettled: callers still
+// compare the directory's entry-name fingerprint in that case.
+fn codex_directory_stat_identity(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    changed: ChangeStamp,
+) -> TranscriptIngestResult<[u8; 32]> {
+    let stat_change = match changed {
+        ChangeStamp::Unvouched(_) => {
+            let native_change_time = RewriteWitness::NATIVE
+                .change_time_nanos(metadata)
+                .map_or(0, |time| u128::from_le_bytes(time.to_le_bytes()));
+            ChangeStamp::Unvouched(native_change_time)
+        }
+        settled => settled,
+    };
+    codex_corpus_identity(path, metadata, stat_change)
 }
 
 fn directory_entry_fingerprint(path: &Path) -> TranscriptIngestResult<[u8; 32]> {

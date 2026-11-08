@@ -1218,6 +1218,7 @@ mod recent_first_discovery_tests {
     use serde_json::json;
     use tempfile::TempDir;
     use tracedecay_domain::ProjectId;
+    use tracedecay_private_fs::ChangeStamp;
     use tracedecay_runtime_core::native_runtime::{
         LONG_POLL, NativeTask, NativeTaskOutcome, block_on, long_native_polls,
     };
@@ -1232,7 +1233,8 @@ mod recent_first_discovery_tests {
         CodexIndexedPath, CodexReplayIndex, EXACT_HOOK_DISCOVERY_UNITS_PER_CALL,
         IDLE_FULL_VALIDATION_CYCLES, MAX_EXACT_HOOK_SESSION_REQUESTS,
         MAX_EXACT_HOOK_SOURCE_AUTHORITIES, MAX_SCAN_DEPTH, codex_directory_changed,
-        codex_directory_witness, directory_entry_fingerprint, directory_stat_witness,
+        codex_directory_stat_identity, codex_directory_witness, directory_entry_fingerprint,
+        directory_stat_witness,
         indexed_replay_pass, replay_index_entries_visited_for_test,
         reset_replay_index_entries_visited_for_test,
     };
@@ -2616,6 +2618,50 @@ mod recent_first_discovery_tests {
             rediscovered,
             "bounded idle authority must eventually validate files outside its active window"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unsettled_directory_stat_does_not_change_with_each_sample() {
+        let temp = TempDir::new().unwrap();
+        let bucket = temp.path().join(".codex/sessions/2026/11/08");
+        std::fs::create_dir_all(&bucket).unwrap();
+        std::fs::write(bucket.join("rollout-existing.jsonl"), b"{}\\n").unwrap();
+        let metadata = std::fs::metadata(&bucket).unwrap();
+
+        // A native Unvouched stamp is deliberately unique on each read.
+        // That is correct for file-content cursors, but must not invalidate
+        // the directory scan merely because the clock has not settled yet.
+        let first_sample =
+            crate::runtime::hosts::codex::codex_corpus_identity(
+                &bucket,
+                &metadata,
+                ChangeStamp::Unvouched(1),
+            )
+            .unwrap();
+        let next_sample =
+            crate::runtime::hosts::codex::codex_corpus_identity(
+                &bucket,
+                &metadata,
+                ChangeStamp::Unvouched(2),
+            )
+            .unwrap();
+        assert_ne!(first_sample, next_sample);
+
+        let first =
+            codex_directory_stat_identity(&bucket, &metadata, ChangeStamp::Unvouched(1)).unwrap();
+        let second =
+            codex_directory_stat_identity(&bucket, &metadata, ChangeStamp::Unvouched(2)).unwrap();
+        assert_eq!(
+            first, second,
+            "identical native directory metadata must survive repeated unsettled probes"
+        );
+
+        // Once the clock settles, the identity must change so that a prior
+        // coarse-window entry-name witness cannot certify an unprobed write.
+        let settled =
+            codex_directory_stat_identity(&bucket, &metadata, ChangeStamp::Settled(0)).unwrap();
+        assert_ne!(first, settled);
     }
 
     #[test]
