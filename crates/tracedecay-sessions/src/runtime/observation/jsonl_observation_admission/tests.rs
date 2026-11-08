@@ -81,6 +81,7 @@ struct SeamSpyAdmission {
     /// strictly inside its range.
     peer_covers_advance_through: Mutex<Option<u64>>,
     rewrites: Mutex<Vec<RewriteCall>>,
+    rewrite_completion_failure: Mutex<Option<HostAdmissionOutcome>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1053,6 +1054,9 @@ impl HostAdmission for SeamSpyAdmission {
             .lock()
             .unwrap()
             .push(RewriteCall::Complete(generation));
+        if let Some(failure) = self.rewrite_completion_failure.lock().unwrap().take() {
+            return Box::pin(async move { Err(failure) });
+        }
         self.inner
             .complete_source_rewrite(source, scope, generation)
     }
@@ -2014,6 +2018,84 @@ async fn unchanged_noop_does_not_skip_initialization_without_provider_opt_in() {
     ));
     assert_eq!(stored_cursor(&spy).await, original_cursor);
     assert!(spy.rewrites.lock().unwrap().is_empty());
+}
+
+/// An empty re-offer still requires a successful durable rewrite-completion
+/// check. A transient read failure must remain a typed block, not an empty
+/// success that incorrectly declares source convergence.
+#[tokio::test]
+async fn unchanged_codex_reoffer_propagates_rewrite_completion_failure() {
+    let (_temp, path, len) = rollout_fixture();
+    let spy = SeamSpyAdmission::default();
+    let initial =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("initial admission");
+    assert_eq!(initial.covered_through, len);
+    let cursor = stored_cursor(&spy).await.expect("committed source cursor");
+    let rows = spy.inner.observations().len();
+    let captures = spy.capture_count();
+    assert!(rows > 0, "the source must have real committed evidence");
+    spy.rewrites.lock().unwrap().clear();
+    *spy.rewrite_completion_failure.lock().unwrap() =
+        Some(HostAdmissionOutcome::retained_unavailable(
+            "projection_storage_retry_scheduled",
+        ));
+
+    let request = super::JsonlObservationAdmissionRequest::new(
+        "codex",
+        &path,
+        &spy,
+        crate::runtime::hosts::codex::codex_observation_source_v2(SESSION_ID).unwrap(),
+        ObservationScopeV1::Profile,
+        RetentionClass::new("test").unwrap(),
+    )
+    .with_persisted_cursor_update(super::PersistedCursorUpdate::Replace)
+    .with_skip_empty_initialization();
+    let error = super::admit_jsonl_observations(
+        request,
+        async |_| {
+            Err::<(), TranscriptIngestError>(TranscriptIngestError::InvalidFrameState {
+                provider: "codex",
+            })
+        },
+        |(), _, _, _, _, _| panic!("unchanged source cannot normalize frames"),
+    )
+    .await
+    .expect_err("failed durable rewrite check must not report convergence");
+    assert!(matches!(
+        error,
+        TranscriptIngestError::HostAdmission {
+            provider: "codex",
+            reason: "projection_storage_retry_scheduled",
+            retryable: true,
+            ..
+        }
+    ));
+    assert_eq!(stored_cursor(&spy).await, Some(cursor.clone()));
+    assert_eq!(spy.inner.observations().len(), rows);
+    assert_eq!(spy.capture_count(), captures);
+    assert_eq!(
+        spy.rewrites.lock().unwrap().as_slice(),
+        &[RewriteCall::Complete(cursor.generation())]
+    );
+
+    let retry =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("retry must recheck durable rewrite completion");
+    assert_eq!(retry.covered_through, len);
+    assert_eq!(retry.bytes_consumed, 0);
+    assert_eq!(retry.frames_persisted, 0);
+    assert_eq!(stored_cursor(&spy).await, Some(cursor.clone()));
+    assert_eq!(spy.inner.observations().len(), rows);
+    assert_eq!(
+        spy.rewrites.lock().unwrap().as_slice(),
+        &[
+            RewriteCall::Complete(cursor.generation()),
+            RewriteCall::Complete(cursor.generation()),
+        ]
+    );
 }
 
 /// A durable unchanged cursor must not pay for a second provider-scope
