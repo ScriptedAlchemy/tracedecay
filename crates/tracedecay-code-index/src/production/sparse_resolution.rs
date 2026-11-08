@@ -711,9 +711,15 @@ pub(super) fn resolve_edit(
             let parent_key = parent_key_of_path
                 .get(files[file_index].logical_path())
                 .ok_or_else(|| contract("a carried file has no parent segment"))?;
-            let repoints = parent
-                .file_evidence(*parent_key)?
-                .is_some_and(|evidence| evidence.targets_any(&edited_paths));
+            let might_repoint = parent
+                .file_evidence_descriptor(*parent_key)
+                .is_some_and(|descriptor| {
+                    descriptor.might_target_any(edited_paths.iter().copied())
+                });
+            let repoints = might_repoint
+                && parent
+                    .file_evidence(*parent_key)?
+                    .is_some_and(|evidence| evidence.targets_any(&edited_paths));
             if repoints {
                 files[file_index].binding()?;
             }

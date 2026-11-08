@@ -142,6 +142,53 @@ pub(super) struct PartitionedFileEvidenceDescriptorV1 {
     /// that carries the file knows to reseal it with identity lineage.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) explicit_lineage: bool,
+    /// Negative edge-target filter; absent on an older seal means read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) target_filter: Option<EvidenceTargetFilterV1>,
+}
+
+/// Four independent path-hash probes. False positives decode evidence as
+/// before; false negatives would suppress required incoming-edge repoints.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub(super) struct EvidenceTargetFilterV1([u64; 4]);
+
+impl EvidenceTargetFilterV1 {
+    fn path_bits(path: &str) -> [usize; 4] {
+        let digest = Sha256::digest(path.as_bytes());
+        std::array::from_fn(|probe| {
+            usize::from(u16::from_be_bytes([digest[probe * 2], digest[probe * 2 + 1]]))
+                % 256
+        })
+    }
+
+    fn from_paths<'a>(paths: impl Iterator<Item = &'a str>) -> Self {
+        let mut bits = [0_u64; 4];
+        for path in paths {
+            for bit in Self::path_bits(path) {
+                bits[bit / 64] |= 1_u64 << (bit % 64);
+            }
+        }
+        Self(bits)
+    }
+
+    fn might_contain(&self, path: &str) -> bool {
+        Self::path_bits(path)
+            .into_iter()
+            .all(|bit| self.0[bit / 64] & (1_u64 << (bit % 64)) != 0)
+    }
+}
+
+impl PartitionedFileEvidenceDescriptorV1 {
+    pub(super) fn might_target_any<'a>(
+        &self,
+        mut paths: impl Iterator<Item = &'a str>,
+    ) -> bool {
+        match &self.target_filter {
+            Some(filter) => paths.any(|path| filter.might_contain(path)),
+            None => true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1724,6 +1771,7 @@ pub(super) fn encode_file_evidence_segment_charged(
         })?,
         decoded_size_bytes,
         explicit_lineage: evidence.has_explicit_lineage(),
+        target_filter: Some(EvidenceTargetFilterV1::from_paths(evidence.target_paths())),
     };
     Ok((descriptor, bytes))
 }
@@ -1748,7 +1796,12 @@ pub(super) fn decode_file_evidence_segment(
                 "sealed file evidence decoding failed: {error}"
             ))
         })?;
-    if evidence.has_explicit_lineage() != descriptor.explicit_lineage || evidence.is_empty() {
+    if evidence.has_explicit_lineage() != descriptor.explicit_lineage
+        || evidence.is_empty()
+        || descriptor.target_filter.as_ref().is_some_and(|filter| {
+            *filter != EvidenceTargetFilterV1::from_paths(evidence.target_paths())
+        })
+    {
         return Err(CodeIndexProductionErrorV1::Contract(
             "sealed file evidence does not match its descriptor".to_owned(),
         ));
