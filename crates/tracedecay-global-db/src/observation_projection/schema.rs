@@ -669,7 +669,6 @@ mod tests {
         );
     }
 
-
     #[asupersync::test]
     async fn registered_projection_queue_rejects_wrong_partial_predicate() {
         let temp = TempDir::new().unwrap();
