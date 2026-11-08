@@ -192,7 +192,8 @@ impl McpServer {
             // Preserve the activity's raw input size after failure, but never
             // credit a token delta that the project store could not commit.
             let committed_saved_tokens = if let Some((tokens_saved, sink)) = persist {
-                if commit_token_savings(&cg, tokens_saved.as_deref(), sink, net_saved_tokens).await {
+                if commit_token_savings(&cg, tokens_saved.as_deref(), sink, net_saved_tokens).await
+                {
                     net_saved_tokens
                 } else {
                     0
@@ -660,7 +661,10 @@ mod tests {
             assert_eq!(entry.before, 20);
             assert_eq!(entry.tool_name, "tracedecay_search");
         }
-        assert_eq!(server.cg_snapshot().await.get_tokens_saved().await.unwrap(), 7);
+        assert_eq!(
+            server.cg_snapshot().await.get_tokens_saved().await.unwrap(),
+            7
+        );
 
         // A real committed maximum forces the next recorder's checked-add
         // refusal, without modifying production code or faking an error.
@@ -690,7 +694,12 @@ mod tests {
             u64::MAX
         );
         assert_eq!(
-            server.cg_snapshot().await.get_local_counter().await.unwrap(),
+            server
+                .cg_snapshot()
+                .await
+                .get_local_counter()
+                .await
+                .unwrap(),
             u64::MAX,
             "the refused delta must not change the resettable counter"
         );
