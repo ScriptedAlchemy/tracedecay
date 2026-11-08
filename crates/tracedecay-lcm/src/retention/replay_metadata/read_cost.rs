@@ -62,8 +62,7 @@ async fn oversized_rows_skip_payload_io() {
         "active_replay": {"role": "assistant", "content": small},
         "ingest_protection": {"sanitization_receipt": sanitized.receipt()}
     });
-    let metadata =
-        raw::resanitize_stored_provider_metadata_json(&metadata.to_string()).unwrap();
+    let metadata = raw::resanitize_stored_provider_metadata_json(&metadata.to_string()).unwrap();
     let large = "x".repeat(2 * MAX_BATCH_BYTES as usize);
     let padded = format!("{metadata}{}", " ".repeat(2 * MAX_BATCH_BYTES as usize));
     let large_hash = projected_content_hash(&large);
