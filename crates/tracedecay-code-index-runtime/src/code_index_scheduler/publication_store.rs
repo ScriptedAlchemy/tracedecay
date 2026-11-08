@@ -2040,7 +2040,18 @@ impl DaemonCodeIndexPublicationStoreV1 {
         // On Unix the pathname/opened inode and change-time identity can be
         // compared without Handle::from_path (another endpoint-scanned open).
         #[cfg(unix)]
-        let same_identity = Self::same_unix_segment_identity(&path_metadata, &file_metadata);
+        let same_identity = {
+            // Also re-stat the pathname after opening. Comparing just the
+            // pre-open path and fd would miss a replacement after open, while
+            // Handle::from_path would require another endpoint-scanned open.
+            let path_after_open = path.symlink_metadata().map_err(|error| {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation segment pathname cannot be rechecked: {error}"
+                ))
+            })?;
+            Self::same_unix_segment_identity(&path_metadata, &file_metadata)
+                && Self::same_unix_segment_identity(&path_after_open, &file_metadata)
+        };
         #[cfg(not(unix))]
         let same_identity = {
             let file_identity = Handle::from_file(file.try_clone().map_err(|error| {
@@ -2147,7 +2158,14 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "staged sealed segment metadata cannot be read: {error}"
             ))
         })?;
-        if !Self::same_unix_segment_identity(&named, &opened) {
+        let named_after_open = path.symlink_metadata().map_err(|error| {
+            CodeIndexProductionErrorV1::Contract(format!(
+                "staged sealed segment pathname cannot be rechecked: {error}"
+            ))
+        })?;
+        if !Self::same_unix_segment_identity(&named, &opened)
+            || !Self::same_unix_segment_identity(&named_after_open, &opened)
+        {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "staged sealed segment was replaced while opening".to_owned(),
             ));
