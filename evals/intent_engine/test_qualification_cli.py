@@ -68,6 +68,12 @@ class QualificationCliTests(unittest.TestCase):
              lambda r: r["rows"][0].update(dropped=None)),
             ("truncated_input", "untruncated_input_evidence",
              lambda r: r["rows"][0].update(dropped=1)),
+            ("unmeasured_input_tokens", "reported_input_token_budget",
+             lambda r: r["rows"][0].update(input_tokens=None)),
+            ("zero_input_tokens", "reported_input_token_budget",
+             lambda r: r["rows"][0].update(input_tokens=0)),
+            ("over_budget_input_tokens", "reported_input_token_budget",
+             lambda r: r["rows"][0].update(input_tokens=65)),
         )
         for name, failed_check, mutate in failures:
             with self.subTest(name=name):

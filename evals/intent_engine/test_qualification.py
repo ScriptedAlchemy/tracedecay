@@ -63,6 +63,7 @@ class QualificationTests(unittest.TestCase):
             },
             "noul_temperature": None,
             "max_request_bytes": 65536,
+            "max_input_tokens": 64,
             "thresholds": {key: 0.6 for key in self.questions},
             "error_tolerances": {
                 "max_none_false_hint_rate": 0.0,
@@ -215,6 +216,7 @@ class QualificationTests(unittest.TestCase):
                 "context_needed": case["context_needed"],
                 "probs": probs,
                 "ms": 10 if case["labels"] else 20,
+                "input_tokens": 64,
                 "dropped": 0,
                 "request_sha256": hashlib.sha256(rendered).hexdigest(),
                 "request_size_bytes": len(rendered),
@@ -255,6 +257,10 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(report["latency"]["p50_ms"], 15)
         self.assertEqual(report["latency"]["p95_ms"], 20)
         self.assertEqual(report["request_size_bytes"]["frozen_limit"], 65536)
+        self.assertEqual(report["input_token_evidence"]["frozen_limit"], 64)
+        self.assertEqual(report["input_token_evidence"]["measured_cases"], 2)
+        self.assertEqual(report["input_token_evidence"]["max_reported_tokens"], 64)
+        self.assertTrue(report["checks"]["reported_input_token_budget"])
         self.assertEqual(report["request_size_bytes"]["total"], sum(
             row["request_size_bytes"] for row in result["rows"]
         ))
@@ -733,6 +739,44 @@ class QualificationTests(unittest.TestCase):
                         self.questions, self.dataset_bytes,
                     )
 
+
+    def test_frozen_token_budget_must_be_positive_integer(self):
+        for limit in (None, 0, -1, True, 1.5, "8192"):
+            with self.subTest(limit=limit):
+                manifest = copy.deepcopy(self.manifest)
+                manifest["max_input_tokens"] = limit
+                with self.assertRaisesRegex(ValueError, "positive integer max_input_tokens"):
+                    self.valid(manifest)
+
+    def test_missing_zero_or_overlimit_input_tokens_cannot_qualify(self):
+        for reported in (None, 0, 65):
+            with self.subTest(reported=reported):
+                result = self.signed_result()
+                result["rows"][0]["input_tokens"] = reported
+                report = qualification.qualified_report(
+                    result, self.manifest, self.manifest_sha,
+                    self.questions, self.dataset_bytes,
+                )
+                self.assertFalse(report["qualified_against_frozen_tolerances"])
+                self.assertFalse(report["checks"]["reported_input_token_budget"])
+                evidence = report["input_token_evidence"]
+                self.assertEqual(evidence["measured_cases"], 1 if reported in (None, 0) else 2)
+                self.assertEqual(evidence["missing_or_zero_cases"], 1 if reported in (None, 0) else 0)
+                self.assertEqual(evidence["cases_over_frozen_limit"], int(reported == 65))
+
+    def test_rehashed_tighter_token_budget_does_not_certify_old_measurements(self):
+        restricted = copy.deepcopy(self.manifest)
+        restricted["max_input_tokens"] = 63
+        restricted_sha = qualification.sha256_json(restricted)
+        result = self.signed_result()
+        result["experiment"]["qualification_manifest_sha256"] = restricted_sha
+        result["experiment_sha256"] = score.evidence_digest(result["experiment"])
+        report = qualification.qualified_report(
+            result, restricted, restricted_sha, self.questions, self.dataset_bytes,
+        )
+        self.assertFalse(report["qualified_against_frozen_tolerances"])
+        self.assertFalse(report["checks"]["reported_input_token_budget"])
+        self.assertEqual(report["input_token_evidence"]["cases_over_frozen_limit"], 2)
 
     def test_frozen_request_byte_budget_must_be_positive_integer(self):
         for budget in (None, 0, -1, True, 0.5, "4096"):

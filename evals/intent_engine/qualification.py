@@ -61,6 +61,10 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
     if (isinstance(request_limit, bool) or not isinstance(request_limit, int)
             or request_limit <= 0):
         raise ValueError("qualification requires a positive integer max_request_bytes")
+    token_limit = manifest.get("max_input_tokens")
+    if (isinstance(token_limit, bool) or not isinstance(token_limit, int)
+            or token_limit <= 0):
+        raise ValueError("qualification requires a positive integer max_input_tokens")
 
     thresholds = manifest.get("thresholds")
     if not isinstance(thresholds, dict) or set(thresholds) != set(questions):
@@ -171,6 +175,7 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
         "heldout_ids": heldout,
         "arm": arm,
         "max_request_bytes": request_limit,
+        "max_input_tokens": token_limit,
         "thresholds": thresholds,
         "noul_temperature": client_temperature,
         "error_tolerances": tolerances,
@@ -296,6 +301,18 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes):
     latency = scores["latency"]
     decisions = holdout_decision_metrics(rows, validated["thresholds"])
     tolerances = validated["error_tolerances"]
+    # A JSON byte ceiling does not bound tokenizer-specific context usage.
+    # An unknown or zero server-reported count is not proof of fitting inside
+    # the model's predeclared validated input-token budget.
+    reported_tokens = [row.get("input_tokens") for row in rows]
+    measured_tokens = [
+        value for value in reported_tokens if type(value) is int and value > 0
+    ]
+    token_evidence_complete = len(measured_tokens) == len(rows)
+    tokens_within_budget = (
+        token_evidence_complete
+        and all(value <= validated["max_input_tokens"] for value in measured_tokens)
+    )
     rates = {
         "none_false_hint_rate": fixed["none_false_hint_rate"],
         "unwanted_hint_rate": decisions["unwanted_hint_rate"],
@@ -318,6 +335,7 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes):
         "p95_ms": rates["p95_ms"] <= tolerances["max_p95_ms"],
         "untruncated_input_evidence": complete_input_evidence,
         "reported_model_consistency": reported_model_consistent,
+        "reported_input_token_budget": tokens_within_budget,
     }
     return {
         "application": validated["application"],
@@ -337,8 +355,17 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes):
             "total": sum(request_sizes),
             "frozen_limit": validated["max_request_bytes"],
         },
+        "input_token_evidence": {
+            "measured_cases": len(measured_tokens),
+            "missing_or_zero_cases": len(rows) - len(measured_tokens),
+            "cases_over_frozen_limit": sum(
+                value > validated["max_input_tokens"] for value in measured_tokens
+            ),
+            "max_reported_tokens": max(measured_tokens, default=None),
+            "frozen_limit": validated["max_input_tokens"],
+        },
         "latency": latency,
         "checks": checks,
         "qualified_against_frozen_tolerances": all(checks.values()),
-        "limits": "Reviewer and serving/model identities are self-declared, not authenticated or checkpoint-attested; task effectiveness and canonical Scout transcript parity are not proven.",
+        "limits": "Reviewer and serving/model identities and token counts are self-reported, not authenticated or checkpoint-attested; task effectiveness and canonical Scout transcript parity are not proven.",
     }

@@ -138,6 +138,13 @@ without changing the threshold manifest. Include
 a required `max_request_bytes` positive integer upper bound on the exact UTF-8
 JSON request body. This precommitted byte limit is **not** the model's
 validated 8,192-token context limit: byte counts and token counts are different.
+Also freeze a positive integer `max_input_tokens` as an independent **reported**
+input-token ceiling. For the published Kev-4B checkpoint, do not set this above
+its 8,192-token validated context range. Unlike the JSON byte cap, token usage
+is known only after the server replies; missing or zero `usage.input_tokens`,
+or any reported count above this precommitted limit, fails qualification rather
+than being counted as within budget. Reported token counts are unverified server
+telemetry, not an independently reproduced tokenization or attestation.
 The runner refuses oversized requests before any result file or model call;
 qualification independently reconstructs and verifies the byte count of every
 held-out request. Every HTTP result also records the model name *reported by
@@ -192,8 +199,9 @@ This writes `evals/intent_engine/qualification_summary.json` separately from
 the historical `summary.json`, and reports only **frozen-threshold** held-out
 false hints, all-case unwanted suggestions, missed positive cases, coverage,
 abstention, positive-case recall, reconstructed JSON request sizes
-(min/p50/max/total and the frozen byte ceiling), p50/p95 measured end-to-end HTTP latency and
-the predeclared tolerances. A passing report requires every held-out case to
+(min/p50/max/total and the frozen byte ceiling), input-token measurement
+coverage, observed peak and over-budget cases, p50/p95 measured end-to-end HTTP
+latency and the predeclared tolerances. A passing report requires every held-out case to
 report measured zero dropped state tokens and a consistent self-reported
 model name. Missing truncation telemetry is unknown, and a response measured after truncated input cannot prove the full
 frozen request was evaluated; the measurements remain in the failing report. Scoring reads the original frozen case bytes,
