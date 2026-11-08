@@ -89,12 +89,15 @@ pub(crate) struct McpToolErrorAnalyticsRequest<'a> {
 /// Commits a response delta even when startup could not read the display
 /// baseline. The optional cache and global projection consume committed data;
 /// neither can suppress the authoritative project-store write.
+/// Whether the canonical project-store counter committed. A failed optional
+/// global projection cannot undo the local commit; the live monitor credits
+/// only this durable outcome, not the response's optimistic estimate.
 pub(super) async fn commit_token_savings(
     cg: &TraceDecay,
     tokens_saved: Option<&AtomicU64>,
     sink: LedgerSink,
     delta: u64,
-) {
+) -> bool {
     match cg.record_token_savings(delta).await {
         Ok(committed_total) => {
             // Two completions may resume in reverse order after their commits.
@@ -112,6 +115,7 @@ pub(super) async fn commit_token_savings(
                     "background token-accounting projection failed"
                 );
             }
+            true
         }
         Err(error) => {
             tracing::warn!(
@@ -119,6 +123,7 @@ pub(super) async fn commit_token_savings(
                 %error,
                 "background token-accounting commit failed"
             );
+            false
         }
     }
 }
@@ -183,9 +188,18 @@ impl McpServer {
             .map(|profile| profile.data_dir().to_path_buf());
         let tool_name = tool_name.to_owned();
         self.spawn_observed_ledger_write(async move {
-            if let Some((tokens_saved, sink)) = persist {
-                commit_token_savings(&cg, tokens_saved.as_deref(), sink, net_saved_tokens).await;
-            }
+            // The monitor is an activity feed, not a second savings authority.
+            // Preserve the activity's raw input size after failure, but never
+            // credit a token delta that the project store could not commit.
+            let committed_saved_tokens = if let Some((tokens_saved, sink)) = persist {
+                if commit_token_savings(&cg, tokens_saved.as_deref(), sink, net_saved_tokens).await {
+                    net_saved_tokens
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
             // The monitor entry opens, locks, and mmaps a file; keep that
             // off the async workers.
             // A server without an owning profile has no monitor ring.
@@ -199,7 +213,7 @@ impl McpServer {
                         &monitor_project_root,
                         "tracedecay",
                         &tool_name,
-                        net_saved_tokens,
+                        committed_saved_tokens,
                         raw_file_tokens,
                     );
                 });
@@ -612,6 +626,75 @@ mod tests {
         let reopened = authority.reopen_project_graph(&project_root).await;
         assert_eq!(reopened.get_tokens_saved().await.unwrap(), 35);
         assert_eq!(reopened.get_local_counter().await.unwrap(), 35);
+    }
+
+    #[tokio::test]
+    async fn live_monitor_reports_only_committed_token_savings() {
+        let (cg, _project, authority) =
+            super::super::writer_test_support::init_indexed_repo().await;
+        let project_root = cg.project_root().to_path_buf();
+        let server = super::super::McpServer::new_with_context(
+            super::super::writer_test_support::registered_context(cg, &authority),
+        )
+        .await;
+        let monitor_dir = server
+            .owner_profile()
+            .expect("fixture has an isolated owner profile")
+            .data_dir()
+            .to_path_buf();
+
+        server.spawn_token_accounting_persist(
+            server.cg_snapshot().await,
+            &project_root,
+            "tracedecay_search",
+            7,
+            20,
+        );
+        server.ledger_writes_settled().await;
+        {
+            let ring = tracedecay_session_memory::monitor_ring::MmapReader::open_at(&monitor_dir)
+                .expect("committed call created monitor");
+            assert_eq!(ring.write_idx(), 1);
+            let entry = ring.entry(0).expect("committed response entry");
+            assert_eq!(entry.delta, 7);
+            assert_eq!(entry.before, 20);
+            assert_eq!(entry.tool_name, "tracedecay_search");
+        }
+        assert_eq!(server.cg_snapshot().await.get_tokens_saved().await.unwrap(), 7);
+
+        // A real committed maximum forces the next recorder's checked-add
+        // refusal, without modifying production code or faking an error.
+        server
+            .cg_snapshot()
+            .await
+            .record_token_savings(u64::MAX - 7)
+            .await
+            .expect("seed a durable lifetime overflow boundary");
+        server.spawn_token_accounting_persist(
+            server.cg_snapshot().await,
+            &project_root,
+            "tracedecay_search",
+            1,
+            30,
+        );
+        server.ledger_writes_settled().await;
+        let ring = tracedecay_session_memory::monitor_ring::MmapReader::open_at(&monitor_dir)
+            .expect("failed accounting still records activity");
+        assert_eq!(ring.write_idx(), 2);
+        let entry = ring.entry(1).expect("failed response activity entry");
+        assert_eq!(entry.delta, 0, "uncommitted savings must not be credited");
+        assert_eq!(entry.before, 30, "raw tool activity remains observable");
+        assert_eq!(entry.tool_name, "tracedecay_search");
+        assert_eq!(
+            server.cg_snapshot().await.get_tokens_saved().await.unwrap(),
+            u64::MAX
+        );
+        assert_eq!(
+            server.cg_snapshot().await.get_local_counter().await.unwrap(),
+            u64::MAX,
+            "the refused delta must not change the resettable counter"
+        );
+        server.shutdown_background_tasks().await;
     }
 
     #[tokio::test]
