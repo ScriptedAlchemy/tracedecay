@@ -7,7 +7,8 @@ use tracedecay_project::project::TraceDecay;
 use tracedecay_contracts::code_index_freshness::{
     CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
     CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1, CodeIndexBuildProgressV1,
-    CodeIndexNativeGraphPhaseV1, CodeIndexReadinessWaitOutcomeV1, CodeIndexStalenessStateV1,
+    CodeIndexNativeGraphPhaseV1, CodeIndexPresealWorkPhaseV1, CodeIndexReadinessWaitOutcomeV1,
+    CodeIndexStalenessStateV1,
     CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_contracts::graph_tool::GraphToolResultV1;
@@ -509,9 +510,21 @@ impl FirstGenerationWorkMarker {
             {
                 return None;
             }
-            if graph.last_progress_micros.is_some() {
-                return Some(Self::native_graph(graph));
+            // Starting the native attempt proves only that there is an owner,
+            // not that it has written any rows. A silent initial window must
+            // be timed from the first status read, not treated as unknown
+            // forever or credited with an invented progress timestamp.
+            // Continue using real text commits if they are advancing
+            // concurrently before the graph reports its first boundary.
+            if graph.last_progress_micros.is_none()
+                && let Some(progress) = worktree
+                    .progress
+                    .as_ref()
+                    .filter(|progress| progress.phase == CodeIndexBuildPhaseV1::BulkCommit)
+            {
+                return Some(Self::text(progress));
             }
+            return Some(Self::native_graph(graph));
         }
         if let Some(progress) = &worktree.progress {
             match progress.phase {
@@ -612,14 +625,17 @@ impl FirstGenerationWorkMarker {
                     ..
                 },
             ) => {
-                use tracedecay_contracts::code_index_freshness::CodeIndexPresealWorkPhaseV1::{
-                    Capture, ParseEvidence,
-                };
                 if (owner, epoch) <= (prior_owner, prior_epoch) {
                     return None;
                 }
                 if owner == prior_owner {
-                    if matches!((prior_phase, phase), (ParseEvidence, Capture))
+                    if matches!(
+                        (prior_phase, phase),
+                        (
+                            CodeIndexPresealWorkPhaseV1::ParseEvidence,
+                            CodeIndexPresealWorkPhaseV1::Capture
+                        )
+                    )
                         || (phase == prior_phase && completed < prior_completed)
                     {
                         return None;
@@ -1424,6 +1440,98 @@ mod daemon_precondition_tests {
         assert_eq!(reads, 5, "only the reached proof ends a progressing wait");
     }
 
+    fn native_graph_without_writes() -> CodeIndexWorktreeFreshnessV1 {
+        let mut worktree = building(true);
+        worktree.progress = Some(CodeIndexBuildProgressV1 {
+            phase: CodeIndexBuildPhaseV1::GraphPublication,
+            ..progress(6_136, None)
+        });
+        worktree.native_graph_progress = Some(
+            tracedecay_contracts::code_index_freshness::CodeIndexNativeGraphProgressV1 {
+                generation_id: "generation.v1.first".to_owned(),
+                sealed_graph_digest: "sha256:sealed".to_owned(),
+                daemon_incarnation: 3,
+                producer_incarnation: 5,
+                attempt_sequence: 1,
+                progress_epoch: 1,
+                phase: None,
+                encoded_entities: 0,
+                total_entities: None,
+                encoded_relations: 0,
+                total_relations: None,
+                committed_stage_pages: 0,
+                committed_stage_mutations: 0,
+                committed_stage_bytes: 0,
+                committed_compact_segments: 0,
+                committed_compact_bytes: 0,
+                last_progress_micros: None,
+                active: true,
+            },
+        );
+        worktree
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_loop_refuses_a_silent_native_writer_before_later_ready() {
+        let cold = native_graph_without_writes();
+        assert!(matches!(
+            super::FirstGenerationWorkMarker::of(Some(&cold)),
+            Some(super::FirstGenerationWorkMarker::NativeGraph {
+                completed: [0, 0, 0, 0, 0, 0],
+                ..
+            })
+        ));
+        let mut repeated = cold.clone();
+        repeated.native_graph_progress.as_mut().unwrap().progress_epoch += 1;
+        // A changed status epoch without a physical row or durable page
+        // must not turn the initial unreported native attempt into progress.
+        let (result, reads) = hold_over(
+            vec![
+                status(timed_out(), warming(cold)),
+                status(timed_out(), warming(repeated)),
+                ready_status(),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        assert_eq!(reads, 2, "the frozen writer must refuse before a later ready");
+        let (code, reason) = refusal(result);
+        assert_eq!(code, CODE_INDEX_READINESS_WAIT_TIMED_OUT);
+        assert!(
+            reason.contains("no observed capture, parse, text, or native graph work"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn first_native_write_advances_silence_but_parallel_text_commits_are_not_hidden() {
+        let mut cold = native_graph_without_writes();
+        let mut text = progress(30, None);
+        text.phase = CodeIndexBuildPhaseV1::BulkCommit;
+        cold.progress = Some(text);
+        assert!(matches!(
+            super::FirstGenerationWorkMarker::of(Some(&cold)),
+            Some(super::FirstGenerationWorkMarker::CommittedText { .. })
+        ));
+
+        cold.progress.as_mut().unwrap().phase = CodeIndexBuildPhaseV1::GraphPublication;
+        let start = Instant::now();
+        let mut window = super::FirstGenerationProgressWindow::new(Duration::from_secs(120));
+        let before = super::FirstGenerationWorkMarker::of(Some(&cold));
+        assert!(!window.observe(before.clone(), start));
+        assert!(!window.observe(before, start + Duration::from_secs(119)));
+        let graph = cold.native_graph_progress.as_mut().unwrap();
+        graph.encoded_entities = 512;
+        graph.total_entities = Some(1024);
+        graph.total_relations = Some(4096);
+        graph.phase = Some(CodeIndexNativeGraphPhaseV1::CompactEncoding);
+        graph.progress_epoch += 1;
+        graph.last_progress_micros = Some(10);
+        let progressed = super::FirstGenerationWorkMarker::of(Some(&cold));
+        assert!(!window.observe(progressed.clone(), start + Duration::from_secs(119)));
+        assert!(!window.observe(progressed.clone(), start + Duration::from_secs(238)));
+        assert!(window.observe(progressed, start + Duration::from_secs(239)));
+    }
 
     #[test]
     fn native_graph_real_counts_refresh_wait_but_duplicate_epochs_and_stale_owners_do_not() {
