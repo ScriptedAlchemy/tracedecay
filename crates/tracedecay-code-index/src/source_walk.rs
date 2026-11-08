@@ -115,6 +115,52 @@ fn nested_repository_marker(directory: &Path) -> std::io::Result<bool> {
     }
 }
 
+/// Default-deny all gitlinks in the parent's Git index even when a child
+/// checkout's .git marker has been removed. A gitlink is a repository boundary,
+/// not an ordinary directory the live source walker can authenticate.
+/// This is deny-only; it never enables submodule admission.
+fn parent_gitlink_paths(project_root: &Path) -> Result<BTreeSet<String>, SourceWalkError> {
+    let marker = project_root.join(".git");
+    let repository = match tracedecay_runtime_core::git_open::open(project_root) {
+        Ok(repository) => repository,
+        Err(error) => {
+            // Non-Git projects still support source walks. An initialized
+            // checkout whose Git authority is unreadable must fail closed.
+            if marker.is_file() || marker.join("HEAD").is_file() {
+                return Err(SourceWalkError {
+                    glob: String::new(),
+                    message: format!("cannot inspect parent Git boundaries: {error}"),
+                });
+            }
+            return Ok(BTreeSet::new());
+        }
+    };
+    if repository.workdir().and_then(|workdir| workdir.canonicalize().ok())
+        != project_root.canonicalize().ok()
+    {
+        return Err(SourceWalkError {
+            glob: String::new(),
+            message: "source walk root is not the opened Git worktree".to_owned(),
+        });
+    }
+    let index = repository.index_or_empty().map_err(|error| SourceWalkError {
+        glob: String::new(),
+        message: format!("cannot inspect parent Git index: {error}"),
+    })?;
+    let mut paths = BTreeSet::new();
+    for entry in index.entries() {
+        if entry.mode.is_commit() {
+            let path: &[u8] = entry.path(&index).as_ref();
+            let relative = std::str::from_utf8(path).map_err(|_| SourceWalkError {
+                glob: String::new(),
+                message: "non-UTF-8 parent gitlink cannot be safely scoped".to_owned(),
+            })?;
+            paths.insert(relative.to_owned());
+        }
+    }
+    Ok(paths)
+}
+
 /// Reject a source beneath another checkout or a symlinked directory.
 /// The root's own Git metadata is exempt. This boundary is shared by
 /// interactive source walks and the indexed worktree candidate roster,
@@ -260,6 +306,7 @@ fn source_walk_inner(
     let path_glob_scope = path_glob.and_then(PathGlobScope::from_path_glob);
     let filter_root = project_root.to_path_buf();
     let path_policy = path_policy.clone();
+    let parent_gitlinks = parent_gitlink_paths(project_root)?;
 
     let mut builder = WalkBuilder::new(project_root);
     builder
@@ -318,6 +365,12 @@ fn source_walk_inner(
             // freshness, so even registered submodules remain separate
             // sources. Linked worktrees and nested clones share this boundary.
             // The project root is deliberately exempt at depth zero above.
+            if parent_gitlinks.contains(&relative) {
+                if let Some(diagnostics) = &diagnostics {
+                    diagnostics.record_skipped_nested_repository(relative);
+                }
+                return false;
+            }
             match nested_repository_marker(entry.path()) {
                 Ok(true) => {
                     if let Some(diagnostics) = &diagnostics {
@@ -668,6 +721,33 @@ mod tests {
                 "{rule}: an explicit scope cannot cross repositories"
             );
         }
+
+        // A missing child .git marker must not turn the parent's stage-0
+        // gitlink into ordinary live source under an explicit include.
+        fs::remove_file(root.join("app/.git")).expect("remove child gitdir marker");
+        assert!(root.join("app/src/feature.rs").is_file());
+        let policy = IndexPathPolicyV1::new(vec![], vec!["app/**".into()]).unwrap();
+        let (walk, diagnostics) =
+            source_walk_with_diagnostics(&root, None, &policy).expect("source walk");
+        let files = walk
+            .map(|entry| entry.expect("source entry"))
+            .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+            .map(|entry| entry.into_path())
+            .collect::<Vec<_>>();
+        assert!(
+            files.iter().all(|path| !path.starts_with(root.join("app"))),
+            "a registered gitlink stays excluded without a child marker: {files:?}"
+        );
+        assert_eq!(
+            diagnostics.skipped_nested_repositories_note().as_deref(),
+            Some("Skipped nested repositories outside parent index: \"app\"")
+        );
+        let explicitly_scoped = source_walk(&root, Some("app/**"), &policy)
+            .expect("explicit gitlink scope")
+            .map(|entry| entry.expect("source entry"))
+            .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+            .count();
+        assert_eq!(explicitly_scoped, 0);
     }
 
     #[test]
