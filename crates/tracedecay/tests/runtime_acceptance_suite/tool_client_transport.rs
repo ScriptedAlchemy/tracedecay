@@ -545,34 +545,12 @@ fn hold_stream_after_files(
     let _ = BufReader::new(stream).read_line(&mut extra);
 }
 
-fn assert_complete_json_document(result: &ChildResult) -> Value {
-    assert!(
-        !result.killed_by_harness,
-        "CLI --json hung after writing files: elapsed={:?} stdout_len={} stderr={}",
-        result.elapsed,
-        result.output.stdout.len(),
-        String::from_utf8_lossy(&result.output.stderr)
-    );
-    assert!(
-        result.output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.output.stderr)
-    );
-    serde_json::from_slice(&result.output.stdout).unwrap_or_else(|error| {
-        panic!(
-            "--json must be one complete parseable document ({error}); bytes={} head={}",
-            result.output.stdout.len(),
-            String::from_utf8_lossy(&result.output.stdout[..result.output.stdout.len().min(200)])
-        )
-    })
-}
-
 #[test]
 fn generic_tool_json_preserves_large_result_while_daemon_waits() {
     let (_home, _project, _socket_dir, home, project, socket) = fixture();
     let files = oversized_files();
     let expected = files.count;
-    let (_requests, server) = spawn_scripted_daemon(
+    let (requests, server) = spawn_scripted_daemon(
         socket.clone(),
         &home,
         &project,
@@ -581,12 +559,29 @@ fn generic_tool_json_preserves_large_result_while_daemon_waits() {
             hold_stream_after_files(stream, request, scope, files.clone());
         },
     );
-    let result = run_command_with_timeout(
-        tool_command(&home, &project, &socket, "large"),
-        CHILD_TIMEOUT,
-    );
+    let child = tool_command(&home, &project, &socket, "large")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn CLI for held response");
+    let mut child = common::TestChildProcess::new(child);
+    // Measure completion while the admitted request's connection remains open.
+    // The daemon has its own bounded acceptance window for cold CLI startup.
+    requests
+        .recv_timeout(ACCEPT_HANG_GUARD)
+        .expect("daemon received the large-result request");
+    let output = child
+        .wait_with_output(CHILD_TIMEOUT)
+        .expect("CLI must finish without waiting for daemon EOF");
     server.join().expect("join scripted daemon");
-    let envelope = assert_complete_json_document(&result);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope: Value =
+        serde_json::from_slice(&output.stdout).expect("--json must contain one complete document");
     assert_eq!(envelope["isError"], false, "{envelope}");
     assert_eq!(envelope["structuredContent"]["count"], expected);
     let files = envelope["structuredContent"]["files"]
@@ -594,9 +589,9 @@ fn generic_tool_json_preserves_large_result_while_daemon_waits() {
         .unwrap_or_else(|| panic!("held-stream --json must keep the full listing: {envelope}"));
     assert_eq!(files.len(), expected);
     assert!(
-        result.output.stdout.len() > 65_536,
+        output.stdout.len() > 65_536,
         "held-stream --json must keep the full listing above 64KiB: {}",
-        result.output.stdout.len()
+        output.stdout.len()
     );
 }
 
