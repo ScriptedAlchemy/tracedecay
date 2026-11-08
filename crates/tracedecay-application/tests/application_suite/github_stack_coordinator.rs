@@ -295,14 +295,30 @@ fn production_coordinator_materializes_all_four_states_and_exact_stack_anchors()
     assert_eq!(
         coordinator
             .observe_policy(
-                probed,
+                probed.clone(),
                 ProviderId::new("provider.github").unwrap(),
-                provider_source_binding(&scope(1), false),
+                provider_source_binding(&probed, false),
                 UtcMicros(5),
             )
             .unwrap(),
         enabled
     );
+    coordinator
+        .register_scope(&probed, GitHubStackedPullRequestPolicyV1::Disabled)
+        .unwrap();
+    let disabled = coordinator
+        .observe_policy(
+            probed.clone(),
+            ProviderId::new("provider.github").unwrap(),
+            provider_source_binding(&probed, false),
+            UtcMicros(6),
+        )
+        .unwrap();
+    assert_eq!(
+        disabled.capability.state,
+        tracedecay_domain::GitHubStackCapabilityStateV1::PrivatePreviewDisabled
+    );
+    assert!(disabled.snapshot.is_none());
 }
 
 #[test]
@@ -390,10 +406,47 @@ fn mounted_provider_observation_reports_pr_tip_merge_base_and_ci_drift() {
         ),
         Err(GitHubStackCoordinatorErrorV1::InvalidProviderObservation)
     );
-    DaemonGitHubStackCoordinatorV1::default()
+    let restored = DaemonGitHubStackCoordinatorV1::default();
+    restored
         .restore_open_drift_interval(&exact_scope, &persisted)
         .unwrap();
+    assert_eq!(
+        restored.observe_policy(
+            exact_scope.clone(),
+            provider.clone(),
+            provider_source_binding(&exact_scope, false),
+            UtcMicros(1),
+        ),
+        Err(GitHubStackCoordinatorErrorV1::InvalidProviderObservation)
+    );
+    let settled = restored
+        .observe_policy(
+            exact_scope.clone(),
+            provider.clone(),
+            provider_source_binding(&exact_scope, false),
+            UtcMicros(3),
+        )
+        .unwrap();
+    assert_eq!(settled.drift_observations.len(), 1);
+    assert_eq!(settled.drift_observations[0].trace_id, persisted.trace_id);
+    assert!(
+        settled.drift_observations[0]
+            .validate(&exact_scope.scope_digest)
+            .is_ok()
+    );
 
+    // A provider completion can reach the transition lock after a newer sample.
+    // It cannot close the open intervals before their recorded starting time.
+    assert_eq!(
+        coordinator.observe_provider(
+            exact_scope.clone(),
+            provider.clone(),
+            GitHubStackProviderOutcomeV1::Enabled(changed.clone()),
+            provider_source_binding(&exact_scope, true),
+            UtcMicros(1),
+        ),
+        Err(GitHubStackCoordinatorErrorV1::InvalidProviderObservation)
+    );
     let closed = coordinator
         .observe_provider(
             exact_scope.clone(),
@@ -435,6 +488,7 @@ fn concurrent_identical_provider_publications_have_one_drift_transition() {
     let mut changed = enabled_snapshot(&exact_scope);
     changed.response_digest = digest('f');
     changed.final_target_commit_id = CommitId::new("commit.main.changed").unwrap();
+    changed.layers[0].pull_request.base_commit_id = changed.final_target_commit_id.clone();
     let barrier = Arc::new(Barrier::new(24));
     let observations = std::thread::scope(|threads| {
         let joins = (0..24)

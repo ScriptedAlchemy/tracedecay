@@ -425,11 +425,10 @@ pub(super) fn update_drift_intervals(
     Ok(observations)
 }
 
-pub(super) fn restore_open_drift_interval(
-    active: &mut Vec<DriftInterval>,
+pub(super) fn restored_open_interval(
     scope: &ResolvedScope,
     observation: &GitHubStackDriftObservationV1,
-) -> Result<(), GitHubStackCoordinatorErrorV1> {
+) -> Result<DriftInterval, GitHubStackCoordinatorErrorV1> {
     scope
         .validate()
         .map_err(|_| GitHubStackCoordinatorErrorV1::InvalidScope)?;
@@ -437,29 +436,11 @@ pub(super) fn restore_open_drift_interval(
     if observation.drift.state != IntervalStateV1::Open {
         return Err(GitHubStackCoordinatorErrorV1::InvalidProviderObservation);
     }
-    let first_observed_at = UtcMicros(observation.drift.first_observed_micros);
-    if drift_trace_id(
-        &scope.scope_digest,
-        observation.drift.kind,
-        first_observed_at,
-    )? != observation.trace_id
-    {
-        return Err(GitHubStackCoordinatorErrorV1::InvalidProviderObservation);
-    }
-    let interval = DriftInterval {
+    Ok(DriftInterval {
         kind: observation.drift.kind,
         trace_id: observation.trace_id.clone(),
-        first_observed_at,
-    };
-    if let Some(existing) = active
-        .iter_mut()
-        .find(|existing| existing.kind == interval.kind)
-    {
-        *existing = interval;
-    } else {
-        active.push(interval);
-    }
-    Ok(())
+        first_observed_at: UtcMicros(observation.drift.first_observed_micros),
+    })
 }
 
 fn push_unique<T: PartialEq>(values: &mut Vec<T>, value: T) {

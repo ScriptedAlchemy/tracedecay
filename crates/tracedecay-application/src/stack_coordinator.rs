@@ -260,24 +260,6 @@ impl DaemonGitHubStackCoordinatorV1 {
         } else {
             GitHubStackCapabilityStateV1::PrivatePreviewDisabled
         };
-        if state == GitHubStackCapabilityStateV1::Unavailable
-            && let Some(provider_observation) = self
-                .observation_states
-                .lock()
-                .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?
-                .get(&scope.scope_digest)
-                .and_then(|state| state.current.as_ref())
-                .filter(|observation| {
-                    matches!(
-                        observation.capability.state,
-                        GitHubStackCapabilityStateV1::Enabled
-                            | GitHubStackCapabilityStateV1::Degraded
-                    )
-                })
-                .cloned()
-        {
-            return Ok(provider_observation);
-        }
         let digest = canonical_sha256(&(
             "tracedecay.github-stack.policy-observation.v1",
             &scope.scope_digest,
@@ -295,7 +277,7 @@ impl DaemonGitHubStackCoordinatorV1 {
                 source_binding: &source_binding,
             },
             observed_at,
-            true,
+            state == GitHubStackCapabilityStateV1::Unavailable,
         )
     }
 
@@ -357,17 +339,24 @@ impl DaemonGitHubStackCoordinatorV1 {
         scope: &ResolvedScope,
         observation: &GitHubStackDriftObservationV1,
     ) -> Result<(), GitHubStackCoordinatorErrorV1> {
+        let interval = transition::restored_open_interval(scope, observation)?;
         let mut states = self
             .observation_states
             .lock()
             .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?;
-        // Validation is part of the transition; no persisted record is changed on refusal.
-        let state = states.entry(scope.scope_digest.clone()).or_default();
-        transition::restore_open_drift_interval(
-            &mut state.drift_intervals,
-            scope,
-            observation,
-        )
+        let active = &mut states
+            .entry(scope.scope_digest.clone())
+            .or_default()
+            .drift_intervals;
+        if let Some(existing) = active
+            .iter_mut()
+            .find(|existing| existing.kind == interval.kind)
+        {
+            *existing = interval;
+        } else {
+            active.push(interval);
+        }
+        Ok(())
     }
 
     #[tracing::instrument(name = "usecases.stack.enqueue", level = "trace", skip_all)]
@@ -722,12 +711,24 @@ impl DaemonGitHubStackCoordinatorV1 {
             && let Some(previous) = state.current.as_ref().filter(|observation| {
                 matches!(
                     observation.capability.state,
-                    GitHubStackCapabilityStateV1::Enabled
-                        | GitHubStackCapabilityStateV1::Degraded
+                    GitHubStackCapabilityStateV1::Enabled | GitHubStackCapabilityStateV1::Degraded
                 )
             })
         {
             return Ok(previous.clone());
+        }
+        // Provider responses may finish out of order. A late sample cannot
+        // replace a newer snapshot or close a restored interval before it opened.
+        if state
+            .current
+            .as_ref()
+            .is_some_and(|current| current.observed_at > observed_at)
+            || state
+                .drift_intervals
+                .iter()
+                .any(|interval| interval.first_observed_at > observed_at)
+        {
+            return Err(GitHubStackCoordinatorErrorV1::InvalidProviderObservation);
         }
         let previous = state
             .current
