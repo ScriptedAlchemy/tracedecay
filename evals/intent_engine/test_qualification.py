@@ -238,5 +238,60 @@ class QualificationTests(unittest.TestCase):
             self.assertFalse((here / "results").exists())
 
 
+    def test_frozen_manifest_cannot_reorder_a_dataset(self):
+        changed = copy.deepcopy(self.manifest)
+        changed["annotations"][0], changed["annotations"][1] = (
+            changed["annotations"][1], changed["annotations"][0]
+        )
+        with self.assertRaisesRegex(ValueError, "case ordering"):
+            self.valid(changed)
+
+    def test_changed_manifest_cannot_resume_or_spend_inference_tokens(self):
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            (here / "dataset.json").write_bytes(self.dataset_bytes)
+            manifest_path = here / "manifest.json"
+            manifest_path.write_bytes(self.manifest_bytes)
+            (here / "server.json").write_text(json.dumps({
+                "checkpoint": "pinned", "server_revision": "r1", "backend": "cpu",
+                "dtype": "float32", "temperature": 2.41,
+            }))
+            args = [
+                "--url", "http://127.0.0.1:8009/v1/systemone",
+                "--tag", "interrupted",
+                "--server-config", str(here / "server.json"),
+                "--qualification-manifest", str(manifest_path),
+                "B_noul_text",
+            ]
+            answer = {"answers": {
+                key: {"type": "noul", "noul": 0.5} for key in self.questions
+            }}
+            with patch.object(run_http, "HERE", str(here)):
+                with patch.object(run_http, "post", side_effect=[
+                    (answer, 11.0), RuntimeError("interrupted"),
+                ]) as initial:
+                    with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                        run_http.main(args)
+                    self.assertEqual(initial.call_count, 2)
+                partial = here / "results" / "interrupted_B_noul_text.json.partial"
+                frozen_bytes = partial.read_bytes()
+                self.assertEqual(len(frozen_bytes.splitlines()), 2,
+                                 "first accepted prediction must be durably resumable")
+                changed = copy.deepcopy(self.manifest)
+                changed["error_tolerances"]["max_p95_ms"] = 21.0
+                manifest_path.write_text(json.dumps(changed))
+                with patch.object(run_http, "post") as no_inference:
+                    with self.assertRaisesRegex(ValueError, "another or unrecorded experiment"):
+                        run_http.main(args)
+                    no_inference.assert_not_called()
+                self.assertEqual(partial.read_bytes(), frozen_bytes)
+                manifest_path.write_bytes(self.manifest_bytes)
+                with patch.object(run_http, "post", return_value=(answer, 12.0)) as remaining:
+                    run_http.main(args)
+                    self.assertEqual(remaining.call_count, 1)
+            completed = here / "results" / "interrupted_B_noul_text.json"
+            self.assertEqual(len(json.loads(completed.read_text())["rows"]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
