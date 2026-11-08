@@ -977,9 +977,7 @@ fn retained_generation_read_refuses_pre_and_post_io_interruptions_without_leakin
         if deadline {
             assert!(matches!(
                 error,
-                CodeIndexProductionErrorV1::Interrupted(
-                    CodeIndexInterruptionV1::DeadlineExceeded
-                )
+                CodeIndexProductionErrorV1::Interrupted(CodeIndexInterruptionV1::DeadlineExceeded)
             ));
         } else {
             assert!(matches!(
