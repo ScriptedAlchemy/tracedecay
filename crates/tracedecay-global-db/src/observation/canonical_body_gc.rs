@@ -352,10 +352,27 @@ async fn collect_candidates(
         .execute(
             "DELETE FROM canonical_body_gc_candidates
              WHERE content_hash IN (SELECT value FROM json_each(?1))",
-            params![hashes],
+            params![hashes.as_str()],
         )
         .await
         .map_err(db_error)?;
+    // A DELETE row count is not a durable discharge receipt: an AFTER DELETE
+    // trigger may have re-enqueued the very same candidates. Refuse the page
+    // under this writer instead of recommitting an identical 48-row batch.
+    let mut remaining = conn
+        .query(
+            "SELECT 1 FROM canonical_body_gc_candidates
+             WHERE content_hash IN (SELECT value FROM json_each(?1)) LIMIT 1",
+            params![hashes.as_str()],
+        )
+        .await
+        .map_err(db_error)?;
+    if remaining.next().await.map_err(db_error)?.is_some() {
+        return Err(integrity_error(
+            "canonical body candidate discharge was not persisted",
+        ));
+    }
+    drop(remaining);
     let discharged = explicitly_discharged
         .checked_add(report.bodies_deleted)
         .ok_or_else(|| integrity_error("canonical body candidate discharge overflow"))?;

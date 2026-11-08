@@ -92,6 +92,15 @@ async fn body_exists(conn: &(impl QueryExecutor + ?Sized), hash: &str) -> bool {
     .is_some()
 }
 
+
+async fn candidate_count(conn: &(impl QueryExecutor + ?Sized)) -> i64 {
+    let mut rows = conn
+        .query("SELECT COUNT(*) FROM canonical_body_gc_candidates", ())
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
+}
+
 fn observation(hash: &str) -> String {
     serde_json::json!({
         "payload": {"text": null},
@@ -634,6 +643,90 @@ async fn rewritten_bootstrap_checkpoint_refuses_commit_and_recovers_across_48_ro
     let idle = store.tick(48).await;
     assert!(idle.bootstrap_complete);
     assert_eq!(idle.roots_scanned, 0);
+    assert_eq!(idle.bodies_scanned, 0);
+    assert!(!idle.has_more);
+}
+
+#[asupersync::test]
+async fn reinserted_candidate_page_refuses_false_discharge_and_recovers() {
+    let store = Store::open().await;
+    for ordinal in 0..52 {
+        let body = StoredCanonicalBody::pack(format!("retained {ordinal}").as_bytes()).unwrap();
+        insert_body(store.conn(), &body).await;
+        store
+            .conn()
+            .execute(
+                "INSERT INTO lcm_raw_messages(storage_kind, content, content_hash)
+                 VALUES ('inline', NULL, ?1)",
+                params![body.content_hash.as_str()],
+            )
+            .await
+            .unwrap();
+    }
+    store.install().await;
+    let mut bootstrap_finished = false;
+    for _ in 0..16 {
+        if store.tick(48).await.bootstrap_complete {
+            bootstrap_finished = true;
+            break;
+        }
+    }
+    assert!(bootstrap_finished, "candidate collection must become eligible");
+    assert_eq!(candidate_count(store.conn()).await, 52);
+
+    // The explicit DELETE returns 48 affected rows even when an AFTER DELETE
+    // trigger restores all of them. Only a same-transaction readback catches
+    // the false progress that otherwise repeats this exact 48-row page.
+    store
+        .conn()
+        .execute_batch(
+            "CREATE TRIGGER keep_candidates_after_delete
+             AFTER DELETE ON canonical_body_gc_candidates BEGIN
+                 INSERT OR IGNORE INTO canonical_body_gc_candidates(content_hash)
+                 VALUES (OLD.content_hash);
+             END",
+        )
+        .await
+        .unwrap();
+    let transaction = store
+        .conn()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .unwrap();
+    let error = step(&transaction, 48).await.unwrap_err();
+    assert!(
+        error.to_string().contains("candidate discharge was not persisted"),
+        "an apparent 48-row DELETE must not count as committed progress: {error}"
+    );
+    assert_eq!(
+        candidate_count(&transaction).await,
+        52,
+        "the trigger left every candidate in the still-open transaction"
+    );
+    transaction.rollback().await.unwrap();
+    assert_eq!(
+        candidate_count(store.conn()).await,
+        52,
+        "the refused page must leave all candidate identities durable"
+    );
+    store
+        .conn()
+        .execute_batch("DROP TRIGGER keep_candidates_after_delete")
+        .await
+        .unwrap();
+
+    let first = store.tick(48).await;
+    assert_eq!(first.bodies_scanned, 48);
+    assert_eq!(first.candidates_discharged, 48);
+    assert_eq!(first.bodies_deleted, 0);
+    assert!(first.has_more);
+    let second = store.tick(48).await;
+    assert_eq!(second.bodies_scanned, 4);
+    assert_eq!(second.candidates_discharged, 4);
+    assert_eq!(second.bodies_deleted, 0);
+    assert!(!second.has_more);
+    assert_eq!(candidate_count(store.conn()).await, 0);
+    let idle = store.tick(48).await;
     assert_eq!(idle.bodies_scanned, 0);
     assert!(!idle.has_more);
 }
