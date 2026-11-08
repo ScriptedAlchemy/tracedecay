@@ -220,6 +220,26 @@ pub async fn project_queued_observations(
     if max == 0 {
         return Ok(ProjectionDrainBatch::default());
     }
+    // An idle drain needs no writer lease. This constant-work existence probe
+    // deliberately does not scan for a ready head: large queues of terminal
+    // collisions must not add a second ordered scan to active write windows.
+    // The transaction below remains the authority for concurrent admissions
+    // and enforces ordering after taking the writer lease.
+    {
+        let reader = database.read_connection();
+        let mut rows = reader
+            .query("SELECT 1 FROM projection_queue LIMIT 1", ())
+            .await
+            .map_err(|error| storage("probe empty projection queue", error))?;
+        if rows
+            .next()
+            .await
+            .map_err(|error| storage("probe empty projection queue", error))?
+            .is_none()
+        {
+            return Ok(ProjectionDrainBatch::default());
+        }
+    }
     let transaction = database
         .begin_write_transaction("begin projection window transaction")
         .await

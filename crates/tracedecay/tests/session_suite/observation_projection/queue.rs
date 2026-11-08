@@ -725,3 +725,46 @@ async fn batched_projection_resumes_after_restart_without_replaying_parked_or_de
         );
     }
 }
+
+#[tokio::test]
+async fn empty_projection_drain_does_not_wait_for_an_unrelated_writer() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap();
+
+    // A separate connection holds SQLite's writer reservation. An idle
+    // projection pass must still finish using only the read connection.
+    let writer = rusqlite::Connection::open(database_path).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let empty = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        store.project_queued_observations(32),
+    )
+    .await
+    .expect("an empty projection pass must not acquire the writer")
+    .unwrap()
+    .unwrap();
+    assert!(empty.items.is_empty());
+    assert!(!empty.has_more);
+    writer.execute_batch("ROLLBACK").unwrap();
+
+    // Skipping the empty writer transaction must never suppress subsequent
+    // admissions after the external writer releases its reservation.
+    let new_record = observation(
+        "session-empty-drain",
+        0,
+        100,
+        "receipt.empty-drain",
+        conversational_payload("message-empty-drain", "post-idle admission"),
+    );
+    persist(&store, new_record, None).await;
+    let after = store.project_queued_observations(32).await.unwrap().unwrap();
+    assert_eq!(after.items.len(), 1);
+    assert!(!after.has_more);
+    assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 1);
+}
