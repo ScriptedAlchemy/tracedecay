@@ -8,7 +8,7 @@
 //! `Unsupported`/`Absent`/`Denied`/`Unknown` read, never a fabricated healthy
 //! result, and partial coverage carries its real reason.
 //!
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracedecay_application::advisory::github_runtime::{
@@ -44,6 +44,9 @@ use tracedecay_domain::CodeGenerationId;
 use tracedecay_global_db::{GlobalDbNativeIntegrationStore, RegisteredGlobalDb};
 
 use crate::DaemonFeedbackRuntimeRegistrar;
+use tracedecay_maintenance::retention::footprint::{
+    ProfileFootprintV1, ProjectRootStateV1, census_profile_footprint, census_sqlite_temp_spill,
+};
 use tracedecay_maintenance::telemetry::GuardedStoreTelemetryPort;
 use tracedecay_session_temporal_store::SessionTemporalAccess;
 
@@ -619,14 +622,10 @@ fn soft_budget_findings(
 /// proven registration state, but file sizes and their bounds do not.
 fn profile_footprint_from_registered_roots(
     profile_root: &Path,
-    registered_roots: Option<&std::collections::BTreeMap<String, String>>,
-    overrides: &std::collections::BTreeMap<String, u64>,
-) -> tracedecay_maintenance::retention::footprint::ProfileFootprintV1 {
-    use tracedecay_maintenance::retention::footprint::{
-        ProjectRootStateV1, census_profile_footprint,
-    };
-
-    let empty_roots = std::collections::BTreeMap::new();
+    registered_roots: Option<&BTreeMap<String, String>>,
+    overrides: &BTreeMap<String, u64>,
+) -> ProfileFootprintV1 {
+    let empty_roots = BTreeMap::new();
     let mut footprint =
         census_profile_footprint(profile_root, registered_roots.unwrap_or(&empty_roots), overrides);
     if registered_roots.is_none() {
@@ -646,7 +645,7 @@ async fn profile_footprint_read(
     registry: &RegisteredGlobalDb,
     profile_root: &Path,
     retention: &tracedecay_configuration::RetentionConfig,
-) -> Option<tracedecay_maintenance::retention::footprint::ProfileFootprintV1> {
+) -> Option<ProfileFootprintV1> {
     let registered = registry
         .list_code_projects(usize::MAX)
         .await
@@ -655,12 +654,11 @@ async fn profile_footprint_read(
             projects
                 .into_iter()
                 .map(|project| (project.project_id, project.canonical_root))
-                .collect::<std::collections::BTreeMap<_, _>>()
+                .collect::<BTreeMap<_, _>>()
         });
     let overrides = retention.store_soft_budgets_bytes.clone();
     let profile_root = profile_root.to_path_buf();
     tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-        use tracedecay_maintenance::retention::footprint::census_sqlite_temp_spill;
         let mut footprint =
             profile_footprint_from_registered_roots(&profile_root, registered.as_ref(), &overrides);
         footprint.entries.extend(census_sqlite_temp_spill(
