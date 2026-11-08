@@ -58,7 +58,11 @@ export function CommandPalette({
   const scope = useScope((state) => state.scope);
   const selectProject = useScope((s) => s.selectProject);
   const [query, setQuery] = useState('');
-  const [active, setActive] = useState(0);
+  const [selection, setSelection] = useState<{
+    query: string;
+    index: number;
+    rowId: string | null;
+  }>({ query: '', index: 0, rowId: null });
   // Entities: registered projects become scope-setting results. Fetched only
   // while the palette is open; a failed registry read simply yields no
   // project rows (workspace navigation never depends on it).
@@ -137,26 +141,33 @@ export function CommandPalette({
       .sort((left, right) => matchRank(left) - matchRank(right));
   }, [entries, query]);
 
-  useEffect(() => setActive(0), [query, open]);
   useEffect(() => {
-    if (open) setQuery('');
+    if (open) {
+      setQuery('');
+      setSelection({ query: '', index: 0, rowId: null });
+    }
   }, [open]);
 
   /**
-   * The row actually being pointed at, which is not always the one `active`
-   * holds.
-   *
-   * `active` is only reset by a query change or a reopen, and the list has a
-   * second input: the registry read behind the project rows. A listing that
-   * shrinks, a refetch returning fewer projects, or an `ok` result becoming a
-   * failure, which drops every project row at once, leaves the stored index
-   * past the end. That row does not exist, so `aria-activedescendant` referred
-   * to nothing and Enter fired nothing: a palette that looked navigable and was
-   * inert. Clamped on read rather than corrected in an effect, so there is no
-   * render in which the index is out of range.
+   * Preserve the selected row's identity when a registry refresh reorders
+   * entries. A numeric index alone can silently activate a different project
+   * after the registry changes. When that identity disappears, clamp its last
+   * position to an extant row. Query changes reset selection synchronously.
    */
-  const activeIndex = filtered.length === 0 ? 0 : Math.max(0, Math.min(active, filtered.length - 1));
+  const currentSelection =
+    selection.query === query ? selection : { query, index: 0, rowId: null };
+  const matchingIndex = currentSelection.rowId === null
+    ? -1
+    : filtered.findIndex((entry) => entry.id === currentSelection.rowId);
+  const activeIndex = filtered.length === 0
+    ? 0
+    : matchingIndex >= 0
+      ? matchingIndex
+      : Math.max(0, Math.min(currentSelection.index, filtered.length - 1));
   const activeEntry = filtered[activeIndex];
+  const selectIndex = (index: number) => {
+    setSelection({ query, index, rowId: filtered[index]?.id ?? null });
+  };
 
   const listRef = useRef<HTMLUListElement>(null);
   useEffect(() => {
@@ -181,10 +192,10 @@ export function CommandPalette({
       // rather than from a stale index further down.
       // An empty result set has no final row. Setting -1 here would leave
       // a newly fetched matching project invisible to Enter and screen readers.
-      if (filtered.length > 0) setActive(Math.min(activeIndex + 1, filtered.length - 1));
+      if (filtered.length > 0) selectIndex(Math.min(activeIndex + 1, filtered.length - 1));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
-      setActive(Math.max(activeIndex - 1, 0));
+      if (filtered.length > 0) selectIndex(Math.max(activeIndex - 1, 0));
     } else if (e.key === 'Enter') {
       e.preventDefault();
       activeEntry?.action();
@@ -239,7 +250,7 @@ export function CommandPalette({
                   id={optionId(i)}
                   role="option"
                   aria-selected={i === activeIndex}
-                  onMouseEnter={() => setActive(i)}
+                  onMouseEnter={() => selectIndex(i)}
                   onClick={entry.action}
                   className={cn(
                     // The same selection grammar as the rail: a cyan position

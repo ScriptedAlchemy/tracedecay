@@ -446,6 +446,39 @@ describe('CommandPalette long and shrinking lists', () => {
     );
   });
 
+  it('keeps the selected project identity when a registry refresh reorders results', async () => {
+    const user = userEvent.setup();
+    const alpha = registryEntry('proj-alpha', 'Rare Alpha', false);
+    const beta = registryEntry('proj-beta', 'Rare Beta', true);
+    stubListing(listing([alpha, beta]));
+    const { findByText, client } = renderPalette();
+    await findByText('Rare Beta');
+
+    await user.keyboard('Rare');
+    await waitFor(() => expect(activeOptionLabel()).toBe('Rare Alpha'));
+    await user.keyboard('{ArrowDown}');
+    expect(activeOptionLabel()).toBe('Rare Beta');
+
+    // Reordered registration results must not silently select a different
+    // project while the keyboard is stationary.
+    act(() => {
+      client.setQueryData([...projectRegistryListKey, UNSCOPED_CACHE_KEY], {
+        outcome: 'envelope',
+        envelope: fixtureEnvelope(listing([beta, alpha])),
+      });
+    });
+    await waitFor(() => expect(activeOptionLabel()).toBe('Rare Beta'));
+    const id = combobox().getAttribute('aria-activedescendant');
+    expect(document.getElementById(id ?? '')?.getAttribute('aria-selected')).toBe('true');
+
+    await user.keyboard('{Enter}');
+    expect(useScope.getState().scope).toMatchObject({
+      kind: 'project',
+      projectId: 'proj-beta',
+      activation: 'active',
+    });
+  });
+
   it('clamps the active row when the listing shrinks, and Enter still fires', async () => {
     const user = userEvent.setup();
     stubListing(listing(MANY));
