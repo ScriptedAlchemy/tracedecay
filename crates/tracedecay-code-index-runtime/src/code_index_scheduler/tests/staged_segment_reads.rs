@@ -1269,3 +1269,90 @@ fn staged_existing_segments_reuse_authenticated_inodes_without_reopening() {
     );
     staged.abort().expect("abort changed preparation");
 }
+
+#[test]
+fn repeated_canonical_segment_writes_reuse_witness_and_refuse_replacement() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let source_root = TempDir::new().expect("source store");
+    let generation = source_generation(&fixture, source_root.path());
+    let target_root = TempDir::new().expect("target store");
+    let mut target = target_store(target_root.path(), &fixture);
+    let mut first = target
+        .prepare(&generation.sealed_scope(), None)
+        .expect("first preparation");
+    let publication = generation
+        .stage_publication(&mut first)
+        .expect("stage canonical generation");
+    target
+        .commit(&mut first, &publication)
+        .expect("publish canonical segments");
+    drop(first);
+
+    let identity = CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+        publication.manifest_bytes().as_ref(),
+    )
+    .expect("read real segment identities")
+    .expect("current partitioned generation")
+    .into_iter()
+    .find(|identity| identity.size_bytes > 0)
+    .expect("nonempty canonical segment");
+    let suffix = sha256_hex_suffix(identity.digest.as_str()).expect("canonical digest suffix");
+    let canonical = target
+        .segments_root
+        .join(format!("segment-{suffix}.json"));
+    let bytes = std::fs::read(&canonical).expect("canonical segment");
+    assert_eq!(segment_digest(&bytes), identity.digest);
+
+    let mut preparation = target
+        .prepare(
+            &generation.sealed_scope(),
+            Some(&generation.manifest().generation_id),
+        )
+        .expect("repeated-write preparation");
+    let before = PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get);
+    for _ in 0..16 {
+        preparation
+            .write_segment(SealedGenerationSegmentPublicationV1::File {
+                digest: &identity.digest,
+                bytes: &bytes,
+            })
+            .expect("authenticate or reuse exact existing segment");
+        assert_eq!(
+            PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get) - before,
+            1,
+            "sixteen repeated writes must open and hash the canonical file only once"
+        );
+    }
+    let reader = preparation.segment_reader();
+    let mut read = Vec::new();
+    reader(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &identity.digest,
+            size_bytes: identity.size_bytes,
+        },
+        &mut read,
+    )
+    .expect("read the exact staged canonical segment");
+    assert_eq!(read, bytes);
+
+    // A byte-identical inode replacement is not the file that was hashed.
+    // A subsequent write must reject it without another File::open.
+    let replacement = canonical.with_extension("repeat-witness.tmp");
+    std::fs::write(&replacement, &bytes).expect("same-byte replacement");
+    std::fs::rename(&replacement, &canonical).expect("replace canonical inode");
+    assert!(
+        preparation
+            .write_segment(SealedGenerationSegmentPublicationV1::File {
+                digest: &identity.digest,
+                bytes: &bytes,
+            })
+            .is_err(),
+        "a replaced immutable inode must not inherit the prior witness"
+    );
+    assert_eq!(
+        PREPARED_SEGMENT_DIGEST_OPENS.with(std::cell::Cell::get) - before,
+        1,
+        "identity refusal should not reopen a substituted inode"
+    );
+    preparation.abort().expect("release repeated-write preparation");
+}

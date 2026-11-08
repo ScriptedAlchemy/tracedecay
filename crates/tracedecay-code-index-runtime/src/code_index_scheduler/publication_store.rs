@@ -1660,6 +1660,20 @@ impl DaemonCodeIndexPublicationStoreV1 {
         if staged.contains(&final_path) {
             return Ok(());
         }
+        // A repeated write of an already authenticated canonical segment
+        // should not pay another endpoint-scanned open and SHA-256 read.
+        // The original opened-file witness is authoritative only while its
+        // exact pathname inode and metadata remain unchanged.
+        #[cfg(unix)]
+        if let Some(original) = staged.verified_existing.get(&final_path) {
+            let current = final_path.symlink_metadata().map_err(Self::unavailable)?;
+            if !Self::same_unix_segment_identity(original, &current) {
+                return Err(Self::corruption(
+                    "previously authenticated sealed segment changed before repeated write",
+                ));
+            }
+            return Ok(());
+        }
         match final_path.symlink_metadata() {
             Ok(metadata) => {
                 existing_segment_bytes_read.fetch_add(metadata.len(), Ordering::Relaxed);
