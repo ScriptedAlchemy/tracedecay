@@ -405,6 +405,11 @@ impl CodexObservationAdmission<'_> {
     /// Prepare this bounded page's context and scope decisions on the blocking
     /// pool. The page owns its reservation throughout preparation; only these
     /// decisions, not filesystem work, are used by frame callbacks and retries.
+    #[tracing::instrument(
+        name = "sessions.observation.codex.resolve_scope",
+        level = "trace",
+        skip_all
+    )]
     async fn resolve_scope(
         &self,
         matchers: &ProjectRootMatcherCache,
