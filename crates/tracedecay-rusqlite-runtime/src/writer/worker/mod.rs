@@ -423,14 +423,16 @@ impl Worker {
             return self.fail_start(WriterStartError::OpenedDatabaseIdentity(error));
         }
         #[cfg(unix)]
-        if self.expected_file_identity.is_some()
-            && connection
+        if self.expected_file_identity.is_some() {
+            let actual = connection
                 .path()
-                .and_then(|path| std::fs::canonicalize(path).ok())
-                .as_deref()
-                != Some(self.canonical_path.as_path())
-        {
-            return self.fail_start(WriterStartError::OpenedDatabasePathMismatch);
+                .and_then(|path| std::fs::canonicalize(path).ok());
+            // Both paths may traverse the host's temporary-directory alias.
+            // File identity was checked against the caller's pathname above.
+            let expected = std::fs::canonicalize(&self.canonical_path);
+            if !matches!(expected, Ok(expected) if actual.as_ref() == Some(&expected)) {
+                return self.fail_start(WriterStartError::OpenedDatabasePathMismatch);
+            }
         }
         let opened_file_identity = match self.expected_file_identity {
             Some(expected) => {
