@@ -1128,15 +1128,22 @@ fn graph_relation_neighborhood_with_reads(
         );
     }
 
+    // The incoming closure can already prove an affected test even when a
+    // later, higher-precedence dependency read cannot finish. Retain that
+    // positive evidence as partial rather than incorrectly returning no hint.
+    let shared_test = (!left_tests.is_disjoint(&right_tests)).then(|| GraphRelation {
+        warning_class: ProximityWarningClassV1::SharedTest,
+        kinds: vec![ProximityRelationPathKindV1::AffectedTest],
+    });
     let Some(left_dependencies) =
         dependency_neighborhood(left_seeds, left_first_hop, &mut read_callees)
     else {
-        return (None, true);
+        return (shared_test, true);
     };
     let Some(right_dependencies) =
         dependency_neighborhood(right_seeds, right_first_hop, &mut read_callees)
     else {
-        return (None, true);
+        return (shared_test, true);
     };
     if !left_dependencies.is_disjoint(&right_dependencies) {
         return (
@@ -1147,16 +1154,7 @@ fn graph_relation_neighborhood_with_reads(
             false,
         );
     }
-    if !left_tests.is_disjoint(&right_tests) {
-        return (
-            Some(GraphRelation {
-                warning_class: ProximityWarningClassV1::SharedTest,
-                kinds: vec![ProximityRelationPathKindV1::AffectedTest],
-            }),
-            false,
-        );
-    }
-    (None, false)
+    (shared_test, false)
 }
 
 fn exact_graph_address(
@@ -1327,6 +1325,33 @@ mod tests {
             }),
             metadata: None,
         }
+    }
+
+    fn test_callable(id: &str, span: SourceSpan) -> CodeGraphSymbolSummaryV1 {
+        let mut node = callable(id, span);
+        let digest = format!("sha256:{}", "a".repeat(64));
+        node.metadata = Some(tracedecay_code_index::lineage::LineageSymbolRecordV1 {
+            occurrence: node.occurrence.clone(),
+            identity: digest.clone().try_into().unwrap(),
+            qualified_name: "tests::shared".to_owned(),
+            simple_name: "shared".to_owned(),
+            kind: "TeSt".to_owned(),
+            visibility: "private".to_owned(),
+            branches: 0,
+            loops: 0,
+            max_nesting: 0,
+            complexity_analysis: tracedecay_domain::ComplexityAnalysisV1::Complete,
+            line_span: 1,
+            start_line: 0,
+            signature: None,
+            docstring: None,
+            is_async: false,
+            derives: Vec::new(),
+            skip_test_coverage: false,
+            file_identity: digest.try_into().unwrap(),
+            content_digest: ContentDigest::of_bytes(b"shared test"),
+        });
+        node
     }
 
     #[test]
@@ -1523,29 +1548,7 @@ mod tests {
             start_byte: 0,
             end_byte: 1,
         };
-        let mut test_node = callable(test_id.as_str(), span);
-        let digest = format!("sha256:{}", "a".repeat(64));
-        test_node.metadata = Some(tracedecay_code_index::lineage::LineageSymbolRecordV1 {
-            occurrence: test_id.clone(),
-            identity: digest.clone().try_into().unwrap(),
-            qualified_name: "tests::shared".to_owned(),
-            simple_name: "shared".to_owned(),
-            kind: "TeSt".to_owned(),
-            visibility: "private".to_owned(),
-            branches: 0,
-            loops: 0,
-            max_nesting: 0,
-            complexity_analysis: tracedecay_domain::ComplexityAnalysisV1::Complete,
-            line_span: 1,
-            start_line: 0,
-            signature: None,
-            docstring: None,
-            is_async: false,
-            derives: Vec::new(),
-            skip_test_coverage: false,
-            file_identity: digest.try_into().unwrap(),
-            content_digest: ContentDigest::of_bytes(b"shared test"),
-        });
+        let test_node = test_callable(test_id.as_str(), span);
         let mut frontiers = Vec::new();
         let (callers, tests) = caller_neighborhood(std::slice::from_ref(&root), 3, |frontier| {
             frontiers.push(frontier.to_vec());
@@ -1649,6 +1652,95 @@ mod tests {
         )
         .expect("supplied adjacency completely covers the seed cycle");
         assert_eq!(result, BTreeSet::from([first, second]));
+    }
+
+    #[test]
+    fn shared_third_hop_test_survives_unavailable_dependency_evidence() {
+        let symbol = |id| SymbolOccurrenceId::new(id).unwrap();
+        let left = symbol("symbol.left");
+        let right = symbol("symbol.right");
+        let span = SourceSpan {
+            start_byte: 0,
+            end_byte: 1,
+        };
+        let shared_test = test_callable("symbol.shared-test", span);
+        let shared_dependency = symbol("symbol.shared-dependency");
+
+        // One side may reject its second hop after both three-hop caller
+        // closures have proven a shared affected test. A complete dependency
+        // proof still outranks the test, but refusal cannot erase it.
+        for failed_second_hop in [
+            Some("symbol.left-direct"),
+            Some("symbol.right-direct"),
+            None,
+        ] {
+            let mut reads = 0;
+            let (relation, partial) = graph_relation_neighborhood_with_reads(
+                std::slice::from_ref(&left),
+                std::slice::from_ref(&right),
+                vec![vec![symbol("symbol.left-direct")]],
+                vec![vec![symbol("symbol.right-direct")]],
+                |frontier| {
+                    Some(
+                        frontier
+                            .iter()
+                            .map(|seed| match seed.as_str() {
+                                "symbol.left" => vec![callable("symbol.left-1", span)],
+                                "symbol.left-1" => vec![callable("symbol.left-2", span)],
+                                "symbol.left-2" => vec![shared_test.clone()],
+                                "symbol.right" => vec![callable("symbol.right-1", span)],
+                                "symbol.right-1" => vec![callable("symbol.right-2", span)],
+                                "symbol.right-2" => vec![shared_test.clone()],
+                                _ => panic!("third-hop tests do not require further reads"),
+                            })
+                            .collect(),
+                    )
+                },
+                |frontier| {
+                    reads += 1;
+                    if frontier
+                        .iter()
+                        .any(|seed| Some(seed.as_str()) == failed_second_hop)
+                    {
+                        return None;
+                    }
+                    Some(
+                        frontier
+                            .iter()
+                            .map(|_| vec![shared_dependency.clone()])
+                            .collect(),
+                    )
+                },
+            );
+            let relation = relation.expect("proven evidence must not be discarded");
+            let failed = failed_second_hop.is_some();
+            assert_eq!(
+                relation.warning_class,
+                if failed {
+                    ProximityWarningClassV1::SharedTest
+                } else {
+                    ProximityWarningClassV1::SharedDependency
+                }
+            );
+            assert_eq!(
+                relation.kinds,
+                vec![if failed {
+                    ProximityRelationPathKindV1::AffectedTest
+                } else {
+                    ProximityRelationPathKindV1::TransitiveDependency
+                }]
+            );
+            assert_eq!(partial, failed, "unread adjacency makes coverage partial");
+            assert_eq!(
+                reads,
+                if failed_second_hop == Some("symbol.left-direct") {
+                    1
+                } else {
+                    2
+                },
+                "stop at the refusing hop, retaining the known test relation"
+            );
+        }
     }
 
     #[test]
