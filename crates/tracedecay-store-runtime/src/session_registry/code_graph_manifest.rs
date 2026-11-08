@@ -2413,7 +2413,6 @@ mod tests {
         assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 0);
     }
 
-
     #[test]
     fn graph_segment_interruption_clears_last_verified_page_without_reopen() {
         let temporary = TempDir::new().unwrap();
