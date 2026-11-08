@@ -329,111 +329,92 @@ async fn read_only_open_mounts_readers_without_acquiring_a_writer() {
     assert_health_route(&project, false).await;
 }
 
-/// The store file is a FIFO, so opening it waits until a writer opens the
-/// other end. Only a task on the runtime's single worker does that while the
-/// open waits. A nonregular-file preflight may also refuse the FIFO before
-/// opening it; the fallback must not block waiting for a reader in that case.
 #[cfg(unix)]
 #[asupersync::test]
-async fn store_open_keeps_the_async_worker_serving_while_the_file_opens() {
-    use std::fs::OpenOptions;
-    use std::os::unix::fs::OpenOptionsExt;
-    use std::sync::atomic::AtomicBool;
-
+async fn store_open_refuses_a_fifo_before_opening_it() {
     let root = TempDir::new().unwrap();
-    let held = root.path().join("held.db");
+    let fifo = root.path().join("held.db");
     assert!(
         std::process::Command::new("mkfifo")
-            .arg(&held)
+            .arg(&fifo)
             .status()
             .unwrap()
             .success()
     );
-    let held = held.canonicalize().unwrap();
     let resolver = Arc::new(FileResolver::default());
-    resolver.push(held.clone());
+    resolver.push(fifo.canonicalize().unwrap());
     let registry = StoreRuntimeRegistry::new(
         asupersync::runtime::Runtime::current_handle().unwrap(),
         resolver,
         Arc::new(LifecycleShardRuntimePublisher),
     )
     .unwrap();
+    let outcome = registry
+        .open(StoreRuntimeOpenRequest::new(
+            profile_shard(),
+            incarnation(),
+            None,
+        ))
+        .await;
+    assert!(matches!(
+        outcome,
+        StoreRuntimeOpenResult::Failed(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            message, ..
+        }) if message.contains("not a regular file")
+    ));
+}
 
-    let (released_by_worker, fallback_stop) = std::sync::mpsc::channel::<()>();
-    let fallback = {
-        let held = held.clone();
-        std::thread::spawn(move || {
-            let parked = matches!(
-                fallback_stop.recv_timeout(Duration::from_secs(10)),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-            );
-            if parked {
-                // No FIFO reader exists if admission rejected the special
-                // file before SQLite could open it. The rescue itself must
-                // never introduce a second, unbounded blocking open.
-                drop(
-                    OpenOptions::new()
-                        .write(true)
-                        .custom_flags(libc::O_NONBLOCK)
-                        .open(&held),
-                );
-            }
-            parked
-        })
-    };
-    let settled = AtomicBool::new(false);
-    let open = async {
-        let outcome = registry
-            .open(StoreRuntimeOpenRequest::new(
-                profile_shard(),
-                incarnation(),
-                None,
-            ))
-            .await;
-        settled.store(true, Ordering::SeqCst);
-        outcome
-    };
-    let release = async {
+#[test]
+fn store_open_keeps_the_async_worker_serving_while_attachment_waits() {
+    let executor = asupersync::runtime::RuntimeBuilder::current_thread()
+        .blocking_threads(1, 1)
+        .enable_time()
+        .build()
+        .unwrap();
+    executor.block_on(async {
+        let root = TempDir::new().unwrap();
+        let resolver = Arc::new(FileResolver::default());
+        resolver.push(seed_final_graph_db(&root, "profile.db").await);
+        let registry = StoreRuntimeRegistry::new(
+            asupersync::runtime::Runtime::current_handle().unwrap(),
+            resolver,
+            Arc::new(LifecycleShardRuntimePublisher),
+        )
+        .unwrap();
+
         let cx = asupersync::Cx::current().unwrap();
-        while !settled.load(Ordering::SeqCst) {
-            match OpenOptions::new()
-                .write(true)
-                .custom_flags(libc::O_NONBLOCK)
-                .open(&held)
-            {
-                Ok(_writer) => {
-                    released_by_worker.send(()).unwrap();
-                    return true;
-                }
-                Err(error) => assert_eq!(error.raw_os_error(), Some(libc::ENXIO)),
-            }
-            asupersync::time::sleep(cx.now(), Duration::from_millis(1)).await;
-        }
-        false
-    };
-    let (outcome, released) = asupersync::join!(open, release);
-    drop(released_by_worker);
-    let parked = fallback.join().unwrap();
+        let pool = cx.blocking_pool_handle().unwrap();
+        let (entered, mut ready) = asupersync::channel::oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let mut blocker = cx
+            .spawn_blocking(move |_| {
+                entered.send_blocking(()).unwrap();
+                held.recv_timeout(Duration::from_secs(10)).is_ok()
+            })
+            .unwrap();
+        ready.recv(&cx).await.unwrap();
 
-    let refused_nonregular = matches!(
-        &outcome,
-        StoreRuntimeOpenResult::Failed(
-            StoreRuntimeRegistryFailure::PhysicalRuntimeFailed { message, .. }
-        ) if message.contains("not a regular file")
-    );
-    assert!(
-        !parked && (released || refused_nonregular),
-        "the worker must release a pending FIFO reader, or admission must refuse the nonregular file before opening it: {outcome:?}"
-    );
-    assert!(
-        matches!(
-            outcome,
-            StoreRuntimeOpenResult::Failed(
-                StoreRuntimeRegistryFailure::PhysicalRuntimeFailed { .. }
-            )
-        ),
-        "a FIFO is not a SQLite store: {outcome:?}"
-    );
+        let open = open_published(
+            &registry,
+            StoreRuntimeOpenRequest::new(profile_shard(), incarnation(), None),
+        );
+        let serve = async {
+            asupersync::time::timeout(cx.now(), Duration::from_secs(10), async {
+                while pool.pending_count() == 0 {
+                    asupersync::time::sleep(cx.now(), Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("physical attachment must queue while the pool is occupied");
+            release.send(()).unwrap();
+        };
+        let (opened, ()) = asupersync::join!(open, serve);
+        assert!(
+            blocker.join(&cx).await.unwrap(),
+            "the async worker must release the pending attachment"
+        );
+        assert_health_route(&opened, true).await;
+    });
 }
 
 #[asupersync::test]
