@@ -73,7 +73,7 @@ export function CodeIndexPipeline({
         </div>
       ) : null}
       {progress.length === 0 ? (
-        worktrees.some((worktree) => worktree.restore_progress != null) ? null : (
+        worktrees.some(hasLiveWorktreeProgress) ? null : (
           <p className="mt-2 text-body text-text-muted">
             {worktrees.some((worktree) => worktree.rebuild_in_flight)
               ? 'code-index build in progress; progress not yet reported'
@@ -132,9 +132,49 @@ function CodeIndexReadinessList({
               {graphServingLabel(worktree.code_graph_serving)}
             </dd>
           </dl>
+          <CodeIndexAttemptReading worktree={worktree} />
         </li>
       ))}
     </ul>
+  );
+}
+
+export function CodeIndexAttemptReading({ worktree }: { worktree: CodeIndexWorktreeFreshnessV1 }) {
+  const attempt = worktree.preseal_attempt;
+  const graph = worktree.native_graph_progress;
+  if (!attempt?.active && !graph?.active) return null;
+  return (
+    <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+      {attempt?.active && (
+        <>
+          <dt className="text-text-muted">Before sealing</dt>
+          <dd className="text-right text-text-secondary">
+            {attempt.phase.replaceAll('_', ' ')} · {formatCount(attempt.completed_items)}
+            {attempt.total_items != null && ` / ${formatCount(attempt.total_items)}`} items
+          </dd>
+        </>
+      )}
+      {graph?.active && (
+        <>
+          <dt className="text-text-muted">Graph writer</dt>
+          <dd className="text-right text-text-secondary">
+            {graph.phase?.replaceAll('_', ' ') ?? 'awaiting first update'} ·{' '}
+            {formatCount(graph.encoded_entities)} entities encoded ·{' '}
+            {formatCount(graph.encoded_relations)} relations encoded ·{' '}
+            {formatCount(graph.committed_stage_pages)} pages committed ·{' '}
+            {formatCount(graph.committed_compact_segments)} segments committed
+          </dd>
+        </>
+      )}
+    </dl>
+  );
+}
+
+export function hasLiveWorktreeProgress(worktree: CodeIndexWorktreeFreshnessV1): boolean {
+  return (
+    worktree.restore_progress != null ||
+    worktree.preseal_attempt?.active === true ||
+    worktree.native_graph_progress?.active === true
   );
 }
 
@@ -233,7 +273,7 @@ export function hasActiveCodeIndexBuild(
       result.envelope.payload.worktrees.some(
         (worktree) =>
           worktree.rebuild_in_flight ||
-          worktree.restore_progress != null ||
+          hasLiveWorktreeProgress(worktree) ||
           (worktree.progress != null && worktree.progress.phase !== 'ready'),
       ))
   );

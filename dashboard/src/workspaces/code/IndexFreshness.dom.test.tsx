@@ -130,6 +130,27 @@ describe('Code index freshness', () => {
     expect(text).toContain('240ms');
   });
 
+  it('distinguishes native rows encoded from pages and segments committed', async () => {
+    renderFreshness('loading', {
+      worktrees: [{
+        ...worktree(),
+        native_graph_progress: {
+          generation_id: 'generation.4f21c9',
+          sealed_graph_digest: 'sha256:graph',
+          daemon_incarnation: 1, producer_incarnation: 2, attempt_sequence: 3, progress_epoch: 4,
+          phase: 'stage_page_commit', active: true, last_progress_micros: NOW_MICROS,
+          encoded_entities: 90, total_entities: 100, encoded_relations: 40, total_relations: 50,
+          committed_stage_pages: 2, committed_stage_mutations: 70, committed_stage_bytes: 4096,
+          committed_compact_segments: 0, committed_compact_bytes: 0,
+        },
+      }],
+      note: 'daemon scheduler state',
+    });
+    expect(await screen.findByText(
+      'stage page commit · 90 entities encoded · 40 relations encoded · 2 pages committed · 0 segments committed',
+    )).toBeTruthy();
+  });
+
   it('renders bounded artifact restore progress separately from a rebuild', async () => {
     renderFreshness('loading', {
       worktrees: [

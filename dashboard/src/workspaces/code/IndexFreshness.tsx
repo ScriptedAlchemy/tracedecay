@@ -37,11 +37,13 @@ import { authorizationState } from '../../ui/EnvelopeTruth.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { elideStart, formatCount, formatMicrosUtc } from '../../ui/format.ts';
 import {
+  CodeIndexAttemptReading,
   CodeIndexMountFailureNotice,
   codeIndexBlockedReasonLabel,
   codeIndexPhaseLabel,
   codeIndexProgressPercentage,
   formatDurationMicros,
+  hasLiveWorktreeProgress,
   isCurrentOrNewerCodeIndexProgress,
 } from '../observatory/CodeIndexPipeline.tsx';
 import { formatBytes } from '../observatory/storageModel.ts';
@@ -162,6 +164,7 @@ function WorktreeReading({
       {progress ? (
         <BuildProgressReading progress={progress} observedAtMicros={observedAtMicros} />
       ) : null}
+      <CodeIndexAttemptReading worktree={worktree} />
       {worktree.restore_progress ? (
         <div className="border-b border-edge-subtle pb-1.5 text-3xs leading-snug">
           <div className="flex items-baseline justify-between gap-2">
@@ -321,6 +324,7 @@ function worktreeHasActiveBuild(worktree: CodeIndexWorktreeFreshnessV1): boolean
     worktree.latest_generation_id == null && worktree.staleness_state === 'indexing';
   if (
     !worktree.rebuild_in_flight &&
+    !hasLiveWorktreeProgress(worktree) &&
     worktree.staleness_state !== 'verifying' &&
     worktree.staleness_state !== 'restoring' &&
     !initialIndexing
@@ -339,9 +343,14 @@ function allActiveBuildsQuiet(
   const observedAt = result.envelope.time.observation_time_micros;
   return result.envelope.payload.worktrees.every((worktree) => {
     if (!worktreeHasActiveBuild(worktree)) return true;
-    const progress = worktree.progress;
-    if (progress == null) return false;
-    return observedAt - progress.last_progress_micros >= QUIET_AFTER_SECONDS * 1_000_000;
+    const lastUpdates = [
+      ...(worktree.preseal_attempt?.active ? [worktree.preseal_attempt.last_progress_micros] : []),
+      ...(worktree.native_graph_progress?.active ? [worktree.native_graph_progress.last_progress_micros] : []),
+      ...(worktree.progress ? [worktree.progress.last_progress_micros] : []),
+    ];
+    return lastUpdates.length > 0 && lastUpdates.every(
+      (stamp) => stamp != null && observedAt - stamp >= QUIET_AFTER_SECONDS * 1_000_000,
+    );
   });
 }
 

@@ -1,5 +1,6 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
+import { CodeIndexFreshnessPayloadV1Schema } from '../../contracts/generated.ts';
 import type {
   CodeIndexBuildProgressV1,
   CodeIndexFreshnessPayloadV1,
@@ -118,6 +119,19 @@ const restoreProgress = {
 afterEach(cleanup);
 
 describe('code-index activity polling', () => {
+  it('shows pre-seal work before the first text page commits', () => {
+    const result = freshness({ preseal_attempt: {
+      daemon_incarnation: 1, producer_incarnation: 2, attempt_sequence: 3,
+      progress_epoch: 4, phase: 'resolution', completed_items: 7,
+      total_items: null, last_progress_micros: OBSERVED_AT, active: true,
+    } });
+    result.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(result.envelope.payload);
+    expect(hasActiveCodeIndexBuild(result)).toBe(true);
+    render(<CodeIndexPipeline result={result} pending={false} scopeKey="project" />);
+    expect(screen.getByText('resolution · 7 items')).toBeTruthy();
+    expect(screen.queryByText('no active code-index build')).toBeNull();
+  });
+
   it('keeps polling an in-flight rebuild before its first committed report', () => {
     expect(hasActiveCodeIndexBuild(freshness({ rebuild_in_flight: true }))).toBe(true);
   });
