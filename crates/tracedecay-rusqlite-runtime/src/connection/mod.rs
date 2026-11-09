@@ -155,6 +155,16 @@ impl OpenedDatabaseFile {
         Ok(opened)
     }
 
+    pub(crate) fn resume_initialization(
+        path: &Path,
+        (main, sidecars): (File, [File; 3]),
+    ) -> Result<Self, OpenedDatabaseFileError> {
+        let mut opened = Self::adopt(main)?;
+        opened.verify_current_path(path)?;
+        opened.created_sidecars = Some(Arc::new(Mutex::new(Some(sidecars))));
+        Ok(opened)
+    }
+
     /// Takes ownership of an already-open handle and records its identity.
     fn adopt(file: File) -> Result<Self, OpenedDatabaseFileError> {
         let metadata = file

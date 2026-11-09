@@ -1,5 +1,5 @@
-//! A prospective SQLite store publishes its completed main last. Each staged
-//! file moves once by no-replace rename; cleanup only removes an empty directory.
+//! A prospective SQLite store publishes its completed main last. It moves staged
+//! files by no-replace rename and retires only empty directories.
 //! A failed schema install therefore cannot delete a file at a reused basename.
 use std::ffi::OsStr;
 use std::fs::{self, File};
@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
+mod interrupted;
+
+use interrupted::InterruptedInstall;
 use tracedecay_private_fs::capability_dir::{self, Dir};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_parent_directory};
 use tracedecay_private_fs::{FileLease, create_private_directory, open_private_directory};
@@ -17,6 +20,14 @@ use tracedecay_private_fs::{FileLease, create_private_directory, open_private_di
 use crate::sqlite_read_snapshot::with_suffix;
 
 const SIDECARS: [&str; 3] = ["-wal", "-shm", "-journal"];
+const STAGED_MEMBERS: [&str; 4] = [
+    "schema.sqlite",
+    "schema.sqlite-wal",
+    "schema.sqlite-shm",
+    "schema.sqlite-journal",
+];
+pub(super) type InitializationFiles = (File, [File; 3]);
+
 const OWNER: &str = "schema-installation.owner";
 const SYNC: DirectorySyncPolicy = DirectorySyncPolicy::TolerateUnsupported;
 
@@ -44,9 +55,26 @@ pub fn lock_offline_sqlite_family_for_reset(destination: &Path) -> io::Result<Op
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct PreparedFamily {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retry: Option<InterruptedInstall>,
     runtime_identity: u64,
     main: LeafIdentity,
     sidecars: [LeafIdentity; 3],
+}
+
+fn surviving_sidecars(sidecars: [File; 3]) -> io::Result<[Option<File>; 3]> {
+    let retained = sidecars.map(Some);
+    #[cfg(windows)]
+    let mut retained = retained;
+    #[cfg(windows)]
+    for slot in &mut retained {
+        if let Some(file) = slot.as_ref()
+            && tracedecay_private_fs::windows_file::deletion_pending(file)?
+        {
+            drop(slot.take());
+        }
+    }
+    Ok(retained)
 }
 
 impl PreparedFamily {
@@ -238,34 +266,10 @@ impl InitializationDirectory {
     ) -> io::Result<[File; 4]> {
         self.verify_directory_name()?;
         let stage = self.stage_cap()?;
-        #[cfg(windows)]
-        let sidecars = {
-            let mut retained = sidecars.map(Some);
-            for slot in &mut retained {
-                if let Some(file) = slot.as_ref()
-                    && tracedecay_private_fs::windows_file::deletion_pending(file)?
-                {
-                    drop(slot.take());
-                }
-            }
-            retained
-        };
-        #[cfg(not(windows))]
-        let sidecars = sidecars.map(Some);
+        let sidecars = surviving_sidecars(sidecars)?;
         let main = LeafIdentity::from_file(&main_file)?;
         let main_pin = main.pin_at(&stage, OsStr::new("schema.sqlite"), false)?;
-        for entry in stage.entries()? {
-            let name = entry?.file_name();
-            if name != "schema.sqlite"
-                && !SIDECARS
-                    .iter()
-                    .any(|suffix| name == OsStr::new(&format!("schema.sqlite{suffix}")))
-            {
-                return Err(ambiguous(
-                    "unexpected SQLite staging member requires offline reconciliation",
-                ));
-            }
-        }
+        require_schema_members(&stage)?;
         main_file.sync_all()?;
         // WAL and rollback-journal bytes may be durable data. The original
         // writer has checkpointed and joined; refuse any remaining frames.
@@ -311,17 +315,24 @@ impl InitializationDirectory {
         let (shm, shm_pin) = reserve(1, "-shm")?;
         let (journal, journal_pin) = reserve(2, "-journal")?;
         let prepared = PreparedFamily {
+            retry: None,
             runtime_identity: expected,
             main,
             sidecars: [wal, shm, journal],
         };
         capability_dir::sync_directory(&stage)?;
-        self.lease.rewind()?;
+        self.record(prepared)?;
+        Ok([main_pin, wal_pin, shm_pin, journal_pin])
+    }
+
+    fn record(&mut self, prepared: PreparedFamily) -> io::Result<()> {
         let bytes = serde_json::to_vec(&prepared).map_err(io::Error::other)?;
+        self.lease.rewind()?;
         self.lease.write_all(&bytes)?;
+        self.lease.set_len(bytes.len() as u64)?;
         self.lease.sync_all()?;
         self.prepared = Some(prepared);
-        Ok([main_pin, wal_pin, shm_pin, journal_pin])
+        Ok(())
     }
 
     fn pin_members(&self, stage: &Dir, prepared: &PreparedFamily) -> io::Result<Vec<File>> {
@@ -365,6 +376,9 @@ impl InitializationDirectory {
         let Some(prepared) = self.prepared.as_ref() else {
             return Ok(None);
         };
+        if prepared.retry.is_some() {
+            return Ok(None);
+        }
         // A persistent inode number alone cannot distinguish inode reuse after
         // process death. A filesystem without allocation generations can publish
         // in the original process, but must preserve interrupted preparation.
@@ -421,28 +435,7 @@ impl InitializationDirectory {
             .directory_pin
             .as_ref()
             .ok_or_else(|| ambiguous("SQLite staging directory is no longer pinned"))?;
-        let named = open_private_directory(&self.directory)?;
-        #[cfg(unix)]
-        let matches = {
-            let left = pinned.metadata()?;
-            let right = named.metadata()?;
-            left.dev() == right.dev() && left.ino() == right.ino()
-        };
-        #[cfg(windows)]
-        let matches = {
-            let left = tracedecay_private_fs::windows_file::information(pinned)?;
-            let right = tracedecay_private_fs::windows_file::information(&named)?;
-            left.volume_serial_number == right.volume_serial_number
-                && left.file_index == right.file_index
-        };
-        #[cfg(not(any(unix, windows)))]
-        let matches = false;
-        if !matches {
-            return Err(ambiguous(
-                "SQLite staging directory no longer names the pinned directory",
-            ));
-        }
-        Ok(())
+        verify_named_directory(pinned, &self.directory)
     }
 
     fn retire(&mut self) -> io::Result<()> {
@@ -507,6 +500,11 @@ impl InitializationDirectory {
         };
         let mut pins = Vec::new();
         if let Some(prepared) = &stage.prepared {
+            if prepared.retry.is_some() {
+                return Err(ambiguous(
+                    "canonical SQLite database appeared during an interrupted schema installation",
+                ));
+            }
             if !prepared.has_durable_generations() {
                 return Err(ambiguous(
                     "SQLite preparation has no durable file generation for recovery",
@@ -539,6 +537,44 @@ impl Drop for InitializationDirectory {
             tracing::warn!(%error, "could not retire empty SQLite initialization directory");
         }
     }
+}
+
+fn require_schema_members(directory: &Dir) -> io::Result<()> {
+    for entry in directory.entries()? {
+        let name = entry?.file_name();
+        if !STAGED_MEMBERS
+            .iter()
+            .any(|member| name == OsStr::new(member))
+        {
+            return Err(ambiguous("unproven member in SQLite schema directory"));
+        }
+    }
+    Ok(())
+}
+
+fn verify_named_directory(pinned: &File, path: &Path) -> io::Result<()> {
+    let named = open_private_directory(path)?;
+    #[cfg(unix)]
+    let matches = {
+        let left = pinned.metadata()?;
+        let right = named.metadata()?;
+        left.dev() == right.dev() && left.ino() == right.ino()
+    };
+    #[cfg(windows)]
+    let matches = {
+        let left = tracedecay_private_fs::windows_file::information(pinned)?;
+        let right = tracedecay_private_fs::windows_file::information(&named)?;
+        left.volume_serial_number == right.volume_serial_number
+            && left.file_index == right.file_index
+    };
+    #[cfg(not(any(unix, windows)))]
+    let matches = false;
+    if !matches {
+        return Err(ambiguous(
+            "SQLite staging directory no longer names the pinned directory",
+        ));
+    }
+    Ok(())
 }
 
 fn leaf(path: &Path) -> io::Result<&OsStr> {
@@ -775,6 +811,52 @@ mod tests {
         lease.read_to_string(&mut receipt).unwrap();
         assert_eq!(receipt, "unresolved preparation");
         assert_eq!(read_value(&destination), 7);
+    }
+
+    #[test]
+    fn interrupted_install_requires_its_entire_recorded_family_before_restoring_any_member() {
+        let root = TempDir::new().unwrap();
+        let destination = root.path().join("sessions.db");
+        let mut stage = InitializationDirectory::begin(destination.clone()).unwrap();
+        seed(&stage.database(), 7);
+        let files = owned_files(&stage);
+        let identity = crate::db::sqlite_generation_identity(&stage.database()).unwrap();
+        stage.hold_interrupted(identity, [1; 32], files).unwrap();
+        let recovery = stage
+            .prepared
+            .as_ref()
+            .unwrap()
+            .retry
+            .as_ref()
+            .unwrap()
+            .directory(&destination);
+        drop(stage);
+        let mut retry = InitializationDirectory::begin(destination.clone()).unwrap();
+        assert_eq!(
+            retry.resume_interrupted([2; 32]).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        drop(retry);
+        let wal = recovery.join("schema.sqlite-wal");
+        fs::write(&wal, b"independent WAL bytes").unwrap();
+        let mut retry = InitializationDirectory::begin(destination.clone()).unwrap();
+        assert_eq!(
+            retry.resume_interrupted([1; 32]).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(fs::read(&wal).unwrap(), b"independent WAL bytes");
+        assert!(recovery.join("schema.sqlite").is_file());
+        assert!(
+            retry
+                .stage_cap()
+                .unwrap()
+                .entries()
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        assert!(!destination.exists());
+        assert!(lock_offline_sqlite_family_for_reset(&destination).is_err());
     }
 
     #[test]

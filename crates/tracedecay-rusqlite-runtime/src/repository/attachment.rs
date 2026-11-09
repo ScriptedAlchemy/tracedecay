@@ -160,6 +160,31 @@ impl RepositoryPhysicalAttachmentFactory {
         )
     }
 
+    /// Rejoins a private, unfinished schema through the initializer's retained
+    /// file generations. The ordinary worker startup and admission checks apply.
+    pub fn resume_initialization(
+        &self,
+        runtime: &RuntimeHandle,
+        binding: StoreRuntimeBindingV1,
+        locator: VerifiedStoreLocatorV1,
+        path: PathBuf,
+        admission: AdmissionConfigV1,
+        files: (std::fs::File, [std::fs::File; 3]),
+    ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
+        let opened = OpenedDatabaseFile::resume_initialization(&path, files)
+            .map_err(RepositoryAttachmentStartError::Identity)?;
+        self.attach_opened(
+            runtime,
+            binding,
+            locator,
+            path,
+            admission,
+            opened,
+            true,
+            &mut |_| {},
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(name = "rusqlite.attachment.attach", level = "trace", skip_all)]
     fn attach_opened(
@@ -509,7 +534,7 @@ impl RepositoryRuntimePhysicalAttachment {
     /// Hands the exclusive original reservations to the publisher after all
     /// SQLite workers have exited. No raw descriptor is closed during a live
     /// POSIX SQLite transaction.
-    pub fn close_completed_initialization(
+    pub fn close_pinned_initialization(
         &self,
     ) -> Result<(std::fs::File, [std::fs::File; 3]), String> {
         self.commit_initialization()?;
