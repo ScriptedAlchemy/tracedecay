@@ -1689,38 +1689,14 @@ async fn maybe_run_global_retention(
     };
     let now_secs = tracedecay_runtime_core::tracedecay::current_timestamp();
     let global_config = global_table_retention_config(config);
-    let Some((retention, stack_compaction)) = administration
+    let Some(retention) = administration
         .try_with_writer(|| async {
-            let retention = tracedecay_maintenance::retention::prune_global_retention(
+            tracedecay_maintenance::retention::prune_global_retention(
                 database,
                 &global_config,
                 now_secs,
             )
-            .await;
-            let cutoff_micros = now_secs
-                .saturating_sub(
-                    tracedecay_global_db::GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1 * 86_400,
-                )
-                .saturating_mul(1_000_000);
-            // Use the existing housekeeping cadence, yielding the registered
-            // writer between bounded slices. A large backlog continues next tick.
-            let stack_compaction = async {
-                let mut retired = 0usize;
-                for _ in 0..64 {
-                    let slice = database
-                        .retire_github_stack_terminal_payloads_before(cutoff_micros)
-                        .await?;
-                    retired = retired.saturating_add(slice.retired);
-                    // A no-op page still advances a durable scan cursor. Do
-                    // not stop behind an old deferred recipient backlog.
-                    if slice.exhausted {
-                        break;
-                    }
-                }
-                Ok::<usize, String>(retired)
-            }
-            .await;
-            (retention, stack_compaction)
+            .await
         })
         .await
     else {
@@ -1734,6 +1710,45 @@ async fn maybe_run_global_retention(
         );
         return;
     };
+    let cutoff_micros = now_secs
+        .saturating_sub(
+            tracedecay_global_db::GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1 * 86_400,
+        )
+        .saturating_mul(1_000_000);
+    // A page has its own registered transaction. Release the daemon-wide
+    // administration writer before admitting another page so an unrelated
+    // store owner is never queued behind the entire retention backlog.
+    let mut retired = 0usize;
+    let mut compaction_error = None;
+    for _ in 0..64 {
+        let Some(page) = administration
+            .try_with_writer(|| async {
+                database
+                    .retire_github_stack_terminal_payloads_before(cutoff_micros)
+                    .await
+            })
+            .await
+        else {
+            compaction_error =
+                Some("writer admission unavailable during stack retirement".to_owned());
+            break;
+        };
+        match page {
+            Ok(page) => {
+                retired = retired.saturating_add(page.retired);
+                if page.exhausted {
+                    break;
+                }
+            }
+            Err(error) => {
+                compaction_error = Some(error);
+                break;
+            }
+        }
+        tokio::task::yield_now().await;
+    }
+    let stack_compaction: std::result::Result<usize, String> =
+        compaction_error.map_or(Ok(retired), Err);
     // An interrupted pass still reports the slices it committed; only the
     // cadence outcome distinguishes it from a complete drain.
     let (committed, succeeded) = match retention {
@@ -1920,6 +1935,101 @@ mod global_retention_tests {
         config.session_lcm.drop_after_days = Some(1);
         config.session_lcm.offload_after_days = None;
         config
+    }
+
+    #[tokio::test]
+    async fn stack_retirement_does_not_hold_daemon_writer_across_slices() {
+        let harness =
+            RegisteredGlobalDbHarness::open("global-stack-retention-writer-fairness").await;
+        let database = harness.registered.clone();
+        let signal_id = "signal.retention-peer-writer";
+        let project_id = "project.retention-peer-writer";
+        let recipient = "actor.retention-peer-writer";
+        database
+            .append_github_stack_signal(
+                tracedecay_global_db::GitHubStackSignalRecordV1 {
+                    project_id: project_id.to_owned(),
+                    signal_id: signal_id.to_owned(),
+                    scope_digest: "sha256:retention-peer-scope".to_owned(),
+                    repository_id: "repository.retention-peer".to_owned(),
+                    watermark_id: "watermark.retention-peer".to_owned(),
+                    observed_at_micros: 10,
+                    signal_json: r#"{"payload":"terminal"}"#.to_owned(),
+                },
+                vec![recipient.to_owned()],
+            )
+            .await
+            .expect("persist one old signal");
+        database
+            .acknowledge_github_stack_host_delivery(project_id, signal_id, recipient)
+            .await
+            .expect("settle old signal before retention");
+
+        let administration = StoreAdministration::default();
+        // Stall the registered database writer so the maintenance task has
+        // definitely acquired daemon-wide writer admission before its peer
+        // queues. The peer must win admission when pruning releases the lane,
+        // *before* the independently admitted signal retirement starts.
+        let held_database_writer = database
+            .begin_write_transaction()
+            .await
+            .expect("hold the registered database writer");
+        let task_administration = administration.clone();
+        let task_database = database.clone();
+        let config = global_retention_config();
+        let maintenance = tokio::spawn(async move {
+            maybe_run_global_retention(&task_administration, task_database.as_ref(), &config).await;
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if administration.try_with_writer(|| async {}).await.is_none() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retention acquired the daemon writer");
+
+        let (peer_tx, peer_rx) = tokio::sync::oneshot::channel();
+        let peer_administration = administration.clone();
+        let peer_database = database.clone();
+        let peer = tokio::spawn(async move {
+            peer_administration
+                .with_writer(|| async move {
+                    let still_expandable = peer_database
+                        .github_stack_signal(project_id, signal_id)
+                        .await
+                        .expect("read signal at peer admission")
+                        .is_some();
+                    peer_tx
+                        .send(still_expandable)
+                        .expect("report exact peer admission");
+                })
+                .await;
+        });
+        held_database_writer
+            .rollback()
+            .await
+            .expect("release registered database writer");
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(10), peer_rx)
+                .await
+                .expect("queued peer must acquire daemon writer")
+                .expect("peer must report signal state"),
+            "the peer writer must enter before stack retirement, not after 64 retained slices"
+        );
+        peer.await.expect("join competing daemon writer");
+        maintenance.await.expect("join retention maintenance");
+        assert!(
+            database
+                .github_stack_signal(project_id, signal_id)
+                .await
+                .expect("read terminal signal after maintenance")
+                .is_none(),
+            "the separate bounded page still retires the settled payload"
+        );
     }
 
     #[tokio::test]
