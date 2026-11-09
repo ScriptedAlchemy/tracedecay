@@ -835,7 +835,10 @@ mod tests {
         // The old breadth-first handle stack needed >=128 live handles
         // here; the corrected walk needs only the current three levels.
         let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
-        assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) }, 0);
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+            0
+        );
         limit.rlim_cur = limit.rlim_cur.min(64);
         assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
 
@@ -847,7 +850,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(totals.get(&true), Some(&(1, 133)));
-        assert_eq!(std::fs::read(generation.join("column-127/value")).unwrap(), b"x");
+        assert_eq!(
+            std::fs::read(generation.join("column-127/value")).unwrap(),
+            b"x"
+        );
     }
 
     #[test]
