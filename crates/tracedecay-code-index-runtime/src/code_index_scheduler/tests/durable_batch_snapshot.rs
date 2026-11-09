@@ -112,6 +112,13 @@ fn durable_batch_rechecks_earlier_windows_after_the_final_barrier() {
         let _capture = set_tracing_capture(observer);
         batch.sync()
     };
-    assert_eq!(retry.expect_err("retry must still refuse").kind(), ErrorKind::InvalidData);
-    assert_eq!(entered.load(Ordering::SeqCst), 1, "invalid retry must not fsync");
+    assert_eq!(
+        retry.expect_err("retry must still refuse").kind(),
+        ErrorKind::InvalidData
+    );
+    assert_eq!(
+        entered.load(Ordering::SeqCst),
+        1,
+        "invalid retry must not fsync"
+    );
 }
