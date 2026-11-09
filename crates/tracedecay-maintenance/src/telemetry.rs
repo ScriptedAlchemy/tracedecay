@@ -51,7 +51,7 @@ struct TableWatermark {
 /// size: a multi-gigabyte session store needs minutes. Once a walk has run
 /// out of time, repeating it on a store at least as large only spends the
 /// deadline again. A smaller store, or a day-old mark, is walked again.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct OverBudgetTableSizeWalk {
     page_count: u64,
     observed_at: UtcMicros,
@@ -99,6 +99,10 @@ fn settle_table_size_walk(
 struct TableGrowthStateV1 {
     watermarks: Option<BTreeMap<TableNameV1, TableWatermark>>,
     latest: Option<TableGrowthTelemetryReadV1>,
+    // A timed-out census describes the work cost of this executable, not a
+    // durable store limit. Restart must re-probe after reader improvements.
+    // Persist only actual samples and their watermarks.
+    #[serde(skip)]
     over_budget: Option<OverBudgetTableSizeWalk>,
 }
 
@@ -1331,10 +1335,15 @@ mod table_growth_tests {
 mod table_growth_restart_tests {
     use std::collections::BTreeSet;
 
-    use tracedecay_contracts::storage::TableGrowthTelemetryReadV1;
+    use tracedecay_contracts::now_micros;
+    use tracedecay_contracts::storage::{
+        TableGrowthTelemetryReadV1, TableGrowthUnavailableReasonV1,
+    };
     use tracedecay_runtime_core::cancellation::CancellationToken;
 
-    use super::{StoreTelemetrySamplingRegistry, storage_telemetry_request_context};
+    use super::{
+        OverBudgetTableSizeWalk, StoreTelemetrySamplingRegistry, storage_telemetry_request_context,
+    };
 
     #[asupersync::test]
     async fn a_restarted_registry_reports_the_persisted_measurement() {
@@ -1395,6 +1404,93 @@ mod table_growth_restart_tests {
                 .iter()
                 .all(|sample| sample.previous_observed_at == observed_at)
         );
+    }
+    #[asupersync::test]
+    async fn restart_reprobes_a_timed_out_census_without_losing_the_baseline() {
+        let temporary = tempfile::tempdir().expect("profile root");
+        let profile_root = temporary.path().join("profile");
+        let database_path = temporary.path().join("project.db");
+        let (database, scope) = super::table_growth_tests::growth_fixture(&database_path).await;
+        let paths = BTreeSet::from([database_path.clone()]);
+        let before = StoreTelemetrySamplingRegistry::persisted_under(&profile_root);
+        assert!(before.register_port(&database_path, &scope, || {
+            database.storage_telemetry_handle()
+        }));
+        before
+            .advance_registered(&paths, &paths, &CancellationToken::new())
+            .await;
+        let context = storage_telemetry_request_context(scope.clone()).expect("reader context");
+        let (store, port) = before
+            .registered_port(&database_path, &scope)
+            .expect("registered port");
+        let TableGrowthTelemetryReadV1::BaselineEstablished { observed_at, .. } =
+            port.latest_table_growth(&context, &store)
+        else {
+            panic!("first maintenance pass must establish a baseline");
+        };
+
+        database
+            .execute_write_batch(
+                "grow retained table after baseline",
+                "INSERT INTO growth_payload VALUES (zeroblob(32768));",
+            )
+            .await
+            .expect("insert a nonzero measured payload");
+        port.table_growth
+            .lock()
+            .expect("table growth state")
+            .over_budget = Some(OverBudgetTableSizeWalk {
+            page_count: 1,
+            observed_at: now_micros(),
+        });
+        before
+            .advance_registered(&paths, &paths, &CancellationToken::new())
+            .await;
+        let skipped = port.latest_table_growth(&context, &store);
+        assert!(matches!(
+            skipped,
+            TableGrowthTelemetryReadV1::Unknown {
+                reason: TableGrowthUnavailableReasonV1::ExceedsMeasurementBudget,
+                ..
+            }
+        ));
+        assert!(port.table_growth_state().over_budget.is_some());
+        drop(port);
+        drop(before);
+
+        let after = StoreTelemetrySamplingRegistry::persisted_under(&profile_root);
+        assert!(after.register_port(&database_path, &scope, || {
+            database.storage_telemetry_handle()
+        }));
+        let (store, port) = after
+            .registered_port(&database_path, &scope)
+            .expect("registered port after restart");
+        assert_eq!(
+            port.latest_table_growth(&context, &store),
+            skipped,
+            "the last unavailability is retained until a real new measurement"
+        );
+        assert_eq!(
+            port.table_growth_state().over_budget,
+            None,
+            "a previous executable's timed-out census must not suppress the new one"
+        );
+
+        after
+            .advance_registered(&paths, &paths, &CancellationToken::new())
+            .await;
+        let TableGrowthTelemetryReadV1::Observed { samples, .. } =
+            port.latest_table_growth(&context, &store)
+        else {
+            panic!("restart must retry and compare to the retained baseline");
+        };
+        let grown = samples
+            .iter()
+            .find(|sample| sample.table.as_str() == "growth_payload")
+            .expect("the retried census reports real table bytes");
+        assert_eq!(grown.previous_observed_at, observed_at);
+        assert!(grown.growth_bytes().get() >= 32_768);
+        assert_eq!(port.table_growth_state().over_budget, None);
     }
 }
 
