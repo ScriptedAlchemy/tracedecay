@@ -250,6 +250,63 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(correct_first["unwanted_hint_rate"], 1)
         self.assertEqual(wrong_first["unwanted_hint_rate"], 1)
 
+    def test_rust_permille_rounding_rejects_false_negative_case_pass(self):
+        result = self.signed_result()
+        # 0.5996 is below the historical float threshold of 0.6, but both
+        # become 600 permille in Scout's actual decision policy.
+        result["rows"][1]["probs"]["call_graph"] = 0.5996
+        report = qualification.qualified_report(
+            result, self.manifest, self.manifest_sha, self.questions,
+            self.dataset_bytes,
+        )
+        self.assertEqual(report["fixed_threshold_metrics"]["none_false_hint_rate"], 0)
+        self.assertEqual(report["holdout_decisions"]["none_false_hint_cases"], 1)
+        self.assertEqual(report["holdout_decisions"]["none_false_hint_rate"], 1)
+        self.assertFalse(report["checks"]["none_false_hint_rate"])
+        self.assertFalse(report["qualified_against_frozen_tolerances"])
+
+    def test_rust_permille_rounding_admits_real_positive_and_refuses_below(self):
+        result = self.signed_result()
+        result["rows"][0]["probs"]["impact"] = 0.5996
+        report = qualification.qualified_report(
+            result, self.manifest, self.manifest_sha, self.questions,
+            self.dataset_bytes,
+        )
+        self.assertEqual(
+            report["fixed_threshold_metrics"]["pos_cases_with_a_correct_hint"], 0
+        )
+        self.assertEqual(report["holdout_decisions"]["model_only_selected_positive_case_recall"], 1)
+        self.assertTrue(report["checks"]["positive_case_recall"])
+        self.assertTrue(report["qualified_against_frozen_tolerances"])
+
+        result["rows"][0]["probs"]["impact"] = 0.5994
+        refused = qualification.qualified_report(
+            result, self.manifest, self.manifest_sha, self.questions,
+            self.dataset_bytes,
+        )
+        self.assertEqual(refused["holdout_decisions"]["model_only_selected_positive_case_recall"], 0)
+        self.assertFalse(refused["checks"]["positive_case_recall"])
+
+    def test_scout_u16_relevance_tie_retains_question_order(self):
+        # The later incorrect answer is higher as an f64, but indistinguishable
+        # after Rust rounds relevance to u16.
+        row = {
+            "labels": ["impact"],
+            "probs": {"impact": 0.9, "call_graph": 0.9000000001},
+        }
+        self.assertEqual(
+            qualification.runtime_probability_score(0.9, 65_535),
+            qualification.runtime_probability_score(0.9000000001, 65_535),
+        )
+        correct = qualification.holdout_decision_metrics(
+            [row], {"impact": 0.6, "call_graph": 0.6},
+        )
+        wrong = qualification.holdout_decision_metrics(
+            [row], {"call_graph": 0.6, "impact": 0.6},
+        )
+        self.assertEqual(correct["model_only_selected_positive_case_recall"], 1)
+        self.assertEqual(wrong["model_only_selected_positive_case_recall"], 0)
+
     def test_native_kev_truncation_is_measured_not_assumed_from_a_flag(self):
         # Native Kev emits state_tokens/state_tokens_used and a top-level
         # truncated flag, not necessarily state_tokens_dropped.

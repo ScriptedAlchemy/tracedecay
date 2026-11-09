@@ -330,28 +330,39 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
     }
 
 
+def runtime_probability_score(probability, scale):
+    """Match Rust's nonnegative f64::round at its fixed-point decision scale."""
+    return math.floor(probability * scale + 0.5)
+
+
 def holdout_decision_metrics(rows, thresholds):
     """Measure all threshold hits separately from the single model-only pick.
 
     Scout delivers only the first candidate, not every above-threshold answer.
-    This diagnostic omits Scout's action facts, margins and delivery suppression;
-    it is a necessary model-only selection check, not production runtime parity.
+    Emulate its permille threshold and u16 relevance rounding, not the historical
+    floating-point benchmark comparison. Action facts, margins and delivery
+    suppression are still omitted; this cannot establish production parity.
     """
     hinted = unwanted = missed_positive = positive = 0
-    selected_correct_positive = selected_unwanted = 0
+    selected_correct_positive = selected_unwanted = none_negative = none_false_hint = 0
     for row in rows:
         labels = set(row["labels"])
-        fired = {key for key in thresholds if row["probs"][key] >= thresholds[key]}
+        fired = {
+            key for key in thresholds
+            if runtime_probability_score(row["probs"][key], 1_000)
+            >= runtime_probability_score(thresholds[key], 1_000)
+        }
+        none_negative += not labels
+        none_false_hint += bool(not labels and fired)
         hinted += bool(fired)
         unwanted += bool(fired - labels)
         positive += bool(labels)
         missed_positive += bool(labels and not (fired & labels))
-        # Keep the frozen question order for equal probabilities. The existing
-        # top1 benchmark picks by distance above threshold, which can disagree
-        # with Scout's relevance-first candidate ordering.
+        # Scout sorts on u16 relevance, not the raw f64. Distinct close
+        # probabilities can quantize to a tie; retain frozen question order.
         selected = max(
             (key for key in thresholds if key in fired),
-            key=lambda key: row["probs"][key],
+            key=lambda key: runtime_probability_score(row["probs"][key], 65_535),
             default=None,
         )
         selected_correct_positive += bool(labels and selected in labels)
@@ -363,6 +374,8 @@ def holdout_decision_metrics(rows, thresholds):
         "abstention_rate": (len(rows) - hinted) / len(rows),
         "unwanted_hint_cases": unwanted,
         "unwanted_hint_rate": unwanted / len(rows),
+        "none_false_hint_cases": none_false_hint,
+        "none_false_hint_rate": none_false_hint / none_negative if none_negative else None,
         "missed_positive_cases": missed_positive,
         "missed_positive_rate": missed_positive / positive if positive else None,
         "model_only_selected_correct_positive_cases": selected_correct_positive,
@@ -555,7 +568,7 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes, c
         and all(value <= validated["max_input_tokens"] for value in measured_tokens)
     )
     rates = {
-        "none_false_hint_rate": fixed["none_false_hint_rate"],
+        "none_false_hint_rate": decisions["none_false_hint_rate"],
         "unwanted_hint_rate": decisions["unwanted_hint_rate"],
         # An any-hit recall can pass even when the highest-ranked suggestion
         # is wrong. Never qualify a single-delivery application on that number.
