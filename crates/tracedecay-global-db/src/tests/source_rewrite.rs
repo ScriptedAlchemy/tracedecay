@@ -37,21 +37,37 @@ async fn rewrite_completion_retires_unoffered_records_beyond_the_query_cap() {
 
     let key = serde_json::to_string(&(source.clone(), scope.clone())).unwrap();
     let writer = harness.registered.writer_connection().unwrap();
-    for index in 0..UNOFFERED_RECORDS {
+    // Keep the regression's 10,003 ghost records without turning fixture
+    // preparation into 10,003 serial writer round-trips.
+    for start in (0..UNOFFERED_RECORDS).step_by(128) {
+        let end = (start + 128).min(UNOFFERED_RECORDS);
         writer
             .execute(
-                "INSERT INTO observation_source_presence (
-                    source_key, observation_id, generation, start_offset
-                 ) VALUES (?1, ?2, ?3, 0)",
+                "WITH RECURSIVE generated(i) AS (
+                     SELECT ?2
+                     UNION ALL
+                     SELECT i + 1 FROM generated WHERE i + 1 < ?3
+                 )
+                 INSERT INTO observation_source_presence (
+                     source_key, observation_id, generation, start_offset
+                 )
+                 SELECT ?1, printf('sha256:unoffered-%06d', i), ?4, 0
+                 FROM generated",
                 params![
                     key.as_str(),
-                    format!("sha256:unoffered-{index:06}"),
+                    start,
+                    end,
                     previous.generation_id().to_string()
                 ],
             )
             .await
             .unwrap();
     }
+    assert_eq!(
+        table_count(&writer, "SELECT COUNT(*) FROM observation_source_presence").await,
+        UNOFFERED_RECORDS,
+        "fixture must cover more rows than the query materialization cap"
+    );
 
     harness
         .registered
@@ -198,82 +214,84 @@ async fn rewrite_completion_resumes_committed_pages_after_failure_and_restart() 
     // record's output. When the last record retires, the surviving owner is
     // read back and its stored rendering derives a different message, which
     // the retire path refuses with `ProvenanceCollision`.
-    let writer = registered.writer_connection().unwrap();
-    writer
-        .execute(
-            "INSERT INTO observation_projection_provenance (
-                projector_version, observation_id, output_ordinal, receipt_id,
-                output_provider, output_message_id, output_digest, message_created,
-                retrieval_anchor_id
-             )
-             SELECT projector_version, observation_id, 1, receipt_id,
-                    output_provider, ?1, output_digest, message_created,
+    let already_retired = {
+        let writer = registered.writer_connection().unwrap();
+        writer
+            .execute(
+                "INSERT INTO observation_projection_provenance (
+                    projector_version, observation_id, output_ordinal, receipt_id,
+                    output_provider, output_message_id, output_digest, message_created,
                     retrieval_anchor_id
-             FROM observation_projection_provenance
-             WHERE observation_id = ?2",
-            params![
-                collided_message_id.as_str(),
-                survivor.observation_id().as_str()
-            ],
-        )
-        .await
-        .unwrap();
+                 )
+                 SELECT projector_version, observation_id, 1, receipt_id,
+                        output_provider, ?1, output_digest, message_created,
+                        retrieval_anchor_id
+                 FROM observation_projection_provenance
+                 WHERE observation_id = ?2",
+                params![
+                    collided_message_id.as_str(),
+                    survivor.observation_id().as_str()
+                ],
+            )
+            .await
+            .unwrap();
 
-    let before_commits = writer_telemetry(registered)
-        .transactions
-        .committed_transactions;
-    let error = registered
-        .complete_observation_source_rewrite(&source, &scope, generation)
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(error, ProjectionStoreError::ProvenanceCollision),
-        "colliding output ownership must fail completion, got {error:?}"
-    );
+        let before_commits = writer_telemetry(registered)
+            .transactions
+            .committed_transactions;
+        let error = registered
+            .complete_observation_source_rewrite(&source, &scope, generation)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ProjectionStoreError::ProvenanceCollision),
+            "colliding output ownership must fail completion, got {error:?}"
+        );
 
-    // Earlier committed pages survive the failure; only the page containing
-    // the collision rolls back. This is the progress a new process must reuse.
-    let already_retired = table_count(
-        &writer,
-        "SELECT COUNT(*) FROM observation_projection_dispositions",
-    )
-    .await;
-    assert!(
-        already_retired >= 128 && already_retired < (RECORDS - 1) as i64,
-        "failure must preserve completed pages, but not the colliding page"
-    );
-    let commits = writer_telemetry(registered)
-        .transactions
-        .committed_transactions
-        - before_commits;
-    assert!(
-        commits >= 1,
-        "at least one bounded retirement page must commit"
-    );
-    assert_eq!(
-        table_count(
+        // Earlier committed pages survive the failure; only the page containing
+        // the collision rolls back. This is the progress a new process must reuse.
+        let already_retired = table_count(
             &writer,
-            "SELECT COUNT(*) FROM observation_projection_provenance",
+            "SELECT COUNT(*) FROM observation_projection_dispositions",
         )
-        .await,
-        i64::try_from(RECORDS).unwrap() + 1 - already_retired,
-        "committed pages must remove their provenance"
-    );
-    assert_eq!(
-        table_count(&writer, "SELECT COUNT(*) FROM lcm_raw_messages").await,
-        i64::try_from(RECORDS).unwrap() - already_retired,
-        "committed pages must remove only their projected outputs"
-    );
-    assert_eq!(
-        table_count(&writer, "SELECT COUNT(*) FROM observation_source_rewrites").await,
-        1,
-        "failed page must leave the rewrite pending for restart"
-    );
+        .await;
+        assert!(
+            already_retired >= 128 && already_retired < (RECORDS - 1) as i64,
+            "failure must preserve completed pages, but not the colliding page"
+        );
+        let commits = writer_telemetry(registered)
+            .transactions
+            .committed_transactions
+            - before_commits;
+        assert!(
+            commits >= 1,
+            "at least one bounded retirement page must commit"
+        );
+        assert_eq!(
+            table_count(
+                &writer,
+                "SELECT COUNT(*) FROM observation_projection_provenance",
+            )
+            .await,
+            i64::try_from(RECORDS).unwrap() + 1 - already_retired,
+            "committed pages must remove their provenance"
+        );
+        assert_eq!(
+            table_count(&writer, "SELECT COUNT(*) FROM lcm_raw_messages").await,
+            i64::try_from(RECORDS).unwrap() - already_retired,
+            "committed pages must remove only their projected outputs"
+        );
+        assert_eq!(
+            table_count(&writer, "SELECT COUNT(*) FROM observation_source_rewrites").await,
+            1,
+            "failed page must leave the rewrite pending for restart"
+        );
+        already_retired
+    };
 
     // Reopen the registered profile store as a new daemon fixture. Durable
     // rewrite state, dispositions and the source-presence page frontier must
     // survive rather than replay the already committed retirement work.
-    drop(writer);
     drop(runtime);
     let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
         .await
@@ -605,7 +623,7 @@ async fn rewrite_completion_skips_settled_records_without_revival() {
             .await
             .unwrap();
 
-        let statements = || writer_telemetry(&registered).sqlite_vm.statements;
+        let statements = || writer_telemetry(registered).sqlite_vm.statements;
         let before = statements();
         assert_eq!(
             registered
