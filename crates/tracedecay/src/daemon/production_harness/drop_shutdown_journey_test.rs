@@ -185,7 +185,7 @@ async fn a_failed_later_mount_releases_the_whole_composition_before_returning() 
         .expect("refused store root");
     std::fs::write(&refused_graph, b"not a project graph database").expect("refused graph");
 
-    let error = match ProductionProjectCompositionHarnessV1::open(
+    let error = match ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
         isolation.path(),
         [first.clone(), refused.clone()],
     )
@@ -207,7 +207,7 @@ async fn a_failed_later_mount_releases_the_whole_composition_before_returning() 
     let stores = [
         profile.join("global.db"),
         profile.join("user-sessions.db"),
-        first_layout.data_root.join("sessions.db"),
+        first_layout.sessions_db_path,
         first_layout.graph_db_path,
     ];
     for store in &stores {
@@ -229,14 +229,23 @@ async fn a_failed_later_mount_releases_the_whole_composition_before_returning() 
     }
 
     std::fs::remove_file(&refused_graph).expect("remove the fixture refusal");
-    let harness = ProductionProjectCompositionHarnessV1::open(
+    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
         isolation.path(),
         [first.clone(), refused.clone()],
     )
     .await
     .expect("both exact projects reopen after failed-open rollback");
-    assert!(harness.server(&first).is_ok());
-    assert!(harness.server(&refused).is_ok());
+    for project in [&first, &refused] {
+        let server = harness.server(project).expect("reopened project server");
+        let store = server
+            .project_session_db()
+            .expect("mounted project sessions");
+        let layout = default_profile_sharded_layout(project, &profile).unwrap();
+        assert_eq!(
+            store.db_path().canonicalize().unwrap(),
+            layout.sessions_db_path.canonicalize().unwrap()
+        );
+    }
     harness.shutdown().await;
 }
 
