@@ -1302,30 +1302,36 @@ async fn sealed_graph_writer_reports_native_work_through_journal_commit_boundary
         .expect("real sealed graph publication");
     let first_head = first_snapshot.verified_head().clone();
     let first = observed.lock().expect("first native graph events").clone();
+    let Some((
+        GraphNativeWorkV1::CompactSegmentVerified {
+            entities,
+            relations,
+            canonical_bytes,
+        },
+        windows,
+    )) = first.split_last()
+    else {
+        panic!("native row windows must precede the verified durable segment: {first:?}");
+    };
+    assert!(*canonical_bytes > 0);
+    for (expected_kind, count) in [
+        (GraphNativeWorkKindV1::Entities, entities),
+        (GraphNativeWorkKindV1::Relations, relations),
+    ] {
+        assert!(
+            *count > 0,
+            "the fixture must write both entities and relations"
+        );
+        assert!(windows.iter().any(|work| matches!(
+            work, GraphNativeWorkV1::CompactRowsEncoded { kind, completed_rows, total_rows, total_relations }
+                if *kind == expected_kind && completed_rows == count && total_rows == count && total_relations == relations
+        )), "missing complete {expected_kind:?} window before segment verification: {first:?}");
+    }
     assert!(
-        first.iter().any(|work| matches!(
-            work,
-            GraphNativeWorkV1::CompactRowsEncoded {
-                kind: GraphNativeWorkKindV1::Entities,
-                completed_rows,
-                ..
-            } if *completed_rows > 0
-        )),
-        "native entity encoding must cross the nested commit context: {first:?}"
-    );
-    let verified_segments = first
-        .iter()
-        .filter(|work| {
-            matches!(
-                work,
-                GraphNativeWorkV1::CompactSegmentVerified { canonical_bytes, .. }
-                    if *canonical_bytes > 0
-            )
-        })
-        .count();
-    assert_eq!(
-        verified_segments, 1,
-        "exactly one installed and digest-verified graph segment must reach the observer: {first:?}"
+        !windows
+            .iter()
+            .any(|work| matches!(work, GraphNativeWorkV1::CompactSegmentVerified { .. })),
+        "the installed segment must be reported exactly once"
     );
 
     drop(first_snapshot);

@@ -1923,12 +1923,8 @@ fn stage_sealed_artifact(
         SealedRowSource::Manifest(manifest) => (Some(manifest.row_sum(check)?), None, None),
         SealedRowSource::Staging(_) => (None, None, None),
     };
-    let container_rows = match rows {
-        SealedRowSource::Layered(layered) => SealedRowSource::Spilled(layered.delta()),
-        rows => rows,
-    };
     let (mut entities, mut relations) =
-        build_sealed_container_with_work(container_rows, identity, staging, check, observe)?;
+        build_sealed_container_with_work(rows, identity, staging, check, observe)?;
     if let Some(layered) = layered {
         layered.install_base_files(staging)?;
         (entities, relations) = layered.row_counts();
@@ -1990,6 +1986,28 @@ fn build_sealed_container_with_work(
 ) -> Result<(usize, usize), GraphDbError> {
     let physical_namespace = identity.physical_namespace()?;
     let mut sealed = SealedCompactRows::new(staging)?;
+    let report_window = |boundary: NativeCompactEncodeBoundaryV1| {
+        tracing::info!(
+            event = "graph_native_compact_rows_encoded",
+            generation = %identity.generation,
+            kind = match boundary.kind {
+                GraphNativeWorkKindV1::Entities => "entities",
+                GraphNativeWorkKindV1::Relations => "relations",
+            },
+            completed_rows = boundary.completed_rows,
+            total_rows = boundary.total_rows,
+            durable = false,
+            "native compact builder accepted a row window"
+        );
+        if let Some(observer) = observe {
+            observer(GraphNativeWorkV1::CompactRowsEncoded {
+                kind: boundary.kind,
+                completed_rows: u64::try_from(boundary.completed_rows).unwrap_or(u64::MAX),
+                total_rows: u64::try_from(boundary.total_rows).unwrap_or(u64::MAX),
+                total_relations: u64::try_from(boundary.total_relations).unwrap_or(u64::MAX),
+            });
+        }
+    };
     let (entity_count, relation_count, dependency_namespaces_written) = {
         let _span = tracing::trace_span!("code_index.seal.encode").entered();
         {
@@ -2004,39 +2022,7 @@ fn build_sealed_container_with_work(
                         &physical_namespace,
                         &mut sealed,
                         check,
-                        &|boundary| {
-                            // Direct sealing bypasses native staging pages.
-                            // Report each real row-window boundary while the
-                            // compact container is being assembled, but do
-                            // NOT count it as a committed native page/segment.
-                            tracing::info!(
-                                event = "graph_native_compact_rows_encoded",
-                                generation = %identity.generation,
-                                kind = boundary.kind.as_str(),
-                                completed_rows = boundary.completed_rows,
-                                total_rows = boundary.total_rows,
-                                durable = false,
-                                "native compact builder accepted a row window"
-                            );
-                            if let Some(observer) = observe {
-                                observer(GraphNativeWorkV1::CompactRowsEncoded {
-                                    kind: match boundary.kind {
-                                        NativeCompactEncodeKindV1::Entities => {
-                                            GraphNativeWorkKindV1::Entities
-                                        }
-                                        NativeCompactEncodeKindV1::Relations => {
-                                            GraphNativeWorkKindV1::Relations
-                                        }
-                                    },
-                                    completed_rows: u64::try_from(boundary.completed_rows)
-                                        .unwrap_or(u64::MAX),
-                                    total_rows: u64::try_from(boundary.total_rows)
-                                        .unwrap_or(u64::MAX),
-                                    total_relations: u64::try_from(manifest.relations.len())
-                                        .unwrap_or(u64::MAX),
-                                });
-                            }
-                        },
+                        &report_window,
                     )?;
                     Ok((counts.0, counts.1, BTreeMap::new()))
                 }
@@ -2047,6 +2033,7 @@ fn build_sealed_container_with_work(
                         &physical_namespace,
                         &mut sealed,
                         check,
+                        &report_window,
                     )?;
                     Ok((counts.0, counts.1, BTreeMap::new()))
                 }
@@ -2057,6 +2044,7 @@ fn build_sealed_container_with_work(
                         &physical_namespace,
                         &mut sealed,
                         check,
+                        &report_window,
                     )?;
                     Ok((counts.0, counts.1, BTreeMap::new()))
                 }
@@ -2102,25 +2090,11 @@ fn build_sealed_container_with_work(
 
 /// An accepted in-memory row window, not a durable graph page or segment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum NativeCompactEncodeKindV1 {
-    Entities,
-    Relations,
-}
-
-impl NativeCompactEncodeKindV1 {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Entities => "entities",
-            Self::Relations => "relations",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct NativeCompactEncodeBoundaryV1 {
-    kind: NativeCompactEncodeKindV1,
+    kind: GraphNativeWorkKindV1,
     completed_rows: usize,
     total_rows: usize,
+    total_relations: usize,
 }
 
 /// Pushes a dependency-free generation's rows straight from its verified
@@ -2188,9 +2162,10 @@ fn push_manifest_rows(
                 // This is actual accepted native builder work. The final
                 // compact container is not yet written, installed or verified.
                 observe(NativeCompactEncodeBoundaryV1 {
-                    kind: NativeCompactEncodeKindV1::Entities,
+                    kind: GraphNativeWorkKindV1::Entities,
                     completed_rows: start.saturating_add(window.len()),
                     total_rows: entities.len(),
+                    total_relations: manifest.relations.len(),
                 });
             }
             Ok::<(), GraphDbError>(())
@@ -2254,9 +2229,10 @@ fn push_manifest_rows(
                     sealed.push_prepared_relation(prepared, endpoints[0], endpoints[1])?;
                 }
                 observe(NativeCompactEncodeBoundaryV1 {
-                    kind: NativeCompactEncodeKindV1::Relations,
+                    kind: GraphNativeWorkKindV1::Relations,
                     completed_rows: start.saturating_add(window.len()),
                     total_rows: relations.len(),
+                    total_relations: relations.len(),
                 });
             }
             Ok::<(), GraphDbError>(())
@@ -2276,6 +2252,7 @@ fn push_spilled_rows(
     physical_namespace: &GraphNamespace,
     sealed: &mut SealedCompactRows,
     check: &dyn Fn() -> Result<(), GraphDbError>,
+    observe: &dyn Fn(NativeCompactEncodeBoundaryV1),
 ) -> Result<(usize, usize), GraphDbError> {
     let projection = &identity.projection.projection;
     let workers = rayon::current_thread_index().map_or(1, |_| rayon::current_num_threads());
@@ -2313,6 +2290,12 @@ fn push_spilled_rows(
                     }
                     pushed += 1;
                 }
+                observe(NativeCompactEncodeBoundaryV1 {
+                    kind: GraphNativeWorkKindV1::Entities,
+                    completed_rows: pushed,
+                    total_rows: entity_count,
+                    total_relations: relation_count,
+                });
             }
             if pushed != entity_count {
                 return Err(GraphDbError::Corrupt {
@@ -2372,6 +2355,12 @@ fn push_spilled_rows(
                     sealed.push_prepared_relation(prepared, nodes[0], nodes[1])?;
                     pushed += 1;
                 }
+                observe(NativeCompactEncodeBoundaryV1 {
+                    kind: GraphNativeWorkKindV1::Relations,
+                    completed_rows: pushed,
+                    total_rows: relation_count,
+                    total_relations: relation_count,
+                });
             }
             if pushed != relation_count {
                 return Err(GraphDbError::Corrupt {
@@ -2868,11 +2857,10 @@ mod build_tests {
     use rayon::ThreadPoolBuilder;
 
     use super::{
-        NativeCompactEncodeBoundaryV1, NativeCompactEncodeKindV1, SEALED_STORE_DATABASE_FILE,
-        SealedCompactRows, SealedRowSource, build_or_open_sealed_store,
-        build_or_open_sealed_store_with_work, build_sealed_container_with_work, push_manifest_rows,
-        sealed_artifact_database_options, sealed_copy_proof, sealed_generation_directory,
-        sealed_store_root,
+        NativeCompactEncodeBoundaryV1, SEALED_STORE_DATABASE_FILE, SealedCompactRows,
+        SealedRowSource, build_or_open_sealed_store, build_or_open_sealed_store_with_work,
+        build_sealed_container_with_work, push_manifest_rows, sealed_artifact_database_options,
+        sealed_copy_proof, sealed_generation_directory, sealed_store_root,
     };
     use tracedecay_store::runtime::{GraphNativeWorkKindV1, GraphNativeWorkV1};
 
@@ -3021,11 +3009,11 @@ mod build_tests {
         let recorded = rows.into_inner().unwrap();
         let entities: Vec<_> = recorded
             .iter()
-            .filter(|event| event.kind == NativeCompactEncodeKindV1::Entities)
+            .filter(|event| event.kind == GraphNativeWorkKindV1::Entities)
             .collect();
         let relations: Vec<_> = recorded
             .iter()
-            .filter(|event| event.kind == NativeCompactEncodeKindV1::Relations)
+            .filter(|event| event.kind == GraphNativeWorkKindV1::Relations)
             .collect();
         assert!(
             entities.len() >= 2,
@@ -3070,7 +3058,7 @@ mod build_tests {
         assert!(matches!(result, Err(GraphDbError::Cancelled)));
         let failed = failed.into_inner().unwrap();
         assert_eq!(failed.len(), 1, "only the first complete window advanced");
-        assert_eq!(failed[0].kind, NativeCompactEncodeKindV1::Entities);
+        assert_eq!(failed[0].kind, GraphNativeWorkKindV1::Entities);
         assert_eq!(failed[0].completed_rows, 512);
         assert_eq!(failed[0].total_rows, 1_101);
     }
