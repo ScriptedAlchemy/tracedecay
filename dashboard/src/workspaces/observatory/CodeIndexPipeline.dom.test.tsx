@@ -119,6 +119,36 @@ const restoreProgress = {
 afterEach(cleanup);
 
 describe('code-index activity polling', () => {
+  it('does not turn an admitted first capture into observed work', () => {
+    const admitted = {
+      daemon_incarnation: 7, producer_incarnation: 9, attempt_sequence: 1,
+      progress_epoch: 1, phase: 'capture' as const, completed_items: 0,
+      total_items: null, last_progress_micros: null, active: true,
+    };
+    const initial = freshness({
+      latest_generation_id: null, code_graph_serving: { state: 'pending' },
+      staleness_state: 'indexing', preseal_attempt: admitted,
+    }, 'loading');
+    initial.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(initial.envelope.payload);
+    const view = render(<CodeIndexPipeline result={initial} pending={false} scopeKey="project" />);
+    expect(screen.getByText('awaiting first observed preseal work')).toBeTruthy();
+    expect(screen.queryByText('capture · 0 items')).toBeNull();
+    expect(screen.queryByText(/no observed preseal work for/)).toBeNull();
+
+    const observed = freshness({
+      latest_generation_id: null, code_graph_serving: { state: 'pending' },
+      staleness_state: 'indexing',
+      preseal_attempt: {
+        ...admitted, progress_epoch: 2, completed_items: 3,
+        total_items: 10, last_progress_micros: OBSERVED_AT,
+      },
+    }, 'loading');
+    observed.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(observed.envelope.payload);
+    view.rerender(<CodeIndexPipeline result={observed} pending={false} scopeKey="project" />);
+    expect(screen.getByText('capture · 3 / 10 items')).toBeTruthy();
+    expect(screen.queryByText('awaiting first observed preseal work')).toBeNull();
+  });
+
   it('shows pre-seal work before the first text page commits', () => {
     const result = freshness({ preseal_attempt: {
       daemon_incarnation: 1, producer_incarnation: 2, attempt_sequence: 3,

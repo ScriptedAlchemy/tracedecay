@@ -153,7 +153,26 @@ describe('Code index freshness', () => {
     )).toBeTruthy();
   });
 
-  it('uses genuine preseal and native writer clocks for no-work warnings', async () => {
+  it('does not present preseal admission as a measured capture', async () => {
+    renderFreshness('loading', {
+      worktrees: [{
+        ...worktree(),
+        latest_generation_id: null,
+        staleness_state: 'indexing',
+        preseal_attempt: {
+          daemon_incarnation: 7, producer_incarnation: 9, attempt_sequence: 1,
+          progress_epoch: 1, phase: 'capture', completed_items: 0,
+          total_items: null, last_progress_micros: null, active: true,
+        },
+      }],
+      note: 'live daemon scheduler state',
+    });
+    expect(await screen.findByText('awaiting first observed preseal work')).toBeTruthy();
+    expect(screen.queryByText('capture · 0 items')).toBeNull();
+    expect(screen.queryByText(/no observed preseal work for/)).toBeNull();
+  });
+
+  it('uses genuine preseal and native writer clocks for no-work warnings', async () {
     renderFreshness('loading', {
       worktrees: [{
         ...worktree(),

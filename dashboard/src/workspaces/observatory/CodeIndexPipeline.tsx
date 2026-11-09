@@ -180,8 +180,14 @@ export function CodeIndexAttemptReading({
         <>
           <dt className="text-text-muted">Before sealing</dt>
           <dd className="text-right text-text-secondary">
-            {attempt.phase.replaceAll('_', ' ')} · {formatCount(attempt.completed_items)}
-            {attempt.total_items != null && ` / ${formatCount(attempt.total_items)}`} items
+            {attempt.last_progress_micros == null ? (
+              'awaiting first observed preseal work'
+            ) : (
+              <>
+                {attempt.phase.replaceAll('_', ' ')} · {formatCount(attempt.completed_items)}
+                {attempt.total_items != null && ` / ${formatCount(attempt.total_items)}`} items
+              </>
+            )}
           </dd>
           {presealQuiet && (
             <>
