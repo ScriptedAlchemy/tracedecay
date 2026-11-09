@@ -515,7 +515,15 @@ fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
             project: Some((components[1].clone(), inner.iter().collect())),
         });
     }
-    let primary = if let Some(end) = components.iter().position(|name| is_wal(name)) {
+    // Managed profile families own their entire directory trees. An LCM payload,
+    // response handle, or maintenance cursor named *.wal is not a database
+    // journal; classifying it as one hides growth from its owning bound.
+    let owned_subtree = matches!(
+        first.as_str(),
+        "lcm-payloads" | "response-handles" | "maintenance"
+    );
+    let wal_component = components.iter().position(|name| is_wal(name));
+    let primary = if let Some(end) = wal_component.filter(|_| !owned_subtree) {
         (components[..=end].join("/"), ProfileFamilyV1::Wal)
     } else if let Some(stem) = graph_container_stem(first, components.len() == 1) {
         // A top-level container and only its recognized sidecars.
@@ -1455,6 +1463,61 @@ mod tests {
                 observed[key].finding().state(),
                 DoctorEvidenceStateV1::Degraded,
                 "{key} must retain its own named bound"
+            );
+        }
+    }
+
+    #[test]
+    fn managed_profile_families_bound_wal_named_payloads() {
+        let temp = tempfile::tempdir().expect("footprint fixture");
+        let profile = temp.path().join("profile");
+        for (name, bytes) in [
+            ("lcm-payloads/payload-wal/part", 25),
+            ("lcm-payloads/archive.wal", 34),
+            ("lcm-payloads/plain", 3),
+            ("response-handles/handle-wal/part", 11),
+            ("maintenance/cursor.wal", 13),
+            ("global.db-wal", 7),
+        ] {
+            sized(&profile.join(name), bytes);
+        }
+        let overrides = BTreeMap::from([
+            ("lcm-payloads".to_owned(), 61),
+            ("response-handles".to_owned(), 10),
+            ("maintenance".to_owned(), 12),
+            ("global.db-wal".to_owned(), 7),
+        ]);
+        let footprint = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
+        assert_eq!(footprint.total_bytes, 93);
+        assert_eq!(footprint.entries.len(), 4, "owner aggregates must not be split");
+        assert_eq!(
+            footprint.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Complete
+        );
+        for (key, family, bytes) in [
+            ("lcm-payloads", ProfileFamilyV1::LcmPayloads, 62),
+            ("response-handles", ProfileFamilyV1::ResponseHandles, 11),
+            ("maintenance", ProfileFamilyV1::Maintenance, 13),
+            ("global.db-wal", ProfileFamilyV1::Wal, 7),
+        ] {
+            let measured = entry(&footprint, key);
+            assert_eq!(measured.family, family, "{key}");
+            assert_eq!(measured.bytes, bytes, "{key}");
+        }
+        let observed = findings(&footprint);
+        assert_eq!(observed.len(), footprint.entries.len() + 1);
+        for key in ["lcm-payloads", "response-handles", "maintenance"] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::Degraded,
+                "{key} must retain a named over-budget finding"
+            );
+        }
+        for key in ["global.db-wal", "profile"] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::HealthyCompleteCoverage,
+                "{key}"
             );
         }
     }
