@@ -253,7 +253,7 @@ async fn terminal_compaction_preserves_pending_peers_and_refuses_replay_collisio
             .registered
             .retire_github_stack_terminal_payloads_before(11)
             .await
-            .expect("attempt cleanup with pending peer"),
+            .expect("attempt cleanup with pending peer").retired,
         0,
         "a pending peer retains its exact payload"
     );
@@ -275,7 +275,7 @@ async fn terminal_compaction_preserves_pending_peers_and_refuses_replay_collisio
             .registered
             .retire_github_stack_terminal_payloads_before(10)
             .await
-            .expect("respect inspection window"),
+            .expect("respect inspection window").retired,
         0,
         "the cutoff excludes the issue timestamp itself"
     );
@@ -284,7 +284,7 @@ async fn terminal_compaction_preserves_pending_peers_and_refuses_replay_collisio
             .registered
             .retire_github_stack_terminal_payloads_before(11)
             .await
-            .expect("retire fully terminal signal"),
+            .expect("retire fully terminal signal").retired,
         1
     );
     assert!(
@@ -389,13 +389,13 @@ async fn compaction_is_bounded_and_raw_sql_cannot_delete_unsettled_delivery() {
         .registered
         .retire_github_stack_terminal_payloads_before(1000)
         .await
-        .expect("bounded first page");
+        .expect("bounded first page").retired;
     assert_eq!(first, crate::MAX_GITHUB_STACK_RETIRE_BATCH_V1);
     let second = harness
         .registered
         .retire_github_stack_terminal_payloads_before(1000)
         .await
-        .expect("next page");
+        .expect("next page").retired;
     assert_eq!(second, 2, "pending signal is ineligible across pages");
     assert_eq!(
         state(&harness, &live, RECIPIENT).await,
@@ -406,9 +406,138 @@ async fn compaction_is_bounded_and_raw_sql_cannot_delete_unsettled_delivery() {
             .registered
             .retire_github_stack_terminal_payloads_before(1000)
             .await
-            .expect("fully drained next page"),
+            .expect("fully drained next page").retired,
         0
     );
+}
+
+
+#[asupersync::test]
+async fn retention_frontier_bounds_writer_work_and_resumes_past_deferred_backlog() {
+    use crate::tests::harness::writer_telemetry;
+    use tracedecay_runtime_core::db::engine::{Executor, params};
+
+    const BLOCKED: usize = 4_096;
+    let harness = RegisteredGlobalDbHarness::open("github-stack-retirement-frontier").await;
+    let writer = harness
+        .registered
+        .writer_connection()
+        .expect("registered retention fixture writer");
+    // One recipient's first 256 signals are pending and all later ones are
+    // deferred. The terminal signal is beyond this old, ineligible prefix.
+    writer
+        .execute(
+            "WITH RECURSIVE seq(n) AS (
+                 SELECT 0 UNION ALL SELECT n + 1 FROM seq WHERE n < 4095
+             )
+             INSERT INTO github_stack_delivery_signals
+                 (project_id, signal_id, scope_digest, repository_id,
+                  watermark_id, observed_at_micros, signal_json)
+             SELECT ?1, printf('signal.github-stack-prefix.%05d', n), ?2,
+                    'repository.github-stack-delivery', 'watermark.github-stack-delivery',
+                    n + 1, json_object('n', n) FROM seq",
+            params![PROJECT_ID, SCOPE_DIGEST],
+        )
+        .await
+        .expect("seed a large genuine signal table");
+    writer
+        .execute(
+            "INSERT INTO github_stack_delivery_recipients
+                 (project_id, signal_id, recipient, state)
+             SELECT project_id, signal_id, ?1,
+                    CASE WHEN observed_at_micros <= 256 THEN 'pending'
+                         ELSE 'deferred' END
+             FROM github_stack_delivery_signals WHERE project_id = ?2",
+            params![RECIPIENT, PROJECT_ID],
+        )
+        .await
+        .expect("seed a saturated recipient backlog");
+    let late = signal("signal.github-stack-eligible-tail", 10_000);
+    harness
+        .registered
+        .append_github_stack_signal(late.clone(), vec![RECIPIENT.to_owned()])
+        .await
+        .expect("append terminal tail beyond the backlog");
+    harness
+        .registered
+        .acknowledge_github_stack_host_delivery(PROJECT_ID, &late.signal_id, RECIPIENT)
+        .await
+        .expect("settle eligible tail");
+
+    let before = writer_telemetry(&harness.registered).sqlite_vm.vm_steps;
+    let first = harness
+        .registered
+        .retire_github_stack_terminal_payloads_before(10_001)
+        .await
+        .expect("scan one bounded pending window");
+    let steps = writer_telemetry(&harness.registered).sqlite_vm.vm_steps - before;
+    assert_eq!(first.retired, 0);
+    assert_eq!(first.inspected, crate::stack_delivery::MAX_GITHUB_STACK_RETIRE_SCAN_V1);
+    assert!(!first.exhausted, "the deferred prefix cannot starve the tail");
+    assert!(
+        steps < 30_000,
+        "one idle writer slice must not examine the 4096-row deferred prefix: {steps} VM steps"
+    );
+    assert_eq!(
+        harness.registered.github_stack_signal(PROJECT_ID, &late.signal_id).await.unwrap(),
+        Some(late.clone()),
+        "the first bounded window must not skip ahead and compact the tail"
+    );
+
+    // The scan cursor is durable, not an in-process iterator. A restart must
+    // resume past exactly the first 64 inspected rows and reach the tail.
+    let restarted = harness.restart().await;
+    let mut retired = 0;
+    for _ in 0..(BLOCKED / crate::stack_delivery::MAX_GITHUB_STACK_RETIRE_SCAN_V1 + 3) {
+        let page = restarted
+            .registered
+            .retire_github_stack_terminal_payloads_before(10_001)
+            .await
+            .expect("continue bounded retirement after restart");
+        assert!(page.inspected <= crate::stack_delivery::MAX_GITHUB_STACK_RETIRE_SCAN_V1);
+        assert!(page.retired <= crate::MAX_GITHUB_STACK_RETIRE_BATCH_V1);
+        retired += page.retired;
+        if retired != 0 {
+            break;
+        }
+    }
+    assert_eq!(retired, 1, "the terminal tail must eventually be reached");
+    assert!(
+        restarted
+            .registered
+            .github_stack_signal(PROJECT_ID, &late.signal_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // On wrap, earlier signals that have since settled are reconsidered.
+    let formerly_pending = "signal.github-stack-prefix.00000";
+    restarted
+        .registered
+        .record_github_stack_authorization_loss(PROJECT_ID, formerly_pending, RECIPIENT)
+        .await
+        .expect("permanently settle an earlier signal");
+    let mut saw_earlier = false;
+    for _ in 0..(BLOCKED / crate::stack_delivery::MAX_GITHUB_STACK_RETIRE_SCAN_V1 + 3) {
+        let page = restarted
+            .registered
+            .retire_github_stack_terminal_payloads_before(10_001)
+            .await
+            .expect("revisit old newly settled signals");
+        assert!(page.inspected <= crate::stack_delivery::MAX_GITHUB_STACK_RETIRE_SCAN_V1);
+        if restarted
+            .registered
+            .github_stack_signal(PROJECT_ID, formerly_pending)
+            .await
+            .unwrap()
+            .is_none()
+        {
+            saw_earlier = true;
+            break;
+        }
+    }
+    assert!(saw_earlier, "wrap must not abandon later-settling old signals");
 }
 
 #[asupersync::test]
@@ -434,7 +563,7 @@ async fn terminal_retirement_cannot_be_accelerated_past_the_issued_window() {
             .registered
             .retire_github_stack_terminal_payloads_before(i64::MAX)
             .await
-            .expect("future cutoff is conservatively clamped"),
+            .expect("future cutoff is conservatively clamped").retired,
         0
     );
     assert_eq!(
@@ -508,7 +637,7 @@ async fn failed_terminal_recipient_retirement_rolls_back_payload_compaction() {
             .registered
             .retire_github_stack_terminal_payloads_before(11)
             .await
-            .expect("retry after failure"),
+            .expect("retry after failure").retired,
         1
     );
     let restarted = harness.restart().await;

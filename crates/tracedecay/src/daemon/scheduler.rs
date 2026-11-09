@@ -1710,8 +1710,10 @@ async fn maybe_run_global_retention(
                     let slice = database
                         .retire_github_stack_terminal_payloads_before(cutoff_micros)
                         .await?;
-                    retired = retired.saturating_add(slice);
-                    if slice < tracedecay_global_db::MAX_GITHUB_STACK_RETIRE_BATCH_V1 {
+                    retired = retired.saturating_add(slice.retired);
+                    // A no-op page still advances a durable scan cursor. Do
+                    // not stop behind an old deferred recipient backlog.
+                    if slice.exhausted {
                         break;
                     }
                 }

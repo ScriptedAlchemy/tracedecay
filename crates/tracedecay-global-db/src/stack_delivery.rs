@@ -29,6 +29,17 @@ pub const GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1: i64 = 14;
 /// Each maintenance transaction holds no more than 16 1-MiB signal payloads.
 pub const MAX_GITHUB_STACK_RETIRE_BATCH_V1: usize = 16;
 const RETIRED_PAYLOAD_KEY: &str = "__tracedecay_retired_stack_sha256_v1";
+/// Bound raw candidates examined even when the entire old prefix is deferred.
+pub(crate) const MAX_GITHUB_STACK_RETIRE_SCAN_V1: usize = 64;
+
+/// One atomic retirement slice. An empty retirement can still advance the
+/// durable scan frontier; callers must continue until the scan is exhausted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GitHubStackTerminalRetirementPageV1 {
+    pub retired: usize,
+    pub inspected: usize,
+    pub exhausted: bool,
+}
 
 /// Neutral, serialized representation of an immutable stack signal.
 ///
@@ -153,6 +164,12 @@ pub(crate) async fn ensure_github_stack_delivery_schema(
                     REFERENCES github_stack_delivery_signals(project_id, signal_id)
                     ON DELETE RESTRICT
             ) STRICT;
+            CREATE TABLE IF NOT EXISTS github_stack_delivery_retirement_frontier (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                observed_at_micros INTEGER NOT NULL CHECK(observed_at_micros > 0),
+                project_id TEXT NOT NULL,
+                signal_id TEXT NOT NULL
+            ) STRICT;
             CREATE INDEX IF NOT EXISTS idx_github_stack_delivery_pending_recipient
                 ON github_stack_delivery_recipients(
                     project_id, recipient, signal_id
@@ -161,8 +178,10 @@ pub(crate) async fn ensure_github_stack_delivery_schema(
                 ON github_stack_delivery_recipients(
                     project_id, recipient, signal_id
                 ) WHERE state = 'deferred';
-            CREATE INDEX IF NOT EXISTS idx_github_stack_delivery_unretired_time
-                ON github_stack_delivery_signals(observed_at_micros)
+            CREATE INDEX IF NOT EXISTS idx_github_stack_delivery_unretired_cursor
+                ON github_stack_delivery_signals(
+                    observed_at_micros, project_id, signal_id
+                )
                 WHERE json_type(signal_json, '$.__tracedecay_retired_stack_sha256_v1') IS NULL;
             DROP TRIGGER IF EXISTS github_stack_delivery_signals_immutable_update;
             CREATE TRIGGER github_stack_delivery_signals_immutable_update
@@ -817,12 +836,13 @@ impl RegisteredGlobalDb {
             .filter(|signal| retired_payload_digest(&signal.signal_json).is_none()))
     }
 
-    /// Atomically discards only terminal, out-of-window transport payloads
-    /// and per-recipient rows. The tiny fingerprint remains for exact append
-    /// replay refusal; native previews and integration receipts are untouched.
+    /// Scan a bounded ordered window of old signal identities, and compact
+    /// only terminal rows. The frontier is committed alongside the mutations
+    /// so a restart cannot repeatedly rescan a blocked pending/deferred prefix.
     ///
-    /// The caller's registered retention cadence supplies the fixed cutoff.
-    /// Each transaction bounds both loaded payload bytes and written rows.
+    /// At the end of the keyspace the frontier wraps: an earlier pending
+    /// signal which later settles will become eligible on a subsequent pass.
+    /// Neither the scan nor the eligible payload count can grow with backlog.
     #[tracing::instrument(
         name = "global_db.stack_delivery.retire_terminal",
         level = "trace",
@@ -831,59 +851,143 @@ impl RegisteredGlobalDb {
     pub async fn retire_github_stack_terminal_payloads_before(
         &self,
         cutoff_micros: i64,
-    ) -> Result<usize, String> {
+    ) -> Result<GitHubStackTerminalRetirementPageV1, String> {
         let oldest_permitted_micros = tracedecay_contracts::now_micros()
             .0
             .saturating_sub(GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1 * 86_400 * 1_000_000);
         let cutoff_micros = cutoff_micros.min(oldest_permitted_micros);
         if cutoff_micros <= 0 {
-            return Ok(0);
+            return Ok(GitHubStackTerminalRetirementPageV1 {
+                retired: 0,
+                inspected: 0,
+                exhausted: true,
+            });
         }
         self.transact_or(
             |error| format!("retire terminal GitHub stack payloads: {error}"),
             async move |transaction| {
+                let (after_time, after_project, after_signal) = {
+                    let mut rows = transaction
+                        .query(
+                            "SELECT observed_at_micros, project_id, signal_id
+                             FROM github_stack_delivery_retirement_frontier
+                             WHERE singleton = 1",
+                            (),
+                        )
+                        .await
+                        .map_err(|error| format!("read stack retirement frontier: {error}"))?;
+                    match rows
+                        .next()
+                        .await
+                        .map_err(|error| format!("read stack retirement frontier row: {error}"))?
+                    {
+                        Some(row) => (
+                            row.get::<i64>(0)
+                                .map_err(|error| format!("decode stack frontier time: {error}"))?,
+                            row.get::<String>(1).map_err(|error| {
+                                format!("decode stack frontier project: {error}")
+                            })?,
+                            row.get::<String>(2)
+                                .map_err(|error| format!("decode stack frontier signal: {error}"))?,
+                        ),
+                        None => (0, String::new(), String::new()),
+                    }
+                };
+                // Do not select signal_json or filter out pending recipients
+                // here: both would make LIMIT a bound on returned rows rather
+                // than on the work examined inside this writer transaction.
                 let mut rows = transaction
                     .query(
-                        "SELECT s.project_id, s.signal_id, s.signal_json
+                        "SELECT s.observed_at_micros, s.project_id, s.signal_id
                          FROM github_stack_delivery_signals AS s
                          WHERE s.observed_at_micros < ?1
                            AND json_type(s.signal_json,
                                '$.__tracedecay_retired_stack_sha256_v1') IS NULL
-                           AND NOT EXISTS (
-                               SELECT 1 FROM github_stack_delivery_recipients AS r
-                               WHERE r.project_id = s.project_id
-                                 AND r.signal_id = s.signal_id
-                                 AND r.state IN ('pending', 'deferred')
-                           )
+                           AND (s.observed_at_micros, s.project_id, s.signal_id)
+                               > (?2, ?3, ?4)
                          ORDER BY s.observed_at_micros, s.project_id, s.signal_id
-                         LIMIT ?2",
-                        params![cutoff_micros, MAX_GITHUB_STACK_RETIRE_BATCH_V1 as i64],
+                         LIMIT ?5",
+                        params![
+                            cutoff_micros,
+                            after_time,
+                            after_project.as_str(),
+                            after_signal.as_str(),
+                            MAX_GITHUB_STACK_RETIRE_SCAN_V1 as i64,
+                        ],
                     )
                     .await
-                    .map_err(|error| format!("query terminal GitHub stack signals: {error}"))?;
-                let mut candidates = Vec::new();
+                    .map_err(|error| format!("scan bounded GitHub stack identities: {error}"))?;
+                let mut keys = Vec::new();
                 while let Some(row) = rows
                     .next()
                     .await
-                    .map_err(|error| format!("read terminal GitHub stack signal: {error}"))?
+                    .map_err(|error| format!("read bounded GitHub stack identity: {error}"))?
                 {
-                    candidates.push((
-                        row.get::<String>(0).map_err(|error| {
-                            format!("decode terminal GitHub stack project: {error}")
-                        })?,
-                        row.get::<String>(1).map_err(|error| {
-                            format!("decode terminal GitHub stack signal: {error}")
-                        })?,
-                        row.get::<String>(2).map_err(|error| {
-                            format!("decode terminal GitHub stack payload: {error}")
-                        })?,
+                    keys.push((
+                        row.get::<i64>(0)
+                            .map_err(|error| format!("decode stack candidate time: {error}"))?,
+                        row.get::<String>(1)
+                            .map_err(|error| format!("decode stack candidate project: {error}"))?,
+                        row.get::<String>(2)
+                            .map_err(|error| format!("decode stack candidate signal: {error}"))?,
                     ));
                 }
                 drop(rows);
 
-                for (project_id, signal_id, payload) in &candidates {
+                let mut inspected = 0usize;
+                let mut retired = 0usize;
+                for (observed_at, project_id, signal_id) in &keys {
+                    if retired == MAX_GITHUB_STACK_RETIRE_BATCH_V1 {
+                        break;
+                    }
+                    inspected += 1;
+                    let mut pending = transaction
+                        .query(
+                            "SELECT EXISTS (
+                                 SELECT 1 FROM github_stack_delivery_recipients
+                                 WHERE project_id = ?1 AND signal_id = ?2
+                                   AND state IN ('pending', 'deferred')
+                             )",
+                            params![project_id.as_str(), signal_id.as_str()],
+                        )
+                        .await
+                        .map_err(|error| format!("test stack terminal eligibility: {error}"))?;
+                    let blocked = pending
+                        .next()
+                        .await
+                        .map_err(|error| format!("read stack terminal eligibility: {error}"))?
+                        .ok_or_else(|| "stack eligibility query returned no row".to_owned())?
+                        .get::<i64>(0)
+                        .map_err(|error| format!("decode stack terminal eligibility: {error}"))?
+                        != 0;
+                    drop(pending);
+                    if blocked {
+                        continue;
+                    }
+                    // Load at most 16 eligible payloads, each already bounded
+                    // by the store's 1 MiB CHECK. Ineligible rows cost only an
+                    // indexed identity and recipient-status probe.
+                    let mut payload_rows = transaction
+                        .query(
+                            "SELECT signal_json FROM github_stack_delivery_signals
+                             WHERE project_id = ?1 AND signal_id = ?2
+                               AND observed_at_micros = ?3
+                               AND json_type(signal_json,
+                                   '$.__tracedecay_retired_stack_sha256_v1') IS NULL",
+                            params![project_id.as_str(), signal_id.as_str(), observed_at],
+                        )
+                        .await
+                        .map_err(|error| format!("read eligible stack payload: {error}"))?;
+                    let payload = payload_rows
+                        .next()
+                        .await
+                        .map_err(|error| format!("read eligible stack payload row: {error}"))?
+                        .ok_or_else(|| "stack signal changed during retirement".to_owned())?
+                        .get::<String>(0)
+                        .map_err(|error| format!("decode eligible stack payload: {error}"))?;
+                    drop(payload_rows);
                     let digest = hex::encode(Sha256::digest(payload.as_bytes()));
-                    let retired =
+                    let compact =
                         format!(r#"{{"__tracedecay_retired_stack_sha256_v1":"{digest}"}}"#);
                     let changed = transaction
                         .execute(
@@ -898,7 +1002,7 @@ impl RegisteredGlobalDb {
                             params![
                                 project_id.as_str(),
                                 signal_id.as_str(),
-                                retired.as_str(),
+                                compact.as_str(),
                                 payload.as_str(),
                                 cutoff_micros,
                             ],
@@ -906,9 +1010,7 @@ impl RegisteredGlobalDb {
                         .await
                         .map_err(|error| format!("compact GitHub stack signal: {error}"))?;
                     if changed != 1 {
-                        return Err(
-                            "terminal GitHub stack signal changed during retirement".to_owned()
-                        );
+                        return Err("terminal GitHub stack signal changed during retirement".to_owned());
                     }
                     transaction
                         .execute(
@@ -919,8 +1021,41 @@ impl RegisteredGlobalDb {
                         )
                         .await
                         .map_err(|error| format!("retire GitHub stack recipient rows: {error}"))?;
+                    retired += 1;
                 }
-                Ok(candidates.len())
+                let exhausted =
+                    inspected == keys.len() && keys.len() < MAX_GITHUB_STACK_RETIRE_SCAN_V1;
+                if exhausted {
+                    // A wrap revisits old blocked rows that have since settled.
+                    // Empty and completed passes must not leave a stale cursor.
+                    transaction
+                        .execute(
+                            "DELETE FROM github_stack_delivery_retirement_frontier
+                             WHERE singleton = 1",
+                            (),
+                        )
+                        .await
+                        .map_err(|error| format!("wrap stack retirement frontier: {error}"))?;
+                } else if let Some((time, project_id, signal_id)) = keys.get(inspected - 1) {
+                    transaction
+                        .execute(
+                            "INSERT INTO github_stack_delivery_retirement_frontier
+                                 (singleton, observed_at_micros, project_id, signal_id)
+                             VALUES (1, ?1, ?2, ?3)
+                             ON CONFLICT(singleton) DO UPDATE SET
+                                 observed_at_micros = excluded.observed_at_micros,
+                                 project_id = excluded.project_id,
+                                 signal_id = excluded.signal_id",
+                            params![time, project_id.as_str(), signal_id.as_str()],
+                        )
+                        .await
+                        .map_err(|error| format!("advance stack retirement frontier: {error}"))?;
+                }
+                Ok(GitHubStackTerminalRetirementPageV1 {
+                    retired,
+                    inspected,
+                    exhausted,
+                })
             },
         )
         .await
