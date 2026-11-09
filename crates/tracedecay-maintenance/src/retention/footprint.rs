@@ -491,21 +491,24 @@ fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
     if first == PROJECTS_DIRECTORY && components.len() >= 3 {
         let store_key = format!("{PROJECTS_DIRECTORY}/{}", components[1]);
         let inner = &components[2..];
+        // A container's verified/spill tree owns its descendants, even when
+        // a scratch file is named *.wal. Only the actual container WAL
+        // directory (or a WAL outside a container) gets a WAL bound.
         let overlay = inner
-            .iter()
-            .position(|name| is_wal(name))
-            .map(|end| {
-                (
-                    format!("{store_key}/{}", inner[..=end].join("/")),
-                    ProfileFamilyV1::Wal,
-                )
-            })
-            .or_else(|| {
-                let (first, rest) = inner.split_first()?;
+            .split_first()
+            .and_then(|(first, rest)| {
                 graph_container_stem(first, rest.is_empty()).map(|stem| {
                     (
                         format!("{store_key}/{stem}"),
                         ProfileFamilyV1::GraphContainer,
+                    )
+                })
+            })
+            .or_else(|| {
+                inner.iter().position(|name| is_wal(name)).map(|end| {
+                    (
+                        format!("{store_key}/{}", inner[..=end].join("/")),
+                        ProfileFamilyV1::Wal,
                     )
                 })
             });
@@ -523,11 +526,11 @@ fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
         "lcm-payloads" | "response-handles" | "maintenance"
     );
     let wal_component = components.iter().position(|name| is_wal(name));
-    let primary = if let Some(end) = wal_component.filter(|_| !owned_subtree) {
-        (components[..=end].join("/"), ProfileFamilyV1::Wal)
-    } else if let Some(stem) = graph_container_stem(first, components.len() == 1) {
-        // A top-level container and only its recognized sidecars.
+    let primary = if let Some(stem) = graph_container_stem(first, components.len() == 1) {
+        // Sidecar trees take precedence over WAL-looking scratch filenames.
         (stem.to_owned(), ProfileFamilyV1::GraphContainer)
+    } else if let Some(end) = wal_component.filter(|_| !owned_subtree) {
+        (components[..=end].join("/"), ProfileFamilyV1::Wal)
     } else if components.len() == 1
         && matches!(
             first.as_str(),
@@ -1378,6 +1381,76 @@ mod tests {
             DoctorEvidenceStateV1::HealthyCompleteCoverage,
             "WAL pressure remains its own bound, not double-charged to containers"
         );
+    }
+
+    #[test]
+    fn nested_wal_named_graph_spill_files_remain_under_container_bounds() {
+        let temp = tempfile::tempdir().expect("footprint fixture");
+        let profile = temp.path().join("profile");
+        for (relative, bytes) in [
+            ("user-sessions.grafeo", 5),
+            ("user-sessions.grafeo.spill/scratch/chunk.wal", 17),
+            ("user-sessions.grafeo.spill/scratch/segment-wal/part", 19),
+            ("user-sessions.grafeo.wal/segment", 7),
+            ("projects/proj_spill/graph.grafeo", 3),
+            ("projects/proj_spill/graph.grafeo.spill/scratch/chunk.wal", 23),
+            ("projects/proj_spill/graph.grafeo.spill/segment-wal/part", 29),
+            ("projects/proj_spill/graph.grafeo.wal/segment", 11),
+        ] {
+            sized(&profile.join(relative), bytes);
+        }
+        let overrides = BTreeMap::from([
+            ("user-sessions.grafeo".to_owned(), 40),
+            ("projects/proj_spill/graph.grafeo".to_owned(), 54),
+            ("user-sessions.grafeo.wal".to_owned(), 7),
+            ("projects/proj_spill/graph.grafeo.wal".to_owned(), 11),
+        ]);
+        let footprint = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
+        assert_eq!(footprint.total_bytes, 114);
+        assert_eq!(footprint.unavailable_entry_count, 0);
+        assert_eq!(footprint.entries.len(), 5);
+        assert_eq!(
+            footprint.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Complete
+        );
+
+        for (key, family, bytes) in [
+            ("user-sessions.grafeo", ProfileFamilyV1::GraphContainer, 41),
+            (
+                "projects/proj_spill/graph.grafeo",
+                ProfileFamilyV1::GraphContainer,
+                55,
+            ),
+            ("user-sessions.grafeo.wal", ProfileFamilyV1::Wal, 7),
+            ("projects/proj_spill/graph.grafeo.wal", ProfileFamilyV1::Wal, 11),
+            ("projects/proj_spill", ProfileFamilyV1::ProjectStore, 66),
+        ] {
+            let measured = entry(&footprint, key);
+            assert_eq!(measured.family, family, "{key}");
+            assert_eq!(measured.bytes, bytes, "{key}");
+        }
+
+        let observed = findings(&footprint);
+        assert_eq!(observed.len(), 6);
+        for key in ["user-sessions.grafeo", "projects/proj_spill/graph.grafeo"] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::Degraded,
+                "{key} must detect spill bytes despite WAL-looking filenames"
+            );
+        }
+        for key in [
+            "user-sessions.grafeo.wal",
+            "projects/proj_spill/graph.grafeo.wal",
+            "projects/proj_spill",
+            PROFILE_TOTAL_KEY,
+        ] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::HealthyCompleteCoverage,
+                "{key} must retain its actual bound"
+            );
+        }
     }
 
     #[test]
