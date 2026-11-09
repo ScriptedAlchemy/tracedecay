@@ -268,29 +268,34 @@ impl ProjectFeedbackObservationSinkV1 {
         })
     }
 
-    #[tracing::instrument(name = "usecases.feedback.close_drain", level = "trace", skip_all)]
-    async fn close_and_drain(&self) -> Result<(), FeedbackRuntimeError> {
-        let terminal = {
-            let _admission = self
-                .admission
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if self.closed.load(Ordering::Acquire) {
-                None
-            } else {
-                let terminal = self.prepare_terminal_envelope()?;
-                self.closed.store(true, Ordering::Release);
-                Some(terminal)
-            }
-        };
-        let terminal_outcome = if let Some(terminal) = terminal {
-            self.control_sender
-                .try_send(terminal)
-                .map_err(|_| FeedbackRuntimeError::ObservationWorker)
-        } else {
-            Ok(())
-        };
+    fn close_and_drain(
+        self: &Arc<Self>,
+    ) -> impl Future<Output = Result<(), FeedbackRuntimeError>> + Send + 'static + use<> {
+        let terminal = self.close_admission();
+        let sink = Arc::clone(self);
+        async move {
+            terminal?;
+            sink.join_worker().await
+        }
+    }
 
+    fn close_admission(&self) -> Result<(), FeedbackRuntimeError> {
+        let _admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.closed.load(Ordering::Acquire) {
+            let terminal = self.prepare_terminal_envelope()?;
+            self.closed.store(true, Ordering::Release);
+            if self.control_sender.try_send(terminal).is_err() {
+                self.record_shutdown_failure(&FeedbackRuntimeError::ObservationWorker);
+            }
+        }
+        Ok(())
+    }
+
+    #[tracing::instrument(name = "usecases.feedback.close_drain", level = "trace", skip_all)]
+    async fn join_worker(&self) -> Result<(), FeedbackRuntimeError> {
         let mut worker = self.worker.lock().await;
         let outcome = match worker.as_ref() {
             Some(task) => match task.wait().await {
@@ -303,7 +308,6 @@ impl ProjectFeedbackObservationSinkV1 {
             None => Ok(()),
         };
         worker.take();
-        let outcome = terminal_outcome.and(outcome);
         if let Err(error) = &outcome {
             self.record_shutdown_failure(error);
         }
@@ -525,10 +529,12 @@ impl FeedbackRuntime {
         })
     }
 
-    /// Stop observation admission, persist the producer's terminal record, and
-    /// join the worker that owns the project database before store retirement.
-    pub async fn close_and_drain_observations(&self) -> Result<(), FeedbackRuntimeError> {
-        self.observation_sink.close_and_drain().await
+    /// Close admission immediately and return a join for the terminal write
+    /// and worker that owns the project database.
+    pub fn close_and_drain_observations(
+        &self,
+    ) -> impl Future<Output = Result<(), FeedbackRuntimeError>> + Send + 'static + use<> {
+        self.observation_sink.close_and_drain()
     }
 
     pub fn owner(&self) -> Arc<ConcreteFeedbackOwner> {
@@ -2471,11 +2477,12 @@ mod tests {
         let boot_id = sink.boot_id.clone();
 
         let worker_guard = sink.worker.lock().await;
-        let closing_sink = Arc::clone(&sink);
-        let close = tokio::spawn(async move { closing_sink.close_and_drain().await });
-        while !sink.closed.load(Ordering::Acquire) {
-            tokio::task::yield_now().await;
-        }
+        let drain = sink.close_and_drain();
+        assert!(
+            sink.closed.load(Ordering::Acquire),
+            "admission closes before joining the worker"
+        );
+        let close = tokio::spawn(drain);
         close.abort();
         assert!(close.await.unwrap_err().is_cancelled());
         drop(worker_guard);
@@ -2515,7 +2522,7 @@ mod tests {
             Err(())
         })
         .unwrap();
-        let sink = ProjectFeedbackObservationSinkV1 {
+        let sink = Arc::new(ProjectFeedbackObservationSinkV1 {
             sender,
             control_sender,
             boot_id: canonical_sha256(&"feedback-terminal-failure").unwrap(),
@@ -2525,7 +2532,7 @@ mod tests {
             closed: AtomicBool::new(false),
             shutdown_failure: AtomicU8::new(OBSERVATION_SHUTDOWN_CLEAN),
             worker: AsyncMutex::new(Some(worker)),
-        };
+        });
 
         assert!(matches!(
             sink.close_and_drain().await,
