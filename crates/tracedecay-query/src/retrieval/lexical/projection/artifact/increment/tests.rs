@@ -1,7 +1,7 @@
 use rusqlite::{Connection, ErrorCode, params};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 
-use super::{CodeLexicalArtifactErrorV1, ShiftV1, shift_row_chunk_documents, shift_rowid_keys};
+use super::{CodeLexicalArtifactErrorV1, ShiftV1, shift_rowid_keys};
 
 struct Active;
 impl CodeIndexExecutionControlV1 for Active {
@@ -25,9 +25,11 @@ fn fixture() -> (tempfile::TempDir, Connection) {
              CREATE TABLE row_blocks(
                  first_document INTEGER PRIMARY KEY, payload BLOB NOT NULL
              );
-             CREATE TABLE row_chunks(
-                 chunk_id BLOB PRIMARY KEY, document_id INTEGER NOT NULL
-             ) WITHOUT ROWID;
+             CREATE TABLE clone_occurrences(
+                 ordinal INTEGER PRIMARY KEY,
+                 symbol_key BLOB NOT NULL UNIQUE,
+                 payload_ordinal INTEGER NOT NULL
+             );
              CREATE TABLE independent(value TEXT NOT NULL);
              INSERT INTO independent VALUES ('live');",
         )
@@ -37,12 +39,17 @@ fn fixture() -> (tempfile::TempDir, Connection) {
         let mut block = transaction
             .prepare("INSERT INTO row_blocks(first_document,payload) VALUES(?1,?2)")
             .unwrap();
-        let mut chunk = transaction
-            .prepare("INSERT INTO row_chunks(chunk_id,document_id) VALUES(?1,?2)")
+        let mut occurrence = transaction
+            .prepare(
+                "INSERT INTO clone_occurrences(ordinal,symbol_key,payload_ordinal)
+                 VALUES(?1,?2,?3)",
+            )
             .unwrap();
         for n in 1_i64..=16_000 {
             block.execute(params![n, [7_u8; 32].as_slice()]).unwrap();
-            chunk.execute(params![n.to_be_bytes().as_slice(), n]).unwrap();
+            occurrence
+                .execute(params![n, n.to_be_bytes().as_slice(), n % 31])
+                .unwrap();
         }
     }
     transaction.commit().unwrap();
@@ -60,12 +67,15 @@ fn blocks(c: &Connection) -> Vec<(i64, Vec<u8>)> {
         .unwrap()
 }
 
-fn chunks(c: &Connection) -> Vec<(Vec<u8>, i64)> {
+fn occurrences(c: &Connection) -> Vec<(i64, Vec<u8>, i64)> {
     let mut query = c
-        .prepare("SELECT chunk_id,document_id FROM row_chunks ORDER BY chunk_id")
+        .prepare(
+            "SELECT ordinal,symbol_key,payload_ordinal
+             FROM clone_occurrences ORDER BY ordinal",
+        )
         .unwrap();
     query
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap()
@@ -81,17 +91,17 @@ fn integrity(c: &Connection) {
 }
 
 #[test]
-fn lexical_row_carry_is_disk_durable_and_collision_safe() {
+fn lexical_rowid_carry_preserves_disk_rows_across_replacements() {
     let (directory, mut connection) = fixture();
     let original_blocks = blocks(&connection);
-    let original_chunks = chunks(&connection);
+    let original_occurrences = occurrences(&connection);
     assert_eq!(original_blocks.len(), 16_000);
-    assert_eq!(original_chunks.len(), 16_000);
+    assert_eq!(original_occurrences.len(), 16_000);
     let shifts = [
         ShiftV1::new([((11, 20), 5), ((36, 39), 6)]).unwrap(),
         ShiftV1::new([((11, 20), 12), ((36, 39), 1)]).unwrap(),
     ];
-    // The old positive-key update really collides without negative staging.
+    // Positive collision control: old in-place positive keys cannot just move.
     {
         let tx = connection.transaction().unwrap();
         let error = tx
@@ -110,27 +120,29 @@ fn lexical_row_carry_is_disk_durable_and_collision_safe() {
                     .map(|mapped| (i64::try_from(mapped).unwrap(), blob.clone()))
             })
             .collect();
-        let expected_chunks: Vec<_> = original_chunks
+        let expected_occurrences: Vec<_> = original_occurrences
             .iter()
-            .filter_map(|(key, document)| {
+            .filter_map(|(key, symbol, payload)| {
                 shift
-                    .map(u64::try_from(*document).unwrap())
+                    .map(u64::try_from(*key).unwrap())
                     .unwrap()
-                    .map(|mapped| (key.clone(), i64::try_from(mapped).unwrap()))
+                    .map(|mapped| (i64::try_from(mapped).unwrap(), symbol.clone(), *payload))
             })
             .collect();
         let tx = connection.transaction().unwrap();
-        for (table, column) in [("row_blocks", "first_document"), ("row_chunks", "document_id")] {
+        for (table, column) in [
+            ("row_blocks", "first_document"),
+            ("clone_occurrences", "ordinal"),
+        ] {
             tx.execute(
                 &format!("DELETE FROM {table} WHERE {}", shift.sql_replaced(column)),
                 [],
             )
             .unwrap();
+            shift_rowid_keys(&tx, table, column, shift, &Active).unwrap();
         }
-        shift_rowid_keys(&tx, "row_blocks", "first_document", shift, &Active).unwrap();
-        shift_row_chunk_documents(&tx, shift, &Active).unwrap();
         assert_eq!(blocks(&tx), expected_blocks);
-        assert_eq!(chunks(&tx), expected_chunks);
+        assert_eq!(occurrences(&tx), expected_occurrences);
         assert_eq!(
             tx.pragma_query_value(Some("temp"), "page_count", |r| r.get::<_, i64>(0))
                 .unwrap(),
@@ -153,11 +165,11 @@ fn lexical_row_carry_is_disk_durable_and_collision_safe() {
             }
         );
         assert_eq!(
-            chunks(&connection),
+            occurrences(&connection),
             if index == 0 {
-                original_chunks.clone()
+                original_occurrences.clone()
             } else {
-                expected_chunks
+                expected_occurrences
             }
         );
         let live: String = connection
@@ -169,10 +181,10 @@ fn lexical_row_carry_is_disk_durable_and_collision_safe() {
 }
 
 #[test]
-fn interrupted_row_carry_rolls_back_both_key_families() {
+fn interrupted_rowid_carry_rolls_back_partial_key_staging() {
     let (directory, mut connection) = fixture();
     let original_blocks = blocks(&connection);
-    let original_chunks = chunks(&connection);
+    let original_occurrences = occurrences(&connection);
     let shift = ShiftV1::new([((1, 1), 1)]).unwrap();
     struct CancelAfter {
         probes: std::sync::atomic::AtomicUsize,
@@ -187,20 +199,21 @@ fn interrupted_row_carry_rolls_back_both_key_families() {
             false
         }
     }
-    for chunk_family in [false, true] {
+    for occurrences_family in [false, true] {
         let tx = connection.transaction().unwrap();
         let cancel = CancelAfter {
             probes: std::sync::atomic::AtomicUsize::new(0),
             limit: 4_100,
         };
-        let error = if chunk_family {
-            shift_row_chunk_documents(&tx, &shift, &cancel).unwrap_err()
+        let (table, column) = if occurrences_family {
+            ("clone_occurrences", "ordinal")
         } else {
-            shift_rowid_keys(&tx, "row_blocks", "first_document", &shift, &cancel).unwrap_err()
+            ("row_blocks", "first_document")
         };
+        let error = shift_rowid_keys(&tx, table, column, &shift, &cancel).unwrap_err();
         assert!(matches!(error, CodeLexicalArtifactErrorV1::Interrupted(_)));
-        if chunk_family {
-            assert_ne!(chunks(&tx), original_chunks);
+        if occurrences_family {
+            assert_ne!(occurrences(&tx), original_occurrences);
         } else {
             assert_ne!(blocks(&tx), original_blocks);
         }
@@ -209,18 +222,18 @@ fn interrupted_row_carry_rolls_back_both_key_families() {
         drop(connection);
         connection = Connection::open(directory.path().join("carry.sqlite")).unwrap();
         assert_eq!(blocks(&connection), original_blocks);
-        assert_eq!(chunks(&connection), original_chunks);
+        assert_eq!(occurrences(&connection), original_occurrences);
         integrity(&connection);
     }
 }
 
 #[cfg(target_os = "linux")]
 #[test]
-fn lexical_row_carry_avoids_live_unlinked_sqlite_spills() {
+fn lexical_rowid_shift_does_not_spill_unlinked_sqlite_files() {
     use std::io;
     use std::process::Command;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     fn spill_bytes() -> io::Result<u64> {
         let mut total = 0;
@@ -241,10 +254,10 @@ fn lexical_row_carry_avoids_live_unlinked_sqlite_spills() {
         Ok(total)
     }
 
-    const CHILD: &str = "TRACEDECAY_ROW_CARRY_SPILL_CHILD";
+    const CHILD: &str = "TRACEDECAY_ROWID_CARRY_SPILL_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let output = Command::new(std::env::current_exe().unwrap())
-            .arg("lexical_row_carry_avoids_live_unlinked_sqlite_spills")
+            .arg("lexical_rowid_shift_does_not_spill_unlinked_sqlite_files")
             .arg("--test-threads=1")
             .arg("--nocapture")
             .env(CHILD, "1")
@@ -258,8 +271,7 @@ fn lexical_row_carry_avoids_live_unlinked_sqlite_spills() {
     }
     let (_directory, mut connection) = fixture();
     let shift = ShiftV1::new([((1, 1), 1)]).unwrap();
-    let original_blocks = blocks(&connection);
-    let original_chunks = chunks(&connection);
+    let original = blocks(&connection);
     let peak = Arc::new(AtomicU64::new(0));
     let unreadable = Arc::new(AtomicBool::new(false));
     let observer_peak = Arc::clone(&peak);
@@ -284,29 +296,33 @@ fn lexical_row_carry_avoids_live_unlinked_sqlite_spills() {
             [],
         )
         .unwrap();
+        // The second bulk UPDATE materializes the transient rowid set.
+        tx.execute(
+            "UPDATE row_blocks SET first_document=-first_document-1 WHERE first_document<0",
+            [],
+        )
+        .unwrap();
         tx.rollback().unwrap();
     }
     assert!(!unreadable.load(Ordering::Relaxed));
-    assert!(peak.load(Ordering::Relaxed) > 0, "old bulk update must spill");
+    assert!(peak.load(Ordering::Relaxed) > 0, "old bulk rowid rewrite must spill");
     assert_eq!(
         connection.pragma_query_value(Some("temp"), "page_count", |r| r.get::<_, i64>(0)).unwrap(),
         0,
         "TEMP pager counts cannot observe the transient statement spill"
     );
-    assert_eq!(blocks(&connection), original_blocks);
+    assert_eq!(blocks(&connection), original);
     assert_eq!(spill_bytes().unwrap(), 0);
     peak.store(0, Ordering::Relaxed);
     {
         let tx = connection.transaction().unwrap();
         shift_rowid_keys(&tx, "row_blocks", "first_document", &shift, &Active).unwrap();
-        shift_row_chunk_documents(&tx, &shift, &Active).unwrap();
         tx.commit().unwrap();
     }
     connection.progress_handler(0, None::<fn() -> bool>);
     assert!(!unreadable.load(Ordering::Relaxed));
-    assert_eq!(peak.load(Ordering::Relaxed), 0, "bounded remap must not spill");
+    assert_eq!(peak.load(Ordering::Relaxed), 0, "bounded rowid shift must not spill");
     assert_eq!(spill_bytes().unwrap(), 0);
-    assert_ne!(blocks(&connection), original_blocks);
-    assert_ne!(chunks(&connection), original_chunks);
+    assert_ne!(blocks(&connection), original);
     integrity(&connection);
 }
