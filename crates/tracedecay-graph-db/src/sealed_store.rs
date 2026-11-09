@@ -3413,9 +3413,10 @@ mod build_tests {
     use rayon::ThreadPoolBuilder;
 
     use super::{
-        SEALED_STORE_DATABASE_FILE, SEALED_STORE_RECEIPT_FILE, SealedRowSource,
-        build_or_open_sealed_store, build_sealed_container, sealed_artifact_database_options,
-        sealed_copy_proof, sealed_generation_directory, sealed_store_root,
+        SEALED_STAGING_OWNER_FILE, SEALED_STORE_DATABASE_FILE, SEALED_STORE_RECEIPT_FILE,
+        SealedRowSource, build_or_open_sealed_store, build_sealed_container,
+        sealed_artifact_database_options, sealed_copy_proof, sealed_generation_directory,
+        sealed_store_root, sweep_abandoned_sealed_staging,
     };
     use crate::location::PersistentGraphStoreState;
     use crate::{
