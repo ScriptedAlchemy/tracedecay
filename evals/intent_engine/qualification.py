@@ -371,6 +371,29 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes, c
         if (row.get("labels") != annotation["verified_labels"]
                 or row.get("context_needed") != annotation["verified_context_needed"]):
             raise ValueError(f"qualification result {row['id']} does not match reviewed labels")
+    # Historical scoring accepts Choice results and optional "none" scores.
+    # Qualified Scout runs are Noul-only: the original HTTP runner cannot emit
+    # a Choice pick or an extra probability outside its frozen question set.
+    # Reject mixed-type edited evidence before computing qualification checks.
+    expected_questions = set(questions)
+    for row in rows:
+        probabilities = row.get("probs")
+        raw_probabilities = row.get("probs_raw")
+        if (
+            "choice" in row
+            or not isinstance(probabilities, dict)
+            or set(probabilities) != expected_questions
+            or (
+                raw_probabilities is not None
+                and (
+                    not isinstance(raw_probabilities, dict)
+                    or set(raw_probabilities) != expected_questions
+                )
+            )
+        ):
+            raise ValueError(
+                f"qualification row {row['id']} must contain only frozen Noul probabilities"
+            )
     # Native truncation counters and the normalized drop count must remain
     # consistent even if the result JSON was edited after the HTTP response.
     for row in rows:

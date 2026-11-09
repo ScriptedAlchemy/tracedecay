@@ -569,6 +569,38 @@ class QualificationTests(unittest.TestCase):
             qualification.qualified_report(result, stricter, qualification.sha256_json(stricter), self.questions, self.dataset_bytes)
 
 
+    def test_qualified_scorer_rejects_edited_choice_and_extra_none_evidence(self):
+        # These edits previously passed the generic historical scorer. An
+        # independently scored Noul-only result must reject them even when
+        # the request hashes, experiment SHA and verified labels still agree.
+        control = self.signed_result()
+        self.assertTrue(qualification.qualified_report(
+            control, self.manifest, self.manifest_sha,
+            self.questions, self.dataset_bytes,
+        )["qualified_against_frozen_tolerances"])
+
+        for variant in ("extra_none_probability", "choice_on_every_case"):
+            with self.subTest(variant=variant):
+                forged = copy.deepcopy(control)
+                if variant == "extra_none_probability":
+                    forged["rows"][0]["probs"]["none"] = 0.95
+                else:
+                    for row in forged["rows"]:
+                        row["choice"] = "none"
+
+                # An unqualified historical result may legitimately have
+                # these fields. This passing control proves the old scored
+                # path would not refuse our adversarial evidence.
+                self.assertIn(
+                    "latency",
+                    score.score_config(forged, cats=tuple(self.questions)),
+                )
+                with self.assertRaisesRegex(ValueError, "only frozen Noul probabilities"):
+                    qualification.qualified_report(
+                        forged, self.manifest, self.manifest_sha,
+                        self.questions, self.dataset_bytes,
+                    )
+
     def test_qualification_reports_missing_or_drifting_model_identity(self):
         for value in (None, "", True, "another-model"):
             with self.subTest(observed_model=value):
