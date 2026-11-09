@@ -667,7 +667,8 @@ pub(crate) fn discard_superseded_sealed_generations(
             };
             recognized_form
                 && receipt.version == SEALED_STORE_RECEIPT_VERSION
-                && receipt.physical_namespace == format!("generation:{name}")
+                && sealed_receipt_matches_generation_entry(&receipt, name)
+                && !receipt.recovered_digest.is_empty()
                 && receipt.graph_format > 0
                 && receipt.graph_format < GraphFormatVersion::current().get()
         },
@@ -680,6 +681,30 @@ pub(crate) fn discard_superseded_sealed_generations(
             error,
         )),
     }
+}
+
+/// A physical generation entry is deletable only if the receipt's logical
+/// locator derives that exact entry name. A copied receipt with a fabricated
+/// physical namespace is not evidence of ownership.
+fn sealed_receipt_matches_generation_entry(
+    receipt: &SealedStoreReceiptV1,
+    generation_hex: &str,
+) -> bool {
+    let (Ok(namespace), Ok(projection), Ok(generation)) = (
+        GraphNamespace::new(receipt.namespace.clone()),
+        GraphProjectionId::new(receipt.projection.clone()),
+        crate::GraphGenerationId::new(receipt.generation.clone()),
+    ) else {
+        return false;
+    };
+    let locator = GenerationLocator::new(
+        GraphProjectionIdentity::new(namespace, projection),
+        generation,
+    );
+    locator.physical_namespace().is_ok_and(|physical| {
+        physical.as_str() == receipt.physical_namespace
+            && receipt.physical_namespace == format!("generation:{generation_hex}")
+    })
 }
 
 fn sealed_staging_name(name: &str) -> bool {
@@ -718,23 +743,7 @@ pub(crate) fn sweep_abandoned_sealed_staging(database_path: &Path) {
             let Ok(receipt) = serde_json::from_slice::<SealedStoreReceiptV1>(bytes) else {
                 return false;
             };
-            // Bind the receipt's logical identity back to the canonical
-            // physical namespace. A copied receipt with a rewritten physical
-            // name is not proof of ownership of another staged generation.
-            let (Ok(namespace), Ok(projection), Ok(generation)) = (
-                GraphNamespace::new(receipt.namespace.clone()),
-                GraphProjectionId::new(receipt.projection.clone()),
-                crate::GraphGenerationId::new(receipt.generation.clone()),
-            ) else {
-                return false;
-            };
-            let locator = GenerationLocator::new(
-                GraphProjectionIdentity::new(namespace, projection),
-                generation,
-            );
-            let Ok(physical_namespace) = locator.physical_namespace() else {
-                return false;
-            };
+            // Reuse the same identity proof as obsolete-format retirement.
             let recognized_form = match receipt.form.as_str() {
                 SEALED_STORE_FORM_COMPACT => receipt.base.is_none(),
                 SEALED_STORE_FORM_LAYERED => receipt.base.is_some(),
@@ -744,8 +753,7 @@ pub(crate) fn sweep_abandoned_sealed_staging(database_path: &Path) {
                 && receipt.version == SEALED_STORE_RECEIPT_VERSION
                 && receipt.graph_format > 0
                 && receipt.graph_format <= GraphFormatVersion::current().get()
-                && receipt.physical_namespace == format!("generation:{generation_hex}")
-                && receipt.physical_namespace == physical_namespace.as_str()
+                && sealed_receipt_matches_generation_entry(&receipt, generation_hex)
                 && !receipt.recovered_digest.is_empty()
         },
     );
@@ -3035,7 +3043,29 @@ mod receipt_budget_tests {
         std::fs::create_dir_all(&root).unwrap();
         let current = GraphFormatVersion::current().get();
         assert!(current > 0);
-        let old = generation(&root, 'a', &receipt(current - 1, &"a".repeat(64), "old"));
+        let old_locator = GenerationLocator::new(
+            GraphProjectionIdentity::new(
+                GraphNamespace::new("test").unwrap(),
+                GraphProjectionId::new("code").unwrap(),
+            ),
+            crate::GraphGenerationId::new("generation:obsolete").unwrap(),
+        );
+        let old_physical = old_locator.physical_namespace().unwrap();
+        let old_name = old_physical.as_str().strip_prefix("generation:").unwrap();
+        let old = root.join(old_name);
+        std::fs::create_dir(&old).unwrap();
+        std::fs::write(
+            old.join(SEALED_STORE_RECEIPT_FILE),
+            receipt(current - 1, old_name, "generation:obsolete"),
+        )
+        .unwrap();
+        // A syntactically plausible old receipt with a different logical
+        // generation cannot authorize deletion of this occupied directory.
+        let forged = generation(
+            &root,
+            'a',
+            &receipt(current - 1, &"a".repeat(64), "generation:foreign"),
+        );
         let live = generation(&root, 'b', &receipt(current, &"b".repeat(64), "live"));
         let invalid = generation(&root, 'c', b"not a receipt");
         // Zero is not a valid GraphFormatVersion, even when the JSON is well formed.
@@ -3070,6 +3100,7 @@ mod receipt_budget_tests {
         };
         for dir in [
             &old,
+            &forged,
             &live,
             &invalid,
             &zero_format,
@@ -3082,7 +3113,15 @@ mod receipt_budget_tests {
 
         discard_superseded_sealed_generations(&database).unwrap();
         assert!(!old.exists(), "verified old-format receipt is reclaimable");
-        for dir in [&live, &invalid, &zero_format, &oversized, &missing, &future] {
+        for dir in [
+            &forged,
+            &live,
+            &invalid,
+            &zero_format,
+            &oversized,
+            &missing,
+            &future,
+        ] {
             assert_eq!(std::fs::read(dir.join("sentinel")).unwrap(), b"owned");
         }
         assert_eq!(std::fs::read(&unrelated).unwrap(), b"foreign");
