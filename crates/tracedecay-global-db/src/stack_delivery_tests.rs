@@ -1,3 +1,6 @@
+use tracedecay_runtime_core::db::engine::params;
+
+use crate::tests::harness::writer_telemetry;
 use crate::{
     GitHubStackDeliveryStateV1, GitHubStackSignalAppendOutcomeV1, GitHubStackSignalRecordV1,
     MAX_GITHUB_STACK_ACTIVE_PENDING_V1, tests::harness::RegisteredGlobalDbHarness,
@@ -208,7 +211,6 @@ async fn settling_a_recipient_promotes_only_its_oldest_deferred_row() {
 }
 
 async fn stored_signal_payload_bytes(harness: &RegisteredGlobalDbHarness, signal_id: &str) -> i64 {
-    use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
     let snapshot = harness
         .registered
         .read_snapshot()
@@ -253,7 +255,8 @@ async fn terminal_compaction_preserves_pending_peers_and_refuses_replay_collisio
             .registered
             .retire_github_stack_terminal_payloads_before(11)
             .await
-            .expect("attempt cleanup with pending peer").retired,
+            .expect("attempt cleanup with pending peer")
+            .retired,
         0,
         "a pending peer retains its exact payload"
     );
@@ -275,7 +278,8 @@ async fn terminal_compaction_preserves_pending_peers_and_refuses_replay_collisio
             .registered
             .retire_github_stack_terminal_payloads_before(10)
             .await
-            .expect("respect inspection window").retired,
+            .expect("respect inspection window")
+            .retired,
         0,
         "the cutoff excludes the issue timestamp itself"
     );
@@ -284,7 +288,8 @@ async fn terminal_compaction_preserves_pending_peers_and_refuses_replay_collisio
             .registered
             .retire_github_stack_terminal_payloads_before(11)
             .await
-            .expect("retire fully terminal signal").retired,
+            .expect("retire fully terminal signal")
+            .retired,
         1
     );
     assert!(
@@ -345,7 +350,6 @@ async fn terminal_compaction_preserves_pending_peers_and_refuses_replay_collisio
 
 #[asupersync::test]
 async fn compaction_is_bounded_and_raw_sql_cannot_delete_unsettled_delivery() {
-    use tracedecay_runtime_core::db::engine::{Executor, params};
     let harness = RegisteredGlobalDbHarness::open("github-stack-bounded-retirement").await;
     let count = crate::MAX_GITHUB_STACK_RETIRE_BATCH_V1 + 3;
     for index in 0..count {
@@ -389,13 +393,15 @@ async fn compaction_is_bounded_and_raw_sql_cannot_delete_unsettled_delivery() {
         .registered
         .retire_github_stack_terminal_payloads_before(1000)
         .await
-        .expect("bounded first page").retired;
+        .expect("bounded first page")
+        .retired;
     assert_eq!(first, crate::MAX_GITHUB_STACK_RETIRE_BATCH_V1);
     let second = harness
         .registered
         .retire_github_stack_terminal_payloads_before(1000)
         .await
-        .expect("next page").retired;
+        .expect("next page")
+        .retired;
     assert_eq!(second, 2, "pending signal is ineligible across pages");
     assert_eq!(
         state(&harness, &live, RECIPIENT).await,
@@ -406,17 +412,14 @@ async fn compaction_is_bounded_and_raw_sql_cannot_delete_unsettled_delivery() {
             .registered
             .retire_github_stack_terminal_payloads_before(1000)
             .await
-            .expect("fully drained next page").retired,
+            .expect("fully drained next page")
+            .retired,
         0
     );
 }
 
-
 #[asupersync::test]
 async fn retention_frontier_bounds_writer_work_and_resumes_past_deferred_backlog() {
-    use crate::tests::harness::writer_telemetry;
-    use tracedecay_runtime_core::db::engine::{Executor, params};
-
     const BLOCKED: usize = 4_096;
     let harness = RegisteredGlobalDbHarness::open("github-stack-retirement-frontier").await;
     let writer = harness
@@ -470,22 +473,37 @@ async fn retention_frontier_bounds_writer_work_and_resumes_past_deferred_backlog
         .await
         .expect("settle eligible tail");
 
-    let before = writer_telemetry(&harness.registered).sqlite_vm.vm_steps;
+    let before = writer_telemetry(&harness.registered);
     let first = harness
         .registered
         .retire_github_stack_terminal_payloads_before(10_001)
         .await
         .expect("scan one bounded pending window");
-    let steps = writer_telemetry(&harness.registered).sqlite_vm.vm_steps - before;
+    let after = writer_telemetry(&harness.registered);
+    assert_eq!(
+        after.transactions.commands - before.transactions.commands,
+        1
+    );
+    let steps = after.sqlite_vm.vm_steps - before.sqlite_vm.vm_steps;
     assert_eq!(first.retired, 0);
-    assert_eq!(first.inspected, crate::stack_delivery::MAX_GITHUB_STACK_RETIRE_SCAN_V1);
-    assert!(!first.exhausted, "the deferred prefix cannot starve the tail");
+    assert_eq!(
+        first.inspected,
+        crate::stack_delivery::MAX_GITHUB_STACK_RETIRE_SCAN_V1
+    );
     assert!(
-        steps < 30_000,
+        !first.exhausted,
+        "the deferred prefix cannot starve the tail"
+    );
+    assert!(
+        (1..30_000).contains(&steps),
         "one idle writer slice must not examine the 4096-row deferred prefix: {steps} VM steps"
     );
     assert_eq!(
-        harness.registered.github_stack_signal(PROJECT_ID, &late.signal_id).await.unwrap(),
+        harness
+            .registered
+            .github_stack_signal(PROJECT_ID, &late.signal_id)
+            .await
+            .unwrap(),
         Some(late.clone()),
         "the first bounded window must not skip ahead and compact the tail"
     );
@@ -543,7 +561,10 @@ async fn retention_frontier_bounds_writer_work_and_resumes_past_deferred_backlog
             break;
         }
     }
-    assert!(saw_earlier, "wrap must not abandon later-settling old signals");
+    assert!(
+        saw_earlier,
+        "wrap must not abandon later-settling old signals"
+    );
 }
 
 #[asupersync::test]
@@ -569,7 +590,8 @@ async fn terminal_retirement_cannot_be_accelerated_past_the_issued_window() {
             .registered
             .retire_github_stack_terminal_payloads_before(i64::MAX)
             .await
-            .expect("future cutoff is conservatively clamped").retired,
+            .expect("future cutoff is conservatively clamped")
+            .retired,
         0
     );
     assert_eq!(
@@ -584,7 +606,6 @@ async fn terminal_retirement_cannot_be_accelerated_past_the_issued_window() {
 
 #[asupersync::test]
 async fn failed_terminal_recipient_retirement_rolls_back_payload_compaction() {
-    use tracedecay_runtime_core::db::engine::Executor;
     let harness = RegisteredGlobalDbHarness::open("github-stack-retire-rollback").await;
     let record = signal("signal.github-stack-rollback", 10);
     harness
@@ -643,7 +664,8 @@ async fn failed_terminal_recipient_retirement_rolls_back_payload_compaction() {
             .registered
             .retire_github_stack_terminal_payloads_before(11)
             .await
-            .expect("retry after failure").retired,
+            .expect("retry after failure")
+            .retired,
         1
     );
     let restarted = harness.restart().await;

@@ -887,8 +887,9 @@ impl RegisteredGlobalDb {
                             row.get::<String>(1).map_err(|error| {
                                 format!("decode stack frontier project: {error}")
                             })?,
-                            row.get::<String>(2)
-                                .map_err(|error| format!("decode stack frontier signal: {error}"))?,
+                            row.get::<String>(2).map_err(|error| {
+                                format!("decode stack frontier signal: {error}")
+                            })?,
                         ),
                         None => (0, String::new(), String::new()),
                     }
@@ -974,7 +975,7 @@ impl RegisteredGlobalDb {
                                AND observed_at_micros = ?3
                                AND json_type(signal_json,
                                    '$.__tracedecay_retired_stack_sha256_v1') IS NULL",
-                            params![project_id.as_str(), signal_id.as_str(), observed_at],
+                            params![project_id.as_str(), signal_id.as_str(), *observed_at],
                         )
                         .await
                         .map_err(|error| format!("read eligible stack payload: {error}"))?;
@@ -1010,7 +1011,9 @@ impl RegisteredGlobalDb {
                         .await
                         .map_err(|error| format!("compact GitHub stack signal: {error}"))?;
                     if changed != 1 {
-                        return Err("terminal GitHub stack signal changed during retirement".to_owned());
+                        return Err(
+                            "terminal GitHub stack signal changed during retirement".to_owned()
+                        );
                     }
                     transaction
                         .execute(
@@ -1046,7 +1049,7 @@ impl RegisteredGlobalDb {
                                  observed_at_micros = excluded.observed_at_micros,
                                  project_id = excluded.project_id,
                                  signal_id = excluded.signal_id",
-                            params![time, project_id.as_str(), signal_id.as_str()],
+                            params![*time, project_id.as_str(), signal_id.as_str()],
                         )
                         .await
                         .map_err(|error| format!("advance stack retirement frontier: {error}"))?;
