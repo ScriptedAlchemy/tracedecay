@@ -210,6 +210,10 @@ impl StoreKindBytesV1 {
         } else if first == GRAPH_REPLAY_POOL_DIRECTORY {
             &mut self.graph_replay_pool
         } else if first.ends_with(GRAPH_CONTAINER_WAL_SUFFIX)
+            // The container's verified and spill sidecars consume the same
+            // graph-container budget; they are not miscellaneous store data.
+            || first.ends_with(".grafeo.verified")
+            || first.ends_with(".grafeo.spill")
             || (first.ends_with(GRAPH_CONTAINER_SUFFIX) && components.next().is_none())
         {
             &mut self.graph_container
@@ -3564,6 +3568,8 @@ mod tests {
             ("tracedecay.graph-replay/generation.json", 40),
             ("tracedecay.grafeo", 500),
             ("tracedecay.grafeo.wal/wal_00000001.log", 60),
+            ("tracedecay.grafeo.verified", 80),
+            ("tracedecay.grafeo.spill/inflight", 120),
             ("sessions.db", 900),
             ("sessions.db-wal", 10),
             (".sessions.db.host-admission/claim", 5),
@@ -3602,13 +3608,13 @@ mod tests {
                 sealed_graph: 3_000,
                 text_artifacts: 2_050,
                 generation_artifacts: 1_000,
-                graph_container: 560,
+                graph_container: 760,
                 graph_replay_pool: 40,
                 sessions: 915,
                 other: 7,
             }
         );
-        assert_eq!(store.total_bytes, 11_768);
+        assert_eq!(store.total_bytes, 11_968);
         assert_eq!(store.total_bytes, walked_bytes);
         assert_eq!(store.unavailable_entry_count, 0);
     }
