@@ -310,6 +310,20 @@ settings and owning transcript authority before making any application
 replacement decision. The runner itself does not export canonical Scout data.
 
 ## Captured Scout request arm (qualified only)
+The live intent pass also records a content-free `intent_decision` analytics
+event for **every completed assessment**, including below-threshold and
+no-signal results that produce no delivered hint. The event keeps the owning
+session/project/provider and boundary identity, original store-ID bounds and
+window digest, settings digest, typed model outcome, Noul probabilities,
+observed action facts, prompt inferences, and the policy selection separately.
+An unavailable model has **null answers**, not fabricated negative labels.
+The transcript body stays in the owning session store. These events are
+provenance pointers, not independent correctness labels or proof that the
+session text still exists: analytics can also be unavailable, and the missing
+bounded exporter must rehydrate the original owning window and independently
+verify its digest before claiming a canonical Scout capture. No such
+rehydration or real Kev experiment is claimed by this event alone.
+
 
 The historical `A/B/B2` renderers do **not** reproduce production Scout
 requests. A separately captured, byte-exact request file can now be evaluated
