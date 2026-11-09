@@ -1268,7 +1268,7 @@ async fn refused_durable_test_result_cannot_publish_a_completed_live_terminal() 
         .await
         .expect_err("unrecorded outcome cannot settle durably");
     assert!(
-        matches!(error, TraceDecayError::Database { .. }),
+        matches!(&error, TraceDecayError::Database { .. }),
         "durable-store refusal must remain typed: {error}"
     );
     let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())

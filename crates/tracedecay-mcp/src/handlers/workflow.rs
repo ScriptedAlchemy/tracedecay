@@ -735,8 +735,8 @@ impl ManagedTestRun {
     /// Settles the durable record with the run's exit status and outcome
     /// counts, then publishes the terminal receipt. Readers rely on that
     /// order: a run whose live stream terminated has its outcome recorded
-    /// unless recording it failed. The receipt is published either way, so
-    /// no subscriber waits on a run that already ended.
+    /// unless recording it failed. A refused durable write publishes a failed
+    /// live terminal, never an unverifiable success, so subscribers stop waiting.
     #[tracing::instrument(name = "mcp.workflow.affected_tests.finish", level = "trace", skip_all)]
     pub(super) async fn finish(
         &self,
