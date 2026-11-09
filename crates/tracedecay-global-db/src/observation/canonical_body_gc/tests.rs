@@ -591,7 +591,10 @@ async fn bootstrap_reports_each_committed_sql_frontier_without_claiming_collecti
     let frontiers = [
         ("raw:0".to_owned(), "raw:1".to_owned()),
         ("observations:0".to_owned(), "observations:1".to_owned()),
-        ("bodies:".to_owned(), format!("bodies:{}", body.content_hash)),
+        (
+            "bodies:".to_owned(),
+            format!("bodies:{}", body.content_hash),
+        ),
     ];
     for (phase, (before, after)) in frontiers.into_iter().enumerate() {
         let report = store.tick(1).await;
@@ -629,6 +632,28 @@ async fn bootstrap_reports_each_committed_sql_frontier_without_claiming_collecti
             ..CanonicalBodyGcReport::default()
         }
     );
+}
+
+#[asupersync::test]
+async fn empty_bootstrap_page_reports_its_committed_frontier_once() {
+    let store = Store::open().await;
+    store.conn().execute(
+        "INSERT INTO lcm_raw_messages(storage_kind, content, content_hash) VALUES ('inline', 'text', 'fixture')", ()
+    ).await.unwrap();
+    store.install().await;
+    store
+        .conn()
+        .execute("DELETE FROM lcm_raw_messages", ())
+        .await
+        .unwrap();
+
+    let page = store.tick(48).await;
+    assert_eq!((page.roots_scanned, page.bodies_scanned), (0, 0));
+    assert_eq!(page.bootstrap_frontier_before.as_deref(), Some("raw:0"));
+    assert_eq!(page.bootstrap_frontier_after.as_deref(), Some("raw:1"));
+    assert_eq!(read_progress(store.conn()).await.unwrap().raw_through, 1);
+    assert!(page.has_committed_work());
+    assert!(!store.tick(48).await.has_committed_work());
 }
 
 #[asupersync::test]

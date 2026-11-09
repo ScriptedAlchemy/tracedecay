@@ -380,7 +380,7 @@ fn record_canonical_body_gc_outcome(
 ) -> MaintenanceTickOutcome {
     match outcome {
         Ok(report) => {
-            if report.roots_scanned > 0 || report.bodies_scanned > 0 {
+            if report.has_committed_work() {
                 log_daemon_event(
                     "retention_canonical_bodies",
                     &[

@@ -45,6 +45,15 @@ pub struct CanonicalBodyGcReport {
     pub has_more: bool,
 }
 
+impl CanonicalBodyGcReport {
+    /// A bootstrap page can commit its remaining frontier after every owner in it was deleted.
+    pub fn has_committed_work(&self) -> bool {
+        self.roots_scanned != 0
+            || self.bodies_scanned != 0
+            || self.bootstrap_frontier_after.is_some()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Progress {
     raw_through: i64,
