@@ -1057,7 +1057,10 @@ impl McpServer {
         cg: &Arc<TraceDecay>,
         tool_name: &str,
         result: &mut ToolResult,
-    ) -> (ToolTokenAccounting, Option<tokio::sync::oneshot::Receiver<bool>>) {
+    ) -> (
+        ToolTokenAccounting,
+        Option<tokio::sync::oneshot::Receiver<bool>>,
+    ) {
         // A result the shared renderer already accounted carries its figures
         // and footer; only persist them.
         let accounting = match result.token_accounting() {

@@ -900,7 +900,10 @@ mod tests {
 
         // Cost and raw activity remain independently observable; their
         // metadata must not claim a saving that failed its canonical commit.
-        let snapshot = accounting_db.read_snapshot().await.expect("analytics snapshot");
+        let snapshot = accounting_db
+            .read_snapshot()
+            .await
+            .expect("analytics snapshot");
         let mut rows = snapshot
             .query(
                 "SELECT metadata_json FROM analytics_events
