@@ -28,6 +28,8 @@ const DEFAULT_MAX_RELATIONS: usize = 100_000;
 // reconstruction and its receipt acknowledgement; each retry re-reads the
 // refreshed generation, so the bound only limits back-to-back supersessions.
 const APPLY_PUBLICATION_RACE_ATTEMPTS: usize = 3;
+// A bounded creation-order prefix avoids counting a dense due backlog.
+const RECOVERY_CREATION_PROBE_ROWS: i64 = 64;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SessionRelationRecoveryPage {
@@ -335,22 +337,101 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 next_retry_at_unix_seconds: retry_at,
             });
         }
-        let mut rows = snapshot
+        let query_limit = bounded_query_limit(limit)?;
+        // Dense ready queues should retain the creation-order plan. A bounded
+        // prefix detects that case without counting every receipt. When the
+        // prefix sleeps, indexed cardinalities distinguish sparse due work
+        // from bulk catch-up: the deadline index avoids reading all older
+        // deferred receipts, while the creation index avoids sorting all due
+        // receipts. Neither plan changes the ordered pagination contract.
+        let mut prefix_rows = snapshot
             .query(
-                "SELECT receipt.session_id, receipt.generation, receipt.scope_kind,
-                        receipt.scope_id, journal.projection_json,
-                        receipt.recovery_failure_count
-                 FROM session_relation_receipts AS receipt
-                 LEFT JOIN session_relation_effect_journal AS journal
-                   ON journal.session_id = receipt.session_id
-                  AND journal.generation = receipt.generation
-                 WHERE receipt.state = 'pending'
-                   AND receipt.recovery_state IN ('pending', 'retryable')
-                   AND receipt.recovery_next_attempt_at <= unixepoch()
-                 ORDER BY receipt.created_at, receipt.session_id, receipt.generation
-                 LIMIT ?1",
-                params![bounded_query_limit(limit)?],
+                "SELECT COUNT(*) FROM (
+                     SELECT recovery_state, recovery_next_attempt_at
+                     FROM session_relation_receipts
+                          INDEXED BY idx_session_relation_receipts_pending
+                     WHERE state = 'pending'
+                     ORDER BY created_at, session_id, generation
+                     LIMIT ?1
+                 ) WHERE recovery_state IN ('pending', 'retryable')
+                   AND recovery_next_attempt_at <= ?2",
+                params![RECOVERY_CREATION_PROBE_ROWS, now],
             )
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let prefix_due: i64 = prefix_rows
+            .next()
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+            .ok_or_else(|| {
+                storage_message(
+                    RECONSTRUCT_OPERATION,
+                    "relation recovery prefix probe returned no aggregate row",
+                )
+            })?
+            .get(0)
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        drop(prefix_rows);
+        let prefer_creation_order = if prefix_due >= query_limit {
+            true
+        } else {
+            let mut count_rows = snapshot
+                .query(
+                    "SELECT
+                         (SELECT COUNT(*) FROM session_relation_receipts
+                              INDEXED BY idx_session_relation_receipts_recovery_due
+                          WHERE state = 'pending'
+                            AND recovery_state IN ('pending', 'retryable')),
+                         (SELECT COUNT(*) FROM session_relation_receipts
+                              INDEXED BY idx_session_relation_receipts_recovery_due
+                          WHERE state = 'pending'
+                            AND recovery_state IN ('pending', 'retryable')
+                            AND recovery_next_attempt_at <= ?1)",
+                    params![now],
+                )
+                .await
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+            let counts = count_rows
+                .next()
+                .await
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+                .ok_or_else(|| {
+                    storage_message(
+                        RECONSTRUCT_OPERATION,
+                        "relation recovery count probe returned no aggregate row",
+                    )
+                })?;
+            let eligible: i64 = counts
+                .get(0)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+            let due: i64 = counts
+                .get(1)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+            drop(count_rows);
+            due.saturating_mul(3) >= eligible
+        };
+        let index_name = if prefer_creation_order {
+            "idx_session_relation_receipts_pending"
+        } else {
+            "idx_session_relation_receipts_recovery_due"
+        };
+        // The index is one of two literal schema names, not external input.
+        let candidate_sql = format!(
+            "SELECT receipt.session_id, receipt.generation, receipt.scope_kind,
+                    receipt.scope_id, journal.projection_json,
+                    receipt.recovery_failure_count
+             FROM session_relation_receipts AS receipt INDEXED BY {index_name}
+             LEFT JOIN session_relation_effect_journal AS journal
+               ON journal.session_id = receipt.session_id
+              AND journal.generation = receipt.generation
+             WHERE receipt.state = 'pending'
+               AND receipt.recovery_state IN ('pending', 'retryable')
+               AND receipt.recovery_next_attempt_at <= ?2
+             ORDER BY receipt.created_at, receipt.session_id, receipt.generation
+             LIMIT ?1"
+        );
+        let mut rows = snapshot
+            .query(candidate_sql.as_str(), params![query_limit, now])
             .await
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
         let mut pending = Vec::new();

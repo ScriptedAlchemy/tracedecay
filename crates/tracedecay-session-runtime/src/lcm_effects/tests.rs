@@ -2488,6 +2488,59 @@ async fn malformed_relation_receipt_is_permanent_without_starving_summary_work()
         .await
         .unwrap();
     assert_eq!(changed, 2, "both durable receipts must be present");
+    // The older receipts are valid rows in the registered temporal schema,
+    // but their deadlines are in the future. Only the two real publication
+    // receipts should be recovered, in creation order, on bounded pages.
+    let generations = transaction
+        .execute(
+            "WITH RECURSIVE seq(n) AS (
+                 SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 256
+             )
+             INSERT INTO session_temporal_generations (
+                 session_id, generation, state, frozen_watermarks_json,
+                 created_at, ready_at, activated_at
+             )
+             SELECT printf('deferred-relation-%04d', n), 1, 'active', '{}',
+                    n, n, n FROM seq",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(generations, 256);
+    let deferred_count = transaction
+        .execute(
+            "WITH RECURSIVE seq(n) AS (
+                 SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 256
+             )
+             INSERT INTO session_relation_receipts (
+                 session_id, generation, scope_kind, scope_id,
+                 expected_graph_watermark, state, created_at,
+                 recovery_state, recovery_failure_count,
+                 recovery_next_attempt_at
+             )
+             SELECT printf('deferred-relation-%04d', n), 1,
+                    scope.scope_kind, scope.scope_id, 'deferred-test',
+                    'pending', n, 'retryable', 1, unixepoch() + 3600
+             FROM seq CROSS JOIN (
+                 SELECT scope_kind, scope_id
+                 FROM session_relation_receipts WHERE session_id = ?1
+                 LIMIT 1
+             ) AS scope",
+            params![poison_session],
+        )
+        .await
+        .unwrap();
+    assert_eq!(deferred_count, 256);
+    let ordered = transaction
+        .execute(
+            "UPDATE session_relation_receipts
+             SET created_at = CASE session_id WHEN ?1 THEN 1000 ELSE 2000 END
+             WHERE session_id IN (?1, ?2)",
+            params![poison_session, healthy_session],
+        )
+        .await
+        .unwrap();
+    assert_eq!(ordered, 2);
     transaction.commit().await.unwrap();
 
     let recovered_first = SessionTemporalAccess::new(&*db)
@@ -2499,6 +2552,21 @@ async fn malformed_relation_receipt_is_permanent_without_starving_summary_work()
         .unwrap();
     assert_eq!(recovered_first.processed, 1);
     assert!(recovered_first.has_more, "the second due receipt is owed");
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT recovery_state FROM session_relation_receipts WHERE session_id = ?1",
+            params![poison_session],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<String>(0).unwrap(),
+        "permanent",
+        "the earlier due receipt must settle on the first page"
+    );
+    drop(rows);
+    drop(snapshot);
 
     let recovered_second = SessionTemporalAccess::new(&*db)
         .recover_pending_session_relation_projection_page(
@@ -2518,6 +2586,10 @@ async fn malformed_relation_receipt_is_permanent_without_starving_summary_work()
         .unwrap();
     assert_eq!(idle.processed, 0, "settled receipts stay parked");
     assert!(!idle.has_more);
+    assert!(
+        idle.next_retry_at_unix_seconds.is_some(),
+        "sleeping receipts must keep their future retry deadline"
+    );
 }
 
 #[test]
