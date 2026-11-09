@@ -34,6 +34,8 @@ use tracedecay_store::runtime::{
     StoreShardIdV1,
 };
 
+use tracedecay_domain::canonical_text::{canonical_framed_sha256, is_lowercase_hex};
+
 use crate::limits::{MAX_VERIFIED_GENERATION_ENTITIES, MAX_VERIFIED_GENERATION_RELATIONS};
 use crate::row_index::{
     ENTITY_ROW_OFFSETS_FILE, EntityRowOffsetsWriter, ROW_INDEX_FILE, RowIndexBuilder,
@@ -66,10 +68,63 @@ const ATTACHMENT_FILE: &str = "attachment";
 pub(crate) const ROW_SPILL_OWNER_RECEIPT_FILE: &str = ".row-spill-owner-v1";
 pub(crate) const MAX_ROW_SPILL_OWNER_RECEIPT_BYTES: usize = 512;
 
-pub(crate) fn row_spill_owner_receipt(name: &OsStr) -> Option<Vec<u8>> {
+pub(crate) const ROW_SPILL_PREFIX: &str = ".rows-";
+const RECEIPT_PREFIX: &str = "tracedecay.graph-row-spill-v1:";
+
+fn row_spill_owner_receipt(name: &OsStr) -> Option<Vec<u8>> {
     let name = name.to_str()?;
-    let receipt = format!("tracedecay.graph-row-spill-v1:{name}").into_bytes();
+    let receipt = format!("{RECEIPT_PREFIX}{name}").into_bytes();
     (receipt.len() <= MAX_ROW_SPILL_OWNER_RECEIPT_BYTES).then_some(receipt)
+}
+
+fn staging_name(owner: u32, receipt: &[u8]) -> String {
+    let digest = canonical_framed_sha256(
+        b"tracedecay.graph-row-spill.pending.v1",
+        &[&owner.to_be_bytes(), receipt],
+    );
+    format!("{ROW_SPILL_PREFIX}{owner}-pending-{digest}")
+}
+
+/// A foreign publisher may have stopped immediately before or after rename.
+/// Reclaim either name only when the receipt on the held child proves it.
+pub(crate) enum AbandonedRowSpill<'a> {
+    Published(Vec<u8>),
+    Pending { owner: u32, name: &'a str },
+}
+
+impl<'a> AbandonedRowSpill<'a> {
+    pub(crate) fn from_name(name: &'a OsStr, current: u32) -> Option<Self> {
+        let text = name.to_str()?;
+        let (pid, suffix) = text.strip_prefix(ROW_SPILL_PREFIX)?.split_once('-')?;
+        let owner = pid.parse::<u32>().ok()?;
+        if current == owner || owner.to_string() != pid {
+            return None;
+        }
+        if let Some(digest) = suffix.strip_prefix("pending-") {
+            return is_lowercase_hex(digest, 64).then_some(Self::Pending { owner, name: text });
+        }
+        let counter = suffix.parse::<u64>().ok()?;
+        if counter.to_string() != suffix {
+            return None;
+        }
+        row_spill_owner_receipt(name).map(Self::Published)
+    }
+
+    pub(crate) fn owns(&self, receipt: &[u8]) -> bool {
+        match self {
+            Self::Published(expected) => receipt == expected,
+            Self::Pending { owner, name } => {
+                let Some(bound_name) = receipt
+                    .strip_prefix(RECEIPT_PREFIX.as_bytes())
+                    .and_then(|bytes| std::str::from_utf8(bytes).ok())
+                else {
+                    return false;
+                };
+                Path::new(bound_name).file_name() == Some(OsStr::new(bound_name))
+                    && staging_name(*owner, receipt) == *name
+            }
+        }
+    }
 }
 
 /// Scratch directory owned by one spill; removed with its owner.
@@ -77,6 +132,14 @@ struct SpillDirectory(PathBuf);
 
 impl SpillDirectory {
     fn create(path: PathBuf) -> Result<Self, GraphDbError> {
+        let mut staging = Self::prepare(&path)?;
+        tracedecay_private_fs::framed_log::rename_noreplace(staging.path(), &path)
+            .map_err(|error| spill_io("directory install", error))?;
+        staging.disable_cleanup(true);
+        Ok(Self(path))
+    }
+
+    fn prepare(path: &Path) -> Result<tempfile::TempDir, GraphDbError> {
         let name = path
             .file_name()
             .ok_or_else(|| GraphDbError::invalid("graph row spill directory has no entry name"))?;
@@ -87,8 +150,12 @@ impl SpillDirectory {
             .ok_or_else(|| GraphDbError::invalid("graph row spill directory has no parent"))?;
         // Receipt failures must leave the requested name available to retry.
         // Keep the partial marker private until the complete spill can be installed.
-        let mut staging =
-            tempfile::tempdir_in(parent).map_err(|error| spill_io("directory create", error))?;
+        let temporary = staging_name(std::process::id(), &receipt);
+        let staging = tempfile::Builder::new()
+            .prefix(&temporary)
+            .rand_bytes(0)
+            .tempdir_in(parent)
+            .map_err(|error| spill_io("directory create", error))?;
         let marker = staging.path().join(ROW_SPILL_OWNER_RECEIPT_FILE);
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -99,10 +166,7 @@ impl SpillDirectory {
             .and_then(|()| file.sync_all())
             .map_err(|error| spill_io("owner marker persist", error))?;
         drop(file);
-        tracedecay_private_fs::framed_log::rename_noreplace(staging.path(), &path)
-            .map_err(|error| spill_io("directory install", error))?;
-        staging.disable_cleanup(true);
-        Ok(Self(path))
+        Ok(staging)
     }
 
     fn path(&self) -> &Path {
@@ -1121,6 +1185,56 @@ mod owner_receipt_tests {
             .unwrap();
         assert_eq!(child.status.code(), Some(WRITE_REFUSED), "{child:?}");
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn store_open_reclaims_receipted_staging_after_producer_exits_before_rename() {
+        const CHILD_ROOT: &str = "TRACEDECAY_TEST_PENDING_SPILL_ROOT";
+        const PREPARED: i32 = 42;
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let name = format!(".rows-{}-1", std::process::id());
+            let _staged =
+                SpillDirectory::prepare(&std::path::PathBuf::from(root).join(name)).unwrap();
+            std::process::exit(PREPARED);
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("graph.grafeo");
+        let root = temp.path().join("graph.sealed");
+        std::fs::create_dir(&root).unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(std::thread::current().name().unwrap())
+            .env(CHILD_ROOT, &root)
+            .output()
+            .unwrap();
+        assert_eq!(child.status.code(), Some(PREPARED), "{child:?}");
+        let interrupted = std::fs::read_dir(&root)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let (owner, _) = interrupted
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split_once("-pending-")
+            .unwrap();
+        let mismatched = root.join(format!("{owner}-pending-{}", "0".repeat(64)));
+        std::fs::create_dir(&mismatched).unwrap();
+        let receipt = std::fs::read(interrupted.join(ROW_SPILL_OWNER_RECEIPT_FILE)).unwrap();
+        std::fs::write(mismatched.join(ROW_SPILL_OWNER_RECEIPT_FILE), &receipt).unwrap();
+
+        let active = SpillDirectory::prepare(&root.join(".rows-active")).unwrap();
+        crate::sealed_store::sweep_abandoned_row_spills(&database);
+        assert!(!interrupted.exists());
+        assert!(active.path().is_dir());
+        assert_eq!(
+            std::fs::read(mismatched.join(ROW_SPILL_OWNER_RECEIPT_FILE)).unwrap(),
+            receipt
+        );
     }
 
     #[test]

@@ -58,9 +58,9 @@ use tracedecay_private_fs::capability_dir::install_child_directory_noreplace_nof
 use tracedecay_store::runtime::GraphRecoveredGenerationDigestV1;
 
 use crate::generation::{
-    GraphRowDigestSum, MAX_ROW_SPILL_OWNER_RECEIPT_BYTES, ROW_SPILL_OWNER_RECEIPT_FILE,
-    physical_namespace_projection_map, recovered_digest_from_row_sum, row_spill_owner_receipt,
-    verify_sealed_copy_generation,
+    AbandonedRowSpill, GraphRowDigestSum, MAX_ROW_SPILL_OWNER_RECEIPT_BYTES,
+    ROW_SPILL_OWNER_RECEIPT_FILE, ROW_SPILL_PREFIX, physical_namespace_projection_map,
+    recovered_digest_from_row_sum, verify_sealed_copy_generation,
 };
 use crate::lease::GenerationLocator;
 use crate::location::PersistentGraphStoreState;
@@ -767,9 +767,6 @@ pub(crate) fn sweep_abandoned_sealed_staging(database_path: &Path) {
     }
 }
 
-/// Prefix of a batch producer's row spill under the sealed root.
-const ROW_SPILL_PREFIX: &str = ".rows-";
-
 /// Removes every row spill another process left under the store's sealed
 /// root. Run at the eager open, whose exclusive store lock means no other
 /// process is producing rows for this store. Spills named for this process
@@ -782,22 +779,8 @@ pub(crate) fn sweep_abandoned_row_spills(database_path: &Path) {
     };
     let own_pid = std::process::id();
     for entry in entries.flatten() {
-        if entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.strip_prefix(ROW_SPILL_PREFIX))
-            .and_then(|suffix| suffix.split_once('-'))
-            .is_some_and(|(pid, sequence)| {
-                let (Ok(owner), Ok(counter)) = (pid.parse::<u32>(), sequence.parse::<u64>()) else {
-                    return false;
-                };
-                owner != own_pid && owner.to_string() == pid && counter.to_string() == sequence
-            })
-        {
-            let name = entry.file_name();
-            let Some(receipt) = row_spill_owner_receipt(&name) else {
-                continue;
-            };
+        let name = entry.file_name();
+        if let Some(proof) = AbandonedRowSpill::from_name(&name, own_pid) {
             let path = entry.path();
             if let Err(error) =
                 tracedecay_private_fs::capability_dir::remove_receipted_child_directory_nofollow(
@@ -805,7 +788,7 @@ pub(crate) fn sweep_abandoned_row_spills(database_path: &Path) {
                     &name,
                     std::ffi::OsStr::new(ROW_SPILL_OWNER_RECEIPT_FILE),
                     MAX_ROW_SPILL_OWNER_RECEIPT_BYTES,
-                    |bytes| bytes == receipt,
+                    |bytes| proof.owns(bytes),
                 )
             {
                 tracing::warn!(

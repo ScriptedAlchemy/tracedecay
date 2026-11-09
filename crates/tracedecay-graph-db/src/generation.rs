@@ -60,8 +60,8 @@ pub(crate) use replay::{
     checked_decode_replay_source, metadata_manifest_from_source, validate_supplied_rows_binding,
 };
 pub(crate) use spill::{
-    ENTITIES_FILE, MAX_ROW_SPILL_OWNER_RECEIPT_BYTES, ROW_SPILL_OWNER_RECEIPT_FILE,
-    read_spilled_entity, row_spill_owner_receipt,
+    AbandonedRowSpill, ENTITIES_FILE, MAX_ROW_SPILL_OWNER_RECEIPT_BYTES,
+    ROW_SPILL_OWNER_RECEIPT_FILE, ROW_SPILL_PREFIX, read_spilled_entity,
 };
 pub use spill::{
     GRAPH_ROW_SPILL_RUN_BYTES, GraphGenerationRowSpill, GraphGenerationRows,
