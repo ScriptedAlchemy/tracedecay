@@ -1384,7 +1384,10 @@ mod daemon_precondition_tests {
         assert_eq!(reads, 2, "do not consume a later ready after a real stall");
         let (code, message) = refusal(result);
         assert_eq!(code, CODE_INDEX_READINESS_WAIT_TIMED_OUT);
-        assert!(message.contains("no observed capture, parse, or committed text work"));
+        assert!(
+            message.contains("no observed capture, parse, text, or native graph work"),
+            "{message}"
+        );
         assert!(message.contains("40/6136 files"));
     }
 
