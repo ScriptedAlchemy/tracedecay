@@ -74,6 +74,10 @@ mod staged_segment_reads;
 #[path = "tests/immutable_segment_equality.rs"]
 mod immutable_segment_equality;
 
+#[cfg(all(test, unix))]
+#[path = "tests/retained_segment_admission.rs"]
+mod retained_segment_admission;
+
 const MAX_DURABLE_PUBLICATION_POINTER_BYTES: u64 = 512 * 1024;
 const DURABLE_GENERATION_IO_CHUNK_BYTES_V1: usize = 64 * 1024;
 
@@ -2561,6 +2565,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         #[cfg(unix)]
         let pinned_reads = Mutex::new(VecDeque::<PinnedPreparationSegmentV1>::new());
         Arc::new(move |request, buffer: &mut Vec<u8>| {
+            buffer.clear();
             #[cfg(unix)]
             {
                 let mut pinned = pinned_reads.lock().map_err(|_| {
@@ -2655,6 +2660,14 @@ impl DaemonCodeIndexPublicationStoreV1 {
                     "retained sealed segment changed while pinned".to_owned(),
                 ));
             }
+            if let Err(error) =
+                Self::read_checked_retained_segment(&mut pinned_reads[index], request, buffer)
+            {
+                pinned_reads.clear();
+                return Err(error);
+            }
+            // Only a successful read changes recency. A failed cache hit
+            // retains the existing fail-closed invalidation behavior.
             let entry = pinned_reads.remove(index).ok_or_else(|| {
                 CodeIndexProductionErrorV1::Contract(
                     "sealed generation read cache lost a handle".to_owned(),
@@ -2672,7 +2685,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
                     "sealed generation segment identity does not match its manifest".to_owned(),
                 ));
             }
-            // Admit the new descriptor before evicting a healthy handle.
+            // Opening is not admission: the first authenticated read must
+            // also succeed before a healthy cached handle can be evicted.
             // Handle::from_path would trigger an additional authorized open.
             let file = File::open(&path).map_err(|error| {
                 CodeIndexProductionErrorV1::Contract(format!(
@@ -2696,10 +2710,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
                     "sealed generation segment identity changed while opening".to_owned(),
                 ));
             }
-            if pinned_reads.len() == MAX_STAGED_SEGMENT_READ_HANDLES {
-                pinned_reads.pop_front();
-            }
-            pinned_reads.push_back(PinnedPreparationSegmentV1 {
+            let mut candidate = PinnedPreparationSegmentV1 {
                 path,
                 identity: opened,
                 segment: PinnedGenerationSegmentV1 {
@@ -2707,26 +2718,33 @@ impl DaemonCodeIndexPublicationStoreV1 {
                     size_bytes,
                     file,
                 },
-            });
+            };
+            // A failed cold candidate owns no cache authority. Drop only
+            // that candidate; existing handles still validate on every use.
+            Self::read_checked_retained_segment(&mut candidate, request, buffer)?;
+            if pinned_reads.len() == MAX_STAGED_SEGMENT_READ_HANDLES {
+                pinned_reads.pop_front();
+            }
+            pinned_reads.push_back(candidate);
         }
-        let pinned = pinned_reads.back_mut().ok_or_else(|| {
-            CodeIndexProductionErrorV1::Contract(
-                "sealed generation read cache has no handle".to_owned(),
-            )
-        })?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn read_checked_retained_segment(
+        pinned: &mut PinnedPreparationSegmentV1,
+        request: SealedGenerationSegmentReadV1<'_>,
+        buffer: &mut Vec<u8>,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
         let result = Self::read_pinned_partitioned_segment(&mut pinned.segment, request, buffer);
-        // A failed read or changed inode cannot leave an authoritative cached
-        // descriptor or bytes visible to the caller.
         if !pinned.unchanged() {
             buffer.clear();
-            pinned_reads.clear();
             return Err(CodeIndexProductionErrorV1::Contract(
                 "retained sealed segment changed during read".to_owned(),
             ));
         }
         if result.is_err() {
             buffer.clear();
-            pinned_reads.clear();
         }
         result
     }
