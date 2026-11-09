@@ -561,7 +561,9 @@ impl RepositoryRuntimePhysicalAttachment {
         {
             let state = self.lock_state();
             if !state.admission_open || state.closed || state.initialization_file.is_none() {
-                return Err("only an unpublished live initialization may close its readers".to_owned());
+                return Err(
+                    "only an unpublished live initialization may close its readers".to_owned(),
+                );
             }
             let readers = state
                 .readers
@@ -575,12 +577,11 @@ impl RepositoryRuntimePhysicalAttachment {
         loop {
             let mut state = self.lock_state();
             if state.file_lost {
-                return Err("SQLite initialization lost its database while draining readers".to_owned());
+                return Err(
+                    "SQLite initialization lost its database while draining readers".to_owned(),
+                );
             }
-            let quiescent = state
-                .readers
-                .as_ref()
-                .is_some_and(ReaderPool::is_quiescent);
+            let quiescent = state.readers.as_ref().is_some_and(ReaderPool::is_quiescent);
             if quiescent {
                 let readers = state.readers.take();
                 drop(state);
@@ -1228,7 +1229,9 @@ mod tests {
         let closing = Arc::clone(&attachment);
         let join = thread::spawn(move || {
             started_tx.send(()).unwrap();
-            finished_tx.send(closing.close_initialization_readers()).unwrap();
+            finished_tx
+                .send(closing.close_initialization_readers())
+                .unwrap();
         });
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(
@@ -1246,7 +1249,9 @@ mod tests {
         join.join().unwrap();
 
         assert!(
-            handle.begin_read_snapshot(Duration::from_millis(50)).is_err(),
+            handle
+                .begin_read_snapshot(Duration::from_millis(50))
+                .is_err(),
             "no reader may reopen between the final checkpoint and publication"
         );
         assert!(
