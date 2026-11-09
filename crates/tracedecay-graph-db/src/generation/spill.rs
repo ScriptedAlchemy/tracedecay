@@ -1329,7 +1329,8 @@ mod owner_receipt_tests {
         let previous = current ^ 1;
         assert_eq!(current >> 64, previous >> 64, "same numeric process ID");
         let final_path = root.join(format!(".rows-{current}-0"));
-        let stale = SpillDirectory::prepare(&final_path, previous)
+        let previous_path = root.join(format!(".rows-{previous}-0"));
+        let stale = SpillDirectory::prepare(&previous_path, previous)
             .unwrap()
             .keep();
         let live = SpillDirectory::prepare(&final_path, current).unwrap();

@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use grafeo_common::types::Value;
 use tempfile::TempDir;
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_graph_db::{
     GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbLeaseV1, GraphDbOwner, GraphEntity,
     GraphEntityId, GraphFormatVersion, GraphIdempotencyKey, GraphLabel, GraphMutation,
@@ -1063,7 +1064,8 @@ fn superseded_format_store_rebuild_removes_proven_old_seals_but_keeps_unproven()
         )
         .unwrap();
     raw.close().unwrap();
-    let sealed_generation_name = "0".repeat(64);
+    // The on-disk name is the digest of the receipt's JSON identity tuple.
+    let sealed_generation_name = sha256_hex(br#"["project","code","g0"]"#);
     let sealed_generation = temp
         .path()
         .join("graph.sealed")
@@ -1106,7 +1108,8 @@ fn superseded_format_store_rebuild_removes_proven_old_seals_but_keeps_unproven()
 
     // A generation this build sealed before the staging container was
     // replaced, as a publication racing the rebuild leaves it.
-    let current_generation = temp.path().join("graph.sealed").join("1".repeat(64));
+    let current_name = sha256_hex(br#"["project","code","g1"]"#);
+    let current_generation = temp.path().join("graph.sealed").join(&current_name);
     std::fs::create_dir_all(&current_generation).unwrap();
     std::fs::write(
         current_generation.join("sealed.json"),
@@ -1116,7 +1119,7 @@ fn superseded_format_store_rebuild_removes_proven_old_seals_but_keeps_unproven()
             "namespace": "project",
             "projection": "code",
             "generation": "g1",
-            "physical_namespace": format!("generation:{}", "1".repeat(64)),
+            "physical_namespace": format!("generation:{current_name}"),
             "recovered_digest": "sha256:1",
             "entities": 1,
             "relations": 0,
