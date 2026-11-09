@@ -51,6 +51,7 @@ where
     .await;
     let recording = ManagedTestRunRecording {
         store: sessions.registered.clone(),
+        events: OperationEventAuthority::default(),
         session_id: None,
     };
     let completion =
@@ -1154,7 +1155,7 @@ fn scoped_file_symbol_page_needs_only_a_file_scale_budget() {
 #[tokio::test]
 async fn request_cancellation_cancels_the_waiting_managed_run() {
     let root = tempfile::tempdir().unwrap();
-    let emitter = operation_event_authority()
+    let emitter = OperationEventAuthority::default()
         .begin_managed_test_run(
             Url::from_directory_path(root.path()).unwrap().to_string(),
             mint_global_request_id(GlobalRequestSurface::ManagedTestRun).unwrap(),

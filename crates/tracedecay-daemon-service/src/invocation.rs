@@ -132,7 +132,7 @@ use tracedecay_application::lsp_runtime::{
     production_semantic_authorities,
 };
 use tracedecay_application::operation_stream::{
-    OperationEmitter, OperationEventAuthority, OperationKind, operation_event_authority,
+    OperationEmitter, OperationEventAuthority, OperationKind,
 };
 use tracedecay_application::primitives::PrimitiveProjectRuntime;
 use tracedecay_contracts::feedback::observations::{
@@ -238,7 +238,7 @@ pub use feedback::{
     DaemonAdvisoryCycleMountChangedFuture, DaemonAdvisoryCycleMountFuture,
     DaemonAdvisoryCycleMountV1, DaemonFeedbackInvocationOwner,
     DaemonFeedbackProximityInvocationFuture, DaemonFeedbackProximityInvocationRequest,
-    advisory_cycle_invocation_result, daemon_operation_event_authority,
+    advisory_cycle_invocation_result,
     feedback_proximity_invocation_result,
 };
 pub use primitive::{
@@ -431,7 +431,7 @@ impl DaemonInvocationService {
             request_cancellations:
                 crate::request_cancellation::RequestCancellationRegistryV1::default(),
             store_observability: StoreObservabilityRegistryV1::default(),
-            operation_events: daemon_operation_event_authority(),
+            operation_events: OperationEventAuthority::default(),
             github_stack_coordinator: Arc::new(
                 tracedecay_application::stack_coordinator::DaemonGitHubStackCoordinatorV1::default(
                 ),

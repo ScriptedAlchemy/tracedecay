@@ -35,7 +35,7 @@ use tracedecay_application::diagnose::{Severity, parse_cargo_output};
 use tracedecay_application::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use tracedecay_application::diagnostics_store::DiagnosticsStore;
 use tracedecay_application::operation_stream::{
-    OperationEmitter, OperationEventError, operation_event_authority,
+    OperationEmitter, OperationEventAuthority, OperationEventError,
 };
 use tracedecay_code_index::is_test_file;
 use tracedecay_contracts::feedback::TestResultProjectionV1;
@@ -461,6 +461,7 @@ fn severity_wire(s: Severity) -> DiagnoseSeverityV1 {
 /// the requesting session the run is attributed to when the request named one.
 pub struct ManagedTestRunRecording {
     pub store: RegisteredGlobalDbLeaseV1,
+    pub events: OperationEventAuthority,
     pub session_id: Option<String>,
 }
 
@@ -839,7 +840,9 @@ async fn begin_test_run(
         })?;
     let document_content_digests =
         managed_test_document_content_digests(&root, changed_paths).await?;
-    let emitter = operation_event_authority()
+    let emitter = admission
+        .recording
+        .events
         .begin_managed_test_run(root_uri.clone(), request_id, admission.deadline.clone())
         .await
         .map_err(|error| test_run_event_error(&error))?;

@@ -435,8 +435,8 @@ impl DaemonInvocationService {
         self.store_observability.join_retirement_drains().await;
         step("observability_retirements_joined");
         self.session_holder_databases.lock().await.clear();
-        // The operation-event authority is process-global, not owned by this
-        // composition: only frontiers without a live producer expire here.
+        // This daemon owns its frontiers; an accepted producer may retain
+        // its terminal-publication window after other owners have drained.
         self.operation_events.expire_idle().await;
         step("idle_operation_events_expired");
         let lease_shutdown_clean = lease_shutdown.is_ok();

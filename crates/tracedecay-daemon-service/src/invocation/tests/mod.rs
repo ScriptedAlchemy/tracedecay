@@ -135,3 +135,32 @@ mod project_lifecycle_tests;
 mod source_edit_tests;
 mod work_routing_fixtures;
 mod work_tests;
+
+#[tokio::test]
+async fn independent_daemon_compositions_have_separate_managed_test_frontiers() {
+    let first = DaemonInvocationService::default();
+    let second = DaemonInvocationService::default();
+    let request = tracedecay_contracts::RequestId::new("request.test.independent-daemons")
+        .expect("request id");
+    let deadline = tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(10_000))
+        .expect("deadline");
+    let _first_run = first
+        .operation_events()
+        .begin_managed_test_run(
+            "file:///composition-first/".to_owned(),
+            request.clone(),
+            deadline.clone(),
+        )
+        .await
+        .expect("first composition admits its operation");
+    let second_run = second
+        .operation_events()
+        .begin_managed_test_run("file:///composition-second/".to_owned(), request, deadline)
+        .await
+        .expect("second composition admits the same request id");
+    first.operation_events().expire_idle().await;
+    second_run
+        .test_result("suite::after-first-shutdown".to_owned(), true)
+        .await
+        .expect("the second owner's accepted producer can still publish");
+}
