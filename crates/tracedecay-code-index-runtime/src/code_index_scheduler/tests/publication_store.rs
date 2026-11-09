@@ -19,8 +19,8 @@ use tracedecay_code_index_retention::code_index_generations::{
     CODE_INDEX_PREPARATION_DIRECTORY_PREFIX_V1, CodeGenerationRetentionErrorV1,
     CodeGenerationRetentionModeV1, DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS,
     DurableGenerationCardinalityV1, DurableGenerationIndexEntryV1, DurablePublicationPointerV1,
-    DurableSealedCodeGenerationIdentityV1, RetainedSegmentHandleRetirementV1,
-    MAX_CODE_GENERATION_RETENTION_BATCH_V1, acquire_code_generation_store_lock,
+    DurableSealedCodeGenerationIdentityV1, MAX_CODE_GENERATION_RETENTION_BATCH_V1,
+    RetainedSegmentHandleRetirementV1, acquire_code_generation_store_lock,
     code_generation_segments_root, code_text_artifact_staging_root, code_text_artifacts_root,
     durable_generation_index_digest, execute_code_generation_retention_cancellable,
     execute_scope_root_retention, plan_scope_root_retention_with_liveness_proof,
@@ -644,7 +644,7 @@ fn partitioned_reclamation_is_bounded_and_preserves_retained_segments() {
         UtcMicros(8_000_000),
         None,
         &|| orphan_paths.iter().any(|path| !path.exists()),
-        None
+        None,
     )
     .expect_err("interrupt segment sweep after its first unlink");
     assert!(
@@ -1646,7 +1646,6 @@ fn evidence_pack_failure_after_pages_never_publishes_manifest_or_pointer() {
     );
 }
 
-
 #[cfg(target_os = "linux")]
 #[test]
 fn ordinary_retention_closes_cached_historical_segment_before_unlink() {
@@ -1675,7 +1674,10 @@ fn ordinary_retention_closes_cached_historical_segment_before_unlink() {
         .expect("successor generation remains indexed");
     let segments_of = |generation_file: &str| {
         let manifest = std::fs::read(
-            store.path().join("code-generations-v1").join(generation_file),
+            store
+                .path()
+                .join("code-generations-v1")
+                .join(generation_file),
         )
         .expect("read exact generation manifest");
         CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
@@ -1694,12 +1696,14 @@ fn ordinary_retention_closes_cached_historical_segment_before_unlink() {
         .iter()
         .find(|identity| !active_digests.contains(identity.digest.as_str()))
         .expect("the source edit must replace at least one nonempty segment");
-    let suffix = sha256_hex_suffix(retired_segment.digest.as_str())
-        .expect("segment content-address suffix");
-    let path = code_generation_segments_root(store.path())
-        .join(format!("segment-{suffix}.json"));
+    let suffix =
+        sha256_hex_suffix(retired_segment.digest.as_str()).expect("segment content-address suffix");
+    let path = code_generation_segments_root(store.path()).join(format!("segment-{suffix}.json"));
     let expected = std::fs::read(&path).expect("read live old segment");
-    assert!(!expected.is_empty(), "the retired segment contains actual bytes");
+    assert!(
+        !expected.is_empty(),
+        "the retired segment contains actual bytes"
+    );
     let inode = std::fs::metadata(&path).expect("original segment inode");
 
     let scheduler = scheduler(
@@ -1727,7 +1731,11 @@ fn ordinary_retention_closes_cached_historical_segment_before_unlink() {
         .expect("serve an actual historical segment through the cached reader");
     assert_eq!(received, expected);
     assert_eq!(
-        publication.retained_segment_reads.lock().expect("retained cache").len(),
+        publication
+            .retained_segment_reads
+            .lock()
+            .expect("retained cache")
+            .len(),
         1,
         "one actual historical segment file is held open"
     );
@@ -1739,13 +1747,17 @@ fn ordinary_retention_closes_cached_historical_segment_before_unlink() {
             .filter(|metadata| metadata.dev() == inode.dev() && metadata.ino() == inode.ino())
             .count()
     };
-    assert!(holders() > 0, "a live descriptor must pin the original inode");
+    assert!(
+        holders() > 0,
+        "a live descriptor must pin the original inode"
+    );
 
-    let plan = tracedecay_code_index_retention::code_index_generations::plan_code_generation_retention(
-        store.path(),
-        &BTreeSet::new(),
-    )
-    .expect("independently verify retention liveness and digests");
+    let plan =
+        tracedecay_code_index_retention::code_index_generations::plan_code_generation_retention(
+            store.path(),
+            &BTreeSet::new(),
+        )
+        .expect("independently verify retention liveness and digests");
     assert!(
         plan.collectable_generations
             .iter()
@@ -1770,14 +1782,19 @@ fn ordinary_retention_closes_cached_historical_segment_before_unlink() {
     )
     .expect("apply the real normal retention transaction");
     assert!(
-        report.deleted_generations
+        report
+            .deleted_generations
             .iter()
             .any(|item| item.generation_id == generation_ids[0]),
         "retention must remove the actual old generation"
     );
     assert_eq!(releases.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert!(
-        publication.retained_segment_reads.lock().expect("retained cache").is_empty(),
+        publication
+            .retained_segment_reads
+            .lock()
+            .expect("retained cache")
+            .is_empty(),
         "retention must clear the shared descriptor cache before unlinking"
     );
     assert!(!path.exists(), "the old-only segment pathname is reclaimed");

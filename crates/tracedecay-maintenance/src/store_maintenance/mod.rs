@@ -15,8 +15,7 @@ use crate::telemetry::StoreTelemetrySamplingRegistry;
 use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationRetentionErrorV1, CodeGenerationRetentionModeV1, CodeGenerationRetentionPlanV1,
     CodeGenerationRetentionReportV1, CodeIndexScopeV1, RetainedSegmentHandleRetirementV1,
-    code_index_scopes, code_index_store_root,
-    execute_code_generation_retention_cancellable,
+    code_index_scopes, code_index_store_root, execute_code_generation_retention_cancellable,
 };
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_domain::CodeGenerationId;
@@ -470,7 +469,9 @@ pub async fn run_code_generation_retention(
         log_code_generation_retention_degraded(observations, "retention_cancelled");
         return CodeGenerationRetentionOutcomeV1::Failed;
     }
-    let retire_cached_segments = schedulers.retained_segment_reclaimer(lease.project_root()).await;
+    let retire_cached_segments = schedulers
+        .retained_segment_reclaimer(lease.project_root())
+        .await;
     let report = match execute_collection(
         &store_root,
         plan,

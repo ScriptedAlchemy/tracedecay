@@ -33,10 +33,10 @@ use tracedecay_code_index_retention::code_index_generations::{
     CodeGenerationStoreLockV1, CodeIndexScopeStoreResetV1, DurableGenerationCardinalityV1,
     DurableGenerationIndexEntryV1, DurablePublicationPointerV1,
     DurableSealedCodeGenerationIdentityV1, MAX_DURABLE_GENERATION_INDEX_BYTES_V1,
-    MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1, acquire_generation_segments_publication_lock,
-    code_generation_segments_root, durable_generation_index_digest, reset_code_index_scope_store,
-    RetainedSegmentHandleRetirementV1, retain_bounded_generation_index, try_acquire_code_generation_store_lock,
-    try_acquire_code_generation_store_read_lock,
+    MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1, RetainedSegmentHandleRetirementV1,
+    acquire_generation_segments_publication_lock, code_generation_segments_root,
+    durable_generation_index_digest, reset_code_index_scope_store, retain_bounded_generation_index,
+    try_acquire_code_generation_store_lock, try_acquire_code_generation_store_read_lock,
 };
 use tracedecay_domain::{
     CodeGenerationId, ContentDigest, ManifestDigest, ProjectId, SanitizerRevision, WorktreeId,

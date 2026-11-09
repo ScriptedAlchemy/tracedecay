@@ -1003,7 +1003,7 @@ fn cancellable_artifact_apply_stops_rehash_before_quarantine_and_retries() {
         UtcMicros(15),
         None,
         &|| checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 6,
-        None
+        None,
     )
     .expect_err("cancellation must interrupt the under-lock artifact rehash");
 
@@ -4056,7 +4056,7 @@ fn abandoned_preparations_are_collected_only_after_shared_project_publication_le
         UtcMicros(1),
         None,
         &|| false,
-        None
+        None,
     );
     assert!(matches!(
         result,
@@ -4074,7 +4074,7 @@ fn abandoned_preparations_are_collected_only_after_shared_project_publication_le
         UtcMicros(1),
         None,
         &|| locking::store_lock_park_count() > prior_parks,
-        None
+        None,
     );
     assert!(matches!(
         result,
