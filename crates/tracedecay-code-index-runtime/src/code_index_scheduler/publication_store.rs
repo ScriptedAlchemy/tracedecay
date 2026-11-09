@@ -78,6 +78,10 @@ mod immutable_segment_equality;
 #[path = "tests/retained_segment_admission.rs"]
 mod retained_segment_admission;
 
+#[cfg(all(test, unix))]
+#[path = "tests/publication_reset.rs"]
+mod publication_reset;
+
 const MAX_DURABLE_PUBLICATION_POINTER_BYTES: u64 = 512 * 1024;
 const DURABLE_GENERATION_IO_CHUNK_BYTES_V1: usize = 64 * 1024;
 
@@ -4074,7 +4078,17 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .lock()
             .map_err(|_| Self::unavailable("retained segment read cache was poisoned"))?
             .clear();
-        let receipt = reset_code_index_scope_store(&store_lock).map_err(Self::unavailable)?;
+        let receipt = {
+            // Release the shared pointer descriptor before any unlink, even
+            // when later cleanup or reconstruction fails. Keep the memo locked
+            // through deletion so a reader cannot repopulate it during reset.
+            let mut memo = self
+                .pointer_memo
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            *memo = None;
+            reset_code_index_scope_store(&store_lock).map_err(Self::unavailable)?
+        };
         std::fs::create_dir_all(&self.generations_root).map_err(Self::unavailable)?;
         tracedecay_code_index_retention::code_index_generations::record_scope_root(
             store_root,
@@ -4092,10 +4106,6 @@ impl DaemonCodeIndexPublicationStoreV1 {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = None;
         self.cache.ready.notify_all();
-        *self
-            .pointer_memo
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = None;
         *self
             .active_manifest_memo
             .lock()
