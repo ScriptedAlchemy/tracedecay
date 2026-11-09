@@ -518,19 +518,13 @@ fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
             project: Some((components[1].clone(), inner.iter().collect())),
         });
     }
-    // Managed profile families own their entire directory trees. An LCM payload,
-    // response handle, or maintenance cursor named *.wal is not a database
-    // journal; classifying it as one hides growth from its owning bound.
-    let owned_subtree = matches!(
-        first.as_str(),
-        "lcm-payloads" | "response-handles" | "maintenance"
-    );
-    let wal_component = components.iter().position(|name| is_wal(name));
+    // A top-level family owns all descendants. WAL-looking nested scratch
+    // filenames in an otherwise unrelated tree must not escape that bound.
     let primary = if let Some(stem) = graph_container_stem(first, components.len() == 1) {
         // Sidecar trees take precedence over WAL-looking scratch filenames.
         (stem.to_owned(), ProfileFamilyV1::GraphContainer)
-    } else if let Some(end) = wal_component.filter(|_| !owned_subtree) {
-        (components[..=end].join("/"), ProfileFamilyV1::Wal)
+    } else if is_wal(first) {
+        (first.clone(), ProfileFamilyV1::Wal)
     } else if components.len() == 1
         && matches!(
             first.as_str(),
@@ -1393,8 +1387,14 @@ mod tests {
             ("user-sessions.grafeo.spill/scratch/segment-wal/part", 19),
             ("user-sessions.grafeo.wal/segment", 7),
             ("projects/proj_spill/graph.grafeo", 3),
-            ("projects/proj_spill/graph.grafeo.spill/scratch/chunk.wal", 23),
-            ("projects/proj_spill/graph.grafeo.spill/segment-wal/part", 29),
+            (
+                "projects/proj_spill/graph.grafeo.spill/scratch/chunk.wal",
+                23,
+            ),
+            (
+                "projects/proj_spill/graph.grafeo.spill/segment-wal/part",
+                29,
+            ),
             ("projects/proj_spill/graph.grafeo.wal/segment", 11),
         ] {
             sized(&profile.join(relative), bytes);
@@ -1422,7 +1422,11 @@ mod tests {
                 55,
             ),
             ("user-sessions.grafeo.wal", ProfileFamilyV1::Wal, 7),
-            ("projects/proj_spill/graph.grafeo.wal", ProfileFamilyV1::Wal, 11),
+            (
+                "projects/proj_spill/graph.grafeo.wal",
+                ProfileFamilyV1::Wal,
+                11,
+            ),
             ("projects/proj_spill", ProfileFamilyV1::ProjectStore, 66),
         ] {
             let measured = entry(&footprint, key);
@@ -1562,7 +1566,11 @@ mod tests {
         ]);
         let footprint = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
         assert_eq!(footprint.total_bytes, 93);
-        assert_eq!(footprint.entries.len(), 4, "owner aggregates must not be split");
+        assert_eq!(
+            footprint.entries.len(),
+            4,
+            "owner aggregates must not be split"
+        );
         assert_eq!(
             footprint.full_profile_size().state,
             ProfileTotalCoverageStateV1::Complete
@@ -1591,6 +1599,59 @@ mod tests {
                 observed[key].finding().state(),
                 DoctorEvidenceStateV1::HealthyCompleteCoverage,
                 "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn unrelated_profile_trees_keep_wal_named_descendants_under_their_own_bounds() {
+        let temp = tempfile::tempdir().expect("footprint fixture");
+        let profile = temp.path().join("profile");
+        for (relative, bytes) in [
+            ("host-bundle-stage/artifact-wal/chunk", 40),
+            ("host-bundle-stage/cache/trace.wal", 30),
+            ("host-components/bundle.wal", 17),
+            ("host-components/plain", 3),
+            ("global.db-wal", 7),
+        ] {
+            sized(&profile.join(relative), bytes);
+        }
+        let overrides = BTreeMap::from([
+            ("host-bundle-stage".to_owned(), 69),
+            ("host-components".to_owned(), 19),
+            ("global.db-wal".to_owned(), 7),
+        ]);
+        let footprint = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
+        assert_eq!(footprint.total_bytes, 97);
+        assert_eq!(footprint.unavailable_entry_count, 0);
+        assert_eq!(footprint.entries.len(), 3);
+        assert_eq!(
+            footprint.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Complete
+        );
+        for (key, family, bytes) in [
+            ("host-bundle-stage", ProfileFamilyV1::Other, 70),
+            ("host-components", ProfileFamilyV1::Other, 20),
+            ("global.db-wal", ProfileFamilyV1::Wal, 7),
+        ] {
+            let measured = entry(&footprint, key);
+            assert_eq!(measured.family, family, "{key}");
+            assert_eq!(measured.bytes, bytes, "{key}");
+        }
+        let observed = findings(&footprint);
+        assert_eq!(observed.len(), 4);
+        for key in ["host-bundle-stage", "host-components"] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::Degraded,
+                "{key} must retain its named over-budget finding"
+            );
+        }
+        for key in ["global.db-wal", PROFILE_TOTAL_KEY] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::HealthyCompleteCoverage,
+                "{key} must keep its actual bound"
             );
         }
     }
@@ -1645,7 +1706,11 @@ mod tests {
                 "{key}"
             );
         }
-        for key in ["global.db-journal", "user-memory.db-shm", "user-sessions.db-shm"] {
+        for key in [
+            "global.db-journal",
+            "user-memory.db-shm",
+            "user-sessions.db-shm",
+        ] {
             assert_eq!(
                 observed[key].finding().state(),
                 DoctorEvidenceStateV1::Degraded,

@@ -241,8 +241,7 @@ impl StoreKindBytesV1 {
                 &mut self.generation_artifacts
             }
         } else if (root_file && sqlite_family_member(&first, SESSIONS_DB_FILENAME))
-            || first.strip_prefix(SESSIONS_DB_FILENAME)
-                == Some(".delivery-settlement-spool-v1")
+            || first.strip_prefix(SESSIONS_DB_FILENAME) == Some(".delivery-settlement-spool-v1")
             || first
                 .strip_prefix('.')
                 .and_then(|name| name.strip_prefix(SESSIONS_DB_FILENAME))
