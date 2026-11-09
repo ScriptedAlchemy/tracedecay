@@ -420,3 +420,68 @@ fn parent_filtered_source_does_not_require_submodule_registration_when_disabled(
     .unwrap();
     assert_eq!(sealed.as_deref(), Some(source.as_bytes()));
 }
+
+#[test]
+fn retained_graph_checks_require_a_successful_submodule_probe_each_time() {
+    let registration = "[submodule \"child\"]\npath = child\n";
+    let parent = GitFixture::new(&[
+        ("lib.rs", "pub fn first() {}\n"),
+        (".gitmodules", registration),
+    ]);
+    let store = TempDir::new().unwrap();
+    // Keep the sealed attribution worktree-relative across the configuration edit.
+    std::fs::write(parent.path().join("lib.rs"), "pub fn latest() {}\n").unwrap();
+    let mut scheduler = start(
+        &parent,
+        store.path(),
+        policy(&[], &[]).with_submodules(true),
+    );
+    published(scheduler.reconcile_now().unwrap());
+    let metadata = scheduler
+        .publication
+        .load_active_manifest()
+        .unwrap()
+        .unwrap()
+        .metadata;
+    // A partially staged edit leaves the worktree and its source bytes readable,
+    // while the index registration still cannot establish submodule identity.
+    let registration_path = parent.path().join(".gitmodules");
+    std::fs::write(&registration_path, "[unfinished").unwrap();
+    super::run_git_in(parent.path(), &["add", ".gitmodules"]);
+    std::fs::write(&registration_path, registration).unwrap();
+    for _ in 0..2 {
+        assert!(
+            !scheduler
+                .freshness_fence()
+                .git_metadata(parent.path())
+                .can_prove_freshness()
+        );
+        let serving_witness = scheduler.currency_witness_for_sealed_snapshot(
+            &metadata.manifest().generation_id,
+            &metadata.snapshot().content_identity,
+        );
+        let retained = scheduler
+            .reconcile_retained_text_generation_with(&metadata, false)
+            .unwrap();
+        assert_eq!(
+            (serving_witness.is_some(), retained.is_some()),
+            (false, false),
+            "unchanged source bytes cannot replace a failed submodule probe"
+        );
+    }
+    super::run_git_in(parent.path(), &["add", ".gitmodules"]);
+    assert!(matches!(
+        scheduler
+            .reconcile_retained_text_generation_with(&metadata, false)
+            .unwrap(),
+        Some(CodeIndexReconcileOutcomeV1::Noop(_))
+    ));
+    assert!(
+        scheduler
+            .currency_witness_for_sealed_snapshot(
+                &metadata.manifest().generation_id,
+                &metadata.snapshot().content_identity,
+            )
+            .is_some()
+    );
+}

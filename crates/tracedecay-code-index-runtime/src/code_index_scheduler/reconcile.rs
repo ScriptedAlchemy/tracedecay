@@ -663,7 +663,7 @@ impl SourceFreshnessFenceV1 {
         state.source_witness = source_witness;
         state.source_roster = source_roster.to_vec();
         state.last_reconciled_at = Instant::now();
-        state.verified_against_source = true;
+        state.verified_against_source = state.git_metadata.can_prove_freshness();
         state.reconciled_without_generation = reconciled_without_generation;
         state.reconciled_source_epoch = source_epoch;
         state.successor_build_in_flight = false;
@@ -845,7 +845,7 @@ impl SourceFreshnessFenceV1 {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.git_metadata = git_metadata;
         state.last_reconciled_at = Instant::now();
-        state.verified_against_source = true;
+        state.verified_against_source = state.git_metadata.can_prove_freshness();
         self.last_reconciled_at_micros
             .store(micros, Ordering::Release);
     }
@@ -883,6 +883,10 @@ impl SourceFreshnessFenceV1 {
         manifest: &SourceContentManifestV1,
         shutting_down: &AtomicBool,
     ) -> (bool, freshness_witness::SourceSweepStatsV1) {
+        // Equal source bytes cannot authenticate a previously selected child checkout.
+        if !git_metadata.can_prove_freshness() {
+            return (false, freshness_witness::SourceSweepStatsV1::default());
+        }
         self.sweep_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -2263,14 +2267,15 @@ impl CodeIndexWorktreeSchedulerV1 {
         // generation's sealed file digests; its matching stat signature is
         // the negative cache that lets a moved tree skip the byte comparison.
         let source_manifest = SourceContentManifestV1::for_snapshot(metadata.snapshot());
-        let sealed_bytes_match =
-            retained_is_reusable && !has_hints && self.sources_match_manifest(&source_manifest);
+        let sealed_bytes_match = retained_is_reusable
+            && !has_hints
+            && sampled_metadata.can_prove_freshness()
+            && self.sources_match_manifest(&source_manifest);
         #[cfg(test)]
         if let Some(hook) = self.after_retained_source_check.clone() {
             hook();
         }
         let quiet_witness = sealed_bytes_match
-            && sampled_metadata.can_prove_freshness()
             && witness.as_ref().is_some_and(|witness| {
                 witness.git_metadata_signature == sampled_metadata.stable_signature()
                     && witness.stat_signature == sampled_sweep.signature
