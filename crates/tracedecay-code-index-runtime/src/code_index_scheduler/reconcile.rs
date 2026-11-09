@@ -4050,14 +4050,27 @@ impl CodeIndexWorktreeSchedulerV1 {
             }
             _ => (self.project_root.clone(), relative),
         };
-        if tracedecay_code_index::source_walk::has_nested_repository_ancestor(
-            &source_root,
-            source_relative,
-        )? || tracedecay_code_index::source_walk::is_source_symlink(
+        let refusal = if tracedecay_code_index::source_walk::has_nested_repository_ancestor(
             &source_root,
             source_relative,
         )? {
-            return Ok(CapturedFileOutcomeV1::Absent);
+            Some(CodeIndexIgnoredDependencyRefusalV1::NotIgnored)
+        } else if tracedecay_code_index::source_walk::is_source_symlink(
+            &source_root,
+            source_relative,
+        )? {
+            Some(CodeIndexIgnoredDependencyRefusalV1::SymlinkEscape)
+        } else {
+            None
+        };
+        if let Some(reason) = refusal {
+            // A retained admission names required bytes. Omitting them silently
+            // would turn a source refusal into a broken snapshot contract.
+            return if explicitly_admitted {
+                Err(reason.into())
+            } else {
+                Ok(CapturedFileOutcomeV1::Absent)
+            };
         }
         match absolute.metadata() {
             Ok(metadata) if !metadata.is_file() => return Ok(CapturedFileOutcomeV1::Absent),
