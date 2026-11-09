@@ -7,7 +7,8 @@ use tracedecay_project::project::TraceDecay;
 use tracedecay_contracts::code_index_freshness::{
     CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
     CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1, CodeIndexBuildProgressV1,
-    CodeIndexNativeGraphPhaseV1, CodeIndexReadinessWaitOutcomeV1, CodeIndexStalenessStateV1,
+    CodeIndexNativeGraphPhaseV1, CodeIndexPresealAttemptProgressV1,
+    CodeIndexReadinessWaitOutcomeV1, CodeIndexStalenessStateV1,
     CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_contracts::graph_tool::GraphToolResultV1;
@@ -405,8 +406,25 @@ where
                 ),
             ));
         }
-        if progress_window.observe(
-            FirstGenerationWorkMarker::of(worktree.as_deref().ok()),
+        let worktree_read = worktree.as_deref().ok();
+        let marker = FirstGenerationWorkMarker::of(worktree_read);
+        // A retained text bulk commit and a successor's live capture can
+        // advance independently. A frozen text cursor cannot hide real
+        // preseal work, nor can a quiet preseal hide actual durable commits.
+        let concurrent_preseal = if matches!(
+            marker.as_ref(),
+            Some(FirstGenerationWorkMarker::CommittedText { .. })
+        ) {
+            worktree_read
+                .and_then(|worktree| worktree.preseal_attempt.as_ref())
+                .filter(|attempt| attempt.active)
+                .map(FirstGenerationWorkMarker::preseal)
+        } else {
+            None
+        };
+        if progress_window.observe_with_concurrent_preseal(
+            marker,
+            concurrent_preseal,
             Instant::now(),
         ) {
             return Err(first_generation_wait_refusal(
@@ -566,17 +584,7 @@ impl FirstGenerationWorkMarker {
         // while the successor actually captures or parses. Those old phase
         // projections must not hide its independently owned attempt work.
         if let Some(attempt) = worktree.preseal_attempt.as_ref().filter(|a| a.active) {
-            return Some(Self::Preseal {
-                owner: (
-                    attempt.daemon_incarnation,
-                    attempt.producer_incarnation,
-                    attempt.attempt_sequence,
-                ),
-                epoch: attempt.progress_epoch,
-                phase: attempt.phase,
-                completed: attempt.completed_items,
-                last_work_micros: attempt.last_progress_micros,
-            });
+            return Some(Self::preseal(attempt));
         }
         // Absent a live attempt, uninstrumented post-text phases remain
         // unknown, not evidence that a writer has stalled.
@@ -585,6 +593,20 @@ impl FirstGenerationWorkMarker {
             .as_ref()
             .filter(|progress| progress.phase == CodeIndexBuildPhaseV1::SourceScan)
             .map(Self::text)
+    }
+
+    fn preseal(attempt: &CodeIndexPresealAttemptProgressV1) -> Self {
+        Self::Preseal {
+            owner: (
+                attempt.daemon_incarnation,
+                attempt.producer_incarnation,
+                attempt.attempt_sequence,
+            ),
+            epoch: attempt.progress_epoch,
+            phase: attempt.phase,
+            completed: attempt.completed_items,
+            last_work_micros: attempt.last_progress_micros,
+        }
     }
 
     fn native_graph(
@@ -769,13 +791,28 @@ impl FirstGenerationProgressWindow {
     }
 
     fn observe(&mut self, marker: Option<FirstGenerationWorkMarker>, now: Instant) -> bool {
-        let Some(marker) = marker else {
+        self.observe_with_concurrent_preseal(marker, None, now)
+    }
+
+    fn observe_with_concurrent_preseal(
+        &mut self,
+        marker: Option<FirstGenerationWorkMarker>,
+        concurrent_preseal: Option<FirstGenerationWorkMarker>,
+        now: Instant,
+    ) -> bool {
+        if marker.is_none() && concurrent_preseal.is_none() {
             // Uninstrumented work is unknown, not stalled. Keep watermarks
             // so returning to an old report cannot fabricate new work.
             self.unchanged_since = None;
             return false;
-        };
-        let advanced = self.record(marker);
+        }
+        let mut advanced = false;
+        if let Some(marker) = marker {
+            advanced |= self.record(marker);
+        }
+        if let Some(preseal) = concurrent_preseal {
+            advanced |= self.record(preseal);
+        }
         if advanced || self.unchanged_since.is_none() {
             self.unchanged_since = Some(now);
             return false;
@@ -786,10 +823,12 @@ impl FirstGenerationProgressWindow {
 
     fn record(&mut self, marker: FirstGenerationWorkMarker) -> bool {
         let owner = marker.owner();
-        if self.owner.is_some_and(|current| owner < current) {
+        // Independently owned writers on one daemon may overlap. Fence an
+        // older daemon globally; each marker kind fences its own producer.
+        if self.owner.is_some_and(|current| owner.0 < current.0) {
             return false;
         }
-        self.owner = Some(owner);
+        self.owner = Some(self.owner.map_or(owner, |current| current.max(owner)));
         let previous = match &marker {
             FirstGenerationWorkMarker::Preseal { .. } => &mut self.preseal,
             FirstGenerationWorkMarker::NativeGraph { .. } => &mut self.native_graph,
@@ -1260,6 +1299,66 @@ mod daemon_precondition_tests {
             super::FirstGenerationWorkMarker::of(Some(&writing)),
             Some(super::FirstGenerationWorkMarker::CommittedText { .. })
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn concurrent_capture_and_text_receipts_each_renew_real_wait_progress() {
+        let mut capturing = attempt(CodeIndexPresealWorkPhaseV1::Capture, 4, 7, 2);
+        capturing.latest_generation_id = Some("generation.prior.sealed".to_owned());
+        let mut retained = progress(40, None);
+        retained.daemon_incarnation = 3;
+        retained.producer_incarnation = 4;
+        retained.phase = CodeIndexBuildPhaseV1::BulkCommit;
+        capturing.progress = Some(retained);
+
+        let mut parsing = capturing.clone();
+        parsing.preseal_attempt =
+            attempt(CodeIndexPresealWorkPhaseV1::ParseEvidence, 5, 1, 2).preseal_attempt;
+
+        let mut committed = parsing.clone();
+        let text = committed.progress.as_mut().unwrap();
+        text.progress_epoch += 1;
+        text.committed_pages += 1;
+
+        let (result, reads) = hold_over(
+            vec![
+                status(timed_out(), warming(capturing)),
+                status(timed_out(), warming(parsing)),
+                status(timed_out(), warming(committed)),
+                ready_status(),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "a frozen text cursor must not hide new parsing, or vice versa: {result:?}"
+        );
+        assert_eq!(reads, 4);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn duplicate_concurrent_writer_reports_still_refuse_before_ready() {
+        let mut capturing = attempt(CodeIndexPresealWorkPhaseV1::Capture, 4, 7, 2);
+        capturing.latest_generation_id = Some("generation.prior.sealed".to_owned());
+        let mut retained = progress(40, None);
+        retained.daemon_incarnation = 3;
+        retained.producer_incarnation = 4;
+        retained.phase = CodeIndexBuildPhaseV1::BulkCommit;
+        capturing.progress = Some(retained);
+        let (result, reads) = hold_over(
+            vec![
+                status(timed_out(), warming(capturing.clone())),
+                status(timed_out(), warming(capturing)),
+                ready_status(),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        assert_eq!(reads, 2, "neither producer advanced before the stall");
+        let (code, reason) = refusal(result);
+        assert_eq!(code, CODE_INDEX_READINESS_WAIT_TIMED_OUT);
+        assert!(reason.contains("no observed capture, parse, text, or native graph work"));
     }
 
     #[test]
