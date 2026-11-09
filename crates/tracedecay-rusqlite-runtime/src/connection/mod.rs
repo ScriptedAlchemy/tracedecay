@@ -157,27 +157,46 @@ impl OpenedDatabaseFile {
 
     pub(crate) fn resume_initialization(
         path: &Path,
-        (main, sidecars): (File, [File; 3]),
+        files: &mut Option<(File, [File; 3])>,
     ) -> Result<Self, OpenedDatabaseFileError> {
+        let (original, _) = files.as_ref().ok_or(OpenedDatabaseFileError::Open)?;
+        let identity = opened_file_identity(original)?;
         #[cfg(windows)]
-        let main = {
-            // Returning to ordinary worker semantics denies main-file renames
-            // for the entire active SQLite attachment.
-            let worker_pin = OpenOptions::new()
+        let worker_pin = {
+            let pin = OpenOptions::new()
                 .read(true)
                 .write(true)
                 .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
                 .open(path)
                 .map_err(|_| OpenedDatabaseFileError::Open)?;
-            if opened_file_identity(&worker_pin)? != opened_file_identity(&main)? {
+            if opened_file_identity(&pin)? != identity {
                 return Err(OpenedDatabaseFileError::Replaced);
             }
+            pin
+        };
+        // Keep all input descriptors with the caller until every fallible
+        // path and worker-pin check succeeds, including Windows sharing.
+        Self::verify_path_identity(path, identity)?;
+        let (main, sidecars) = files.take().ok_or(OpenedDatabaseFileError::Open)?;
+        #[cfg(windows)]
+        let main = {
+            drop(main);
             worker_pin
         };
-        let mut opened = Self::adopt(main)?;
-        opened.verify_current_path(path)?;
-        opened.created_sidecars = Some(Arc::new(Mutex::new(Some(sidecars))));
-        Ok(opened)
+        Ok(Self {
+            file: Arc::new(Mutex::new(Some(main))),
+            created_sidecars: Some(Arc::new(Mutex::new(Some(sidecars)))),
+            identity,
+        })
+    }
+
+    pub(crate) fn take_idle_initialization_files(&self) -> Option<(File, [File; 3])> {
+        if Arc::strong_count(&self.file) != 1
+            || Arc::strong_count(self.created_sidecars.as_ref()?) != 1
+        {
+            return None;
+        }
+        self.take_completed_files()
     }
 
     /// Takes ownership of an already-open handle and records its identity.
@@ -325,6 +344,10 @@ impl OpenedDatabaseFile {
     }
 
     pub(crate) fn verify_current_path(&self, path: &Path) -> Result<(), OpenedDatabaseFileError> {
+        Self::verify_path_identity(path, self.identity)
+    }
+
+    fn verify_path_identity(path: &Path, identity: u64) -> Result<(), OpenedDatabaseFileError> {
         // POSIX record locks belong to the process: closing any descriptor
         // for this inode releases SQLite's locks, even on another connection.
         // Inspect the pathname without opening a temporary descriptor. Keep
@@ -340,7 +363,7 @@ impl OpenedDatabaseFile {
             let current = File::open(path).map_err(|_| OpenedDatabaseFileError::Open)?;
             opened_file_identity(&current)?
         };
-        if current_identity != self.identity {
+        if current_identity != identity {
             return Err(OpenedDatabaseFileError::Replaced);
         }
         Ok(())
@@ -530,7 +553,7 @@ fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
 }
 
 #[cfg(unix)]
-fn opened_file_identity(file: &File) -> Result<u64, OpenedDatabaseFileError> {
+pub(crate) fn opened_file_identity(file: &File) -> Result<u64, OpenedDatabaseFileError> {
     let metadata = file
         .metadata()
         .map_err(|_| OpenedDatabaseFileError::Inspect)?;
@@ -575,7 +598,7 @@ fn sqlite_connection_has_moved(connection: &Connection) -> Result<bool, OpenedDa
 }
 
 #[cfg(windows)]
-fn opened_file_identity(file: &File) -> Result<u64, OpenedDatabaseFileError> {
+pub(crate) fn opened_file_identity(file: &File) -> Result<u64, OpenedDatabaseFileError> {
     use std::mem::MaybeUninit;
     use std::os::windows::io::AsRawHandle;
 
@@ -631,7 +654,7 @@ unsafe extern "system" {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn opened_file_identity(_file: &File) -> Result<u64, OpenedDatabaseFileError> {
+pub(crate) fn opened_file_identity(_file: &File) -> Result<u64, OpenedDatabaseFileError> {
     Err(OpenedDatabaseFileError::Unsupported)
 }
 

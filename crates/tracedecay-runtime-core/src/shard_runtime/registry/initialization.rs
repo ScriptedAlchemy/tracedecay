@@ -27,7 +27,7 @@ const STAGED_MEMBERS: [&str; 4] = [
     "schema.sqlite-shm",
     "schema.sqlite-journal",
 ];
-pub(super) type InitializationFiles = (File, [File; 3]);
+use tracedecay_rusqlite_runtime::repository::InitializationFiles;
 
 const OWNER: &str = "schema-installation.owner";
 const SYNC: DirectorySyncPolicy = DirectorySyncPolicy::TolerateUnsupported;

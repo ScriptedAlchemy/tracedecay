@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -18,7 +19,7 @@ use tracedecay_store::{
     StoreShardScopeV1, VerifiedStoreLocatorV1,
 };
 
-use super::initialization::{InitializationDirectory, InitializationFiles};
+use super::initialization::InitializationDirectory;
 use super::{
     PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot, PhysicalWriterRuntimeSnapshot,
     PublishedShardRuntime, StoreRuntimeAccessMode, StoreRuntimeKey, StoreRuntimeOpenMode,
@@ -144,11 +145,14 @@ impl ShardRuntimePublisher for LifecycleShardRuntimePublisher {
                 },
             )?;
             let published_identity = if request.locator.is_prospective() {
-                Some(initialize_staged_runtime(&executor, &request).await?)
+                Some(
+                    initialize_staged_runtime(&executor, &request, AdmissionConfigV1::default())
+                        .await?,
+                )
             } else {
                 None
             };
-            let attachment = attach_runtime(&executor, &request, None, published_identity).await?;
+            let attachment = attach_runtime(&executor, &request, published_identity).await?;
             publish_lifecycle_runtime(request, runtime, attachment).await
         })
     }
@@ -167,7 +171,6 @@ fn physical_failure(
 async fn attach_runtime(
     executor: &RuntimeHandle,
     request: &ShardRuntimeBuildRequest,
-    staging: Option<(Arc<InitializationDirectory>, Option<InitializationFiles>)>,
     published_identity: Option<u64>,
 ) -> Result<LifecyclePhysicalAttachment, StoreRuntimeRegistryFailure> {
     let executor = executor.clone();
@@ -185,7 +188,7 @@ async fn attach_runtime(
             }
         }
         let attachment = LifecycleShardRuntimeAttachment::new(RepositoryPhysicalAttachmentFactory)
-            .attach(&executor, &request, staging, AdmissionConfigV1::default())?;
+            .attach(&executor, &request, AdmissionConfigV1::default())?;
         if published_identity
             .is_some_and(|expected| expected != attachment.0.opened_file_identity())
         {
@@ -205,9 +208,10 @@ async fn attach_runtime(
     .map_err(|error| physical_failure("attach SQLite runtime", error))?
 }
 
-async fn initialize_staged_runtime(
+pub(super) async fn initialize_staged_runtime(
     executor: &RuntimeHandle,
     request: &ShardRuntimeBuildRequest,
+    admission: AdmissionConfigV1,
 ) -> Result<u64, StoreRuntimeRegistryFailure> {
     const OPERATION: &str = "publish initialized SQLite family";
     let authority = request
@@ -236,33 +240,52 @@ async fn initialize_staged_runtime(
             .map_err(|error| physical_failure(OPERATION, error))?,
     )
     .into();
-    let stage = crate::native_runtime::spawn_blocking(move || {
+    let executor = executor.clone();
+    let binding = request.binding.clone();
+    let locator = request.locator.verified().clone();
+    let started = crate::native_runtime::spawn_blocking(move || -> std::io::Result<_> {
         let mut stage = InitializationDirectory::begin(destination)?;
-        let resumed = stage.resume_prepared()?;
+        if let Some(identity) = stage.resume_prepared()? {
+            return Ok(ControlFlow::Break(identity));
+        }
         let interrupted = stage.resume_interrupted(locator_digest)?;
-        Ok::<_, std::io::Error>((stage, resumed, interrupted))
+        let attachment = RepositoryPhysicalAttachmentFactory
+            .start_reserved_initialization(
+                &executor,
+                binding,
+                locator,
+                stage.database(),
+                admission,
+                interrupted,
+            )
+            .map_err(|failure| {
+                if let Some((identity, files)) = failure.files
+                    && let Err(hold) = stage.hold_interrupted(identity, locator_digest, files)
+                {
+                    return std::io::Error::other(format!(
+                        "{}; preserving failed startup: {hold}",
+                        failure.error
+                    ));
+                }
+                std::io::Error::other(failure.error)
+            })?;
+        Ok(ControlFlow::Continue((stage, attachment)))
     })
     .await
     .map_err(|error| physical_failure(OPERATION, error))?
     .map_err(|error| physical_failure(OPERATION, error))?;
-    let (stage, resumed, interrupted) = stage;
-    if let Some(identity) = resumed {
-        return Ok(identity);
-    }
-    let stage = Arc::new(stage);
-    let path = stage.database();
-    let attachment =
-        attach_runtime(executor, request, Some((stage.clone(), interrupted)), None).await?;
-    let identity = attachment.0.opened_file_identity();
+    let (mut stage, attachment) = match started {
+        ControlFlow::Continue(started) => started,
+        ControlFlow::Break(already_published) => return Ok(already_published),
+    };
+    let identity = attachment.opened_file_identity();
     let installation =
-        install_final_schema_before_publication(request, attachment.as_physical(), &path).await;
-    let files = crate::native_runtime::spawn_blocking(move || {
-        let LifecyclePhysicalAttachment(physical, _stage) = attachment;
-        physical.close_pinned_initialization()
-    })
-    .await
-    .and_then(|result| result)
-    .map_err(|error| physical_failure(OPERATION, error))?;
+        install_final_schema_before_publication(request, &attachment, &stage.database()).await;
+    let files =
+        crate::native_runtime::spawn_blocking(move || attachment.close_pinned_initialization())
+            .await
+            .and_then(|outcome| outcome)
+            .map_err(|error| physical_failure(OPERATION, error))?;
     let installation = installation.and_then(|()| {
         authority
             .require_active_write_scope(OPERATION)
@@ -275,8 +298,6 @@ async fn initialize_staged_runtime(
         Ok(())
     });
     crate::native_runtime::spawn_blocking(move || {
-        let mut stage = Arc::try_unwrap(stage)
-            .map_err(|_| physical_failure(OPERATION, "SQLite schema workers still hold staging"))?;
         if let Err(error) = installation {
             stage
                 .hold_interrupted(identity, locator_digest, files)
@@ -426,10 +447,7 @@ async fn verify_final_schema_before_existing_publication(
         })
 }
 
-struct LifecyclePhysicalAttachment(
-    RepositoryRuntimePhysicalAttachment,
-    Option<Arc<InitializationDirectory>>,
-);
+struct LifecyclePhysicalAttachment(RepositoryRuntimePhysicalAttachment);
 
 struct LifecycleShardRuntimeAttachment {
     repository: RepositoryPhysicalAttachmentFactory,
@@ -444,41 +462,17 @@ impl LifecycleShardRuntimeAttachment {
         &self,
         runtime: &RuntimeHandle,
         request: &ShardRuntimeBuildRequest,
-        staging: Option<(Arc<InitializationDirectory>, Option<InitializationFiles>)>,
         admission: AdmissionConfigV1,
     ) -> Result<LifecyclePhysicalAttachment, StoreRuntimeRegistryFailure> {
-        if staging.is_none() {
-            let path = request.locator.path();
-            match request.access {
-                StoreRuntimeAccessMode::ReadOnly => {
-                    InitializationDirectory::verify_read_only_handoff(path)
-                }
-                StoreRuntimeAccessMode::ReadWrite => {
-                    InitializationDirectory::recover_published(path)
-                }
+        let path = request.locator.path();
+        match request.access {
+            StoreRuntimeAccessMode::ReadOnly => {
+                InitializationDirectory::verify_read_only_handoff(path)
             }
-            .map_err(|error| physical_failure("verify initialized SQLite family", error))?;
+            StoreRuntimeAccessMode::ReadWrite => InitializationDirectory::recover_published(path),
         }
-        let (stage, interrupted) = staging.unzip();
-        let attachment = if let Some(stage) = &stage {
-            match interrupted.flatten() {
-                Some(files) => self.repository.resume_initialization(
-                    runtime,
-                    request.binding.clone(),
-                    request.locator.verified().clone(),
-                    stage.database(),
-                    admission,
-                    files,
-                ),
-                None => self.repository.initialize(
-                    runtime,
-                    request.binding.clone(),
-                    request.locator.verified().clone(),
-                    stage.database(),
-                    admission,
-                ),
-            }
-        } else if request.access == StoreRuntimeAccessMode::ReadOnly {
+        .map_err(|error| physical_failure("verify initialized SQLite family", error))?;
+        let attachment = if request.access == StoreRuntimeAccessMode::ReadOnly {
             self.repository.attach_read_only(
                 request.binding.clone(),
                 request.locator.verified().clone(),
@@ -498,7 +492,7 @@ impl LifecycleShardRuntimeAttachment {
             operation: "attach rusqlite repository runtime",
             message: error.to_string(),
         })?;
-        Ok(LifecyclePhysicalAttachment(attachment, stage))
+        Ok(LifecyclePhysicalAttachment(attachment))
     }
 }
 
@@ -511,10 +505,6 @@ impl LifecyclePhysicalAttachment {
     /// and readers parks the calling thread.
     async fn close(self) -> Result<(), String> {
         crate::native_runtime::spawn_blocking(move || {
-            let stage = self.1;
-            if stage.is_some() {
-                return self.0.abort_initialization();
-            }
             self.0.drain()?;
             self.0.close_and_join()
         })

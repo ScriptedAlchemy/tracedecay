@@ -19,7 +19,7 @@ use tracedecay_store::{
 use crate::{
     CheckpointOutcome, CheckpointRequest, ExistingWriterLocator, PersistentWriter,
     RuntimeWriteAuthority, WriterActorError, WriterStartError, WriterState,
-    connection::{OpenedDatabaseFile, OpenedDatabaseFileError},
+    connection::{OpenedDatabaseFile, OpenedDatabaseFileError, opened_file_identity},
     exact_sql::{ExactSqlError, ExactSqlHandle},
     ledger::{self, LedgerError},
     reader::{
@@ -146,43 +146,42 @@ impl RepositoryPhysicalAttachmentFactory {
         path: PathBuf,
         admission: AdmissionConfigV1,
     ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
-        let opened_database = OpenedDatabaseFile::create_new(&path)
-            .map_err(RepositoryAttachmentStartError::Identity)?;
-        self.attach_opened(
-            runtime,
-            binding,
-            locator,
-            path,
-            admission,
-            opened_database,
-            true,
-            &mut |_| {},
-        )
+        self.start_reserved_initialization(runtime, binding, locator, path, admission, None)
+            .map_err(|failure| failure.error)
     }
 
-    /// Rejoins a private, unfinished schema through the initializer's retained
-    /// file generations. The ordinary worker startup and admission checks apply.
-    pub fn resume_initialization(
+    /// Initialization owns its sole set of raw descriptors across the entire
+    /// worker start. On a handled failure, only a fully released worker set
+    /// can return those original reservations to the external publisher.
+    pub fn start_reserved_initialization(
         &self,
         runtime: &RuntimeHandle,
         binding: StoreRuntimeBindingV1,
         locator: VerifiedStoreLocatorV1,
         path: PathBuf,
         admission: AdmissionConfigV1,
-        files: (std::fs::File, [std::fs::File; 3]),
-    ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
-        let opened = OpenedDatabaseFile::resume_initialization(&path, files)
-            .map_err(RepositoryAttachmentStartError::Identity)?;
-        self.attach_opened(
-            runtime,
-            binding,
-            locator,
-            path,
-            admission,
-            opened,
-            true,
-            &mut |_| {},
-        )
+        mut resumed: Option<InitializationFiles>,
+    ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryInitializationStartFailure> {
+        let opened = if resumed.is_some() {
+            OpenedDatabaseFile::resume_initialization(&path, &mut resumed)
+        } else {
+            OpenedDatabaseFile::create_new(&path)
+        }
+        .map_err(|error| {
+            RepositoryInitializationStartFailure::before_workers(error, resumed.take())
+        })?;
+        start_with_reserved_files(opened, |worker_pin| {
+            self.attach_opened(
+                runtime,
+                binding,
+                locator,
+                path,
+                admission,
+                worker_pin,
+                true,
+                &mut |_| {},
+            )
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -379,6 +378,52 @@ fn repository_start_failure(
     }
     drop(opened_database);
     failure
+}
+
+fn start_with_reserved_files(
+    opened: OpenedDatabaseFile,
+    start: impl FnOnce(
+        OpenedDatabaseFile,
+    )
+        -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError>,
+) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryInitializationStartFailure> {
+    let started = opened
+        .try_clone()
+        .map_err(RepositoryAttachmentStartError::Identity)
+        .and_then(start);
+    started.map_err(|error| RepositoryInitializationStartFailure {
+        error,
+        files: opened
+            .take_idle_initialization_files()
+            .map(|files| (opened.identity(), files)),
+    })
+}
+
+pub type InitializationFiles = (std::fs::File, [std::fs::File; 3]);
+
+#[derive(Debug)]
+pub struct RepositoryInitializationStartFailure {
+    pub error: RepositoryAttachmentStartError,
+    pub files: Option<(u64, InitializationFiles)>,
+}
+
+impl RepositoryInitializationStartFailure {
+    fn before_workers(
+        mut error: OpenedDatabaseFileError,
+        originals: Option<InitializationFiles>,
+    ) -> Self {
+        let files = originals.and_then(|files| match opened_file_identity(&files.0) {
+            Ok(identity) => Some((identity, files)),
+            Err(inaccessible) => {
+                error = inaccessible;
+                None
+            }
+        });
+        Self {
+            error: RepositoryAttachmentStartError::Identity(error),
+            files,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1398,6 +1443,110 @@ mod tests {
             assert_eq!(fs::metadata(&path).unwrap().len(), 0);
             assert_eq!(fs::read(&sidecar).unwrap(), sentinel.as_bytes());
         }
+    }
+
+    #[test]
+    fn reader_start_failure_returns_idle_initialization_files_for_retry() {
+        use std::process::Command;
+
+        const CHILD: &str = "TRACEDECAY_TEST_SQLITE_READER_START_LIMIT";
+        if std::env::var_os(CHILD).is_none() {
+            let name = format!(
+                "{}::reader_start_failure_returns_idle_initialization_files_for_retry",
+                module_path!().split_once("::").unwrap().1
+            );
+            let result = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &name, "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success()
+                    && String::from_utf8_lossy(&result.stdout).contains("1 passed"),
+                "{} {}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            return;
+        }
+        // Bundled SQLite may default process-wide allocation tracking off.
+        // This isolated child has not opened SQLite yet.
+        // SAFETY: SQLITE_CONFIG_MEMSTATUS consumes a single C int.
+        let configured =
+            unsafe { rusqlite::ffi::sqlite3_config(rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS, 1_i32) };
+        assert_eq!(configured, rusqlite::ffi::SQLITE_OK);
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("sessions.db");
+        let binding = binding();
+        let runtime = native_runtime();
+        let files = OpenedDatabaseFile::create_new(&path).unwrap();
+        let factory = RepositoryPhysicalAttachmentFactory;
+        let outcome = start_with_reserved_files(files, |worker_pin| {
+            factory.attach_opened(
+                &runtime,
+                binding.clone(),
+                locator(&binding),
+                path.clone(),
+                AdmissionConfigV1::default(),
+                worker_pin,
+                true,
+                &mut |stage| {
+                    // SQLite's process-wide supported memory ceiling makes the
+                    // next reader open report SQLITE_NOMEM. The writer has
+                    // already reported successful startup in this isolated process.
+                    if stage == AttachmentWorkerStartStage::BeforeReaders {
+                        // SAFETY: sqlite3_hard_heap_limit64 takes no pointers.
+                        unsafe {
+                            rusqlite::ffi::sqlite3_hard_heap_limit64(1);
+                        }
+                    } else if stage == AttachmentWorkerStartStage::AfterReaders {
+                        // SAFETY: zero disables the limit before worker shutdown.
+                        unsafe {
+                            rusqlite::ffi::sqlite3_hard_heap_limit64(0);
+                        }
+                    }
+                },
+            )
+        });
+        let failure = match outcome {
+            Ok(_) => panic!("reader started under exhausted SQLite budget"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(failure.error, RepositoryAttachmentStartError::Reader(_)),
+            "{}",
+            failure.error
+        );
+        let mut cause: &(dyn Error + 'static) = &failure.error;
+        while let Some(next) = cause.source() {
+            if cause.is::<rusqlite::Error>() {
+                break;
+            }
+            cause = next;
+        }
+        assert_eq!(
+            cause
+                .downcast_ref::<rusqlite::Error>()
+                .and_then(rusqlite::Error::sqlite_error_code),
+            Some(rusqlite::ErrorCode::OutOfMemory)
+        );
+        let (identity, files) = failure
+            .files
+            .expect("writer and readers returned all original file handles");
+        let reopened = factory
+            .start_reserved_initialization(
+                &runtime,
+                binding.clone(),
+                locator(&binding),
+                path.clone(),
+                AdmissionConfigV1::default(),
+                Some(files),
+            )
+            .unwrap();
+        assert!(reopened.snapshot().healthy);
+        assert_eq!(reopened.opened_file_identity(), identity);
+        reopened.drain().unwrap();
+        reopened.close_and_join().unwrap();
     }
 
     #[test]

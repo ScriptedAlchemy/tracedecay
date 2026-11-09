@@ -46,7 +46,8 @@ use crate::StorageOperationExecutor;
 use crate::operation::StorageOperationError;
 
 pub use attachment::{
-    RepositoryAttachmentStartError, RepositoryDispatchError, RepositoryPhysicalAttachmentFactory,
+    InitializationFiles, RepositoryAttachmentStartError, RepositoryDispatchError,
+    RepositoryInitializationStartFailure, RepositoryPhysicalAttachmentFactory,
     RepositoryRuntimePhysicalAttachment, RepositoryRuntimePhysicalSnapshot,
     RepositoryWriterRuntimeSnapshot,
 };

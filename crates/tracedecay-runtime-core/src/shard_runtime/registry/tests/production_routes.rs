@@ -636,7 +636,7 @@ async fn stopped_schema_installation_resumes_committed_steps_in_a_new_process() 
         for first in ["cancel", "failure"] {
             let root = TempDir::new().unwrap();
             let path = root.path().canonicalize().unwrap().join("sessions.db");
-            for phase in [first, "resume"] {
+            for phase in ["fresh_start_error", first, "resumed_start_error", "resume"] {
                 let output = Command::new(std::env::current_exe().unwrap())
                     .args(["--exact", &name, "--nocapture"])
                     .env(PATH, &path)
@@ -711,16 +711,32 @@ async fn stopped_schema_installation_resumes_committed_steps_in_a_new_process() 
         StoreRuntimeKey::from_binding(&binding),
         ResolvedStoreLocator::prospective(verified, path.clone()),
     );
-    let published = LifecycleShardRuntimePublisher
-        .publish(ShardRuntimeBuildRequest::new(
-            binding,
-            locator,
-            StoreRuntimeOpenMode::Initialize,
-            StoreRuntimeAccessMode::ReadWrite,
-            Some(authority),
-            CancellationToken::new(),
-        ))
-        .await;
+    let request = ShardRuntimeBuildRequest::new(
+        binding,
+        locator,
+        StoreRuntimeOpenMode::Initialize,
+        StoreRuntimeAccessMode::ReadWrite,
+        Some(authority),
+        CancellationToken::new(),
+    );
+    if matches!(
+        std::env::var(PHASE).unwrap().as_str(),
+        "fresh_start_error" | "resumed_start_error"
+    ) {
+        let mut admission = tracedecay_store::AdmissionConfigV1::default();
+        admission.per_shard_queue.max_operations = 0;
+        let runtime = crate::native_runtime::handle().unwrap();
+        let error = super::super::ports::initialize_staged_runtime(&runtime, &request, admission)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, StoreRuntimeRegistryFailure::PhysicalRuntimeFailed { ref message, .. } if message.contains("invalid writer admission")),
+            "{error:?}"
+        );
+        assert!(!path.exists());
+        return;
+    }
+    let published = LifecycleShardRuntimePublisher.publish(request).await;
     match std::env::var(PHASE).unwrap().as_str() {
         "cancel" => assert!(
             matches!(
