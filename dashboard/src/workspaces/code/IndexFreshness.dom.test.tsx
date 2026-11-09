@@ -193,7 +193,7 @@ describe('Code index freshness', () => {
     expect(screen.queryByText(/no observed preseal work for/)).toBeNull();
   });
 
-  it('uses genuine preseal and native writer clocks for no-work warnings', async () {
+  it('uses genuine preseal and native writer clocks for no-work warnings', async () => {
     renderFreshness('loading', {
       worktrees: [{
         ...worktree(),
