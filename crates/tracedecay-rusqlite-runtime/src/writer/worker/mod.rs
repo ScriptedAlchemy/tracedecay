@@ -1201,15 +1201,15 @@ fn run_incremental_vacuum(
         .verify(RuntimeWriteAuthorityStage::BeforeCommit)
         .is_err()
     {
-        let result = match transaction.rollback() {
-            Ok(()) => Err(WriterActorError::AuthorityDenied {
-                stage: RuntimeWriteAuthorityStage::BeforeCommit,
-            }),
-            Err(error) => Err(WriterActorError::IncrementalVacuumFailed(format!(
-                "rollback after authority loss: {error}"
-            ))),
-        };
-        command.settle(result);
+        if let Err(error) = transaction.rollback() {
+            tracing::error!(
+                error = %error,
+                "SQLite vacuum rollback failed after write authority was revoked"
+            );
+        }
+        command.settle(Err(WriterActorError::AuthorityDenied {
+            stage: RuntimeWriteAuthorityStage::BeforeCommit,
+        }));
         return;
     }
     let result = transaction

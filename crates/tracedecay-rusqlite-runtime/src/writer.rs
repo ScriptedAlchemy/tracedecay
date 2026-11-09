@@ -371,6 +371,7 @@ pub enum WriterActorError {
     WaitCancelled,
     StorageFailure(StorageRuntimeErrorV1),
     IncrementalVacuumFailed(String),
+    IncrementalVacuumBusy,
     InvalidWorkerOutcome(StorageRuntimeContractErrorV1),
     TaskPanicked,
 }
@@ -391,6 +392,7 @@ impl fmt::Display for WriterActorError {
             Self::IncrementalVacuumFailed(message) => {
                 write!(f, "SQLite incremental vacuum failed: {message}")
             }
+            Self::IncrementalVacuumBusy => f.write_str("SQLite vacuum command channel is busy"),
             Self::InvalidWorkerOutcome(error) => {
                 write!(f, "SQLite writer returned an invalid outcome: {error}")
             }
@@ -776,9 +778,7 @@ impl PersistentWriter {
                 stage: RuntimeWriteAuthorityStage::BeforeAdmission,
             })?;
         if self.state() != WriterState::Ready {
-            return Err(WriterActorError::IncrementalVacuumFailed(
-                "writer is unavailable".to_owned(),
-            ));
+            return Err(WriterActorError::ReplyDropped);
         }
         let (reply, mut response) = oneshot::channel();
         let command = IncrementalVacuumCommand::new(max_pages, authority, reply);
@@ -796,11 +796,9 @@ impl PersistentWriter {
             }
         };
         send_result.map_err(|error| match error {
-            mpsc::SendError::Full(_) => {
-                WriterActorError::IncrementalVacuumFailed("command channel is busy".to_owned())
-            }
+            mpsc::SendError::Full(_) => WriterActorError::IncrementalVacuumBusy,
             mpsc::SendError::Disconnected(_) | mpsc::SendError::Cancelled(_) => {
-                WriterActorError::IncrementalVacuumFailed("writer is unavailable".to_owned())
+                WriterActorError::ReplyDropped
             }
         })?;
         response.recv(cx).await.map_err(writer_reply_error)?
