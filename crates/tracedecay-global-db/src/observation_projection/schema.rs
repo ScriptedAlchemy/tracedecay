@@ -372,10 +372,11 @@ pub(crate) const OBSERVATION_PROJECTION_PERFORMANCE_INDEX_SQL: &[&str] = &[
 pub(in super::super) async fn ensure_observation_projection_schema(
     conn: &impl Executor,
 ) -> Result<(), Error> {
-    // Stores created before retry ownership was recorded have only prior-mount deadlines.
-    if !projection_table_column_exists(conn, "projection_queue", "retry_mount").await? {
-        conn.execute_batch("ALTER TABLE projection_queue ADD COLUMN retry_mount TEXT")
-            .await?;
+    // Existing queue shapes are immutable. A previous binary's queue cannot
+    // be upgraded behind the registered schema contract: refuse before DDL.
+    let queue_columns = projection_rebuild_column_names(conn, "projection_queue").await?;
+    if !queue_columns.is_empty() && !queue_columns.iter().any(|column| column == "retry_mount") {
+        return Err(unsupported_projection_schema("projection_queue"));
     }
     conn.execute_batch(OBSERVATION_PROJECTION_SCHEMA_SQL)
         .await?;
@@ -636,6 +637,48 @@ mod tests {
         assert!(
             message.contains("create a fresh one"),
             "refusal must name the fresh-start remedy, not a migrate command: {message}"
+        );
+    }
+
+    /// Reopening a store with the preceding queue shape must refuse without
+    /// silently adding retry ownership or changing the original table.
+    #[asupersync::test]
+    async fn prior_retry_queue_shape_is_refused_without_schema_mutation() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("global.db");
+        drop(open_registered_schema(&path).await.unwrap());
+
+        let conn = TestConnection::open(&path);
+        conn.execute_batch("ALTER TABLE projection_queue DROP COLUMN retry_mount")
+            .await
+            .unwrap();
+        drop(conn);
+
+        let Err(error) = open_registered_schema(&path).await else {
+            panic!("a prior retry queue must be refused, not upgraded in place");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("projection_queue"),
+            "the refusal must identify the incompatible queue: {message}"
+        );
+        assert!(
+            message.contains("create a fresh one"),
+            "a prior schema must get the reset remedy: {message}"
+        );
+
+        let conn = TestConnection::open(&path);
+        let mut rows = conn
+            .query(
+                "SELECT name FROM pragma_table_xinfo('projection_queue')
+                 WHERE name = 'retry_mount'",
+                (),
+            )
+            .await
+            .unwrap();
+        assert!(
+            rows.next().await.unwrap().is_none(),
+            "refused admission must preserve the old queue shape unchanged"
         );
     }
 
