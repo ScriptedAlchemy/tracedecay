@@ -1258,47 +1258,43 @@ mod tests {
         assert_eq!(remaining, 9);
     }
 
-    #[cfg(unix)]
     #[test]
     fn hashed_wal_reference_keeps_overages_and_partial_coverage() {
-        let temp = tempfile::tempdir().expect("footprint fixture");
-        let profile = temp.path().join("profile");
-        let mut directory = profile.join("projects/proj_deep");
-        // Linux can create a key longer than Doctor's 1,024-byte reference.
-        // On Unix filesystems with a smaller path limit, a control character
-        // reaches the same reference fallback through a real directory walk.
-        #[cfg(target_os = "linux")]
-        for index in 0..6 {
-            directory.push(format!("shard_{index}_{}", "x".repeat(192)));
-        }
-        #[cfg(not(target_os = "linux"))]
-        directory.push("shard\narchive");
-        let wal_directory = directory.join("sessions.wal");
-        sized(&wal_directory.join("segment-1"), 2 * GIB);
-        std::os::unix::fs::symlink("missing", wal_directory.join("segment-2"))
-            .expect("unreadable WAL segment");
-        let mut overrides = BTreeMap::from([
-            ("projects/proj_deep".to_owned(), 1),
-            (PROFILE_TOTAL_KEY.to_owned(), 1),
-        ]);
-        let footprint = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
-        assert_eq!(footprint.total_bytes, 2 * GIB);
-        let wal = footprint
-            .entries
-            .iter()
-            .find(|entry| entry.family == ProfileFamilyV1::Wal)
-            .expect("named WAL footprint");
-        #[cfg(target_os = "linux")]
-        assert!(
-            wal.key.len() > 1024,
-            "fixture must exceed Doctor identity bound"
-        );
-        assert!(DoctorEvidenceReferenceV1::new(wal.key.clone()).is_err());
-        assert_eq!(wal.bytes, 2 * GIB);
+        // A real WAL overlay is anchored at a store root; nested payloads do
+        // not create WAL families. Construct the oversized diagnostic key
+        // directly to exercise the bounded Doctor evidence contract.
+        let key = format!("projects/proj_deep/{}.wal", "x".repeat(1025));
+        let mut footprint = ProfileFootprintV1 {
+            entries: vec![
+                ProfileFootprintEntryV1 {
+                    key: "projects/proj_deep".to_owned(),
+                    family: ProfileFamilyV1::ProjectStore,
+                    bytes: 2 * GIB,
+                    unavailable_entry_count: 1,
+                    bound_bytes: 1,
+                    project: None,
+                    kinds: None,
+                },
+                ProfileFootprintEntryV1 {
+                    key: key.clone(),
+                    family: ProfileFamilyV1::Wal,
+                    bytes: 2 * GIB,
+                    unavailable_entry_count: 1,
+                    bound_bytes: default_bound_bytes(ProfileFamilyV1::Wal),
+                    project: None,
+                    kinds: None,
+                },
+            ],
+            total_bytes: 2 * GIB,
+            unavailable_entry_count: 1,
+            truncated: false,
+            total_bound_bytes: 1,
+        };
+        assert!(DoctorEvidenceReferenceV1::new(key.clone()).is_err());
 
         let observed = findings(&footprint);
         assert_eq!(observed.len(), footprint.entries.len() + 1);
-        let reference = format!("footprint/sha256:{}", sha256_hex(wal.key.as_bytes()));
+        let reference = format!("footprint/sha256:{}", sha256_hex(key.as_bytes()));
         let wal_finding = &observed[&reference];
         assert_eq!(
             wal_finding.finding().state(),
@@ -1314,17 +1310,17 @@ mod tests {
             statement.contains(&format_bytes(default_bound_bytes(ProfileFamilyV1::Wal))),
             "{statement}"
         );
+        assert!(statement.contains("1 unreadable entries"), "{statement}");
         for reference in ["projects/proj_deep", PROFILE_TOTAL_KEY] {
             assert_eq!(
                 observed[reference].finding().state(),
                 DoctorEvidenceStateV1::Degraded,
-                "a long WAL identity must not suppress the other overages"
+                "an oversized identity must not suppress other overages"
             );
         }
 
-        overrides.insert(wal.key.clone(), 3 * GIB);
-        let partial = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
-        let observed = findings(&partial);
+        footprint.entries[1].bound_bytes = 3 * GIB;
+        let observed = findings(&footprint);
         let finding = observed[&reference].finding();
         assert_eq!(finding.state(), DoctorEvidenceStateV1::Partial);
         let statement = finding.coverage().statement();
