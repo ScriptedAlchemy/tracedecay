@@ -9,8 +9,7 @@
 use std::path::Path;
 
 use crate::common::{
-    create_runtime, get_json, http_agent, in_child_test, pick_free_port, rerun_test_in_child,
-    wait_for_dashboard,
+    create_runtime, get_json, http_agent, in_child_test, rerun_test_in_child, wait_for_dashboard,
 };
 use crate::dashboard_api_support::{MessageDetails, MessageRecordBuilder, message};
 use crate::runtime::DashboardTestRuntimeV1;
@@ -398,8 +397,7 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
             seed_daily_limit_regression(&host_runtime, &project_root, day_start).await;
         }
     }
-    let port = pick_free_port();
-    let (access, base_url) = crate::dashboard_api_support::dashboard_access_for(port);
+    let (endpoint, base_url) = crate::dashboard_api_support::dashboard_endpoint().await;
     let server_runtime = Arc::clone(&host_runtime);
     let server_graph = Arc::new(cg);
     let server_profile = profile.clone();
@@ -407,24 +405,21 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
         let authority = server_runtime
             .dashboard_test_authority()
             .expect("dashboard savings authority");
-        let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
+        dashboard::run_until_shutdown_for_tests_with_host_admission(
             server_graph,
             &server_profile,
             None,
             authority,
             tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
-            tracedecay_dashboard_api::DashboardTestEndpointV1 {
-                host: "127.0.0.1",
-                port,
-                access,
-            },
+            endpoint,
             tracedecay_project::product_runtime::register_fixture_product_runtime().build_version(),
             tracedecay_api::static_dashboard_router(
                 tracedecay_project::product_runtime::FIXTURE_DASHBOARD_ASSETS,
             ),
             std::future::pending(),
         )
-        .await;
+        .await
+        .expect("serve fixture dashboard");
     });
 
     wait_for_dashboard(&http_agent(), &base_url).await;
