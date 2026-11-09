@@ -370,8 +370,14 @@ async fn run_registered_storage_continuation(
         )
         .await;
     record_session_lcm_outcome(&session_lcm)
-        .combine(record_canonical_body_gc_outcome(database.db_path(), &canonical_body_gc))
-        .combine(record_replay_metadata_outcome(database.db_path(), &replay_metadata))
+        .combine(record_canonical_body_gc_outcome(
+            database.db_path(),
+            &canonical_body_gc,
+        ))
+        .combine(record_replay_metadata_outcome(
+            database.db_path(),
+            &replay_metadata,
+        ))
 }
 
 fn record_canonical_body_gc_outcome(
@@ -2134,7 +2140,10 @@ mod tests {
         assert_eq!(lines.len(), 4, "expected two events per store: {stderr}");
         for store in stores {
             for (event, frontier) in [
-                ("retention_canonical_bodies", "bootstrap_frontier_after=raw:48"),
+                (
+                    "retention_canonical_bodies",
+                    "bootstrap_frontier_after=raw:48",
+                ),
                 ("retention_replay_metadata", "frontier_after=48"),
             ] {
                 let count = lines
@@ -2145,7 +2154,10 @@ mod tests {
                             && line.contains(frontier)
                     })
                     .count();
-                assert_eq!(count, 1, "missing distinct {event} page for {store}: {stderr}");
+                assert_eq!(
+                    count, 1,
+                    "missing distinct {event} page for {store}: {stderr}"
+                );
             }
         }
     }
