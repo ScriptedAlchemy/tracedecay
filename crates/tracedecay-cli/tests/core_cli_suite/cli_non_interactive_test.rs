@@ -42,18 +42,20 @@ fn ephemeral_safe_fixture_base(test_path: &str) -> Option<PathBuf> {
         assert!(!tracedecay_global_db::is_ephemeral_path(&root));
         return Some(root);
     }
-    // Worker scratch paths and macOS's per-user temporary directory can leave
-    // too little room for the nested child home and its Unix daemon socket.
-    // Use a short, private root on Unix. The private child TMPDIR
-    // still defines the ephemeral boundary, with durable fixtures beside it.
-    let scratch = if cfg!(unix) {
-        TempDir::new_in("/tmp")
+    // Linux fleet scratch can exceed the Unix socket path limit. Darwin's
+    // sandbox grants writes to the user's temporary directory, not /tmp.
+    let parent = if cfg!(target_os = "linux") {
+        PathBuf::from("/tmp")
     } else {
-        TempDir::new()
-    }
-    .expect("isolated temp-policy fixture");
-    let temporary = scratch.path().join("temporary");
-    let durable = scratch.path().join("durable");
+        std::env::temp_dir()
+    };
+    let scratch = tempfile::Builder::new()
+        .prefix("f")
+        .tempdir_in(parent)
+        .expect("isolated temp-policy fixture");
+    // These components also prefix the child's 104-byte Darwin socket address.
+    let temporary = scratch.path().join("t");
+    let durable = scratch.path().join("d");
     std::fs::create_dir(&temporary).unwrap();
     std::fs::create_dir(&durable).unwrap();
     crate::common::rerun_test_in_child(
@@ -1259,15 +1261,12 @@ fn init_wait_holds_until_first_generation_is_ready() {
     );
 }
 
-/// Unix daemon endpoints must fit even when the runner's temporary directory
-/// has a long sandbox prefix. The profile remains private to the fixture.
-fn daemon_contract_home() -> TempDir {
-    if cfg!(unix) {
-        TempDir::new_in("/tmp")
-    } else {
-        TempDir::new()
-    }
-    .expect("private daemon fixture home")
+/// Keep the socket path short and outside the child process's temporary root.
+fn daemon_contract_home(durable: &Path) -> TempDir {
+    tempfile::Builder::new()
+        .prefix("h")
+        .tempdir_in(durable)
+        .expect("private daemon fixture home")
 }
 
 fn assert_project_storage_absent(home: &Path, project: &Path) {
@@ -1309,7 +1308,7 @@ fn init_without_a_running_daemon_refuses_before_any_index_write() {
     ) else {
         return;
     };
-    let home = daemon_contract_home();
+    let home = daemon_contract_home(&durable);
     let project = tempfile::Builder::new()
         .prefix("no-daemon-init-project-")
         .tempdir_in(durable)
@@ -1351,7 +1350,7 @@ fn status_and_query_reads_refuse_typed_daemon_unavailable_without_one() {
     ) else {
         return;
     };
-    let home = daemon_contract_home();
+    let home = daemon_contract_home(&durable);
     let project = tempfile::Builder::new()
         .prefix("no-daemon-read-project-")
         .tempdir_in(durable)
@@ -1519,7 +1518,7 @@ fn pricing_and_usage_reads_make_no_http_request() {
     ) else {
         return;
     };
-    let home = daemon_contract_home();
+    let home = daemon_contract_home(&durable);
     let project = tempfile::Builder::new()
         .prefix("local-usage-project-")
         .tempdir_in(durable)
