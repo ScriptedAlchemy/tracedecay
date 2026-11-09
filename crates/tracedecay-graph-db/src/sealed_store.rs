@@ -2789,11 +2789,10 @@ fn persist_sealed_store_check(directory: &Path, expected_digest: &str) -> Result
     }
     // Never truncate an existing symlink target: the marker is a rebuildable
     // cache, so stage a regular file and publish it by atomic replacement.
-    tracedecay_private_fs::framed_log::atomic_write(
-        &directory.join(SEALED_STORE_CHECKED_FILE),
-        "sealed-check",
+    tracedecay_private_fs::capability_dir::atomic_replace_child_file_nofollow(
+        directory,
+        std::ffi::OsStr::new(SEALED_STORE_CHECKED_FILE),
         expected_digest.as_bytes(),
-        tracedecay_private_fs::framed_log::DirectorySyncPolicy::TolerateUnsupported,
     )
     .map_err(|error| sealed_store_io_failure("sealed check persist failed", error))
 }
@@ -3518,8 +3517,9 @@ mod build_tests {
         MAX_SEALED_RECEIPT_BYTES, SEALED_STAGING_OWNER_FILE, SEALED_STORE_DATABASE_FILE,
         SEALED_STORE_RECEIPT_FILE, SealedRowSource, SealedStagingOwnerV1,
         build_or_open_sealed_store, build_sealed_container, census_sealed_store,
-        initial_sealed_staging_owner, sealed_artifact_database_options, sealed_copy_proof,
-        sealed_generation_directory, sealed_store_root, sweep_abandoned_sealed_staging,
+        initial_sealed_staging_owner, persist_sealed_store_check, sealed_artifact_database_options,
+        sealed_copy_proof, sealed_generation_directory, sealed_store_root,
+        sweep_abandoned_sealed_staging,
     };
     use crate::location::PersistentGraphStoreState;
     use crate::{
@@ -3529,6 +3529,38 @@ mod build_tests {
         GraphProjectionId, GraphProjectionIdentity, GraphProperty, GraphPropertyName,
         GraphRelationId, GraphRelationKind, GraphWatermark, NeverCancelled, SourceGeneration,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn sealed_check_persistence_refuses_a_substituted_generation_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let owned = temp.path().join("owned-generation");
+        let foreign = temp.path().join("foreign-generation");
+        std::fs::create_dir(&owned).unwrap();
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::write(foreign.join("sealed.checked"), b"foreign marker").unwrap();
+        std::fs::remove_dir(&owned).unwrap();
+        symlink(&foreign, &owned).unwrap();
+
+        assert!(persist_sealed_store_check(&owned, "accepted-digest").is_err());
+        assert_eq!(
+            std::fs::read(foreign.join("sealed.checked")).unwrap(),
+            b"foreign marker",
+        );
+        std::fs::remove_file(&owned).unwrap();
+        std::fs::create_dir(&owned).unwrap();
+        persist_sealed_store_check(&owned, "accepted-digest").unwrap();
+        assert_eq!(
+            std::fs::read(owned.join("sealed.checked")).unwrap(),
+            b"accepted-digest",
+        );
+        assert_eq!(
+            std::fs::read(foreign.join("sealed.checked")).unwrap(),
+            b"foreign marker",
+        );
+    }
 
     fn entity_identity(index: usize) -> GraphEntityId {
         GraphEntityId::new(format!("symbol:{index:05}")).unwrap()

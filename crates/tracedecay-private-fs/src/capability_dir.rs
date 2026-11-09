@@ -7,8 +7,9 @@
 
 #[cfg(unix)]
 use std::ffi::CString;
-use std::ffi::OsStr;
-use std::io;
+use std::ffi::{OsStr, OsString};
+use std::io::{self, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
@@ -225,6 +226,61 @@ fn single_component(name: &OsStr) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Publish a rebuildable marker through one held directory. Replacing the
+/// pathname after acquisition cannot redirect its bytes into a foreign tree.
+pub fn atomic_replace_child_file_nofollow(
+    directory_path: &Path,
+    filename: &OsStr,
+    contents: &[u8],
+) -> io::Result<()> {
+    single_component(filename)?;
+    let directory = open_root_nofollow(directory_path)?;
+    atomic_replace_file_in_dir(&directory, filename, contents)
+}
+
+fn atomic_replace_file_in_dir(
+    directory: &Dir,
+    filename: &OsStr,
+    contents: &[u8],
+) -> io::Result<()> {
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    let (temporary, mut file) = (0..8)
+        .find_map(|_| {
+            let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+            let temporary = OsString::from(format!(
+                ".sealed-proof-{}-{:016x}-{sequence:016x}.tmp",
+                std::process::id(),
+                crate::process_instance_nonce(),
+            ));
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            match directory.open_with(&temporary, &options) {
+                Ok(file) => Some(Ok((temporary, file))),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => None,
+                Err(error) => Some(Err(error)),
+            }
+        })
+        .transpose()?
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "could not exclusively stage a sealed proof marker",
+            )
+        })?;
+    let persisted = file.write_all(contents).and_then(|()| file.sync_all());
+    drop(file);
+    let result = persisted
+        .and_then(|()| replace_file(directory, &temporary, filename))
+        .and_then(|()| match sync_directory(directory) {
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput => Ok(()),
+            result => result,
+        });
+    if result.is_err() {
+        let _ = directory.remove_file(&temporary);
+    }
+    result
 }
 
 fn open_root_nofollow(root_path: &Path) -> io::Result<Dir> {
@@ -473,6 +529,42 @@ mod replacement_tests {
     use std::io::Read;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn marker_publication_does_not_follow_a_substituted_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let owned = temp.path().join("owned");
+        let moved = temp.path().join("moved");
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir(&owned).unwrap();
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::write(foreign.join("sealed.checked"), b"foreign bytes").unwrap();
+
+        let held = open_root_nofollow(&owned).unwrap();
+        std::fs::rename(&owned, &moved).unwrap();
+        symlink(&foreign, &owned).unwrap();
+
+        assert!(atomic_replace_child_file_nofollow(
+            &owned,
+            OsStr::new("sealed.checked"),
+            b"new proof",
+        )
+        .is_err());
+        atomic_replace_file_in_dir(&held, OsStr::new("sealed.checked"), b"owned proof")
+            .unwrap();
+        assert_eq!(
+            std::fs::read(foreign.join("sealed.checked")).unwrap(),
+            b"foreign bytes",
+        );
+        assert_eq!(
+            std::fs::read(moved.join("sealed.checked")).unwrap(),
+            b"owned proof",
+        );
+    }
+
 
     #[test]
     fn replacement_publishes_complete_bytes_and_refuses_parent_traversal() {
