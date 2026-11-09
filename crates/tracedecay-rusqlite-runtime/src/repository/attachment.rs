@@ -1735,6 +1735,101 @@ mod tests {
             .unwrap()
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn existing_physical_attachments_preserve_an_independent_writers_locks() {
+        use crate::connection::path_identity_tests::probe_external_connection;
+
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("sessions.db");
+        let writer = rusqlite::Connection::open(&path).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=DELETE;
+             CREATE TABLE sample(value INTEGER);
+             INSERT INTO sample VALUES(3);
+             BEGIN IMMEDIATE;
+             UPDATE sample SET value=7",
+            )
+            .unwrap();
+        let binding = binding();
+        let factory = RepositoryPhysicalAttachmentFactory;
+        let read_only = factory
+            .attach_read_only(
+                binding.clone(),
+                locator(&binding),
+                path.clone(),
+                AdmissionConfigV1::default(),
+            )
+            .unwrap();
+        probe_external_connection(&path, "write", true);
+        read_only.drain().unwrap();
+        read_only.close_and_join().unwrap();
+        probe_external_connection(&path, "write", true);
+
+        let mut invalid = AdmissionConfigV1::default();
+        invalid.readers.min_per_hot_shard = 0;
+        assert!(matches!(
+            factory.attach_read_only(binding.clone(), locator(&binding), path.clone(), invalid),
+            Err(RepositoryAttachmentStartError::Reader(
+                ReaderStartError::InvalidReaderBudget(_)
+            ))
+        ));
+        probe_external_connection(&path, "write", true);
+        writer.execute_batch("COMMIT").unwrap();
+        probe_external_connection(&path, "write", false);
+
+        // Dropping the route alias exercises the real writer's lost-file
+        // notification while an independent connection keeps the DB open
+        // through its physical pathname, with its WAL family intact.
+        let route = directory.path().join("route.db");
+        std::os::unix::fs::symlink(&path, &route).unwrap();
+        let writable = factory
+            .attach(
+                &native_runtime(),
+                binding.clone(),
+                locator(&binding),
+                route.clone(),
+                AdmissionConfigV1::default(),
+            )
+            .unwrap();
+        writer
+            .execute_batch("BEGIN IMMEDIATE; UPDATE sample SET value=11")
+            .unwrap();
+        probe_external_connection(&path, "write", true);
+        fs::remove_file(route).unwrap();
+        let deadline =
+            std::time::Instant::now() + crate::FILE_PROBE_INTERVAL + Duration::from_secs(10);
+        while !(writable.file_lost() && writable.lost_file_closed()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "physical attachment did not close the lost route"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        writable.drain().unwrap();
+        writable.close_and_join().unwrap();
+        probe_external_connection(&path, "write", true);
+        probe_external_connection(&path, "journal", true);
+        writer.execute_batch("ROLLBACK").unwrap();
+        drop(writer);
+        probe_external_connection(&path, "write", false);
+        probe_external_connection(&path, "journal", false);
+        let checked = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(
+            checked
+                .query_row("SELECT value FROM sample", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            7
+        );
+        assert_eq!(
+            checked
+                .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+    }
+
     /// The attachment's original identity descriptor must not be dropped
     /// during startup or initialization commit while SQLite workers are live.
     /// On Unix, closing it can release the process's unrelated SQLite locks.

@@ -21,7 +21,7 @@ const PROBE_COMPLETE: &str = "tracedecay-path-identity-probe-complete";
 // shares inode/lock bookkeeping within a process and can hide a lost OS lock.
 // Execute only the child test in a fresh process, with a marker to reject a
 // successful test harness invocation that accidentally selected zero tests.
-fn probe_external_connection(path: &Path, operation: &str, blocked: bool) {
+pub(crate) fn probe_external_connection(path: &Path, operation: &str, blocked: bool) {
     probe_external_connection_expectation(
         path,
         operation,
@@ -585,7 +585,7 @@ fn probe_reserved_lock(path: &Path, blocked: bool) {
 
 /// Opening an already valid database for attachment must not close an
 /// unrelated raw descriptor and discard a live writer's POSIX RESERVED lock.
-/// The pin returned by admission outlives the writer, just as in production.
+/// Closing one attachment must preserve the independent writer’s transaction.
 #[test]
 fn valid_existing_store_admission_preserves_other_writer_locks() {
     let temp = TempDir::new().unwrap();
@@ -607,9 +607,10 @@ fn valid_existing_store_admission_preserves_other_writer_locks() {
     assert_eq!(opened.identity(), live_path_identity(&path).unwrap());
     probe_reserved_lock(&path, true);
 
+    opened.release_after_workers_exit();
+    probe_reserved_lock(&path, true);
     writer.execute_batch("COMMIT").unwrap();
     drop(writer);
-    opened.release_after_workers_exit();
     probe_reserved_lock(&path, false);
     assert_committed_data(&path);
 }

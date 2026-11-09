@@ -70,10 +70,10 @@ const RETAINED_WAL_BYTES: i64 = WAL_SOFT_LIMIT_BYTES as i64;
 /// pathname stat.
 #[derive(Debug)]
 pub(crate) struct OpenedDatabaseFile {
-    /// One descriptor shared by every attachment worker. Duplicating this
-    /// descriptor and closing a clone while SQLite holds POSIX locks would
-    /// release locks belonging to other live connections to the same inode.
-    file: Arc<Mutex<Option<File>>>,
+    /// Share one identity pin across workers. A private initialization file
+    /// stays pinned until workers exit. Existing stores use a lock-neutral
+    /// descriptor or give the SQLite VFS ownership of the descriptor.
+    file: Arc<Mutex<Option<DatabasePin>>>,
     // Exclusive reservations for a *new* basename. Hold the descriptors until
     // all SQLite workers exit: closing an unrelated fd during a live SQLite
     // transaction can release process-owned POSIX locks.
@@ -81,7 +81,41 @@ pub(crate) struct OpenedDatabaseFile {
     identity: u64,
 }
 
+#[derive(Debug)]
+enum DatabasePin {
+    File(File),
+    // The SQLite VFS defers the actual close while another local connection
+    // holds POSIX locks on this inode. A raw O_RDONLY fd cannot do that.
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+    Sqlite(Connection),
+}
+
 impl OpenedDatabaseFile {
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+    pub(crate) fn pin(path: &Path) -> Result<Self, OpenedDatabaseFileError> {
+        let identity = live_path_identity(path)?;
+        // Opening the main file alone pins its inode without starting a read
+        // transaction, inspecting the schema, or opening unverified sidecars.
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE,
+        )
+        .map_err(|_| OpenedDatabaseFileError::Open)?;
+        match sqlite_connection_has_moved(&connection)? {
+            Some(false) => Self::verify_path_identity(path, identity)?,
+            Some(true) => return Err(OpenedDatabaseFileError::Replaced),
+            None => return Err(OpenedDatabaseFileError::Inspect),
+        }
+        Ok(Self {
+            file: Arc::new(Mutex::new(Some(DatabasePin::Sqlite(connection)))),
+            created_sidecars: None,
+            identity,
+        })
+    }
+
+    #[cfg(any(not(unix), target_os = "linux", target_os = "android"))]
     pub(crate) fn pin(path: &Path) -> Result<Self, OpenedDatabaseFileError> {
         let file = open_pinned_database(path).map_err(|_| OpenedDatabaseFileError::Open)?;
         Self::adopt(file)
@@ -110,10 +144,12 @@ impl OpenedDatabaseFile {
         // locks held by another live SQLite connection in this process.
         // An immutable SQLite reader uses the VFS's lock-aware lifetime and
         // never opens or mutates the unverified WAL/SHM/journal sidecars.
+        let pinned = Self::pin(path)?;
         let inspection =
             open_immutable_reader(path).map_err(|_| OpenedDatabaseFileError::InvalidHeader)?;
         let initialized =
             has_store_schema(&inspection).map_err(|_| OpenedDatabaseFileError::InvalidHeader)?;
+        pinned.verify_connection(&inspection, path)?;
         drop(inspection);
         if !initialized {
             let sidecar = |suffix| match std::fs::symlink_metadata(sidecar_path(path, suffix)) {
@@ -132,7 +168,8 @@ impl OpenedDatabaseFile {
                 _ => return Err(OpenedDatabaseFileError::IncompleteInitialization),
             }
         }
-        Self::pin(path)
+        pinned.verify_current_path(path)?;
+        Ok(pinned)
     }
 
     pub(crate) fn create_new(path: &Path) -> Result<Self, OpenedDatabaseFileError> {
@@ -184,7 +221,7 @@ impl OpenedDatabaseFile {
             worker_pin
         };
         Ok(Self {
-            file: Arc::new(Mutex::new(Some(main))),
+            file: Arc::new(Mutex::new(Some(DatabasePin::File(main)))),
             created_sidecars: Some(Arc::new(Mutex::new(Some(sidecars)))),
             identity,
         })
@@ -209,7 +246,7 @@ impl OpenedDatabaseFile {
         }
         let identity = opened_file_identity(&file)?;
         Ok(Self {
-            file: Arc::new(Mutex::new(Some(file))),
+            file: Arc::new(Mutex::new(Some(DatabasePin::File(file)))),
             created_sidecars: None,
             identity,
         })
@@ -242,22 +279,26 @@ impl OpenedDatabaseFile {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()?;
-        Some((main, sidecars))
+        match main {
+            DatabasePin::File(main) => Some((main, sidecars)),
+            #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+            DatabasePin::Sqlite(_) => None,
+        }
     }
 
     pub(crate) const fn identity(&self) -> u64 {
         self.identity
     }
 
-    fn with_file<T>(
+    fn with_pin<T>(
         &self,
-        use_file: impl FnOnce(&File) -> T,
+        use_pin: impl FnOnce(&DatabasePin) -> T,
     ) -> Result<T, OpenedDatabaseFileError> {
         self.file
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-            .map(use_file)
+            .map(use_pin)
             .ok_or(OpenedDatabaseFileError::Replaced)
     }
 
@@ -265,7 +306,7 @@ impl OpenedDatabaseFile {
         // Share the *same* raw descriptor instead of dup(2): closing any
         // duplicate descriptor after a SQLite connection acquires POSIX locks
         // can silently release that connection's locks process-wide.
-        self.with_file(|_| ())?;
+        self.with_pin(|_| ())?;
         Ok(Self {
             file: Arc::clone(&self.file),
             created_sidecars: self.created_sidecars.as_ref().map(Arc::clone),
@@ -280,7 +321,7 @@ impl OpenedDatabaseFile {
     ) -> Result<PathBuf, OpenedDatabaseFileError> {
         use std::os::unix::io::AsRawFd;
 
-        let descriptor = self.with_file(|file| file.as_raw_fd())?;
+        let descriptor = self.with_pin(|DatabasePin::File(file)| file.as_raw_fd())?;
         Ok(PathBuf::from(format!("/proc/self/fd/{descriptor}")))
     }
 
@@ -376,7 +417,13 @@ impl OpenedDatabaseFile {
         use std::os::unix::fs::MetadataExt;
 
         let unlinked = self
-            .with_file(|file| file.metadata().is_ok_and(|pinned| pinned.nlink() == 0))
+            .with_pin(|pin| match pin {
+                DatabasePin::File(file) => file.metadata().is_ok_and(|pinned| pinned.nlink() == 0),
+                #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+                DatabasePin::Sqlite(connection) => {
+                    sqlite_connection_has_moved(connection) == Ok(Some(true))
+                }
+            })
             .unwrap_or(true);
         if unlinked {
             return true;
@@ -405,7 +452,7 @@ impl OpenedDatabaseFile {
         // HAS_MOVED below still observes the SQLite handle's different inode.
         self.verify_current_path(canonical_path)?;
         #[cfg(unix)]
-        if sqlite_connection_has_moved(_connection)? {
+        if sqlite_connection_has_moved(_connection)? == Some(true) {
             return Err(OpenedDatabaseFileError::Replaced);
         }
         #[cfg(unix)]
@@ -490,7 +537,7 @@ fn open_pinned_database(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
-#[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
+#[cfg(not(any(windows, unix)))]
 fn open_pinned_database(path: &Path) -> io::Result<File> {
     File::open(path)
 }
@@ -574,7 +621,9 @@ fn metadata_identity(metadata: &std::fs::Metadata) -> u64 {
 }
 
 #[cfg(unix)]
-fn sqlite_connection_has_moved(connection: &Connection) -> Result<bool, OpenedDatabaseFileError> {
+fn sqlite_connection_has_moved(
+    connection: &Connection,
+) -> Result<Option<bool>, OpenedDatabaseFileError> {
     let database_name = CString::new("main").expect("static SQLite database name");
     let mut moved = 0_i32;
     // SAFETY: `connection` owns a live SQLite handle, `database_name` is a
@@ -589,10 +638,10 @@ fn sqlite_connection_has_moved(connection: &Connection) -> Result<bool, OpenedDa
         )
     };
     match result {
-        rusqlite::ffi::SQLITE_OK => Ok(moved != 0),
-        // VFS implementations predating HAS_MOVED report NOTFOUND. The
-        // pinned dev/inode check remains authoritative in that case.
-        rusqlite::ffi::SQLITE_NOTFOUND => Ok(false),
+        rusqlite::ffi::SQLITE_OK => Ok(Some(moved != 0)),
+        // Callers establishing identity through SQLite must have a VFS
+        // answer. A worker with an independent inode pin can retain it.
+        rusqlite::ffi::SQLITE_NOTFOUND => Ok(None),
         _ => Err(OpenedDatabaseFileError::Inspect),
     }
 }
@@ -1532,7 +1581,7 @@ fn policy(stage: &'static str, source: rusqlite::Error) -> ConnectionPolicyError
 }
 
 #[cfg(all(test, unix))]
-mod path_identity_tests;
+pub(crate) mod path_identity_tests;
 
 #[cfg(test)]
 mod tests;
