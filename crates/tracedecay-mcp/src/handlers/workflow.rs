@@ -766,7 +766,20 @@ impl ManagedTestRun {
             .record_managed_test_run_outcome(&self.operation_id(), &outcome)
             .await
             .map_err(test_run_record_error);
-        publish_test_run_terminal(&self.emitter, receipt.clone()).await?;
+        // A completed test process is not a completed durable run if its
+        // outcome could not be recorded. Close the live stream with failure,
+        // rather than publishing success that no reader can verify.
+        let stream_receipt = if recorded.is_ok() {
+            receipt.clone()
+        } else {
+            test_run_receipt(
+                self.started_at,
+                &self.deadline,
+                OperationTermination::Failed,
+                bytes_consumed,
+            )
+        };
+        publish_test_run_terminal(&self.emitter, stream_receipt).await?;
         recorded?;
         Ok(receipt)
     }

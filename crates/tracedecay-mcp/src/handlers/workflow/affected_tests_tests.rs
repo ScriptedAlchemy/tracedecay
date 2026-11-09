@@ -1208,3 +1208,79 @@ fn assert_failed_terminal(output: &Value) {
     assert_eq!(output["terminal"]["receipt"]["termination"], "failed");
     assert!(output["note"].is_null());
 }
+
+#[tokio::test]
+async fn refused_durable_test_result_cannot_publish_a_completed_live_terminal() {
+    use futures_util::StreamExt as _;
+    use tracedecay_application::operation_stream::{
+        OperationEventAuthority, OperationId, OperationKind,
+    };
+    use tracedecay_contracts::StreamEventKind;
+
+    let cancellation =
+        CancellationSignal::active("cancellation.affected-tests.settlement-refusal")
+            .expect("fixture cancellation");
+    let context = verified_graph_context(&cancellation);
+    let authority = OperationEventAuthority::default();
+    let emitter = authority
+        .begin(&context, OperationKind::TestRun, UtcMicros(1))
+        .await
+        .expect("admit an authenticated operation");
+    let subscription = authority
+        .subscribe(
+            &OperationId::from_request(context.request_id().clone()),
+            &context,
+            UtcMicros(1),
+            0,
+            None,
+        )
+        .await
+        .expect("subscribe before settlement");
+    let (_, _, mut stream) = subscription.into_sse_parts();
+    let accepted = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("initial event must arrive")
+        .expect("accepted event");
+    assert!(matches!(accepted.kind, StreamEventKind::Item(_)));
+
+    let store = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "affected-tests-unrecorded-terminal",
+    )
+    .await;
+    // No durable start row exists. An outcome UPDATE must affect zero rows;
+    // the live stream must not tell an observer the run completed successfully.
+    let managed = ManagedTestRun {
+        emitter,
+        recording: ManagedTestRunRecording {
+            store: store.registered.clone(),
+            session_id: None,
+        },
+        started_at: UtcMicros(10),
+        deadline: Deadline::new(UtcMicros(i64::MAX)).expect("fixture deadline"),
+    };
+    let error = managed
+        .finish(
+            OperationTermination::Completed,
+            7,
+            Some(0),
+            &LibtestReport::default(),
+        )
+        .await
+        .expect_err("unrecorded outcome cannot settle durably");
+    assert!(
+        matches!(error, TraceDecayError::Database { .. }),
+        "durable-store refusal must remain typed: {error}"
+    );
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("a refused record must still settle the live stream")
+        .expect("terminal event");
+    assert!(matches!(
+        terminal.kind,
+        StreamEventKind::Terminal(termination)
+            if termination.termination == OperationTermination::Failed
+                && termination.receipt.termination == OperationTermination::Failed
+                && termination.receipt.budget.bytes_consumed == 7
+    ));
+    assert!(stream.next().await.is_none(), "live stream ends after refusal");
+}
