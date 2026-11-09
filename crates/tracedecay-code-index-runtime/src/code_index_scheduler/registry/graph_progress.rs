@@ -200,7 +200,10 @@ impl CodeIndexNativeGraphProgressSlotStateV1 {
                 live_bytes,
                 ..
             } => {
-                if mutations == 0 || self.last_stage_ordinal.is_some_and(|last| ordinal <= last) {
+                if mutations == 0
+                    || next.committed_compact_segments != 0
+                    || self.last_stage_ordinal.is_some_and(|last| ordinal <= last)
+                {
                     return false;
                 }
                 self.last_stage_ordinal = Some(ordinal);
@@ -398,6 +401,20 @@ mod tests {
         assert_eq!(installed.committed_compact_segments, 1);
         assert_eq!(installed.committed_compact_bytes, 67890);
         assert!(installed.progress_epoch > durable.progress_epoch);
+        // Publication was already installed and digest-verified. Even a
+        // previously unapplied ordinal arriving late cannot revive staging
+        // or renew the genuine last-work timestamp of this attempt.
+        observer(GraphNativeWorkV1::StagePageApplied {
+            ordinal: 1,
+            kind: GraphNativeWorkKindV1::Relations,
+            mutations: 1,
+            live_bytes: 128,
+        });
+        assert_eq!(
+            slot.read().unwrap().snapshot().unwrap(),
+            installed,
+            "late staging callbacks cannot regress verified compact publication"
+        );
         drop(attempt);
         let finished = slot.read().unwrap().snapshot().unwrap();
         assert!(!finished.active);
