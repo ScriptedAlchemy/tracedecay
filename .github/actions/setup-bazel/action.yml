@@ -270,7 +270,7 @@ runs:
       id: release-distfiles
       env:
         GH_TOKEN: ${{ github.token }}
-      if: runner.environment == 'github-hosted'
+      if: runner.environment == 'github-hosted' && inputs.verify-launcher-cache != 'true'
       shell: bash
       run: |
         runner_temp=$RUNNER_TEMP
