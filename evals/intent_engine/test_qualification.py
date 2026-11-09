@@ -1628,7 +1628,7 @@ class QualificationTests(unittest.TestCase):
         bodies = qualification.captured_request_bodies(
             capture, ["holdout-positive", "holdout-negative"],
             self.questions, None, manifest["max_request_bytes"],
-        manifest["max_state_bytes"],
+            manifest["max_state_bytes"],
         )
         self.assertEqual(bodies["holdout-positive"], records[0]["body"].encode("utf-8"))
         self.assertEqual(bodies["holdout-negative"], records[1]["body"].encode("utf-8"))
@@ -1737,7 +1737,7 @@ class QualificationTests(unittest.TestCase):
                         qualification.captured_request_bodies(
                             changed_bytes, ["holdout-positive", "holdout-negative"],
                             self.questions, None, manifest["max_request_bytes"],
-                        manifest["max_state_bytes"],
+                            manifest["max_state_bytes"],
                         )
             for name, changed in [
                 ("changed text", capture_bytes.replace(b"What changes?", b"What changed?")),
@@ -1782,7 +1782,7 @@ class QualificationTests(unittest.TestCase):
             qualification.captured_request_bodies(
                 reordered, ["holdout-positive", "holdout-negative"],
                 self.questions, None, manifest["max_request_bytes"],
-            manifest["max_state_bytes"],
+                manifest["max_state_bytes"],
             )
 
         # Runner refusal precedes network traffic and evidence-file creation.
@@ -1949,7 +1949,7 @@ class QualificationTests(unittest.TestCase):
                     qualification.captured_request_bodies(
                         altered, ["holdout-positive", "holdout-negative"],
                         self.questions, None, manifest["max_request_bytes"],
-                    manifest["max_state_bytes"],
+                        manifest["max_state_bytes"],
                     )
 
                 with tempfile.TemporaryDirectory() as temp:
