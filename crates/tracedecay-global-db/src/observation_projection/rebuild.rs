@@ -2382,61 +2382,7 @@ async fn activate_rebuild_sessions(
     .map_err(|error| storage("bind rebuilt child session spawn calls", error))
 }
 
-async fn prepare_rebuild_output_activation(
-    conn: &impl Executor,
-    generation: &str,
-) -> ProjectionStoreResult<()> {
-    conn.execute_batch(
-        "DROP TABLE IF EXISTS temp.observation_projection_rebuild_preexisting_outputs;
-         CREATE TEMP TABLE observation_projection_rebuild_preexisting_outputs (
-            output_provider TEXT NOT NULL,
-            output_message_id TEXT NOT NULL,
-            active_exists INTEGER NOT NULL CHECK(active_exists IN (0, 1)),
-            current_owned INTEGER NOT NULL CHECK(current_owned IN (0, 1)),
-            cross_owned INTEGER NOT NULL CHECK(cross_owned IN (0, 1)),
-            staged_created INTEGER NOT NULL CHECK(staged_created IN (0, 1)),
-            PRIMARY KEY(output_provider, output_message_id)
-         ) WITHOUT ROWID;",
-    )
-    .await
-    .map_err(|error| storage("prepare staged projection output activation", error))?;
-    conn.execute(
-        "INSERT INTO temp.observation_projection_rebuild_preexisting_outputs (
-            output_provider, output_message_id, active_exists,
-            current_owned, cross_owned, staged_created
-         )
-         SELECT staged.output_provider, staged.output_message_id,
-                EXISTS (
-                  SELECT 1 FROM lcm_raw_messages AS active
-                  WHERE active.provider = staged.output_provider
-                    AND active.message_id = staged.output_message_id
-                ),
-                EXISTS (
-                  SELECT 1 FROM observation_projection_provenance AS owner
-                  WHERE owner.projector_version = ?1 AND owner.message_created = 1
-                    AND owner.output_provider = staged.output_provider
-                    AND owner.output_message_id = staged.output_message_id
-                ),
-                EXISTS (
-                  SELECT 1 FROM observation_projection_provenance AS owner
-                  WHERE owner.projector_version <> ?1
-                    AND owner.output_provider = staged.output_provider
-                    AND owner.output_message_id = staged.output_message_id
-                ),
-                EXISTS (
-                  SELECT 1 FROM observation_projection_rebuild_provenance AS owner
-                  WHERE owner.projector_version = ?1 AND owner.generation = ?2
-                    AND owner.message_created = 1
-                    AND owner.output_provider = staged.output_provider
-                    AND owner.output_message_id = staged.output_message_id
-                )
-         FROM observation_projection_rebuild_messages AS staged
-         WHERE staged.projector_version = ?1 AND staged.generation = ?2",
-        params![SESSION_MESSAGE_PROJECTOR_VERSION, generation],
-    )
-    .await
-    .map_err(|error| storage("materialize preexisting projection outputs", error))?;
-
+fn rebuild_output_preflight_query(has_cursor: bool) -> String {
     let message_conflicts = format!(
         "{}
                      OR (active.provider <> 'hermes' AND (
@@ -2451,49 +2397,123 @@ async fn prepare_rebuild_output_activation(
         json_extract_expr(STAGED_MESSAGE_JSON_COLUMN, "text"),
         json_extract_expr(STAGED_MESSAGE_JSON_COLUMN, "metadata_json"),
     );
-    let mut conflicts = conn
-        .query(
-            &format!(
-                "SELECT staged.output_provider, staged.output_message_id
-             FROM observation_projection_rebuild_messages AS staged
-             JOIN temp.observation_projection_rebuild_preexisting_outputs AS ownership
-               ON ownership.output_provider = staged.output_provider
-              AND ownership.output_message_id = staged.output_message_id
-             LEFT JOIN lcm_raw_messages AS active
-               ON active.provider = staged.output_provider
-              AND active.message_id = staged.output_message_id
-             WHERE staged.projector_version = ?1 AND staged.generation = ?2
+    let canonical_body = "active.provider <> 'hermes'
+                          AND active.storage_kind = 'inline' AND active.content IS NULL";
+    let cursor_clause = if has_cursor {
+        "AND (staged.output_provider, staged.output_message_id) > (?3, ?4)"
+    } else {
+        ""
+    };
+    format!(
+        "SELECT staged.output_provider, staged.output_message_id,
+                CASE WHEN {canonical_body} THEN 1 ELSE 0 END
+         FROM observation_projection_rebuild_messages AS staged
+         LEFT JOIN lcm_raw_messages AS active
+           ON active.provider = staged.output_provider
+          AND active.message_id = staged.output_message_id
+         WHERE staged.projector_version = ?1 AND staged.generation = ?2
+           {cursor_clause}
+           AND (
+             (active.message_id IS NULL
+               AND NOT EXISTS (
+                 SELECT 1 FROM observation_projection_rebuild_provenance AS staged_owner
+                 WHERE staged_owner.projector_version = ?1
+                   AND staged_owner.generation = ?2
+                   AND staged_owner.message_created = 1
+                   AND staged_owner.output_provider = staged.output_provider
+                   AND staged_owner.output_message_id = staged.output_message_id
+               ))
+             OR (
+               active.message_id IS NOT NULL
                AND (
-                 (ownership.active_exists = 0 AND ownership.staged_created = 0)
-                 OR (
-                   ownership.active_exists = 1
-                   AND NOT (ownership.current_owned = 1 AND ownership.cross_owned = 0)
-                   AND (
-                     {message_conflicts}
-                   )
+                 NOT EXISTS (
+                   SELECT 1 FROM observation_projection_provenance AS current_owner
+                   WHERE current_owner.projector_version = ?1
+                     AND current_owner.message_created = 1
+                     AND current_owner.output_provider = staged.output_provider
+                     AND current_owner.output_message_id = staged.output_message_id
+                 )
+                 OR EXISTS (
+                   SELECT 1 FROM observation_projection_provenance AS foreign_owner
+                   WHERE foreign_owner.projector_version <> ?1
+                     AND foreign_owner.output_provider = staged.output_provider
+                     AND foreign_owner.output_message_id = staged.output_message_id
                  )
                )
-             LIMIT 1"
-            ),
-            params![SESSION_MESSAGE_PROJECTOR_VERSION, generation],
-        )
-        .await
-        .map_err(|error| storage("validate staged projection outputs", error))?;
-    if let Some(row) = conflicts
-        .next()
-        .await
-        .map_err(|error| storage("validate staged projection outputs", error))?
-    {
-        return Err(ProjectionStoreError::OutputCollision {
-            provider: row
-                .get(0)
-                .map_err(|error| storage("validate staged projection outputs", error))?,
-            message_id: row
-                .get(1)
-                .map_err(|error| storage("validate staged projection outputs", error))?,
-        });
+               AND (({message_conflicts}) OR ({canonical_body}))
+             )
+           )
+         ORDER BY staged.output_provider, staged.output_message_id
+         LIMIT ?5"
+    )
+}
+
+async fn prepare_rebuild_output_activation(
+    conn: &impl Executor,
+    generation: &str,
+) -> ProjectionStoreResult<()> {
+    // Keep ownership on the indexed durable tables, not connection-local TEMP
+    // storage. Only compacted bodies need hydration: their placeholders are not
+    // the text staged by the rebuild, and a stored hash alone cannot prove that
+    // the referenced bytes still exist and are intact.
+    let mut cursor: Option<(String, String)> = None;
+    loop {
+        let (after_provider, after_message) = match cursor.as_ref() {
+            Some((provider, message_id)) => (Some(provider.as_str()), Some(message_id.as_str())),
+            None => (None, None),
+        };
+        let mut rows = conn
+            .query(
+                &rebuild_output_preflight_query(cursor.is_some()),
+                params![
+                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                    generation,
+                    after_provider,
+                    after_message,
+                    REBUILD_PAGE_SIZE
+                ],
+            )
+            .await
+            .map_err(|error| storage("validate staged projection outputs", error))?;
+        let mut candidates = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| storage("validate staged projection outputs", error))?
+        {
+            candidates.push((
+                row.get::<String>(0)
+                    .map_err(|error| storage("validate staged projection outputs", error))?,
+                row.get::<String>(1)
+                    .map_err(|error| storage("validate staged projection outputs", error))?,
+                row.get::<i64>(2)
+                    .map_err(|error| storage("validate staged projection outputs", error))?
+                    != 0,
+            ));
+        }
+        // Hydrate at most one body at a time through the existing verified
+        // reader, after dropping the key-only page's cursor. Large bodies must
+        // not multiply into a transport-sized page or an unbounded Rust cache.
+        drop(rows);
+        let scanned = candidates.len();
+        for (provider, message_id, canonical_body) in candidates {
+            if canonical_body {
+                let actual = read_message(conn, &provider, &message_id).await?;
+                let staged = read_staged_message(conn, generation, &provider, &message_id).await?;
+                if matches!((actual, staged), (Some(actual), Some(staged)) if actual == staged) {
+                    cursor = Some((provider, message_id));
+                    continue;
+                }
+            }
+            return Err(ProjectionStoreError::OutputCollision {
+                provider,
+                message_id,
+            });
+        }
+        if scanned < REBUILD_PAGE_SIZE as usize {
+            return Ok(());
+        }
     }
-    Ok(())
 }
 
 async fn activate_rebuild_messages(
@@ -2667,6 +2687,7 @@ mod activation_tests {
     use super::{
         REBUILD_PAGE_SIZE, SESSION_MESSAGE_PROJECTOR_VERSION,
         activate_projection_rebuild_transaction, activate_rebuild_sessions,
+        prepare_rebuild_output_activation, projected_stored_message, read_message,
         reconcile_overlapping_rebuild_sessions, write_staged_message,
     };
     use crate::tests::harness::RegisteredGlobalDbHarness;
@@ -2852,6 +2873,345 @@ mod activation_tests {
             0,
             "failed activation staging rolls back with the transaction"
         );
+    }
+
+    #[asupersync::test]
+    async fn output_preflight_rejects_unowned_changes_without_retaining_temp_storage() {
+        const GENERATION: &str = "generation.output-preflight";
+        let harness = RegisteredGlobalDbHarness::open("output-preflight-no-temp").await;
+        let active = session(None, None);
+        assert!(harness.registered.upsert_session(&active).await);
+
+        let foreign = SessionMessageRecord {
+            provider: active.provider.clone(),
+            session_id: active.session_id.clone(),
+            message_id: "message.unowned".to_owned(),
+            role: "assistant".to_owned(),
+            timestamp: Some(1),
+            ordinal: 1,
+            text: "foreign durable body".to_owned(),
+            kind: None,
+            model: None,
+            tool_names: None,
+            source_path: None,
+            source_offset: None,
+            metadata_json: None,
+        };
+        let transaction = harness.registered.begin_write_transaction().await.unwrap();
+        tracedecay_lcm::raw::upsert_projection_raw_message(
+            &transaction,
+            &foreign,
+            Some("/foreign"),
+        )
+        .await
+        .unwrap();
+        transaction.commit().await.unwrap();
+
+        // The foreign message must exist in the committed store before a
+        // separate rebuild transaction attempts to replace it.
+        let transaction = harness.registered.begin_write_transaction().await.unwrap();
+        stage(&transaction, GENERATION, &active).await;
+        let changed = SessionMessageRecord {
+            text: "overwritten body".to_owned(),
+            ..foreign.clone()
+        };
+        let changed_stored = projected_stored_message(&changed).unwrap();
+        write_staged_message(&transaction, GENERATION, &changed_stored)
+            .await
+            .unwrap();
+        // Schema initialization and other writer operations can already
+        // allocate TEMP pages. The preflight must not grow that allocation,
+        // regardless of unrelated TEMP storage already held by this connection.
+        let mut baseline_pages = transaction
+            .query("PRAGMA temp.page_count", ())
+            .await
+            .unwrap();
+        let baseline_page_count = baseline_pages
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap();
+        drop(baseline_pages);
+
+        let error = prepare_rebuild_output_activation(&transaction, GENERATION)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ProjectionStoreError::OutputCollision { provider, message_id }
+                if provider == "cursor" && message_id == "message.unowned"),
+            "rebuild must refuse a foreign output with different content"
+        );
+
+        // Matching foreign bodies are compatible; rejecting every unowned row
+        // would also avoid spills, but would break legitimate rebuilds.
+        let compatible_stored = projected_stored_message(&foreign).unwrap();
+        write_staged_message(&transaction, GENERATION, &compatible_stored)
+            .await
+            .unwrap();
+        prepare_rebuild_output_activation(&transaction, GENERATION)
+            .await
+            .expect("unchanged foreign output must remain eligible");
+
+        let missing = SessionMessageRecord {
+            message_id: "message.not-created".to_owned(),
+            ..foreign.clone()
+        };
+        let missing_stored = projected_stored_message(&missing).unwrap();
+        write_staged_message(&transaction, GENERATION, &missing_stored)
+            .await
+            .unwrap();
+        let error = prepare_rebuild_output_activation(&transaction, GENERATION)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ProjectionStoreError::OutputCollision { provider, message_id }
+                if provider == "cursor" && message_id == "message.not-created"),
+            "an absent output without staged creation evidence must be rejected"
+        );
+
+        let mut rows = transaction
+            .query(
+                "SELECT name FROM sqlite_temp_master
+                 WHERE name = 'observation_projection_rebuild_preexisting_outputs'",
+                (),
+            )
+            .await
+            .unwrap();
+        assert!(
+            rows.next().await.unwrap().is_none(),
+            "repeated preflight checks must not retain a connection-local TEMP table"
+        );
+        drop(rows);
+
+        // A dropped TEMP b-tree can disappear from sqlite_temp_master while
+        // its pages remain allocated on this writer. Compare page counts on
+        // this same long-lived connection before and after repeated preflight
+        // calls; requiring an absolute zero would conflate earlier storage.
+        let mut pages = transaction
+            .query("PRAGMA temp.page_count", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            pages.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            baseline_page_count,
+            "repeated preflight checks must not grow SQLite TEMP database pages"
+        );
+        drop(pages);
+
+        transaction.rollback().await.unwrap();
+        let snapshot = harness.registered.read_snapshot().await.unwrap();
+        let mut rows = snapshot
+            .query(
+                "SELECT content, location_path FROM lcm_raw_messages
+                 WHERE provider = ?1 AND message_id = ?2",
+                params![foreign.provider.as_str(), foreign.message_id.as_str()],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(
+            row.get::<String>(0).unwrap(),
+            foreign.text,
+            "a denied rebuild must not replace a committed foreign body"
+        );
+        assert_eq!(row.get::<String>(1).unwrap(), "/foreign");
+        drop(rows);
+
+        let mut rows = snapshot
+            .query(
+                "SELECT COUNT(*) FROM observation_projection_rebuilds
+                 WHERE generation = ?1",
+                params![GENERATION],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            0,
+            "a failed rebuild must leave no durable staging generation"
+        );
+        drop(rows);
+
+        let mut integrity = snapshot.query("PRAGMA integrity_check", ()).await.unwrap();
+        assert_eq!(
+            integrity
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<String>(0)
+                .unwrap(),
+            "ok",
+            "the committed SQLite store must remain structurally sound after rollback"
+        );
+    }
+
+    #[asupersync::test]
+    async fn output_preflight_verifies_canonical_bodies_past_one_page() {
+        const GENERATION: &str = "generation.canonical-output-preflight";
+        let harness = RegisteredGlobalDbHarness::open("canonical-output-preflight").await;
+        let active = session(None, None);
+        assert!(harness.registered.upsert_session(&active).await);
+        let body = "Canonical retained message body.\n".repeat(256);
+        assert!(body.len() > tracedecay_store::INLINE_BODY_BYTES);
+        let transaction = harness.registered.begin_write_transaction().await.unwrap();
+        let mut expected = Vec::new();
+        for index in 0..=REBUILD_PAGE_SIZE {
+            let message = SessionMessageRecord {
+                provider: active.provider.clone(),
+                session_id: active.session_id.clone(),
+                message_id: format!("message.canonical.{index:03}"),
+                role: "assistant".to_owned(),
+                timestamp: Some(1),
+                ordinal: index,
+                text: body.clone(),
+                kind: None,
+                model: None,
+                tool_names: None,
+                source_path: None,
+                source_offset: None,
+                metadata_json: None,
+            };
+            tracedecay_lcm::raw::upsert_projection_raw_message(
+                &transaction,
+                &message,
+                Some("/foreign"),
+            )
+            .await
+            .unwrap();
+            expected.push(projected_stored_message(&message).unwrap());
+        }
+        transaction.commit().await.unwrap();
+
+        let transaction = harness.registered.begin_write_transaction().await.unwrap();
+        stage(&transaction, GENERATION, &active).await;
+        for message in &expected {
+            write_staged_message(&transaction, GENERATION, message)
+                .await
+                .unwrap();
+        }
+        let mut rows = transaction
+            .query(
+                "SELECT COUNT(*) FROM lcm_raw_messages
+                 WHERE provider = 'cursor' AND message_id LIKE 'message.canonical.%'
+                   AND content IS NULL AND storage_kind = 'inline'",
+                (),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            REBUILD_PAGE_SIZE + 1,
+            "the fixture must exercise canonical bodies, not short inline text"
+        );
+        drop(rows);
+        prepare_rebuild_output_activation(&transaction, GENERATION)
+            .await
+            .expect("matching canonical bodies must not collide with their placeholders");
+
+        // Keep metadata identical and change only a tail beyond the snippet.
+        // A placeholder-only or first-page-only check must not accept this last row.
+        let last = expected.last().unwrap();
+        let mut changed = last.clone();
+        changed.text.push_str("different retained tail");
+        assert_eq!(
+            tracedecay_lcm::retrieval_content::derived_text_for_snippet(&changed.text),
+            tracedecay_lcm::retrieval_content::derived_text_for_snippet(&last.text)
+        );
+        write_staged_message(&transaction, GENERATION, &changed)
+            .await
+            .unwrap();
+        assert!(matches!(
+            prepare_rebuild_output_activation(&transaction, GENERATION)
+                .await
+                .unwrap_err(),
+            ProjectionStoreError::OutputCollision { provider, message_id }
+                if provider == last.provider && message_id == last.message_id
+        ));
+        write_staged_message(&transaction, GENERATION, last)
+            .await
+            .unwrap();
+
+        // Damage the actual persisted body behind an unchanged hash, then
+        // remove it entirely. Neither state is permission to overwrite or
+        // repair foreign data; each must fail through the verified reader.
+        let hash = tracedecay_lcm::retrieval_content::projected_content_hash(&expected[0].text);
+        // Defer (do not disable) the fixture's foreign keys so a missing
+        // body can be inspected before rollback. A commit would still refuse
+        // the missing parent; no ownership guards or schema are removed.
+        transaction
+            .execute_batch("PRAGMA defer_foreign_keys = ON")
+            .await
+            .unwrap();
+        for mutation in [
+            "UPDATE session_canonical_bodies SET body = X'00' WHERE content_hash = ?1",
+            "DELETE FROM session_canonical_bodies WHERE content_hash = ?1",
+        ] {
+            transaction
+                .execute_batch("SAVEPOINT canonical_body_fault")
+                .await
+                .unwrap();
+            assert_eq!(
+                transaction
+                    .execute(mutation, params![hash.as_str()])
+                    .await
+                    .unwrap(),
+                1,
+                "the corruption fixture must alter a real stored body"
+            );
+            assert!(matches!(
+                prepare_rebuild_output_activation(&transaction, GENERATION)
+                    .await
+                    .unwrap_err(),
+                ProjectionStoreError::Storage { .. }
+            ));
+            transaction
+                .execute_batch("ROLLBACK TO canonical_body_fault; RELEASE canonical_body_fault;")
+                .await
+                .unwrap();
+        }
+        prepare_rebuild_output_activation(&transaction, GENERATION)
+            .await
+            .expect("restoring the body must restore compatibility");
+        transaction.rollback().await.unwrap();
+
+        let snapshot = harness.registered.read_snapshot().await.unwrap();
+        for message in &expected {
+            assert_eq!(
+                read_message(&snapshot, &message.provider, &message.message_id)
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                Some(message),
+                "refused rebuilds must preserve every committed body and its metadata"
+            );
+        }
+        let mut rows = snapshot
+            .query(
+                "SELECT COUNT(*) FROM observation_projection_rebuilds WHERE generation = ?1",
+                params![GENERATION],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            0
+        );
+        drop(rows);
+        let mut rows = snapshot.query("PRAGMA integrity_check", ()).await.unwrap();
+        let mut integrity = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            integrity.push(row.get::<String>(0).unwrap());
+        }
+        assert_eq!(integrity, vec!["ok".to_owned()]);
+        drop(rows);
+        let mut foreign_keys = snapshot
+            .query("PRAGMA foreign_key_check", ())
+            .await
+            .unwrap();
+        assert!(foreign_keys.next().await.unwrap().is_none());
     }
 
     #[asupersync::test]
