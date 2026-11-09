@@ -549,11 +549,7 @@ pub fn footprint_findings(footprint: &ProfileFootprintV1) -> DoctorStorageFamily
     let mut findings = Vec::with_capacity(footprint.entries.len() + 1);
     for entry in &footprint.entries {
         let evidence_key = doctor_footprint_reference_key(&entry.key);
-        let subject = if evidence_key.as_ref() == entry.key.as_str() {
-            entry_statement(entry)
-        } else {
-            format!("footprint entry {evidence_key} (full path in storage report)")
-        };
+        let subject = entry_statement(entry, &evidence_key);
         let Some(finding) = bounded_finding(
             evidence_key.as_ref(),
             &subject,
@@ -593,7 +589,7 @@ fn floor_note(unavailable_entry_count: usize, truncated: bool) -> String {
     }
 }
 
-fn entry_statement(entry: &ProfileFootprintEntryV1) -> String {
+fn entry_statement(entry: &ProfileFootprintEntryV1, evidence_key: &str) -> String {
     let label = match entry.family {
         ProfileFamilyV1::ProjectStore => "project store",
         ProfileFamilyV1::GraphContainer => "graph container",
@@ -608,6 +604,10 @@ fn entry_statement(entry: &ProfileFootprintEntryV1) -> String {
         ProfileFamilyV1::SqliteTempSpill => "unlinked SQLite temp files",
         ProfileFamilyV1::Other => "profile entry",
     };
+    let floor = floor_note(entry.unavailable_entry_count, false);
+    if evidence_key != entry.key {
+        return format!("{label} {evidence_key} (full path in storage report){floor}");
+    }
     let root =
         entry
             .project
@@ -626,11 +626,7 @@ fn entry_statement(entry: &ProfileFootprintEntryV1) -> String {
                 format_bytes(kinds.graph_replay_pool)
             )
         });
-    format!(
-        "{label} {}{root}{breakdown}{}",
-        entry.key,
-        floor_note(entry.unavailable_entry_count, false)
-    )
+    format!("{label} {evidence_key}{root}{breakdown}{floor}")
 }
 
 fn bounded_finding(
@@ -1136,15 +1132,24 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn deeply_nested_wal_cannot_hide_large_store_or_profile_findings() {
+    fn hashed_wal_reference_keeps_overages_and_partial_coverage() {
         let temp = tempfile::tempdir().expect("footprint fixture");
         let profile = temp.path().join("profile");
         let mut directory = profile.join("projects/proj_deep");
+        // Linux can create a key longer than Doctor's 1,024-byte reference.
+        // On Unix filesystems with a smaller path limit, a control character
+        // reaches the same reference fallback through a real directory walk.
+        #[cfg(target_os = "linux")]
         for index in 0..6 {
             directory.push(format!("shard_{index}_{}", "x".repeat(192)));
         }
-        sized(&directory.join("sessions.wal"), 2 * GIB);
-        let overrides = BTreeMap::from([
+        #[cfg(not(target_os = "linux"))]
+        directory.push("shard\narchive");
+        let wal_directory = directory.join("sessions.wal");
+        sized(&wal_directory.join("segment-1"), 2 * GIB);
+        std::os::unix::fs::symlink("missing", wal_directory.join("segment-2"))
+            .expect("unreadable WAL segment");
+        let mut overrides = BTreeMap::from([
             ("projects/proj_deep".to_owned(), 1),
             (PROFILE_TOTAL_KEY.to_owned(), 1),
         ]);
@@ -1155,7 +1160,12 @@ mod tests {
             .iter()
             .find(|entry| entry.family == ProfileFamilyV1::Wal)
             .expect("named WAL footprint");
-        assert!(wal.key.len() > 1024, "fixture must exceed Doctor identity bound");
+        #[cfg(target_os = "linux")]
+        assert!(
+            wal.key.len() > 1024,
+            "fixture must exceed Doctor identity bound"
+        );
+        assert!(DoctorEvidenceReferenceV1::new(wal.key.clone()).is_err());
         assert_eq!(wal.bytes, 2 * GIB);
 
         let observed = findings(&footprint);
@@ -1167,7 +1177,10 @@ mod tests {
             DoctorEvidenceStateV1::Degraded
         );
         let statement = wal_finding.finding().coverage().statement();
-        assert!(statement.contains("full path in storage report"), "{statement}");
+        assert!(
+            statement.contains("full path in storage report"),
+            "{statement}"
+        );
         assert!(statement.contains(&format_bytes(2 * GIB)), "{statement}");
         assert!(
             statement.contains(&format_bytes(default_bound_bytes(ProfileFamilyV1::Wal))),
@@ -1180,6 +1193,15 @@ mod tests {
                 "a long WAL identity must not suppress the other overages"
             );
         }
+
+        overrides.insert(wal.key.clone(), 3 * GIB);
+        let partial = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
+        let observed = findings(&partial);
+        let finding = observed[&reference].finding();
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Partial);
+        let statement = finding.coverage().statement();
+        assert!(statement.contains("WAL "), "{statement}");
+        assert!(statement.contains("1 unreadable entries"), "{statement}");
     }
 
     #[test]
