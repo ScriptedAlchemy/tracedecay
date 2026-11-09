@@ -413,7 +413,10 @@ where
         // preseal work, nor can a quiet preseal hide actual durable commits.
         let concurrent_preseal = if matches!(
             marker.as_ref(),
-            Some(FirstGenerationWorkMarker::CommittedText { .. })
+            Some(
+                FirstGenerationWorkMarker::CommittedText { .. }
+                    | FirstGenerationWorkMarker::NativeGraph { .. }
+            )
         ) {
             worktree_read
                 .and_then(|worktree| worktree.preseal_attempt.as_ref())
@@ -1356,6 +1359,54 @@ mod daemon_precondition_tests {
         )
         .await;
         assert_eq!(reads, 2, "neither producer advanced before the stall");
+        let (code, reason) = refusal(result);
+        assert_eq!(code, CODE_INDEX_READINESS_WAIT_TIMED_OUT);
+        assert!(reason.contains("no observed capture, parse, text, or native graph work"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn successor_capture_advances_while_prior_native_writer_is_quiet() {
+        // The previously sealed graph may still be encoding when a new
+        // source pass begins. Both are independently owned, and an unchanged
+        // native counter must not conceal genuine successor parse work.
+        let mut capturing = native_graph_without_writes();
+        capturing.preseal_attempt =
+            attempt(CodeIndexPresealWorkPhaseV1::Capture, 4, 7, 2).preseal_attempt;
+        let mut parsing = capturing.clone();
+        parsing.preseal_attempt =
+            attempt(CodeIndexPresealWorkPhaseV1::ParseEvidence, 5, 1, 2).preseal_attempt;
+
+        let (result, reads) = hold_over(
+            vec![
+                status(timed_out(), warming(capturing)),
+                status(timed_out(), warming(parsing)),
+                ready_status(),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "real successor parsing must renew the wait despite a silent native writer: {result:?}"
+        );
+        assert_eq!(reads, 3, "only the reached receipt ends a progressing wait");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn duplicate_graph_and_successor_attempts_cannot_mask_a_stall() {
+        let mut stalled = native_graph_without_writes();
+        stalled.preseal_attempt =
+            attempt(CodeIndexPresealWorkPhaseV1::Capture, 4, 7, 2).preseal_attempt;
+        let (result, reads) = hold_over(
+            vec![
+                status(timed_out(), warming(stalled.clone())),
+                status(timed_out(), warming(stalled)),
+                ready_status(),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        assert_eq!(reads, 2, "neither independent writer advanced");
         let (code, reason) = refusal(result);
         assert_eq!(code, CODE_INDEX_READINESS_WAIT_TIMED_OUT);
         assert!(reason.contains("no observed capture, parse, text, or native graph work"));
