@@ -3,9 +3,8 @@
 //! Rewrite completion retires every record the rewritten source no longer
 //! offers. One long host session can hold more unoffered records than the
 //! exact-SQL engine's per-query materialization cap, so completion must read
-//! them in keyset pages rather than one unbounded statement; the unbounded
-//! read failed deterministically for exactly those sources and wedged the
-//! host catch-up in a retry loop that never converged.
+//! them in bounded writer pages. Each committed page must persist enough
+//! progress that a restart does not repeat its already-retired records.
 
 use tempfile::TempDir;
 
@@ -24,7 +23,7 @@ use crate::tests::harness::{
 
 /// More unoffered records than one keyset page *and* more than the engine's
 /// per-query materialization cap, so the test fails against the unbounded
-/// read and exercises repeated pagination against the fix.
+/// read and exercises repeated, independently committed writer pages.
 const UNOFFERED_RECORDS: i64 = 10_003;
 
 #[asupersync::test]
@@ -65,6 +64,7 @@ async fn rewrite_completion_retires_unoffered_records_beyond_the_query_cap() {
     // all presence rows, without issuing per-ghost UPDATE/receipt queries
     // while holding the SQLite writer's fixed transaction lease.
     let before = writer_telemetry(&harness.registered).sqlite_vm.statements;
+    let before_commits = writer_telemetry(&harness.registered).transactions.committed_transactions;
     let retired = harness
         .registered
         .complete_observation_source_rewrite(&source, &scope, generation)
@@ -72,6 +72,13 @@ async fn rewrite_completion_retires_unoffered_records_beyond_the_query_cap() {
         .unwrap_or_else(|error| panic!("rewrite completion must not exceed query caps: {error}"));
     assert_eq!(retired, 0);
     let statements = writer_telemetry(&harness.registered).sqlite_vm.statements - before;
+    let after = writer_telemetry(&harness.registered);
+    let commits = after.transactions.committed_transactions - before_commits;
+    assert_eq!(
+        commits,
+        (UNOFFERED_RECORDS as u64).div_ceil(128),
+        "each bounded page must durably commit before the next page"
+    );
     assert!(
         statements.saturating_mul(16) < UNOFFERED_RECORDS as u64,
         "presence-only ghosts must not cause per-record writer commands: {statements} statements for {UNOFFERED_RECORDS} records"
@@ -106,24 +113,15 @@ async fn table_count(conn: &impl QueryExecutor, sql: &str) -> i64 {
     row.get(0).unwrap()
 }
 
-/// Retiring an unoffered record is real work, not a presence-row cleanup:
-/// its provenance and workflow facts are removed, a `source_record_retired`
-/// disposition takes their place, and a sole-owned projected output is
-/// deleted. A completion that dies mid-transaction must roll every earlier
-/// retirement back; the pending rewrite survives, so a retry after the
-/// failure clears converges — the retry loop the paged read exists to keep
-/// alive would otherwise stay wedged.
-///
-/// The fixture plants an inconsistent provenance row (a surviving co-owner
-/// that claims an output its durable record does not derive) on the
-/// record the keyset order retires last, so the first attempt retires real
-/// records across pages and then fails inside
-/// `retire_source_record` with `ProvenanceCollision`. Removing the planted
-/// row and completing again retires every unoffered record for real.
+/// Retiring an unoffered record also removes its projections and workflow
+/// facts. A collision on a later page must roll that page back, but earlier
+/// page commits must remain durable for the next daemon invocation.
+/// Reopening the registered store must resume from those committed pages,
+/// preserving the reoffered survivor and retiring each obsolete record once.
 #[asupersync::test]
-async fn rewrite_completion_retires_projected_records_and_rolls_back_a_failed_attempt() {
-    // More real projected records than one keyset page, so a failed attempt
-    // leaves proven retirements to roll back on every page.
+async fn rewrite_completion_resumes_committed_pages_after_failure_and_restart() {
+    // More real projected records than one page: prior page commits must
+    // remain durable when the final page's provenance collision aborts.
     const RECORDS: usize = 1_005;
 
     let directory = TempDir::new().unwrap();
@@ -219,6 +217,7 @@ async fn rewrite_completion_retires_projected_records_and_rolls_back_a_failed_at
         .await
         .unwrap();
 
+    let before_commits = writer_telemetry(registered).transactions.committed_transactions;
     let error = registered
         .complete_observation_source_rewrite(&source, &scope, generation)
         .await
@@ -228,36 +227,59 @@ async fn rewrite_completion_retires_projected_records_and_rolls_back_a_failed_at
         "colliding output ownership must fail completion, got {error:?}"
     );
 
-    // Every retirement the attempt already performed must be rolled back:
-    // provenance and projected outputs restored, no dispositions recorded,
-    // and the pending rewrite still waiting for a converging retry.
-    assert_eq!(
-        table_count(
-            &writer,
-            "SELECT COUNT(*) FROM observation_projection_dispositions"
-        )
-        .await,
-        0,
-        "retirements before the collision must roll back with the transaction"
+    // Earlier committed pages survive the failure; only the page containing
+    // the collision rolls back. This is the progress a new process must reuse.
+    let already_retired = table_count(
+        &writer,
+        "SELECT COUNT(*) FROM observation_projection_dispositions",
+    )
+    .await;
+    assert!(
+        already_retired >= 128 && already_retired < (RECORDS - 1) as i64,
+        "failure must preserve completed pages, but not the colliding page"
     );
+    let commits = writer_telemetry(registered).transactions.committed_transactions - before_commits;
+    assert!(commits >= 1, "at least one bounded retirement page must commit");
     assert_eq!(
         table_count(
             &writer,
-            "SELECT COUNT(*) FROM observation_projection_provenance"
+            "SELECT COUNT(*) FROM observation_projection_provenance",
         )
         .await,
-        i64::try_from(RECORDS).unwrap() + 1,
-        "rolled-back retirements must restore provenance"
+        i64::try_from(RECORDS).unwrap() + 1 - already_retired,
+        "committed pages must remove their provenance"
     );
     assert_eq!(
         table_count(&writer, "SELECT COUNT(*) FROM lcm_raw_messages").await,
-        i64::try_from(RECORDS).unwrap(),
-        "rolled-back retirements must restore projected outputs"
+        i64::try_from(RECORDS).unwrap() - already_retired,
+        "committed pages must remove only their projected outputs"
     );
     assert_eq!(
         table_count(&writer, "SELECT COUNT(*) FROM observation_source_rewrites").await,
         1,
-        "the failed attempt must leave the rewrite pending"
+        "failed page must leave the rewrite pending for restart"
+    );
+
+    // Reopen the registered profile store as a new daemon fixture. Durable
+    // rewrite state, dispositions and the source-presence page frontier must
+    // survive rather than replay the already committed retirement work.
+    drop(writer);
+    drop(runtime);
+    let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+        .await
+        .unwrap();
+    let registered = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("reopened registered profile database");
+    let writer = registered.writer_connection().unwrap();
+    assert_eq!(
+        table_count(
+            &writer,
+            "SELECT COUNT(*) FROM observation_projection_dispositions",
+        )
+        .await,
+        already_retired,
+        "restart must retain the completed retirement frontier"
     );
 
     writer
@@ -275,7 +297,11 @@ async fn rewrite_completion_retires_projected_records_and_rolls_back_a_failed_at
         .unwrap_or_else(|error| {
             panic!("retry after clearing the collision must converge: {error}")
         });
-    assert_eq!(retired, u64::try_from(RECORDS - 1).unwrap());
+    assert_eq!(
+        retired,
+        u64::try_from(RECORDS - 1).unwrap() - already_retired as u64,
+        "restart must retire only records that were not already settled"
+    );
 
     let retired_reason = ProjectionSkipReason::SourceRecordRetired.as_str();
     assert_eq!(

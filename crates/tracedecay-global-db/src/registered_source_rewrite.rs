@@ -22,11 +22,9 @@ use super::RegisteredGlobalDb;
 use super::observation_projection::retire_source_record;
 use super::registered::JobExit;
 
-/// Unoffered-record reads are keyset-paginated at this page size. The exact-
-/// SQL engine refuses a query that materializes more rows than its hard cap,
-/// and one long host session can hold more unoffered records than that cap,
-/// which made rewrite completion fail deterministically for those sources.
-const UNOFFERED_RECORD_PAGE_SIZE: i64 = 1_000;
+/// Each committed page settles at most this many source-presence records,
+/// releasing the writer lease and making restart continuation durable.
+const UNOFFERED_RECORD_PAGE_SIZE: i64 = 128;
 
 /// One page is small enough for the SQLite JSON virtual table and writer
 /// deadline. The entire supplied presence batch still commits atomically.
@@ -256,107 +254,126 @@ impl RegisteredGlobalDb {
             return Ok(0);
         }
         drop(snapshot);
-        self.transact_or_rollback(
-            |error| storage("run source rewrite completion", error),
-            async move |transaction| {
-                if pending_rewrite(&transaction, &key).await?.as_deref()
-                    != Some(generation.as_str())
-                {
-                    return Err(JobExit::Rollback(0));
-                }
-                let mut retired = 0_u64;
-                // Paginate only unoffered records that still require a
-                // retirement or have an accepted revival to cancel. An
-                // already-disposed record with no pending revival cannot
-                // produce another output change; invoking retirement for it
-                // issued redundant UPDATE/SELECT commands under the writer.
-                // Presence-only ghosts without an observation or queued
-                // revival have nothing to retire: skip their per-row writer
-                // UPDATE/receipt read. A queued accepted revival remains
-                // eligible even if the observation is absent. The final
-                // DELETE still settles every stale presence row.
-                // Retirement never mutates source presence, so the keyset is
-                // stable through the atomic transaction.
-                let mut after_observation_id = String::new();
-                loop {
-                    let mut rows = transaction
-                        .query(
-                            "SELECT presence.observation_id
-                             FROM observation_source_presence AS presence
-                             WHERE presence.source_key = ?1 AND presence.generation <> ?2
-                               AND presence.observation_id > ?3
-                               AND (
-                                   (
-                                       EXISTS (
-                                           SELECT 1 FROM observations AS observation
-                                           WHERE observation.observation_id = presence.observation_id
-                                       )
-                                       AND NOT EXISTS (
-                                           SELECT 1 FROM observation_projection_dispositions AS disposition
-                                           WHERE disposition.projector_version = ?5
-                                             AND disposition.observation_id = presence.observation_id
-                                       )
-                                   )
-                                   OR EXISTS (
-                                       SELECT 1 FROM projection_queue AS queued
-                                       WHERE queued.observation_id = presence.observation_id
-                                         AND (queued.revival_generation IS NOT NULL
-                                              OR queued.revival_start_offset IS NOT NULL)
-                                   )
-                               )
-                             ORDER BY presence.observation_id
-                             LIMIT ?4",
-                            params![
-                                key.as_str(),
-                                generation.as_str(),
-                                after_observation_id.as_str(),
-                                UNOFFERED_RECORD_PAGE_SIZE,
-                                SESSION_MESSAGE_PROJECTOR_VERSION
-                            ],
-                        )
-                        .await
-                        .map_err(|error| storage("read unoffered source records", error))?;
-                    let mut page = Vec::new();
-                    while let Some(row) = rows
-                        .next()
-                        .await
-                        .map_err(|error| storage("read unoffered source records", error))?
-                    {
-                        page.push(
-                            row.get::<String>(0)
-                                .map_err(|error| storage("read unoffered source records", error))?,
-                        );
-                    }
-                    drop(rows);
-                    if page.is_empty() {
-                        break;
-                    }
-                    let page_len = page.len();
-                    after_observation_id = page[page_len - 1].clone();
-                    for observation_id in &page {
-                        let retired_one: Pin<
-                            Box<dyn Future<Output = ProjectionStoreResult<bool>> + Send + '_>,
-                        > = Box::pin(retire_source_record(&transaction, observation_id));
-                        if retired_one.await? {
-                            retired += 1;
+        let mut total_retired = 0_u64;
+        loop {
+            // The remaining older-generation presence entries are the durable
+            // continuation frontier. Each page commits its retirements and
+            // deletes only the entries it has finished processing; a failed
+            // page rolls back without repeating earlier committed pages.
+            let key = key.clone();
+            let generation = generation.clone();
+            let (retired, finished) = self
+                .transact_or_rollback(
+                    |error| storage("run source rewrite completion page", error),
+                    async move |transaction| {
+                        if pending_rewrite(&transaction, &key).await?.as_deref()
+                            != Some(generation.as_str())
+                        {
+                            return Err(JobExit::Rollback((0_u64, true)));
                         }
-                    }
-                    if (page_len as i64) < UNOFFERED_RECORD_PAGE_SIZE {
-                        break;
-                    }
-                }
-                for sql in [
-                    "DELETE FROM observation_source_presence WHERE source_key = ?1 AND generation <> ?2",
-                    "DELETE FROM observation_source_rewrites WHERE source_key = ?1 AND generation = ?2",
-                ] {
-                    transaction
-                        .execute(sql, params![key.as_str(), generation.as_str()])
-                        .await
-                        .map_err(|error| storage("settle source rewrite", error))?;
-                }
-                Ok(retired)
-            },
-        )
-        .await
+                        let mut rows = transaction
+                            .query(
+                                "SELECT presence.observation_id,
+                                        (
+                                            (
+                                                EXISTS (
+                                                    SELECT 1 FROM observations AS observation
+                                                    WHERE observation.observation_id = presence.observation_id
+                                                )
+                                                AND NOT EXISTS (
+                                                    SELECT 1 FROM observation_projection_dispositions AS disposition
+                                                    WHERE disposition.projector_version = ?4
+                                                      AND disposition.observation_id = presence.observation_id
+                                                )
+                                            )
+                                            OR EXISTS (
+                                                SELECT 1 FROM projection_queue AS queued
+                                                WHERE queued.observation_id = presence.observation_id
+                                                  AND (queued.revival_generation IS NOT NULL
+                                                       OR queued.revival_start_offset IS NOT NULL)
+                                            )
+                                        )
+                                 FROM observation_source_presence AS presence
+                                 WHERE presence.source_key = ?1 AND presence.generation <> ?2
+                                 ORDER BY presence.observation_id
+                                 LIMIT ?3",
+                                params![
+                                    key.as_str(),
+                                    generation.as_str(),
+                                    UNOFFERED_RECORD_PAGE_SIZE,
+                                    SESSION_MESSAGE_PROJECTOR_VERSION,
+                                ],
+                            )
+                            .await
+                            .map_err(|error| storage("read unoffered source records", error))?;
+                        let mut page = Vec::new();
+                        while let Some(row) = rows
+                            .next()
+                            .await
+                            .map_err(|error| storage("read unoffered source records", error))?
+                        {
+                            page.push((
+                                row.get::<String>(0).map_err(|error| {
+                                    storage("read unoffered source records", error)
+                                })?,
+                                row.get::<i64>(1).map_err(|error| {
+                                    storage("read unoffered source records", error)
+                                })? != 0,
+                            ));
+                        }
+                        drop(rows);
+                        if page.is_empty() {
+                            transaction
+                                .execute(
+                                    "DELETE FROM observation_source_rewrites
+                                     WHERE source_key = ?1 AND generation = ?2",
+                                    params![key.as_str(), generation.as_str()],
+                                )
+                                .await
+                                .map_err(|error| storage("settle source rewrite", error))?;
+                            return Ok((0, true));
+                        }
+                        let mut retired = 0_u64;
+                        for (observation_id, needs_retirement) in &page {
+                            if !needs_retirement {
+                                continue;
+                            }
+                            let retired_one: Pin<
+                                Box<dyn Future<Output = ProjectionStoreResult<bool>> + Send + '_>,
+                            > = Box::pin(retire_source_record(&transaction, observation_id));
+                            if retired_one.await? {
+                                retired += 1;
+                            }
+                        }
+                        let last_id = &page[page.len() - 1].0;
+                        transaction
+                            .execute(
+                                "DELETE FROM observation_source_presence
+                                 WHERE source_key = ?1 AND generation <> ?2
+                                   AND observation_id <= ?3",
+                                params![key.as_str(), generation.as_str(), last_id.as_str()],
+                            )
+                            .await
+                            .map_err(|error| storage("settle source rewrite page", error))?;
+                        let finished = (page.len() as i64) < UNOFFERED_RECORD_PAGE_SIZE;
+                        if finished {
+                            transaction
+                                .execute(
+                                    "DELETE FROM observation_source_rewrites
+                                     WHERE source_key = ?1 AND generation = ?2",
+                                    params![key.as_str(), generation.as_str()],
+                                )
+                                .await
+                                .map_err(|error| storage("settle source rewrite", error))?;
+                        }
+                        Ok((retired, finished))
+                    },
+                )
+                .await?;
+            total_retired += retired;
+            if finished {
+                return Ok(total_retired);
+            }
+        }
     }
 }
