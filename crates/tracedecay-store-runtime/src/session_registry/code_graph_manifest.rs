@@ -2842,8 +2842,14 @@ mod tests {
         let proven = super::read_checked_seal_manifest_for_proof(&mut file, &|| Ok(()))
             .unwrap()
             .expect("a short read must not skip the sealed component proof");
-        assert_eq!(proven, expected, "the entire manifest must remain byte-exact");
-        assert!(file.nonempty_reads > 1, "the fixture must use multiple actual file reads");
+        assert_eq!(
+            proven, expected,
+            "the entire manifest must remain byte-exact"
+        );
+        assert!(
+            file.nonempty_reads > 1,
+            "the fixture must use multiple actual file reads"
+        );
         assert_eq!(file.file.stream_position().unwrap(), expected.len() as u64);
     }
 
