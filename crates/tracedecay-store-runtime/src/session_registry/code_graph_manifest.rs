@@ -1643,6 +1643,7 @@ fn classify_sealed_projection_build_error(error: CodeGraphProjectionError) -> Gr
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::path::Path;
     use std::process::Command;
@@ -1686,7 +1687,6 @@ mod tests {
 
     #[test]
     fn checked_seal_reader_refuses_late_interruption_after_nonzero_file_read() {
-        use std::cell::Cell;
 
         let temporary = TempDir::new().expect("seal reader fixture");
         let path = temporary.path().join("generation.json");
@@ -1720,7 +1720,10 @@ mod tests {
                 "interrupted read cannot return verified bytes"
             );
             assert_eq!(
-                reader.reader.stream_position().expect("actual file position"),
+                reader
+                    .reader
+                    .stream_position()
+                    .expect("actual file position"),
                 expected.len() as u64,
                 "the late probe must occur after real nonempty file I/O"
             );
@@ -1733,7 +1736,10 @@ mod tests {
             assert!(matches!(
                 (&reader.failure, &interruption),
                 (Some(GraphDbError::Cancelled), GraphDbError::Cancelled)
-                    | (Some(GraphDbError::DeadlineExceeded), GraphDbError::DeadlineExceeded)
+                    | (
+                        Some(GraphDbError::DeadlineExceeded),
+                        GraphDbError::DeadlineExceeded
+                    )
             ));
         }
 
@@ -1760,7 +1766,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn checked_seal_reader_preserves_late_deadline_after_real_io_failure() {
-        use std::cell::Cell;
 
         let temporary = TempDir::new().expect("failed read fixture");
         let mut direct = std::fs::File::open(temporary.path()).expect("open directory handle");
@@ -1792,7 +1797,10 @@ mod tests {
         let mut output = [0xa5; 8];
         assert!(reader.read(&mut output).is_err());
         assert_eq!(probes.get(), 2, "the failure must be followed by a probe");
-        assert!(matches!(reader.failure, Some(GraphDbError::DeadlineExceeded)));
+        assert!(matches!(
+            reader.failure,
+            Some(GraphDbError::DeadlineExceeded)
+        ));
         assert_eq!(output, [0; 8], "failed reads must expose no stale bytes");
         assert_eq!(reader.bytes_read, 0);
     }
