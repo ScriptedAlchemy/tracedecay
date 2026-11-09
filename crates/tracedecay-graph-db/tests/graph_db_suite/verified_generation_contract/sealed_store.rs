@@ -1389,12 +1389,11 @@ fn reopening_the_store_reclaims_only_receipted_staging() {
     assert_snapshot_reads(&snapshot, &identity, "durable");
 }
 
-/// The sealed census splits the sealed root into what serves and what does
-/// not: the head's artifact, a superseded generation's artifact, and staging
-/// an interrupted seal left behind are each counted where they belong, and a
-/// directory without a readable receipt is reported rather than classed.
+/// The sealed census splits the sealed root into verified head and
+/// superseded artifacts. Unreceipted staging and unrelated directories remain
+/// unrecognized rather than falsely counted as reclaimable garbage.
 #[test]
-fn sealed_census_separates_heads_from_superseded_and_abandoned_bytes() {
+fn sealed_census_separates_heads_and_preserves_unproven_staging() {
     let temp = TempDir::new().unwrap();
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let mut authority = RelationalAuthority::default();
@@ -1450,9 +1449,9 @@ fn sealed_census_separates_heads_from_superseded_and_abandoned_bytes() {
         census.superseded_count, 1,
         "g1 is sealed but no longer the head"
     );
-    assert_eq!(census.abandoned_staging_count, 1);
-    assert_eq!(census.abandoned_staging_bytes, 4096);
-    assert_eq!(census.unrecognized_count, 1);
+    assert_eq!(census.abandoned_staging_count, 0);
+    assert_eq!(census.abandoned_staging_bytes, 0);
+    assert_eq!(census.unrecognized_count, 2);
     assert!(census.head_bytes > 0 && census.superseded_bytes > 0);
 
     // With no heads journaled every sealed artifact reads as superseded, and

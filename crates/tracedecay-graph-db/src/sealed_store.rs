@@ -556,11 +556,12 @@ pub struct SealedStoreCensusV1 {
     /// retirement has not run since the last publication.
     pub superseded_count: u64,
     pub superseded_bytes: u64,
-    /// `.staging-*` directories left by seals that never installed.
+    /// Receipt-verified `.staging-*` directories belonging to earlier producer
+    /// incarnations; current or unproven staging cannot be called abandoned.
     pub abandoned_staging_count: u64,
     pub abandoned_staging_bytes: u64,
-    /// Entries that are neither a readable sealed receipt nor staging: an
-    /// unrecognized layout is reported, never silently classed as dead.
+    /// Unrecognized or unproven entries (including live staging) are reported
+    /// without walking their contents or claiming that they can be reclaimed.
     pub unrecognized_count: u64,
 }
 
@@ -593,9 +594,25 @@ pub fn census_sealed_store(
         let path = entry.path();
         let name = entry.file_name();
         if name.to_str().is_some_and(sealed_staging_name) {
+            // A matching filename is not proof that the directory is
+            // abandoned: remounts can overlap a seal in this process, and
+            // foreign or interrupted pre-receipt entries may occupy its name.
+            // Do not walk unverified trees (which may be arbitrarily large).
+            let verified = tracedecay_private_fs::framed_log::read_bounded(
+                &path.join(SEALED_STAGING_OWNER_FILE),
+                MAX_SEALED_RECEIPT_BYTES,
+            )
+            .ok()
+            .flatten()
+            .and_then(|bytes| verified_staging_receipt(&name, &bytes))
+            .is_some_and(|owner| owner.producer != row_spill_owner().to_string());
+            if !verified {
+                census.unrecognized_count += 1;
+                continue;
+            }
             let bytes = directory_bytes(&path, &mut counted)?;
             census.abandoned_staging_count += 1;
-            census.abandoned_staging_bytes += bytes;
+            census.abandoned_staging_bytes = census.abandoned_staging_bytes.saturating_add(bytes);
             continue;
         }
         // Receipt existence is not sufficient: a copied receipt can name a
@@ -3511,10 +3528,11 @@ mod build_tests {
     use rayon::ThreadPoolBuilder;
 
     use super::{
-        SEALED_STAGING_OWNER_FILE, SEALED_STORE_DATABASE_FILE, SEALED_STORE_RECEIPT_FILE,
-        SealedRowSource, build_or_open_sealed_store, build_sealed_container,
-        sealed_artifact_database_options, sealed_copy_proof, sealed_generation_directory,
-        sealed_store_root, sweep_abandoned_sealed_staging,
+        MAX_SEALED_RECEIPT_BYTES, SEALED_STAGING_OWNER_FILE, SEALED_STORE_DATABASE_FILE,
+        SEALED_STORE_RECEIPT_FILE, SealedRowSource, SealedStagingOwnerV1,
+        build_or_open_sealed_store, build_sealed_container, census_sealed_store,
+        initial_sealed_staging_owner, sealed_artifact_database_options, sealed_copy_proof,
+        sealed_generation_directory, sealed_store_root, sweep_abandoned_sealed_staging,
     };
     use crate::location::PersistentGraphStoreState;
     use crate::{
@@ -3580,6 +3598,76 @@ mod build_tests {
             relation_rows,
         )
         .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sealed_census_only_attributes_verified_abandoned_staging() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("source.grafeo");
+        let root = sealed_store_root(&database);
+        let manifest = manifest(2, 1);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
+        let physical = identity.physical_namespace().unwrap();
+        let name = physical.as_str().strip_prefix("generation:").unwrap();
+        let staging = root.join(format!(".staging-{name}"));
+        std::fs::create_dir_all(&staging).unwrap();
+
+        let exited = SealedStagingOwnerV1 {
+            producer: (crate::generation::row_spill_owner() ^ 1).to_string(),
+            receipt: initial_sealed_staging_owner(&identity, &expected, physical.as_str()),
+        };
+        let bytes = serde_json::to_vec(&exited).unwrap();
+        let owner_path = staging.join(SEALED_STAGING_OWNER_FILE);
+        std::fs::write(&owner_path, &bytes).unwrap();
+        std::fs::write(staging.join("payload"), vec![7; 4096]).unwrap();
+
+        let census = census_sealed_store(&database, &BTreeSet::new()).unwrap();
+        assert_eq!(census.abandoned_staging_count, 1);
+        assert_eq!(census.abandoned_staging_bytes, bytes.len() as u64 + 4096);
+        assert_eq!(census.unrecognized_count, 0);
+
+        // This same completed marker may belong to a seal currently running
+        // in this process. A remount must not report its bytes as garbage.
+        let live = SealedStagingOwnerV1 {
+            producer: crate::generation::row_spill_owner().to_string(),
+            receipt: initial_sealed_staging_owner(&identity, &expected, physical.as_str()),
+        };
+        std::fs::write(&owner_path, serde_json::to_vec(&live).unwrap()).unwrap();
+        let census = census_sealed_store(&database, &BTreeSet::new()).unwrap();
+        assert_eq!(census.abandoned_staging_count, 0);
+        assert_eq!(census.abandoned_staging_bytes, 0);
+        assert_eq!(census.unrecognized_count, 1);
+
+        // A copied authentic receipt in a different physical staging name
+        // does not authorize either reclamation or an unbounded size walk.
+        let foreign_name = if name == "f".repeat(64) {
+            "e".repeat(64)
+        } else {
+            "f".repeat(64)
+        };
+        let foreign = root.join(format!(".staging-{foreign_name}"));
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::write(foreign.join(SEALED_STAGING_OWNER_FILE), &bytes).unwrap();
+        std::fs::File::create(foreign.join("sparse-foreign-payload"))
+            .unwrap()
+            .set_len(5 * 1024 * 1024 * 1024)
+            .unwrap();
+        let census = census_sealed_store(&database, &BTreeSet::new()).unwrap();
+        assert_eq!(census.abandoned_staging_count, 0);
+        assert_eq!(census.abandoned_staging_bytes, 0);
+        assert_eq!(census.unrecognized_count, 2);
+        assert!(foreign.join("sparse-foreign-payload").is_file());
+
+        // Even an owned directory whose marker exceeds the fixed bound must
+        // not cause its contents to be traversed or counted as abandoned.
+        let oversized = vec![b'x'; MAX_SEALED_RECEIPT_BYTES + 1];
+        std::fs::write(&owner_path, &oversized).unwrap();
+        let census = census_sealed_store(&database, &BTreeSet::new()).unwrap();
+        assert_eq!(census.abandoned_staging_count, 0);
+        assert_eq!(census.unrecognized_count, 2);
+        assert_eq!(std::fs::read(&owner_path).unwrap(), oversized);
     }
 
     fn open_source(database_path: &std::path::Path) -> crate::GraphDbLeaseV1 {
