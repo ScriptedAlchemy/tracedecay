@@ -31,6 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-bazel
+        id: bazel
         with:
           cache-key: upstream-compat-bazel10
           tailscale-client-id: >-
@@ -47,6 +48,14 @@ jobs:
             --incompatible_no_implicit_file_export \
             --rewind_lost_inputs \
             //crates/...
+
+      - name: Save newly fetched Bazel dependencies
+        if: always() && !cancelled() && steps.bazel.outputs.repository-cache-key != ''
+        uses: ./.github/actions/setup-bazel/save
+        with:
+          path: ${{ steps.bazel.outputs.repository-cache-path }}
+          key: ${{ steps.bazel.outputs.repository-cache-key }}
+          restored-entries: ${{ steps.bazel.outputs.repository-cache-entries }}
 
       - name: Report final build disk usage
         if: ${{ always() && hashFiles('.github/actions/setup-bazel/report_disk.sh') != '' }}
