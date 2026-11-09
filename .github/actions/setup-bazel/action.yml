@@ -224,6 +224,8 @@ runs:
 
     - name: Stage pinned Bazel inputs from the GitHub release API
       id: release-distfiles
+      env:
+        GH_TOKEN: ${{ github.token }}
       if: runner.environment == 'github-hosted'
       shell: bash
       run: |
