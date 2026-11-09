@@ -305,7 +305,7 @@ impl RegisteredGlobalDb {
                                  WHERE presence.source_key = ?1 AND presence.generation <> ?2
                                    AND presence.observation_id >= ?5
                                  ORDER BY presence.observation_id
-                                 LIMIT ?3",
+                                 LIMIT (?3 + 1)",
                                 params![
                                     key.as_str(),
                                     generation.as_str(),
@@ -332,6 +332,12 @@ impl RegisteredGlobalDb {
                             ));
                         }
                         drop(rows);
+                        // An extra read-only key establishes whether a full page
+                        // was the final page. Never retire or delete the lookahead.
+                        let has_next_page = page.len() > UNOFFERED_RECORD_PAGE_SIZE as usize;
+                        if has_next_page {
+                            page.pop();
+                        }
                         let mut retired = 0_u64;
                         for (observation_id, needs_retirement) in &page {
                             if !needs_retirement {
@@ -363,7 +369,7 @@ impl RegisteredGlobalDb {
                         // Another admitted writer can append an older-generation
                         // key behind this in-memory seek between commits. Recheck
                         // the entire source before dropping the durable marker.
-                        let last_page = (page.len() as i64) < UNOFFERED_RECORD_PAGE_SIZE;
+                        let last_page = !has_next_page;
                         let finished = if last_page {
                             // With no seek this page covered the entire source
                             // under the writer lock, so no second scan is needed.

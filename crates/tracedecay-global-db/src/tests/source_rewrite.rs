@@ -125,6 +125,111 @@ async fn rewrite_completion_retires_unoffered_records_beyond_the_query_cap() {
     assert_eq!(rewrites, 0, "completed rewrite row must be removed");
 }
 
+/// An exact multiple of the bounded page must retire its final records and
+/// clear the pending marker in the same productive writer transaction. A
+/// lookahead row may be read, but must never be retired in the previous page.
+#[asupersync::test]
+async fn rewrite_completion_exact_page_boundaries_need_no_empty_writer() {
+    for (unoffered, fixture) in [
+        (128_i64, "source-rewrite-exact-128"),
+        (256, "source-rewrite-exact-256"),
+        (257, "source-rewrite-after-exact-256"),
+    ] {
+        let harness = RegisteredGlobalDbHarness::open(fixture).await;
+        let source =
+            ObservationSourceIdentityV1::new(SessionId::new("session.exact-pages").unwrap())
+                .unwrap();
+        let scope = ObservationScopeV1::Profile;
+        let previous = ObservationSourceGenerationV1::new(1).unwrap();
+        let generation = ObservationSourceGenerationV1::new(2).unwrap();
+        let key = serde_json::to_string(&(source.clone(), scope.clone())).unwrap();
+        let writer = harness.registered.writer_connection().unwrap();
+
+        writer
+            .execute(
+                "INSERT INTO observation_source_presence
+                 (source_key, observation_id, generation, start_offset)
+                 VALUES (?1, 'sha256:current', ?2, 0)",
+                params![key.as_str(), generation.generation_id().to_string()],
+            )
+            .await
+            .unwrap();
+        for start in (0..unoffered).step_by(128) {
+            let end = (start + 128).min(unoffered);
+            assert_eq!(
+                writer
+                    .execute(
+                        "WITH RECURSIVE generated(i) AS (
+                             SELECT ?2
+                             UNION ALL
+                             SELECT i + 1 FROM generated WHERE i + 1 < ?3
+                         )
+                         INSERT INTO observation_source_presence
+                         (source_key, observation_id, generation, start_offset)
+                         SELECT ?1, printf('sha256:obsolete-%06d', i), ?4, 0
+                         FROM generated",
+                        params![
+                            key.as_str(),
+                            start,
+                            end,
+                            previous.generation_id().to_string(),
+                        ],
+                    )
+                    .await
+                    .unwrap(),
+                u64::try_from(end - start).unwrap()
+            );
+        }
+
+        harness
+            .registered
+            .begin_observation_source_rewrite(&source, &scope, previous, generation, 0)
+            .await
+            .unwrap();
+        let before = writer_telemetry(&harness.registered)
+            .transactions
+            .committed_transactions;
+        assert_eq!(
+            harness
+                .registered
+                .complete_observation_source_rewrite(&source, &scope, generation)
+                .await
+                .unwrap(),
+            0,
+            "presence-only ghosts must not count as projected retirements"
+        );
+        let commits = writer_telemetry(&harness.registered)
+            .transactions
+            .committed_transactions
+            - before;
+        assert_eq!(
+            commits,
+            u64::try_from(unoffered).unwrap().div_ceil(128),
+            "{fixture}: no empty writer transaction after an exact full page"
+        );
+        assert_eq!(
+            table_count(&writer, "SELECT COUNT(*) FROM observation_source_rewrites").await,
+            0,
+            "the durable pending rewrite marker must be cleared"
+        );
+        assert_eq!(
+            table_count(&writer, "SELECT COUNT(*) FROM observation_source_presence").await,
+            1,
+            "every obsolete identity must be retired"
+        );
+        assert_eq!(
+            table_count(
+                &writer,
+                "SELECT COUNT(*) FROM observation_source_presence
+                 WHERE observation_id = 'sha256:current' AND generation = '2'"
+            )
+            .await,
+            1,
+            "the current-generation survivor must remain"
+        );
+    }
+}
+
 async fn table_count(conn: &impl QueryExecutor, sql: &str) -> i64 {
     let mut rows = conn.query(sql, ()).await.unwrap();
     let row = rows.next().await.unwrap().unwrap();
