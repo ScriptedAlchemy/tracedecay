@@ -158,6 +158,29 @@ async fn queue_state(harness: &RegisteredGlobalDbHarness) -> (i64, i64, i64) {
 }
 
 #[asupersync::test]
+async fn rearm_writer_work_scales_with_deferred_rows() {
+    async fn writer_steps(rows: i64) -> u64 {
+        let harness = RegisteredGlobalDbHarness::open("rearm-dense-queue").await;
+        seed_queue(&harness, rows, 0).await;
+        let steps = || writer_telemetry(&harness.registered).sqlite_vm.vm_steps;
+        let before = steps();
+        let rearmed = rearm_queued_projection_retries(harness.registered.runtime_database(), 4)
+            .await
+            .unwrap();
+        assert_eq!(rearmed.rows, u64::try_from(rows).unwrap());
+        steps() - before
+    }
+
+    let base = writer_steps(32).await;
+    let grown = writer_steps(256).await;
+    assert!(base > 0);
+    assert!(
+        grown < base * 12,
+        "an eightfold larger dense queue must not rescan its remainder per window: {base} -> {grown}"
+    );
+}
+
+#[asupersync::test]
 async fn rearm_walks_deferred_retries_in_bounded_batches() {
     let harness = RegisteredGlobalDbHarness::open("rearm-bounded-batches").await;
     seed_queue(&harness, 9, 3).await;

@@ -16,7 +16,7 @@ use tracedecay_lcm::raw::{message_body_from_record_row, stored_message_record_se
 use tracedecay_lcm::retrieval_content::projected_content_hash;
 use tracedecay_lcm::{LcmError, LcmStorageKind};
 use tracedecay_runtime_core::db::Database;
-use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, Row, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 use tracedecay_sessions::runtime::shared::durable_project_path_key;
 #[cfg(windows)]
 use tracedecay_sessions::runtime::shared::path_identity_key;
@@ -284,15 +284,7 @@ pub(crate) async fn rearm_queued_projection_retries(
     }
     let mut rearmed = RearmedProjectionRetries::default();
     let now = tracedecay_contracts::clock::now_micros().0;
-    let Some(last_rowid) = query_optional_i64(
-        &database.read_connection(),
-        // qpsg-exempt: the fixed terminal sentinel anchors index eligibility;
-        // the dynamic due-time bound further narrows eligible retry rows.
-        "SELECT MAX(rowid) FROM projection_queue
-         WHERE next_retry_at_micros > ?1 AND next_retry_at_micros < 9223372036854775807",
-        params![now],
-    )
-    .await?
+    let Some(last_rowid) = last_deferred_retry_rowid(&database.read_connection(), now).await?
     else {
         return Ok(rearmed);
     };
@@ -330,20 +322,29 @@ async fn rearm_projection_retry_batch(
         .begin_write_transaction(OPERATION)
         .await
         .map_err(|error| storage(OPERATION, error))?;
-    let Some(batch_end) = query_optional_i64(
-        &transaction,
-        // qpsg-exempt: the fixed terminal sentinel keeps the eligible-row
-        // partial-index predicate explicit; the due-time bound is additional.
-        "SELECT MAX(rowid) FROM (
-            SELECT rowid FROM projection_queue
-            WHERE rowid > ?1 AND rowid <= ?2
-              AND next_retry_at_micros > ?4
-              AND next_retry_at_micros < 9223372036854775807
-            ORDER BY rowid LIMIT ?3
-         )",
-        params![after_rowid, last_rowid, batch_rows, now_micros],
-    )
-    .await?
+    let mut candidates = transaction
+        .query(
+            // qpsg-exempt: the literal ceiling excludes terminal rows; the independent
+            // clock bound narrows the forward primary-key window to deferred retries.
+            "SELECT MAX(rowid), json_group_array(rowid) FROM (
+                SELECT rowid FROM projection_queue NOT INDEXED
+                WHERE rowid > ?1 AND rowid <= ?2
+                  AND next_retry_at_micros > ?4
+                  AND next_retry_at_micros < 9223372036854775807
+                ORDER BY rowid LIMIT ?3
+             )",
+            params![after_rowid, last_rowid, batch_rows, now_micros],
+        )
+        .await
+        .map_err(|error| storage(OPERATION, error))?;
+    let batch = candidates
+        .next()
+        .await
+        .map_err(|error| storage(OPERATION, error))?
+        .ok_or_else(|| storage_message(OPERATION, "missing retry batch aggregate"))?;
+    let Some(batch_end) = batch
+        .get::<Option<i64>>(0)
+        .map_err(|error| storage(OPERATION, error))?
     else {
         transaction
             .rollback()
@@ -351,15 +352,14 @@ async fn rearm_projection_retry_batch(
             .map_err(|error| storage(OPERATION, error))?;
         return Ok(None);
     };
+    // Membership was determined under this writer lease. Apply the bounded set
+    // by primary key so a dense deadline index is never rescanned per window.
+    let rowids: String = batch.get(1).map_err(|error| storage(OPERATION, error))?;
     let rows = transaction
         .execute(
-            // qpsg-exempt: the literal terminal sentinel remains in WHERE;
-            // the bound deadline excludes already-due rows during restart.
             "UPDATE projection_queue SET next_retry_at_micros = 0
-             WHERE rowid > ?1 AND rowid <= ?2
-               AND next_retry_at_micros > ?3
-               AND next_retry_at_micros < 9223372036854775807",
-            params![after_rowid, batch_end, now_micros],
+             WHERE rowid IN (SELECT value FROM json_each(?1))",
+            params![rowids],
         )
         .await
         .map_err(|error| storage(OPERATION, error))?;
@@ -370,14 +370,20 @@ async fn rearm_projection_retry_batch(
     Ok(Some((batch_end, rows)))
 }
 
-pub(super) async fn query_optional_i64(
+async fn last_deferred_retry_rowid(
     conn: &impl QueryExecutor,
-    sql: &str,
-    params: impl IntoParams,
+    now_micros: i64,
 ) -> ProjectionStoreResult<Option<i64>> {
-    const OPERATION: &str = "read projection retry rearm window";
+    const OPERATION: &str = "read projection retry frontier";
+    // The ceiling excludes terminal collisions. The clock excludes already-due rows.
+    // The deadline index also proves an empty range without walking the whole table.
     let mut rows = conn
-        .query(sql, params)
+        .query(
+            // qpsg-exempt: the deadline index uses both the clock and the literal terminal ceiling.
+            "SELECT MAX(rowid) FROM projection_queue INDEXED BY idx_projection_queue_retry_deadline
+             WHERE next_retry_at_micros > ?1 AND next_retry_at_micros < 9223372036854775807",
+            params![now_micros],
+        )
         .await
         .map_err(|error| storage(OPERATION, error))?;
     let Some(row) = rows
