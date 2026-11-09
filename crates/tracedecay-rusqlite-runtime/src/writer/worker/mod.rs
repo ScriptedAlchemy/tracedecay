@@ -1151,6 +1151,15 @@ fn queue_wait_micros(enqueued_at: impl IntoIterator<Item = Instant>, dequeued_at
     })
 }
 
+fn incremental_vacuum_error(error: rusqlite::Error) -> WriterActorError {
+    match error.sqlite_error_code() {
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
+            WriterActorError::IncrementalVacuumBusy
+        }
+        _ => WriterActorError::IncrementalVacuumFailed(error.to_string()),
+    }
+}
+
 fn run_incremental_vacuum(
     connection: &mut rusqlite::Connection,
     command: IncrementalVacuumCommand,
@@ -1172,9 +1181,7 @@ fn run_incremental_vacuum(
     let transaction = match match_result {
         Ok(transaction) => transaction,
         Err(error) => {
-            command.settle(Err(WriterActorError::IncrementalVacuumFailed(
-                error.to_string(),
-            )));
+            command.settle(Err(incremental_vacuum_error(error)));
             return;
         }
     };
@@ -1191,9 +1198,7 @@ fn run_incremental_vacuum(
             Ok(())
         });
     if let Err(error) = reclaimed {
-        command.settle(Err(WriterActorError::IncrementalVacuumFailed(
-            error.to_string(),
-        )));
+        command.settle(Err(incremental_vacuum_error(error)));
         return;
     }
     if command
@@ -1212,9 +1217,7 @@ fn run_incremental_vacuum(
         }));
         return;
     }
-    let result = transaction
-        .commit()
-        .map_err(|error| WriterActorError::IncrementalVacuumFailed(error.to_string()));
+    let result = transaction.commit().map_err(incremental_vacuum_error);
     command.settle(result);
 }
 
@@ -1327,7 +1330,7 @@ mod auxiliary_scheduling_tests {
     use super::{
         AcceptedRequest, AuxiliaryWork, BatchCoalescingWindow, IncrementalVacuumCommand,
         PendingBatchDwell, WriterActorError, build_batches, checkpoint_config, dwell_for_batch,
-        enqueue, run_incremental_vacuum, select_auxiliary_work,
+        enqueue, reject_incremental_vacuum, run_incremental_vacuum, select_auxiliary_work,
     };
 
     struct BatchProbe {
@@ -2005,6 +2008,50 @@ mod auxiliary_scheduling_tests {
             select_auxiliary_work(false, true, true, false, AuxiliaryWork::ExactSql),
             Some(AuxiliaryWork::IncrementalVacuum)
         );
+    }
+
+    #[test]
+    fn incremental_vacuum_defers_contention_but_reports_unusable_writers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vacuum.db");
+        let mut connection = rusqlite::Connection::open(&path).unwrap();
+        connection.busy_timeout(Duration::ZERO).unwrap();
+        let competing_writer = rusqlite::Connection::open(path).unwrap();
+        competing_writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let command = || {
+            let (reply, response) = oneshot::channel();
+            (
+                IncrementalVacuumCommand::new(
+                    1,
+                    Arc::new(UnrestrictedRuntimeWriteAuthority),
+                    reply,
+                ),
+                response,
+            )
+        };
+
+        let (vacuum, mut result) = command();
+        run_incremental_vacuum(&mut connection, vacuum);
+        assert!(matches!(
+            result.try_recv().unwrap(),
+            Err(WriterActorError::IncrementalVacuumBusy)
+        ));
+        competing_writer.execute_batch("ROLLBACK").unwrap();
+
+        connection.pragma_update(None, "query_only", true).unwrap();
+        let (vacuum, mut result) = command();
+        run_incremental_vacuum(&mut connection, vacuum);
+        assert!(matches!(
+            result.try_recv().unwrap(),
+            Err(WriterActorError::IncrementalVacuumFailed(_))
+        ));
+
+        let (vacuum, mut result) = command();
+        reject_incremental_vacuum(vacuum);
+        assert!(matches!(
+            result.try_recv().unwrap(),
+            Err(WriterActorError::IncrementalVacuumFailed(_))
+        ));
     }
 
     #[test]

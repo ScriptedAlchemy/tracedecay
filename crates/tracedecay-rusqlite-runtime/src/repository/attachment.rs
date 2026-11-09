@@ -839,11 +839,8 @@ impl Drop for RepositoryRuntimePhysicalAttachment {
 // A lost writer, revoked authority or failed reply is fatal to admission.
 fn compaction_dispatch_error(error: WriterActorError) -> RepositoryDispatchError {
     match error {
-        WriterActorError::IncrementalVacuumFailed(message) => {
-            RepositoryDispatchError::CompactionDeferred(message)
-        }
         WriterActorError::IncrementalVacuumBusy => {
-            RepositoryDispatchError::CompactionDeferred("vacuum command channel is busy".to_owned())
+            RepositoryDispatchError::CompactionDeferred(error.to_string())
         }
         other => RepositoryDispatchError::Writer(other.to_string()),
     }
@@ -878,7 +875,10 @@ impl Error for RepositoryDispatchError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Reader(error) => Some(error),
-            Self::Closed | Self::ReaderWorker(_) | Self::Writer(_) | Self::CompactionDeferred(_) => None,
+            Self::Closed
+            | Self::ReaderWorker(_)
+            | Self::Writer(_)
+            | Self::CompactionDeferred(_) => None,
             Self::WriterRuntime(error) => Some(error),
         }
     }
@@ -1002,14 +1002,14 @@ mod tests {
         let blocked = compaction_dispatch_error(WriterActorError::IncrementalVacuumBusy);
         assert!(
             matches!(blocked, RepositoryDispatchError::CompactionDeferred(_)),
-            "only the optional maintenance queue may defer"
+            "an occupied maintenance queue or busy SQLite transaction may defer"
         );
         let sqlite = compaction_dispatch_error(WriterActorError::IncrementalVacuumFailed(
-            "database is busy".to_owned(),
+            "database is read-only".to_owned(),
         ));
         assert!(
-            matches!(sqlite, RepositoryDispatchError::CompactionDeferred(_)),
-            "a failed vacuum transaction can defer without denying a healthy writer"
+            matches!(sqlite, RepositoryDispatchError::Writer(_)),
+            "database and worker failures must deny admission"
         );
     }
 

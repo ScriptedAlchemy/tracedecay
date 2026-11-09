@@ -392,7 +392,9 @@ impl fmt::Display for WriterActorError {
             Self::IncrementalVacuumFailed(message) => {
                 write!(f, "SQLite incremental vacuum failed: {message}")
             }
-            Self::IncrementalVacuumBusy => f.write_str("SQLite vacuum command channel is busy"),
+            Self::IncrementalVacuumBusy => {
+                f.write_str("SQLite vacuum deferred by writer or database contention")
+            }
             Self::InvalidWorkerOutcome(error) => {
                 write!(f, "SQLite writer returned an invalid outcome: {error}")
             }
