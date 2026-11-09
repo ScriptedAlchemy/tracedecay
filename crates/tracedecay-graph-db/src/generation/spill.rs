@@ -130,8 +130,20 @@ impl<'a> AbandonedRowSpill<'a> {
                 let Some((declared_owner, bound_name)) = bound_name.split_once(':') else {
                     return false;
                 };
+                // A pending receipt must bind a real published spill name.
+                // Hashing arbitrary receipt text is not proof that the
+                // directory was ever produced by a graph row-spill writer.
+                let Some((published_owner, counter)) = bound_name
+                    .strip_prefix(ROW_SPILL_PREFIX)
+                    .and_then(|suffix| suffix.split_once('-'))
+                else {
+                    return false;
+                };
                 declared_owner == owner.to_string()
-                    && Path::new(bound_name).file_name() == Some(OsStr::new(bound_name))
+                    && published_owner == declared_owner
+                    && counter
+                        .parse::<u64>()
+                        .is_ok_and(|parsed| parsed.to_string() == counter)
                     && staging_name(*owner, receipt) == *name
             }
         }
@@ -1164,7 +1176,10 @@ impl GraphGenerationManifestIdentity {
 
 #[cfg(test)]
 mod owner_receipt_tests {
-    use super::{ROW_SPILL_OWNER_RECEIPT_FILE, SpillDirectory, row_spill_owner};
+    use super::{
+        RECEIPT_PREFIX, ROW_SPILL_OWNER_RECEIPT_FILE, ROW_SPILL_PREFIX, SpillDirectory,
+        row_spill_owner, staging_name,
+    };
 
     #[cfg(unix)]
     #[test]
@@ -1250,6 +1265,58 @@ mod owner_receipt_tests {
             std::fs::read(mismatched.join(ROW_SPILL_OWNER_RECEIPT_FILE)).unwrap(),
             receipt
         );
+    }
+
+    #[test]
+    fn store_open_preserves_pending_spills_with_noncanonical_published_receipts() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("graph.grafeo");
+        let root = temp.path().join("graph.sealed");
+        std::fs::create_dir(&root).unwrap();
+        let previous_owner = row_spill_owner() ^ 1;
+        let canonical = root.join(format!("{ROW_SPILL_PREFIX}{previous_owner}-7"));
+        let owned = SpillDirectory::prepare(&canonical, previous_owner)
+            .unwrap()
+            .keep();
+
+        let forged_bound_names = [
+            "unrelated".to_owned(),
+            format!("{ROW_SPILL_PREFIX}{previous_owner}-00"),
+            format!("{ROW_SPILL_PREFIX}{previous_owner}-not-a-counter"),
+            format!("{ROW_SPILL_PREFIX}{previous_owner}-18446744073709551616"),
+            format!("{ROW_SPILL_PREFIX}{}-7", previous_owner ^ 2),
+        ];
+        let mut foreign = Vec::new();
+        for (index, bound_name) in forged_bound_names.iter().enumerate() {
+            // Even a digest-consistent staging name is not ownership proof
+            // when its claimed published row-spill name is not canonical.
+            let receipt = format!("{RECEIPT_PREFIX}{previous_owner}:{bound_name}").into_bytes();
+            let directory = root.join(staging_name(previous_owner, &receipt));
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::write(directory.join(ROW_SPILL_OWNER_RECEIPT_FILE), &receipt).unwrap();
+            let sentinel = format!("foreign-{index}").into_bytes();
+            std::fs::write(directory.join("sentinel"), &sentinel).unwrap();
+            foreign.push((directory, receipt, sentinel));
+        }
+        let unrelated = root.join("live-generation");
+        std::fs::create_dir(&unrelated).unwrap();
+        std::fs::write(unrelated.join("sentinel"), b"live").unwrap();
+
+        crate::sealed_store::sweep_abandoned_row_spills(&database);
+
+        assert!(
+            !owned.exists(),
+            "a genuine interrupted pending spill must still be reclaimed"
+        );
+        for (directory, receipt, sentinel) in foreign {
+            assert_eq!(
+                std::fs::read(directory.join(ROW_SPILL_OWNER_RECEIPT_FILE)).unwrap(),
+                receipt,
+                "a forged receipt cannot authorize pending-spill cleanup"
+            );
+            assert_eq!(std::fs::read(directory.join("sentinel")).unwrap(), sentinel);
+        }
+        assert_eq!(std::fs::read(unrelated.join("sentinel")).unwrap(), b"live");
     }
 
     #[test]
