@@ -311,6 +311,8 @@ struct EntryTally {
     bytes: u64,
     unavailable_entry_count: usize,
     kinds: Option<StoreKindBytesV1>,
+    /// An expected project directory was replaced by a regular file.
+    unexpected_project_file: bool,
 }
 
 struct FootprintKeys {
@@ -348,10 +350,28 @@ pub(crate) fn census_profile_footprint_with_budget(
             else {
                 return;
             };
+            // The file itself is measurable, but it cannot be a usable
+            // project-store directory. Keep its bytes in the physical total,
+            // and report the missing store traversal as unavailable rather
+            // than calling the replaced project healthy.
+            let unexpected_project_file = matches!(walked, WalkedEntryV1::File { .. })
+                && keys
+                    .project
+                    .as_ref()
+                    .is_some_and(|(_, relative)| relative.as_os_str().is_empty());
+            if unexpected_project_file {
+                unavailable_entry_count = unavailable_entry_count.saturating_add(1);
+            }
             let primary = tallies.entry(keys.primary).or_default();
             tally(primary, walked);
+            if unexpected_project_file {
+                primary.unavailable_entry_count =
+                    primary.unavailable_entry_count.saturating_add(1);
+                primary.unexpected_project_file = true;
+            }
             if let (Some((_, store_relative)), WalkedEntryV1::File { bytes }) =
                 (&keys.project, walked)
+                && !unexpected_project_file
             {
                 primary
                     .kinds
@@ -375,10 +395,15 @@ pub(crate) fn census_profile_footprint_with_budget(
                 }
             });
             ProfileFootprintEntryV1 {
-                bound_bytes: bound_overrides
-                    .get(&key)
-                    .copied()
-                    .unwrap_or_else(|| default_bound_bytes(family)),
+                bound_bytes: bound_overrides.get(&key).copied().unwrap_or_else(|| {
+                    if tally.unexpected_project_file {
+                        // An unrelated file must not inherit a project's 10 GiB
+                        // allowance. An explicit owner override still wins.
+                        default_bound_bytes(ProfileFamilyV1::Other)
+                    } else {
+                        default_bound_bytes(family)
+                    }
+                }),
                 key,
                 family,
                 bytes: tally.bytes,
@@ -1208,6 +1233,76 @@ mod tests {
         assert_eq!(
             observed[PROFILE_TOTAL_KEY].finding().state(),
             DoctorEvidenceStateV1::Partial
+        );
+    }
+
+    #[test]
+    fn regular_file_replacing_project_directory_is_not_healthy_or_project_budgeted() {
+        let temporary = tempfile::tempdir().expect("footprint fixture");
+        let profile = temporary.path().join("profile");
+        sized(&profile.join("projects/proj_replaced"), 11);
+        sized(&profile.join("projects/proj_healthy/tracedecay.db"), 7);
+        let registered_root = temporary.path().join("registered-checkout");
+        std::fs::create_dir(&registered_root).expect("registered root");
+        let registered = BTreeMap::from([(
+            "proj_replaced".to_owned(),
+            registered_root.display().to_string(),
+        )]);
+
+        let footprint = census_profile_footprint(&profile, &registered, &BTreeMap::new());
+        assert_eq!(footprint.total_bytes, 18, "count all regular-file bytes");
+        assert_eq!(footprint.unavailable_entry_count, 1);
+        assert_eq!(footprint.entries.len(), 2, "name the replaced store");
+        let replaced = entry(&footprint, "projects/proj_replaced");
+        assert_eq!(replaced.family, ProfileFamilyV1::ProjectStore);
+        assert_eq!(replaced.bytes, 11, "do not hide the replacement file");
+        assert_eq!(replaced.unavailable_entry_count, 1);
+        assert_eq!(
+            replaced.bound_bytes,
+            default_bound_bytes(ProfileFamilyV1::Other),
+            "a replacement file must not inherit the 10 GiB project allowance"
+        );
+        assert!(replaced.kinds.is_none(), "not a valid project-store file");
+        assert_eq!(
+            replaced.project.as_ref().expect("registration").state,
+            ProjectRootStateV1::Present
+        );
+        let healthy = entry(&footprint, "projects/proj_healthy");
+        assert_eq!(healthy.bytes, 7);
+        assert_eq!(healthy.unavailable_entry_count, 0);
+        assert_eq!(
+            healthy.bound_bytes,
+            default_bound_bytes(ProfileFamilyV1::ProjectStore)
+        );
+
+        let observed = findings(&footprint);
+        assert_eq!(observed.len(), 3);
+        assert_eq!(
+            observed["projects/proj_replaced"].finding().state(),
+            DoctorEvidenceStateV1::Partial
+        );
+        assert_eq!(
+            observed["projects/proj_healthy"].finding().state(),
+            DoctorEvidenceStateV1::HealthyCompleteCoverage
+        );
+        assert_eq!(
+            observed[PROFILE_TOTAL_KEY].finding().state(),
+            DoctorEvidenceStateV1::Partial
+        );
+
+        sized(
+            &profile.join("projects/proj_replaced"),
+            default_bound_bytes(ProfileFamilyV1::Other) + 1,
+        );
+        let over = census_profile_footprint(&profile, &registered, &BTreeMap::new());
+        assert_eq!(
+            over.total_bytes,
+            default_bound_bytes(ProfileFamilyV1::Other) + 1 + 7
+        );
+        assert_eq!(
+            findings(&over)["projects/proj_replaced"].finding().state(),
+            DoctorEvidenceStateV1::Degraded,
+            "a large replacement file must trigger its tighter named bound"
         );
     }
 
