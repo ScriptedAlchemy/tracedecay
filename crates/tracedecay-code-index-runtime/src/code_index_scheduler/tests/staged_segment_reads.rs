@@ -1712,14 +1712,13 @@ fn cached_publication_pointer_refuses_equal_byte_symlink_and_recovers_snapshot()
     let pointer_path = publisher.active_path.clone();
     let exact_bytes = std::fs::read(&pointer_path).expect("committed pointer bytes");
     assert!(!exact_bytes.is_empty());
-    let expected_generation = generation.manifest().generation_id.clone();
     assert_eq!(
         publisher
             .read_publication_pointer()
             .expect("legitimate cached pointer")
             .expect("active generation")
             .generation_id,
-        expected_generation
+        generation.manifest().generation_id.as_str()
     );
 
     let original = target_root.path().join("original-active-pointer");
