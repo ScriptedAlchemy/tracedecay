@@ -44,15 +44,15 @@ struct TableWatermark {
     observed_at: UtcMicros,
 }
 
-/// The store size at which a per-table `dbstat` walk last ran out of its
-/// deadline.
+/// The live-page count at which a per-table `dbstat` walk timed out.
 ///
-/// The walk reads every page of every table, so its cost tracks the store
-/// size: a multi-gigabyte session store needs minutes. Once a walk has run
-/// out of time, repeating it on a store at least as large only spends the
-/// deadline again. A smaller store, or a day-old mark, is walked again.
+/// Deleting data can reclaim table pages to SQLite's freelist without shrinking
+/// the database file. `dbstat` no longer walks those pages, so the retry
+/// decision uses allocated pages minus freelist pages instead of file size.
+/// A store with fewer live pages, or a day-old mark, gets another measurement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct OverBudgetTableSizeWalk {
+    /// Allocated pages minus freelist pages when the walk timed out.
     page_count: u64,
     observed_at: UtcMicros,
 }
@@ -209,10 +209,13 @@ impl GuardedStoreTelemetryPort {
         let over_budget = self.table_growth_state().over_budget;
         let walk = native_runtime::spawn_blocking(move || {
             let interrupted = || telemetry_interruption(&context);
-            let page_count = handle
+            let sample = handle
                 .store_size_telemetry(reader_wait, interrupted)
-                .map_err(|error| error.table_growth_unavailable_reason())?
-                .page_count;
+                .map_err(|error| error.table_growth_unavailable_reason())?;
+            let page_count = sample
+                .page_count
+                .checked_sub(sample.freelist_pages)
+                .ok_or(TableGrowthUnavailableReasonV1::StorageOther)?;
             if over_budget.is_some_and(|walk| walk.still_applies(page_count, now_micros())) {
                 return Ok(TableSizeWalk::Skipped);
             }
@@ -1325,6 +1328,72 @@ mod table_growth_tests {
                 TableGrowthTelemetryReadV1::Observed { .. }
             ),
             "a day-old over-budget mark is probed again"
+        );
+        assert_eq!(port.table_growth_state().over_budget, None);
+    }
+
+    #[asupersync::test]
+    async fn freed_pages_retry_a_timed_out_census_without_file_compaction() {
+        let temporary = tempfile::tempdir().expect("telemetry fixture root");
+        let (database, store, port) =
+            fixture_port(&temporary.path().join("project.db"), Duration::from_secs(5)).await;
+        let context = storage_telemetry_request_context(port.scope.clone()).expect("context");
+
+        database
+            .execute_write_batch(
+                "grow a disposable table before retention",
+                "WITH RECURSIVE n(i) AS (
+                    SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 8
+                 ) INSERT INTO growth_payload SELECT zeroblob(1048576) FROM n;",
+            )
+            .await
+            .expect("fill the table with real overflow pages");
+        let StorageTelemetryReadV1::Observed { sample: before } =
+            port.store_size(&context, &store).await
+        else {
+            panic!("the grown store must expose its page and freelist counts");
+        };
+        let live_pages_before = before.page_count - before.freelist_pages;
+        assert!(live_pages_before > 1024, "the fixture must have many live pages");
+
+        port.table_growth
+            .lock()
+            .expect("table growth state")
+            .over_budget = Some(OverBudgetTableSizeWalk {
+            page_count: live_pages_before,
+            observed_at: now_micros(),
+        });
+        assert!(matches!(
+            port.table_growth(&context, &store).await,
+            TableGrowthTelemetryReadV1::Unknown {
+                reason: TableGrowthUnavailableReasonV1::ExceedsMeasurementBudget,
+                ..
+            }
+        ));
+
+        database
+            .execute_write_batch(
+                "reclaim the disposable table without vacuum",
+                "DELETE FROM growth_payload;",
+            )
+            .await
+            .expect("reclaim the table's overflow pages");
+        let StorageTelemetryReadV1::Observed { sample: after } =
+            port.store_size(&context, &store).await
+        else {
+            panic!("the reclaimed store must expose its page and freelist counts");
+        };
+        assert_eq!(
+            after.page_count, before.page_count,
+            "the database did not shrink, so allocated-page retry suppression would still apply"
+        );
+        assert!(after.freelist_pages > before.freelist_pages);
+        assert!(after.page_count - after.freelist_pages < live_pages_before);
+
+        let retried = port.table_growth(&context, &store).await;
+        assert!(
+            matches!(retried, TableGrowthTelemetryReadV1::BaselineEstablished { .. }),
+            "the cheaper post-reclamation census must run without a restart: {retried:?}"
         );
         assert_eq!(port.table_growth_state().over_budget, None);
     }
