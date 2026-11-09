@@ -3270,9 +3270,9 @@ mod build_tests {
     use rayon::ThreadPoolBuilder;
 
     use super::{
-        SEALED_STORE_DATABASE_FILE, SealedRowSource, build_or_open_sealed_store,
-        build_sealed_container, sealed_artifact_database_options, sealed_copy_proof,
-        sealed_generation_directory, sealed_store_root,
+        SEALED_STORE_DATABASE_FILE, SEALED_STORE_RECEIPT_FILE, SealedRowSource,
+        build_or_open_sealed_store, build_sealed_container, sealed_artifact_database_options,
+        sealed_copy_proof, sealed_generation_directory, sealed_store_root,
     };
     use crate::location::PersistentGraphStoreState;
     use crate::{
@@ -3723,7 +3723,10 @@ mod build_tests {
             &database_path,
             check,
         );
-        assert!(result.is_err(), "an occupied staging entry must refuse sealing");
+        assert!(
+            result.is_err(),
+            "an occupied staging entry must refuse sealing"
+        );
         assert_eq!(std::fs::read(&sentinel).unwrap(), b"must survive");
         assert!(
             !staging.join(SEALED_STORE_DATABASE_FILE).exists()

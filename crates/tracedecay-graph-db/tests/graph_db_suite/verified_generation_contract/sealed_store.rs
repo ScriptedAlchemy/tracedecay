@@ -1330,7 +1330,10 @@ fn reopening_the_store_reclaims_only_receipted_staging() {
         )
         .unwrap();
 
-    assert!(!verified.exists(), "a verified abandoned seal must be reclaimed");
+    assert!(
+        !verified.exists(),
+        "a verified abandoned seal must be reclaimed"
+    );
     assert_eq!(
         std::fs::read(unowned.join("generation.grafeo")).unwrap(),
         b"foreign bytes",
