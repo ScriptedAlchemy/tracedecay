@@ -4036,7 +4036,14 @@ impl CodeIndexWorktreeSchedulerV1 {
                     return Ok(CapturedFileOutcomeV1::Absent);
                 }
                 let root = self.project_root.join(prefix);
-                if root.canonicalize().ok().as_ref() != Some(&root)
+                // The scheduler stores a plain canonical path. Windows
+                // canonicalize() returns a verbatim \\?\\ disk path, so compare
+                // through the same existing-root identity without relaxing
+                // the no-symlink/no-escape boundary.
+                if tracedecay_runtime_core::path_safety::canonical_existing_identity(&root)
+                    .ok()
+                    .as_ref()
+                    != Some(&root)
                     || !absolute
                         .symlink_metadata()
                         .is_ok_and(|metadata| metadata.is_file())
