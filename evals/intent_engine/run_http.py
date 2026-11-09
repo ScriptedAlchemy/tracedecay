@@ -522,6 +522,8 @@ def main(argv=None):
     ap.add_argument("--questions-file", help="declared typed Noul questions; qualified runs only, requires separate runtime provenance")
     ap.add_argument("--captured-requests", help="frozen verbatim Scout HTTP requests, captured qualification arm only")
     ap.add_argument("--send-model")
+    ap.add_argument("--timeout-ms", type=int, default=1_800_000,
+                    help="per-request HTTP timeout in milliseconds (1..1800000); frozen for qualified runs")
     ap.add_argument("--bearer-token-env", metavar="NAME",
                     help="name of an environment variable holding a bearer token (never recorded)")
     ap.add_argument("--sample-out", help="write the first raw response here")
@@ -533,6 +535,8 @@ def main(argv=None):
     if (args.noul_temperature is not None
             and (not math.isfinite(args.noul_temperature) or args.noul_temperature <= 0)):
         raise ValueError("--noul-temperature must be finite and greater than zero")
+    if not 0 < args.timeout_ms <= 1_800_000:
+        raise ValueError("--timeout-ms must be in (0, 1800000]")
     require_http_endpoint(args.url)
     server_config = load_server_config(args.server_config)
     bearer_token = (load_bearer_token(args.bearer_token_env, args.url)
@@ -563,6 +567,7 @@ def main(argv=None):
         arm = qualified["arm"]
         if (args.configs != [arm["config"]]
                 or args.send_model != arm["requested_model"]
+                or args.timeout_ms != arm["timeout_ms"]
                 or hashlib.sha256(args.url.encode("utf-8")).hexdigest() != arm["endpoint_sha256"]
                 or digest(server_config) != arm["server_config_sha256"]):
             raise ValueError("qualification HTTP arm differs from frozen manifest")
@@ -646,6 +651,7 @@ def main(argv=None):
         }
         if qualification_sha is not None:
             identity["qualification_manifest_sha256"] = qualification_sha
+            identity["timeout_ms"] = args.timeout_ms
         header = {"experiment": identity, "experiment_sha256": digest(identity)}
         partial_path = path + ".partial"
         try:
@@ -680,10 +686,15 @@ def main(argv=None):
                 if case["id"] in done:
                     continue
                 body, request_sha = requests[case["id"]]
+                # Match the precommitted model-serving deadline; a post-hoc
+                # p95 threshold cannot substitute for a real request timeout.
+                timeout_arg = ({"timeout": args.timeout_ms / 1000}
+                               if qualification_sha is not None or args.timeout_ms != 1_800_000
+                               else {})
                 if bearer_token is None:
-                    response, ms = post(args.url, body)
+                    response, ms = post(args.url, body, **timeout_arg)
                 else:
-                    response, ms = post(args.url, body, bearer_token=bearer_token)
+                    response, ms = post(args.url, body, bearer_token=bearer_token, **timeout_arg)
                 probs = noul_probabilities(response, questions)
                 observed_model = response.get("model")
                 if (args.send_model is not None and observed_model is not None

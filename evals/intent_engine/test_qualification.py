@@ -61,6 +61,7 @@ class QualificationTests(unittest.TestCase):
                 "config": "B_noul_text", "requested_model": None,
                 "endpoint_sha256": qualification.sha256_bytes(self.endpoint.encode("utf-8")),
                 "server_config_sha256": qualification.sha256_json(self.server_config),
+                "timeout_ms": 1_800_000,
             },
             "noul_temperature": None,
             "max_request_bytes": 65536,
@@ -516,6 +517,7 @@ class QualificationTests(unittest.TestCase):
             "config": "B_noul_text",
             "requested_model": None,
             "endpoint_sha256": self.manifest["arm"]["endpoint_sha256"],
+            "timeout_ms": self.manifest["arm"]["timeout_ms"],
             "case_ids": [row["id"] for row in rows],
             "dataset_sha256": self.dataset_sha,
             "case_annotations_sha256": score.evidence_digest([
@@ -962,7 +964,7 @@ class QualificationTests(unittest.TestCase):
             (here / "server.json").write_text(json.dumps(self.server_config))
             calls = []
 
-            def answer(url, body):
+            def answer(url, body, **kwargs):
                 calls.append(body)
                 return {"model": "self-reported-test-model", "answers": {
                     key: {"type": "noul", "noul": 0.5}
@@ -1187,6 +1189,45 @@ class QualificationTests(unittest.TestCase):
 
 
 
+    def test_qualified_timeout_is_enforced_and_scored_against_frozen_arm(self):
+        manifest = copy.deepcopy(self.manifest)
+        manifest["arm"]["timeout_ms"] = 250
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            (here / "dataset.json").write_bytes(self.dataset_bytes)
+            (here / "manifest.json").write_text(json.dumps(manifest))
+            (here / "server.json").write_text(json.dumps(self.server_config))
+            args = [
+                "--url", self.endpoint, "--tag", "deadline",
+                "--server-config", str(here / "server.json"),
+                "--qualification-manifest", str(here / "manifest.json"),
+                "--timeout-ms", "250", "B_noul_text",
+            ]
+            response = {
+                "model": "self-reported-test-model",
+                "answers": {key: {"noul": 0.9} for key in self.questions},
+                "usage": {"input_tokens": 32, "state_tokens_dropped": 0},
+            }
+            with patch.object(run_http, "HERE", str(here)):
+                with patch.object(run_http, "post", return_value=(response, 5.0)) as post:
+                    run_http.main(args)
+                self.assertEqual(post.call_count, 2)
+                self.assertTrue(all(call.kwargs == {"timeout": 0.25}
+                                    for call in post.call_args_list))
+                result = json.loads(
+                    (here / "results" / "deadline_B_noul_text.json").read_text()
+                )
+                self.assertEqual(result["experiment"]["timeout_ms"], 250)
+                # Rehashing result metadata cannot change the frozen deadline.
+                result["experiment"]["timeout_ms"] = 1_800_000
+                result["experiment_sha256"] = score.evidence_digest(result["experiment"])
+                with self.assertRaisesRegex(ValueError, "HTTP arm differs"):
+                    qualification.qualified_report(
+                        result, manifest,
+                        qualification.sha256_bytes((here / "manifest.json").read_bytes()),
+                        self.questions, self.dataset_bytes,
+                    )
+
     def test_frozen_http_arm_is_required_and_well_formed(self):
         mutations = (
             (lambda m: m.pop("arm"), "frozen HTTP arm"),
@@ -1195,6 +1236,10 @@ class QualificationTests(unittest.TestCase):
             (lambda m: m["arm"].update(requested_model=""), "requested model"),
             (lambda m: m["arm"].update(endpoint_sha256="x" * 64), "endpoint_sha256"),
             (lambda m: m["arm"].update(server_config_sha256=None), "server_config_sha256"),
+            (lambda m: m["arm"].pop("timeout_ms"), "frozen HTTP arm"),
+            (lambda m: m["arm"].update(timeout_ms=0), "timeout_ms"),
+            (lambda m: m["arm"].update(timeout_ms=1_800_001), "timeout_ms"),
+            (lambda m: m["arm"].update(timeout_ms=True), "timeout_ms"),
         )
         for mutate, error in mutations:
             with self.subTest(error=error):
@@ -1220,6 +1265,7 @@ class QualificationTests(unittest.TestCase):
                 ("multiple-renderers", lambda a: a.append("A_noul_prompt")),
                 ("model", lambda a: a.__setitem__(slice(-1, -1), ["--send-model", "unfrozen-model"])),
                 ("endpoint", lambda a: a.__setitem__(1, "http://127.0.0.1:8010/v1/systemone")),
+                ("timeout", lambda a: a.__setitem__(slice(-1, -1), ["--timeout-ms", "250"])),
             )
             with patch.object(run_http, "HERE", str(here)):
                 for label, mutation in trials:
@@ -1483,7 +1529,7 @@ class QualificationTests(unittest.TestCase):
             (here / "questions.json").write_text(json.dumps(questions))
             (here / "server.json").write_text(json.dumps(self.server_config))
 
-            def inference(_url, body):
+            def inference(_url, body, **kwargs):
                 self.assertEqual(set(body["questions"]), set(questions))
                 probability = 0.9 if "What changes?" in body["state"] else 0.1
                 return ({
@@ -1597,7 +1643,7 @@ class QualificationTests(unittest.TestCase):
             (here / "server.json").write_text(json.dumps(self.server_config))
             transmitted = []
 
-            def inference(_url, body):
+            def inference(_url, body, **kwargs):
                 self.assertIsInstance(body, bytes, "must not reserialize the Rust request")
                 transmitted.append(body)
                 request = qualification.loads_unambiguous_json(body)

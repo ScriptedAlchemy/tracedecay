@@ -145,11 +145,14 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
     # A held-out split is not independent if the evaluator can try multiple
     # renderers, model selectors or serving declarations and pick the winner.
     arm = manifest.get("arm")
-    required_arm = {"config", "requested_model", "endpoint_sha256", "server_config_sha256"}
+    required_arm = {"config", "requested_model", "endpoint_sha256", "server_config_sha256", "timeout_ms"}
     if not isinstance(arm, dict) or set(arm) != required_arm:
         raise ValueError("qualification requires one frozen HTTP arm")
     if not isinstance(arm["config"], str) or not arm["config"].strip():
         raise ValueError("qualification HTTP arm requires a renderer config")
+    timeout_ms = arm["timeout_ms"]
+    if type(timeout_ms) is not int or not 0 < timeout_ms <= 1_800_000:
+        raise ValueError("qualification HTTP arm requires timeout_ms in (0, 1800000]")
     model = arm["requested_model"]
     if model is not None and (not isinstance(model, str) or not model.strip()):
         raise ValueError("qualification HTTP arm requires a valid requested model or null")
@@ -357,6 +360,7 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes, c
     arm = validated["arm"]
     if (experiment.get("config") != arm["config"]
             or experiment.get("requested_model") != arm["requested_model"]
+            or experiment.get("timeout_ms") != arm["timeout_ms"]
             or experiment.get("endpoint_sha256") != arm["endpoint_sha256"]
             or sha256_json(server) != arm["server_config_sha256"]):
         raise ValueError("qualification HTTP arm differs from frozen manifest")

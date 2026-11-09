@@ -11,6 +11,13 @@ python evals/intent_engine/run_http.py \
   B_noul_text
 ```
 
+The `--timeout-ms` CLI flag must match frozen `arm.timeout_ms` for qualified
+experiments. The frozen value (1 to 1,800,000 milliseconds) is enforced on
+each network request, not just checked as a p95 scoring tolerance afterward.
+This is a transport deadline, not proof of the production Scout pass's
+end-to-end cancellation or resource costs. Historical unqualified runs
+retain their original 30-minute default.
+
 The endpoint must use HTTP or HTTPS with a hostname. File URLs, data URLs,
 other non-HTTP schemes, malformed ports and URL-embedded credentials are
 refused before any evaluation output is opened. Otherwise urllib can read
@@ -157,7 +164,8 @@ Generate a new frozen manifest for a changed renderer; a renderer config name
 alone is not a code or output identity. This remains declared benchmark
 evidence, **not** production Scout transcript rehydration or runtime parity.
 Include an `arm` object predeclaring exactly one `config` renderer, a nullable
-`requested_model`, `endpoint_sha256` (SHA-256 of the exact URL bytes), and
+`requested_model`, `timeout_ms` (the enforced per-request timeout),
+`endpoint_sha256` (SHA-256 of the exact URL bytes), and
 `server_config_sha256` (the sorted-JSON digest of the complete serving
 configuration, via `qualification.sha256_json(server_config)`). The runner
 refuses additional renderers or changed serving/model/endpoint declarations
