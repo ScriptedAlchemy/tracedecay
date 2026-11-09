@@ -79,8 +79,11 @@ fn run_command_with_timeout(mut command: Command, timeout: Duration) -> ChildRes
     }
 }
 
-fn run_tool_after_admission(mut command: Command, requests: mpsc::Receiver<Instant>) -> Output {
-    let started = Instant::now();
+fn run_tool_after_admission(
+    mut command: Command,
+    requests: mpsc::Receiver<Instant>,
+    deadline: Instant,
+) -> Output {
     let child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -88,9 +91,8 @@ fn run_tool_after_admission(mut command: Command, requests: mpsc::Receiver<Insta
         .spawn()
         .expect("spawn CLI for scripted daemon");
     let mut child = common::TestChildProcess::new(child);
-    let startup_deadline = started + CHILD_TIMEOUT;
     let admitted = loop {
-        let remaining = startup_deadline.saturating_duration_since(Instant::now());
+        let remaining = deadline.saturating_duration_since(Instant::now());
         match requests.recv_timeout(remaining.min(Duration::from_millis(50))) {
             Ok(admitted) => break admitted,
             Err(RecvTimeoutError::Timeout) => {
@@ -101,24 +103,23 @@ fn run_tool_after_admission(mut command: Command, requests: mpsc::Receiver<Insta
                         .is_none(),
                     "CLI exited before the daemon received its request"
                 );
-                assert!(
-                    Instant::now() < startup_deadline,
-                    "CLI request admission timed out"
-                );
+                assert!(Instant::now() < deadline, "CLI request admission timed out");
             }
             Err(RecvTimeoutError::Disconnected) => {
                 panic!("scripted daemon stopped before receiving the CLI request")
             }
         }
     };
-    assert!(
-        admitted <= startup_deadline,
-        "CLI request admission timed out"
-    );
-    // The daemon timestamps the authenticated request. Scheduling this test
-    // thread later must not extend the response deadline.
+    assert!(admitted <= deadline, "CLI request admission timed out");
+    // Admission diagnoses which phase stalled; it does not grant a second
+    // watchdog. Startup, response delivery and process exit share the same
+    // absolute deadline, including delayed observation of a queued receipt.
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .expect("CLI response deadline expired after admission");
     let output = child
-        .wait_with_output(CHILD_TIMEOUT.saturating_sub(admitted.elapsed()))
+        .wait_with_output(remaining)
         .expect("CLI must finish delivering the admitted response within its deadline");
     assert!(
         output.status.success(),
@@ -126,6 +127,20 @@ fn run_tool_after_admission(mut command: Command, requests: mpsc::Receiver<Insta
         String::from_utf8_lossy(&output.stderr)
     );
     output
+}
+
+#[test]
+#[should_panic(expected = "CLI response deadline expired after admission")]
+fn admission_receipt_cannot_restart_an_expired_child_watchdog() {
+    // Use a real subprocess without recursively running this test. A receipt
+    // admitted at the deadline can be observed later from the channel, but
+    // must not grant that child a fresh response-delivery timeout.
+    let mut command = Command::new(std::env::current_exe().expect("test executable"));
+    command.arg("--list");
+    let (admitted_tx, admitted_rx) = mpsc::channel();
+    let deadline = Instant::now();
+    admitted_tx.send(deadline).expect("queue admitted request");
+    run_tool_after_admission(command, admitted_rx, deadline);
 }
 
 fn init_project(home: &Path, project: &Path) {
@@ -512,8 +527,11 @@ fn generic_tool_retrieves_oversized_typed_result() {
                 .expect("write oversized result");
         },
     );
-    let output =
-        run_tool_after_admission(tool_command(&home, &project, &socket, "large"), requests);
+    let output = run_tool_after_admission(
+        tool_command(&home, &project, &socket, "large"),
+        requests,
+        Instant::now() + CHILD_TIMEOUT,
+    );
     server.join().expect("join scripted daemon");
     let preview = output_payload(&output);
     assert_eq!(preview["truncated"], true, "{preview}");
@@ -603,8 +621,11 @@ fn generic_tool_json_preserves_large_result_while_daemon_waits() {
             hold_stream_after_files(stream, request, scope, files.clone());
         },
     );
-    let output =
-        run_tool_after_admission(tool_command(&home, &project, &socket, "large"), requests);
+    let output = run_tool_after_admission(
+        tool_command(&home, &project, &socket, "large"),
+        requests,
+        Instant::now() + CHILD_TIMEOUT,
+    );
     server.join().expect("join scripted daemon");
     let envelope: Value =
         serde_json::from_slice(&output.stdout).expect("--json must contain one complete document");
