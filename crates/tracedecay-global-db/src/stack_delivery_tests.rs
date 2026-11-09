@@ -452,15 +452,21 @@ async fn retention_frontier_bounds_writer_work_and_resumes_past_deferred_backlog
         )
         .await
         .expect("seed a saturated recipient backlog");
+    // The writer client must not hold the first registered attachment open
+    // across the restart below.
+    drop(writer);
     let late = signal("signal.github-stack-eligible-tail", 10_000);
+    // The old recipient is saturated. Give the eligible tail an independently
+    // admitted recipient so it can actually settle before retirement.
+    let tail_recipient = "actor.terminal-tail";
     harness
         .registered
-        .append_github_stack_signal(late.clone(), vec![RECIPIENT.to_owned()])
+        .append_github_stack_signal(late.clone(), vec![tail_recipient.to_owned()])
         .await
         .expect("append terminal tail beyond the backlog");
     harness
         .registered
-        .acknowledge_github_stack_host_delivery(PROJECT_ID, &late.signal_id, RECIPIENT)
+        .acknowledge_github_stack_host_delivery(PROJECT_ID, &late.signal_id, tail_recipient)
         .await
         .expect("settle eligible tail");
 
