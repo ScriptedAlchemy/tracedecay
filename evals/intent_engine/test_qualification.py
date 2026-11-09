@@ -2281,12 +2281,102 @@ class QualificationTests(unittest.TestCase):
         manifest = copy.deepcopy(self.manifest)
         manifest["arm"]["config"] = qualification.CAPTURED_SCOUT_CONFIG
         manifest["max_state_bytes"] = 4096
+        # The HTTP wire does not contain the local Scout selection margins.
+        manifest["margin_permille"] = {key: None for key in self.questions}
         manifest["captured_requests_sha256"] = qualification.sha256_bytes(capture_bytes)
         manifest["holdout_requests_sha256"] = score.evidence_digest([
             [record["id"], hashlib.sha256(record["body"].encode("utf-8")).hexdigest()]
             for record in records
         ])
         return capture_bytes, manifest
+
+    def test_captured_scout_margins_are_frozen_before_network(self):
+        capture, manifest = self.captured_scout_fixture()
+        self.valid(manifest)
+        variants = [
+            ("missing", lambda m: m.pop("margin_permille")),
+            ("incomplete", lambda m: m["margin_permille"].pop("impact")),
+            ("negative", lambda m: m["margin_permille"].update(impact=-1)),
+            ("over-limit", lambda m: m["margin_permille"].update(impact=1001)),
+            ("fraction", lambda m: m["margin_permille"].update(impact=0.2)),
+            ("boolean", lambda m: m["margin_permille"].update(impact=True)),
+        ]
+        for name, mutate in variants:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:
+                changed = copy.deepcopy(manifest)
+                mutate(changed)
+                here = Path(temp)
+                (here / "manifest.json").write_text(json.dumps(changed))
+                (here / "dataset.json").write_bytes(self.dataset_bytes)
+                (here / "captured.json").write_bytes(capture)
+                (here / "server.json").write_text(json.dumps(self.server_config))
+                with patch.object(run_http, "HERE", str(here)), patch.object(
+                    run_http, "post"
+                ) as post:
+                    with self.assertRaisesRegex(ValueError, "margin_permille"):
+                        run_http.main([
+                            "--url", self.endpoint, "--tag", "margin-refusal",
+                            "--server-config", str(here / "server.json"),
+                            "--qualification-manifest", str(here / "manifest.json"),
+                            "--captured-requests", str(here / "captured.json"),
+                            qualification.CAPTURED_SCOUT_CONFIG,
+                        ])
+                    post.assert_not_called()
+                self.assertFalse((here / "results").exists())
+
+        # Historical benchmark arms must not silently reinterpret a policy
+        # margin declaration as a property of their synthetic renderer.
+        historical = copy.deepcopy(self.manifest)
+        historical["margin_permille"] = {key: None for key in self.questions}
+        with self.assertRaisesRegex(ValueError, "only captured Scout"):
+            self.valid(historical)
+
+    def test_model_only_scout_margin_uses_unqualified_runner_up(self):
+        thresholds = {"impact": 0.6, "call_graph": 0.95}
+        questions = ("impact", "call_graph")
+        rows = [{"labels": ["impact"], "probs": {
+            "impact": 0.90, "call_graph": 0.89,
+        }}]
+        # The competing 890-permille answer is BELOW its own 950 threshold.
+        # Rust still uses it as the runner-up for impact's 20-permille margin.
+        baseline = qualification.holdout_decision_metrics(
+            rows, thresholds, questions
+        )
+        self.assertEqual(baseline["model_only_selected_positive_case_recall"], 1)
+        gated = qualification.holdout_decision_metrics(
+            rows, thresholds, questions,
+            {"impact": 20, "call_graph": None},
+        )
+        self.assertEqual(gated["model_only_selected_positive_case_recall"], 0)
+        self.assertEqual(gated["missed_positive_cases"], 1)
+        self.assertEqual(gated["abstained_cases"], 1)
+        # A true lead of at least 10 permille is accepted.
+        admitted = qualification.holdout_decision_metrics(
+            rows, thresholds, questions,
+            {"impact": 10, "call_graph": None},
+        )
+        self.assertEqual(admitted["model_only_selected_positive_case_recall"], 1)
+        with self.assertRaisesRegex(ValueError, "margins must cover"):
+            qualification.holdout_decision_metrics(
+                rows, thresholds, questions, {"impact": 20}
+            )
+
+    def test_margin_rejects_wrong_selected_hint_at_rounded_boundary(self):
+        rows = [{"labels": ["impact"], "probs": {
+            "impact": 0.9004, "call_graph": 0.9000,
+        }}]
+        thresholds = {"impact": 0.6, "call_graph": 0.6}
+        questions = ("impact", "call_graph")
+        baseline = qualification.holdout_decision_metrics(rows, thresholds, questions)
+        self.assertEqual(baseline["model_only_selected_positive_case_recall"], 1)
+        # Both probabilities round to 900-permille. A nonzero margin
+        # suppresses the correct intent; the competing no-margin intent wins.
+        gated = qualification.holdout_decision_metrics(
+            rows, thresholds, questions,
+            {"impact": 1, "call_graph": None},
+        )
+        self.assertEqual(gated["model_only_selected_positive_case_recall"], 0)
+        self.assertEqual(gated["model_only_selected_unwanted_hint_cases"], 1)
 
     def test_captured_scout_accepts_canonical_wire_order_not_settings_vector_order(self):
         capture, manifest = self.captured_scout_fixture()

@@ -200,6 +200,19 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
     elif state_limit is not None:
         raise ValueError("only captured Scout arms may declare max_state_bytes")
 
+    # Margins belong to the local intent policy, not the Noul HTTP body.
+    # Without freezing them a captured arm can pass on hints that Scout
+    # would suppress when a close competing answer is present.
+    margins = manifest.get("margin_permille")
+    if arm["config"] == CAPTURED_SCOUT_CONFIG:
+        if not isinstance(margins, dict) or set(margins) != set(questions):
+            raise ValueError("captured Scout arm requires a complete frozen margin_permille map")
+        for key, margin in margins.items():
+            if margin is not None and (type(margin) is not int or not 0 <= margin <= 1_000):
+                raise ValueError(f"captured Scout margin_permille for {key} must be null or 0..1000")
+    elif margins is not None:
+        raise ValueError("only captured Scout arms may declare margin_permille")
+
     request_limit = manifest.get("max_request_bytes")
     if (isinstance(request_limit, bool) or not isinstance(request_limit, int)
             or request_limit <= 0):
@@ -323,6 +336,7 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
         "max_state_bytes": state_limit,
         "max_input_tokens": token_limit,
         "thresholds": thresholds,
+        "margin_permille": margins,
         "noul_temperature": client_temperature,
         "error_tolerances": tolerances,
         "annotations": {a["id"]: a for a in annotations},
@@ -335,27 +349,48 @@ def runtime_probability_score(probability, scale):
     return math.floor(probability * scale + 0.5)
 
 
-def holdout_decision_metrics(rows, thresholds, question_order):
+def holdout_decision_metrics(rows, thresholds, question_order, margin_permille=None):
     """Measure all threshold hits separately from the single model-only pick.
 
     Scout delivers only the first candidate, not every above-threshold answer.
     Emulate its permille threshold and u16 relevance rounding, not the historical
     floating-point benchmark comparison. Stable relevance ties must use the
     frozen question sequence, never the independently serialized threshold map
-    order. Action facts, margins and delivery suppression are still omitted;
-    this cannot establish production parity.
+    order. Captured arms also apply frozen per-question margins against every
+    usable model answer, even when that competitor is below its own threshold.
+    Action facts and delivery suppression are still omitted; this cannot
+    establish production parity.
     """
     if len(question_order) != len(thresholds) or set(question_order) != set(thresholds):
         raise ValueError("model-only selection requires the complete frozen question order")
+    if margin_permille is not None and (
+        not isinstance(margin_permille, dict)
+        or set(margin_permille) != set(question_order)
+        or any(value is not None and (type(value) is not int or not 0 <= value <= 1_000)
+               for value in margin_permille.values())
+    ):
+        raise ValueError("model-only margins must cover frozen questions in permille")
     hinted = unwanted = missed_positive = positive = 0
     selected_correct_positive = selected_unwanted = none_negative = none_false_hint = 0
     for row in rows:
         labels = set(row["labels"])
-        fired = {
-            key for key in thresholds
-            if runtime_probability_score(row["probs"][key], 1_000)
-            >= runtime_probability_score(thresholds[key], 1_000)
+        scores = {
+            key: runtime_probability_score(row["probs"][key], 1_000)
+            for key in question_order
         }
+        fired = set()
+        for key in question_order:
+            if scores[key] < runtime_probability_score(thresholds[key], 1_000):
+                continue
+            margin = margin_permille[key] if margin_permille is not None else None
+            if margin is not None:
+                # Rust's runner-up is any other answered question, not only
+                # a competitor that passed its own threshold. Saturate at zero.
+                runner_up = max((value for other, value in scores.items()
+                                 if other != key), default=0)
+                if max(0, scores[key] - runner_up) < margin:
+                    continue
+            fired.add(key)
         none_negative += not labels
         none_false_hint += bool(not labels and fired)
         hinted += bool(fired)
@@ -557,7 +592,10 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes, c
     scores = score_config(result, fixed_t=validated["thresholds"], cats=tuple(questions))
     fixed = scores["fixed"]["all"]
     latency = scores["latency"]
-    decisions = holdout_decision_metrics(rows, validated["thresholds"], tuple(questions))
+    decisions = holdout_decision_metrics(
+        rows, validated["thresholds"], tuple(questions),
+        validated["margin_permille"],
+    )
     tolerances = validated["error_tolerances"]
     # A JSON byte ceiling does not bound tokenizer-specific context usage.
     # An unknown or zero server-reported count is not proof of fitting inside

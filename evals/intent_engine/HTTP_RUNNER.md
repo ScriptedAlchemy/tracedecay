@@ -269,9 +269,13 @@ historical benchmark's floating-point threshold comparison as production.
 Thus a probability of 0.5996 meets Scout's 600-permille threshold, even though
 it is below the historical floating-point threshold of 0.6. The historical
 fixed-threshold metrics remain diagnostic, not acceptance evidence. This is
-only a necessary Noul selection check: the model-only comparison does **not**
-replay Scout's deterministic action facts, per-question margins, duplicate
-suppression or delivery state and cannot establish runtime parity.
+only a necessary Noul selection check: captured Scout arms additionally use
+frozen `margin_permille` values and compare against **all** other answered
+Noul questions, including those below their own threshold, matching Rust's
+saturating integer-permille margin calculation. Historical arms have no margin
+policy. The model-only comparison still does **not** replay Scout's deterministic
+action facts, duplicate suppression or delivery state and cannot establish
+runtime parity.
 These tolerances must be frozen before examining the held-out results.
 
 The `annotations` array must cover every case in the original dataset, in
@@ -403,8 +407,15 @@ been recomputed. Only the inner request must be canonical; the outer evidence
 file preserves its original hashed bytes. This wire-shape check does **not**
 attest that the bytes actually originated from Scout.
 
-The manifest must set `arm.config` to `S_scout_captured` and freeze a
-positive integer `max_state_bytes` from the actual production
+The manifest must set `arm.config` to `S_scout_captured` and freeze
+`margin_permille` as a complete key-to-value map in configured question order:
+each value is either `null` (no margin) or an integer from 0 through 1000
+matching the effective production `IntentQuestionSettingsV1.margin_permille`.
+The HTTP request body does **not** contain these local policy settings; they
+must be obtained from the same settings authority and independently verified,
+not inferred from the model predictions. Missing, incomplete, malformed or
+historical-arm margin declarations fail before HTTP inference. The arm also
+freezes a positive integer `max_state_bytes` from the actual production
 `DecisionEngineConfigV1` / effective Scout settings. This limits the UTF-8
 bytes in the decoded `state` field separately from the whole HTTP JSON byte
 ceiling. The Rust client keeps only the newest state tail (on a character
