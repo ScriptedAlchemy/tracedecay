@@ -87,10 +87,11 @@ after a completed first row, and a sample with no completed first row all refuse
 without further inference or modifying the interrupted log. If the process
 crashes between first-sample publication and its row append, start a new tag;
 the original incomplete evidence is not silently reconstructed. A concurrent
-sample publication is refused instead of being silently adopted. These
-sample admission uses an opened regular inode, refuses symlink/FIFO substitution,
-and rechecks the pathname after reading to reject a concurrent replacement. These
-cross-checks prevent accidental stale or corrupted sample attribution, but
+sample publication is refused instead of being silently adopted. Qualified
+sample admission opens a nonblocking, no-follow regular-file inode and checks
+that the pathname still identifies it after reading. Symlink, FIFO and concurrent
+pathname substitution refuse qualification. These cross-checks prevent accidental
+stale or corrupted sample attribution, but
 operator-authored digests are **not remote response attestation**. Historical
 nonqualified sample behavior is unchanged. Old unbound samples are not
 silently migrated: use a new sample path.
