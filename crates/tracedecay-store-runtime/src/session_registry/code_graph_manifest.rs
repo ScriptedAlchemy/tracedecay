@@ -1687,7 +1687,6 @@ mod tests {
 
     #[test]
     fn checked_seal_reader_refuses_late_interruption_after_nonzero_file_read() {
-
         let temporary = TempDir::new().expect("seal reader fixture");
         let path = temporary.path().join("generation.json");
         let expected = b"{\"format_revision\":1,\"pages\":[1]}";
@@ -1766,7 +1765,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn checked_seal_reader_preserves_late_deadline_after_real_io_failure() {
-
         let temporary = TempDir::new().expect("failed read fixture");
         let mut direct = std::fs::File::open(temporary.path()).expect("open directory handle");
         assert!(
