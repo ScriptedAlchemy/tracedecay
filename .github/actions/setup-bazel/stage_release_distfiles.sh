@@ -7,9 +7,16 @@ distdir=${1:?expected a runner-private distdir}
 
 stage_asset() {
   local repo=$1 id=$2 name=$3
-  if ! curl --fail --silent --show-error --location --remove-on-error \
+  # Hosted runners share unauthenticated API quotas. Read the job token only
+  # for the fixed GitHub API origin. Curl drops Authorization on a redirect
+  # to the release storage host, and the header stays off the command line.
+  local api_header=''
+  if [[ -n ${GH_TOKEN:-} ]]; then
+    api_header="Authorization: Bearer $GH_TOKEN"
+  fi
+  if ! curl --proto '=https' --proto-redir '=https' --header @- --fail --silent --show-error --location --remove-on-error \
       --connect-timeout 5 --max-time 30 --header 'Accept: application/octet-stream' \
-      --output "$distdir/$name" "https://api.github.com/repos/$repo/releases/assets/$id"; then
+      --output "$distdir/$name" "https://api.github.com/repos/$repo/releases/assets/$id" <<< "$api_header"; then
     printf '::notice::Release API unavailable for %s; Bazel will use its configured source.\n' "$name"
   fi
 }
