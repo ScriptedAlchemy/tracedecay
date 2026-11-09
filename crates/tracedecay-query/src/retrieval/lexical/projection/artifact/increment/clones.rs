@@ -139,12 +139,7 @@ fn shift_clone_posting_keys(
     transaction: &Transaction<'_>,
     clones: &ShiftV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    shift_rowid_keys(
-        transaction,
-        "clone_exact_postings",
-        "occurrence_ordinal",
-        clones,
-    )
+    shift_rowid_keys(transaction, "clone_exact_postings", "occurrence_ordinal", clones)
 }
 
 /// Where a run's first successor occurrence lands: its parent start moved
@@ -341,6 +336,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             connection
+                .pragma_query_value(None, "temp_store", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1,
+            "the probe must use file-backed TEMP storage"
+        );
+        assert_eq!(
+            connection
                 .pragma_query_value(Some("temp"), "auto_vacuum", |row| row.get::<_, i64>(0))
                 .unwrap(),
             0,
@@ -427,5 +429,26 @@ mod tests {
             }
             integrity(&connection, "main");
         }
+
+        // Positive control: the removed CREATE TEMP / DROP pattern really
+        // allocates retained pages on this SQLite build. Without this check,
+        // a zero-page assertion could pass on a build that never spills.
+        connection
+            .execute_batch(
+                "CREATE TEMP TABLE old_style_clone_copy AS
+                     SELECT class, normalization_revision, digest, occurrence_ordinal
+                     FROM clone_exact_postings;
+                 DROP TABLE temp.old_style_clone_copy;",
+            )
+            .unwrap();
+        let retained_pages: i64 = connection
+            .pragma_query_value(Some("temp"), "page_count", |row| row.get(0))
+            .unwrap();
+        assert!(
+            retained_pages > 32,
+            "the old large TEMP copy must retain physical pager pages: {retained_pages}"
+        );
+        integrity(&connection, "main");
+        integrity(&connection, "temp");
     }
 }
