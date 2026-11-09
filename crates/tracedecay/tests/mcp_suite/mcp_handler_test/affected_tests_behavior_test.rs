@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tracedecay::mcp::McpServer;
-use tracedecay_application::operation_stream::OperationEventAuthority;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::{Deadline, OperationBudgetUsage, OperationReceipt};
 use tracedecay_domain::UtcMicros;
