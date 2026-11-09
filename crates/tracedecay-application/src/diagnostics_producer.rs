@@ -97,9 +97,12 @@ enum ProjectResult {
 impl ProjectResult {
     fn compiler_revision(&self) -> Option<[u8; 32]> {
         match self {
-            Self::Checked { compiler_revision, .. } | Self::Failed { compiler_revision, .. } => {
-                *compiler_revision
+            Self::Checked {
+                compiler_revision, ..
             }
+            | Self::Failed {
+                compiler_revision, ..
+            } => *compiler_revision,
         }
     }
 }
