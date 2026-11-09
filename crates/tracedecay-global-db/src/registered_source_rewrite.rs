@@ -180,15 +180,13 @@ impl RegisteredGlobalDb {
                 transaction
                     .execute(
                         "UPDATE projection_queue SET revival_generation = ?2
-                         WHERE EXISTS (
-                             SELECT 1 FROM observation_source_presence AS presence
-                             WHERE presence.source_key = ?1
-                               AND presence.observation_id = projection_queue.observation_id
-                               AND presence.start_offset < ?3
-                               AND presence.generation IN (?4, ?5)
-                               AND presence.generation = projection_queue.revival_generation
-                               AND presence.start_offset = projection_queue.revival_start_offset
-                         )",
+                         FROM observation_source_presence AS presence
+                         WHERE presence.source_key = ?1
+                           AND presence.observation_id = projection_queue.observation_id
+                           AND presence.start_offset < ?3
+                           AND presence.generation IN (?4, ?5)
+                           AND presence.generation = projection_queue.revival_generation
+                           AND presence.start_offset = projection_queue.revival_start_offset",
                         params![
                             key.as_str(),
                             generation.as_str(),

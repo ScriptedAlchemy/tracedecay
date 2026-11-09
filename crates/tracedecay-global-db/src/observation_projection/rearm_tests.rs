@@ -939,3 +939,87 @@ async fn daemon_admission_defers_rearm_to_background_convergence() {
         "background convergence re-arms the fresh mount's queue"
     );
 }
+
+// A rewrite for one source must not visit the entire projection queue while
+// holding the SQLite writer. The real queue grows with all imported sources,
+// but only records offered by this source may have their revival fence moved.
+#[asupersync::test]
+async fn source_rewrite_begin_writer_work_is_independent_of_unrelated_queue_rows() {
+    async fn writer_steps(queue_rows: i64, label: &'static str) -> u64 {
+        let harness = RegisteredGlobalDbHarness::open(label).await;
+        seed_queue(&harness, queue_rows, 0).await;
+        let (observation, _) = queued_observation(0);
+        let source = observation.source().clone();
+        let scope = observation.scope().clone();
+        let previous = observation.identity().generation();
+        let successor = ObservationSourceGenerationV1::new(2).unwrap();
+
+        harness
+            .registered
+            .record_observation_source_presence(
+                &source,
+                &scope,
+                &[crate::ObservationSourcePresenceV1 {
+                    observation_id: observation.observation_id().clone(),
+                    generation: previous,
+                    start_offset: 0,
+                }],
+            )
+            .await
+            .unwrap();
+        let transaction = harness.registered.begin_write_transaction().await.unwrap();
+        assert_eq!(
+            transaction
+                .execute(
+                    "UPDATE projection_queue SET revival_generation = ?1,
+                     revival_start_offset = 0 WHERE observation_id = ?2",
+                    params![
+                        previous.generation_id().to_string(),
+                        observation.observation_id().as_str()
+                    ],
+                )
+                .await
+                .unwrap(),
+            1
+        );
+        transaction.commit().await.unwrap();
+
+        let before = writer_telemetry(&harness.registered).sqlite_vm.vm_steps;
+        harness
+            .registered
+            .begin_observation_source_rewrite(&source, &scope, previous, successor, 1)
+            .await
+            .unwrap();
+        let after = writer_telemetry(&harness.registered).sqlite_vm.vm_steps;
+
+        let snapshot = harness.registered.read_snapshot().await.unwrap();
+        let mut rows = snapshot
+            .query(
+                "SELECT observation_id, revival_generation, revival_start_offset
+                 FROM projection_queue WHERE revival_generation IS NOT NULL",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<String>(0).unwrap(), observation.observation_id().as_str());
+        assert_eq!(
+            row.get::<String>(1).unwrap(),
+            successor.generation_id().to_string()
+        );
+        assert_eq!(row.get::<i64>(2).unwrap(), 0);
+        assert!(
+            rows.next().await.unwrap().is_none(),
+            "unrelated queue rows must retain their original null revival state"
+        );
+        after - before
+    }
+
+    let small = writer_steps(32, "source-rewrite-sparse-32").await;
+    let large = writer_steps(256, "source-rewrite-sparse-256").await;
+    assert!(small > 0);
+    assert!(
+        large < small * 2,
+        "an eightfold larger unrelated queue must not amplify writer work: {small} -> {large}"
+    );
+}
