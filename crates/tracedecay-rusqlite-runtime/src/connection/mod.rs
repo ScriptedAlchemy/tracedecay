@@ -941,6 +941,28 @@ fn apply_pragmas(
         .pragma_update(None, "trusted_schema", false)
         .map_err(|source| policy("trusted schema", source))?;
 
+    // A dropped TEMP b-tree normally retains its pages in SQLite's unlinked
+    // TEMP file until this connection closes. FULL auto-vacuum truncates that
+    // file at commit without resetting unrelated live TEMP tables. Apply this
+    // before any TEMP schema is created; changing temp_store later destroys
+    // the TEMP schema and is not a safe way to reclaim it.
+    if mode != ConnectionMode::Reader {
+        connection
+            .execute_batch("PRAGMA temp.auto_vacuum = FULL")
+            .map_err(|source| policy("TEMP auto-vacuum", source))?;
+        let temp_auto_vacuum: i64 = connection
+            .query_row("PRAGMA temp.auto_vacuum", [], |row| row.get(0))
+            .map_err(|source| policy("TEMP auto-vacuum verification", source))?;
+        if temp_auto_vacuum != 1 {
+            return Err(policy(
+                "TEMP auto-vacuum verification",
+                rusqlite::Error::InvalidParameterName(format!(
+                    "temp.auto_vacuum={temp_auto_vacuum}, expected 1"
+                )),
+            ));
+        }
+    }
+
     if mode == ConnectionMode::Writer {
         if fresh_writer {
             connection
