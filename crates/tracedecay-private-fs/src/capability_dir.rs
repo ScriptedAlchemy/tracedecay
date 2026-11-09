@@ -12,7 +12,70 @@ use std::io;
 use cap_fs_ext::DirExt;
 #[cfg(not(windows))]
 use cap_fs_ext::OpenOptionsMaybeDirExt;
-use cap_std::fs::{Dir, File, OpenOptions};
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+pub use cap_std::fs::Dir;
+use cap_std::fs::{File, OpenOptions};
+
+/// Pins the parent of a cross-directory publication. On Windows the no-delete
+/// sharing mode also keeps its resolved Win32 pathname usable for rename.
+pub fn pin_parent(path: &std::path::Path) -> io::Result<Dir> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        };
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        if !file.metadata()?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                "publication parent is not a directory",
+            ));
+        }
+        Ok(Dir::from_std_file(file))
+    }
+    #[cfg(not(windows))]
+    {
+        Dir::open_ambient_dir(path, cap_std::ambient_authority())
+    }
+}
+
+pub fn open_regular_nofollow(directory: &Dir, name: &OsStr) -> io::Result<std::fs::File> {
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = directory.open_with(name, &options)?.into_std();
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "expected a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+pub fn create_private_file(directory: &Dir, name: &OsStr) -> io::Result<std::fs::File> {
+    #[cfg(windows)]
+    {
+        crate::create_private_file(&dir_entry_path(directory, name)?)
+    }
+    #[cfg(not(windows))]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create_new(true).mode(0o600);
+        Ok(directory.open_with(name, &options)?.into_std())
+    }
+}
 
 /// How many times a create-or-open that reports the entry missing is asked
 /// again before the answer is believed. xnu bounds its own retry of the same

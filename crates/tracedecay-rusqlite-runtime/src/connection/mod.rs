@@ -186,6 +186,21 @@ impl OpenedDatabaseFile {
         }
     }
 
+    pub(crate) fn take_completed_files(&self) -> Option<(File, [File; 3])> {
+        let sidecars = self
+            .created_sidecars
+            .as_ref()?
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()?;
+        let main = self
+            .file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()?;
+        Some((main, sidecars))
+    }
+
     pub(crate) const fn identity(&self) -> u64 {
         self.identity
     }

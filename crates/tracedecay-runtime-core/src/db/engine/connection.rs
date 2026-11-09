@@ -186,6 +186,13 @@ impl Connection {
         Ok(Rows::from_exact(rows))
     }
 
+    pub(crate) async fn finish_initial_schema(&self) -> Result<()> {
+        self.runtime
+            .finish_initial_schema()
+            .await
+            .map_err(Into::into)
+    }
+
     pub async fn checkpoint_wal_truncate(&self) -> Result<Rows> {
         let runtime = Arc::clone(&self.runtime);
         let rows = runtime.checkpoint_wal_truncate_async().await?;

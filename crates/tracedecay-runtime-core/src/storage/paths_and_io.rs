@@ -795,6 +795,18 @@ pub(crate) fn try_lock_existing_durable_directory(path: &Path) -> io::Result<Opt
     }
 }
 
+/// Read-only admission never opens the coordination file for writing.
+pub(crate) fn durable_directory_lock_has_data(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(private_directory_lock_path(path)?) {
+        Ok(meta) if meta.is_file() => Ok(meta.len() != 0),
+        Ok(_) => Err(invalid_input(
+            "durable directory lock is not a regular file",
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Non-blocking sidecar lock acquisition. Returns the held lock file on
 /// success, or `None` when another process/thread already holds it (the caller
 /// then skips its critical section). See the sidecar-lock module note above for

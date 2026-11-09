@@ -224,23 +224,44 @@ async fn initialize_staged_runtime(
     authority
         .require_active_write_scope(OPERATION)
         .map_err(|error| physical_failure(OPERATION, error))?;
+    if request.open_cancellation.is_cancelled() {
+        return Err(StoreRuntimeRegistryFailure::OpenCancelled {
+            key: Box::new(StoreRuntimeKey::from_binding(&request.binding)),
+        });
+    }
     let destination = request.locator.path().to_owned();
     let stage = crate::native_runtime::spawn_blocking(move || {
-        InitializationDirectory::begin(destination).map(Arc::new)
+        let mut stage = InitializationDirectory::begin(destination)?;
+        let resumed = stage.resume_prepared()?;
+        Ok::<_, std::io::Error>((stage, resumed))
     })
     .await
     .map_err(|error| physical_failure(OPERATION, error))?
     .map_err(|error| physical_failure(OPERATION, error))?;
+    let (stage, resumed) = stage;
+    if let Some(identity) = resumed {
+        return Ok(identity);
+    }
+    let stage = Arc::new(stage);
     let path = stage.database();
     let attachment = attach_runtime(executor, request, Some(stage.clone()), None).await?;
     let identity = attachment.0.opened_file_identity();
-    let schema =
-        install_final_schema_before_publication(request, attachment.as_physical(), &path).await;
-    attachment
-        .close(schema.is_ok())
-        .await
-        .map_err(|error| physical_failure(OPERATION, error))?;
-    schema?;
+    if let Err(error) =
+        install_final_schema_before_publication(request, attachment.as_physical(), &path).await
+    {
+        attachment
+            .close()
+            .await
+            .map_err(|error| physical_failure(OPERATION, error))?;
+        return Err(error);
+    }
+    let files = crate::native_runtime::spawn_blocking(move || {
+        let LifecyclePhysicalAttachment(physical, _stage) = attachment;
+        physical.close_completed_initialization()
+    })
+    .await
+    .and_then(|result| result)
+    .map_err(|error| physical_failure(OPERATION, error))?;
     authority
         .require_active_write_scope(OPERATION)
         .map_err(|error| physical_failure(OPERATION, error))?;
@@ -252,7 +273,7 @@ async fn initialize_staged_runtime(
     crate::native_runtime::spawn_blocking(move || {
         Arc::try_unwrap(stage)
             .map_err(|_| std::io::Error::other("SQLite schema workers still hold staging"))?
-            .publish()
+            .publish(identity, files)
     })
     .await
     .map_err(|error| physical_failure(OPERATION, error))?
@@ -274,7 +295,7 @@ async fn publish_lifecycle_runtime(
         )
         .await
     {
-        let _ = attachment.close(false).await;
+        let _ = attachment.close().await;
         return Err(error);
     }
     if request.mode == StoreRuntimeOpenMode::Existing
@@ -283,7 +304,7 @@ async fn publish_lifecycle_runtime(
             verify_final_schema_before_existing_publication(&request, attachment.as_physical())
                 .await
     {
-        let _ = attachment.close(false).await;
+        let _ = attachment.close().await;
         return Err(error);
     }
     if request.mode == StoreRuntimeOpenMode::Existing
@@ -294,7 +315,7 @@ async fn publish_lifecycle_runtime(
     {
         // This failed attachment must finish closing before the registry can
         // retry at a new epoch.
-        attachment.close(false).await.map_err(|message| {
+        attachment.close().await.map_err(|message| {
             StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                 operation: "close runtime after writer authority refusal",
                 message,
@@ -303,7 +324,7 @@ async fn publish_lifecycle_runtime(
         return Err(error);
     }
     if let Err(error) = runtime.transition(RuntimeMaintenanceStateV1::Ready) {
-        let _ = attachment.close(false).await;
+        let _ = attachment.close().await;
         return Err(runtime_lifecycle_failure(error));
     }
     Ok(PublishedShardRuntime::new(runtime, attachment.into_box()))
@@ -461,14 +482,11 @@ impl LifecyclePhysicalAttachment {
 
     /// Closes an attachment that will not be published. Joining its writer
     /// and readers parks the calling thread.
-    async fn close(self, completed_schema: bool) -> Result<(), String> {
+    async fn close(self) -> Result<(), String> {
         crate::native_runtime::spawn_blocking(move || {
             let stage = self.1;
             if stage.is_some() {
-                if !completed_schema {
-                    return self.0.abort_initialization();
-                }
-                self.0.commit_initialization()?;
+                return self.0.abort_initialization();
             }
             self.0.drain()?;
             self.0.close_and_join()
@@ -604,7 +622,7 @@ async fn install_final_schema_before_publication(
         | StoreShardScopeV1::ProfileSessions
         | StoreShardScopeV1::ProjectSessions { .. } => {
             crate::ports::registered_schema::install_from_authorized_connection(
-                connection,
+                connection.clone(),
                 request.open_cancellation.clone(),
             )
             .await
@@ -630,6 +648,12 @@ async fn install_final_schema_before_publication(
                     message: error.to_string(),
                 })?;
         }
+    }
+    if request.locator.is_prospective() {
+        connection
+            .finish_initial_schema()
+            .await
+            .map_err(|error| physical_failure("finish prospective SQLite schema", error))?;
     }
     Ok(())
 }

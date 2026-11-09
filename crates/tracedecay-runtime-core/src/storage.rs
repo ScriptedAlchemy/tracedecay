@@ -465,7 +465,10 @@ pub use paths_and_io::{
     retry_transient_file_op, set_private_dir_permissions, try_acquire_sidecar_lock,
     validate_project_id,
 };
-pub(crate) use paths_and_io::{try_lock_durable_directory, try_lock_existing_durable_directory};
+pub(crate) use paths_and_io::{
+    durable_directory_lock_has_data, try_lock_durable_directory,
+    try_lock_existing_durable_directory,
+};
 pub use profile_identity::{
     PROFILE_IDENTITY_RECORD_NAME, PROFILE_IDENTITY_SCHEMA_VERSION, ProfileIdentityRecordV1,
     read_existing_profile_identity_record,

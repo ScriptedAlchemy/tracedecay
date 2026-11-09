@@ -506,6 +506,29 @@ impl RepositoryRuntimePhysicalAttachment {
         Ok(())
     }
 
+    /// Hands the exclusive original reservations to the publisher after all
+    /// SQLite workers have exited. No raw descriptor is closed during a live
+    /// POSIX SQLite transaction.
+    pub fn close_completed_initialization(
+        &self,
+    ) -> Result<(std::fs::File, [std::fs::File; 3]), String> {
+        self.commit_initialization()?;
+        self.drain()?;
+        let files = {
+            let state = self.lock_state();
+            if state.file_lost {
+                return Err("initial schema lost its database generation".to_owned());
+            }
+            state
+                .retained_file_pin
+                .as_ref()
+                .and_then(OpenedDatabaseFile::take_completed_files)
+                .ok_or_else(|| "initial schema has no original sidecar reservations".to_owned())?
+        };
+        self.close_and_join()?;
+        Ok(files)
+    }
+
     pub fn abort_initialization(&self) -> Result<(), String> {
         self.drain()?;
         self.close_and_join()?;

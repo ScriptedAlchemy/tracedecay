@@ -615,6 +615,25 @@ impl ExactSqlHandle {
             .map_err(|_| ExactSqlError::WriterUnavailable)
     }
 
+    /// Marks the completed prospective store and requires a fully checkpointed
+    /// main while its original authorized SQLite writer still owns the family.
+    pub async fn finish_initial_schema(&self) -> Result<(), ExactSqlError> {
+        let authority = self
+            .write_authority
+            .clone()
+            .ok_or(ExactSqlError::AuthorityMismatch)?;
+        let (reply, response) = async_channel::bounded(1);
+        self.writer
+            .as_ref()
+            .ok_or(ExactSqlError::WriterUnavailable)?
+            .try_send(WriterCommand::FinishInitialSchema { reply, authority })
+            .map_err(map_writer_send_error)?;
+        response
+            .recv()
+            .await
+            .map_err(|_| ExactSqlError::WriterUnavailable)?
+    }
+
     /// Checkpoints and truncates the WAL on the serialized writer connection.
     fn enqueue_checkpoint_wal_truncate(
         &self,
