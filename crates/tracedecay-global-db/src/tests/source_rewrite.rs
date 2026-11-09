@@ -64,7 +64,9 @@ async fn rewrite_completion_retires_unoffered_records_beyond_the_query_cap() {
     // all presence rows, without issuing per-ghost UPDATE/receipt queries
     // while holding the SQLite writer's fixed transaction lease.
     let before = writer_telemetry(&harness.registered).sqlite_vm.statements;
-    let before_commits = writer_telemetry(&harness.registered).transactions.committed_transactions;
+    let before_commits = writer_telemetry(&harness.registered)
+        .transactions
+        .committed_transactions;
     let retired = harness
         .registered
         .complete_observation_source_rewrite(&source, &scope, generation)
@@ -217,7 +219,9 @@ async fn rewrite_completion_resumes_committed_pages_after_failure_and_restart() 
         .await
         .unwrap();
 
-    let before_commits = writer_telemetry(registered).transactions.committed_transactions;
+    let before_commits = writer_telemetry(registered)
+        .transactions
+        .committed_transactions;
     let error = registered
         .complete_observation_source_rewrite(&source, &scope, generation)
         .await
@@ -238,8 +242,14 @@ async fn rewrite_completion_resumes_committed_pages_after_failure_and_restart() 
         already_retired >= 128 && already_retired < (RECORDS - 1) as i64,
         "failure must preserve completed pages, but not the colliding page"
     );
-    let commits = writer_telemetry(registered).transactions.committed_transactions - before_commits;
-    assert!(commits >= 1, "at least one bounded retirement page must commit");
+    let commits = writer_telemetry(registered)
+        .transactions
+        .committed_transactions
+        - before_commits;
+    assert!(
+        commits >= 1,
+        "at least one bounded retirement page must commit"
+    );
     assert_eq!(
         table_count(
             &writer,
