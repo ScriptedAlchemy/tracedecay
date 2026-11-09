@@ -731,7 +731,26 @@ impl Worker {
                                     tracing::trace_span!("rusqlite.writer.incremental_vacuum")
                                         .entered();
                                 {
-                                    run_incremental_vacuum(checkpoint.connection_mut(), command);
+                                    if run_incremental_vacuum(checkpoint.connection_mut(), command) {
+                                        // A failed SQLite rollback must not leak its
+                                        // transaction into the next accepted write.
+                                        self.state.store(
+                                            WriterState::Faulted as u8,
+                                            Ordering::Release,
+                                        );
+                                        reject_all(
+                                            &mut queue,
+                                            &self.telemetry,
+                                            UnavailableReasonV1::Faulted,
+                                        );
+                                        reject_all_exact_sql(&mut exact_sql_queue);
+                                        reject_all_incremental_vacuum(
+                                            &mut incremental_vacuum_queue,
+                                        );
+                                        checkpoint_queue.clear();
+                                        // Closing the connection releases any live transaction.
+                                        return;
+                                    }
                                 }
                             };
                         } else {
@@ -1167,7 +1186,7 @@ fn incremental_vacuum_error(error: rusqlite::Error) -> WriterActorError {
 fn run_incremental_vacuum(
     connection: &mut rusqlite::Connection,
     command: IncrementalVacuumCommand,
-) {
+) -> bool {
     if command
         .authority
         .verify(RuntimeWriteAuthorityStage::Dequeued)
@@ -1176,7 +1195,7 @@ fn run_incremental_vacuum(
         command.settle(Err(WriterActorError::AuthorityDenied {
             stage: RuntimeWriteAuthorityStage::Dequeued,
         }));
-        return;
+        return !connection.is_autocommit();
     }
     let match_result = {
         let _span = tracing::trace_span!("rusqlite.begin_immediate").entered();
@@ -1186,7 +1205,7 @@ fn run_incremental_vacuum(
         Ok(transaction) => transaction,
         Err(error) => {
             command.settle(Err(incremental_vacuum_error(error)));
-            return;
+            return !connection.is_autocommit();
         }
     };
     // Each result row releases one page. pragma_update only steps once, so
@@ -1202,8 +1221,10 @@ fn run_incremental_vacuum(
             Ok(())
         });
     if let Err(error) = reclaimed {
+        drop(transaction);
+        let unclosed_transaction = !connection.is_autocommit();
         command.settle(Err(incremental_vacuum_error(error)));
-        return;
+        return unclosed_transaction;
     }
     if command
         .authority
@@ -1225,10 +1246,12 @@ fn run_incremental_vacuum(
             }
         };
         command.settle(Err(failure));
-        return;
+        return !connection.is_autocommit();
     }
     let result = transaction.commit().map_err(incremental_vacuum_error);
+    let unclosed_transaction = !connection.is_autocommit();
     command.settle(result);
+    unclosed_transaction
 }
 
 fn build_batches(
@@ -2042,7 +2065,10 @@ mod auxiliary_scheduling_tests {
         };
 
         let (vacuum, mut result) = command();
-        run_incremental_vacuum(&mut connection, vacuum);
+        assert!(
+            !run_incremental_vacuum(&mut connection, vacuum),
+            "a settled SQLite busy/read-only attempt must not strand a transaction"
+        );
         assert!(matches!(
             result.try_recv().unwrap(),
             Err(WriterActorError::IncrementalVacuumBusy)
@@ -2051,7 +2077,10 @@ mod auxiliary_scheduling_tests {
 
         connection.pragma_update(None, "query_only", true).unwrap();
         let (vacuum, mut result) = command();
-        run_incremental_vacuum(&mut connection, vacuum);
+        assert!(
+            !run_incremental_vacuum(&mut connection, vacuum),
+            "a settled SQLite busy/read-only attempt must not strand a transaction"
+        );
         assert!(matches!(
             result.try_recv().unwrap(),
             Err(WriterActorError::IncrementalVacuumFailed(_))
@@ -2188,9 +2217,12 @@ mod auxiliary_scheduling_tests {
         });
         let (reply, mut response) = oneshot::channel();
 
-        run_incremental_vacuum(
-            &mut connection,
-            IncrementalVacuumCommand::new(8, authority, reply),
+        assert!(
+            !run_incremental_vacuum(
+                &mut connection,
+                IncrementalVacuumCommand::new(8, authority, reply),
+            ),
+            "a successful rollback must leave the writer usable"
         );
 
         assert!(matches!(
@@ -2231,9 +2263,13 @@ mod auxiliary_scheduling_tests {
             deny_before_commit: true,
         });
         let (reply, mut response) = oneshot::channel();
-        run_incremental_vacuum(
+        let must_retire_writer = run_incremental_vacuum(
             &mut connection,
             IncrementalVacuumCommand::new(8, authority, reply),
+        );
+        assert!(
+            must_retire_writer,
+            "a failed rollback with an open transaction must retire the writer"
         );
 
         assert!(rollback_denied.load(Ordering::SeqCst));
