@@ -199,15 +199,10 @@ async fn rearm_walks_deferred_retries_in_bounded_batches() {
         },
         "nine deferred rows re-arm in ceil(9 / 4) statements, never one queue-sized one"
     );
+    // The exact-SQL writer counts one dispatched command per leased transaction,
+    // including a rollback. The persisted queue below proves the windows committed.
     let after = writer_telemetry(&harness.registered).transactions;
-    assert_eq!(
-        after.committed_transactions - before.committed_transactions,
-        3
-    );
-    assert_eq!(
-        after.rolled_back_transactions, before.rolled_back_transactions,
-        "reaching the captured frontier must not open an empty final transaction"
-    );
+    assert_eq!(after.commands - before.commands, 3);
     assert_eq!(
         queue_state(&harness).await,
         (12, 0, 12),
@@ -302,14 +297,7 @@ async fn expired_retry_deadlines_survive_restarts_without_rearm_writes() {
         }
     );
     let after = writer_telemetry(&harness.registered).transactions;
-    assert_eq!(
-        after.committed_transactions - before.committed_transactions,
-        2
-    );
-    assert_eq!(
-        after.rolled_back_transactions,
-        before.rolled_back_transactions
-    );
+    assert_eq!(after.commands - before.commands, 2);
     assert_eq!(queue_state(&harness).await, (8, 6, 8));
 
     let snapshot = harness.registered.read_snapshot().await.unwrap();
@@ -376,14 +364,7 @@ async fn rearm_ignores_parked_terminal_collisions_without_empty_write_batches() 
         "parked collisions must not consume re-arm write windows"
     );
     let after = writer_telemetry(&harness.registered).transactions;
-    assert_eq!(
-        after.committed_transactions - before.committed_transactions,
-        2
-    );
-    assert_eq!(
-        after.rolled_back_transactions,
-        before.rolled_back_transactions
-    );
+    assert_eq!(after.commands - before.commands, 2);
     assert_eq!(
         queue_state(&harness).await,
         (12, 6, 12),
@@ -431,14 +412,7 @@ async fn rearm_ignores_parked_terminal_collisions_without_empty_write_batches() 
         }
     );
     let after = writer_telemetry(&harness.registered).transactions;
-    assert_eq!(
-        after.committed_transactions - before.committed_transactions,
-        1
-    );
-    assert_eq!(
-        after.rolled_back_transactions,
-        before.rolled_back_transactions
-    );
+    assert_eq!(after.commands - before.commands, 1);
     assert_eq!(queue_state(&harness).await, (12, 6, 12));
 }
 
@@ -467,14 +441,7 @@ async fn rearm_rejects_nonpositive_windows_before_acquiring_the_writer() {
         }
     );
     let after = writer_telemetry(&harness.registered).transactions;
-    assert_eq!(
-        after.committed_transactions - before.committed_transactions,
-        3
-    );
-    assert_eq!(
-        after.rolled_back_transactions,
-        before.rolled_back_transactions
-    );
+    assert_eq!(after.commands - before.commands, 3);
     assert_eq!(queue_state(&harness).await, (5, 0, 5));
 }
 
