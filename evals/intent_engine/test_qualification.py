@@ -1249,6 +1249,63 @@ class QualificationTests(unittest.TestCase):
             )
             self.assertEqual(sample.read_bytes(), sample_bytes)
 
+    def test_qualified_sample_refuses_oversize_and_growth_before_parsing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            sample = Path(temp) / "first.json"
+            request = {"state": "bounded Scout window", "questions": self.questions}
+            response = {
+                "model": "reported-model",
+                "answers": {key: {"type": "noul", "noul": 0.2}
+                            for key in self.questions},
+            }
+            request_sha = hashlib.sha256(run_http.request_bytes(request)).hexdigest()
+            requests = {"holdout-positive": (request, request_sha)}
+            evidence = {
+                "case_id": "holdout-positive",
+                "experiment_sha256": "f" * 64,
+                "request_sha256": request_sha,
+                "row_sha256": "a" * 64,
+                "request": request,
+                "response": response,
+            }
+            valid_bytes = json.dumps(evidence).encode("utf-8")
+            sample.write_bytes(valid_bytes)
+            self.assertEqual(
+                run_http.validate_qualified_sample(str(sample), "f" * 64, requests),
+                (run_http.digest(response), "a" * 64),
+            )
+            sample_limit = 16 * (
+                len(run_http.request_bytes(request)) + run_http.MAX_HTTP_RESPONSE_BYTES
+            ) + 4096
+
+            # An oversized sparse file must be refused from fstat alone,
+            # without materializing its huge attacker-controlled contents.
+            with sample.open("r+b") as output:
+                output.truncate(sample_limit + 1)
+            with patch.object(run_http.os, "fdopen") as fdopen:
+                with self.assertRaisesRegex(ValueError, "exceeds bounded evidence"):
+                    run_http.validate_qualified_sample(str(sample), "f" * 64, requests)
+                fdopen.assert_not_called()
+
+            # A writer may grow the same inode *after* the initial size
+            # check. The bounded read must refuse that race too.
+            sample.write_bytes(valid_bytes)
+            actual_fstat = os.fstat
+            changes = []
+
+            def grow_after_fstat(descriptor):
+                original_stat = actual_fstat(descriptor)
+                changes.append(original_stat.st_size)
+                with sample.open("r+b") as output:
+                    output.truncate(sample_limit + 1)
+                return original_stat
+
+            with patch.object(run_http.os, "fstat", side_effect=grow_after_fstat):
+                with self.assertRaisesRegex(ValueError, "exceeds bounded evidence"):
+                    run_http.validate_qualified_sample(str(sample), "f" * 64, requests)
+            self.assertEqual(changes, [len(valid_bytes)])
+            self.assertEqual(sample.stat().st_size, sample_limit + 1)
+
     @unittest.skipUnless(
         os.name == "posix" and hasattr(os, "O_NOFOLLOW"),
         "inode-safe sample admission requires POSIX O_NOFOLLOW",

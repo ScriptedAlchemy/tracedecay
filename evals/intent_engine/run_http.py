@@ -64,6 +64,11 @@ def validate_qualified_sample(path, experiment_sha, requests):
     # preflight followed by builtins.open can follow a swapped-in symlink.
     # Open the inode itself without following links or waiting on a FIFO,
     # then verify it is still the named, regular sample after reading.
+    # A sample contains two representations of the frozen first request and
+    # a JSON-escaped copy of the at-most-1-MiB response. Allow generous
+    # serialization expansion, not unlimited attacker-controlled file bytes.
+    first_request = next(iter(requests.values()))[0]
+    sample_limit = 16 * (len(request_bytes(first_request)) + MAX_HTTP_RESPONSE_BYTES) + 4096
     if not hasattr(os, "O_NOFOLLOW") and os.path.islink(path):
         raise ValueError("qualified sample path must be a regular file")
     flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -77,8 +82,14 @@ def validate_qualified_sample(path, experiment_sha, requests):
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode):
             raise ValueError("qualified sample path must be a regular file")
+        if opened.st_size > sample_limit:
+            raise ValueError("qualified sample exceeds bounded evidence byte limit")
         with os.fdopen(descriptor, "rb", closefd=False) as source:
-            sample_bytes = source.read()
+            sample_bytes = source.read(sample_limit + 1)
+        # The inode can grow between fstat and read. A bounded read must also
+        # refuse growth rather than treating a truncated prefix as evidence.
+        if len(sample_bytes) > sample_limit:
+            raise ValueError("qualified sample exceeds bounded evidence byte limit")
     finally:
         os.close(descriptor)
     try:
