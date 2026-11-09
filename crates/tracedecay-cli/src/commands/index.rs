@@ -1017,9 +1017,8 @@ mod daemon_precondition_tests {
         CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1,
         CodeIndexBuildProgressV1, CodeIndexFreshnessLadderInputsV1, CodeIndexFreshnessLadderV1,
         CodeIndexNativeGraphPhaseV1, CodeIndexPresealWorkPhaseV1, CodeIndexReadinessTargetV1,
-        CodeIndexReadinessV1,
-        CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitReadV1, CodeIndexStalenessStateV1,
-        CodeIndexWorktreeFreshnessV1,
+        CodeIndexReadinessV1, CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitReadV1,
+        CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
     };
     use tracedecay_contracts::retrieval::StatusCodeIndexFreshnessV1;
     use tracedecay_domain::errors::TraceDecayError;
@@ -1307,7 +1306,10 @@ mod daemon_precondition_tests {
             Duration::ZERO,
         )
         .await;
-        assert!(result.is_ok(), "new parse evidence is real work: {result:?}");
+        assert!(
+            result.is_ok(),
+            "new parse evidence is real work: {result:?}"
+        );
         assert_eq!(reads, 3);
     }
 

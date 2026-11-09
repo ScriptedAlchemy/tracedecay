@@ -211,7 +211,6 @@ mod tests {
         assert_eq!(slot.read().unwrap().snapshot().unwrap(), after);
     }
 
-
     fn work(
         phase: CodeIndexPresealWorkPhaseV1,
         n: u64,
