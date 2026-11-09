@@ -22,6 +22,10 @@ use windows_sys::Win32::Storage::FileSystem::{
 #[path = "framed_log_batch_tests.rs"]
 mod batch_tests;
 
+#[cfg(all(test, target_os = "linux", feature = "test-helpers"))]
+#[path = "framed_log_snapshot_tests.rs"]
+mod snapshot_tests;
+
 #[cfg(test)]
 thread_local! {
     static DIRECTORY_SYNC_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -225,7 +229,14 @@ impl DurableFileBatch {
             for identity in &self.synced {
                 identity.validate_path()?;
             }
-            self.sync_pending()
+            self.sync_pending()?;
+            // The final barriers may block long enough for an earlier window
+            // to change. Its pre-barrier observation cannot authorize the
+            // whole batch after those barriers return. Recheck without opens.
+            for identity in &self.synced {
+                identity.validate_path()?;
+            }
+            Ok(())
         }
         #[cfg(not(target_os = "linux"))]
         {
