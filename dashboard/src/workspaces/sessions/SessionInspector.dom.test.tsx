@@ -331,7 +331,26 @@ describe('Session provenance inspector', () => {
     expect(onSelectProvider).toHaveBeenCalledWith('codex');
   });
 
-  it("links a session with unknown provider through Loom's bare-ID resolver", () => {
+  it('links a provider-less session absent from the loaded page through Loom bare-ID', () => {
+    stubTranscript();
+    renderWith(
+      <SessionInspector
+        selection={{ provider: null, sessionId: 'quiet' }}
+        index={ready(indexPayload({ sessions: [] }))}
+        indexPage={1}
+        onSelectProvider={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByRole('region', { name: 'Identity' }).querySelector('[data-identity="absent"]')).not.toBeNull();
+    const pivot = screen.getByRole('link', { name: /Open in Loom/ });
+    const target = new URL(pivot.getAttribute('href') ?? '', 'http://dashboard.test');
+    expect(target.pathname).toBe('/loom');
+    expect(target.searchParams.get('loomBareSession')).toBe('quiet');
+    expect(target.searchParams.has('loomSession')).toBe(false);
+  });
+
+  it('keeps a recorded unknown-provider row on its explicit unknown Loom lane', () => {
     stubTranscript();
     renderWith(
       <SessionInspector
@@ -344,9 +363,8 @@ describe('Session provenance inspector', () => {
     );
     const pivot = screen.getByRole('link', { name: /Open in Loom/ });
     const target = new URL(pivot.getAttribute('href') ?? '', 'http://dashboard.test');
-    expect(target.pathname).toBe('/loom');
-    expect(target.searchParams.get('loomBareSession')).toBe('quiet');
-    expect(target.searchParams.has('loomSession')).toBe(false);
+    expect(target.searchParams.get('loomSession')).toBe('["unknown","quiet"]');
+    expect(target.searchParams.has('loomBareSession')).toBe(false);
   });
 
   it('reports a blocked index read as the reason identity and relations are missing', () => {
