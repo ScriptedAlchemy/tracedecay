@@ -216,6 +216,12 @@ runs:
         sudo chmod 0440 /etc/sudoers.d/tailscale-ci-network
         sudo visudo -cf /etc/sudoers.d/tailscale-ci-network
 
+    - name: Read the hosted Mac's Ethernet resolver settings
+      id: macos-dns
+      if: runner.os == 'macOS' && inputs.tailscale-client-id != ''
+      shell: bash
+      run: python3 "$GITHUB_ACTION_PATH/macos_dns.py" read >> "$GITHUB_OUTPUT"
+
     - name: Connect to the private Bazel fleet
       id: tailscale
       if: inputs.tailscale-client-id != ''
@@ -229,6 +235,15 @@ runs:
         # Public dependency downloads keep the hosted runner's DNS resolver.
         args: --accept-dns=false
         ping: ubuntu-main
+
+    # The pinned Tailscale action explicitly reconfigures Ethernet when MagicDNS
+    # is enabled on macOS, even when tailscale up receives --accept-dns=false.
+    - name: Restore the hosted Mac's Ethernet resolver settings
+      if: always() && steps.macos-dns.outcome == 'success'
+      shell: bash
+      env:
+        ETHERNET_DNS: ${{ steps.macos-dns.outputs.settings }}
+      run: python3 "$GITHUB_ACTION_PATH/macos_dns.py" restore
 
     - name: Select private executor or hosted execution
       id: fleet
