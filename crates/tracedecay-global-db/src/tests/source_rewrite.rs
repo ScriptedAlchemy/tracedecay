@@ -545,6 +545,25 @@ async fn rewrite_completion_skips_settled_records_without_revival() {
             .await
             .unwrap();
 
+        // A settled observation can still have a newly accepted revival.
+        // The optimization must clear this queued offer before skipping the
+        // retired disposition; otherwise projection can resurrect old output.
+        let writer = registered.writer_connection().unwrap();
+        writer
+            .execute(
+                "INSERT INTO projection_queue (
+                    observation_id, observation_sequence, revival_generation, revival_start_offset
+                 )
+                 SELECT observation_id, sequence, '2', 0
+                 FROM observations WHERE observation_id = ?1
+                 ON CONFLICT(observation_id) DO UPDATE SET
+                     revival_generation = excluded.revival_generation,
+                     revival_start_offset = excluded.revival_start_offset",
+                params![seeded[0].0.observation_id().as_str()],
+            )
+            .await
+            .unwrap();
+
         let statements = || writer_telemetry(&registered).sqlite_vm.statements;
         let before = statements();
         assert_eq!(
@@ -577,6 +596,18 @@ async fn rewrite_completion_skips_settled_records_without_revival() {
             .unwrap();
         let row = pending.next().await.unwrap().unwrap();
         assert_eq!(row.get::<i64>(0).unwrap(), 0);
+        drop(pending);
+        let mut revival = snapshot
+            .query(
+                "SELECT revival_generation, revival_start_offset
+                 FROM projection_queue WHERE observation_id = ?1",
+                params![seeded[0].0.observation_id().as_str()],
+            )
+            .await
+            .unwrap();
+        let row = revival.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<Option<String>>(0).unwrap(), None);
+        assert_eq!(row.get::<Option<i64>>(1).unwrap(), None);
         writer_commands
     }
 
