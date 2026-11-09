@@ -295,6 +295,45 @@ async fn noncanonical_retirement_marker_cannot_reopen_an_expired_signal() {
             .contains("identity conflict")
     );
 
+    // SQLite decodes Unicode-escaped object keys as the same retirement
+    // field, even though its literal byte spelling differs from the key.
+    let escaped = signal("signal.github-stack-escaped-retirement-key", 12);
+    harness
+        .registered
+        .append_github_stack_signal(escaped.clone(), vec![RECIPIENT.to_owned()])
+        .await
+        .expect("append the Unicode-key fixture");
+    harness
+        .registered
+        .acknowledge_github_stack_host_delivery(PROJECT_ID, &escaped.signal_id, RECIPIENT)
+        .await
+        .expect("settle Unicode-key fixture");
+    let escaped_marker = format!(
+        r#"{{"__trac\u0065decay_retired_stack_sha256_v1":"{digest}"}}"#
+    );
+    let writer = harness
+        .registered
+        .writer_connection()
+        .expect("registered Unicode-marker writer");
+    writer
+        .execute(
+            "UPDATE github_stack_delivery_signals SET signal_json = ?3
+             WHERE project_id = ?1 AND signal_id = ?2",
+            params![PROJECT_ID, escaped.signal_id.as_str(), escaped_marker.as_str()],
+        )
+        .await
+        .expect("SQLite accepts the escaped retirement key");
+    drop(writer);
+    assert!(
+        harness
+            .registered
+            .github_stack_signal(PROJECT_ID, &escaped.signal_id)
+            .await
+            .expect("escaped-key marker must not expand")
+            .is_none(),
+        "escaped JSON keys must retain the same retired identity"
+    );
+
     let malformed = signal("signal.github-stack-malformed-marker", 11);
     harness
         .registered

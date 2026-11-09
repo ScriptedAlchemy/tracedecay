@@ -295,9 +295,9 @@ fn validate_signal(record: &GitHubStackSignalRecordV1) -> Result<(), String> {
 /// noncanonical spacing choice must never turn a retired marker back into an
 /// expandable native signal; corrupt markers fail closed instead.
 fn retired_payload_digest(json: &str) -> Result<Option<String>, String> {
-    if !json.contains(RETIRED_PAYLOAD_KEY) {
-        return Ok(None);
-    }
+    // JSON member names may contain Unicode escapes. A raw substring check
+    // would miss a retired key accepted by SQLite's json_type() guard and
+    // could expose its fingerprint as if it were a live signal.
     let value: serde_json::Value = serde_json::from_str(json)
         .map_err(|error| format!("decode GitHub stack retirement marker: {error}"))?;
     let Some(object) = value.as_object() else {
