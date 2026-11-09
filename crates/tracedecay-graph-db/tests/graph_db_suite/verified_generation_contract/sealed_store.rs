@@ -1229,9 +1229,9 @@ fn restart_recovery_adopts_or_discards_the_on_disk_artifact() {
     assert_snapshot_reads(&snapshot, &identity, "durable");
 }
 
-/// A completed interrupted seal carries an exact generation receipt and is
-/// reclaimed when reopening the store. Unreceipted, mismatched, oversized and
-/// linked lookalikes must survive instead of being deleted by filename.
+/// A copied installed receipt is not a staging-owner receipt. Recovery must
+/// preserve that lookalike alongside unreceipted, mismatched, oversized and
+/// linked entries, rather than deleting them based on their names.
 #[test]
 fn reopening_the_store_reclaims_only_receipted_staging() {
     let temp = TempDir::new().unwrap();
@@ -1331,8 +1331,13 @@ fn reopening_the_store_reclaims_only_receipted_staging() {
         .unwrap();
 
     assert!(
-        !verified.exists(),
-        "a verified abandoned seal must be reclaimed"
+        verified.is_dir(),
+        "a copied final receipt must not authorize abandoned-stage cleanup"
+    );
+    assert_eq!(
+        std::fs::read(verified.join("sealed.json")).unwrap(),
+        receipt,
+        "recovery must preserve the copied final receipt byte-for-byte"
     );
     assert_eq!(
         std::fs::read(unowned.join("generation.grafeo")).unwrap(),

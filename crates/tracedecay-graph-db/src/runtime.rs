@@ -1028,10 +1028,18 @@ impl GraphDb {
             }
         };
         if !engine_is_open {
-            if self.inner.closed.swap(true, Ordering::AcqRel) {
-                return Err(GraphDbError::Closed);
+            let previously_closed = self.inner.closed.swap(true, Ordering::AcqRel);
+            // A failed physical close can already have consumed the engine.
+            // Its absent handle must not turn an uncertain result into a
+            // successful close (or an idempotent Closed on the next retry).
+            if self.inner.poisoned.load(Ordering::Acquire) {
+                return Err(durability_uncertain());
             }
-            return Ok(());
+            return if previously_closed {
+                Err(GraphDbError::Closed)
+            } else {
+                Ok(())
+            };
         }
         let _snapshot_gate = self.wait_snapshot_gate_write();
         let mut guard =
