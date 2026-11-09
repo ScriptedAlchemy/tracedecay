@@ -1250,6 +1250,7 @@ async fn refused_durable_test_result_cannot_publish_a_completed_live_terminal() 
         emitter,
         recording: ManagedTestRunRecording {
             store: store.registered.clone(),
+            events: authority.clone(),
             session_id: None,
         },
         started_at: UtcMicros(10),
@@ -1328,6 +1329,7 @@ async fn durable_store_refusal_remains_primary_when_terminal_publication_also_fa
         emitter,
         recording: ManagedTestRunRecording {
             store: store.registered.clone(),
+            events: authority.clone(),
             session_id: None,
         },
         started_at: UtcMicros(10),
