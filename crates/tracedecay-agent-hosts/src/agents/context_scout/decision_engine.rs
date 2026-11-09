@@ -683,7 +683,7 @@ pub mod test_server {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+    use std::io::{BufRead as _, BufReader, Write as _};
     use std::time::{Duration, Instant};
 
     use super::test_server::{
