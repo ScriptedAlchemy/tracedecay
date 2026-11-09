@@ -717,6 +717,23 @@ pub(crate) fn sweep_abandoned_sealed_staging(database_path: &Path) {
             let Ok(receipt) = serde_json::from_slice::<SealedStoreReceiptV1>(bytes) else {
                 return false;
             };
+            // Bind the receipt's logical identity back to the canonical
+            // physical namespace. A copied receipt with a rewritten physical
+            // name is not proof of ownership of another staged generation.
+            let (Ok(namespace), Ok(projection), Ok(generation)) = (
+                GraphNamespace::new(receipt.namespace.clone()),
+                GraphProjectionId::new(receipt.projection.clone()),
+                crate::GraphGenerationId::new(receipt.generation.clone()),
+            ) else {
+                return false;
+            };
+            let locator = GenerationLocator::new(
+                GraphProjectionIdentity::new(namespace, projection),
+                generation,
+            );
+            let Ok(physical_namespace) = locator.physical_namespace() else {
+                return false;
+            };
             let recognized_form = match receipt.form.as_str() {
                 SEALED_STORE_FORM_COMPACT => receipt.base.is_none(),
                 SEALED_STORE_FORM_LAYERED => receipt.base.is_some(),
@@ -727,9 +744,7 @@ pub(crate) fn sweep_abandoned_sealed_staging(database_path: &Path) {
                 && receipt.graph_format > 0
                 && receipt.graph_format <= GraphFormatVersion::current().get()
                 && receipt.physical_namespace == format!("generation:{generation_hex}")
-                && !receipt.namespace.is_empty()
-                && !receipt.projection.is_empty()
-                && !receipt.generation.is_empty()
+                && receipt.physical_namespace == physical_namespace.as_str()
                 && !receipt.recovered_digest.is_empty()
         },
     );

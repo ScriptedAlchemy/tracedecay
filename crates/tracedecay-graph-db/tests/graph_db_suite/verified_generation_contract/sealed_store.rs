@@ -1284,6 +1284,21 @@ fn reopening_the_store_reclaims_only_receipted_staging() {
     std::fs::create_dir(&mismatched).unwrap();
     std::fs::write(mismatched.join("sealed.json"), &receipt).unwrap();
     std::fs::write(mismatched.join("sentinel"), b"wrong identity").unwrap();
+    // A copied receipt whose physical namespace was rewritten to fit the
+    // staging filename still does not bind the original logical generation.
+    let forged_name = "a".repeat(64);
+    let forged = root.join(format!(".staging-{forged_name}"));
+    std::fs::create_dir(&forged).unwrap();
+    let mut forged_receipt: serde_json::Value = serde_json::from_slice(&receipt).unwrap();
+    forged_receipt["physical_namespace"] =
+        serde_json::Value::String(format!("generation:{forged_name}"));
+    let forged_bytes = serde_json::to_vec(&forged_receipt).unwrap();
+    std::fs::write(forged.join("sealed.json"), &forged_bytes).unwrap();
+    std::fs::write(forged.join("sentinel"), b"forged receipt").unwrap();
+    let malformed = root.join(format!(".staging-{}", "b".repeat(64)));
+    std::fs::create_dir(&malformed).unwrap();
+    std::fs::write(malformed.join("sealed.json"), b"not-json").unwrap();
+    std::fs::write(malformed.join("sentinel"), b"malformed receipt").unwrap();
     let oversized = root.join(format!(".staging-{}", "e".repeat(64)));
     std::fs::create_dir(&oversized).unwrap();
     std::fs::write(oversized.join("sealed.json"), vec![b'x'; 128 * 1024]).unwrap();
@@ -1329,6 +1344,19 @@ fn reopening_the_store_reclaims_only_receipted_staging() {
     assert_eq!(
         std::fs::read(mismatched.join("sentinel")).unwrap(),
         b"wrong identity"
+    );
+    assert_eq!(
+        std::fs::read(forged.join("sealed.json")).unwrap(),
+        forged_bytes,
+        "a rewritten physical namespace is not generation ownership"
+    );
+    assert_eq!(
+        std::fs::read(forged.join("sentinel")).unwrap(),
+        b"forged receipt"
+    );
+    assert_eq!(
+        std::fs::read(malformed.join("sentinel")).unwrap(),
+        b"malformed receipt"
     );
     assert_eq!(
         std::fs::read(oversized.join("sentinel")).unwrap(),
