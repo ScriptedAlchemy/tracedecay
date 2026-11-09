@@ -273,7 +273,7 @@ impl RegisteredGlobalDb {
                         if pending_rewrite(&transaction, &key).await?.as_deref()
                             != Some(generation.as_str())
                         {
-                            return Err(JobExit::Rollback((0_u64, true)));
+                            return Err(JobExit::Rollback((0_u64, true, String::new())));
                         }
                         let mut rows = transaction
                             .query(
