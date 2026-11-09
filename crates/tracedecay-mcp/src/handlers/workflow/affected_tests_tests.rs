@@ -1295,6 +1295,17 @@ async fn durable_store_refusal_remains_primary_when_terminal_publication_also_fa
         .begin(&context, OperationKind::TestRun, UtcMicros(1))
         .await
         .expect("admit an authenticated operation");
+    let subscription = authority
+        .subscribe(
+            &OperationId::from_request(context.request_id().clone()),
+            &context,
+            UtcMicros(1),
+            0,
+            None,
+        )
+        .await
+        .expect("observe the original operation terminal");
+    let (_, _, mut stream) = subscription.into_sse_parts();
     let deadline = Deadline::new(UtcMicros(i64::MAX)).expect("fixture deadline");
     // Deliberately pre-settle this event owner so the subsequent Failed
     // publication is refused with TerminalAlreadyPublished.
@@ -1336,5 +1347,25 @@ async fn durable_store_refusal_remains_primary_when_terminal_publication_also_fa
     assert!(
         matches!(&error, TraceDecayError::Database { .. }),
         "the storage refusal must take precedence: {error}"
+    );
+    let accepted = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("original accepted event must be observable")
+        .expect("accepted event");
+    assert!(matches!(accepted.kind, StreamEventKind::Item(_)));
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("original terminal must remain observable")
+        .expect("original terminal event");
+    assert!(matches!(
+        terminal.kind,
+        StreamEventKind::Terminal(termination)
+            if termination.termination == OperationTermination::Completed
+                && termination.receipt.termination == OperationTermination::Completed
+                && termination.receipt.budget.bytes_consumed == 0
+    ));
+    assert!(
+        stream.next().await.is_none(),
+        "refused later publication must not insert a second terminal"
     );
 }

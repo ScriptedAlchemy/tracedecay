@@ -790,6 +790,14 @@ impl ManagedTestRun {
         // A refused stream publication cannot obscure a durable-store failure.
         // When the durable write succeeds, publication errors still propagate.
         let published = publish_test_run_terminal(&self.emitter, stream_receipt).await;
+        if let (Err(record_error), Err(publish_error)) = (&recorded, &published) {
+            tracing::warn!(
+                operation_id = %self.operation_id(),
+                storage_error = %record_error,
+                publication_error = %publish_error,
+                "managed test-run outcome and failed terminal publication both refused"
+            );
+        }
         recorded?;
         published?;
         Ok(receipt)
