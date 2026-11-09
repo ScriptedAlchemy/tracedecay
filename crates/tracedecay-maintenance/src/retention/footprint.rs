@@ -505,11 +505,8 @@ fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
                 })
             })
             .or_else(|| {
-                inner.iter().position(|name| is_wal(name)).map(|end| {
-                    (
-                        format!("{store_key}/{}", inner[..=end].join("/")),
-                        ProfileFamilyV1::Wal,
-                    )
+                inner.first().filter(|name| is_wal(name)).map(|first| {
+                    (format!("{store_key}/{first}"), ProfileFamilyV1::Wal)
                 })
             });
         return Some(FootprintKeys {
@@ -1595,6 +1592,57 @@ mod tests {
             );
         }
         for key in ["global.db-wal", "profile"] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::HealthyCompleteCoverage,
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn project_payloads_with_wal_names_retain_only_real_root_wal_overlays() {
+        let temp = tempfile::tempdir().expect("footprint fixture");
+        let profile = temp.path().join("profile");
+        for (relative, bytes) in [
+            ("projects/proj_payload/code-index-v1/objects/archive.wal", 40),
+            ("projects/proj_payload/lcm-payloads/payload-wal/chunk", 30),
+            ("projects/proj_payload/response-handles/result.wal", 17),
+            ("projects/proj_payload/plain", 3),
+            ("projects/proj_payload/sessions.db-wal", 7),
+        ] {
+            sized(&profile.join(relative), bytes);
+        }
+        let overrides = BTreeMap::from([
+            ("projects/proj_payload".to_owned(), 96),
+            ("projects/proj_payload/sessions.db-wal".to_owned(), 7),
+        ]);
+        let footprint = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
+        assert_eq!(footprint.total_bytes, 97);
+        assert_eq!(footprint.unavailable_entry_count, 0);
+        assert_eq!(footprint.entries.len(), 2, "nested payloads cannot be false WALs");
+        assert_eq!(
+            footprint.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Complete
+        );
+        let project = entry(&footprint, "projects/proj_payload");
+        assert_eq!(project.family, ProfileFamilyV1::ProjectStore);
+        assert_eq!(project.bytes, 97);
+        let kinds = project.kinds.expect("project breakdown");
+        assert_eq!(kinds.generation_artifacts, 40);
+        assert_eq!(kinds.sessions, 7);
+        assert_eq!(kinds.other, 50);
+        assert_eq!(kinds.total(), 97);
+        let wal = entry(&footprint, "projects/proj_payload/sessions.db-wal");
+        assert_eq!(wal.family, ProfileFamilyV1::Wal);
+        assert_eq!(wal.bytes, 7);
+        let observed = findings(&footprint);
+        assert_eq!(observed.len(), 3);
+        assert_eq!(
+            observed["projects/proj_payload"].finding().state(),
+            DoctorEvidenceStateV1::Degraded
+        );
+        for key in ["projects/proj_payload/sessions.db-wal", PROFILE_TOTAL_KEY] {
             assert_eq!(
                 observed[key].finding().state(),
                 DoctorEvidenceStateV1::HealthyCompleteCoverage,
