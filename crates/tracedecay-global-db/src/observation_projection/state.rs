@@ -249,6 +249,10 @@ pub(super) async fn projection_retry_state(
 /// Queue rows one re-arm transaction touches.
 pub(crate) const REARM_PROJECTION_RETRY_BATCH_ROWS: i64 = 1_024;
 
+/// Maximum candidate-identity memory staged before rearm starts writing.
+/// The bound avoids trading WAL retention for an unbounded heap allocation.
+const REARM_CANDIDATE_STAGE_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RearmedProjectionRetries {
     pub(crate) rows: u64,
@@ -256,18 +260,14 @@ pub(crate) struct RearmedProjectionRetries {
 }
 
 /// A projection retry deadline paces re-attempts within the store mount that
-/// observed the failure. A fresh mount re-arms retryable deferred projections
-/// for immediate replay so recovery does not wait out a dead process's backoff.
-/// Attempt counts, last errors, and terminal collision deadlines persist.
+/// observed the failure. A fresh mount re-arms only previously deferred
+/// observations. Fresh foreground retries must keep their own deadline.
 ///
-/// The reader captures the queue frontier before taking any writer
-/// lease. Already-due, already-armed, and terminal-only queues need no writer
-/// transaction; expired deadlines remain eligible for ordinary projection.
-/// A stable read snapshot selects at most `batch_rows` candidates per window
-/// without retaining a SQLite writer. It excludes retries created after this
-/// mount started recovery, even if their queue rowids predate its frontier.
-/// Short writer transactions conditionally update only unchanged identities.
-/// Rows beyond the captured frontier are left for later recovery.
+/// Freeze the exact candidates in one consistent read view *before* taking
+/// a writer lease. Keeping a WAL snapshot pinned across write windows would
+/// prevent restart checkpoints and risk revocation during large recoveries.
+/// Each subsequent short writer transaction conditionally updates unchanged
+/// observation identities; an interrupted recovery keeps its committed prefix.
 #[tracing::instrument(
     name = "global_db.observation_projection.rearm_retries",
     level = "trace",
@@ -277,77 +277,85 @@ pub(crate) async fn rearm_queued_projection_retries(
     database: &Database,
     batch_rows: i64,
 ) -> ProjectionStoreResult<RearmedProjectionRetries> {
-    if batch_rows <= 0 {
+    if batch_rows <= 0 || batch_rows > REARM_PROJECTION_RETRY_BATCH_ROWS {
         return Err(storage_message(
             "rearm queued projection retries",
-            "projection retry batch size must be positive",
+            "projection retry batch size is outside the bounded range",
         ));
     }
-    let mut rearmed = RearmedProjectionRetries::default();
     let now = tracedecay_contracts::clock::now_micros().0;
-    // Freeze the previous mount's retry eligibility before any re-arm write.
-    // A live reader on each page would accidentally re-arm a *new* retry that
-    // foreground projection schedules between recovery windows.
+    let windows = stage_rearm_projection_retry_candidates(
+        database,
+        batch_rows,
+        now,
+        REARM_CANDIDATE_STAGE_BYTES,
+    )
+    .await?;
+    let mut rearmed = RearmedProjectionRetries::default();
+    for candidates in windows {
+        let rows = apply_rearm_projection_retry_candidates(database, &candidates, now).await?;
+        rearmed.rows += rows;
+        if rows != 0 {
+            rearmed.batches += 1;
+        }
+    }
+    Ok(rearmed)
+}
+
+/// The snapshot pins the WAL only during read-only candidate discovery and
+/// drops before any recovery writes. Scan the old queue in bounded pages
+/// without staging the inactive prefix or any observation payload.
+/// Refuse over-capacity staging before changing any retry deadline.
+#[tracing::instrument(
+    name = "global_db.observation_projection.stage_retry_rearm",
+    level = "trace",
+    skip_all
+)]
+pub(super) async fn stage_rearm_projection_retry_candidates(
+    database: &Database,
+    batch_rows: i64,
+    now_micros: i64,
+    max_staged_bytes: usize,
+) -> ProjectionStoreResult<Vec<String>> {
+    const OPERATION: &str = "stage queued projection retries";
     let snapshot = database
         .read_connection()
         .convergence_snapshot()
         .await
         .map_err(|error| storage("open projection retry recovery snapshot", error))?;
-    let Some(last_rowid) = retry_rearm_frontier(&snapshot, now).await? else {
-        return Ok(rearmed);
+    let Some(last_rowid) = retry_rearm_frontier(&snapshot, now_micros).await? else {
+        return Ok(Vec::new());
     };
+    let mut staged = Vec::new();
+    let mut staged_bytes = 0_usize;
     let mut after_rowid = 0_i64;
     while after_rowid < last_rowid {
-        let Some((batch_end, rows)) = rearm_projection_retry_batch(
-            database,
+        let Some((batch_end, candidates)) = read_rearm_projection_retry_candidates(
             &snapshot,
             after_rowid,
             last_rowid,
             batch_rows,
-            now,
+            now_micros,
         )
         .await?
         else {
             break;
         };
-        rearmed.rows += rows;
-        if rows != 0 {
-            rearmed.batches += 1;
+        staged_bytes = staged_bytes
+            .checked_add(candidates.len())
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<String>()))
+            .ok_or_else(|| storage_message(OPERATION, "retry candidate staging size overflow"))?;
+        if staged_bytes > max_staged_bytes {
+            return Err(storage_message(
+                OPERATION,
+                "retry candidate staging exceeds the bounded memory allowance",
+            ));
         }
+        staged.push(candidates);
         after_rowid = batch_end;
     }
-    Ok(rearmed)
-}
-
-/// Select a bounded retry window outside the SQLite writer lease. The
-/// sparse tail scan may visit many already-due or terminal rows; only the
-/// exact selected identities are looked up while holding the writer.
-#[tracing::instrument(
-    name = "global_db.observation_projection.rearm_retries.batch",
-    level = "trace",
-    skip_all
-)]
-pub(super) async fn rearm_projection_retry_batch(
-    database: &Database,
-    snapshot: &DatabaseEngineReadSnapshot,
-    after_rowid: i64,
-    last_rowid: i64,
-    batch_rows: i64,
-    now_micros: i64,
-) -> ProjectionStoreResult<Option<(i64, u64)>> {
-    let Some((batch_end, candidates)) = read_rearm_projection_retry_candidates(
-        snapshot,
-        after_rowid,
-        last_rowid,
-        batch_rows,
-        now_micros,
-    )
-    .await?
-    else {
-        return Ok(None);
-    };
-    let rows = apply_rearm_projection_retry_candidates(database, &candidates, now_micros).await?;
-    Ok(Some((batch_end, rows)))
+    drop(snapshot);
+    Ok(staged)
 }
 
 /// Candidate membership is fixed by the recovery snapshot. The foreground

@@ -12,7 +12,7 @@ use tracedecay_runtime_core::db::engine::params;
 
 use super::state::{
     apply_rearm_projection_retry_candidates, read_rearm_projection_retry_candidates,
-    rearm_projection_retry_batch, retry_rearm_frontier,
+    retry_rearm_frontier, stage_rearm_projection_retry_candidates,
 };
 use super::{RearmedProjectionRetries, rearm_queued_projection_retries};
 use crate::tests::harness::{RegisteredGlobalDbHarness, writer_telemetry};
@@ -576,20 +576,18 @@ async fn retry_rearm_does_not_erase_a_live_retry_between_windows() {
     seed_queue(&harness, 2, 1).await;
     let database = harness.registered.runtime_database();
     let now = 1_000_000_i64;
-    let read = database
-        .read_connection()
-        .convergence_snapshot()
+    let staged = stage_rearm_projection_retry_candidates(database, 1, now, usize::MAX)
         .await
         .unwrap();
-    let frontier = retry_rearm_frontier(&read, now).await.unwrap().unwrap();
+    assert_eq!(staged.len(), 2);
 
-    // The first old retry is rearmed, leaving a previously due row between
-    // it and the next old retry in canonical queue order.
+    // The snapshot is released before any writer lease. The original two
+    // deferred rows are frozen independently of later foreground retries.
     assert_eq!(
-        rearm_projection_retry_batch(database, &read, 0, frontier, 1, now)
+        apply_rearm_projection_retry_candidates(database, &staged[0], now)
             .await
             .unwrap(),
-        Some((1, 1))
+        1
     );
     let transaction = harness.registered.begin_write_transaction().await.unwrap();
     assert_eq!(
@@ -608,15 +606,14 @@ async fn retry_rearm_does_not_erase_a_live_retry_between_windows() {
     transaction.commit().await.unwrap();
 
     // A fresh per-page SELECT would see the new deadline at sequence 2 and
-    // illegally clear the current mount's backoff. The original snapshot must
-    // skip it, select the old sequence 3 and update only that row.
+    // illegally clear this mount's backoff. The staged eligibility excludes
+    // the new retry even after dropping the WAL reader.
     assert_eq!(
-        rearm_projection_retry_batch(database, &read, 1, frontier, 1, now)
+        apply_rearm_projection_retry_candidates(database, &staged[1], now)
             .await
             .unwrap(),
-        Some((3, 1))
+        1
     );
-    drop(read);
 
     let snapshot = harness.registered.read_snapshot().await.unwrap();
     let mut rows = snapshot
@@ -656,17 +653,15 @@ async fn rearm_leaves_later_observations_with_reused_queue_rowids_deferred() {
         .await
         .unwrap();
     transaction.commit().await.unwrap();
-    let read = database
-        .read_connection()
-        .convergence_snapshot()
+    let staged = stage_rearm_projection_retry_candidates(database, 1, now, usize::MAX)
         .await
         .unwrap();
-    let frontier = retry_rearm_frontier(&read, now).await.unwrap().unwrap();
+    assert_eq!(staged.len(), 3);
     assert_eq!(
-        rearm_projection_retry_batch(database, &read, 0, frontier, 1, now)
+        apply_rearm_projection_retry_candidates(database, &staged[0], now)
             .await
             .unwrap(),
-        Some((1, 1))
+        1
     );
 
     // A foreground pass settles the old tail. SQLite assigns its rowid to a
@@ -690,14 +685,16 @@ async fn rearm_leaves_later_observations_with_reused_queue_rowids_deferred() {
         .await
         .unwrap();
     transaction.commit().await.unwrap();
-    assert_eq!(
-        rearm_projection_retry_batch(database, &read, 1, frontier, 4, now)
+    let mut remaining = 0;
+    for candidates in staged.iter().skip(1) {
+        remaining += apply_rearm_projection_retry_candidates(database, candidates, now)
             .await
-            .unwrap(),
-        Some((3, 1)),
-        "only the original retry is inside the captured frontier"
+            .unwrap();
+    }
+    assert_eq!(
+        remaining, 1,
+        "only the unchanged original retry survives rowid reuse"
     );
-    drop(read);
     let snapshot = harness.registered.read_snapshot().await.unwrap();
     let mut rows = snapshot
         .query(
@@ -710,6 +707,61 @@ async fn rearm_leaves_later_observations_with_reused_queue_rowids_deferred() {
     let new = rows.next().await.unwrap().unwrap();
     assert_eq!(new.get::<i64>(0).unwrap(), 3);
     assert_eq!(new.get::<i64>(1).unwrap(), FAR_FUTURE_MICROS);
+}
+
+#[asupersync::test]
+async fn staged_retry_recovery_releases_wal_reader_before_writes() {
+    let harness = RegisteredGlobalDbHarness::open("rearm-release-wal-reader").await;
+    seed_queue(&harness, 9, 0).await;
+    let database = harness.registered.runtime_database();
+    let staged = stage_rearm_projection_retry_candidates(database, 2, 1_000_000, usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(staged.len(), 5);
+    let mut changed = 0;
+    for candidates in staged {
+        changed += apply_rearm_projection_retry_candidates(database, &candidates, 1_000_000)
+            .await
+            .unwrap();
+    }
+    assert_eq!(changed, 9);
+
+    // The checkpoint is run through a separate SQLite connection solely on
+    // this disposable registered-store fixture. A snapshot kept across the
+    // writer batches would leave a pinned WAL read slot and report busy.
+    let outside = rusqlite::Connection::open(harness.registered.db_path()).unwrap();
+    let (busy, log_frames, checkpointed): (i64, i64, i64) = outside
+        .query_row("PRAGMA wal_checkpoint(RESTART)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .unwrap();
+    assert_eq!(busy, 0, "no rearm snapshot may pin the WAL after staging");
+    assert!(log_frames > 0, "the checkpoint must observe actual writer traffic");
+    assert_eq!(checkpointed, log_frames);
+    assert_eq!(queue_state(&harness).await, (9, 0, 9));
+}
+
+#[asupersync::test]
+async fn retry_candidate_stage_refuses_capacity_before_any_writer_lease() {
+    let harness = RegisteredGlobalDbHarness::open("rearm-stage-memory-bound").await;
+    seed_queue(&harness, 9, 0).await;
+    let database = harness.registered.runtime_database();
+    let before = writer_telemetry(&harness.registered).transactions;
+    assert!(
+        stage_rearm_projection_retry_candidates(database, 2, 1_000_000, 8)
+            .await
+            .is_err(),
+        "an oversized eligibility stage must refuse before modifying retry state"
+    );
+    assert_eq!(writer_telemetry(&harness.registered).transactions, before);
+    assert_eq!(queue_state(&harness).await, (9, 9, 9));
+
+    assert_eq!(
+        rearm_queued_projection_retries(database, 2).await.unwrap(),
+        RearmedProjectionRetries { rows: 9, batches: 5 },
+        "recovery with admitted capacity must remain possible after refusal"
+    );
+    assert_eq!(queue_state(&harness).await, (9, 0, 9));
 }
 
 #[asupersync::test]
