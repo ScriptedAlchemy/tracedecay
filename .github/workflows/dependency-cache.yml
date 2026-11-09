@@ -29,6 +29,8 @@ concurrency:
 jobs:
   helpers:
     name: Cache launcher helpers
+    outputs:
+      cache-key: ${{ steps.bazel.outputs.launcher-cache-key }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -93,6 +95,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           cache-key: dependency-helpers-verification
+          repository-cache-key: ${{ needs.helpers.outputs.cache-key }}
           cache-save: "false"
           verify-launcher-cache: "true"
       - *resolve-helpers

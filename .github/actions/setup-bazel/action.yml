@@ -25,6 +25,9 @@ inputs:
   cache-save:
     description: Whether master jobs may save Bazelisk and newly fetched dependencies.
     default: "true"
+  repository-cache-key:
+    description: Exact dependency snapshot to restore without a workload fallback.
+    default: ""
   verify-launcher-cache:
     description: Restore only the complete launcher cache for an offline verification.
     default: "false"
@@ -264,7 +267,7 @@ runs:
     # A partial dependency snapshot can seed only its own workload.
     - name: Restore workload dependency cache
       id: repository-cache
-      if: inputs.verify-launcher-cache != 'true'
+      if: inputs.repository-cache-key == '' && inputs.verify-launcher-cache != 'true'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ steps.disk-cache-config.outputs.repository-path }}
@@ -276,14 +279,14 @@ runs:
     # The hosted Ubuntu warmer publishes all launcher targets as one immutable
     # snapshot. Extract it into the checksum-addressed cache after the workload
     # snapshot, before Bazel runs, so a partial workload cannot shadow it.
-    - name: Restore complete launcher helpers
+    - name: Restore exact dependency snapshot
       id: launcher-cache
-      if: runner.os == 'Linux'
+      if: runner.os == 'Linux' || inputs.repository-cache-key != ''
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ steps.disk-cache-config.outputs.repository-path }}
-        key: ${{ steps.disk-cache-config.outputs.launcher }}
-        fail-on-cache-miss: ${{ inputs.verify-launcher-cache == 'true' }}
+        key: ${{ inputs.repository-cache-key || steps.disk-cache-config.outputs.launcher }}
+        fail-on-cache-miss: ${{ inputs.repository-cache-key != '' || inputs.verify-launcher-cache == 'true' }}
 
     - name: Measure restored dependency cache
       id: repository-cache-state
