@@ -103,6 +103,14 @@ rejects a sample with no matching first-row commitment, a missing required
 sample, or a forged commitment on a later row. Runs without a raw sample
 report `first_response_sample_checked: false`, not raw-response attestation.
 
+Interrupted .partial logs are untrusted evidence. Resume checks a
+case-count-derived total size ceiling before parsing, and bounds reads of
+each identity header and result row. The bounds include the original 1-MiB
+HTTP response cap, frozen questions and case IDs, with space for JSON
+escaping. Oversized sparse files and overlong or unterminated rows refuse
+before inference, without overwriting recoverable legitimate prefixes.
+This is a memory-admission check, not independent source attestation.
+
 An interrupted run resumes only with matching identity. Changed questions,
 question order, renderer output, labels, subset contents, or serving settings
 refuse before any HTTP request or append. Headerless old logs, incomplete rows,

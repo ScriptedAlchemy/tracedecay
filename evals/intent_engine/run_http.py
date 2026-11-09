@@ -549,14 +549,29 @@ def open_partial_for_resume(path):
 
 def resume_rows(partial, header, cases, requests, questions, temperature):
     """Validate the whole existing log before appending or issuing HTTP work."""
-    first = partial.readline()
+    # .partial is untrusted input. Limit total evidence and individual JSON
+    # lines using the original response cap and frozen case/question identities.
+    # The writer uses ASCII-escaped JSON; these character caps also bound bytes.
+    header_limit = len(json.dumps(header, allow_nan=False)) + 4096
+    row_limit = 16 * (
+        MAX_HTTP_RESPONSE_BYTES
+        + len(json.dumps(questions, allow_nan=False))
+        + max(len(case_id) for case_id in cases)
+    ) + 4096
+    if os.fstat(partial.fileno()).st_size > header_limit + 1 + len(cases) * (row_limit + 1):
+        raise ValueError("partial output exceeds bounded evidence byte limit")
+    first = partial.readline(header_limit + 1)
+    if len(first) > header_limit:
+        raise ValueError("partial header exceeds bounded evidence byte limit")
     if not first.endswith("\n") or loads_unambiguous_json(first) != header:
         raise ValueError("partial output belongs to another or unrecorded experiment; use a new tag")
     done = {}
     ordered_ids = tuple(cases)
     qualified = "qualification_manifest_sha256" in header["experiment"]
     previous_model = None
-    for line_number, line in enumerate(partial, 2):
+    for line_number, line in enumerate(iter(lambda: partial.readline(row_limit + 1), ""), 2):
+        if len(line) > row_limit:
+            raise ValueError(f"partial row at line {line_number} exceeds bounded evidence byte limit")
         if not line.endswith("\n"):
             raise ValueError(f"partial output has an incomplete row at line {line_number}")
         row = loads_unambiguous_json(line)

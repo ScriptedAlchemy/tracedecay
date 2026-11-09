@@ -1249,6 +1249,93 @@ class QualificationTests(unittest.TestCase):
             )
             self.assertEqual(sample.read_bytes(), sample_bytes)
 
+    def test_qualified_resume_bounds_sparse_partial_and_individual_rows(self):
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            (here / "dataset.json").write_bytes(self.dataset_bytes)
+            (here / "manifest.json").write_bytes(self.manifest_bytes)
+            (here / "server.json").write_text(json.dumps(self.server_config))
+            args = [
+                "--url", self.endpoint, "--tag", "bounded-resume",
+                "--server-config", str(here / "server.json"),
+                "--qualification-manifest", str(here / "manifest.json"),
+                "B_noul_text",
+            ]
+            partial = here / "results" / "bounded-resume_B_noul_text.json.partial"
+            completed = here / "results" / "bounded-resume_B_noul_text.json"
+            calls = 0
+
+            def interrupt(url, body, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("interrupted after first held-out result")
+                return {
+                    "model": "self-reported-test-model",
+                    "answers": {key: {"type": "noul", "noul": 0.2}
+                                for key in body["questions"]},
+                }, 4.0
+
+            with patch.object(run_http, "HERE", str(here)), patch.object(
+                run_http, "post", side_effect=interrupt,
+            ):
+                with self.assertRaisesRegex(OSError, "interrupted after first held-out"):
+                    run_http.main(args)
+            self.assertEqual(calls, 2)
+            original = partial.read_bytes()
+            self.assertEqual(len(original.splitlines()), 2)
+            self.assertFalse(completed.exists())
+
+            header = json.loads(original.splitlines()[0])
+            header_limit = len(json.dumps(header, allow_nan=False)) + 4096
+            case_ids = ["holdout-positive", "holdout-negative"]
+            row_limit = 16 * (
+                run_http.MAX_HTTP_RESPONSE_BYTES
+                + len(json.dumps(self.questions, allow_nan=False))
+                + max(map(len, case_ids))
+            ) + 4096
+            total_limit = header_limit + 1 + len(case_ids) * (row_limit + 1)
+
+            # A sparse oversized file fails at fstat rather than being read.
+            with partial.open("r+b") as output:
+                output.truncate(total_limit + 1)
+            with patch.object(run_http, "HERE", str(here)), patch.object(
+                run_http, "post",
+            ) as post:
+                with self.assertRaisesRegex(ValueError, "partial output exceeds bounded evidence"):
+                    run_http.main(args)
+                post.assert_not_called()
+            self.assertEqual(partial.stat().st_size, total_limit + 1)
+            self.assertFalse(completed.exists())
+
+            # A single unterminated row exceeds its cap even below total cap.
+            partial.write_bytes(original)
+            with partial.open("r+b") as output:
+                output.truncate(len(original) + row_limit + 1)
+            self.assertLessEqual(partial.stat().st_size, total_limit)
+            with patch.object(run_http, "HERE", str(here)), patch.object(
+                run_http, "post",
+            ) as post:
+                with self.assertRaisesRegex(ValueError, "partial row at line 3 exceeds bounded"):
+                    run_http.main(args)
+                post.assert_not_called()
+            self.assertFalse(completed.exists())
+
+            # Restoring the real prefix resumes exactly one remaining case.
+            partial.write_bytes(original)
+            with patch.object(run_http, "HERE", str(here)), patch.object(
+                run_http, "post", side_effect=lambda url, body, **kwargs: (
+                    {"model": "self-reported-test-model",
+                     "answers": {key: {"type": "noul", "noul": 0.1}
+                                 for key in body["questions"]}},
+                    3.0,
+                ),
+            ) as post:
+                run_http.main(args)
+                self.assertEqual(post.call_count, 1)
+            self.assertFalse(partial.exists())
+            self.assertEqual(len(json.loads(completed.read_text())["rows"]), 2)
+
     def test_qualified_sample_refuses_oversize_and_growth_before_parsing(self):
         with tempfile.TemporaryDirectory() as temp:
             sample = Path(temp) / "first.json"
