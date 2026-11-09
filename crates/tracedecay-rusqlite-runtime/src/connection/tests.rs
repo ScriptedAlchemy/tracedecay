@@ -49,6 +49,13 @@ fn writer_mode_applies_wal_integrity_and_write_policy() {
     assert_eq!(pragma_i64(&connection, "synchronous"), 1);
     assert_eq!(pragma_i64(&connection, "foreign_keys"), 1);
     assert_eq!(pragma_i64(&connection, "trusted_schema"), 0);
+    assert_eq!(
+        connection
+            .query_row("PRAGMA temp.auto_vacuum", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        1,
+        "production writers must install TEMP reclamation before using TEMP"
+    );
     assert!(
         connection
             .db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE)
