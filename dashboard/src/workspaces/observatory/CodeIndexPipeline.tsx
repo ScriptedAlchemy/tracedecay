@@ -142,7 +142,15 @@ function CodeIndexReadinessList({
 export function CodeIndexAttemptReading({ worktree }: { worktree: CodeIndexWorktreeFreshnessV1 }) {
   const attempt = worktree.preseal_attempt;
   const graph = worktree.native_graph_progress;
-  if (!attempt?.active && !graph?.active) return null;
+  // An inactive writer is no longer live, but its committed milestones still
+  // belong to this generation. Encoding alone is not durable completion.
+  const showGraph = graph != null && (
+    graph.active || (
+      graph.generation_id === worktree.latest_generation_id &&
+      (graph.committed_stage_pages > 0 || graph.committed_compact_segments > 0)
+    )
+  );
+  if (!attempt?.active && !showGraph) return null;
   return (
     <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
       {attempt?.active && (
@@ -154,9 +162,11 @@ export function CodeIndexAttemptReading({ worktree }: { worktree: CodeIndexWorkt
           </dd>
         </>
       )}
-      {graph?.active && (
+      {showGraph && graph && (
         <>
-          <dt className="text-text-muted">Graph writer</dt>
+          <dt className="text-text-muted">
+            {graph.active ? 'Graph writer' : 'Graph milestones'}
+          </dt>
           <dd className="text-right text-text-secondary">
             {graph.phase?.replaceAll('_', ' ') ?? 'awaiting first update'} ·{' '}
             {formatCount(graph.encoded_entities)} entities encoded ·{' '}
