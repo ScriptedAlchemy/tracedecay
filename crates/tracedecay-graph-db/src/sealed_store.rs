@@ -1922,8 +1922,8 @@ fn build_or_open_sealed_store(
             .and_then(|name| name.to_str())
             .unwrap_or("sealed")
     ));
-    // A failed cleanup must never be followed by create_dir_all: it would
-    // accept a pre-existing staging symlink and write into its foreign target.
+    // create_dir_all may accept a symlinked sealed root, so verify the actual
+    // root before creating the staging entry or writing a container.
     std::fs::create_dir_all(&root)
         .map_err(|error| sealed_store_io_failure("sealed root create failed", error))?;
     // create_dir_all accepts symlinked directory components. Refuse a
@@ -1938,8 +1938,9 @@ fn build_or_open_sealed_store(
     let staging_name = staging
         .file_name()
         .ok_or_else(|| GraphDbError::unavailable("sealed staging name missing"))?;
-    tracedecay_private_fs::capability_dir::remove_child_directory_nofollow(&root, staging_name)
-        .map_err(|error| sealed_store_io_failure("staging directory cleanup refused", error))?;
+    // A deterministic staging name is not proof of ownership. An earlier
+    // interrupted build or a foreign directory must not be deleted on retry.
+    // create_dir is exclusive, so an occupied name fails closed.
     std::fs::create_dir(&staging)
         .map_err(|error| sealed_store_io_failure("staging directory create failed", error))?;
     let receipt = stage_sealed_artifact(rows, identity, expected, &staging, check)
@@ -3612,9 +3613,8 @@ mod build_tests {
         assert_eq!(store.recovered_digest(), expected.as_str());
     }
 
-    /// A leftover staging symlink must not become a writable artifact root.
-    /// Refusing it preserves the foreign target rather than following it after
-    /// a best-effort cleanup that did not actually unlink the entry.
+    /// A pre-existing staging symlink must not become a writable artifact
+    /// root or be unlinked as disposable scratch space.
     #[cfg(unix)]
     #[test]
     fn sealed_build_refuses_a_foreign_staging_symlink() {
@@ -3677,6 +3677,55 @@ mod build_tests {
             directory.join(SEALED_STORE_DATABASE_FILE).is_file(),
             "valid staging must install a verified sealed container"
         );
+    }
+
+    /// A pre-existing real staging directory is not disposable merely
+    /// because its name matches the generation being built.
+    #[test]
+    fn sealed_build_preserves_a_foreign_real_staging_directory() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(2, 1);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        let root = sealed_store_root(&database_path);
+        let directory = sealed_generation_directory(&root, &identity.physical_namespace().unwrap());
+        let staging = root.join(format!(
+            ".staging-{}",
+            directory.file_name().unwrap().to_str().unwrap()
+        ));
+        std::fs::create_dir_all(&staging).unwrap();
+        let sentinel = staging.join("foreign-sentinel");
+        std::fs::write(&sentinel, b"must survive").unwrap();
+
+        let result = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        );
+        assert!(result.is_err(), "an occupied staging entry must refuse sealing");
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"must survive");
+        assert!(
+            !staging.join(SEALED_STORE_DATABASE_FILE).exists()
+                && !staging.join(SEALED_STORE_RECEIPT_FILE).exists(),
+            "refused sealing must not modify foreign staging data"
+        );
+        assert!(!directory.exists(), "no generation may be installed");
+
+        std::fs::remove_dir_all(&staging).unwrap();
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .expect("clearing the unknown stage allows a verified seal");
+        assert_eq!(store.recovered_digest(), expected.as_str());
+        assert!(directory.join(SEALED_STORE_DATABASE_FILE).is_file());
     }
 
     /// The sealed container is written once, complete, after every row has
