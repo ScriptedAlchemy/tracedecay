@@ -407,12 +407,13 @@ fn read_verified_seal_manifest(
     }
 
     let mut manifest = Vec::new();
-    file.by_ref()
-        .take(admitted_len)
-        .read_to_end(&mut manifest)
-        .map_err(|error| GraphDbError::Corrupt {
-            message: format!("sealed generation manifest read failed: {error}"),
-        })?;
+    let read = file.by_ref().take(admitted_len).read_to_end(&mut manifest);
+    // Endpoint scanning may finish this I/O after a caller deadline, even
+    // when the read failed. The interruption is not source corruption.
+    (check)()?;
+    read.map_err(|error| GraphDbError::Corrupt {
+        message: format!("sealed generation manifest read failed: {error}"),
+    })?;
     if u64::try_from(manifest.len()).ok() != Some(admitted_len)
         || encode_lowercase_hex(&Sha256::digest(&manifest)) != expected_digest
     {
@@ -2081,6 +2082,45 @@ mod tests {
     }
 
     #[test]
+    fn sealed_manifest_read_preserves_late_interruption_over_corrupt_bytes() {
+        let temp = TempDir::new().unwrap();
+        let bytes = b"nonempty canonical seal manifest payload";
+        let valid_digest = hex::encode(Sha256::digest(bytes));
+        let wrong_digest = hex::encode(Sha256::digest(b"a different seal payload"));
+        let path = temp.path().join("generation.json");
+        std::fs::write(&path, bytes).unwrap();
+
+        // The real file read succeeds with its exact digest, while identical
+        // I/O with a wrong manifest identity is still rejected as corruption.
+        assert_eq!(
+            read_verified_seal_manifest(&path, &valid_digest, &|| Ok(())).unwrap(),
+            bytes
+        );
+        assert!(matches!(
+            read_verified_seal_manifest(&path, &wrong_digest, &|| Ok(())),
+            Err(GraphDbError::Corrupt { .. })
+        ));
+
+        for interruption in [GraphDbError::Cancelled, GraphDbError::DeadlineExceeded] {
+            let probes = AtomicUsize::new(0);
+            let error = read_verified_seal_manifest(&path, &wrong_digest, &|| {
+                if probes.fetch_add(1, Ordering::SeqCst) == 1 {
+                    Err(interruption.clone())
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+            assert_eq!(error, interruption);
+            assert_eq!(
+                probes.load(Ordering::SeqCst),
+                2,
+                "a nonzero real manifest read must finish before interruption is reported",
+            );
+        }
+    }
+
+    #[test]
     fn retained_seal_fallback_preserves_late_interruption_after_real_reads() {
         let temp = TempDir::new().unwrap();
         let canonical = temp.path().join("canonical-seal");
@@ -2109,7 +2149,7 @@ mod tests {
                 &pool,
                 &digest,
                 &|| {
-                    if probes.fetch_add(1, Ordering::SeqCst) >= 2 {
+                    if probes.fetch_add(1, Ordering::SeqCst) >= 3 {
                         Err(interruption.clone())
                     } else {
                         Ok(())
@@ -2121,7 +2161,7 @@ mod tests {
             assert_eq!(error, interruption);
             assert_eq!(
                 probes.load(Ordering::SeqCst),
-                3,
+                4,
                 "the retained copy must complete its real read before the late interruption",
             );
         }
