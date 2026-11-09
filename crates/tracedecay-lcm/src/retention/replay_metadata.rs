@@ -110,7 +110,7 @@ struct Candidate {
     store_id: i64,
     eligible: bool,
     oversized: bool,
-    read_bytes: Option<u64>,
+    body_size_known: bool,
 }
 
 /// Admit a prefix bounded by both metadata parsing and body-read estimates
@@ -185,7 +185,7 @@ async fn candidates(
             store_id,
             eligible: false,
             oversized,
-            read_bytes,
+            body_size_known: read_bytes.is_some(),
         });
     }
     drop(rows);
@@ -235,48 +235,38 @@ async fn step(
         metadata_bytes_examined,
         ..ReplayMetadataCompactionReport::default()
     };
-    let mut remaining = MAX_BATCH_BYTES;
     let mut guard_suspended = false;
     for candidate in candidates {
         if candidate.oversized {
             report.rows_skipped += 1;
             report.rows_skipped_oversized += 1;
         } else if candidate.eligible {
-            let bytes = candidate.read_bytes.ok_or_else(|| {
-                db_error(format!(
+            if !candidate.body_size_known {
+                return Err(db_error(format!(
                     "raw row {} has no bounded canonical body",
                     candidate.store_id
-                ))
-            })?;
-            if bytes > MAX_BATCH_BYTES {
-                report.rows_skipped += 1;
-                report.rows_skipped_oversized += 1;
-            } else if bytes > remaining {
-                break;
-            } else {
-                remaining -= bytes;
-                let message = raw::load_raw_message_by_store_id(conn, candidate.store_id).await?;
-                if let Some(metadata) = compacted_metadata(&message)? {
-                    if !guard_suspended {
-                        summary_convergence::suspend_raw_update_guard(conn).await?;
-                        guard_suspended = true;
-                    }
-                    let changed =
-                        apply_metadata(conn, candidate.store_id, &message, &metadata).await?;
-                    if changed {
-                        report.rows_compacted += 1;
-                        report.metadata_bytes_removed += message
-                            .metadata_json
-                            .as_deref()
-                            .map_or(0, str::len)
-                            .saturating_sub(metadata.len())
-                            as u64;
-                    } else {
-                        report.rows_skipped += 1;
-                    }
+                )));
+            }
+            let message = raw::load_raw_message_by_store_id(conn, candidate.store_id).await?;
+            if let Some(metadata) = compacted_metadata(&message)? {
+                if !guard_suspended {
+                    summary_convergence::suspend_raw_update_guard(conn).await?;
+                    guard_suspended = true;
+                }
+                let changed = apply_metadata(conn, candidate.store_id, &message, &metadata).await?;
+                if changed {
+                    report.rows_compacted += 1;
+                    report.metadata_bytes_removed += message
+                        .metadata_json
+                        .as_deref()
+                        .map_or(0, str::len)
+                        .saturating_sub(metadata.len())
+                        as u64;
                 } else {
                     report.rows_skipped += 1;
                 }
+            } else {
+                report.rows_skipped += 1;
             }
         }
         report.rows_scanned += 1;
