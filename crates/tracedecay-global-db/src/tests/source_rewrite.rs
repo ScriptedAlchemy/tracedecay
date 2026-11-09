@@ -660,3 +660,100 @@ async fn rewrite_completion_skips_settled_records_without_revival() {
         "eightfold more settled records must not create per-record writer commands"
     );
 }
+
+/// With a large current-generation prefix, each older-generation page must
+/// seek beyond already checked survivors instead of walking them repeatedly.
+async fn source_rewrite_steps_with_survivor_prefix(unoffered: usize) -> u64 {
+    const SURVIVORS: usize = 4_096;
+    let harness = RegisteredGlobalDbHarness::open("source-rewrite-seek-prefix").await;
+    let source =
+        ObservationSourceIdentityV1::new(SessionId::new("session.seek-prefix").unwrap()).unwrap();
+    let scope = ObservationScopeV1::Profile;
+    let previous = ObservationSourceGenerationV1::new(1).unwrap();
+    let generation = ObservationSourceGenerationV1::new(2).unwrap();
+    let key = serde_json::to_string(&(source.clone(), scope.clone())).unwrap();
+    let old_id = previous.generation_id().to_string();
+    let new_id = generation.generation_id().to_string();
+    let writer = harness.registered.writer_connection().unwrap();
+    for start in (0..(SURVIVORS + unoffered)).step_by(128) {
+        let end = (start + 128).min(SURVIVORS + unoffered);
+        let values = (start..end)
+            .map(|index| {
+                (
+                    format!("sha256:{index:06}"),
+                    if index < SURVIVORS {
+                        new_id.as_str()
+                    } else {
+                        old_id.as_str()
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let encoded = serde_json::to_string(&values).unwrap();
+        writer
+            .execute(
+                "INSERT INTO observation_source_presence (
+                    source_key, observation_id, generation, start_offset
+                 ) SELECT ?1, json_extract(value, '$[0]'),
+                          json_extract(value, '$[1]'), 0 FROM json_each(?2)",
+                params![key.as_str(), encoded.as_str()],
+            )
+            .await
+            .unwrap();
+    }
+    harness
+        .registered
+        .begin_observation_source_rewrite(&source, &scope, previous, generation, 0)
+        .await
+        .unwrap();
+    let before = writer_telemetry(&harness.registered);
+    assert_eq!(
+        harness
+            .registered
+            .complete_observation_source_rewrite(&source, &scope, generation)
+            .await
+            .unwrap(),
+        0,
+        "presence-only rows have no projected observations to retire"
+    );
+    let after = writer_telemetry(&harness.registered);
+    assert_eq!(
+        after.transactions.committed_transactions - before.transactions.committed_transactions,
+        unoffered.div_ceil(128) as u64,
+        "each bounded page must commit independently"
+    );
+    assert_eq!(
+        table_count(
+            &writer,
+            &format!(
+                "SELECT COUNT(*) FROM observation_source_presence WHERE generation = '{old_id}'"
+            ),
+        )
+        .await,
+        0,
+        "all unoffered older records must be deleted"
+    );
+    assert_eq!(
+        table_count(
+            &writer,
+            &format!(
+                "SELECT COUNT(*) FROM observation_source_presence WHERE generation = '{new_id}'"
+            ),
+        )
+        .await,
+        SURVIVORS as i64,
+        "the current-generation survivors must remain untouched"
+    );
+    after.sqlite_vm.vm_steps - before.sqlite_vm.vm_steps
+}
+
+#[asupersync::test]
+async fn source_rewrite_pages_do_not_rescan_the_same_survivor_prefix() {
+    let one_page_steps = source_rewrite_steps_with_survivor_prefix(127).await;
+    let eight_page_steps = source_rewrite_steps_with_survivor_prefix(1_023).await;
+    assert!(
+        eight_page_steps < one_page_steps.saturating_mul(3),
+        "eight retirement pages must seek beyond the 4096 survivor records: \
+         one page {one_page_steps} VM steps; eight pages {eight_page_steps}"
+    );
+}

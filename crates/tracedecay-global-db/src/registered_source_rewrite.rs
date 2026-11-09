@@ -255,6 +255,9 @@ impl RegisteredGlobalDb {
         }
         drop(snapshot);
         let mut total_retired = 0_u64;
+        // Durably deleted pages survive restart; within this invocation seek
+        // past the already-visited current-generation survivor prefix.
+        let mut resume_from = String::new();
         loop {
             // The remaining older-generation presence entries are the durable
             // continuation frontier. Each page commits its retirements and
@@ -262,7 +265,8 @@ impl RegisteredGlobalDb {
             // page rolls back without repeating earlier committed pages.
             let key = key.clone();
             let generation = generation.clone();
-            let (retired, finished) = self
+            let after_id = resume_from.clone();
+            let (retired, finished, next_cursor) = self
                 .transact_or_rollback(
                     |error| storage("run source rewrite completion page", error),
                     async move |transaction| {
@@ -295,6 +299,7 @@ impl RegisteredGlobalDb {
                                         )
                                  FROM observation_source_presence AS presence
                                  WHERE presence.source_key = ?1 AND presence.generation <> ?2
+                                   AND presence.observation_id >= ?5
                                  ORDER BY presence.observation_id
                                  LIMIT ?3",
                                 params![
@@ -302,6 +307,7 @@ impl RegisteredGlobalDb {
                                     generation.as_str(),
                                     UNOFFERED_RECORD_PAGE_SIZE,
                                     SESSION_MESSAGE_PROJECTOR_VERSION,
+                                    after_id.as_str(),
                                 ],
                             )
                             .await
@@ -322,17 +328,6 @@ impl RegisteredGlobalDb {
                             ));
                         }
                         drop(rows);
-                        if page.is_empty() {
-                            transaction
-                                .execute(
-                                    "DELETE FROM observation_source_rewrites
-                                     WHERE source_key = ?1 AND generation = ?2",
-                                    params![key.as_str(), generation.as_str()],
-                                )
-                                .await
-                                .map_err(|error| storage("settle source rewrite", error))?;
-                            return Ok((0, true));
-                        }
                         let mut retired = 0_u64;
                         for (observation_id, needs_retirement) in &page {
                             if !needs_retirement {
@@ -345,28 +340,61 @@ impl RegisteredGlobalDb {
                                 retired += 1;
                             }
                         }
-                        let last_id = &page[page.len() - 1].0;
-                        transaction
-                            .execute(
-                                "DELETE FROM observation_source_presence
-                                 WHERE source_key = ?1 AND generation <> ?2
-                                   AND observation_id <= ?3",
-                                params![key.as_str(), generation.as_str(), last_id.as_str()],
-                            )
-                            .await
-                            .map_err(|error| storage("settle source rewrite page", error))?;
-                        let finished = (page.len() as i64) < UNOFFERED_RECORD_PAGE_SIZE;
-                        if finished {
+                        if let Some((last_id, _)) = page.last() {
                             transaction
                                 .execute(
-                                    "DELETE FROM observation_source_rewrites
-                                     WHERE source_key = ?1 AND generation = ?2",
+                                    "DELETE FROM observation_source_presence
+                                     WHERE source_key = ?1 AND generation <> ?2
+                                       AND observation_id >= ?4 AND observation_id <= ?3",
+                                    params![
+                                        key.as_str(),
+                                        generation.as_str(),
+                                        last_id.as_str(),
+                                        after_id.as_str(),
+                                    ],
+                                )
+                                .await
+                                .map_err(|error| storage("settle source rewrite page", error))?;
+                        }
+                        // Another admitted writer can append an older-generation
+                        // key behind this in-memory seek between commits. Recheck
+                        // the entire source before dropping the durable marker.
+                        let last_page = (page.len() as i64) < UNOFFERED_RECORD_PAGE_SIZE;
+                        let finished = if last_page {
+                            let mut remaining = transaction
+                                .query(
+                                    "SELECT 1 FROM observation_source_presence
+                                     WHERE source_key = ?1 AND generation <> ?2 LIMIT 1",
                                     params![key.as_str(), generation.as_str()],
                                 )
                                 .await
-                                .map_err(|error| storage("settle source rewrite", error))?;
-                        }
-                        Ok((retired, finished))
+                                .map_err(|error| storage("check remaining source records", error))?;
+                            let empty = remaining
+                                .next()
+                                .await
+                                .map_err(|error| storage("check remaining source records", error))?
+                                .is_none();
+                            drop(remaining);
+                            if empty {
+                                transaction
+                                    .execute(
+                                        "DELETE FROM observation_source_rewrites
+                                         WHERE source_key = ?1 AND generation = ?2",
+                                        params![key.as_str(), generation.as_str()],
+                                    )
+                                    .await
+                                    .map_err(|error| storage("settle source rewrite", error))?;
+                            }
+                            empty
+                        } else {
+                            false
+                        };
+                        let next_cursor = if last_page {
+                            String::new()
+                        } else {
+                            page.last().map(|(id, _)| id.clone()).unwrap_or_default()
+                        };
+                        Ok((retired, finished, next_cursor))
                     },
                 )
                 .await?;
@@ -374,6 +402,7 @@ impl RegisteredGlobalDb {
             if finished {
                 return Ok(total_retired);
             }
+            resume_from = next_cursor;
         }
     }
 }
