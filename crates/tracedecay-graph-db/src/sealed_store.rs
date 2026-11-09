@@ -2012,9 +2012,14 @@ fn build_sealed_container_with_work(
         let _span = tracing::trace_span!("code_index.seal.encode").entered();
         {
             match rows {
-                SealedRowSource::Staging(source) => {
-                    push_staged_rows(source, identity, &physical_namespace, &mut sealed, check)
-                }
+                SealedRowSource::Staging(source) => push_staged_rows(
+                    source,
+                    identity,
+                    &physical_namespace,
+                    &mut sealed,
+                    check,
+                    &report_window,
+                ),
                 SealedRowSource::Manifest(manifest) => {
                     let counts = push_manifest_rows(
                         manifest,
@@ -2386,6 +2391,7 @@ fn push_staged_rows(
     physical_namespace: &GraphNamespace,
     rows: &mut SealedCompactRows,
     check: &dyn Fn() -> Result<(), GraphDbError>,
+    observe: &dyn Fn(NativeCompactEncodeBoundaryV1),
 ) -> Result<(usize, usize, BTreeMap<GraphNamespace, GraphProjectionId>), GraphDbError> {
     // Physical namespace -> projection identity for the generation and its
     // dependency closure; an endpoint outside this map escapes the closure.
@@ -2420,6 +2426,7 @@ fn push_staged_rows(
     let relation_count = relation_locators.len();
     // Staging entity handle -> sealed node, for endpoint resolution.
     let mut sealed_endpoints: HashMap<NodeId, NodeId> = HashMap::new();
+    let mut encoded_entities = 0usize;
 
     // 1. The generation's own entities, in recovered-digest order.
     {
@@ -2450,6 +2457,16 @@ fn push_staged_rows(
                         });
                     }
                 }
+                drop(guard);
+                encoded_entities += chunk.len();
+                // The compact builder accepted these exact staged rows; this
+                // is not another receipted staging-page transaction.
+                observe(NativeCompactEncodeBoundaryV1 {
+                    kind: GraphNativeWorkKindV1::Entities,
+                    completed_rows: encoded_entities,
+                    total_rows: entity_count,
+                    total_relations: relation_count,
+                });
             }
             Ok::<(), GraphDbError>(())
         }
@@ -2463,6 +2480,7 @@ fn push_staged_rows(
     let mut endpoint_cache = EndpointIdentityCache::default();
     let mut dependency_namespaces_written: BTreeMap<GraphNamespace, GraphProjectionId> =
         BTreeMap::new();
+    let mut encoded_relations = 0usize;
     {
         let _span = tracing::trace_span!("graph_db.sealed_store.copy.relations").entered();
         {
@@ -2519,6 +2537,14 @@ fn push_staged_rows(
                         endpoints[1],
                     )?;
                 }
+                drop(guard);
+                encoded_relations += chunk.len();
+                observe(NativeCompactEncodeBoundaryV1 {
+                    kind: GraphNativeWorkKindV1::Relations,
+                    completed_rows: encoded_relations,
+                    total_rows: relation_count,
+                    total_relations: relation_count,
+                });
             }
             Ok::<(), GraphDbError>(())
         }
@@ -3315,6 +3341,135 @@ mod build_tests {
             written,
             "reopen, proof, reads, and close must leave the sealed bytes exactly as written"
         );
+    }
+
+    /// Staging pages are already durable, but copying their rows into the
+    /// final compact builder is separate, non-durable work. Cancellation must
+    /// expose only accepted windows; retry must install one verified segment
+    /// and adoption must not report any new work.
+    #[test]
+    fn staged_compact_copy_reports_real_windows_without_forged_commits() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let database = open_source(&database_path);
+        let manifest = manifest(1_500, 1_600);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        database
+            .apply_generation_unverified_with_digest(Arc::new(manifest), &expected, check)
+            .unwrap();
+
+        let accepted_entities = AtomicUsize::new(0);
+        let interrupted_work = Mutex::new(Vec::<GraphNativeWorkV1>::new());
+        let on_interrupted_window = |event: GraphNativeWorkV1| {
+            if let GraphNativeWorkV1::CompactRowsEncoded {
+                kind: GraphNativeWorkKindV1::Entities,
+                completed_rows,
+                ..
+            } = &event
+            {
+                accepted_entities.store(*completed_rows as usize, Ordering::Release);
+            }
+            interrupted_work.lock().unwrap().push(event);
+        };
+        let interrupt_after_window = || {
+            if accepted_entities.load(Ordering::Acquire) > 0 {
+                Err(GraphDbError::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
+        let interrupted = build_or_open_sealed_store_with_work(
+            SealedRowSource::Staging(&database),
+            &identity,
+            &expected,
+            &database_path,
+            &interrupt_after_window,
+            Some(&on_interrupted_window),
+        );
+        assert!(matches!(interrupted, Err(GraphDbError::Cancelled)));
+        let interrupted_work = interrupted_work.lock().unwrap().clone();
+        assert!(
+            interrupted_work.iter().any(|event| matches!(
+                event,
+                GraphNativeWorkV1::CompactRowsEncoded {
+                    kind: GraphNativeWorkKindV1::Entities,
+                    completed_rows: 1..,
+                    ..
+                }
+            )),
+            "a real staged row window must precede the cancellation"
+        );
+        assert!(
+            interrupted_work.iter().all(|event| matches!(
+                event,
+                GraphNativeWorkV1::CompactRowsEncoded { .. }
+            )),
+            "failed compact copy cannot claim a verified segment or a new staging page"
+        );
+
+        let observed = Mutex::new(Vec::<GraphNativeWorkV1>::new());
+        let report = |event| observed.lock().unwrap().push(event);
+        let (installed, proof) = build_or_open_sealed_store_with_work(
+            SealedRowSource::Staging(&database),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+            Some(&report),
+        )
+        .expect("retry staged copy and verify compact segment");
+        assert!(proof.is_some());
+        assert_eq!(installed.recovered_digest(), expected.as_str());
+        let completed = observed.lock().unwrap().clone();
+        assert!(completed.iter().any(|event| matches!(
+            event,
+            GraphNativeWorkV1::CompactRowsEncoded {
+                kind: GraphNativeWorkKindV1::Entities,
+                completed_rows: 1500,
+                total_rows: 1500,
+                total_relations: 1600,
+            }
+        )));
+        assert!(completed.iter().any(|event| matches!(
+            event,
+            GraphNativeWorkV1::CompactRowsEncoded {
+                kind: GraphNativeWorkKindV1::Relations,
+                completed_rows: 1600,
+                total_rows: 1600,
+                total_relations: 1600,
+            }
+        )));
+        assert!(matches!(
+            completed.last(),
+            Some(GraphNativeWorkV1::CompactSegmentVerified {
+                entities: 1500,
+                relations: 1600,
+                canonical_bytes: 1..,
+            })
+        ));
+        assert!(
+            completed.iter().all(|event| !matches!(
+                event,
+                GraphNativeWorkV1::StagePageApplied { .. }
+            )),
+            "compact copies are non-durable until their verified segment is installed"
+        );
+        let _ = installed.database().close();
+        let (reused, reuse_proof) = build_or_open_sealed_store_with_work(
+            SealedRowSource::Staging(&database),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+            Some(&report),
+        )
+        .expect("reopen already installed compact segment");
+        assert!(reuse_proof.is_none());
+        assert_eq!(reused.recovered_digest(), expected.as_str());
+        assert_eq!(*observed.lock().unwrap(), completed);
+        let _ = reused.database().close();
     }
 
     /// A competing writer's already installed segment is read-only evidence,
