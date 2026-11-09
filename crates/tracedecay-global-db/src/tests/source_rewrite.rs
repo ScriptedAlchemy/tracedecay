@@ -19,7 +19,7 @@ use tracedecay_store::{ProjectionSkipReason, ProjectionStoreError};
 use crate::ObservationSourcePresenceV1;
 use crate::tests::harness::{
     HostAdmissionScope, HostAdmissionTestRuntimeV1, RegisteredGlobalDbHarness,
-    seed_projected_messages, writer_telemetry,
+    seed_projected_messages,
 };
 
 /// More unoffered records than one keyset page *and* more than the engine's
@@ -345,18 +345,43 @@ async fn source_presence_pages_are_atomic_and_unchanged_reoffers_do_not_write() 
             start_offset: index as u64,
         })
         .collect::<Vec<_>>();
-    let commands = || writer_telemetry(&harness.registered).transactions.commands;
-    let before = commands();
+    // SQLite accounts for the outer INSERT's rows when its statement ends.
+    // Subtract the probe's own writes so all rows from one statement share
+    // a marker, even though their AFTER INSERT trigger fires individually.
+    let setup = harness.registered.begin_write_transaction().await.unwrap();
+    setup
+        .execute_batch(
+            "CREATE TABLE presence_page_probe (prior_changes INTEGER NOT NULL);
+             CREATE TRIGGER observe_presence_page AFTER INSERT ON observation_source_presence
+             BEGIN
+                 INSERT INTO presence_page_probe VALUES (
+                     total_changes() - (SELECT COALESCE(MAX(rowid), 0) FROM presence_page_probe)
+                 );
+             END;",
+        )
+        .await
+        .unwrap();
+    setup.commit().await.unwrap();
     harness
         .registered
         .record_observation_source_presence(&source, &scope, &offered)
         .await
         .unwrap();
-    assert_eq!(
-        commands() - before,
-        3,
-        "257 real presence records must need three bounded writer statements, not 257"
-    );
+    let snapshot = harness.registered.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT COUNT(*) FROM presence_page_probe GROUP BY prior_changes ORDER BY prior_changes",
+            (),
+        )
+        .await
+        .unwrap();
+    let mut pages = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        pages.push(row.get::<i64>(0).unwrap());
+    }
+    assert_eq!(pages, [128, 128, 1]);
+    drop(rows);
+    drop(snapshot);
 
     // A SQLite trigger makes a redundant UPDATE observable and fatal, even
     // if SQLite would have written unchanged column values.
@@ -373,13 +398,11 @@ async fn source_presence_pages_are_atomic_and_unchanged_reoffers_do_not_write() 
         .await
         .unwrap();
     transaction.commit().await.unwrap();
-    let before = commands();
     harness
         .registered
         .record_observation_source_presence(&source, &scope, &offered)
         .await
         .unwrap();
-    assert_eq!(commands() - before, 3);
 
     let mut replacement = offered
         .iter()
