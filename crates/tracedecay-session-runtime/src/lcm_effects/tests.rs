@@ -2278,6 +2278,87 @@ async fn partial_revision_invalidation_hides_replay_and_yields_to_a_due_peer() {
 }
 
 #[tokio::test]
+async fn relation_recovery_orders_tied_keys_and_preserves_the_deferred_deadline() {
+    let harness = RegisteredGlobalDbHarness::open("relation-recovery-page-order").await;
+    let db = &harness.registered;
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch(
+            "WITH RECURSIVE seq(n) AS (
+                 VALUES(0) UNION ALL SELECT n + 1 FROM seq WHERE n < 70
+             )
+             INSERT INTO session_temporal_generations (
+                 session_id, generation, state, frozen_watermarks_json, created_at
+             ) SELECT printf('relation-page-%02d', n / 2), 1 + n % 2, 'building', '{}', n
+               FROM seq;
+             INSERT INTO session_relation_receipts (
+                 session_id, generation, scope_kind, scope_id, expected_graph_watermark,
+                 state, created_at, recovery_state, recovery_next_attempt_at
+             ) SELECT session_id, generation, 'project_sessions', 'unrelated-scope', 'expected',
+                      'pending', 42, CASE WHEN generation = 1 THEN 'retryable' ELSE 'pending' END,
+                      CASE WHEN created_at = 70 THEN unixepoch() + 86400
+                           ELSE (70 - created_at) % 3 END
+               FROM session_temporal_generations;",
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    let access = SessionTemporalAccess::new(&**db);
+    let cancellation = std::sync::Arc::new(tracedecay_graph_db::NeverCancelled);
+    let first = access
+        .recover_pending_session_relation_projection_page(65, cancellation.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        (first.processed, first.recovered, first.has_more),
+        (65, 0, true)
+    );
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT generation, recovery_state, recovery_failure_code
+             FROM session_relation_receipts WHERE session_id = 'relation-page-32'
+             ORDER BY generation",
+            (),
+        )
+        .await
+        .unwrap();
+    let settled = rows.next().await.unwrap().unwrap();
+    assert_eq!(settled.get::<i64>(0).unwrap(), 1);
+    assert_eq!(settled.get::<String>(2).unwrap(), "scope_mismatch");
+    let sentinel = rows.next().await.unwrap().unwrap();
+    assert_eq!(sentinel.get::<i64>(0).unwrap(), 2);
+    assert_eq!(sentinel.get::<String>(1).unwrap(), "pending");
+    assert_eq!(sentinel.get::<Option<String>>(2).unwrap(), None);
+    drop(rows);
+    let mut rows = snapshot
+        .query(
+            "SELECT recovery_next_attempt_at FROM session_relation_receipts
+             WHERE session_id = 'relation-page-35' AND generation = 1",
+            (),
+        )
+        .await
+        .unwrap();
+    let deferred_deadline = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+    drop(rows);
+    drop(snapshot);
+    let rest = access
+        .recover_pending_session_relation_projection_page(65, cancellation.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        (rest.processed, rest.recovered, rest.has_more),
+        (5, 0, false)
+    );
+    let idle = access
+        .recover_pending_session_relation_projection_page(65, cancellation)
+        .await
+        .unwrap();
+    assert_eq!((idle.processed, idle.has_more), (0, false));
+    assert_eq!(idle.next_retry_at_unix_seconds, Some(deferred_deadline));
+}
+
+#[tokio::test]
 async fn malformed_relation_receipt_is_permanent_without_starving_summary_work() {
     let harness = RegisteredGlobalDbHarness::open("lcm-relation-recovery-poison").await;
     let db = harness.registered.clone();
@@ -2497,11 +2578,9 @@ async fn malformed_relation_receipt_is_permanent_without_starving_summary_work()
                  SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 256
              )
              INSERT INTO session_temporal_generations (
-                 session_id, generation, state, frozen_watermarks_json,
-                 created_at, ready_at, activated_at
+                 session_id, generation, state, frozen_watermarks_json, created_at
              )
-             SELECT printf('deferred-relation-%04d', n), 1, 'active', '{}',
-                    n, n, n FROM seq",
+             SELECT printf('deferred-relation-%04d', n), 1, 'building', '{}', n FROM seq",
             (),
         )
         .await
@@ -2561,7 +2640,12 @@ async fn malformed_relation_receipt_is_permanent_without_starving_summary_work()
         .await
         .unwrap();
     assert_eq!(
-        rows.next().await.unwrap().unwrap().get::<String>(0).unwrap(),
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
         "permanent",
         "the earlier due receipt must settle on the first page"
     );
