@@ -166,7 +166,7 @@ function WorktreeReading({
       {progress ? (
         <BuildProgressReading progress={progress} observedAtMicros={observedAtMicros} />
       ) : null}
-      <CodeIndexAttemptReading worktree={worktree} />
+      <CodeIndexAttemptReading worktree={worktree} observedAtMicros={observedAtMicros} />
       {worktree.restore_progress ? (
         <div className="border-b border-edge-subtle pb-1.5 text-3xs leading-snug">
           <div className="flex items-baseline justify-between gap-2">

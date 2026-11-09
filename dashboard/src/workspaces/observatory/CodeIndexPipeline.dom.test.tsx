@@ -132,6 +132,68 @@ describe('code-index activity polling', () => {
     expect(screen.queryByText('no active code-index build')).toBeNull();
   });
 
+  it('reports frozen writer clocks and clears warnings on real work or retirement', () => {
+    const frozen = freshness({
+      progress: progress({ phase: 'ready' }),
+      preseal_attempt: {
+        daemon_incarnation: 1, producer_incarnation: 2, attempt_sequence: 3,
+        progress_epoch: 4, phase: 'capture', completed_items: 7,
+        total_items: 10, last_progress_micros: OBSERVED_AT - 60_000_000, active: true,
+      },
+    }, 'loading');
+    frozen.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(frozen.envelope.payload);
+    const view = render(<CodeIndexPipeline result={frozen} pending={false} scopeKey="project" />);
+    expect(screen.getByText('no observed preseal work for 60s')).toBeTruthy();
+    expect(screen.getByText('capture · 7 / 10 items')).toBeTruthy();
+
+    const recovered = freshness({
+      preseal_attempt: {
+        daemon_incarnation: 1, producer_incarnation: 2, attempt_sequence: 3,
+        progress_epoch: 5, phase: 'parse_evidence', completed_items: 8,
+        total_items: 10, last_progress_micros: OBSERVED_AT, active: true,
+      },
+    }, 'loading');
+    recovered.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(recovered.envelope.payload);
+    view.rerender(<CodeIndexPipeline result={recovered} pending={false} scopeKey="project" />);
+    expect(screen.getByText('parse evidence · 8 / 10 items')).toBeTruthy();
+    expect(screen.queryByText(/no observed preseal work/)).toBeNull();
+
+    const nativeProgress: NonNullable<CodeIndexWorktreeFreshnessV1['native_graph_progress']> = {
+      generation_id: GENERATION, sealed_graph_digest: 'sha256:graph',
+      daemon_incarnation: 1, producer_incarnation: 2, attempt_sequence: 4,
+      progress_epoch: 6, phase: 'stage_page_commit',
+      encoded_entities: 17, total_entities: 25,
+      encoded_relations: 3, total_relations: 9,
+      committed_stage_pages: 1, committed_stage_mutations: 3, committed_stage_bytes: 128,
+      committed_compact_segments: 0, committed_compact_bytes: 0,
+      last_progress_micros: OBSERVED_AT - 120_000_000, active: true,
+    };
+    const frozenGraph = freshness({ native_graph_progress: nativeProgress }, 'loading');
+    frozenGraph.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(frozenGraph.envelope.payload);
+    view.rerender(<CodeIndexPipeline result={frozenGraph} pending={false} scopeKey="project" />);
+    expect(screen.getByText('no observed native graph work for 2m')).toBeTruthy();
+
+    // A verified but inactive writer remains a milestone, not a stalled writer.
+    const completed = freshness({
+      native_graph_progress: {
+        ...nativeProgress, active: false,
+        phase: 'compact_segment_verified', committed_compact_segments: 1,
+      },
+    });
+    completed.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(completed.envelope.payload);
+    view.rerender(<CodeIndexPipeline result={completed} pending={false} scopeKey="project" />);
+    expect(screen.getByText('Graph milestones')).toBeTruthy();
+    expect(screen.queryByText(/no observed native graph work/)).toBeNull();
+
+    // Without a real work stamp, no elapsed no-work duration can be invented.
+    const unreported = freshness({
+      native_graph_progress: { ...nativeProgress, last_progress_micros: null },
+    }, 'loading');
+    unreported.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(unreported.envelope.payload);
+    view.rerender(<CodeIndexPipeline result={unreported} pending={false} scopeKey="project" />);
+    expect(screen.queryByText(/no observed native graph work/)).toBeNull();
+  });
+
   it('keeps polling an in-flight rebuild before its first committed report', () => {
     expect(hasActiveCodeIndexBuild(freshness({ rebuild_in_flight: true }))).toBe(true);
   });

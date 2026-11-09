@@ -24,6 +24,8 @@ export function CodeIndexPipeline({
   const progress = useLatestCodeIndexProgress(result, scopeKey);
   const payload = result?.outcome === 'envelope' ? result.envelope.payload : undefined;
   const worktrees = payload?.worktrees ?? [];
+  const observedAtMicros =
+    result?.outcome === 'envelope' ? result.envelope.time.observation_time_micros : null;
   if (pending) {
     return (
       <section className="mx-4 mt-3" aria-label="Code-index pipeline">
@@ -47,7 +49,7 @@ export function CodeIndexPipeline({
       {payload?.mount_failure ? (
         <CodeIndexMountFailureNotice className="mt-2" failure={payload.mount_failure} />
       ) : (
-        <CodeIndexReadinessList worktrees={worktrees} />
+        <CodeIndexReadinessList worktrees={worktrees} observedAtMicros={observedAtMicros} />
       )}
       {worktrees.some((worktree) => worktree.restore_progress != null) ? (
         <div className="mt-2 flex flex-col gap-2">
@@ -109,8 +111,10 @@ export function CodeIndexMountFailureNotice({
 
 function CodeIndexReadinessList({
   worktrees,
+  observedAtMicros,
 }: {
   worktrees: CodeIndexWorktreeFreshnessV1[];
+  observedAtMicros: number | null;
 }) {
   if (worktrees.length === 0) {
     return <p className="mt-2 text-body text-text-muted">no mounted code-index worktree</p>;
@@ -132,7 +136,7 @@ function CodeIndexReadinessList({
               {graphServingLabel(worktree.code_graph_serving)}
             </dd>
           </dl>
-          <CodeIndexAttemptReading worktree={worktree} />
+          <CodeIndexAttemptReading worktree={worktree} observedAtMicros={observedAtMicros} />
           {worktree.parked ? (
             <p className="mt-2 text-sm text-state-warning">
               parked: {worktree.parked.reason} · {worktree.parked.remediation}
@@ -144,9 +148,23 @@ function CodeIndexReadinessList({
   );
 }
 
-export function CodeIndexAttemptReading({ worktree }: { worktree: CodeIndexWorktreeFreshnessV1 }) {
+export function CodeIndexAttemptReading({
+  worktree,
+  observedAtMicros,
+}: {
+  worktree: CodeIndexWorktreeFreshnessV1;
+  observedAtMicros: number | null;
+}) {
   const attempt = worktree.preseal_attempt;
   const graph = worktree.native_graph_progress;
+  // Only the daemon's observation time and an actual producer work stamp
+  // can establish inactivity. Reading status is not a progress heartbeat.
+  const presealQuiet = attempt?.active
+    ? observedWorkQuietDuration(attempt.last_progress_micros, observedAtMicros)
+    : null;
+  const graphQuiet = graph?.active
+    ? observedWorkQuietDuration(graph.last_progress_micros, observedAtMicros)
+    : null;
   // An inactive writer is no longer live, but its committed milestones still
   // belong to this generation. Encoding alone is not durable completion.
   const showGraph = graph != null && (
@@ -165,6 +183,14 @@ export function CodeIndexAttemptReading({ worktree }: { worktree: CodeIndexWorkt
             {attempt.phase.replaceAll('_', ' ')} · {formatCount(attempt.completed_items)}
             {attempt.total_items != null && ` / ${formatCount(attempt.total_items)}`} items
           </dd>
+          {presealQuiet && (
+            <>
+              <dt className="text-state-warning">Preseal progress</dt>
+              <dd className="text-right text-state-warning">
+                no observed preseal work for {presealQuiet}
+              </dd>
+            </>
+          )}
         </>
       )}
       {showGraph && graph && (
@@ -179,10 +205,28 @@ export function CodeIndexAttemptReading({ worktree }: { worktree: CodeIndexWorkt
             {formatCount(graph.committed_stage_pages)} pages committed ·{' '}
             {formatCount(graph.committed_compact_segments)} segments committed
           </dd>
+          {graphQuiet && (
+            <>
+              <dt className="text-state-warning">Graph progress</dt>
+              <dd className="text-right text-state-warning">
+                no observed native graph work for {graphQuiet}
+              </dd>
+            </>
+          )}
         </>
       )}
     </dl>
   );
+}
+
+function observedWorkQuietDuration(
+  lastProgressMicros: number | null,
+  observedAtMicros: number | null,
+): string | null {
+  if (lastProgressMicros == null || observedAtMicros == null) return null;
+  const quietMicros = observedAtMicros - lastProgressMicros;
+  // No work stamp, or a stamp after the read, is not evidence of a stall.
+  return quietMicros >= 30_000_000 ? formatDurationMicros(quietMicros) : null;
 }
 
 export function hasLiveWorktreeProgress(worktree: CodeIndexWorktreeFreshnessV1): boolean {

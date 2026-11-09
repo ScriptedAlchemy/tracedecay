@@ -153,6 +153,34 @@ describe('Code index freshness', () => {
     )).toBeTruthy();
   });
 
+  it('uses genuine preseal and native writer clocks for no-work warnings', async () => {
+    renderFreshness('loading', {
+      worktrees: [{
+        ...worktree(),
+        preseal_attempt: {
+          daemon_incarnation: 1, producer_incarnation: 2, attempt_sequence: 3,
+          progress_epoch: 4, phase: 'parse_evidence', completed_items: 7,
+          total_items: 10, last_progress_micros: NOW_MICROS - 60_000_000, active: true,
+        },
+        native_graph_progress: {
+          generation_id: 'generation.4f21c9', sealed_graph_digest: 'sha256:graph',
+          daemon_incarnation: 1, producer_incarnation: 2, attempt_sequence: 4,
+          progress_epoch: 6, phase: 'compact_encoding',
+          encoded_entities: 17, total_entities: 25,
+          encoded_relations: 3, total_relations: 9,
+          committed_stage_pages: 0, committed_stage_mutations: 0, committed_stage_bytes: 0,
+          committed_compact_segments: 0, committed_compact_bytes: 0,
+          last_progress_micros: NOW_MICROS - 120_000_000, active: true,
+        },
+      }],
+      note: 'live daemon scheduler state',
+    });
+    expect(await screen.findByText('parse evidence · 7 / 10 items')).toBeTruthy();
+    expect(screen.getByText('no observed preseal work for 60s')).toBeTruthy();
+    expect(screen.getByText('no observed native graph work for 2m')).toBeTruthy();
+    expect(screen.getByText(/17 entities encoded/)).toBeTruthy();
+  });
+
   it('renders bounded artifact restore progress separately from a rebuild', async () => {
     renderFreshness('loading', {
       worktrees: [
