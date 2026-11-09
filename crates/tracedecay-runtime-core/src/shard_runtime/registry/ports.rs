@@ -279,8 +279,14 @@ pub(super) async fn initialize_staged_runtime(
         ControlFlow::Break(already_published) => return Ok(already_published),
     };
     let identity = attachment.opened_file_identity();
-    let installation =
-        install_final_schema_before_publication(request, &attachment, &stage.database()).await;
+    let attachment = Arc::new(attachment);
+    let installation = install_final_schema_before_publication(
+        request,
+        attachment.as_ref(),
+        &stage.database(),
+        Some(Arc::clone(&attachment)),
+    )
+    .await;
     let files =
         crate::native_runtime::spawn_blocking(move || attachment.close_pinned_initialization())
             .await
@@ -329,6 +335,7 @@ async fn publish_lifecycle_runtime(
             &request,
             attachment.as_physical(),
             request.locator.path(),
+            None,
         )
         .await
     {
@@ -616,6 +623,7 @@ async fn install_final_schema_before_publication(
     request: &ShardRuntimeBuildRequest,
     attachment: &dyn PhysicalRuntimeAttachment,
     physical_path: &Path,
+    prospective_attachment: Option<Arc<RepositoryRuntimePhysicalAttachment>>,
 ) -> Result<(), StoreRuntimeRegistryFailure> {
     let connection = authorized_schema_connection(
         request,
@@ -667,6 +675,19 @@ async fn install_final_schema_before_publication(
         }
     }
     if request.locator.is_prospective() {
+        // Publication needs no live reader snapshots of the private staging
+        // database. Retire both SQLite reader lanes and join their workers
+        // before the still-open serialized writer checkpoints the WAL.
+        let prospective = prospective_attachment.ok_or_else(|| {
+            physical_failure(
+                "quiesce prospective SQLite readers",
+                "prospective attachment authority is missing",
+            )
+        })?;
+        crate::native_runtime::spawn_blocking(move || prospective.close_initialization_readers())
+            .await
+            .map_err(|error| physical_failure("quiesce prospective SQLite readers", error))?
+            .map_err(|error| physical_failure("quiesce prospective SQLite readers", error))?;
         connection
             .finish_initial_schema()
             .await

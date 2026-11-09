@@ -546,6 +546,61 @@ impl RepositoryRuntimePhysicalAttachment {
         self.lock_state().opened_file_identity
     }
 
+    /// Retire initialization's SQLite readers before the writer's final WAL
+    /// checkpoint. A live reader snapshot can make TRUNCATE report BUSY even
+    /// after every schema write has committed. Keep the writer and all original
+    /// file pins alive until the checkpoint has completed.
+    pub fn close_initialization_readers(&self) -> Result<(), String> {
+        if crate::storage_pool::on_pool() {
+            return Err("initialization readers cannot close on a storage pool thread".to_owned());
+        }
+        let _serial = self
+            .drain_serial
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        {
+            let state = self.lock_state();
+            if !state.admission_open || state.closed || state.initialization_file.is_none() {
+                return Err("only an unpublished live initialization may close its readers".to_owned());
+            }
+            let readers = state
+                .readers
+                .as_ref()
+                .ok_or_else(|| "initialization readers have already closed".to_owned())?;
+            // Fence both general and reserved health acquisitions before
+            // checking for the last retained snapshot.
+            readers.begin_shutdown_drain();
+        }
+        let started = Instant::now();
+        loop {
+            let mut state = self.lock_state();
+            if state.file_lost {
+                return Err("SQLite initialization lost its database while draining readers".to_owned());
+            }
+            let quiescent = state
+                .readers
+                .as_ref()
+                .is_some_and(ReaderPool::is_quiescent);
+            if quiescent {
+                let readers = state.readers.take();
+                drop(state);
+                // Drop joins the idle SQLite workers. No independent raw pin
+                // closes before the writer's final schema barrier.
+                drop(readers);
+                return Ok(());
+            }
+            if started.elapsed() >= ATTACHMENT_DRAIN_TIMEOUT {
+                // Keep the draining readers owned by the attachment so its
+                // ordinary failure teardown can still join every worker.
+                return Err(format!(
+                    "initialization readers did not quiesce within {ATTACHMENT_DRAIN_TIMEOUT:?}"
+                ));
+            }
+            drop(state);
+            thread::sleep(ATTACHMENT_DRAIN_POLL);
+        }
+    }
+
     pub fn commit_initialization(&self) -> Result<(), String> {
         let mut state = self.lock_state();
         if !state.admission_open || state.closed {
@@ -1134,6 +1189,81 @@ mod tests {
         connection
             .execute("INSERT INTO identity_probe (value) VALUES (?)", [value])
             .unwrap();
+    }
+
+    #[test]
+    fn initialization_reader_shutdown_releases_pinned_wal_snapshot_before_finalization() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("schema.sqlite3");
+        let binding = binding();
+        let attachment = Arc::new(
+            RepositoryPhysicalAttachmentFactory
+                .start_reserved_initialization(
+                    &native_runtime(),
+                    binding.clone(),
+                    locator(&binding),
+                    path.clone(),
+                    AdmissionConfigV1::default(),
+                    None,
+                )
+                .unwrap(),
+        );
+        let handle = attachment.exact_sql_handle().unwrap();
+        handle
+            .execute_batch(
+                "CREATE TABLE durable (value INTEGER NOT NULL); INSERT INTO durable VALUES (1)"
+                    .to_owned(),
+            )
+            .unwrap();
+        let snapshot = handle.begin_read_snapshot(Duration::from_secs(1)).unwrap();
+        snapshot
+            .query(statement("SELECT COUNT(*) FROM durable", vec![]))
+            .unwrap();
+        handle
+            .execute_batch("INSERT INTO durable VALUES (2)".to_owned())
+            .unwrap();
+
+        let (started_tx, started_rx) = mpsc::sync_channel(1);
+        let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+        let closing = Arc::clone(&attachment);
+        let join = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            finished_tx.send(closing.close_initialization_readers()).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            matches!(
+                finished_rx.recv_timeout(Duration::from_millis(50)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ),
+            "a live SQLite read snapshot must hold finalization's reader fence"
+        );
+        drop(snapshot);
+        assert_eq!(
+            finished_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+            Ok(())
+        );
+        join.join().unwrap();
+
+        assert!(
+            handle.begin_read_snapshot(Duration::from_millis(50)).is_err(),
+            "no reader may reopen between the final checkpoint and publication"
+        );
+        assert!(
+            attachment.snapshot().writer_present,
+            "the serialized SQLite writer must outlive its readers"
+        );
+        let files = attachment.close_pinned_initialization().unwrap();
+        drop(files);
+        let reopened = rusqlite::Connection::open(&path).unwrap();
+        let rows: i64 = reopened
+            .query_row("SELECT COUNT(*) FROM durable", [], |row| row.get(0))
+            .unwrap();
+        let integrity: String = reopened
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 2);
+        assert_eq!(integrity, "ok");
     }
 
     #[test]
