@@ -202,6 +202,15 @@ pub(super) fn graph_container_stem(name: &str, is_leaf: bool) -> Option<&str> {
     stem.ends_with(GRAPH_CONTAINER_SUFFIX).then_some(stem)
 }
 
+// Only SQLite-owned sidecars belong to the database family. Incident debris,
+// backups and unrelated adjacent files must remain visible as "other" bytes.
+fn sqlite_family_member(name: &str, main: &str) -> bool {
+    name == main
+        || name
+            .strip_prefix(main)
+            .is_some_and(|suffix| matches!(suffix, "-wal" | "-shm" | "-journal"))
+}
+
 impl StoreKindBytesV1 {
     pub(crate) fn add(&mut self, relative: &Path, bytes: u64) {
         let mut components = relative
@@ -210,11 +219,7 @@ impl StoreKindBytesV1 {
             .peekable();
         let first = components.next().unwrap_or_default();
         let db_filename = tracedecay_runtime_core::config::DB_FILENAME;
-        let family = if first == db_filename
-            || first
-                .strip_prefix(db_filename)
-                .is_some_and(|suffix| suffix.starts_with('-'))
-        {
+        let family = if sqlite_family_member(&first, db_filename) {
             &mut self.graph_database
         } else if first == SEALED_GRAPH_DIRECTORY {
             &mut self.sealed_graph
@@ -234,10 +239,13 @@ impl StoreKindBytesV1 {
             } else {
                 &mut self.generation_artifacts
             }
-        } else if first.starts_with(SESSIONS_DB_FILENAME)
+        } else if sqlite_family_member(&first, SESSIONS_DB_FILENAME)
+            || first.strip_prefix(SESSIONS_DB_FILENAME)
+                == Some(".delivery-settlement-spool-v1")
             || first
                 .strip_prefix('.')
-                .is_some_and(|name| name.starts_with(SESSIONS_DB_FILENAME))
+                .and_then(|name| name.strip_prefix(SESSIONS_DB_FILENAME))
+                == Some(".host-admission")
         {
             &mut self.sessions
         } else {
@@ -3580,6 +3588,11 @@ mod tests {
             ("sessions.db", 900),
             ("sessions.db-wal", 10),
             (".sessions.db.host-admission/claim", 5),
+            ("sessions.db.delivery-settlement-spool-v1/claim", 11),
+            ("tracedecay.db-archive", 17),
+            ("sessions.db-backup", 19),
+            ("sessions.db.corrupt-incident", 23),
+            (".sessions.db.host-admission-backup/claim", 13),
             ("hook-delivery-spool/claude/record", 7),
         ] {
             let path = data_root.join(relative);
@@ -3617,11 +3630,11 @@ mod tests {
                 generation_artifacts: 1_000,
                 graph_container: 760,
                 graph_replay_pool: 40,
-                sessions: 915,
-                other: 7,
+                sessions: 926,
+                other: 79,
             }
         );
-        assert_eq!(store.total_bytes, 11_968);
+        assert_eq!(store.total_bytes, 12_051);
         assert_eq!(store.total_bytes, walked_bytes);
         assert_eq!(store.unavailable_entry_count, 0);
     }
