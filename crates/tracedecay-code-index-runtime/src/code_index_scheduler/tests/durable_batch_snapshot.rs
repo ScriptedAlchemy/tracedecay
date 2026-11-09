@@ -64,9 +64,13 @@ fn durable_batch_rechecks_earlier_windows_after_the_final_barrier() {
         let path = root.path().join(format!("member-{index}.tmp"));
         let mut writer = File::create(&path).expect("member writer");
         writer.write_all(bytes).expect("nonempty member bytes");
-        batch.written(&path, &writer).expect("admit immutable member");
+        batch
+            .written(&path, &writer)
+            .expect("admit immutable member");
     }
-    batch.sync().expect("intact multi-window batch must succeed");
+    batch
+        .sync()
+        .expect("intact multi-window batch must succeed");
     assert_eq!(fs::read(&first).expect("exact original bytes"), bytes);
 
     let original = fs::symlink_metadata(&first).expect("original identity");
