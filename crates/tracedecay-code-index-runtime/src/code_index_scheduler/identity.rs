@@ -512,7 +512,10 @@ mod tests {
         let parent_only = GitMetadataFingerprintV1::capture(root.path());
         let failed = GitMetadataFingerprintV1::for_policy(root.path(), true);
 
-        assert!(failed.submodule_probe_failed, "opt-in probe must fail closed");
+        assert!(
+            failed.submodule_probe_failed,
+            "opt-in probe must fail closed"
+        );
         assert!(!failed.can_prove_freshness());
         assert!(failed.differs_from(&parent_only));
         assert_ne!(
