@@ -8,6 +8,7 @@
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params, params_from_iter};
 
 use crate::{RegisteredGlobalDb, registered::JobExit};
@@ -22,6 +23,12 @@ pub const MAX_GITHUB_STACK_DELIVERY_BATCH_V1: usize = 256;
 /// before they reach the registered store.
 const MAX_GITHUB_STACK_ID_BYTES: usize = 512;
 const MAX_GITHUB_STACK_SIGNAL_JSON_BYTES: usize = 1_048_576;
+/// The supported inspection/replay window is measured from signal issuance.
+/// Older terminal-only records can be compacted without losing native receipts.
+pub const GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1: i64 = 14;
+/// Each maintenance transaction holds no more than 16 1-MiB signal payloads.
+pub const MAX_GITHUB_STACK_RETIRE_BATCH_V1: usize = 16;
+const RETIRED_PAYLOAD_KEY: &str = "__tracedecay_retired_stack_sha256_v1";
 
 /// Neutral, serialized representation of an immutable stack signal.
 ///
@@ -154,8 +161,27 @@ pub(crate) async fn ensure_github_stack_delivery_schema(
                 ON github_stack_delivery_recipients(
                     project_id, recipient, signal_id
                 ) WHERE state = 'deferred';
-            CREATE TRIGGER IF NOT EXISTS github_stack_delivery_signals_immutable_update
+            CREATE INDEX IF NOT EXISTS idx_github_stack_delivery_unretired_time
+                ON github_stack_delivery_signals(observed_at_micros)
+                WHERE json_type(signal_json, '$.__tracedecay_retired_stack_sha256_v1') IS NULL;
+            DROP TRIGGER IF EXISTS github_stack_delivery_signals_immutable_update;
+            CREATE TRIGGER github_stack_delivery_signals_immutable_update
             BEFORE UPDATE ON github_stack_delivery_signals
+            WHEN OLD.project_id != NEW.project_id
+              OR OLD.signal_id != NEW.signal_id
+              OR OLD.scope_digest != NEW.scope_digest
+              OR OLD.repository_id != NEW.repository_id
+              OR OLD.watermark_id != NEW.watermark_id
+              OR OLD.observed_at_micros != NEW.observed_at_micros
+              OR json_type(OLD.signal_json, '$.__tracedecay_retired_stack_sha256_v1') IS NOT NULL
+              OR json_type(NEW.signal_json, '$.__tracedecay_retired_stack_sha256_v1') IS NOT 'text'
+              OR length(json_extract(NEW.signal_json, '$.__tracedecay_retired_stack_sha256_v1')) != 64
+              OR EXISTS (
+                  SELECT 1 FROM github_stack_delivery_recipients AS r
+                  WHERE r.project_id = OLD.project_id
+                    AND r.signal_id = OLD.signal_id
+                    AND r.state IN ('pending', 'deferred')
+              )
             BEGIN
                 SELECT RAISE(ABORT, 'GitHub stack delivery signals are immutable');
             END;
@@ -182,10 +208,18 @@ pub(crate) async fn ensure_github_stack_delivery_schema(
             BEGIN
                 SELECT RAISE(ABORT, 'invalid GitHub stack delivery state transition');
             END;
-            CREATE TRIGGER IF NOT EXISTS github_stack_delivery_recipients_no_delete
+            DROP TRIGGER IF EXISTS github_stack_delivery_recipients_no_delete;
+            CREATE TRIGGER github_stack_delivery_recipients_no_delete
             BEFORE DELETE ON github_stack_delivery_recipients
+            WHEN OLD.state IN ('pending', 'deferred')
+              OR NOT EXISTS (
+                  SELECT 1 FROM github_stack_delivery_signals AS s
+                  WHERE s.project_id = OLD.project_id
+                    AND s.signal_id = OLD.signal_id
+                    AND json_type(s.signal_json, '$.__tracedecay_retired_stack_sha256_v1') = 'text'
+              )
             BEGIN
-                SELECT RAISE(ABORT, 'GitHub stack delivery recipient rows are retained');
+                SELECT RAISE(ABORT, 'GitHub stack delivery recipient is not retired');
             END;
             {promote}",
         promote = promote_deferred_sql("")
@@ -222,9 +256,47 @@ fn validate_signal(record: &GitHubStackSignalRecordV1) -> Result<(), String> {
     if record.signal_json.len() > MAX_GITHUB_STACK_SIGNAL_JSON_BYTES {
         return Err("GitHub stack signal JSON exceeds 1 MiB".to_owned());
     }
-    serde_json::from_str::<serde_json::Value>(&record.signal_json)
+    let payload: serde_json::Value = serde_json::from_str(&record.signal_json)
         .map_err(|error| format!("GitHub stack signal JSON is invalid: {error}"))?;
+    if payload
+        .as_object()
+        .is_some_and(|object| object.contains_key(RETIRED_PAYLOAD_KEY))
+    {
+        return Err("GitHub stack signal uses a reserved retirement marker".to_owned());
+    }
     Ok(())
+}
+
+/// A compacted payload is only an identity fingerprint, never an expandable
+/// native signal. Keep the signal key to reject late replays without retaining
+/// a second copy of the native preview/terminal receipt.
+fn retired_payload_digest(json: &str) -> Option<&str> {
+    let prefix = r#"{"__tracedecay_retired_stack_sha256_v1":""#;
+    let digest = json.strip_prefix(prefix)?.strip_suffix(r#""}"#)?;
+    (digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
+    .then_some(digest)
+}
+
+fn matches_replayed_signal(
+    existing: &GitHubStackSignalRecordV1,
+    offered: &GitHubStackSignalRecordV1,
+) -> bool {
+    if existing == offered {
+        return true;
+    }
+    let Some(retired_hash) = retired_payload_digest(&existing.signal_json) else {
+        return false;
+    };
+    existing.project_id == offered.project_id
+        && existing.signal_id == offered.signal_id
+        && existing.scope_digest == offered.scope_digest
+        && existing.repository_id == offered.repository_id
+        && existing.watermark_id == offered.watermark_id
+        && existing.observed_at_micros == offered.observed_at_micros
+        && retired_hash == hex::encode(Sha256::digest(offered.signal_json.as_bytes()))
 }
 
 fn validate_recipient(recipient: &str) -> Result<(), String> {
@@ -442,7 +514,7 @@ impl RegisteredGlobalDb {
                 if let Some(existing) =
                     lookup_signal(&transaction, &record.project_id, &record.signal_id).await?
                 {
-                    if existing != record {
+                    if !matches_replayed_signal(&existing, &record) {
                         return Err("GitHub stack signal identity conflict".to_owned().into());
                     }
                     let (pending_count, deferred_count) =
@@ -740,7 +812,118 @@ impl RegisteredGlobalDb {
             .read_snapshot()
             .await
             .map_err(|error| format!("begin GitHub stack signal lookup: {error}"))?;
-        lookup_signal(&snapshot, project_id, signal_id).await
+        Ok(lookup_signal(&snapshot, project_id, signal_id)
+            .await?
+            .filter(|signal| retired_payload_digest(&signal.signal_json).is_none()))
+    }
+
+    /// Atomically discards only terminal, out-of-window transport payloads
+    /// and per-recipient rows. The tiny fingerprint remains for exact append
+    /// replay refusal; native previews and integration receipts are untouched.
+    ///
+    /// The caller's registered retention cadence supplies the fixed cutoff.
+    /// Each transaction bounds both loaded payload bytes and written rows.
+    #[tracing::instrument(
+        name = "global_db.stack_delivery.retire_terminal",
+        level = "trace",
+        skip_all
+    )]
+    pub async fn retire_github_stack_terminal_payloads_before(
+        &self,
+        cutoff_micros: i64,
+    ) -> Result<usize, String> {
+        let oldest_permitted_micros = tracedecay_contracts::now_micros()
+            .0
+            .saturating_sub(GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1 * 86_400 * 1_000_000);
+        let cutoff_micros = cutoff_micros.min(oldest_permitted_micros);
+        if cutoff_micros <= 0 {
+            return Ok(0);
+        }
+        self.transact_or(
+            |error| format!("retire terminal GitHub stack payloads: {error}"),
+            async move |transaction| {
+                let mut rows = transaction
+                    .query(
+                        "SELECT s.project_id, s.signal_id, s.signal_json
+                         FROM github_stack_delivery_signals AS s
+                         WHERE s.observed_at_micros < ?1
+                           AND json_type(s.signal_json,
+                               '$.__tracedecay_retired_stack_sha256_v1') IS NULL
+                           AND NOT EXISTS (
+                               SELECT 1 FROM github_stack_delivery_recipients AS r
+                               WHERE r.project_id = s.project_id
+                                 AND r.signal_id = s.signal_id
+                                 AND r.state IN ('pending', 'deferred')
+                           )
+                         ORDER BY s.observed_at_micros, s.project_id, s.signal_id
+                         LIMIT ?2",
+                        params![cutoff_micros, MAX_GITHUB_STACK_RETIRE_BATCH_V1 as i64],
+                    )
+                    .await
+                    .map_err(|error| format!("query terminal GitHub stack signals: {error}"))?;
+                let mut candidates = Vec::new();
+                while let Some(row) = rows
+                    .next()
+                    .await
+                    .map_err(|error| format!("read terminal GitHub stack signal: {error}"))?
+                {
+                    candidates.push((
+                        row.get::<String>(0).map_err(|error| {
+                            format!("decode terminal GitHub stack project: {error}")
+                        })?,
+                        row.get::<String>(1).map_err(|error| {
+                            format!("decode terminal GitHub stack signal: {error}")
+                        })?,
+                        row.get::<String>(2).map_err(|error| {
+                            format!("decode terminal GitHub stack payload: {error}")
+                        })?,
+                    ));
+                }
+                drop(rows);
+
+                for (project_id, signal_id, payload) in &candidates {
+                    let digest = hex::encode(Sha256::digest(payload.as_bytes()));
+                    let retired =
+                        format!(r#"{{"__tracedecay_retired_stack_sha256_v1":"{digest}"}}"#);
+                    let changed = transaction
+                        .execute(
+                            "UPDATE github_stack_delivery_signals SET signal_json = ?3
+                             WHERE project_id = ?1 AND signal_id = ?2
+                               AND signal_json = ?4 AND observed_at_micros < ?5
+                               AND NOT EXISTS (
+                                   SELECT 1 FROM github_stack_delivery_recipients
+                                   WHERE project_id = ?1 AND signal_id = ?2
+                                     AND state IN ('pending', 'deferred')
+                               )",
+                            params![
+                                project_id.as_str(),
+                                signal_id.as_str(),
+                                retired.as_str(),
+                                payload.as_str(),
+                                cutoff_micros,
+                            ],
+                        )
+                        .await
+                        .map_err(|error| format!("compact GitHub stack signal: {error}"))?;
+                    if changed != 1 {
+                        return Err(
+                            "terminal GitHub stack signal changed during retirement".to_owned()
+                        );
+                    }
+                    transaction
+                        .execute(
+                            "DELETE FROM github_stack_delivery_recipients
+                             WHERE project_id = ?1 AND signal_id = ?2
+                               AND state IN ('settled', 'authorization_lost')",
+                            params![project_id.as_str(), signal_id.as_str()],
+                        )
+                        .await
+                        .map_err(|error| format!("retire GitHub stack recipient rows: {error}"))?;
+                }
+                Ok(candidates.len())
+            },
+        )
+        .await
     }
 
     /// Returns one recipient's durable binding state.
