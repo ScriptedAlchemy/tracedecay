@@ -2359,6 +2359,76 @@ async fn relation_recovery_orders_tied_keys_and_preserves_the_deferred_deadline(
 }
 
 #[tokio::test]
+async fn relation_recovery_fragmented_deadlines_preserve_order_across_single_item_pages() {
+    let harness = RegisteredGlobalDbHarness::open("relation-fragmented-deadlines").await;
+    let db = &harness.registered;
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch(
+            "WITH RECURSIVE seq(n) AS (
+                 VALUES(0) UNION ALL SELECT n + 1 FROM seq WHERE n < 535
+             )
+             INSERT INTO session_temporal_generations (
+                 session_id, generation, state, frozen_watermarks_json, created_at
+             ) SELECT printf('fragmented-relation-%04d', n), 1, 'building', '{}', n
+               FROM seq;
+             INSERT INTO session_relation_receipts (
+                 session_id, generation, scope_kind, scope_id, expected_graph_watermark,
+                 state, created_at, recovery_state, recovery_next_attempt_at
+             ) SELECT session_id, generation, 'project_sessions', 'unrelated-scope',
+                      'expected', 'pending', created_at,
+                      CASE WHEN created_at < 512 THEN 'retryable' ELSE 'pending' END,
+                      CASE WHEN created_at < 512 THEN unixepoch() + 86400
+                           ELSE created_at - 511 END
+               FROM session_temporal_generations;",
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let access = SessionTemporalAccess::new(&**db);
+    let cancellation = std::sync::Arc::new(tracedecay_graph_db::NeverCancelled);
+    // The 512 older receipts are sleeping, while 24 newer due receipts have
+    // 24 distinct deadlines. No four-deadline band can cover the due set.
+    // This forces the fragmented fallback repeatedly, not just on page one.
+    for index in 0..24 {
+        let page = access
+            .recover_pending_session_relation_projection_page(1, cancellation.clone())
+            .await
+            .unwrap();
+        assert_eq!((page.processed, page.recovered), (1, 0));
+        assert_eq!(page.has_more, index < 23);
+
+        let snapshot = db.read_snapshot().await.unwrap();
+        let mut rows = snapshot
+            .query(
+                "SELECT session_id FROM session_relation_receipts
+                 WHERE recovery_state = 'permanent' ORDER BY created_at",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut settled = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            settled.push(row.get::<String>(0).unwrap());
+        }
+        assert_eq!(settled.len(), index + 1);
+        let expected = format!("fragmented-relation-{:04}", index + 512);
+        assert_eq!(settled.last().map(String::as_str), Some(expected.as_str()));
+    }
+
+    let idle = access
+        .recover_pending_session_relation_projection_page(1, cancellation)
+        .await
+        .unwrap();
+    assert_eq!((idle.processed, idle.has_more), (0, false));
+    assert!(
+        idle.next_retry_at_unix_seconds.is_some(),
+        "the sleeping prefix must retain its future wakeup"
+    );
+}
+
+#[tokio::test]
 async fn malformed_relation_receipt_is_permanent_without_starving_summary_work() {
     let harness = RegisteredGlobalDbHarness::open("lcm-relation-recovery-poison").await;
     let db = harness.registered.clone();
