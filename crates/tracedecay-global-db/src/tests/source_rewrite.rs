@@ -19,7 +19,7 @@ use tracedecay_store::{ProjectionSkipReason, ProjectionStoreError};
 use crate::ObservationSourcePresenceV1;
 use crate::tests::harness::{
     HostAdmissionScope, HostAdmissionTestRuntimeV1, RegisteredGlobalDbHarness,
-    seed_projected_messages,
+    seed_projected_messages, writer_telemetry,
 };
 
 /// More unoffered records than one keyset page *and* more than the engine's
@@ -362,11 +362,19 @@ async fn source_presence_pages_are_atomic_and_unchanged_reoffers_do_not_write() 
         .await
         .unwrap();
     setup.commit().await.unwrap();
+    let statements = || writer_telemetry(&harness.registered).sqlite_vm.statements;
+    // Measure the registered writer's own transaction bookkeeping on this shard.
+    let before_empty = statements();
+    let empty = harness.registered.begin_write_transaction().await.unwrap();
+    empty.commit().await.unwrap();
+    let transaction_overhead = statements() - before_empty;
+    let before = statements();
     harness
         .registered
         .record_observation_source_presence(&source, &scope, &offered)
         .await
         .unwrap();
+    assert_eq!(statements() - before, transaction_overhead + 3);
     let snapshot = harness.registered.read_snapshot().await.unwrap();
     let mut rows = snapshot
         .query(
@@ -398,11 +406,13 @@ async fn source_presence_pages_are_atomic_and_unchanged_reoffers_do_not_write() 
         .await
         .unwrap();
     transaction.commit().await.unwrap();
+    let before = statements();
     harness
         .registered
         .record_observation_source_presence(&source, &scope, &offered)
         .await
         .unwrap();
+    assert_eq!(statements() - before, transaction_overhead + 3);
 
     let mut replacement = offered
         .iter()
