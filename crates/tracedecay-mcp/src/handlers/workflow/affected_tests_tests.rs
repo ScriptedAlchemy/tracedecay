@@ -1,6 +1,5 @@
 use super::*;
 
-use futures_util::StreamExt as _;
 use serde_json::json;
 
 use crate::ToolResult;
@@ -1287,8 +1286,9 @@ async fn refused_durable_test_result_cannot_publish_a_completed_live_terminal() 
 
 #[tokio::test]
 async fn durable_store_refusal_remains_primary_when_terminal_publication_also_fails() {
-    let cancellation = CancellationSignal::active("cancellation.affected-tests.concurrent-terminal")
-        .expect("fixture cancellation");
+    let cancellation =
+        CancellationSignal::active("cancellation.affected-tests.concurrent-terminal")
+            .expect("fixture cancellation");
     let context = verified_graph_context(&cancellation);
     let authority = OperationEventAuthority::default();
     let emitter = authority
