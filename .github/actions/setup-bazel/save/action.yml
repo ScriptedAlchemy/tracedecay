@@ -1,0 +1,36 @@
+name: Save Bazel dependencies
+description: Publish newly fetched dependency blobs from trusted master jobs.
+inputs:
+  path:
+    description: Repository-cache directory returned by setup-bazel.
+    required: true
+  key:
+    description: Run-specific key returned by setup-bazel.
+    required: true
+  restored-entries:
+    description: Entry count returned by setup-bazel before the build.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Check for newly fetched dependencies
+      id: changed
+      if: always() && !cancelled() && github.ref == 'refs/heads/master' && github.event_name != 'pull_request' && inputs.key != '' && inputs.restored-entries != ''
+      shell: bash
+      env:
+        CACHE_PATH: ${{ inputs.path }}
+        RESTORED_ENTRIES: ${{ inputs.restored-entries }}
+      run: |
+        node <<'JS'
+        const fs = require('node:fs');
+        const path = process.env.CACHE_PATH;
+        const entries = fs.existsSync(path) ? fs.readdirSync(path, { recursive: true }).length : 0;
+        const changed = entries > Number(process.env.RESTORED_ENTRIES);
+        console.log(`Dependency cache entries: ${process.env.RESTORED_ENTRIES} restored, ${entries} after build`);
+        fs.appendFileSync(process.env.GITHUB_OUTPUT, `changed=${changed}\n`);
+        JS
+    - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: always() && !cancelled() && steps.changed.outputs.changed == 'true'
+      with:
+        path: ${{ inputs.path }}
+        key: ${{ inputs.key }}
