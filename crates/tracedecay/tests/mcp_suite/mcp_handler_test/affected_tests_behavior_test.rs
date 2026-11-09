@@ -674,9 +674,12 @@ async fn operation_history_keeps_an_admitted_test_run_across_a_peer_composition_
     .expect("affected fixture root URI")
     .to_string();
     let deadline = Deadline::new(UtcMicros(i64::MAX)).expect("deadline");
-    let request_id = mint_global_request_id(GlobalRequestSurface::ManagedTestRun)
-        .expect("request id");
-    let owner_events = owner.harness.operation_events().expect("first composition authority");
+    let request_id =
+        mint_global_request_id(GlobalRequestSurface::ManagedTestRun).expect("request id");
+    let owner_events = owner
+        .harness
+        .operation_events()
+        .expect("first composition authority");
     let peer_events = peer.operation_events().expect("peer composition authority");
     let emitter = owner_events
         .begin_managed_test_run(root_uri.clone(), request_id.clone(), deadline.clone())

@@ -238,8 +238,7 @@ pub use feedback::{
     DaemonAdvisoryCycleMountChangedFuture, DaemonAdvisoryCycleMountFuture,
     DaemonAdvisoryCycleMountV1, DaemonFeedbackInvocationOwner,
     DaemonFeedbackProximityInvocationFuture, DaemonFeedbackProximityInvocationRequest,
-    advisory_cycle_invocation_result,
-    feedback_proximity_invocation_result,
+    advisory_cycle_invocation_result, feedback_proximity_invocation_result,
 };
 pub use primitive::{
     DaemonContextScoutRuntimeRegistrar, DaemonContextScoutRuntimeRegistrationError,

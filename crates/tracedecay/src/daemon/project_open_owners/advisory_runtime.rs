@@ -114,9 +114,8 @@ use tracedecay_daemon_service::{
     DaemonFeedbackProximityInvocationFuture, DaemonFeedbackProximityInvocationRequest,
     HookOrchestrationRequestV1, HookOrchestrationTriggerV1, HookOrchestrationWorkOutcomeV1,
     advisory_cycle_invocation_result, daemon_owned_project_source_access_at,
-    feedback_proximity_invocation_result,
-    project_open_source_access_authority, register_hook_orchestration_runtime,
-    unregister_hook_orchestration_runtime,
+    feedback_proximity_invocation_result, project_open_source_access_authority,
+    register_hook_orchestration_runtime, unregister_hook_orchestration_runtime,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::handlers::hook_runtime::daemon_mint_hook_v2_file_id;
