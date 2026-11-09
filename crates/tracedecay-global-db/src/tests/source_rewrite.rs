@@ -60,17 +60,22 @@ async fn rewrite_completion_retires_unoffered_records_beyond_the_query_cap() {
         .await
         .unwrap();
 
-    // None of the seeded records are re-offered under the new generation, so
-    // completion must retire-path all of them. The `observations` table is
-    // empty, so each retire is a no-op returning false; what matters is that
-    // the reads stay under the materialization cap and the settle deletes
-    // still clear the source.
+    // These are presence-only ghosts: no observations, dispositions, or
+    // queued revivals exist to retire. The final settle must still delete
+    // all presence rows, without issuing per-ghost UPDATE/receipt queries
+    // while holding the SQLite writer's fixed transaction lease.
+    let before = writer_telemetry(&harness.registered).sqlite_vm.statements;
     let retired = harness
         .registered
         .complete_observation_source_rewrite(&source, &scope, generation)
         .await
         .unwrap_or_else(|error| panic!("rewrite completion must not exceed query caps: {error}"));
     assert_eq!(retired, 0);
+    let statements = writer_telemetry(&harness.registered).sqlite_vm.statements - before;
+    assert!(
+        statements.saturating_mul(16) < UNOFFERED_RECORDS as u64,
+        "presence-only ghosts must not cause per-record writer commands: {statements} statements for {UNOFFERED_RECORDS} records"
+    );
 
     let mut remaining = writer
         .query(

@@ -270,9 +270,11 @@ impl RegisteredGlobalDb {
                 // already-disposed record with no pending revival cannot
                 // produce another output change; invoking retirement for it
                 // issued redundant UPDATE/SELECT commands under the writer.
-                // Missing observations are still visited, preserving the
-                // unoffered keyset coverage test. The final DELETE removes
-                // every old presence row, including those skipped here.
+                // Presence-only ghosts without an observation or queued
+                // revival have nothing to retire: skip their per-row writer
+                // UPDATE/receipt read. A queued accepted revival remains
+                // eligible even if the observation is absent. The final
+                // DELETE still settles every stale presence row.
                 // Retirement never mutates source presence, so the keyset is
                 // stable through the atomic transaction.
                 let mut after_observation_id = String::new();
@@ -284,10 +286,16 @@ impl RegisteredGlobalDb {
                              WHERE presence.source_key = ?1 AND presence.generation <> ?2
                                AND presence.observation_id > ?3
                                AND (
-                                   NOT EXISTS (
-                                       SELECT 1 FROM observation_projection_dispositions AS disposition
-                                       WHERE disposition.projector_version = ?5
-                                         AND disposition.observation_id = presence.observation_id
+                                   (
+                                       EXISTS (
+                                           SELECT 1 FROM observations AS observation
+                                           WHERE observation.observation_id = presence.observation_id
+                                       )
+                                       AND NOT EXISTS (
+                                           SELECT 1 FROM observation_projection_dispositions AS disposition
+                                           WHERE disposition.projector_version = ?5
+                                             AND disposition.observation_id = presence.observation_id
+                                       )
                                    )
                                    OR EXISTS (
                                        SELECT 1 FROM projection_queue AS queued
