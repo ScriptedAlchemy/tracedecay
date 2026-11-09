@@ -89,6 +89,7 @@ pub(in crate::runtime) struct JsonlObservationAdmissionRequest<'request> {
     persisted_cursor_update: PersistedCursorUpdate,
     cancellation: ObservationCancellation,
     shared_frame_preparation: SharedJsonlFramePreparation,
+    skip_empty_initialization: bool,
 }
 
 impl<'request> JsonlObservationAdmissionRequest<'request> {
@@ -112,6 +113,7 @@ impl<'request> JsonlObservationAdmissionRequest<'request> {
             persisted_cursor_update: PersistedCursorUpdate::Monotonic,
             cancellation: ObservationCancellation::default(),
             shared_frame_preparation: SharedJsonlFramePreparation::None,
+            skip_empty_initialization: false,
         }
     }
 
@@ -143,6 +145,13 @@ impl<'request> JsonlObservationAdmissionRequest<'request> {
 
     pub(in crate::runtime) fn with_lazy_shared_frame_preparation(mut self) -> Self {
         self.shared_frame_preparation = SharedJsonlFramePreparation::Lazy;
+        self
+    }
+
+    /// Opt in only when an empty page needs no provider-specific validation.
+    /// Pi, for example, must verify its header even on a no-frame rewrite.
+    pub(in crate::runtime) fn with_skip_empty_initialization(mut self) -> Self {
+        self.skip_empty_initialization = true;
         self
     }
 }
@@ -2345,6 +2354,7 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         persisted_cursor_update,
         cancellation,
         shared_frame_preparation,
+        skip_empty_initialization,
     } = request;
     if cancellation.is_cancelled() {
         return Err(TranscriptIngestError::Cancelled { provider });
@@ -2459,6 +2469,48 @@ pub(in crate::runtime) async fn admit_jsonl_observations<State: Clone>(
         return Err(TranscriptIngestError::Cancelled { provider });
     }
     let generation = ObservationSourceGenerationV1::new(raw.new_cursor.file_id)?;
+    // An unchanged, fully covered source has no context or frames to resolve.
+    // Keep the durable completion check: a prior interrupted rewrite may still
+    // have unretired records even though this pass reads zero new bytes.
+    if skip_empty_initialization
+        && had_expected_cursor
+        && previous_generation == Some(generation)
+        && expected_cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.position() == raw.start_offset)
+        && !raw.replacement_generation
+        && raw.start_offset == raw.read_through
+        && raw.frames.is_empty()
+        && raw.skipped.is_empty()
+        && !progress.source_deferred
+    {
+        let records_retired = admission
+            .complete_source_rewrite(&source, &scope, generation)
+            .await
+            .map_err(|outcome| {
+                if is_admission_cancellation(&outcome, &cancellation) {
+                    TranscriptIngestError::Cancelled { provider }
+                } else {
+                    host_admission_error(provider, outcome)
+                }
+            })?;
+        tracing::debug!(
+            event = "transcript_admission_batch",
+            phase = "complete",
+            provider,
+            transcript = %transcript_log_identity(path),
+            total_frames,
+            retained_frame_bytes,
+            bytes_consumed = progress.bytes_consumed,
+            source_deferred = progress.source_deferred,
+            records_retired,
+            "transcript admission batch finished"
+        );
+        progress.covered_through = expected_cursor
+            .as_ref()
+            .map_or(0, ObservationSourceCursorV1::position);
+        return Ok(progress);
+    }
     let mut state = initialize(JsonlObservationScan {
         resumed: had_expected_cursor && raw.start_offset > 0,
         // Derived from the scanned generation rather than this batch's first
