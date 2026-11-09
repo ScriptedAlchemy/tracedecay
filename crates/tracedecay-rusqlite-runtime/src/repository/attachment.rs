@@ -1069,6 +1069,8 @@ mod tests {
     use tracedecay_domain::LocatorDigest;
     use tracedecay_store::{AdmissionConfigV1, StoreIncarnationV1};
 
+    #[cfg(unix)]
+    use crate::connection::path_identity_tests::probe_external_connection;
     use crate::exact_sql::{ExactSqlError, ExactSqlStatement, ExactSqlValue};
 
     use asupersync::channel::watch;
@@ -1738,8 +1740,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn existing_physical_attachments_preserve_an_independent_writers_locks() {
-        use crate::connection::path_identity_tests::probe_external_connection;
-
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("sessions.db");
         let writer = rusqlite::Connection::open(&path).unwrap();
