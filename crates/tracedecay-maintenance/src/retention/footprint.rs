@@ -530,7 +530,10 @@ fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
         "user-sessions.db" | "user-sessions.db-shm" | "user-sessions.db-journal"
     ) {
         ("user-sessions.db".to_owned(), ProfileFamilyV1::UserSessions)
-    } else if first.starts_with("user-memory.") {
+    } else if matches!(
+        first.as_str(),
+        "user-memory.db" | "user-memory.db-shm" | "user-memory.db-journal"
+    ) {
         ("user-memory".to_owned(), ProfileFamilyV1::UserMemory)
     } else {
         let family = match first.as_str() {
@@ -1378,6 +1381,12 @@ mod tests {
             ("user-sessions.db-journal", 29),
             ("user-sessions.db-wal", 31),
             ("user-sessions.db-backup", 37),
+            ("user-memory.db", 41),
+            ("user-memory.db-shm", 43),
+            ("user-memory.db-journal", 47),
+            ("user-memory.db-wal", 53),
+            ("user-memory.db-backup", 59),
+            ("user-memory.grafeo.notes", 61),
         ] {
             sized(&profile.join(name), bytes);
         }
@@ -1386,9 +1395,13 @@ mod tests {
             ("user-sessions.db".to_owned(), 71),
             ("global.db-mystery".to_owned(), 16),
             ("user-sessions.db-backup".to_owned(), 36),
+            ("user-memory".to_owned(), 132),
+            ("user-memory.db-wal".to_owned(), 54),
+            ("user-memory.db-backup".to_owned(), 58),
+            ("user-memory.grafeo.notes".to_owned(), 60),
         ]);
         let footprint = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
-        assert_eq!(footprint.total_bytes, 192);
+        assert_eq!(footprint.total_bytes, 496);
         assert_eq!(
             footprint.full_profile_size().state,
             ProfileTotalCoverageStateV1::Complete
@@ -1401,17 +1414,24 @@ mod tests {
             ("user-sessions.db-wal", ProfileFamilyV1::Wal, 31),
             ("global.db-mystery", ProfileFamilyV1::Other, 17),
             ("user-sessions.db-backup", ProfileFamilyV1::Other, 37),
+            ("user-memory", ProfileFamilyV1::UserMemory, 131),
+            ("user-memory.db-wal", ProfileFamilyV1::Wal, 53),
+            ("user-memory.db-backup", ProfileFamilyV1::Other, 59),
+            ("user-memory.grafeo.notes", ProfileFamilyV1::Other, 61),
         ] {
             let measured = entry(&footprint, key);
             assert_eq!(measured.family, family, "{key}");
             assert_eq!(measured.bytes, bytes, "{key}");
         }
         let observed = findings(&footprint);
+        assert_eq!(observed.len(), footprint.entries.len() + 1);
         for key in [
             "global.db",
             "user-sessions.db",
             "global.db-wal",
             "user-sessions.db-wal",
+            "user-memory",
+            "user-memory.db-wal",
         ] {
             assert_eq!(
                 observed[key].finding().state(),
@@ -1419,7 +1439,12 @@ mod tests {
                 "{key} must not inherit unrelated suffix bytes"
             );
         }
-        for key in ["global.db-mystery", "user-sessions.db-backup"] {
+        for key in [
+            "global.db-mystery",
+            "user-sessions.db-backup",
+            "user-memory.db-backup",
+            "user-memory.grafeo.notes",
+        ] {
             assert_eq!(
                 observed[key].finding().state(),
                 DoctorEvidenceStateV1::Degraded,
