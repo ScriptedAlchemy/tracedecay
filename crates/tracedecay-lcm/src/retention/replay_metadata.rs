@@ -38,7 +38,8 @@ pub struct ReplayMetadataCompactionReport {
     pub frontier_after: Option<i64>,
     pub rows_compacted: u64,
     /// Rows retained because their representation, sanitizer result, or byte
-    /// bound could not prove this narrow lossless transformation.
+    /// bound could not prove this narrow lossless transformation, including
+    /// rows rejected by the eligibility check before body verification.
     pub rows_skipped: u64,
     /// Subset of skipped rows whose metadata plus canonical/stored body
     /// representations exceed this pass's 4 MiB read and verification budget.
@@ -268,6 +269,9 @@ async fn step(
             } else {
                 report.rows_skipped += 1;
             }
+        } else {
+            // Eligibility refusal retains the original representation too.
+            report.rows_skipped += 1;
         }
         report.rows_scanned += 1;
         after = candidate.store_id;

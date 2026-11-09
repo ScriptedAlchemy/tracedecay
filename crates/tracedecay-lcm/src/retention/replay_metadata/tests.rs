@@ -250,6 +250,8 @@ async fn structured_different_media_and_external_representations_are_retained() 
     let report = store.tick(48).await;
     assert_eq!(report.rows_scanned, 5);
     assert_eq!(report.rows_compacted, 0);
+    assert_eq!(report.rows_skipped, 5);
+    assert_eq!(report.rows_skipped_oversized, 0);
     assert_eq!(report.metadata_bytes_removed, 0);
     // All five provider representations still carry their original content.
     assert_eq!(scalar(&store.conn, "SELECT COUNT(*) FROM lcm_raw_messages WHERE json_type(metadata_json, '$.active_replay.content') IS NOT NULL").await, 5);
@@ -405,6 +407,8 @@ async fn zero_compaction_pages_advance_distinct_durable_frontiers() {
     let first = store.tick(48).await;
     assert_eq!(first.rows_scanned, 48);
     assert_eq!(first.rows_compacted, 0);
+    assert_eq!(first.rows_skipped, 48);
+    assert_eq!(first.rows_skipped_oversized, 0);
     assert_eq!(first.frontier_before, Some(0));
     assert_eq!(first.frontier_after, Some(48));
     assert!(first.has_more);
@@ -412,6 +416,8 @@ async fn zero_compaction_pages_advance_distinct_durable_frontiers() {
     let second = store.tick(48).await;
     assert_eq!(second.rows_scanned, 4);
     assert_eq!(second.rows_compacted, 0);
+    assert_eq!(second.rows_skipped, 4);
+    assert_eq!(second.rows_skipped_oversized, 0);
     assert_eq!(second.frontier_before, Some(48));
     assert_eq!(second.frontier_after, Some(52));
     assert!(!second.has_more);
@@ -462,7 +468,8 @@ async fn large_ineligible_metadata_is_bounded_before_eligibility_checks() {
         ticks += 1;
         assert!(report.rows_scanned > 0);
         assert_eq!(report.rows_compacted, 0);
-        assert_eq!(report.rows_skipped, 0);
+        assert_eq!(report.rows_skipped, report.rows_scanned);
+        assert_eq!(report.rows_skipped_oversized, 0);
         assert_eq!(report.metadata_bytes_removed, 0);
         assert!(report.metadata_bytes_examined > 0);
         assert!(report.metadata_bytes_examined <= MAX_BATCH_BYTES);
