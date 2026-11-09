@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use rusqlite::types::Value;
 use rusqlite::{Transaction, params};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 
@@ -13,6 +14,7 @@ use super::super::format::contract_number;
 use super::super::prepared::PreparedCloneBodyV1;
 use super::super::row_codec::stored_symbol_key;
 use super::super::{CodeLexicalArtifactErrorV1, checkpoint, sqlite_error};
+use super::postings::scan_window;
 use super::{ReplacedFilesV1, ShiftV1, shift_rowid_keys, shifted};
 
 /// One successor clone body with the occurrence ordinal it takes.
@@ -54,8 +56,9 @@ pub(super) fn carry_clone_rows(
         .map_err(sqlite_error)?;
     // A TEMP copy of every surviving exact posting retains unlinked pager pages
     // after DROP until this long-lived builder resets its TEMP schema. Move the
-    // composite primary keys through a disjoint negative ordinal namespace,
-    // just as the carried occurrence rows do, without materializing a TEMP b-tree.
+    // composite primary keys through bounded, ordered windows and a negative
+    // ordinal namespace. A single bulk UPDATE can itself spill an unlinked
+    // statement journal, even when the TEMP pager has zero pages.
     shift_clone_posting_keys(transaction, clones)?;
     {
         let mut insert = transaction
@@ -132,14 +135,113 @@ pub(super) fn carry_clone_rows(
     renumber_clone_payloads(transaction, &parent_payloads, &successor_payloads, control)
 }
 
+/// A key-ordered window, so SQLite can seek the WITHOUT ROWID primary key
+/// without sorting the entire posting index into an external TEMP file.
+type ClonePostingKey = (i64, i64, Vec<u8>, i64);
+
+fn clone_posting_window(
+    transaction: &Transaction<'_>,
+    predicate: &str,
+    last: &Option<ClonePostingKey>,
+) -> Result<Vec<ClonePostingKey>, CodeLexicalArtifactErrorV1> {
+    let columns = "class, normalization_revision, digest, occurrence_ordinal";
+    scan_window(
+        transaction,
+        &format!(
+            "SELECT {columns} FROM clone_exact_postings WHERE {predicate} ORDER BY {columns} LIMIT ?1"
+        ),
+        &format!(
+            "SELECT {columns} FROM clone_exact_postings WHERE {predicate} AND ({columns}) > (?1, ?2, ?3, ?4) ORDER BY {columns} LIMIT ?5"
+        ),
+        last,
+        |(class, revision, digest, ordinal)| {
+            vec![
+                Value::Integer(*class),
+                Value::Integer(*revision),
+                Value::Blob(digest.clone()),
+                Value::Integer(*ordinal),
+            ]
+        },
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )
+}
+
 /// Shift the occurrence component of the WITHOUT ROWID posting primary key.
-/// Staging the new keys as negative ordinals prevents an in-place update from
-/// colliding with other positive parent keys, including on shrinking ranges.
+/// Both passes seek bounded primary-key windows and update one keyed row at a
+/// time: SQLite's single bulk UPDATE can allocate an unlinked statement
+/// journal independently of the TEMP b-tree pager. The negative namespace
+/// prevents collisions with positive keys while a window advances.
 fn shift_clone_posting_keys(
     transaction: &Transaction<'_>,
     clones: &ShiftV1,
 ) -> Result<(), CodeLexicalArtifactErrorV1> {
-    shift_rowid_keys(transaction, "clone_exact_postings", "occurrence_ordinal", clones)
+    let Some(first) = clones.first_affected().filter(|_| clones.shifts()) else {
+        return Ok(());
+    };
+    let mut update = transaction
+        .prepare_cached(
+            "UPDATE clone_exact_postings SET occurrence_ordinal = ?5
+             WHERE class = ?1 AND normalization_revision = ?2
+               AND digest = ?3 AND occurrence_ordinal = ?4",
+        )
+        .map_err(sqlite_error)?;
+    let mut last = None;
+    loop {
+        let window = clone_posting_window(
+            transaction,
+            &format!("occurrence_ordinal >= {first}"),
+            &last,
+        )?;
+        let Some(final_key) = window.last() else {
+            break;
+        };
+        last = Some(final_key.clone());
+        for (class, revision, digest, ordinal) in window {
+            let mapped = clones
+                .map(u64::try_from(ordinal).map_err(contract_number)?)?
+                .ok_or_else(|| {
+                    CodeLexicalArtifactErrorV1::Corrupt(
+                        "carried clone posting belongs to a replaced range".to_owned(),
+                    )
+                })?;
+            let mapped = i64::try_from(mapped).map_err(contract_number)?;
+            // -mapped - 1 fits even when mapped == i64::MAX.
+            let staged = -mapped - 1;
+            if update
+                .execute(params![class, revision, digest, ordinal, staged])
+                .map_err(sqlite_error)?
+                != 1
+            {
+                return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                    "carried clone posting changed during key shift".to_owned(),
+                ));
+            }
+        }
+    }
+    // All moved keys are now negative and disjoint from every unchanged key.
+    // Keyset pagination remains stable as restored positive keys leave the
+    // scan; compute -(ordinal + 1) to handle an i64::MIN staged key.
+    let mut last = None;
+    loop {
+        let window = clone_posting_window(transaction, "occurrence_ordinal < 0", &last)?;
+        let Some(final_key) = window.last() else {
+            break;
+        };
+        last = Some(final_key.clone());
+        for (class, revision, digest, ordinal) in window {
+            let restored = -(ordinal + 1);
+            if update
+                .execute(params![class, revision, digest, ordinal, restored])
+                .map_err(sqlite_error)?
+                != 1
+            {
+                return Err(CodeLexicalArtifactErrorV1::Corrupt(
+                    "staged clone posting changed during key restoration".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Where a run's first successor occurrence lands: its parent start moved
@@ -318,7 +420,9 @@ mod tests {
 
     #[test]
     fn carried_clone_keys_shift_without_retained_file_backed_temp_pages() {
-        let mut connection = Connection::open_in_memory().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("clone-posting-carry.sqlite");
+        let mut connection = Connection::open(&path).unwrap();
         connection
             .execute_batch(
                 "PRAGMA temp_store = FILE;
@@ -367,6 +471,7 @@ mod tests {
         }
         let original = postings(&connection);
         assert_eq!(original.len(), 48_000);
+        let mut committed = original.clone();
         for (index, shift) in [
             ShiftV1::new([((11, 20), 5), ((36, 39), 6)]).unwrap(),
             ShiftV1::new([((11, 20), 12), ((36, 39), 1)]).unwrap(),
@@ -422,10 +527,19 @@ mod tests {
 
             if index == 0 {
                 transaction.rollback().unwrap();
-                assert_eq!(postings(&connection), original, "rollback restores every key");
+                assert_eq!(
+                    postings(&connection),
+                    original,
+                    "rollback restores every key"
+                );
             } else {
                 transaction.commit().unwrap();
-                assert_eq!(postings(&connection), expected, "commit preserves every key");
+                committed = expected;
+                assert_eq!(
+                    postings(&connection),
+                    committed,
+                    "commit preserves every key"
+                );
             }
             integrity(&connection, "main");
         }
@@ -450,5 +564,15 @@ mod tests {
         );
         integrity(&connection, "main");
         integrity(&connection, "temp");
+        // Main storage must actually survive closing the writer and reopening
+        // its file: checking only an in-memory connection masks durability bugs.
+        drop(connection);
+        let reopened = Connection::open(&path).unwrap();
+        assert_eq!(postings(&reopened), committed);
+        integrity(&reopened, "main");
+        let survivor: String = reopened
+            .query_row("SELECT value FROM independent", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(survivor, "survivor");
     }
 }
