@@ -25,6 +25,12 @@ inputs:
   cache-save:
     description: Whether master jobs may save Bazelisk and newly fetched dependencies.
     default: "true"
+  repository-cache-key:
+    description: Exact dependency snapshot to restore without a workload fallback.
+    default: ""
+  verify-launcher-cache:
+    description: Restore only the complete launcher cache for an offline verification.
+    default: "false"
   windows-redirect-temp:
     description: Put Windows test temporary files on the runner workspace drive.
     default: "false"
@@ -52,6 +58,12 @@ outputs:
   repository-cache-entries:
     description: Restored entry count, used to avoid uploading an unchanged cache.
     value: ${{ steps.repository-cache-state.outputs.entries }}
+  launcher-cache-key:
+    description: Immutable platform and manifest key for a complete launcher archive.
+    value: ${{ steps.launcher-cache.outputs.cache-primary-key }}
+  launcher-cache-hit:
+    description: Whether the exact complete launcher archive was restored.
+    value: ${{ steps.launcher-cache.outputs.cache-hit }}
 
 runs:
   using: composite
@@ -142,6 +154,10 @@ runs:
       shell: bash
       env:
         CACHE_NAME: ${{ inputs.cache-key }}
+        WORKFLOW_NAME: ${{ github.workflow }}
+        JOB_NAME: ${{ github.job }}
+        MANIFEST: ${{ hashFiles('MODULE.bazel', 'Cargo.lock', 'pnpm-lock.yaml', '.bazelversion') }}
+        LAUNCHER_MANIFEST: ${{ hashFiles('MODULE.bazel', 'Cargo.lock', 'pnpm-lock.yaml', '.bazelversion', '.bazelrc', 'scripts/bazel/downloader.cfg', '.github/workflows/dependency-cache.yml') }}
         EXTRA_RESTORE_KEYS: ${{ inputs.extra-restore-keys }}
       run: |
         node <<'JS'
@@ -156,17 +172,30 @@ runs:
         const repositoryPath = windowsRoot
           ? `${windowsRoot}b-repo`
           : `${os.homedir().replace(/\\/g, '/')}/.cache/bazel-repo`;
-        const repositoryPrefix = `setup-bazel-1-${process.platform}-${os.arch()}-repository-`;
+        const platform = `setup-bazel-1-${process.platform}-${os.arch()}`;
+        const { WORKFLOW_NAME, JOB_NAME, CACHE_NAME, MANIFEST } = process.env;
+        const identity = [WORKFLOW_NAME, JOB_NAME, CACHE_NAME].map(encodeURIComponent).join(':');
+        const workload = `${platform}-deps:${identity}:`;
+        const launcher = `${platform}-launcher-helpers-${process.env.LAUNCHER_MANIFEST}`;
         const names = [process.env.CACHE_NAME, ...(process.env.EXTRA_RESTORE_KEYS || '')
           .split(',')
           .map((name) => name.trim())
           .filter(Boolean)];
         const prefixes = names.map((name) =>
           `setup-bazel-1-${process.platform}-${os.arch()}-disk-${name}-`);
-        fs.appendFileSync(
-          process.env.GITHUB_OUTPUT,
-          `repository-path=${repositoryPath}\nrepository-prefix=${repositoryPrefix}\npath=${path}\noutput-base=${windowsRoot ? `${windowsRoot}b` : ''}\nprefix=${prefixes[0]}\nrestore-keys<<EOF\n${prefixes.join('\n')}\nEOF\n`,
-        );
+        const outputs = [
+          `repository-path=${repositoryPath}`,
+          `workload=${workload}`,
+          `workload-manifest=${workload}${MANIFEST}-`,
+          `launcher=${launcher}`,
+          `path=${path}`,
+          `output-base=${windowsRoot ? `${windowsRoot}b` : ''}`,
+          `prefix=${prefixes[0]}`,
+          'restore-keys<<EOF',
+          ...prefixes,
+          'EOF',
+        ];
+        fs.appendFileSync(process.env.GITHUB_OUTPUT, outputs.join('\n') + '\n');
         JS
 
     - name: Preserve the runner network environment for Tailscale
@@ -187,6 +216,12 @@ runs:
         sudo chmod 0440 /etc/sudoers.d/tailscale-ci-network
         sudo visudo -cf /etc/sudoers.d/tailscale-ci-network
 
+    - name: Read the hosted Mac's Ethernet resolver settings
+      id: macos-dns
+      if: runner.os == 'macOS' && inputs.tailscale-client-id != ''
+      shell: bash
+      run: python3 "$GITHUB_ACTION_PATH/macos_dns.py" read >> "$GITHUB_OUTPUT"
+
     - name: Connect to the private Bazel fleet
       id: tailscale
       if: inputs.tailscale-client-id != ''
@@ -200,6 +235,15 @@ runs:
         # Public dependency downloads keep the hosted runner's DNS resolver.
         args: --accept-dns=false
         ping: ubuntu-main
+
+    # The pinned Tailscale action explicitly reconfigures Ethernet when MagicDNS
+    # is enabled on macOS, even when tailscale up receives --accept-dns=false.
+    - name: Restore the hosted Mac's Ethernet resolver settings
+      if: always() && steps.macos-dns.outcome == 'success'
+      shell: bash
+      env:
+        ETHERNET_DNS: ${{ steps.macos-dns.outputs.settings }}
+      run: python3 "$GITHUB_ACTION_PATH/macos_dns.py" restore
 
     - name: Select private executor or hosted execution
       id: fleet
@@ -226,7 +270,7 @@ runs:
       id: release-distfiles
       env:
         GH_TOKEN: ${{ github.token }}
-      if: runner.environment == 'github-hosted'
+      if: runner.environment == 'github-hosted' && inputs.verify-launcher-cache != 'true'
       shell: bash
       run: |
         runner_temp=$RUNNER_TEMP
@@ -252,17 +296,29 @@ runs:
         # under its repository name twice; keep the output base short.
         output-base: ${{ steps.disk-cache-config.outputs.output-base }}
 
-    # Restore by manifest, then platform. Publishing uses a fresh key only
-    # when the caller fetched new blobs, so a partial snapshot can grow.
-    - name: Restore dependency cache
+    # A partial dependency snapshot can seed only its own workload.
+    - name: Restore workload dependency cache
       id: repository-cache
+      if: inputs.repository-cache-key == '' && inputs.verify-launcher-cache != 'true'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ steps.disk-cache-config.outputs.repository-path }}
-        key: ${{ steps.disk-cache-config.outputs.repository-prefix }}${{ hashFiles('MODULE.bazel', 'Cargo.lock', 'pnpm-lock.yaml', '.bazelversion') }}-run-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ inputs.cache-key }}
+        key: ${{ steps.disk-cache-config.outputs.workload-manifest }}run-${{ github.run_id }}-${{ github.run_attempt }}
         restore-keys: |
-          ${{ steps.disk-cache-config.outputs.repository-prefix }}${{ hashFiles('MODULE.bazel', 'Cargo.lock', 'pnpm-lock.yaml', '.bazelversion') }}-
-          ${{ steps.disk-cache-config.outputs.repository-prefix }}
+          ${{ steps.disk-cache-config.outputs.workload-manifest }}
+          ${{ steps.disk-cache-config.outputs.workload }}
+
+    # The hosted Ubuntu warmer publishes all launcher targets as one immutable
+    # snapshot. Extract it into the checksum-addressed cache after the workload
+    # snapshot, before Bazel runs, so a partial workload cannot shadow it.
+    - name: Restore exact dependency snapshot
+      id: launcher-cache
+      if: runner.os == 'Linux' || inputs.repository-cache-key != ''
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.disk-cache-config.outputs.repository-path }}
+        key: ${{ inputs.repository-cache-key || steps.disk-cache-config.outputs.launcher }}
+        fail-on-cache-miss: ${{ inputs.repository-cache-key != '' || inputs.verify-launcher-cache == 'true' }}
 
     - name: Measure restored dependency cache
       id: repository-cache-state
