@@ -248,6 +248,9 @@ fn remove_store_family(directory: &Path, database: &str) -> Result<usize> {
         let stem = database.strip_suffix(".db").unwrap_or(database);
         let graph = format!("{stem}.grafeo");
         members.extend([
+            // A graph container owns its verification marker beside it:
+            // sessions.grafeo -> sessions.verified (also user-sessions).
+            (format!("{stem}.verified"), false),
             (format!("{graph}.wal"), true),
             (graph, false),
             (format!(".{database}.host-admission"), true),
@@ -309,6 +312,9 @@ mod tests {
             "sessions.db-wal",
             "sessions.db-shm",
             "sessions.grafeo",
+            "sessions.verified",
+            "user-sessions.verified",
+            "tracedecay.verified",
             "tracedecay.db",
             "tracedecay.db-wal",
             "tracedecay.grafeo",
@@ -332,7 +338,7 @@ mod tests {
             std::fs::write(root.join(dir).join("entry"), dir).expect("write store entry");
         }
 
-        assert_eq!(remove_store_family(root, "sessions.db").unwrap(), 6);
+        assert_eq!(remove_store_family(root, "sessions.db").unwrap(), 7);
         assert_eq!(remove_store_family(root, GLOBAL_DB_FILENAME).unwrap(), 3);
 
         let mut kept: Vec<String> = std::fs::read_dir(root)
@@ -351,9 +357,49 @@ mod tests {
                 "tracedecay.db",
                 "tracedecay.db-wal",
                 "tracedecay.grafeo",
+                "tracedecay.verified",
                 "user-sessions.db",
+                "user-sessions.verified",
             ]
         );
+    }
+
+
+    #[test]
+    fn profile_sessions_reset_removes_only_its_graph_verification_marker() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        for name in [
+            "sessions.db",
+            "sessions.verified",
+            "user-sessions.db",
+            "user-sessions.verified",
+        ] {
+            std::fs::write(root.join(name), name).unwrap();
+        }
+
+        assert_eq!(remove_store_family(root, USER_SESSIONS_DB_FILENAME).unwrap(), 2);
+        assert!(!root.join("user-sessions.db").exists());
+        assert!(!root.join("user-sessions.verified").exists());
+        assert_eq!(std::fs::read(root.join("sessions.db")).unwrap(), b"sessions.db");
+        assert_eq!(
+            std::fs::read(root.join("sessions.verified")).unwrap(),
+            b"sessions.verified"
+        );
+    }
+
+    #[test]
+    fn unexpected_graph_verification_marker_kind_preserves_the_store() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        std::fs::write(root.join("sessions.db"), b"store").unwrap();
+        let marker = root.join("sessions.verified");
+        std::fs::create_dir(&marker).unwrap();
+        std::fs::write(marker.join("foreign"), b"preserve").unwrap();
+
+        assert!(remove_store_family(root, SESSIONS_DB_FILENAME).is_err());
+        assert_eq!(std::fs::read(root.join("sessions.db")).unwrap(), b"store");
+        assert_eq!(std::fs::read(marker.join("foreign")).unwrap(), b"preserve");
     }
 
     #[test]
