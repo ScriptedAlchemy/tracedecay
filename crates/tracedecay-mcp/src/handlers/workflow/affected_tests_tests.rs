@@ -1215,9 +1215,8 @@ fn assert_failed_terminal(output: &Value) {
 
 #[tokio::test]
 async fn refused_durable_test_result_cannot_publish_a_completed_live_terminal() {
-    let cancellation =
-        CancellationSignal::active("cancellation.affected-tests.settlement-refusal")
-            .expect("fixture cancellation");
+    let cancellation = CancellationSignal::active("cancellation.affected-tests.settlement-refusal")
+        .expect("fixture cancellation");
     let context = verified_graph_context(&cancellation);
     let authority = OperationEventAuthority::default();
     let emitter = authority
@@ -1280,14 +1279,16 @@ async fn refused_durable_test_result_cannot_publish_a_completed_live_terminal() 
                 && termination.receipt.termination == OperationTermination::Failed
                 && termination.receipt.budget.bytes_consumed == 7
     ));
-    assert!(stream.next().await.is_none(), "live stream ends after refusal");
+    assert!(
+        stream.next().await.is_none(),
+        "live stream ends after refusal"
+    );
 }
 
 #[tokio::test]
 async fn durable_store_refusal_remains_primary_when_terminal_publication_also_fails() {
-    let cancellation =
-        CancellationSignal::active("cancellation.affected-tests.concurrent-terminal")
-            .expect("fixture cancellation");
+    let cancellation = CancellationSignal::active("cancellation.affected-tests.concurrent-terminal")
+        .expect("fixture cancellation");
     let context = verified_graph_context(&cancellation);
     let authority = OperationEventAuthority::default();
     let emitter = authority
