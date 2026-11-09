@@ -17,6 +17,7 @@
 
 use std::cmp::{Ordering as CmpOrdering, Reverse};
 use std::collections::BinaryHeap;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -59,13 +60,41 @@ const RELATIONS_FILE: &str = "relations.rows";
 /// A producer-owned file that travels with the sealed generation, see
 /// [`GraphGenerationRowSpill::attachment_path`].
 const ATTACHMENT_FILE: &str = "attachment";
+/// An abandoned row-spill name is not authority to erase an occupied directory.
+/// Persist this marker before any rows; a crash before the marker leaves an
+/// unverified directory for inspection rather than authorizing deletion.
+pub(crate) const ROW_SPILL_OWNER_RECEIPT_FILE: &str = ".row-spill-owner-v1";
+pub(crate) const MAX_ROW_SPILL_OWNER_RECEIPT_BYTES: usize = 512;
+
+pub(crate) fn row_spill_owner_receipt(name: &OsStr) -> Option<Vec<u8>> {
+    let name = name.to_str()?;
+    let receipt = format!("tracedecay.graph-row-spill-v1:{name}").into_bytes();
+    (receipt.len() <= MAX_ROW_SPILL_OWNER_RECEIPT_BYTES).then_some(receipt)
+}
 
 /// Scratch directory owned by one spill; removed with its owner.
 struct SpillDirectory(PathBuf);
 
 impl SpillDirectory {
     fn create(path: PathBuf) -> Result<Self, GraphDbError> {
+        let name = path
+            .file_name()
+            .ok_or_else(|| GraphDbError::invalid("graph row spill directory has no entry name"))?;
+        let receipt = row_spill_owner_receipt(name)
+            .ok_or_else(|| GraphDbError::invalid("graph row spill directory name is invalid"))?;
         std::fs::create_dir(&path).map_err(|error| spill_io("directory create", error))?;
+        // Exclusive marker creation refuses a substituted preexisting file.
+        // The marker is synced before row writes so crash recovery can verify
+        // this exact directory instead of deleting by its filename.
+        let marker = path.join(ROW_SPILL_OWNER_RECEIPT_FILE);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker)
+            .map_err(|error| spill_io("owner marker create", error))?;
+        file.write_all(&receipt)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| spill_io("owner marker persist", error))?;
         Ok(Self(path))
     }
 
@@ -76,14 +105,27 @@ impl SpillDirectory {
 
 impl Drop for SpillDirectory {
     fn drop(&mut self) {
-        match std::fs::remove_dir_all(&self.0) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        let Some((root, name)) = self.0.parent().zip(self.0.file_name()) else {
+            return;
+        };
+        let Some(receipt) = row_spill_owner_receipt(name) else {
+            return;
+        };
+        // The pathname may have been replaced since this spill was created.
+        // Read the proof and remove relative to the same held child capability.
+        match tracedecay_private_fs::capability_dir::remove_receipted_child_directory_nofollow(
+            root,
+            name,
+            OsStr::new(ROW_SPILL_OWNER_RECEIPT_FILE),
+            MAX_ROW_SPILL_OWNER_RECEIPT_BYTES,
+            |bytes| bytes == receipt,
+        ) {
+            Ok(_) => {}
             Err(error) => tracing::warn!(
                 event = "graph_row_spill_remove_failed",
                 path = %self.0.display(),
                 error = %error,
-                "graph row spill directory could not be removed; the next store open sweeps it"
+                "unverified graph row spill preserved for inspection"
             ),
         }
     }
@@ -1035,5 +1077,49 @@ impl GraphGenerationManifestIdentity {
             payload,
         )
         .map_err(|error| GraphDbError::invalid(error.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod owner_receipt_tests {
+    use super::{SpillDirectory, ROW_SPILL_OWNER_RECEIPT_FILE};
+
+    #[test]
+    fn row_spill_recovery_reclaims_only_proven_owners_and_drop_is_fail_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("graph.grafeo");
+        let root = temp.path().join("graph.sealed");
+        std::fs::create_dir(&root).unwrap();
+        let other_pid = std::process::id().wrapping_add(1);
+        let owned = root.join(format!(".rows-{other_pid}-1"));
+        let completed = SpillDirectory::create(owned.clone()).unwrap();
+        std::fs::write(owned.join("entities-0.run"), b"owned").unwrap();
+        std::mem::forget(completed); // Simulate a producer killed before Drop.
+
+        let unreceipted = root.join(format!(".rows-{other_pid}-2"));
+        std::fs::create_dir(&unreceipted).unwrap();
+        std::fs::write(unreceipted.join("foreign"), b"unowned").unwrap();
+        let forged = root.join(format!(".rows-{other_pid}-3"));
+        let interrupted = SpillDirectory::create(forged.clone()).unwrap();
+        std::fs::write(forged.join(ROW_SPILL_OWNER_RECEIPT_FILE), b"wrong owner").unwrap();
+        std::fs::write(forged.join("foreign"), b"preserve").unwrap();
+        std::mem::forget(interrupted);
+
+        crate::sealed_store::sweep_abandoned_row_spills(&database);
+        assert!(!owned.exists(), "the completed, marker-bound spill is reclaimed");
+        assert_eq!(std::fs::read(unreceipted.join("foreign")).unwrap(), b"unowned");
+        assert_eq!(std::fs::read(forged.join("foreign")).unwrap(), b"preserve");
+
+        let active = root.join(format!(".rows-{}-4", std::process::id()));
+        let spill = SpillDirectory::create(active.clone()).unwrap();
+        drop(spill);
+        assert!(!active.exists(), "a current, proven spill cleans up on drop");
+
+        let substituted = root.join(format!(".rows-{}-5", std::process::id()));
+        let spill = SpillDirectory::create(substituted.clone()).unwrap();
+        std::fs::write(substituted.join("foreign"), b"still here").unwrap();
+        std::fs::write(substituted.join(ROW_SPILL_OWNER_RECEIPT_FILE), b"substituted").unwrap();
+        drop(spill);
+        assert_eq!(std::fs::read(substituted.join("foreign")).unwrap(), b"still here");
     }
 }

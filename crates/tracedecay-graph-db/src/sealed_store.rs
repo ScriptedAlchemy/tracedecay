@@ -58,7 +58,8 @@ use tracedecay_private_fs::capability_dir::install_child_directory_noreplace_nof
 use tracedecay_store::runtime::GraphRecoveredGenerationDigestV1;
 
 use crate::generation::{
-    GraphRowDigestSum, physical_namespace_projection_map, recovered_digest_from_row_sum,
+    GraphRowDigestSum, MAX_ROW_SPILL_OWNER_RECEIPT_BYTES, ROW_SPILL_OWNER_RECEIPT_FILE,
+    physical_namespace_projection_map, recovered_digest_from_row_sum, row_spill_owner_receipt,
     verify_sealed_copy_generation,
 };
 use crate::lease::GenerationLocator;
@@ -793,18 +794,25 @@ pub(crate) fn sweep_abandoned_row_spills(database_path: &Path) {
                 owner != own_pid && owner.to_string() == pid && counter.to_string() == sequence
             })
         {
+            let name = entry.file_name();
+            let Some(receipt) = row_spill_owner_receipt(&name) else {
+                continue;
+            };
             let path = entry.path();
             if let Err(error) =
-                tracedecay_private_fs::capability_dir::remove_child_directory_nofollow(
+                tracedecay_private_fs::capability_dir::remove_receipted_child_directory_nofollow(
                     &root,
-                    &entry.file_name(),
+                    &name,
+                    std::ffi::OsStr::new(ROW_SPILL_OWNER_RECEIPT_FILE),
+                    MAX_ROW_SPILL_OWNER_RECEIPT_BYTES,
+                    |bytes| bytes == receipt,
                 )
             {
                 tracing::warn!(
                     event = "graph_row_spill_sweep_failed",
                     path = %path.display(),
                     error = %error,
-                    "abandoned graph row spill could not be removed"
+                    "unverified abandoned graph row spill preserved for inspection"
                 );
             }
         }
