@@ -87,7 +87,9 @@ class RunHttpTest(unittest.TestCase):
         ):
             with self.subTest(name=name):
                 with patch("urllib.request.build_opener") as opener:
-                    opener.return_value.open.return_value = io.BytesIO(payload)
+                    response = io.BytesIO(payload)
+                    response.status = 200
+                    opener.return_value.open.return_value = response
                     with self.assertRaisesRegex(ValueError, message):
                         run_http.post("http://localhost:8009/v1/systemone",
                                       {"state": "test", "questions": {}})
@@ -102,6 +104,7 @@ class RunHttpTest(unittest.TestCase):
                     # The HTTP body is read from the context manager's
                     # entered stream, not the mock returned by opener.open().
                     response = opener.return_value.open.return_value.__enter__.return_value
+                    response.status = 200
                     response.read.side_effect = io.BytesIO(payload).read
                     if accepted:
                         result, latency = run_http.post(
@@ -122,7 +125,9 @@ class RunHttpTest(unittest.TestCase):
         sample = self.root / "sample.json"
         payload = b" " * (run_http.MAX_HTTP_RESPONSE_BYTES + 1)
         with patch("urllib.request.build_opener") as opener:
-            opener.return_value.open.return_value = io.BytesIO(payload)
+            response = io.BytesIO(payload)
+            response.status = 200
+            opener.return_value.open.return_value = response
             with self.assertRaisesRegex(ValueError, "bounded byte limit"):
                 self.run_main(("--sample-out", str(sample)))
         self.assertFalse(sample.exists())
@@ -1085,6 +1090,7 @@ class RunHttpTest(unittest.TestCase):
 
     def test_transmitted_bytes_match_the_recorded_request_fingerprint(self):
         response = io.BytesIO(json.dumps({"answers": {}}).encode())
+        response.status = 200
         body = {"state": "Unicode λ", "questions": {"a": {}, "b": {}}}
         with patch("urllib.request.build_opener") as build_opener:
             build_opener.return_value.open.return_value = response
@@ -1155,6 +1161,55 @@ class RunHttpTest(unittest.TestCase):
                 self.run_main(["--bearer-token-env", ""])
             post.assert_not_called()
         self.assertFalse(self.partial.exists())
+
+    def test_non_200_success_status_does_not_become_scout_evidence(self):
+        # urllib accepts all 2xx statuses, but the production Scout client
+        # refuses any status other than 200 before parsing a typed response.
+        status = [201]
+        requests = []
+        reply = json.dumps({
+            "answers": {key: {"noul": 0.25} for key in run_http.noul_questions()},
+            "usage": {"input_tokens": 12},
+        }).encode("utf-8")
+
+        class RespondWithStatus(BaseHTTPRequestHandler):
+            def do_POST(self):
+                requests.append(self.rfile.read(int(self.headers["Content-Length"])))
+                self.send_response(status[0])
+                self.send_header("Content-Length", str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
+
+            def log_message(self, *_):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), RespondWithStatus)
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        self.base[1] = f"http://127.0.0.1:{server.server_port}/v1/systemone"
+        sample = self.root / "http-status-sample.json"
+        try:
+            for code in (201, 202, 206):
+                with self.subTest(status=code):
+                    status[0] = code
+                    with self.assertRaisesRegex(ValueError, f"decision HTTP status {code}"):
+                        self.run_main(("--sample-out", str(sample)))
+                    self.assertTrue(self.partial.exists())
+                    self.assertEqual(len(self.partial.read_bytes().splitlines()), 1)
+                    self.assertFalse(self.output.exists())
+                    self.assertFalse(sample.exists())
+            # A legitimate 200 on the same frozen experiment can recover
+            # without accepting the previously refused response as a row.
+            status[0] = 200
+            self.run_main(("--sample-out", str(sample)))
+            self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+            self.assertTrue(sample.exists())
+            self.assertFalse(self.partial.exists())
+            self.assertEqual(len(requests), 5)
+        finally:
+            server.shutdown()
+            worker.join(timeout=2)
+            server.server_close()
 
     def test_bearer_transport_sends_only_to_selected_loopback_server(self):
         received = []

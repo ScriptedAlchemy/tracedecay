@@ -30,6 +30,10 @@ the HTTP Authorization header, and never stores the credential or its variable
 name in result evidence. An authenticated remote endpoint must use HTTPS;
 plain HTTP is accepted only for direct loopback addresses. Ambient proxies
 and HTTP redirects are disabled, including for authenticated requests.
+An HTTP response counts as a decision only at status **200**, matching the
+production Scout client. Other successful-looking 2xx statuses (201/202/206)
+refuse before reading or publishing a prediction; an interrupted exact-identity
+run may resume after a genuine 200 without accepting the refused response.
 
 Frozen inputs and HTTP responses must be unambiguous JSON: repeated object keys
 (including identical duplicate values) and nonfinite constants such as `NaN`

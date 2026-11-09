@@ -180,6 +180,10 @@ def post(url, body, timeout=1800, bearer_token=None):
     )
     started = time.perf_counter()
     with opener.open(req, timeout=timeout) as response:
+        # urllib treats every 2xx status as successful. The Rust Scout client
+        # accepts exactly 200, so a 201/202/206 must not become model evidence.
+        if response.status != 200:
+            raise ValueError(f"decision HTTP status {response.status}; Scout requires 200")
         raw = response.read(MAX_HTTP_RESPONSE_BYTES + 1)
         if len(raw) > MAX_HTTP_RESPONSE_BYTES:
             raise ValueError("decision HTTP response exceeds bounded byte limit")
