@@ -305,10 +305,9 @@ impl Drop for InitializationDirectory {
             // schema or a reservation still exists, retain it for recovery.
             if matches!(present(&self.directory.join(OWNER)), Ok(true))
                 && matches!(Self::pending(&self.directory), Ok(false))
+                && let Err(error) = self.retire()
             {
-                if let Err(error) = self.retire() {
-                    tracing::warn!(%error, "could not retire SQLite initialization directory");
-                }
+                tracing::warn!(%error, "could not retire SQLite initialization directory");
             }
             return;
         }
@@ -326,7 +325,7 @@ impl Drop for InitializationDirectory {
                 }
             }
             Err(error) => {
-                tracing::warn!(%error, "could not inspect initialized SQLite destination")
+                tracing::warn!(%error, "could not inspect initialized SQLite destination");
             }
             Ok(true) => {}
         }
