@@ -121,14 +121,14 @@ impl LeafIdentity {
         }
     }
 
-    fn require_at(&self, directory: &Dir, name: &OsStr, empty: bool) -> io::Result<()> {
+    fn pin_at(&self, directory: &Dir, name: &OsStr, empty: bool) -> io::Result<File> {
         let file = capability_dir::open_regular_nofollow(directory, name)?;
         if *self != Self::from_file(&file)? || (empty && file.metadata()?.len() != 0) {
             return Err(ambiguous(
                 "SQLite initialization member no longer matches its prepared generation",
             ));
         }
-        Ok(())
+        Ok(file)
     }
 }
 
@@ -235,7 +235,7 @@ impl InitializationDirectory {
         &mut self,
         expected: u64,
         (main_file, sidecars): (File, [File; 3]),
-    ) -> io::Result<()> {
+    ) -> io::Result<[File; 4]> {
         self.verify_directory_name()?;
         let stage = self.stage_cap()?;
         #[cfg(windows)]
@@ -253,7 +253,7 @@ impl InitializationDirectory {
         #[cfg(not(windows))]
         let sidecars = sidecars.map(Some);
         let main = LeafIdentity::from_file(&main_file)?;
-        main.require_at(&stage, OsStr::new("schema.sqlite"), false)?;
+        let main_pin = main.pin_at(&stage, OsStr::new("schema.sqlite"), false)?;
         for entry in stage.entries()? {
             let name = entry?.file_name();
             if name != "schema.sqlite"
@@ -276,7 +276,7 @@ impl InitializationDirectory {
                 let file = sidecars[index].as_ref().ok_or_else(|| {
                     ambiguous("SQLite sidecar has no surviving original reservation")
                 })?;
-                LeafIdentity::from_file(file)?.require_at(
+                LeafIdentity::from_file(file)?.pin_at(
                     &stage,
                     source.as_ref(),
                     *suffix != "-shm",
@@ -291,28 +291,29 @@ impl InitializationDirectory {
                     ambiguous("SQLite sidecar has no surviving original reservation")
                 })?;
                 let identity = LeafIdentity::from_file(file)?;
-                identity.require_at(&stage, source.as_ref(), suffix != "-shm")?;
+                identity.pin_at(&stage, source.as_ref(), suffix != "-shm")?;
                 if suffix == "-shm" {
                     file.set_len(0)?;
                 }
                 file.sync_all()?;
                 capability_dir::rename_noreplace(&stage, source.as_ref(), &stage, target.as_ref())?;
-                identity.require_at(&stage, target.as_ref(), true)?;
-                Ok(identity)
+                let pin = identity.pin_at(&stage, target.as_ref(), true)?;
+                Ok::<_, io::Error>((identity, pin))
             } else {
                 let file = capability_dir::create_private_file(&stage, target.as_ref())?;
                 file.sync_all()?;
-                LeafIdentity::from_file(&file)
+                let identity = LeafIdentity::from_file(&file)?;
+                let pin = identity.pin_at(&stage, target.as_ref(), true)?;
+                Ok((identity, pin))
             }
         };
+        let (wal, wal_pin) = reserve(0, "-wal")?;
+        let (shm, shm_pin) = reserve(1, "-shm")?;
+        let (journal, journal_pin) = reserve(2, "-journal")?;
         let prepared = PreparedFamily {
             runtime_identity: expected,
             main,
-            sidecars: [
-                reserve(0, "-wal")?,
-                reserve(1, "-shm")?,
-                reserve(2, "-journal")?,
-            ],
+            sidecars: [wal, shm, journal],
         };
         capability_dir::sync_directory(&stage)?;
         self.lease.rewind()?;
@@ -320,10 +321,10 @@ impl InitializationDirectory {
         self.lease.write_all(&bytes)?;
         self.lease.sync_all()?;
         self.prepared = Some(prepared);
-        Ok(())
+        Ok([main_pin, wal_pin, shm_pin, journal_pin])
     }
 
-    fn check_members(&self, stage: &Dir, prepared: &PreparedFamily) -> io::Result<()> {
+    fn pin_members(&self, stage: &Dir, prepared: &PreparedFamily) -> io::Result<Vec<File>> {
         self.verify_directory_name()?;
         for entry in stage.entries()? {
             let name = entry?.file_name();
@@ -337,23 +338,27 @@ impl InitializationDirectory {
                 ));
             }
         }
-        prepared
-            .main
-            .require_at(stage, OsStr::new("schema.sqlite"), false)?;
+        let mut pins = vec![
+            prepared
+                .main
+                .pin_at(stage, OsStr::new("schema.sqlite"), false)?,
+        ];
         for (suffix, identity) in SIDECARS.into_iter().zip(&prepared.sidecars) {
             let from = format!("reservation{suffix}");
             let to = with_suffix(&self.destination, suffix);
             let to = leaf(&to)?;
-            match (
-                present_at(stage, from.as_ref())?,
-                present_at(&self.parent, to)?,
-            ) {
-                (true, false) => identity.require_at(stage, from.as_ref(), true)?,
-                (false, true) => identity.require_at(&self.parent, to, true)?,
-                _ => return Err(ambiguous("SQLite reservation is missing or ambiguous")),
-            }
+            pins.push(
+                match (
+                    present_at(stage, from.as_ref())?,
+                    present_at(&self.parent, to)?,
+                ) {
+                    (true, false) => identity.pin_at(stage, from.as_ref(), true)?,
+                    (false, true) => identity.pin_at(&self.parent, to, true)?,
+                    _ => return Err(ambiguous("SQLite reservation is missing or ambiguous")),
+                },
+            );
         }
-        Ok(())
+        Ok(pins)
     }
 
     pub(super) fn resume_prepared(&mut self) -> io::Result<Option<u64>> {
@@ -377,7 +382,7 @@ impl InitializationDirectory {
             .as_ref()
             .ok_or_else(|| ambiguous("SQLite preparation receipt is missing"))?;
         let stage = self.stage_cap()?;
-        self.check_members(&stage, prepared)?;
+        let _pins = self.pin_members(&stage, prepared)?;
         for (suffix, identity) in SIDECARS.into_iter().zip(&prepared.sidecars) {
             let from = format!("reservation{suffix}");
             let to = with_suffix(&self.destination, suffix);
@@ -385,11 +390,11 @@ impl InitializationDirectory {
             if present_at(&stage, from.as_ref())? {
                 capability_dir::rename_noreplace(&stage, from.as_ref(), &self.parent, to)?;
             }
-            identity.require_at(&self.parent, to, true)?;
+            identity.pin_at(&self.parent, to, true)?;
         }
         capability_dir::sync_directory(&stage)?;
         capability_dir::sync_directory(&self.parent)?;
-        self.check_members(&stage, prepared)?;
+        self.pin_members(&stage, prepared)?;
         let expected = prepared.runtime_identity;
         capability_dir::rename_noreplace(
             &stage,
@@ -400,14 +405,14 @@ impl InitializationDirectory {
         capability_dir::sync_directory(&self.parent)?;
         prepared
             .main
-            .require_at(&self.parent, leaf(&self.destination)?, false)?;
+            .pin_at(&self.parent, leaf(&self.destination)?, false)?;
         drop(stage);
         self.retire()?;
         Ok(expected)
     }
 
     pub(super) fn publish(mut self, expected: u64, files: (File, [File; 3])) -> io::Result<()> {
-        self.prepare(expected, files)?;
+        let _creation_pins = self.prepare(expected, files)?;
         self.publish_prepared().map(|_| ())
     }
 
@@ -457,12 +462,12 @@ impl InitializationDirectory {
 
     pub(super) fn verify_read_only_handoff(destination: &Path) -> io::Result<()> {
         let directory = Self::path(destination);
-        let _pin = match open_private_directory(&directory) {
+        let pin = match open_private_directory(&directory) {
             Ok(pin) => pin,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error),
         };
-        for entry in fs::read_dir(&directory)? {
+        for entry in Dir::from_std_file(pin).entries()? {
             // An empty owner-only marker from the previous layout is harmless
             // for read-only admission. Never retire it by mutable pathname.
             let entry = entry?;
@@ -503,7 +508,7 @@ impl InitializationDirectory {
             }
             prepared
                 .main
-                .require_at(&stage.parent, leaf(destination)?, false)?;
+                .pin_at(&stage.parent, leaf(destination)?, false)?;
         }
         stage.retire()
     }

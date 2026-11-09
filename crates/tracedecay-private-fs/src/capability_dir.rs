@@ -48,6 +48,14 @@ pub fn pin_parent(path: &std::path::Path) -> io::Result<Dir> {
 pub fn open_regular_nofollow(directory: &Dir, name: &OsStr) -> io::Result<std::fs::File> {
     let mut options = OpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    }
     #[cfg(unix)]
     {
         use cap_std::fs::OpenOptionsExt;
