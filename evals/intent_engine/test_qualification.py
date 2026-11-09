@@ -1821,6 +1821,82 @@ class QualificationTests(unittest.TestCase):
                 self.questions, self.dataset_bytes, reordered,
             )
 
+    def test_noncanonical_wire_bytes_refuse_even_after_rehashing_all_evidence(self):
+        # A syntactically different request can decode to identical Noul
+        # semantics, yet cannot be the original Rust send_json wire payload.
+        # Freeze new capture/holdout/result digests to bypass hash-mismatch
+        # guards and exercise the actual production-wire-shape check.
+        capture, _ = self.captured_scout_fixture()
+        original = qualification.loads_unambiguous_json(capture)
+        for encoding in ("top_level_order", "json_spacing"):
+            with self.subTest(encoding=encoding):
+                records = copy.deepcopy(original)
+                for record in records:
+                    decoded = qualification.loads_unambiguous_json(record["body"])
+                    if encoding == "top_level_order":
+                        changed = json.dumps(
+                            {"state": decoded["state"], "questions": decoded["questions"]},
+                            ensure_ascii=False, separators=(",", ":"),
+                        )
+                    else:
+                        changed = json.dumps(decoded, sort_keys=True, ensure_ascii=False)
+                    self.assertEqual(qualification.loads_unambiguous_json(changed), decoded)
+                    self.assertNotEqual(changed, record["body"])
+                    record["body"] = changed
+                altered = json.dumps(records, ensure_ascii=False).encode("utf-8")
+                _, manifest = self.captured_scout_fixture()
+                manifest["captured_requests_sha256"] = qualification.sha256_bytes(altered)
+                manifest["holdout_requests_sha256"] = score.evidence_digest([
+                    [record["id"], qualification.sha256_bytes(record["body"].encode("utf-8"))]
+                    for record in records
+                ])
+                self.valid(manifest)
+                with self.assertRaisesRegex(ValueError, "canonical Rust JSON wire bytes"):
+                    qualification.captured_request_bodies(
+                        altered, ["holdout-positive", "holdout-negative"],
+                        self.questions, None, manifest["max_request_bytes"],
+                    )
+
+                with tempfile.TemporaryDirectory() as temp:
+                    here = Path(temp)
+                    (here / "dataset.json").write_bytes(self.dataset_bytes)
+                    manifest_bytes = json.dumps(manifest).encode("utf-8")
+                    (here / "manifest.json").write_bytes(manifest_bytes)
+                    (here / "server.json").write_text(json.dumps(self.server_config))
+                    (here / "captured.json").write_bytes(altered)
+                    with patch.object(run_http, "HERE", str(here)):
+                        with patch.object(run_http, "post") as post:
+                            with self.assertRaisesRegex(ValueError, "canonical Rust JSON wire bytes"):
+                                run_http.main([
+                                    "--url", self.endpoint, "--tag", "noncanonical",
+                                    "--server-config", str(here / "server.json"),
+                                    "--qualification-manifest", str(here / "manifest.json"),
+                                    "--captured-requests", str(here / "captured.json"),
+                                    qualification.CAPTURED_SCOUT_CONFIG,
+                                ])
+                            post.assert_not_called()
+                    self.assertFalse((here / "results").exists())
+
+                    result = self.signed_result()
+                    for row, record in zip(result["rows"], records, strict=True):
+                        raw = record["body"].encode("utf-8")
+                        row["request_sha256"] = qualification.sha256_bytes(raw)
+                        row["request_size_bytes"] = len(raw)
+                    result["config"] = "trial_" + qualification.CAPTURED_SCOUT_CONFIG
+                    experiment = result["experiment"]
+                    experiment["config"] = qualification.CAPTURED_SCOUT_CONFIG
+                    experiment["requests_sha256"] = manifest["holdout_requests_sha256"]
+                    experiment["qualification_manifest_sha256"] = qualification.sha256_bytes(
+                        manifest_bytes
+                    )
+                    result["experiment_sha256"] = score.evidence_digest(experiment)
+                    with self.assertRaisesRegex(ValueError, "canonical Rust JSON wire bytes"):
+                        qualification.qualified_report(
+                            result, manifest,
+                            qualification.sha256_bytes(manifest_bytes),
+                            self.questions, self.dataset_bytes, altered,
+                        )
+
 
 if __name__ == "__main__":
     unittest.main()
