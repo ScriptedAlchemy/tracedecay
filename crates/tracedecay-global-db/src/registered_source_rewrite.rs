@@ -361,20 +361,28 @@ impl RegisteredGlobalDb {
                         // the entire source before dropping the durable marker.
                         let last_page = (page.len() as i64) < UNOFFERED_RECORD_PAGE_SIZE;
                         let finished = if last_page {
-                            let mut remaining = transaction
-                                .query(
-                                    "SELECT 1 FROM observation_source_presence
-                                     WHERE source_key = ?1 AND generation <> ?2 LIMIT 1",
-                                    params![key.as_str(), generation.as_str()],
-                                )
-                                .await
-                                .map_err(|error| storage("check remaining source records", error))?;
-                            let empty = remaining
-                                .next()
-                                .await
-                                .map_err(|error| storage("check remaining source records", error))?
-                                .is_none();
-                            drop(remaining);
+                            // With no seek this page covered the entire source
+                            // under the writer lock, so no second scan is needed.
+                            // A resumed page must check keys admitted behind it.
+                            let empty = if after_id.is_empty() {
+                                true
+                            } else {
+                                let mut remaining = transaction
+                                    .query(
+                                        "SELECT 1 FROM observation_source_presence
+                                         WHERE source_key = ?1 AND generation <> ?2 LIMIT 1",
+                                        params![key.as_str(), generation.as_str()],
+                                    )
+                                    .await
+                                    .map_err(|error| storage("check remaining source records", error))?;
+                                let empty = remaining
+                                    .next()
+                                    .await
+                                    .map_err(|error| storage("check remaining source records", error))?
+                                    .is_none();
+                                drop(remaining);
+                                empty
+                            };
                             if empty {
                                 transaction
                                     .execute(
