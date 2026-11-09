@@ -89,7 +89,7 @@ pub(super) fn carry_clone_rows(
             [],
         )
         .map_err(sqlite_error)?;
-    shift_rowid_keys(transaction, "clone_occurrences", "ordinal", clones)?;
+    shift_rowid_keys(transaction, "clone_occurrences", "ordinal", clones, control)?;
     let mut parent_payloads = BTreeMap::<i64, Vec<u8>>::new();
     {
         let mut statement = transaction
