@@ -224,6 +224,8 @@ runs:
 
     - name: Stage hermetic launchers from the GitHub release API
       id: linux-launchers
+      env:
+        GH_TOKEN: ${{ github.token }}
       if: runner.environment == 'github-hosted' && runner.os == 'Linux' && runner.arch == 'X64'
       shell: bash
       run: |

@@ -9,9 +9,16 @@ api=https://api.github.com/repos/hermeticbuild/hermetic-launcher/releases/assets
 
 stage_asset() {
   local id=$1 name=$2
-  if ! curl --fail --silent --show-error --location --remove-on-error \
+  # Hosted runners share unauthenticated API quotas. Read the job token only
+  # for the fixed GitHub API origin. Curl drops Authorization on a redirect
+  # to the release storage host, and the header stays off the command line.
+  local api_header=''
+  if [[ -n ${GH_TOKEN:-} ]]; then
+    api_header="Authorization: Bearer $GH_TOKEN"
+  fi
+  if ! curl --proto '=https' --proto-redir '=https' --header @- --fail --silent --show-error --location --remove-on-error \
       --connect-timeout 5 --max-time 30 --header 'Accept: application/octet-stream' \
-      --output "$distdir/$name" "$api/$id"; then
+      --output "$distdir/$name" "$api/$id" <<< "$api_header"; then
     printf '::notice::Release API unavailable for %s; Bazel will use its configured source.\n' "$name"
   fi
 }
