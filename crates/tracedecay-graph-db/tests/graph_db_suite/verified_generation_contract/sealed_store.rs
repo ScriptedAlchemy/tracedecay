@@ -2451,16 +2451,44 @@ fn spilled_rows_refuse_conflicting_repeats_and_dangling_endpoints() {
 /// own live publisher's and stays.
 #[test]
 fn store_open_sweeps_row_spills_abandoned_by_another_process() {
-    let temp = TempDir::new().unwrap();
-    let root = sealed_store_root(temp.path());
-    std::fs::create_dir_all(&root).unwrap();
-    let abandoned = root.join(".rows-4194305-0");
+    const CHILD_ROOT: &str = "TRACEDECAY_TEST_ABANDONED_GRAPH_SPILL";
+    const SPILLED: i32 = 42;
     let identity = projection("code", "store-open-spill");
-    let spill = GraphGenerationRowSpill::create(abandoned.clone(), identity.clone()).unwrap();
-    std::fs::write(abandoned.join("entities-0.run"), b"abandoned").unwrap();
-    std::mem::forget(spill); // Simulate a producer that exited before Drop.
-    let own = root.join(format!(".rows-{}-999999", std::process::id()));
-    let _live_spill = GraphGenerationRowSpill::create(own.clone(), identity).unwrap();
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let root = PathBuf::from(root);
+        let registered = RegisteredGraph::new_mounted(&root).unwrap();
+        let spill = registered
+            .registry
+            .generation_row_spill(registration(registered.binding.clone(), &root), identity)
+            .unwrap();
+        std::fs::write(spill.attachment_path(), b"abandoned").unwrap();
+        std::process::exit(SPILLED);
+    }
+
+    let temp = TempDir::new().unwrap();
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg(std::thread::current().name().unwrap())
+        .env(CHILD_ROOT, temp.path())
+        .output()
+        .unwrap();
+    assert_eq!(child.status.code(), Some(SPILLED), "{child:?}");
+    let root = sealed_store_root(temp.path());
+    let abandoned = row_spills(temp.path());
+    assert_eq!(abandoned.len(), 1);
+    let abandoned = root.join(&abandoned[0]);
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    assert!(!abandoned.exists());
+    let live_spill = registered
+        .registry
+        .generation_row_spill(
+            registration(registered.binding.clone(), temp.path()),
+            identity,
+        )
+        .unwrap();
+    let attachment = live_spill.attachment_path();
+    std::fs::write(&attachment, b"live peer attachment").unwrap();
+    drop(registered);
 
     let foreign = ".rows-notes";
     std::fs::create_dir(root.join(foreign)).unwrap();
@@ -2471,6 +2499,5 @@ fn store_open_sweeps_row_spills_abandoned_by_another_process() {
         std::fs::read(root.join(foreign).join("notes")).unwrap(),
         b"keep"
     );
-    assert!(own.is_dir());
-    assert!(!abandoned.exists());
+    assert_eq!(std::fs::read(attachment).unwrap(), b"live peer attachment");
 }

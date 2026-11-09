@@ -61,7 +61,7 @@ pub(crate) use replay::{
 };
 pub(crate) use spill::{
     AbandonedRowSpill, ENTITIES_FILE, MAX_ROW_SPILL_OWNER_RECEIPT_BYTES,
-    ROW_SPILL_OWNER_RECEIPT_FILE, ROW_SPILL_PREFIX, read_spilled_entity,
+    ROW_SPILL_OWNER_RECEIPT_FILE, ROW_SPILL_PREFIX, read_spilled_entity, row_spill_owner,
 };
 pub use spill::{
     GRAPH_ROW_SPILL_RUN_BYTES, GraphGenerationRowSpill, GraphGenerationRows,

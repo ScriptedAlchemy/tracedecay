@@ -60,7 +60,7 @@ use tracedecay_store::runtime::GraphRecoveredGenerationDigestV1;
 use crate::generation::{
     AbandonedRowSpill, GraphRowDigestSum, MAX_ROW_SPILL_OWNER_RECEIPT_BYTES,
     ROW_SPILL_OWNER_RECEIPT_FILE, ROW_SPILL_PREFIX, physical_namespace_projection_map,
-    recovered_digest_from_row_sum, verify_sealed_copy_generation,
+    recovered_digest_from_row_sum, row_spill_owner, verify_sealed_copy_generation,
 };
 use crate::lease::GenerationLocator;
 use crate::location::PersistentGraphStoreState;
@@ -777,10 +777,10 @@ pub(crate) fn sweep_abandoned_row_spills(database_path: &Path) {
     let Ok(entries) = std::fs::read_dir(&root) else {
         return;
     };
-    let own_pid = std::process::id();
+    let current_owner = row_spill_owner();
     for entry in entries.flatten() {
         let name = entry.file_name();
-        if let Some(proof) = AbandonedRowSpill::from_name(&name, own_pid) {
+        if let Some(proof) = AbandonedRowSpill::from_name(&name, current_owner) {
             let path = entry.path();
             if let Err(error) =
                 tracedecay_private_fs::capability_dir::remove_receipted_child_directory_nofollow(
@@ -1469,7 +1469,7 @@ impl GraphDb {
             .map_err(|error| sealed_store_io_failure("row spill root create failed", error))?;
         Ok(root.join(format!(
             "{ROW_SPILL_PREFIX}{}-{}",
-            std::process::id(),
+            row_spill_owner(),
             NEXT_SPILL.fetch_add(1, AtomicOrdering::Relaxed)
         )))
     }
