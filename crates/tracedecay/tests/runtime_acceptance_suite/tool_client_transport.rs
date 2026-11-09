@@ -79,6 +79,70 @@ fn run_command_with_timeout(mut command: Command, timeout: Duration) -> ChildRes
     }
 }
 
+fn run_tool_after_admission(
+    mut command: Command,
+    requests: mpsc::Receiver<Instant>,
+    deadline: Instant,
+) -> Output {
+    let child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn CLI for scripted daemon");
+    let mut child = common::TestChildProcess::new(child);
+    let admitted = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match requests.recv_timeout(remaining.min(Duration::from_millis(50))) {
+            Ok(admitted) => break admitted,
+            Err(RecvTimeoutError::Timeout) => {
+                assert!(
+                    child
+                        .try_wait()
+                        .expect("poll CLI before admission")
+                        .is_none(),
+                    "CLI exited before the daemon received its request"
+                );
+                assert!(Instant::now() < deadline, "CLI request admission timed out");
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                panic!("scripted daemon stopped before receiving the CLI request")
+            }
+        }
+    };
+    assert!(admitted <= deadline, "CLI request admission timed out");
+    // Admission diagnoses which phase stalled; it does not grant a second
+    // watchdog. Startup, response delivery and process exit share the same
+    // absolute deadline, including delayed observation of a queued receipt.
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .expect("CLI response deadline expired after admission");
+    let output = child
+        .wait_with_output(remaining)
+        .expect("CLI must finish delivering the admitted response within its deadline");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+#[test]
+#[should_panic(expected = "CLI response deadline expired after admission")]
+fn admission_receipt_cannot_restart_an_expired_child_watchdog() {
+    // Use a real subprocess without recursively running this test. A receipt
+    // admitted at the deadline can be observed later from the channel, but
+    // must not grant that child a fresh response-delivery timeout.
+    let mut command = Command::new(std::env::current_exe().expect("test executable"));
+    command.arg("--list");
+    let (admitted_tx, admitted_rx) = mpsc::channel();
+    let deadline = Instant::now();
+    admitted_tx.send(deadline).expect("queue admitted request");
+    run_tool_after_admission(command, admitted_rx, deadline);
+}
+
 fn init_project(home: &Path, project: &Path) {
     std::fs::create_dir_all(project.join("src")).expect("create project source");
     std::fs::write(project.join("src/lib.rs"), "pub fn marker() {}\n")
@@ -161,11 +225,11 @@ fn response_bytes(request: &DaemonInvocationRequest, scope: ResolvedScope, text:
     files_response(request, scope, files_result([text.to_owned()]))
 }
 
-fn output_payload(result: &ChildResult) -> Value {
-    let envelope = serde_json::from_slice(&result.output.stdout).unwrap_or_else(|error| {
+fn output_payload(output: &Output) -> Value {
+    let envelope = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
         panic!(
             "invalid CLI JSON ({error}); stderr: {}",
-            String::from_utf8_lossy(&result.output.stderr)
+            String::from_utf8_lossy(&output.stderr)
         )
     });
     tracedecay::daemon::tool_json_payload(&envelope, "transport fixture")
@@ -190,7 +254,7 @@ fn spawn_scripted_daemon<F>(
     project: &Path,
     connections: usize,
     script: F,
-) -> (mpsc::Receiver<()>, JoinHandle<()>)
+) -> (mpsc::Receiver<Instant>, JoinHandle<()>)
 where
     F: Fn(UnixStream, DaemonInvocationRequest, ResolvedScope) + Send + Sync + 'static,
 {
@@ -275,7 +339,9 @@ where
                             ..
                         }
                     ));
-                    request_tx.send(()).expect("publish request receipt");
+                    request_tx
+                        .send(Instant::now())
+                        .expect("publish request receipt");
                     let script = Arc::clone(&script);
                     let scope = scope.clone();
                     workers.push(std::thread::spawn(move || script(stream, request, scope)));
@@ -423,7 +489,7 @@ fn generic_tool_reports_unavailable_truncation_storage() {
         "{}",
         String::from_utf8_lossy(&result.output.stderr)
     );
-    let payload = output_payload(&result);
+    let payload = output_payload(&result.output);
     assert_eq!(payload["truncated"], true, "{payload}");
     assert_eq!(payload["handle_available"], false, "{payload}");
     assert!(
@@ -448,30 +514,26 @@ fn generic_tool_reports_unavailable_truncation_storage() {
 #[test]
 fn generic_tool_retrieves_oversized_typed_result() {
     let (_home, _project, _socket_dir, home, project, socket) = fixture();
-    let expected = serde_json::to_value(oversized_files()).expect("expected file listing");
-    let (_requests, server) = spawn_scripted_daemon(
+    let files = oversized_files();
+    let expected = serde_json::to_value(&files).expect("expected file listing");
+    let (requests, server) = spawn_scripted_daemon(
         socket.clone(),
         &home,
         &project,
         1,
-        |mut stream, request, scope| {
+        move |mut stream, request, scope| {
             stream
-                .write_all(&files_response(&request, scope, oversized_files()))
+                .write_all(&files_response(&request, scope, files.clone()))
                 .expect("write oversized result");
         },
     );
-    let result = run_command_with_timeout(
+    let output = run_tool_after_admission(
         tool_command(&home, &project, &socket, "large"),
-        CHILD_TIMEOUT,
+        requests,
+        Instant::now() + CHILD_TIMEOUT,
     );
     server.join().expect("join scripted daemon");
-    assert!(!result.killed_by_harness, "oversized response hung");
-    assert!(
-        result.output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.output.stderr)
-    );
-    let preview = output_payload(&result);
+    let preview = output_payload(&output);
     assert_eq!(preview["truncated"], true, "{preview}");
     let handle = preview["handle"].as_str().expect("stored response handle");
     assert_eq!(preview["retrieve_tool"], "tracedecay_retrieve");
@@ -501,7 +563,7 @@ fn generic_tool_retrieves_oversized_typed_result() {
             "{}",
             String::from_utf8_lossy(&retrieved.output.stderr)
         );
-        let page = output_payload(&retrieved);
+        let page = output_payload(&retrieved.output);
         pages += 1;
         assert_eq!(page["handle"], handle);
         assert_eq!(page["offset"], offset);
@@ -559,49 +621,12 @@ fn generic_tool_json_preserves_large_result_while_daemon_waits() {
             hold_stream_after_files(stream, request, scope, files.clone());
         },
     );
-    let child = tool_command(&home, &project, &socket, "large")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn CLI for held response");
-    let mut child = common::TestChildProcess::new(child);
-    // Request admission and CLI startup share the original child deadline.
-    // Poll the child as well as the receipt: waiting only for the daemon's
-    // 120-second accept leak guard would mask an early CLI exit or failure.
-    let request_deadline = Instant::now() + CHILD_TIMEOUT;
-    loop {
-        match requests.recv_timeout(Duration::from_millis(50)) {
-            Ok(()) => break,
-            Err(RecvTimeoutError::Timeout) => {
-                assert!(
-                    child
-                        .try_wait()
-                        .expect("poll CLI before daemon request")
-                        .is_none(),
-                    "CLI exited before the fake daemon received its request"
-                );
-                assert!(
-                    Instant::now() < request_deadline,
-                    "CLI did not send a daemon request within the child startup deadline"
-                );
-            }
-            Err(RecvTimeoutError::Disconnected) => {
-                panic!("fake daemon stopped before the CLI sent its request")
-            }
-        }
-    }
-    // Once admitted, prove the full response is written while the daemon
-    // deliberately holds the connection open, not after an EOF or stall.
-    let output = child
-        .wait_with_output(CHILD_TIMEOUT)
-        .expect("CLI must finish without waiting for daemon EOF");
-    server.join().expect("join scripted daemon");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+    let output = run_tool_after_admission(
+        tool_command(&home, &project, &socket, "large"),
+        requests,
+        Instant::now() + CHILD_TIMEOUT,
     );
+    server.join().expect("join scripted daemon");
     let envelope: Value =
         serde_json::from_slice(&output.stdout).expect("--json must contain one complete document");
     assert_eq!(envelope["isError"], false, "{envelope}");
@@ -749,7 +774,7 @@ fn cancelling_generic_tool_reaps_child_and_closes_request() {
     // load, and fail fast if the CLI dies or the daemon stops first.
     loop {
         match requests.recv_timeout(Duration::from_millis(50)) {
-            Ok(()) => break,
+            Ok(_) => break,
             Err(RecvTimeoutError::Timeout) => assert!(
                 child.try_wait().expect("poll cancellable CLI").is_none(),
                 "CLI exited before the fake daemon received its request"
