@@ -329,7 +329,16 @@ been recomputed. Only the inner request must be canonical; the outer evidence
 file preserves its original hashed bytes. This wire-shape check does **not**
 attest that the bytes actually originated from Scout.
 
-The manifest must set `arm.config` to `S_scout_captured`,
+The manifest must set `arm.config` to `S_scout_captured` and freeze a
+positive integer `max_state_bytes` from the actual production
+`DecisionEngineConfigV1` / effective Scout settings. This limits the UTF-8
+bytes in the decoded `state` field separately from the whole HTTP JSON byte
+ceiling. The Rust client keeps only the newest state tail (on a character
+boundary) if the input is larger; therefore a claimed capture exceeding this
+state cap cannot have been emitted by that configured client. The validator
+refuses it before inference, even if all capture and manifest digests are
+recomputed. This is a **declared** setting until verified against canonical
+settings provenance, not proof of production runtime identity. Set
 `captured_requests_sha256` to the SHA-256 of the entire **original capture
 file**, and `holdout_requests_sha256` to the existing ordered
 `[[case_id, sha256(inner_body_bytes)], ...]` commitment. Other manifest

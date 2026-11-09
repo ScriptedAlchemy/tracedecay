@@ -1609,6 +1609,7 @@ class QualificationTests(unittest.TestCase):
         capture_bytes = json.dumps(records, ensure_ascii=False).encode("utf-8")
         manifest = copy.deepcopy(self.manifest)
         manifest["arm"]["config"] = qualification.CAPTURED_SCOUT_CONFIG
+        manifest["max_state_bytes"] = 4096
         manifest["captured_requests_sha256"] = qualification.sha256_bytes(capture_bytes)
         manifest["holdout_requests_sha256"] = score.evidence_digest([
             [record["id"], hashlib.sha256(record["body"].encode("utf-8")).hexdigest()]
@@ -1627,6 +1628,7 @@ class QualificationTests(unittest.TestCase):
         bodies = qualification.captured_request_bodies(
             capture, ["holdout-positive", "holdout-negative"],
             self.questions, None, manifest["max_request_bytes"],
+        manifest["max_state_bytes"],
         )
         self.assertEqual(bodies["holdout-positive"], records[0]["body"].encode("utf-8"))
         self.assertEqual(bodies["holdout-negative"], records[1]["body"].encode("utf-8"))
@@ -1735,6 +1737,7 @@ class QualificationTests(unittest.TestCase):
                         qualification.captured_request_bodies(
                             changed_bytes, ["holdout-positive", "holdout-negative"],
                             self.questions, None, manifest["max_request_bytes"],
+                        manifest["max_state_bytes"],
                         )
             for name, changed in [
                 ("changed text", capture_bytes.replace(b"What changes?", b"What changed?")),
@@ -1779,6 +1782,7 @@ class QualificationTests(unittest.TestCase):
             qualification.captured_request_bodies(
                 reordered, ["holdout-positive", "holdout-negative"],
                 self.questions, None, manifest["max_request_bytes"],
+            manifest["max_state_bytes"],
             )
 
         # Runner refusal precedes network traffic and evidence-file creation.
@@ -1821,6 +1825,96 @@ class QualificationTests(unittest.TestCase):
                 self.questions, self.dataset_bytes, reordered,
             )
 
+    def test_captured_state_budget_is_utf8_bytes_and_independently_checked(self):
+        capture, manifest = self.captured_scout_fixture()
+        records = qualification.loads_unambiguous_json(capture)
+        # Two Unicode scalar values are four UTF-8 bytes, not two bytes.
+        # Recompute every capture and request digest, so the refusal is
+        # caused by the runtime state limit, not by stale provenance hashes.
+        for record in records:
+            body = qualification.loads_unambiguous_json(record["body"])
+            body["state"] = "éé"
+            record["body"] = json.dumps(
+                body, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+            )
+        capture = json.dumps(records, ensure_ascii=False).encode("utf-8")
+        manifest["captured_requests_sha256"] = qualification.sha256_bytes(capture)
+        manifest["holdout_requests_sha256"] = score.evidence_digest([
+            [record["id"], qualification.sha256_bytes(record["body"].encode("utf-8"))]
+            for record in records
+        ])
+        for limit in (None, True, 0, "4096"):
+            with self.subTest(invalid_limit=limit):
+                invalid = copy.deepcopy(manifest)
+                invalid["max_state_bytes"] = limit
+                with self.assertRaisesRegex(ValueError, "max_state_bytes"):
+                    self.valid(invalid)
+        unexpected = copy.deepcopy(self.manifest)
+        unexpected["max_state_bytes"] = 4096
+        with self.assertRaisesRegex(ValueError, "only captured Scout"):
+            self.valid(unexpected)
+
+        manifest["max_state_bytes"] = 3
+        self.valid(manifest)
+        with self.assertRaisesRegex(ValueError, "state byte budget"):
+            qualification.captured_request_bodies(
+                capture, ["holdout-positive", "holdout-negative"],
+                self.questions, None, manifest["max_request_bytes"],
+                manifest["max_state_bytes"],
+            )
+
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            (here / "dataset.json").write_bytes(self.dataset_bytes)
+            manifest_bytes = json.dumps(manifest).encode("utf-8")
+            (here / "manifest.json").write_bytes(manifest_bytes)
+            (here / "captured.json").write_bytes(capture)
+            (here / "server.json").write_text(json.dumps(self.server_config))
+            with patch.object(run_http, "HERE", str(here)):
+                with patch.object(run_http, "post") as inference:
+                    with self.assertRaisesRegex(ValueError, "state byte budget"):
+                        run_http.main([
+                            "--url", self.endpoint, "--tag", "oversized-state",
+                            "--server-config", str(here / "server.json"),
+                            "--qualification-manifest", str(here / "manifest.json"),
+                            "--captured-requests", str(here / "captured.json"),
+                            qualification.CAPTURED_SCOUT_CONFIG,
+                        ])
+                    inference.assert_not_called()
+            self.assertFalse((here / "results").exists())
+
+            result = self.signed_result()
+            for row, record in zip(result["rows"], records, strict=True):
+                encoded = record["body"].encode("utf-8")
+                row["request_sha256"] = qualification.sha256_bytes(encoded)
+                row["request_size_bytes"] = len(encoded)
+            result["config"] = "trial_" + qualification.CAPTURED_SCOUT_CONFIG
+            experiment = result["experiment"]
+            experiment["config"] = qualification.CAPTURED_SCOUT_CONFIG
+            experiment["requests_sha256"] = manifest["holdout_requests_sha256"]
+            experiment["qualification_manifest_sha256"] = qualification.sha256_bytes(manifest_bytes)
+            result["experiment_sha256"] = score.evidence_digest(experiment)
+            with self.assertRaisesRegex(ValueError, "state byte budget"):
+                qualification.qualified_report(
+                    result, manifest, qualification.sha256_bytes(manifest_bytes),
+                    self.questions, self.dataset_bytes, capture,
+                )
+
+        # Boundary acceptance is equally important: the runtime would send
+        # this four-byte state unchanged with a four-byte budget.
+        manifest["max_state_bytes"] = 4
+        self.valid(manifest)
+        accepted = qualification.captured_request_bodies(
+            capture, ["holdout-positive", "holdout-negative"],
+            self.questions, None, manifest["max_request_bytes"],
+            manifest["max_state_bytes"],
+        )
+        self.assertEqual(len(accepted), 2)
+        self.assertEqual(
+            qualification.loads_unambiguous_json(accepted["holdout-positive"])["state"],
+            "éé",
+        )
+
     def test_noncanonical_wire_bytes_refuse_even_after_rehashing_all_evidence(self):
         # A syntactically different request can decode to identical Noul
         # semantics, yet cannot be the original Rust send_json wire payload.
@@ -1855,6 +1949,7 @@ class QualificationTests(unittest.TestCase):
                     qualification.captured_request_bodies(
                         altered, ["holdout-positive", "holdout-negative"],
                         self.questions, None, manifest["max_request_bytes"],
+                    manifest["max_state_bytes"],
                     )
 
                 with tempfile.TemporaryDirectory() as temp:

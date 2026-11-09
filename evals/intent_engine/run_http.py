@@ -585,6 +585,7 @@ def main(argv=None):
             captured = captured_request_bodies(
                 capture_bytes, qualified["heldout_ids"], questions,
                 args.send_model, qualified["max_request_bytes"],
+                qualified["max_state_bytes"],
             )
         keep = set(qualified["heldout_ids"])
         dataset = [case for case in dataset if case["id"] in keep]

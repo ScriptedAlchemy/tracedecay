@@ -32,12 +32,14 @@ def loads_unambiguous_json(raw):
 CAPTURED_SCOUT_CONFIG = "S_scout_captured"
 
 
-def captured_request_bodies(raw, case_ids, questions, requested_model, max_bytes):
+def captured_request_bodies(raw, case_ids, questions, requested_model, max_bytes, max_state_bytes):
     """Replay exact, operator-supplied Scout HTTP request bytes without rendering.
 
     Captures are declarations until independently exported from a digest-checked
     owning transcript window. This method does not attest their origin.
     """
+    if type(max_state_bytes) is not int or max_state_bytes <= 0:
+        raise ValueError("captured Scout requests require a positive frozen state byte budget")
     records = loads_unambiguous_json(raw)
     if (not isinstance(records, list) or len(records) != len(case_ids)
             or not all(isinstance(record, dict)
@@ -58,6 +60,13 @@ def captured_request_bodies(raw, case_ids, questions, requested_model, max_bytes
                 or request["questions"] != questions
                 or (requested_model is not None and request.get("model") != requested_model)):
             raise ValueError(f"captured Scout request {record['id']} differs from frozen Noul contract")
+        # DecisionEngineClientV1::request_body keeps only the newest
+        # max_state_bytes of UTF-8 state on a character boundary. A longer
+        # captured state could never have been sent by the frozen client.
+        if len(request["state"].encode("utf-8")) > max_state_bytes:
+            raise ValueError(
+                f"captured Scout request {record['id']} exceeds frozen state byte budget"
+            )
         # The production Rust serde_json::Map sorts keys on the Bazel
         # build. The settings Vec order is not the serialized wire order.
         # Capture bytes are pinned independently; reject any question-map
@@ -181,6 +190,16 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
     elif captured_sha is not None:
         raise ValueError("only captured Scout arms may declare captured request evidence")
 
+    # Freeze the production DecisionEngineConfigV1 state cap independently
+    # from the whole serialized HTTP request limit. Without this, an invented
+    # capture with a larger model-visible transcript could be called parity.
+    state_limit = manifest.get("max_state_bytes")
+    if arm["config"] == CAPTURED_SCOUT_CONFIG:
+        if type(state_limit) is not int or state_limit <= 0:
+            raise ValueError("captured Scout arm requires frozen positive max_state_bytes")
+    elif state_limit is not None:
+        raise ValueError("only captured Scout arms may declare max_state_bytes")
+
     request_limit = manifest.get("max_request_bytes")
     if (isinstance(request_limit, bool) or not isinstance(request_limit, int)
             or request_limit <= 0):
@@ -301,6 +320,7 @@ def validate_manifest(manifest, dataset_sha, questions, cases=None):
         "arm": arm,
         "captured_requests_sha256": captured_sha,
         "max_request_bytes": request_limit,
+        "max_state_bytes": state_limit,
         "max_input_tokens": token_limit,
         "thresholds": thresholds,
         "noul_temperature": client_temperature,
@@ -429,6 +449,7 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes, c
         captured = captured_request_bodies(
             captured_requests_bytes, validated["heldout_ids"], questions,
             arm["requested_model"], validated["max_request_bytes"],
+            validated["max_state_bytes"],
         )
         renderer = None
     else:
