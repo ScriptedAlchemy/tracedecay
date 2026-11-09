@@ -3,9 +3,11 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use gix::bstr::ByteSlice;
+use ignore::{DirEntry, Error as WalkError, Walk};
 
 use super::{SourceWalkError, has_nested_repository_ancestor};
 
@@ -29,6 +31,19 @@ pub(super) struct ChildSources {
 }
 
 impl AuthenticatedSubmodule {
+    fn checkout_is_live(&self) -> bool {
+        let marker = self.worktree.join(".git");
+        self.worktree.canonicalize().ok().as_ref() == Some(&self.worktree)
+            && marker
+                .symlink_metadata()
+                .is_ok_and(|metadata| metadata.is_file())
+            && gix::discover::path::from_gitdir_file(&marker)
+                .ok()
+                .and_then(|target| target.canonicalize().ok())
+                .as_ref()
+                == Some(&self.git_dir)
+    }
+
     pub(super) fn sources(&self) -> Result<ChildSources, SourceWalkError> {
         let repository = tracedecay_runtime_core::git_open::open(&self.git_dir).map_err(failure)?;
         let inventory =
@@ -40,6 +55,50 @@ impl AuthenticatedSubmodule {
                 .map_err(failure)?,
             gitlinks: inventory.gitlink_paths().clone(),
         })
+    }
+}
+
+/// A lazy walk that cannot outlive its authenticated child checkout binding.
+/// The ordinary parent walk has no child binding and retains its own policy.
+pub struct CheckoutWalk {
+    walk: Option<Walk>,
+    child: Option<AuthenticatedSubmodule>,
+}
+
+impl CheckoutWalk {
+    pub(super) fn new(walk: Walk, child: Option<AuthenticatedSubmodule>) -> Self {
+        Self {
+            walk: Some(walk),
+            child,
+        }
+    }
+}
+
+impl Iterator for CheckoutWalk {
+    type Item = Result<DirEntry, WalkError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.walk.as_ref()?;
+        if let Some(child) = &self.child
+            && !child.checkout_is_live()
+        {
+            // Check before polling, including the root entry: ignore does not
+            // apply filter_entry to a walk's root. Stop permanently after a
+            // binding change, even if the original marker is later restored.
+            self.walk = None;
+            return Some(Err(WalkError::WithPath {
+                path: child.worktree.clone(),
+                err: Box::new(WalkError::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "authenticated submodule checkout binding changed during source walk",
+                ))),
+            }));
+        }
+        let next = self.walk.as_mut()?.next();
+        if next.is_none() {
+            self.walk = None;
+        }
+        next
     }
 }
 
@@ -241,19 +300,7 @@ impl LiveSourceBoundaries {
             };
             relative = path.strip_prefix(ancestor).map_err(std::io::Error::other)?;
             if !relative.to_str().is_some_and(|file| files.contains(file))
-                || child.worktree.canonicalize().ok().as_ref() != Some(&child.worktree)
-            {
-                return Ok(None);
-            }
-            let marker = child.worktree.join(".git");
-            if !marker
-                .symlink_metadata()
-                .is_ok_and(|metadata| metadata.is_file())
-                || gix::discover::path::from_gitdir_file(&marker)
-                    .ok()
-                    .and_then(|target| target.canonicalize().ok())
-                    .as_ref()
-                    != Some(&child.git_dir)
+                || !child.checkout_is_live()
             {
                 return Ok(None);
             }
@@ -300,3 +347,6 @@ pub fn pinned_submodules(
     }
     Ok(children)
 }
+
+#[cfg(test)]
+mod tests;

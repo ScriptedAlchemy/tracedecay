@@ -18,11 +18,11 @@ use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use ignore::WalkBuilder;
 use ignore::overrides::{Override, OverrideBuilder};
-use ignore::{Walk, WalkBuilder};
 use tracedecay_domain::{IndexPathPolicyV1, forward_slash_path};
 
-pub type SourceWalk = std::iter::Flatten<std::vec::IntoIter<Walk>>;
+pub type SourceWalk = std::iter::Flatten<std::vec::IntoIter<submodules::CheckoutWalk>>;
 
 #[derive(Debug)]
 pub struct SourceWalkError {
@@ -401,6 +401,7 @@ fn source_walk_inner(
     let mut parent_gitlinks = boundaries.gitlinks;
     let mut authenticated = BTreeSet::new();
     let mut child_files = BTreeSet::new();
+    let mut roots = Vec::new();
     for (path, child) in boundaries.children {
         let absolute = project_root.join(&path);
         let policy = if scoped_policy(&absolute, true) {
@@ -427,12 +428,9 @@ fn source_walk_inner(
             parent_gitlinks.insert(format!("{path}/{nested}"));
         }
         authenticated.insert(path);
+        roots.push((absolute, child));
     }
 
-    let roots = authenticated
-        .iter()
-        .map(|path| project_root.join(path))
-        .collect::<Vec<_>>();
     let child_dirs = child_files
         .iter()
         .flat_map(|path| Path::new(path).ancestors().skip(1))
@@ -497,11 +495,16 @@ fn source_walk_inner(
             Err(_) => false,
         }
     });
-    let mut builders = vec![(WalkBuilder::new(project_root), false)];
-    builders.extend(roots.into_iter().map(|root| (WalkBuilder::new(root), true)));
+    let mut builders = vec![(WalkBuilder::new(project_root), None)];
+    builders.extend(
+        roots
+            .into_iter()
+            .map(|(root, child)| (WalkBuilder::new(root), Some(child))),
+    );
     let walks = builders
         .into_iter()
-        .map(|(mut builder, in_child)| {
+        .map(|(mut builder, child)| {
+            let in_child = child.is_some();
             // The child Git roster already applied that checkout's ignores, including
             // tracked exceptions. Running parent ignore rules over it would hide those files.
             if in_child {
@@ -517,7 +520,7 @@ fn source_walk_inner(
             if let Some(overrides) = &overrides {
                 builder.overrides(overrides.clone());
             }
-            builder.build()
+            submodules::CheckoutWalk::new(builder.build(), child)
         })
         .collect::<Vec<_>>();
     Ok(walks.into_iter().flatten())
