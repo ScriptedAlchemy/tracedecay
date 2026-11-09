@@ -357,6 +357,8 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         let query_limit = bounded_query_limit(limit)?;
         let candidates =
             recovery_candidate_query(&snapshot, now, query_limit, &cancellation).await?;
+        // Drive hydration from the bounded page: a planner-selected receipt
+        // outer loop would revisit the sleeping backlog on each small page.
         let candidate_sql = format!(
             "WITH candidates AS MATERIALIZED ({candidates}), page AS MATERIALIZED (
                  SELECT created_at, session_id, generation FROM candidates
@@ -365,7 +367,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
              SELECT page.session_id, page.generation, receipt.scope_kind, receipt.scope_id,
                     journal.projection_json, receipt.recovery_failure_count,
                     (SELECT COUNT(*) FROM candidates) = ?1
-             FROM page JOIN session_relation_receipts AS receipt
+             FROM page CROSS JOIN session_relation_receipts AS receipt
                ON receipt.session_id = page.session_id AND receipt.generation = page.generation
              LEFT JOIN session_relation_effect_journal AS journal
                ON journal.session_id = page.session_id AND journal.generation = page.generation
