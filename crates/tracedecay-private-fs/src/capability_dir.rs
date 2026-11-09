@@ -334,6 +334,84 @@ pub fn install_child_directory_noreplace_nofollow(
     rename_noreplace(&root, staging_name, &root, generation_name)
 }
 
+/// Census proof-bound children through held root/child capabilities, not
+/// ambient paths. Unknown entries are counted but never traversed; only
+/// multiply linked inodes consume deduplication memory. Receipts are bounded
+/// and read from the same child whose bytes are subsequently charged.
+pub fn census_receipted_directory_bytes<K: Ord + Copy>(
+    root_path: &Path,
+    unrecognized: K,
+    mut receipt_for: impl FnMut(&OsStr) -> (&'static str, usize),
+    mut classify: impl FnMut(&OsStr, Option<&[u8]>) -> K,
+) -> io::Result<std::collections::BTreeMap<K, (u64, u64)>> {
+    let root = match open_root_nofollow(root_path) {
+        Ok(root) => root,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) => return Err(error),
+    };
+    let mut totals = std::collections::BTreeMap::<K, (u64, u64)>::new();
+    let mut counted = std::collections::HashSet::<(u64, u64)>::new();
+    for entry in root.read_dir(".")? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let child = if entry.file_type()?.is_dir() {
+            root.open_dir_nofollow(&name).ok()
+        } else {
+            None
+        };
+        let (category, bytes) = if let Some(child) = child {
+            let (receipt_name, maximum) = receipt_for(&name);
+            let receipt =
+                read_bounded_child_receipt(&child, OsStr::new(receipt_name), maximum).ok();
+            let category = classify(&name, receipt.as_deref());
+            let bytes = if category == unrecognized {
+                0
+            } else {
+                directory_bytes_from_held_dir(child, &mut counted)?
+            };
+            (category, bytes)
+        } else {
+            (unrecognized, 0)
+        };
+        let totals = totals.entry(category).or_default();
+        totals.0 = totals.0.saturating_add(1);
+        totals.1 = totals.1.saturating_add(bytes);
+    }
+    Ok(totals)
+}
+
+/// Walk no-follow entries relative to the same held child, even after its
+/// old pathname has been renamed. The stack scales with directory depth.
+fn directory_bytes_from_held_dir(
+    directory: Dir,
+    counted: &mut std::collections::HashSet<(u64, u64)>,
+) -> io::Result<u64> {
+    let mut total = 0_u64;
+    let mut pending = vec![directory];
+    while let Some(directory) = pending.pop() {
+        for entry in directory.read_dir(".")? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let metadata = directory.symlink_metadata(&name)?;
+            if metadata.is_dir() {
+                pending.push(directory.open_dir_nofollow(&name)?);
+                continue;
+            }
+            #[cfg(unix)]
+            {
+                use cap_std::fs::MetadataExt;
+                if metadata.nlink() > 1 && !counted.insert((metadata.dev(), metadata.ino())) {
+                    continue;
+                }
+            }
+            #[cfg(not(unix))]
+            let _ = &counted;
+            total = total.saturating_add(metadata.len());
+        }
+    }
+    Ok(total)
+}
+
 /// Remove exactly one held child directory without following a substituted
 /// sealed-root or child symlink. Missing entries are idempotent; other failures
 /// remain errors so callers can retain retry ownership.
@@ -817,6 +895,50 @@ mod tests {
         assert_eq!(
             std::fs::read(external.path().join("sentinel")).expect("sentinel survives"),
             b"preserve"
+        );
+    }
+
+    /// An ambient-path census would charge the 100,041 foreign bytes after
+    /// a root swap. This census must charge only its held 41-byte payload.
+    #[cfg(unix)]
+    #[test]
+    fn receipted_census_keeps_opened_child_after_root_substitution() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("graph.sealed");
+        let displaced = temp.path().join("displaced");
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir_all(root.join("generation")).unwrap();
+        std::fs::create_dir_all(foreign.join("generation")).unwrap();
+        std::fs::write(root.join("generation/owner"), b"owned").unwrap();
+        std::fs::write(root.join("generation/payload"), vec![b'a'; 41]).unwrap();
+        std::fs::write(foreign.join("generation/owner"), b"owned").unwrap();
+        std::fs::write(foreign.join("generation/payload"), vec![b'f'; 100_041]).unwrap();
+        #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+        enum Entry {
+            Owned,
+            Unknown,
+        }
+        let totals = census_receipted_directory_bytes(
+            &root,
+            Entry::Unknown,
+            |_| ("owner", 16),
+            |name, receipt| {
+                assert_eq!(name, OsStr::new("generation"));
+                assert_eq!(receipt, Some(b"owned".as_slice()));
+                std::fs::rename(&root, &displaced).unwrap();
+                std::os::unix::fs::symlink(&foreign, &root).unwrap();
+                Entry::Owned
+            },
+        )
+        .unwrap();
+        assert_eq!(totals.get(&Entry::Owned), Some(&(1, 46)));
+        assert_eq!(
+            std::fs::read(foreign.join("generation/payload")).unwrap(),
+            vec![b'f'; 100_041],
+        );
+        assert_eq!(
+            std::fs::read(displaced.join("generation/payload")).unwrap(),
+            vec![b'a'; 41],
         );
     }
 

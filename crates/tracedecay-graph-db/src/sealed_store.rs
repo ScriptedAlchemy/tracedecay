@@ -571,123 +571,89 @@ pub struct SealedStoreCensusV1 {
 /// Metadata only: every entry is one receipt read plus a directory size walk,
 /// never a container open. An unreadable receipt counts as unrecognized so the
 /// census stays truthful when a receipt is mid-write or corrupt.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum SealedCensusEntry {
+    Head,
+    Superseded,
+    AbandonedStaging,
+    Unrecognized,
+}
+
 pub fn census_sealed_store(
     database_path: &Path,
     head_generations: &std::collections::BTreeSet<String>,
 ) -> std::io::Result<SealedStoreCensusV1> {
     let root = sealed_store_root(database_path);
-    let entries = match std::fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(SealedStoreCensusV1::default());
-        }
-        Err(error) => return Err(error),
-    };
-    let mut census = SealedStoreCensusV1::default();
-    let mut counted = std::collections::HashSet::new();
-    for entry in entries {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            census.unrecognized_count += 1;
-            continue;
-        }
-        let path = entry.path();
-        let name = entry.file_name();
-        if name.to_str().is_some_and(sealed_staging_name) {
-            // A matching filename is not proof that the directory is
-            // abandoned: remounts can overlap a seal in this process, and
-            // foreign or interrupted pre-receipt entries may occupy its name.
-            // Do not walk unverified trees (which may be arbitrarily large).
-            let verified = tracedecay_private_fs::framed_log::read_bounded(
-                &path.join(SEALED_STAGING_OWNER_FILE),
-                MAX_SEALED_RECEIPT_BYTES,
-            )
-            .ok()
-            .flatten()
-            .and_then(|bytes| verified_staging_receipt(&name, &bytes))
-            .is_some_and(|owner| owner.producer != row_spill_owner().to_string());
-            if !verified {
-                census.unrecognized_count += 1;
-                continue;
+    let current_producer = row_spill_owner().to_string();
+    let totals = tracedecay_private_fs::capability_dir::census_receipted_directory_bytes(
+        &root,
+        SealedCensusEntry::Unrecognized,
+        |name| {
+            if name.to_str().is_some_and(sealed_staging_name) {
+                (SEALED_STAGING_OWNER_FILE, MAX_SEALED_RECEIPT_BYTES)
+            } else {
+                (SEALED_STORE_RECEIPT_FILE, MAX_SEALED_RECEIPT_BYTES)
             }
-            let bytes = directory_bytes(&path, &mut counted)?;
-            census.abandoned_staging_count += 1;
-            census.abandoned_staging_bytes = census.abandoned_staging_bytes.saturating_add(bytes);
-            continue;
-        }
-        // Receipt existence is not sufficient: a copied receipt can name a
-        // verified head while residing in an unrelated physical directory.
-        // Classify unproven entries before walking or charging their contents.
-        let receipt = read_sealed_receipt_bytes(&path.join(SEALED_STORE_RECEIPT_FILE))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<SealedStoreReceiptV1>(&bytes).ok());
-        let Some(receipt) = receipt else {
-            census.unrecognized_count += 1;
-            continue;
-        };
-        let Some(name) = name.to_str() else {
-            census.unrecognized_count += 1;
-            continue;
-        };
-        let form_valid = match receipt.form.as_str() {
-            SEALED_STORE_FORM_COMPACT => receipt.base.is_none(),
-            SEALED_STORE_FORM_LAYERED => receipt.base.is_some(),
-            _ => false,
-        };
-        if !form_valid
-            || receipt.version != SEALED_STORE_RECEIPT_VERSION
-            || receipt.graph_format == 0
-            || receipt.graph_format > GraphFormatVersion::current().get()
-            || receipt.recovered_digest.is_empty()
-            || !sealed_receipt_matches_generation_entry(&receipt, name)
-        {
-            census.unrecognized_count += 1;
-            continue;
-        }
-        let bytes = directory_bytes(&path, &mut counted)?;
-        if head_generations.contains(&receipt.generation) {
-            census.head_count += 1;
-            census.head_bytes = census.head_bytes.saturating_add(bytes);
-        } else {
-            census.superseded_count += 1;
-            census.superseded_bytes = census.superseded_bytes.saturating_add(bytes);
+        },
+        |name, bytes| {
+            let Some(bytes) = bytes else {
+                return SealedCensusEntry::Unrecognized;
+            };
+            if name.to_str().is_some_and(sealed_staging_name) {
+                return if verified_staging_receipt(name, bytes)
+                    .is_some_and(|owner| owner.producer != current_producer)
+                {
+                    SealedCensusEntry::AbandonedStaging
+                } else {
+                    SealedCensusEntry::Unrecognized
+                };
+            }
+            let Some(name) = name.to_str() else {
+                return SealedCensusEntry::Unrecognized;
+            };
+            let Ok(receipt) = serde_json::from_slice::<SealedStoreReceiptV1>(bytes) else {
+                return SealedCensusEntry::Unrecognized;
+            };
+            let form_valid = match receipt.form.as_str() {
+                SEALED_STORE_FORM_COMPACT => receipt.base.is_none(),
+                SEALED_STORE_FORM_LAYERED => receipt.base.is_some(),
+                _ => false,
+            };
+            if !form_valid
+                || receipt.version != SEALED_STORE_RECEIPT_VERSION
+                || receipt.graph_format == 0
+                || receipt.graph_format > GraphFormatVersion::current().get()
+                || receipt.recovered_digest.is_empty()
+                || !sealed_receipt_matches_generation_entry(&receipt, name)
+            {
+                return SealedCensusEntry::Unrecognized;
+            }
+            if head_generations.contains(&receipt.generation) {
+                SealedCensusEntry::Head
+            } else {
+                SealedCensusEntry::Superseded
+            }
+        },
+    )?;
+    let mut census = SealedStoreCensusV1::default();
+    for (kind, (count, bytes)) in totals {
+        match kind {
+            SealedCensusEntry::Head => {
+                census.head_count = count;
+                census.head_bytes = bytes;
+            }
+            SealedCensusEntry::Superseded => {
+                census.superseded_count = count;
+                census.superseded_bytes = bytes;
+            }
+            SealedCensusEntry::AbandonedStaging => {
+                census.abandoned_staging_count = count;
+                census.abandoned_staging_bytes = bytes;
+            }
+            SealedCensusEntry::Unrecognized => census.unrecognized_count = count,
         }
     }
     Ok(census)
-}
-
-/// Bytes under `directory` not already counted in `counted`: a layered
-/// generation's base container is a hard link to bytes another directory
-/// already holds, so each file is charged once per census.
-fn directory_bytes(
-    directory: &Path,
-    counted: &mut std::collections::HashSet<(u64, u64)>,
-) -> std::io::Result<u64> {
-    let mut total = 0u64;
-    let mut pending = vec![directory.to_path_buf()];
-    while let Some(directory) = pending.pop() {
-        for entry in std::fs::read_dir(&directory)? {
-            let entry = entry?;
-            // Count only the link itself: following a foreign directory link
-            // can mischarge its entire tree or revisit an ancestor forever.
-            let metadata = std::fs::symlink_metadata(entry.path())?;
-            if metadata.is_dir() {
-                pending.push(entry.path());
-                continue;
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                if metadata.nlink() > 1 && !counted.insert((metadata.dev(), metadata.ino())) {
-                    continue;
-                }
-            }
-            #[cfg(not(unix))]
-            let _ = &counted;
-            total = total.saturating_add(metadata.len());
-        }
-    }
-    Ok(total)
 }
 
 /// Removes every sealed generation beside `database_path` whose receipt does
