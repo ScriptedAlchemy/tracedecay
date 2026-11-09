@@ -2,6 +2,7 @@
 //! including callers whose source did not change when a target was re-keyed.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
 use tracedecay_code_index::{
@@ -16,11 +17,43 @@ use tracedecay_domain::{
     FileOccurrenceId, LanguageId, ManifestDigest, RelationEdgeKindV1, SanitizedCodeFileV1,
     SensitivityLevelV1, SnapshotFileDispositionV1, SymbolOccurrenceId,
 };
+use tracedecay_runtime_core::logging::set_tracing_capture;
 
 use crate::{
     production_orchestration::{ActiveControl, config, request_with_source},
     support::{PartitionedSealV1, cold_generation, id, reseal_manifest},
 };
+
+// Count actual graph row emission, not publication writes: a redundant seal
+// can regenerate the same digest and be deduplicated before reaching the store.
+struct CountGraphEmissions(Arc<AtomicU64>);
+
+impl tracing::Subscriber for CountGraphEmissions {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        metadata.name() == "code_index.seal.collect.emit"
+    }
+
+    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(self.0.fetch_add(1, Ordering::Relaxed) + 1)
+    }
+
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+    fn event(&self, _event: &tracing::Event<'_>) {}
+
+    fn enter(&self, _span: &tracing::span::Id) {}
+
+    fn exit(&self, _span: &tracing::span::Id) {}
+}
+
+fn with_graph_emission_count<T>(build: impl FnOnce() -> T) -> (T, u64) {
+    let emissions = Arc::new(AtomicU64::new(0));
+    let _capture = set_tracing_capture(CountGraphEmissions(Arc::clone(&emissions)));
+    let result = build();
+    (result, emissions.load(Ordering::Relaxed))
+}
 
 fn tree_request(util: &str, sealed_at: i64, phase: &str) -> CodeIndexBuildRequestV1 {
     let root = concat!(
@@ -133,17 +166,23 @@ fn comment_successor_skips_unrelated_evidence_and_publishes_the_cold_chunk_delta
     let store = MemorySealedPublicationStoreV1::default();
     let mut owner = CodeIndexProductionOwnerV1::new(config(), store.clone()).expect("owner");
     let before_request = tree_request(&util, 1_100_000, "before");
-    let parent = owner
-        .build_and_publish(before_request.clone(), &ActiveControl)
-        .expect("parent publishes");
+    let (parent, cold_emissions) = with_graph_emission_count(|| {
+        owner.build_and_publish(before_request.clone(), &ActiveControl)
+    });
+    let parent = parent.expect("parent publishes");
     assert!(parent.cold_reason().is_some());
+    assert_eq!(
+        cold_emissions,
+        before_request.snapshot.files.len() as u64,
+        "the cold control must observe actual graph work for every fixture file"
+    );
     // Descriptor presence alone does not prove a resolved call. Establish
     // the four actual unrelated edges before taking the read baselines.
     let before = cold_generation(&parent);
     assert_unrelated_calls(&before);
     let envelope: serde_json::Value =
         serde_json::from_slice(parent.manifest_bytes()).expect("sealed manifest envelope");
-    let evidence_digest = |path: &str| {
+    let segment_digest = |kind: &str, path: &str| {
         let key = before_request
             .snapshot
             .files
@@ -151,23 +190,32 @@ fn comment_successor_skips_unrelated_evidence_and_publishes_the_cold_chunk_delta
             .position(|file| file.logical_path == path)
             .expect("fixture path");
         let key = u64::try_from(key).expect("file key fits u64");
-        let descriptor = envelope["generation"]["file_evidence"]
+        let descriptor = envelope["generation"][kind]
             .as_array()
-            .expect("evidence descriptors")
+            .expect("segment descriptors")
             .iter()
             .find(|descriptor| descriptor["file_key"].as_u64() == Some(key))
-            .unwrap_or_else(|| panic!("{path} must seal real cross-file evidence"));
+            .unwrap_or_else(|| panic!("{path} must have a sealed {kind} descriptor"));
         serde_json::from_value::<ManifestDigest>(descriptor["segment_digest"].clone())
-            .expect("evidence digest")
+            .expect("segment digest")
     };
     let unrelated = (0..4)
-        .map(|n| evidence_digest(&format!("src/caller{n}.rs")))
+        .map(|n| segment_digest("file_evidence", &format!("src/caller{n}.rs")))
         .map(|digest| {
             let reads = store.segment_reads(&digest);
             (digest, reads)
         })
         .collect::<Vec<_>>();
-    let dependent = evidence_digest("src/consumer.rs");
+    let unrelated_files = (0..4)
+        .map(|n| format!("src/caller{n}.rs"))
+        .chain(["src/other.rs".to_owned()])
+        .map(|path| {
+            let digest = segment_digest("file_segments", &path);
+            let reads = store.segment_reads(&digest);
+            (path, digest, reads)
+        })
+        .collect::<Vec<_>>();
+    let dependent = segment_digest("file_evidence", "src/consumer.rs");
     let dependent_reads = store.segment_reads(&dependent);
     let edited = format!("{util}// comment only\n");
     let cold_request = tree_request(&edited, 1_200_000, "after");
@@ -185,16 +233,59 @@ fn comment_successor_skips_unrelated_evidence_and_publishes_the_cold_chunk_delta
         .retain(|file| file.file_occurrence_id == edited_occurrence);
     assert_eq!(sparse_request.captured_files.len(), 1);
     sparse_request.changed_files = ["src/util.rs".to_owned()].into_iter().collect();
-    let sparse = owner
-        .build_and_publish(sparse_request, &ActiveControl)
-        .expect("sparse successor publishes without recapturing callers");
+    let (sparse, sparse_emissions) =
+        with_graph_emission_count(|| owner.build_and_publish(sparse_request, &ActiveControl));
+    let sparse = sparse.expect("sparse successor publishes without recapturing callers");
     assert_eq!(sparse.cold_reason(), None);
 
     // Observe reads before restoring either result, not on a second build.
     for (digest, reads) in unrelated {
         assert_eq!(store.segment_reads(&digest), reads, "unrelated evidence");
     }
+    for (path, digest, reads) in unrelated_files {
+        assert_eq!(store.segment_reads(&digest), reads, "unrelated file {path}");
+    }
     assert!(store.segment_reads(&dependent) > dependent_reads);
+
+    // Check the same measured publication before either result is restored.
+    // Equal descriptors alone would miss needless resealing of identical bytes.
+    let successor_envelope: serde_json::Value =
+        serde_json::from_slice(sparse.manifest_bytes()).expect("successor manifest");
+    let parent_pages = envelope["generation"]["code_graph_pages"]
+        .as_array()
+        .expect("parent graph pages");
+    let successor_pages = successor_envelope["generation"]["code_graph_pages"]
+        .as_array()
+        .expect("successor graph pages");
+    assert_eq!(parent_pages.len(), before_request.snapshot.files.len());
+    assert_eq!(successor_pages.len(), parent_pages.len());
+    let mut changed_graph_paths = Vec::new();
+    for parent_page in parent_pages {
+        let key = parent_page["file_key"].as_u64().expect("graph file key");
+        let file_index = usize::try_from(key).expect("file key fits usize");
+        let file = &before_request.snapshot.files[file_index];
+        let path = file.logical_path.as_str();
+        let successor_page = successor_pages
+            .iter()
+            .find(|page| page["file_key"].as_u64() == Some(key))
+            .expect("every parent file retains a graph page");
+        if successor_page["page_digest"] != parent_page["page_digest"] {
+            changed_graph_paths.push(path);
+        } else {
+            assert_eq!(successor_page, parent_page, "carried graph page {path}");
+        }
+    }
+    changed_graph_paths.sort_unstable();
+    assert_eq!(
+        changed_graph_paths,
+        vec!["src/consumer.rs", "src/sibling.rs", "src/util.rs"],
+        "only the edited file and its two real dependent owners change graph pages"
+    );
+    assert_eq!(
+        sparse_emissions,
+        changed_graph_paths.len() as u64,
+        "unchanged graph pages must not be emitted again before digest deduplication"
+    );
 
     let mut cold_owner =
         CodeIndexProductionOwnerV1::new(config(), MemorySealedPublicationStoreV1::default())
