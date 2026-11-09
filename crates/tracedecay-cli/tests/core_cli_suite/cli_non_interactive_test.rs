@@ -1261,11 +1261,14 @@ fn init_wait_holds_until_first_generation_is_ready() {
     );
 }
 
-/// Keep the socket path short and outside the child process's temporary root.
-fn daemon_contract_home(durable: &Path) -> TempDir {
+/// Allocate a short socket path within the caller's private fixture root.
+fn daemon_contract_home(root: &Path) -> TempDir {
+    // The outer scratch already isolates this home. Keep its component one byte
+    // so the default socket fits even in the native worker scratch directory.
     tempfile::Builder::new()
         .prefix("h")
-        .tempdir_in(durable)
+        .rand_bytes(0)
+        .tempdir_in(root)
         .expect("private daemon fixture home")
 }
 
@@ -2835,7 +2838,7 @@ fn list_all_reports_orphan_manifest_reconstructable_store() {
     ) else {
         return;
     };
-    let home = TempDir::new().unwrap();
+    let home = daemon_contract_home(&std::env::temp_dir());
     let project = tempfile::Builder::new()
         .prefix("list-orphan-project-")
         .tempdir_in(durable)
