@@ -365,8 +365,7 @@ pub(crate) fn census_profile_footprint_with_budget(
             let primary = tallies.entry(keys.primary).or_default();
             tally(primary, walked);
             if unexpected_project_file {
-                primary.unavailable_entry_count =
-                    primary.unavailable_entry_count.saturating_add(1);
+                primary.unavailable_entry_count = primary.unavailable_entry_count.saturating_add(1);
                 primary.unexpected_project_file = true;
             }
             if let (Some((_, store_relative)), WalkedEntryV1::File { bytes }) =
