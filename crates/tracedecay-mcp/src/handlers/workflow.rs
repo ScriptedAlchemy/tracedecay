@@ -719,7 +719,9 @@ impl ManagedTestRun {
         else {
             return Ok(());
         };
-        publish_test_run_terminal(
+        // Once recording is refused, preserve the store failure even when a
+        // concurrent lifecycle shutdown also prevents terminal publication.
+        if let Err(publish_error) = publish_test_run_terminal(
             &self.emitter,
             test_run_receipt(
                 self.started_at,
@@ -728,7 +730,13 @@ impl ManagedTestRun {
                 0,
             ),
         )
-        .await?;
+        .await
+        {
+            tracing::warn!(
+                error = %publish_error,
+                "could not publish failed managed test-run start receipt"
+            );
+        }
         Err(test_run_record_error(error))
     }
 
@@ -779,8 +787,11 @@ impl ManagedTestRun {
                 bytes_consumed,
             )
         };
-        publish_test_run_terminal(&self.emitter, stream_receipt).await?;
+        // A refused stream publication cannot obscure a durable-store failure.
+        // When the durable write succeeds, publication errors still propagate.
+        let published = publish_test_run_terminal(&self.emitter, stream_receipt).await;
         recorded?;
+        published?;
         Ok(receipt)
     }
 

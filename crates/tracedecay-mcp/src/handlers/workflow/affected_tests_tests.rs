@@ -1,5 +1,6 @@
 use super::*;
 
+use futures_util::StreamExt as _;
 use serde_json::json;
 
 use crate::ToolResult;
@@ -10,11 +11,14 @@ use std::future::ready;
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
+use tracedecay_application::operation_stream::{
+    OperationEventAuthority, OperationId, OperationKind,
+};
 use tracedecay_code_index::graph_projection::HermeticCodeGraphProjectionStore;
 use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 use tracedecay_contracts::{
     CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass,
-    RequestContext, RequestId, ResolvedScope,
+    RequestContext, RequestId, ResolvedScope, StreamEventKind,
 };
 use tracedecay_domain::{
     ActorId, BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeGenerationId,
@@ -1211,12 +1215,6 @@ fn assert_failed_terminal(output: &Value) {
 
 #[tokio::test]
 async fn refused_durable_test_result_cannot_publish_a_completed_live_terminal() {
-    use futures_util::StreamExt as _;
-    use tracedecay_application::operation_stream::{
-        OperationEventAuthority, OperationId, OperationKind,
-    };
-    use tracedecay_contracts::StreamEventKind;
-
     let cancellation =
         CancellationSignal::active("cancellation.affected-tests.settlement-refusal")
             .expect("fixture cancellation");
@@ -1283,4 +1281,59 @@ async fn refused_durable_test_result_cannot_publish_a_completed_live_terminal() 
                 && termination.receipt.budget.bytes_consumed == 7
     ));
     assert!(stream.next().await.is_none(), "live stream ends after refusal");
+}
+
+#[tokio::test]
+async fn durable_store_refusal_remains_primary_when_terminal_publication_also_fails() {
+    let cancellation =
+        CancellationSignal::active("cancellation.affected-tests.concurrent-terminal")
+            .expect("fixture cancellation");
+    let context = verified_graph_context(&cancellation);
+    let authority = OperationEventAuthority::default();
+    let emitter = authority
+        .begin(&context, OperationKind::TestRun, UtcMicros(1))
+        .await
+        .expect("admit an authenticated operation");
+    let deadline = Deadline::new(UtcMicros(i64::MAX)).expect("fixture deadline");
+    // Deliberately pre-settle this event owner so the subsequent Failed
+    // publication is refused with TerminalAlreadyPublished.
+    emitter
+        .terminal(test_run_receipt(
+            UtcMicros(10),
+            &deadline,
+            OperationTermination::Completed,
+            0,
+        ))
+        .await
+        .expect("pre-settle lifecycle");
+
+    let store = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+        "affected-tests-dual-settlement-refusal",
+    )
+    .await;
+    let run = ManagedTestRun {
+        emitter,
+        recording: ManagedTestRunRecording {
+            store: store.registered.clone(),
+            session_id: None,
+        },
+        started_at: UtcMicros(10),
+        deadline,
+    };
+    // No start record exists, so the durable write is also refused.
+    // Keep that primary failure even when event publication independently
+    // rejects a second, nonidentical terminal.
+    let error = run
+        .finish(
+            OperationTermination::Completed,
+            7,
+            Some(0),
+            &LibtestReport::default(),
+        )
+        .await
+        .expect_err("no successful durability should be reported");
+    assert!(
+        matches!(&error, TraceDecayError::Database { .. }),
+        "the storage refusal must take precedence: {error}"
+    );
 }
