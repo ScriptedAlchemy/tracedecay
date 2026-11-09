@@ -263,10 +263,10 @@ pub(crate) struct RearmedProjectionRetries {
 /// The reader captures the last still-deferred row before taking any writer
 /// lease. Already-due, already-armed, and terminal-only queues need no writer
 /// transaction; expired deadlines remain eligible for ordinary projection.
-/// Each write window selects and updates at most `batch_rows` eligible rows
-/// under the same writer lease; foreground writes interleave between windows.
-/// Scanning past ineligible rows can still scale with the queue. Rows beyond
-/// the captured frontier are left for a later recovery pass.
+/// Each read window selects at most `batch_rows` eligible rows outside
+/// the writer lease. A short writer transaction conditionally updates their
+/// exact observed identities, so sparse inactive prefixes never hold the
+/// writer. Rows beyond the captured frontier are left for later recovery.
 #[tracing::instrument(
     name = "global_db.observation_projection.rearm_retries",
     level = "trace",
@@ -297,14 +297,17 @@ pub(crate) async fn rearm_queued_projection_retries(
             break;
         };
         rearmed.rows += rows;
-        rearmed.batches += 1;
+        if rows != 0 {
+            rearmed.batches += 1;
+        }
         after_rowid = batch_end;
     }
     Ok(rearmed)
 }
 
-/// Re-arms the next `batch_rows` not-yet-due rows after `after_rowid` in one
-/// writer transaction and returns the last rowid it covered.
+/// Select a bounded retry window outside the SQLite writer lease. The
+/// sparse tail scan may visit many already-due or terminal rows; only the
+/// exact selected identities are looked up while holding the writer.
 #[tracing::instrument(
     name = "global_db.observation_projection.rearm_retries.batch",
     level = "trace",
@@ -317,17 +320,42 @@ async fn rearm_projection_retry_batch(
     batch_rows: i64,
     now_micros: i64,
 ) -> ProjectionStoreResult<Option<(i64, u64)>> {
-    const OPERATION: &str = "rearm queued projection retries";
-    let transaction = database
-        .begin_write_transaction(OPERATION)
-        .await
-        .map_err(|error| storage(OPERATION, error))?;
-    let mut candidates = transaction
+    let Some((batch_end, candidates)) = read_rearm_projection_retry_candidates(
+        &database.read_connection(),
+        after_rowid,
+        last_rowid,
+        batch_rows,
+        now_micros,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let rows = apply_rearm_projection_retry_candidates(database, &candidates, now_micros).await?;
+    Ok(Some((batch_end, rows)))
+}
+
+/// Candidate reads are repeatable within this statement, but not guaranteed
+/// current when a later writer lease is acquired. Retain observation identity,
+/// retry deadline and attempt generation for a conditional write.
+pub(super) async fn read_rearm_projection_retry_candidates(
+    conn: &impl QueryExecutor,
+    after_rowid: i64,
+    last_rowid: i64,
+    batch_rows: i64,
+    now_micros: i64,
+) -> ProjectionStoreResult<Option<(i64, String)>> {
+    const OPERATION: &str = "read projection retry rearm window";
+    let mut candidates = conn
         .query(
-            // qpsg-exempt: the literal ceiling excludes terminal rows; the independent
-            // clock bound narrows the forward primary-key window to deferred retries.
-            "SELECT MAX(rowid), json_group_array(rowid) FROM (
-                SELECT rowid FROM projection_queue NOT INDEXED
+            // qpsg-exempt: the literal terminal ceiling and independent clock
+            // predicate select a bounded rowid-ordered window on the reader.
+            "SELECT MAX(rowid),
+                    json_group_array(json_array(rowid, observation_id,
+                                                next_retry_at_micros, attempt_count))
+             FROM (
+                SELECT rowid, observation_id, next_retry_at_micros, attempt_count
+                FROM projection_queue NOT INDEXED
                 WHERE rowid > ?1 AND rowid <= ?2
                   AND next_retry_at_micros > ?4
                   AND next_retry_at_micros < 9223372036854775807
@@ -346,28 +374,55 @@ async fn rearm_projection_retry_batch(
         .get::<Option<i64>>(0)
         .map_err(|error| storage(OPERATION, error))?
     else {
+        return Ok(None);
+    };
+    let identities: String = batch.get(1).map_err(|error| storage(OPERATION, error))?;
+    Ok(Some((batch_end, identities)))
+}
+
+/// Primary-key lookups make writer work proportional to this bounded page.
+/// A newly retried, settled, terminal, or replaced observation cannot be
+/// rearmed using a stale reader snapshot. A fully stale page rolls back.
+pub(super) async fn apply_rearm_projection_retry_candidates(
+    database: &Database,
+    candidates: &str,
+    now_micros: i64,
+) -> ProjectionStoreResult<u64> {
+    const OPERATION: &str = "rearm queued projection retries";
+    let transaction = database
+        .begin_write_transaction(OPERATION)
+        .await
+        .map_err(|error| storage(OPERATION, error))?;
+    let rows = transaction
+        .execute(
+            // qpsg-exempt: the candidate list contains exact rowid identities,
+            // and the literal terminal bound protects a concurrent park.
+            "UPDATE projection_queue SET next_retry_at_micros = 0
+             WHERE (rowid, observation_id, next_retry_at_micros, attempt_count) IN (
+                 SELECT json_extract(value, '$[0]'),
+                        json_extract(value, '$[1]'),
+                        json_extract(value, '$[2]'),
+                        json_extract(value, '$[3]')
+                 FROM json_each(?1)
+             )
+               AND next_retry_at_micros > ?2
+               AND next_retry_at_micros < 9223372036854775807",
+            params![candidates, now_micros],
+        )
+        .await
+        .map_err(|error| storage(OPERATION, error))?;
+    if rows == 0 {
         transaction
             .rollback()
             .await
             .map_err(|error| storage(OPERATION, error))?;
-        return Ok(None);
-    };
-    // Membership was determined under this writer lease. Apply the bounded set
-    // by primary key so a dense deadline index is never rescanned per window.
-    let rowids: String = batch.get(1).map_err(|error| storage(OPERATION, error))?;
-    let rows = transaction
-        .execute(
-            "UPDATE projection_queue SET next_retry_at_micros = 0
-             WHERE rowid IN (SELECT value FROM json_each(?1))",
-            params![rowids],
-        )
-        .await
-        .map_err(|error| storage(OPERATION, error))?;
-    transaction
-        .commit()
-        .await
-        .map_err(|error| storage(OPERATION, error))?;
-    Ok(Some((batch_end, rows)))
+    } else {
+        transaction
+            .commit()
+            .await
+            .map_err(|error| storage(OPERATION, error))?;
+    }
+    Ok(rows)
 }
 
 async fn last_deferred_retry_rowid(

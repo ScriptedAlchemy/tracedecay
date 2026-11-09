@@ -8,6 +8,9 @@ use tracedecay_domain::{
 };
 use tracedecay_runtime_core::db::engine::params;
 
+use super::state::{
+    apply_rearm_projection_retry_candidates, read_rearm_projection_retry_candidates,
+};
 use super::{RearmedProjectionRetries, rearm_queued_projection_retries};
 use crate::tests::harness::{RegisteredGlobalDbHarness, writer_telemetry};
 
@@ -443,6 +446,127 @@ async fn rearm_rejects_nonpositive_windows_before_acquiring_the_writer() {
     let after = writer_telemetry(&harness.registered).transactions;
     assert_eq!(after.commands - before.commands, 3);
     assert_eq!(queue_state(&harness).await, (5, 0, 5));
+}
+
+#[asupersync::test]
+async fn sparse_retry_rearm_writer_work_is_bounded_by_updated_rows() {
+    async fn writer_steps(prefix: i64, fixture: &'static str) -> u64 {
+        let harness = RegisteredGlobalDbHarness::open(fixture).await;
+        seed_queue(&harness, prefix + 4, 0).await;
+        let transaction = harness.registered.begin_write_transaction().await.unwrap();
+        assert_eq!(
+            transaction
+                .execute(
+                    "UPDATE projection_queue SET next_retry_at_micros = 0
+                     WHERE observation_sequence <= ?1",
+                    params![prefix],
+                )
+                .await
+                .unwrap(),
+            u64::try_from(prefix).unwrap()
+        );
+        transaction.commit().await.unwrap();
+        let before = writer_telemetry(&harness.registered);
+        let rearmed = rearm_queued_projection_retries(harness.registered.runtime_database(), 4)
+            .await
+            .unwrap();
+        assert_eq!(
+            rearmed,
+            RearmedProjectionRetries {
+                rows: 4,
+                batches: 1,
+            }
+        );
+        let after = writer_telemetry(&harness.registered);
+        assert_eq!(after.transactions.commands - before.transactions.commands, 1);
+        assert_eq!(queue_state(&harness).await.1, 0);
+        after.sqlite_vm.vm_steps - before.sqlite_vm.vm_steps
+    }
+
+    let small = writer_steps(32, "rearm-sparse-small").await;
+    let large = writer_steps(256, "rearm-sparse-large").await;
+    assert!(small > 0);
+    assert!(
+        large < small * 2,
+        "eight times as many inert queue rows must not multiply SQLite writer work: {small} -> {large}"
+    );
+}
+
+#[asupersync::test]
+async fn rearm_reader_snapshot_cannot_clear_a_new_retry_generation() {
+    let harness = RegisteredGlobalDbHarness::open("rearm-stale-candidates").await;
+    seed_queue(&harness, 3, 0).await;
+    let now = 1_000_000_i64;
+    let (last, candidates) = read_rearm_projection_retry_candidates(
+        &harness.registered.runtime_database().read_connection(),
+        0,
+        3,
+        3,
+        now,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(last, 3);
+
+    // The reader's window is now stale: a foreground owner schedules a new
+    // generation for one row and another row has become due.
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    assert_eq!(
+        transaction
+            .execute(
+                "UPDATE projection_queue SET attempt_count = attempt_count + 1
+                 WHERE observation_sequence = 2",
+                (),
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        transaction
+            .execute(
+                "UPDATE projection_queue SET next_retry_at_micros = 1
+                 WHERE observation_sequence = 3",
+                (),
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    transaction.commit().await.unwrap();
+
+    assert_eq!(
+        apply_rearm_projection_retry_candidates(
+            harness.registered.runtime_database(),
+            &candidates,
+            now,
+        )
+        .await
+        .unwrap(),
+        1,
+        "only the unchanged candidate can be reset"
+    );
+    let snapshot = harness.registered.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT observation_sequence, attempt_count, next_retry_at_micros
+             FROM projection_queue ORDER BY observation_sequence",
+            (),
+        )
+        .await
+        .unwrap();
+    for (sequence, attempts, deadline) in [
+        (1_i64, 3_i64, 0_i64),
+        (2, 4, FAR_FUTURE_MICROS),
+        (3, 3, 1),
+    ] {
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<i64>(0).unwrap(), sequence);
+        assert_eq!(row.get::<i64>(1).unwrap(), attempts);
+        assert_eq!(row.get::<i64>(2).unwrap(), deadline);
+    }
+    assert!(rows.next().await.unwrap().is_none());
 }
 
 #[asupersync::test]
