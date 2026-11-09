@@ -25,6 +25,9 @@ inputs:
   cache-save:
     description: Whether master jobs may save Bazelisk and newly fetched dependencies.
     default: "true"
+  repository-cache-key:
+    description: Exact dependency snapshot to restore without prefix fallback.
+    default: ""
   windows-redirect-temp:
     description: Put Windows test temporary files on the runner workspace drive.
     default: "false"
@@ -49,6 +52,9 @@ outputs:
   repository-cache-key:
     description: Fresh save key; empty when this job cannot publish dependencies.
     value: ${{ github.ref == 'refs/heads/master' && github.event_name != 'pull_request' && inputs.cache-save == 'true' && steps.repository-cache.outputs.cache-primary-key || '' }}
+  repository-cache-restored-key:
+    description: Snapshot restored before the build.
+    value: ${{ steps.repository-cache.outputs.cache-matched-key }}
   repository-cache-entries:
     description: Restored entry count, used to avoid uploading an unchanged cache.
     value: ${{ steps.repository-cache-state.outputs.entries }}
@@ -242,10 +248,11 @@ runs:
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ steps.disk-cache-config.outputs.repository-path }}
-        key: ${{ steps.disk-cache-config.outputs.repository-prefix }}${{ hashFiles('MODULE.bazel', 'Cargo.lock', 'pnpm-lock.yaml', '.bazelversion') }}-run-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ inputs.cache-key }}
+        key: ${{ inputs.repository-cache-key || format('{0}{1}-run-{2}-{3}-{4}-{5}', steps.disk-cache-config.outputs.repository-prefix, hashFiles('MODULE.bazel', 'Cargo.lock', 'pnpm-lock.yaml', '.bazelversion'), github.run_id, github.run_attempt, github.job, inputs.cache-key) }}
+        fail-on-cache-miss: ${{ inputs.repository-cache-key != '' }}
         restore-keys: |
-          ${{ steps.disk-cache-config.outputs.repository-prefix }}${{ hashFiles('MODULE.bazel', 'Cargo.lock', 'pnpm-lock.yaml', '.bazelversion') }}-
-          ${{ steps.disk-cache-config.outputs.repository-prefix }}
+          ${{ inputs.repository-cache-key == '' && format('{0}{1}-', steps.disk-cache-config.outputs.repository-prefix, hashFiles('MODULE.bazel', 'Cargo.lock', 'pnpm-lock.yaml', '.bazelversion')) || '' }}
+          ${{ inputs.repository-cache-key == '' && steps.disk-cache-config.outputs.repository-prefix || '' }}
 
     - name: Measure restored dependency cache
       id: repository-cache-state
