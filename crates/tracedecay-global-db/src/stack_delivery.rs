@@ -191,6 +191,18 @@ pub(crate) async fn ensure_github_stack_delivery_schema(
             BEGIN
                 SELECT RAISE(ABORT, 'GitHub stack signal JSON exceeds 1 MiB');
             END;
+            -- Raw SQL must not mint an already-retired identity. Only the
+            -- guarded UPDATE may retire a settled signal after the window.
+            -- json_each sees escaped and duplicate top-level member names.
+            CREATE TRIGGER IF NOT EXISTS github_stack_delivery_signals_insert_unretired
+            BEFORE INSERT ON github_stack_delivery_signals
+            WHEN json_valid(NEW.signal_json) AND EXISTS (
+                SELECT 1 FROM json_each(NEW.signal_json)
+                WHERE key = '__tracedecay_retired_stack_sha256_v1'
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'GitHub stack signal uses a reserved retirement marker');
+            END;
             DROP TRIGGER IF EXISTS github_stack_delivery_signals_immutable_update;
             CREATE TRIGGER github_stack_delivery_signals_immutable_update
             BEFORE UPDATE ON github_stack_delivery_signals

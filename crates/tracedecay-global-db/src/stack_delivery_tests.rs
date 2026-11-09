@@ -109,6 +109,79 @@ async fn registered_stack_signal_limit_counts_utf8_bytes_not_characters() {
 }
 
 #[asupersync::test]
+async fn registered_sql_cannot_forge_a_retired_signal_identity() {
+    let harness = RegisteredGlobalDbHarness::open("github-stack-no-forged-retirement").await;
+    let record = signal("signal.github-stack-forged-retirement", 10);
+    let digest = "a".repeat(64);
+    // The registered database must enforce the same reserved-key policy as
+    // append_github_stack_signal, including null and escaped/duplicate keys.
+    // An INSERT-only forgery would reserve this identity permanently without
+    // a delivery recipient, bypassing the required settlement and age checks.
+    for forged in [
+        format!(r#"{{"__tracedecay_retired_stack_sha256_v1":"{digest}"}}"#),
+        r#"{"__tracedecay_retired_stack_sha256_v1":null}"#.to_owned(),
+        format!(r#"{{"__trac\u0065decay_retired_stack_sha256_v1":"{digest}"}}"#),
+        r#"{"payload":true,"__tracedecay_retired_stack_sha256_v1":null}"#.to_owned(),
+        format!(
+            r#"{{"__tracedecay_retired_stack_sha256_v1":null,"__tracedecay_retired_stack_sha256_v1":"{digest}"}}"#
+        ),
+    ] {
+        let writer = harness
+            .registered
+            .writer_connection()
+            .expect("registered signal insert writer");
+        let refusal = writer
+            .execute(
+                "INSERT INTO github_stack_delivery_signals
+                     (project_id, signal_id, scope_digest, repository_id,
+                      watermark_id, observed_at_micros, signal_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    record.project_id.as_str(),
+                    record.signal_id.as_str(),
+                    record.scope_digest.as_str(),
+                    record.repository_id.as_str(),
+                    record.watermark_id.as_str(),
+                    record.observed_at_micros,
+                    forged.as_str(),
+                ],
+            )
+            .await
+            .expect_err("registered INSERT must refuse forged retirement")
+            .to_string();
+        assert!(
+            refusal.contains("GitHub stack signal uses a reserved retirement marker"),
+            "{refusal}"
+        );
+        drop(writer);
+        assert!(
+            harness
+                .registered
+                .github_stack_signal(PROJECT_ID, &record.signal_id)
+                .await
+                .expect("refused forgery must not reserve a signal identity")
+                .is_none()
+        );
+    }
+
+    let mut valid = signal("signal.github-stack-after-forgery", 11);
+    valid.signal_json = r#"{"payload":{"not_retired":true}}"#.to_owned();
+    harness
+        .registered
+        .append_github_stack_signal(valid.clone(), vec![RECIPIENT.to_owned()])
+        .await
+        .expect("normal signal admission must remain available");
+    assert_eq!(
+        harness
+            .registered
+            .github_stack_signal(PROJECT_ID, &valid.signal_id)
+            .await
+            .expect("read admitted live signal"),
+        Some(valid)
+    );
+}
+
+#[asupersync::test]
 async fn pending_delivery_survives_restart_and_settles_only_after_acknowledgement() {
     let harness = RegisteredGlobalDbHarness::open("github-stack-delivery-restart").await;
     let record = signal("signal.github-stack-restart", 10);
