@@ -380,6 +380,142 @@ async fn rewrite_completion_resumes_committed_pages_after_failure_and_restart() 
     );
 }
 
+/// Beginning the same in-progress layout again must not write retained records
+/// whose generation and accepted revival were already advanced. Each trigger
+/// makes a redundant physical UPDATE fail, while the next *real* generation
+/// transition must still advance both authorities.
+#[asupersync::test]
+async fn repeated_source_rewrite_begin_preserves_already_advanced_prefix() {
+    let directory = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+        .await
+        .unwrap();
+    let registered = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let seeded = seed_projected_messages(&runtime, 0..2).await;
+    let source =
+        ObservationSourceIdentityV1::new(SessionId::new("session.repeat-prefix").unwrap()).unwrap();
+    let scope = ObservationScopeV1::Profile;
+    let previous = ObservationSourceGenerationV1::new(1).unwrap();
+    let generation = ObservationSourceGenerationV1::new(2).unwrap();
+    let next = ObservationSourceGenerationV1::new(3).unwrap();
+    let offered = seeded
+        .iter()
+        .map(|(observation, _)| ObservationSourcePresenceV1 {
+            observation_id: observation.observation_id().clone(),
+            generation: previous,
+            start_offset: observation.identity().position().start(),
+        })
+        .collect::<Vec<_>>();
+    registered
+        .record_observation_source_presence(&source, &scope, &offered)
+        .await
+        .unwrap();
+    let writer = registered.writer_connection().unwrap();
+    writer
+        .execute(
+            "INSERT INTO projection_queue (
+                 observation_id, observation_sequence, revival_generation, revival_start_offset
+             )
+             SELECT observation_id, sequence, ?2, ?3
+             FROM observations WHERE observation_id = ?1
+             ON CONFLICT(observation_id) DO UPDATE SET
+                 revival_generation = excluded.revival_generation,
+                 revival_start_offset = excluded.revival_start_offset",
+            params![
+                offered[0].observation_id.as_str(),
+                previous.generation_id().to_string(),
+                i64::try_from(offered[0].start_offset).unwrap()
+            ],
+        )
+        .await
+        .unwrap();
+
+    let limit = i64::MAX as u64;
+    registered
+        .begin_observation_source_rewrite(&source, &scope, previous, generation, limit)
+        .await
+        .unwrap();
+    assert_eq!(
+        table_count(
+            &writer,
+            "SELECT COUNT(*) FROM observation_source_presence WHERE generation = '2'"
+        )
+        .await,
+        2,
+        "the first rewrite must advance both retained presence rows"
+    );
+    assert_eq!(
+        table_count(
+            &writer,
+            "SELECT COUNT(*) FROM projection_queue WHERE revival_generation = '2'"
+        )
+        .await,
+        1,
+        "the first rewrite must advance the queued accepted revival"
+    );
+
+    // The second beginning is exactly what an interrupted host re-import
+    // repeats. Rejecting no-op updates on both tables proves the changed
+    // predicates actually prevent writer amplification, not just identical
+    // resulting values.
+    writer
+        .execute_batch(
+            "CREATE TRIGGER reject_unchanged_presence
+             BEFORE UPDATE OF generation ON observation_source_presence
+             WHEN NEW.generation IS OLD.generation
+             BEGIN SELECT RAISE(ABORT, 'repeated retained presence update'); END;
+             CREATE TRIGGER reject_unchanged_revival
+             BEFORE UPDATE OF revival_generation ON projection_queue
+             WHEN NEW.revival_generation IS OLD.revival_generation
+             BEGIN SELECT RAISE(ABORT, 'repeated accepted revival update'); END;",
+        )
+        .await
+        .unwrap();
+    registered
+        .begin_observation_source_rewrite(&source, &scope, previous, generation, limit)
+        .await
+        .expect("restarting an identical layout must not update retained rows");
+    assert_eq!(
+        table_count(
+            &writer,
+            "SELECT COUNT(*) FROM observation_source_presence WHERE generation = '2'"
+        )
+        .await,
+        2
+    );
+    assert_eq!(
+        table_count(
+            &writer,
+            "SELECT COUNT(*) FROM projection_queue WHERE revival_generation = '2'"
+        )
+        .await,
+        1
+    );
+
+    registered
+        .begin_observation_source_rewrite(&source, &scope, generation, next, limit)
+        .await
+        .expect("a genuinely new rewrite must still advance the retained prefix");
+    assert_eq!(
+        table_count(
+            &writer,
+            "SELECT COUNT(*) FROM observation_source_presence WHERE generation = '3'"
+        )
+        .await,
+        2
+    );
+    assert_eq!(
+        table_count(
+            &writer,
+            "SELECT COUNT(*) FROM projection_queue WHERE revival_generation = '3'"
+        )
+        .await,
+        1
+    );
+}
+
 /// Capturing one host page previously dispatched one SQLite statement per
 /// record, even for reoffers identical to the already durable generation.
 /// The JSON batch must preserve last-offer ordering, exact identity and

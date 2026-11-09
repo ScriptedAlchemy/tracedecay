@@ -186,7 +186,8 @@ impl RegisteredGlobalDb {
                            AND presence.start_offset < ?3
                            AND presence.generation IN (?4, ?5)
                            AND presence.generation = projection_queue.revival_generation
-                           AND presence.start_offset = projection_queue.revival_start_offset",
+                           AND presence.start_offset = projection_queue.revival_start_offset
+                           AND presence.generation <> ?2",
                         params![
                             key.as_str(),
                             generation.as_str(),
@@ -201,7 +202,8 @@ impl RegisteredGlobalDb {
                     .execute(
                         "UPDATE observation_source_presence SET generation = ?2
                          WHERE source_key = ?1 AND start_offset < ?3
-                           AND generation IN (?4, ?5)",
+                           AND generation IN (?4, ?5)
+                           AND generation <> ?2",
                         params![
                             key.as_str(),
                             generation.as_str(),
