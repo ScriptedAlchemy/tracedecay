@@ -331,7 +331,7 @@ describe('Session provenance inspector', () => {
     expect(onSelectProvider).toHaveBeenCalledWith('codex');
   });
 
-  it('links a session with unknown provider through Loom's bare-ID resolver', () => {
+  it("links a session with unknown provider through Loom's bare-ID resolver", () => {
     stubTranscript();
     renderWith(
       <SessionInspector
