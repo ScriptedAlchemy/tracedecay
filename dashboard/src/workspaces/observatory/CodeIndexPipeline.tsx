@@ -347,12 +347,11 @@ function useLatestCodeIndexProgress(
         const renderedProgress = current.get(worktree.worktree_root);
         if (!incoming) {
           // A confirmed replacement seal makes the old text cursor stale.
-          // Retain only a transient missing sample for the same generation
-          // (or while no generation has sealed); neither is new work.
+          // Retain only a transient missing sample for a still-sealed
+          // generation. No sealed generation means no text cursor to retain.
           if (
             renderedProgress &&
-            (worktree.latest_generation_id == null ||
-              worktree.latest_generation_id === renderedProgress.generation_id) &&
+            worktree.latest_generation_id === renderedProgress.generation_id &&
             !(
               result.envelope.domain_state === 'ready' &&
               worktree.latest_generation_id === renderedProgress.generation_id

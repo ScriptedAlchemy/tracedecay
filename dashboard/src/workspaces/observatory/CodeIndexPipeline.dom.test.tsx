@@ -233,6 +233,35 @@ describe('code-index progress transitions', () => {
     expect(screen.queryByRole('progressbar')).toBeNull();
   });
 
+  it('retires cached text when the daemon reports no sealed generation', async () => {
+    const building = freshness({
+      latest_generation_id: GENERATION,
+      rebuild_in_flight: true,
+      progress: progress({ progress_epoch: 9 }),
+    }, 'loading');
+    const view = render(<CodeIndexPipeline result={building} pending={false} scopeKey="project" />);
+    expect(await screen.findByText('bulk commit · 20.0%')).toBeTruthy();
+
+    // This is not an absent progress sample from the *same* durable
+    // generation: the mount now explicitly has no sealed generation.
+    view.rerender(<CodeIndexPipeline
+      result={freshness({
+        latest_generation_id: null,
+        sealed_at_micros: null,
+        snapshot_content_identity: null,
+        staleness_state: 'indexing',
+        rebuild_in_flight: true,
+        progress: null,
+      }, 'loading')}
+      pending={false}
+      scopeKey="project"
+    />);
+    expect(await screen.findByText('code-index build in progress; progress not yet reported'))
+      .toBeTruthy();
+    expect(screen.queryByText('bulk commit · 20.0%')).toBeNull();
+    expect(screen.queryByRole('progressbar')).toBeNull();
+  });
+
   it('discards a retired text cursor after a different generation seals', async () => {
     const building = freshness({
       progress: progress({ progress_epoch: 41 }),

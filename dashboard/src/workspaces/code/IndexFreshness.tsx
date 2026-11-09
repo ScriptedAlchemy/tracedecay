@@ -380,8 +380,7 @@ function useLatestBuildProgress(
         if (!incoming) {
           if (
             current &&
-            (worktree.latest_generation_id == null ||
-              worktree.latest_generation_id === current.generation_id) &&
+            worktree.latest_generation_id === current.generation_id &&
             !(result.envelope.domain_state === 'ready' &&
               worktree.latest_generation_id === current.generation_id)
           ) {

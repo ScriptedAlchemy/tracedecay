@@ -251,6 +251,46 @@ describe('Code index freshness', () => {
     expect(screen.queryByRole('progressbar', { name: 'Code progress' })).toBeNull();
   });
 
+  it('retires prior committed counters when a live mount has no sealed generation', async () => {
+    vi.useFakeTimers();
+    const building = envelope('loading', {
+      worktrees: [{
+        ...worktree(),
+        latest_generation_id: 'generation.catchup.01',
+        staleness_state: 'indexing',
+        rebuild_in_flight: true,
+        progress: progress(),
+      }],
+      note: 'previous sealed generation remains visible',
+    });
+    const restarted = envelope('loading', {
+      worktrees: [{
+        ...worktree(),
+        latest_generation_id: null,
+        sealed_at_micros: null,
+        snapshot_content_identity: null,
+        staleness_state: 'indexing',
+        rebuild_in_flight: true,
+        progress: null,
+      }],
+      note: 'no sealed generation in the current scheduler',
+    });
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(building), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(restarted), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText('250 / 500 files')).toBeTruthy();
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('no sealed generation yet')).toBeTruthy();
+    expect(screen.queryByText('250 / 500 files')).toBeNull();
+    expect(screen.queryByRole('progressbar', { name: 'Code progress' })).toBeNull();
+  });
+
   it('does not resurrect text progress after its mount disappears and reappears', async () => {
     vi.useFakeTimers();
     const original = envelope('loading', {
