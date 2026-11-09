@@ -30,6 +30,16 @@ the HTTP Authorization header, and never stores the credential or its variable
 name in result evidence. An authenticated remote endpoint must use HTTPS;
 plain HTTP is accepted only for direct loopback addresses. Ambient proxies
 and HTTP redirects are disabled, including for authenticated requests.
+For the captured Scout arm, the endpoint must terminate in the literal
+`/v1/systemone` path, with no query or fragment. The production
+`DecisionEngineClientV1` appends that path to its configured base URL.
+A refrozen endpoint digest alone cannot establish transport parity if a
+different HTTP route accepts the same request bytes. The evaluator checks
+the URL before creating evidence or making any request; a historical
+(non-Scout) evaluation can still use its own endpoint. Scoring only sees
+the URL's hash, not its original text, so this admission check does **not**
+attest the remote server or prove real Scout provenance.
+
 An HTTP response counts as a decision only at status **200**, matching the
 production Scout client. Other successful-looking 2xx statuses (201/202/206)
 refuse before reading or publishing a prediction; an interrupted exact-identity

@@ -1633,6 +1633,50 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(bodies["holdout-positive"], records[0]["body"].encode("utf-8"))
         self.assertEqual(bodies["holdout-negative"], records[1]["body"].encode("utf-8"))
 
+    def test_captured_scout_requires_production_endpoint_even_after_refreezing(self):
+        # A differently routed HTTP service can return valid-looking Noul
+        # predictions, but Scout's configured client never sends requests
+        # there. Rehash the manifest endpoint to exercise the actual parity
+        # guard instead of an incidental digest mismatch.
+        capture, manifest = self.captured_scout_fixture()
+        self.valid(manifest)
+        self.assertIsNone(run_http.require_scout_endpoint(self.endpoint))
+        self.assertIsNone(run_http.require_scout_endpoint(
+            "https://example.test/adapter/v1/systemone"
+        ))
+        variants = (
+            self.endpoint.replace("/v1/systemone", "/v1/predict"),
+            self.endpoint + "?model=other",
+            self.endpoint + "#different",
+            self.endpoint + "/",
+        )
+        for endpoint in variants:
+            with self.subTest(endpoint=endpoint), tempfile.TemporaryDirectory() as temp:
+                here = Path(temp)
+                refrozen = copy.deepcopy(manifest)
+                refrozen["arm"]["endpoint_sha256"] = qualification.sha256_bytes(
+                    endpoint.encode("utf-8")
+                )
+                (here / "manifest.json").write_text(json.dumps(refrozen))
+                (here / "dataset.json").write_bytes(self.dataset_bytes)
+                (here / "captured.json").write_bytes(capture)
+                (here / "server.json").write_text(json.dumps(self.server_config))
+                with patch.object(run_http, "HERE", str(here)), patch.object(
+                    run_http, "post"
+                ) as post:
+                    with self.assertRaisesRegex(
+                        ValueError, "canonical /v1/systemone endpoint"
+                    ):
+                        run_http.main([
+                            "--url", endpoint, "--tag", "captured-endpoint",
+                            "--server-config", str(here / "server.json"),
+                            "--qualification-manifest", str(here / "manifest.json"),
+                            "--captured-requests", str(here / "captured.json"),
+                            qualification.CAPTURED_SCOUT_CONFIG,
+                        ])
+                    post.assert_not_called()
+                self.assertFalse((here / "results").exists())
+
     def test_captured_scout_requests_replay_exact_bytes_and_score(self):
         # This proves a captured arm is byte-exact, not that the synthetic
         # fixture came from real Scout or that its labels were reviewed.

@@ -151,6 +151,22 @@ def require_http_endpoint(url):
     return endpoint
 
 
+def require_scout_endpoint(url):
+    """The captured arm must use the same endpoint shape as Scout's client.
+
+    DecisionEngineClientV1 appends /v1/systemone to its base URL; allowing
+    an arbitrary route, query or fragment turns byte-exact request replay
+    into a different inference contract despite a refrozen endpoint digest.
+    """
+    endpoint = require_http_endpoint(url)
+    if (not endpoint.path.endswith("/v1/systemone")
+            or endpoint.query or endpoint.fragment):
+        raise ValueError(
+            "captured Scout inference requires canonical /v1/systemone "
+            "endpoint without query or fragment"
+        )
+
+
 def load_bearer_token(name, url):
     """Read an optional bearer credential without persisting it in evidence."""
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
@@ -575,6 +591,8 @@ def main(argv=None):
                 or hashlib.sha256(args.url.encode("utf-8")).hexdigest() != arm["endpoint_sha256"]
                 or digest(server_config) != arm["server_config_sha256"]):
             raise ValueError("qualification HTTP arm differs from frozen manifest")
+        if arm["config"] == CAPTURED_SCOUT_CONFIG:
+            require_scout_endpoint(args.url)
         if (arm["config"] == CAPTURED_SCOUT_CONFIG) != bool(args.captured_requests):
             raise ValueError("captured Scout arms require --captured-requests and no historical renderer")
         if args.captured_requests:
