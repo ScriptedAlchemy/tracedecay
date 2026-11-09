@@ -70,6 +70,10 @@ use crate::code_graph_seat::CodeGraphBuildAdmissionV1;
 #[path = "tests/staged_segment_reads.rs"]
 mod staged_segment_reads;
 
+#[cfg(all(test, unix))]
+#[path = "tests/immutable_segment_equality.rs"]
+mod immutable_segment_equality;
+
 const MAX_DURABLE_PUBLICATION_POINTER_BYTES: u64 = 512 * 1024;
 const DURABLE_GENERATION_IO_CHUNK_BYTES_V1: usize = 64 * 1024;
 
@@ -1983,25 +1987,60 @@ impl DaemonCodeIndexPublicationStoreV1 {
         if left_metadata.len() != right_metadata.len() {
             return Ok(false);
         }
-        let mut left = File::open(left).map_err(Self::unavailable)?;
-        let mut right = File::open(right).map_err(Self::unavailable)?;
-        let mut left_buffer = vec![0_u8; DURABLE_GENERATION_IO_CHUNK_BYTES_V1];
-        let mut right_buffer = vec![0_u8; DURABLE_GENERATION_IO_CHUNK_BYTES_V1];
-        loop {
-            let left_read = left.read(&mut left_buffer).map_err(Self::unavailable)?;
-            if left_read == 0 {
-                return Ok(right
-                    .read(&mut right_buffer[..1])
-                    .map_err(Self::unavailable)?
-                    == 0);
-            }
-            right
-                .read_exact(&mut right_buffer[..left_read])
-                .map_err(Self::unavailable)?;
-            if left_buffer[..left_read] != right_buffer[..left_read] {
-                return Ok(false);
+        let mut left_file = File::open(left).map_err(Self::unavailable)?;
+        let mut right_file = File::open(right).map_err(Self::unavailable)?;
+        #[cfg(unix)]
+        {
+            let left_opened = left_file.metadata().map_err(Self::unavailable)?;
+            let right_opened = right_file.metadata().map_err(Self::unavailable)?;
+            if !Self::same_unix_segment_identity(&left_metadata, &left_opened)
+                || !Self::same_unix_segment_identity(&right_metadata, &right_opened)
+            {
+                return Err(Self::corruption(
+                    "immutable code-index file changed while opening for comparison",
+                ));
             }
         }
+        let mut left_buffer = vec![0_u8; DURABLE_GENERATION_IO_CHUNK_BYTES_V1];
+        let mut right_buffer = vec![0_u8; DURABLE_GENERATION_IO_CHUNK_BYTES_V1];
+        // Content equality authorizes discarding the pending canonical copy.
+        // A slow endpoint-scanned read must not authorize a swapped pathname.
+        let equal = {
+            let _span =
+                tracing::trace_span!("code_index.generation.compare_immutable_bytes").entered();
+            loop {
+                let left_read = left_file.read(&mut left_buffer).map_err(Self::unavailable)?;
+                if left_read == 0 {
+                    break right_file
+                        .read(&mut right_buffer[..1])
+                        .map_err(Self::unavailable)?
+                        == 0;
+                }
+                right_file
+                    .read_exact(&mut right_buffer[..left_read])
+                    .map_err(Self::unavailable)?;
+                if left_buffer[..left_read] != right_buffer[..left_read] {
+                    break false;
+                }
+            }
+        };
+        #[cfg(unix)]
+        {
+            let left_named = left.symlink_metadata().map_err(Self::unavailable)?;
+            let right_named = right.symlink_metadata().map_err(Self::unavailable)?;
+            let left_opened = left_file.metadata().map_err(Self::unavailable)?;
+            let right_opened = right_file.metadata().map_err(Self::unavailable)?;
+            if !Self::same_unix_segment_identity(&left_metadata, &left_named)
+                || !Self::same_unix_segment_identity(&left_metadata, &left_opened)
+                || !Self::same_unix_segment_identity(&right_metadata, &right_named)
+                || !Self::same_unix_segment_identity(&right_metadata, &right_opened)
+            {
+                return Err(Self::corruption(
+                    "immutable code-index file changed during comparison",
+                ));
+            }
+        }
+        Ok(equal)
     }
 
     pub(super) fn state_digest(bytes: &[u8]) -> String {
