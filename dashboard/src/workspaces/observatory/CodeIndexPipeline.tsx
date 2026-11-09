@@ -82,8 +82,8 @@ export function CodeIndexPipeline({
         )
       ) : (
         <div className="mt-2 flex flex-col gap-2">
-          {progress.map((build) => (
-            <CodeIndexBuildCard key={build.generation_id} progress={build} />
+          {progress.map(([worktreeRoot, build]) => (
+            <CodeIndexBuildCard key={worktreeRoot} worktreeRoot={worktreeRoot} progress={build} />
           ))}
         </div>
       )}
@@ -220,7 +220,13 @@ export function graphServingLabel(
   }
 }
 
-function CodeIndexBuildCard({ progress }: { progress: CodeIndexBuildProgressV1 }) {
+function CodeIndexBuildCard({
+  progress,
+  worktreeRoot,
+}: {
+  progress: CodeIndexBuildProgressV1;
+  worktreeRoot: string;
+}) {
   const percentage = codeIndexProgressPercentage(progress);
   const hasRate =
     progress.files_per_second != null && progress.lexical_units_per_second != null;
@@ -244,6 +250,10 @@ function CodeIndexBuildCard({ progress }: { progress: CodeIndexBuildProgressV1 }
         <dt className="text-text-muted">generation</dt>
         <dd className="truncate text-right font-mono text-text-secondary" title={progress.generation_id}>
           {progress.generation_id}
+        </dd>
+        <dt className="text-text-muted">worktree</dt>
+        <dd className="truncate text-right font-mono text-text-secondary" title={worktreeRoot}>
+          {worktreeRoot}
         </dd>
         <dt className="text-text-muted">files</dt>
         <dd className="text-right text-text-secondary">
@@ -312,7 +322,7 @@ export function hasActiveCodeIndexBuild(
 function useLatestCodeIndexProgress(
   result: EnvelopeResult<CodeIndexFreshnessPayloadV1> | undefined,
   currentScopeKey: string,
-): readonly CodeIndexBuildProgressV1[] {
+): ReadonlyArray<readonly [string, CodeIndexBuildProgressV1]> {
   const [latestProgress, setLatestProgress] = useState<ScopedCodeIndexProgress>(() => ({
     scopeKey: currentScopeKey,
     byWorktree: new Map(),
@@ -365,7 +375,7 @@ function useLatestCodeIndexProgress(
         : { scopeKey: currentScopeKey, byWorktree: next };
     });
   }, [currentScopeKey, result]);
-  return latestProgress.scopeKey === currentScopeKey ? [...latestProgress.byWorktree.values()] : [];
+  return latestProgress.scopeKey === currentScopeKey ? [...latestProgress.byWorktree] : [];
 }
 
 interface ScopedCodeIndexProgress {

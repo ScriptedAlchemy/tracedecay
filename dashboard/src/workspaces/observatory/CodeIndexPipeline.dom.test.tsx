@@ -265,6 +265,55 @@ describe('code-index progress transitions', () => {
     expect(screen.queryByRole('progressbar')).toBeNull();
   });
 
+  it('keeps identical-generation progress separate for each mounted worktree', async () => {
+    // Linked worktrees can share a sealed generation ID but have independent
+    // build counters and must not share React list identity.
+    const first = freshness({
+      rebuild_in_flight: true,
+      progress: progress({ committed_pages: 2, completed_files: 2 }),
+    }, 'loading');
+    first.envelope.payload.worktrees.push(worktree({
+      worktree_root: '/project/linked',
+      rebuild_in_flight: true,
+      progress: progress({
+        committed_pages: 7,
+        completed_files: 7,
+        completed_lexical_units: 7,
+      }),
+    }));
+    first.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(first.envelope.payload);
+    const view = render(<CodeIndexPipeline result={first} pending={false} scopeKey="project" />);
+
+    const original = await screen.findByText('/project');
+    const linked = screen.getByText('/project/linked');
+    expect(original.closest('article[data-code-index-generation]')?.textContent)
+      .toContain('2 / 10 files');
+    expect(linked.closest('article[data-code-index-generation]')?.textContent)
+      .toContain('7 / 10 files');
+    expect(screen.getAllByRole('progressbar', { name: /Code progress for/ })).toHaveLength(2);
+
+    const updated = freshness({
+      rebuild_in_flight: true,
+      progress: progress({ committed_pages: 2, completed_files: 2 }),
+    }, 'loading');
+    updated.envelope.payload.worktrees.push(worktree({
+      worktree_root: '/project/linked',
+      rebuild_in_flight: true,
+      progress: progress({
+        progress_epoch: 2,
+        committed_pages: 9,
+        completed_files: 9,
+        completed_lexical_units: 9,
+      }),
+    }));
+    view.rerender(<CodeIndexPipeline result={updated} pending={false} scopeKey="project" />);
+    expect(await screen.findByText('9 / 10 files')).toBeTruthy();
+    expect(screen.getByText('/project').closest('article[data-code-index-generation]')?.textContent)
+      .toContain('2 / 10 files');
+    expect(screen.getByText('/project/linked').closest('article[data-code-index-generation]')?.textContent)
+      .toContain('9 / 10 files');
+  });
+
   it('keeps restore checks separate from build counters and stops polling after restoration', async () => {
     const restoring = freshness({ restore_progress: restoreProgress });
     const view = render(<CodeIndexPipeline result={restoring} pending={false} scopeKey="project" />);
