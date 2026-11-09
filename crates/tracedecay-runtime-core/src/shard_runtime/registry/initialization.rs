@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracedecay_private_fs::capability_dir::{self, Dir};
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_parent_directory};
 use tracedecay_private_fs::{FileLease, create_private_directory, open_private_directory};
@@ -46,6 +47,7 @@ pub fn lock_offline_sqlite_family_for_reset(destination: &Path) -> io::Result<Op
 struct PreparedFamily {
     runtime_identity: u64,
     main: LeafIdentity,
+    main_sha256: [u8; 32],
     sidecars: [LeafIdentity; 3],
 }
 
@@ -56,6 +58,14 @@ impl PreparedFamily {
                 .sidecars
                 .iter()
                 .all(|sidecar| sidecar.allocation.is_some())
+    }
+
+    fn pin_main(&self, directory: &Dir, name: &OsStr) -> io::Result<File> {
+        let mut file = self.main.pin_at(directory, name, false)?;
+        if sha256_file(&mut file)? != self.main_sha256 {
+            return Err(ambiguous("prepared SQLite main file content changed"));
+        }
+        Ok(file)
     }
 
     fn load(file: &mut File) -> io::Result<Option<Self>> {
@@ -130,6 +140,20 @@ impl LeafIdentity {
         }
         Ok(file)
     }
+}
+
+fn sha256_file(file: &mut File) -> io::Result<[u8; 32]> {
+    file.rewind()?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let length = file.read(&mut buffer)?;
+        if length == 0 {
+            break;
+        }
+        hasher.update(&buffer[..length]);
+    }
+    Ok(hasher.finalize().into())
 }
 
 fn ambiguous(message: &'static str) -> io::Error {
@@ -253,7 +277,7 @@ impl InitializationDirectory {
         #[cfg(not(windows))]
         let sidecars = sidecars.map(Some);
         let main = LeafIdentity::from_file(&main_file)?;
-        let main_pin = main.pin_at(&stage, OsStr::new("schema.sqlite"), false)?;
+        let mut main_pin = main.pin_at(&stage, OsStr::new("schema.sqlite"), false)?;
         for entry in stage.entries()? {
             let name = entry?.file_name();
             if name != "schema.sqlite"
@@ -267,6 +291,7 @@ impl InitializationDirectory {
             }
         }
         main_file.sync_all()?;
+        let main_sha256 = sha256_file(&mut main_pin)?;
         // WAL and rollback-journal bytes may be durable data. The original
         // writer has checkpointed and joined; refuse any remaining frames.
         // Only the original, now-unused SHM index may be cleared by descriptor.
@@ -313,6 +338,7 @@ impl InitializationDirectory {
         let prepared = PreparedFamily {
             runtime_identity: expected,
             main,
+            main_sha256,
             sidecars: [wal, shm, journal],
         };
         capability_dir::sync_directory(&stage)?;
@@ -338,11 +364,7 @@ impl InitializationDirectory {
                 ));
             }
         }
-        let mut pins = vec![
-            prepared
-                .main
-                .pin_at(stage, OsStr::new("schema.sqlite"), false)?,
-        ];
+        let mut pins = vec![prepared.pin_main(stage, OsStr::new("schema.sqlite"))?];
         for (suffix, identity) in SIDECARS.into_iter().zip(&prepared.sidecars) {
             let from = format!("reservation{suffix}");
             let to = with_suffix(&self.destination, suffix);
@@ -403,9 +425,7 @@ impl InitializationDirectory {
             leaf(&self.destination)?,
         )?;
         capability_dir::sync_directory(&self.parent)?;
-        prepared
-            .main
-            .pin_at(&self.parent, leaf(&self.destination)?, false)?;
+        prepared.pin_main(&self.parent, leaf(&self.destination)?)?;
         drop(stage);
         self.retire()?;
         Ok(expected)
@@ -512,11 +532,7 @@ impl InitializationDirectory {
                     "SQLite preparation has no durable file generation for recovery",
                 ));
             }
-            pins.push(
-                prepared
-                    .main
-                    .pin_at(&stage.parent, leaf(destination)?, false)?,
-            );
+            pins.push(prepared.pin_main(&stage.parent, leaf(destination)?)?);
             for (suffix, identity) in SIDECARS.into_iter().zip(&prepared.sidecars) {
                 pins.push(identity.pin_at(
                     &stage.parent,
@@ -587,6 +603,58 @@ mod tests {
             main,
             SIDECARS.map(|suffix| create_private_file(&with_suffix(&path, suffix)).unwrap()),
         )
+    }
+
+    #[test]
+    fn changed_prepared_sqlite_bytes_are_preserved_and_never_published() {
+        const CHILD: &str = "TRACEDECAY_SQLITE_PREPARED_SWAP";
+        const FOREIGN: &str = "TRACEDECAY_SQLITE_PREPARED_FOREIGN";
+        if let Some(target) = std::env::var_os(CHILD) {
+            let bytes = fs::read(std::env::var_os(FOREIGN).unwrap()).unwrap();
+            let mut file = fs::OpenOptions::new().write(true).open(target).unwrap();
+            assert_eq!(file.metadata().unwrap().len(), bytes.len() as u64);
+            file.rewind().unwrap();
+            file.write_all(&bytes).unwrap();
+            file.sync_all().unwrap();
+            return;
+        }
+
+        let root = TempDir::new().unwrap();
+        let destination = root.path().join("sessions.db");
+        let mut stage = InitializationDirectory::begin(destination.clone()).unwrap();
+        seed(&stage.database(), 7);
+        let foreign = root.path().join("foreign.sqlite");
+        seed(&foreign, 99);
+        let before = fs::read(stage.database()).unwrap();
+        assert_eq!(before.len(), fs::metadata(&foreign).unwrap().len() as usize);
+        let identity = crate::db::sqlite_generation_identity(&stage.database()).unwrap();
+        let files = owned_files(&stage);
+        stage.prepare(identity, files).unwrap();
+
+        let (_, module) = module_path!().split_once("::").unwrap();
+        let test = format!("{module}::changed_prepared_sqlite_bytes_are_preserved_and_never_published");
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &test])
+            .env(CHILD, stage.database())
+            .env(FOREIGN, &foreign)
+            .output()
+            .unwrap();
+        assert!(child.status.success(), "cross-process mutation failed: {child:?}");
+        assert!(LeafIdentity::from_file(&File::open(stage.database()).unwrap()).unwrap()
+            == stage.prepared.as_ref().unwrap().main);
+        assert_ne!(fs::read(stage.database()).unwrap(), before);
+        assert_eq!(read_value(&stage.database()), 99);
+        assert_eq!(
+            stage.publish_prepared().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(!destination.exists());
+        for suffix in SIDECARS {
+            assert!(!with_suffix(&destination, suffix).exists());
+            assert!(stage.reservation(suffix).exists());
+        }
+        assert_eq!(read_value(&stage.database()), 99);
+        assert_eq!(read_value(&foreign), 99);
     }
 
     #[test]
