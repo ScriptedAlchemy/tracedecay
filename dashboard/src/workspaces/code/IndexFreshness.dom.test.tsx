@@ -761,7 +761,7 @@ describe('Code index freshness', () => {
     await advanceTimers(1);
     await advanceTimers(0);
     expect(fetch).toHaveBeenCalledTimes(2);
-    expect(screen.getByText('capture · 8 / 20 items')).toBeTruthy();
+    expect(await screen.findByText('capture · 8 / 20 items')).toBeTruthy();
     await advanceTimers(1_001);
     await advanceTimers(0);
     expect(fetch).toHaveBeenCalledTimes(3);
