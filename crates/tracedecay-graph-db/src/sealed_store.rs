@@ -3977,11 +3977,32 @@ mod build_tests {
             "an interrupted direct build must leave neither its staging directory nor an artifact"
         );
 
-        // A crash image: the process died after creating the staging
-        // directory and part of a container. The next attempt owns that
-        // directory and rebuilds from the manifest.
+        // A crash before the receipt exists leaves no deletion authority.
+        // A retry must preserve the unverified staging bytes, not silently
+        // treat a name collision as proof that the directory belongs to us.
         std::fs::create_dir_all(&staging).unwrap();
-        std::fs::write(staging.join(SEALED_STORE_DATABASE_FILE), b"torn container").unwrap();
+        let torn_container = staging.join(SEALED_STORE_DATABASE_FILE);
+        std::fs::write(&torn_container, b"torn container").unwrap();
+        let refused = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        );
+        assert!(
+            matches!(&refused, Err(GraphDbError::Unavailable { .. })),
+            "an unreceipted staging collision must fail closed: {refused:?}"
+        );
+        assert_eq!(std::fs::read(&torn_container).unwrap(), b"torn container");
+        assert!(
+            !directory.exists(),
+            "refused build must not publish a generation"
+        );
+
+        // The test fixture explicitly removes its unowned crash image.
+        // Only then may the same build succeed and prove its normal payload.
+        std::fs::remove_dir_all(&staging).unwrap();
         let (direct, staging_proof) = build_or_open_sealed_store(
             SealedRowSource::Manifest(&manifest),
             &identity,
@@ -3998,7 +4019,7 @@ mod build_tests {
         assert_eq!((direct.entity_count, direct.relation_count), (2_000, 3_000));
         assert!(
             !staging.exists(),
-            "the crash image must be replaced, not kept"
+            "successful build must consume its staging directory"
         );
         let _ = direct.database().close();
         let direct_bytes = std::fs::read(&artifact).unwrap();
