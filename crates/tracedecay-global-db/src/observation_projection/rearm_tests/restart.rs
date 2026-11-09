@@ -133,7 +133,9 @@ async fn retry_rearm_skips_deadlines_that_mature_during_recovery() {
 
     // Model a recovery that started before deadlines at 1_500_000 micros.
     // The actual runtime clock is later; this does not rely on sleeping.
-    let mut windows = RetryRearmWindows::new(database, 4, 1_000_000).await.unwrap();
+    let mut windows = RetryRearmWindows::new(database, 4, 1_000_000)
+        .await
+        .unwrap();
     let transaction = harness.registered.begin_write_transaction().await.unwrap();
     assert_eq!(
         transaction
@@ -188,7 +190,9 @@ async fn retry_rearm_skips_deadlines_that_mature_during_recovery() {
         .await
         .unwrap();
     transaction.commit().await.unwrap();
-    let mut expired = RetryRearmWindows::new(database, 4, 1_000_000).await.unwrap();
+    let mut expired = RetryRearmWindows::new(database, 4, 1_000_000)
+        .await
+        .unwrap();
     let transaction = harness.registered.begin_write_transaction().await.unwrap();
     transaction
         .execute(
@@ -202,14 +206,25 @@ async fn retry_rearm_skips_deadlines_that_mature_during_recovery() {
 
     let before_idle = writer_telemetry(&harness.registered).transactions;
     assert!(expired.next().await.unwrap().is_none());
-    assert_eq!(writer_telemetry(&harness.registered).transactions, before_idle);
+    assert_eq!(
+        writer_telemetry(&harness.registered).transactions,
+        before_idle
+    );
     assert_eq!(
         rearm_queued_projection_retries(database, 4).await.unwrap(),
         RearmedProjectionRetries::default()
     );
-    assert_eq!(writer_telemetry(&harness.registered).transactions, before_idle);
+    assert_eq!(
+        writer_telemetry(&harness.registered).transactions,
+        before_idle
+    );
     assert_eq!(
         retry_deadlines(&harness).await,
-        vec![(1, 1_500_000), (2, 1_500_000), (3, 1_500_000), (4, 1_500_000)]
+        vec![
+            (1, 1_500_000),
+            (2, 1_500_000),
+            (3, 1_500_000),
+            (4, 1_500_000)
+        ]
     );
 }

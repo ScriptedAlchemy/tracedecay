@@ -329,10 +329,9 @@ async fn rewrite_completion_retires_projected_records_and_rolls_back_a_failed_at
 async fn source_presence_pages_are_atomic_and_unchanged_reoffers_do_not_write() {
     const RECORDS: usize = 257;
     let harness = RegisteredGlobalDbHarness::open("source-presence-batched").await;
-    let source = ObservationSourceIdentityV1::new(
-        SessionId::new("session.presence-batched").unwrap(),
-    )
-    .unwrap();
+    let source =
+        ObservationSourceIdentityV1::new(SessionId::new("session.presence-batched").unwrap())
+            .unwrap();
     let scope = ObservationScopeV1::Profile;
     let first = ObservationSourceGenerationV1::new(1).unwrap();
     let second = ObservationSourceGenerationV1::new(2).unwrap();
