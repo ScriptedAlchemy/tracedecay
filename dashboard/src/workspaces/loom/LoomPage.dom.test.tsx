@@ -836,6 +836,21 @@ describe('LoomPage', () => {
     expect(screen.getByTestId('loom-url').textContent).toBe('?loomSession=session.alpha.1');
   });
 
+  it('keeps a tuple-shaped bare ID on its actual session instead of another provider lane', async () => {
+    const temporal = structuredClone(TEMPORAL);
+    const literalId = '["claude","sess-closed"]';
+    temporal.payload.sessions[0]!.session_id = literalId;
+    renderLoom(
+      { ...HAPPY, '/api/loom/temporal': { status: 200, body: temporal } },
+      sessionHref('loom', { provider: null, sessionId: literalId }, useScope.getState().scope),
+    );
+    const thread = await screen.findByRole('region', { name: 'Loaded execution' });
+    expect(thread.textContent).toContain('Deliver Git primitive runtime');
+    expect(thread.textContent).not.toContain('Verify QUERY scheduler');
+    expect(screen.getByTestId('loom-url').textContent).toContain('loomBareSession=');
+    expect(screen.queryByText(/outside this loaded page/)).toBeNull();
+  });
+
   it('opens no thread for a bare id two providers answer to and says so', async () => {
     const temporal = structuredClone(TEMPORAL);
     temporal.payload.sessions[1]!.session_id = 'sess-open';

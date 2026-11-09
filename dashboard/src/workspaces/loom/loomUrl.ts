@@ -19,6 +19,7 @@ import {
 
 export const LOOM_PARAMS = {
   session: 'loomSession',
+  bareSession: 'loomBareSession',
   event: 'loomEvent',
   window: 'loomWindow',
   collapsed: 'loomCollapsed',
@@ -41,7 +42,15 @@ type LoomSessionParam =
   | { readonly kind: 'lane'; readonly laneId: string; readonly selection: SessionSelection }
   | { readonly kind: 'bare_id'; readonly selection: SessionSelection };
 
-export function parseLoomSession(raw: string | null): LoomSessionParam | null {
+export function parseLoomSession(
+  raw: string | null,
+  bareId: string | null = null,
+): LoomSessionParam | null {
+  // A provider-unknown session ID may be serialized JSON shaped like a lane.
+  // A dedicated URL field preserves that identity without guessing a provider.
+  if (bareId !== null && bareId !== '') {
+    return { kind: 'bare_id', selection: { provider: null, sessionId: bareId } };
+  }
   if (raw == null || raw === '') return null;
   const tuple = parseTuple(raw);
   if (tuple === null) return { kind: 'bare_id', selection: { provider: null, sessionId: raw } };

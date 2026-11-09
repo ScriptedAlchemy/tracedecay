@@ -22,12 +22,14 @@ export function sessionHref(
   const [pathname, search = ''] = scopedWorkspacePath(scope, target).split('?');
   const params = new URLSearchParams(search);
   if (target !== 'loom') return `${pathname}?${writeSessionSelection(params, session).toString()}`;
-  params.set(
-    LOOM_PARAMS.session,
-    session.provider === null
-      ? session.sessionId
-      : sessionLaneId(session.provider, session.sessionId),
-  );
+  if (session.provider === null) {
+    // Bare IDs can look like lane tuples; never reinterpret one as a provider.
+    params.set(LOOM_PARAMS.bareSession, session.sessionId);
+    params.delete(LOOM_PARAMS.session);
+  } else {
+    params.set(LOOM_PARAMS.session, sessionLaneId(session.provider, session.sessionId));
+    params.delete(LOOM_PARAMS.bareSession);
+  }
   return `${pathname}?${params.toString()}`;
 }
 

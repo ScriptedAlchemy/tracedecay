@@ -89,6 +89,15 @@ describe('loomUrl', () => {
       kind: 'bare_id',
       selection: { provider: null, sessionId: 'session.alpha.1' },
     });
+    expect(parseLoomSession(null, '["claude","other"]')).toEqual({
+      kind: 'bare_id',
+      selection: { provider: null, sessionId: '["claude","other"]' },
+    });
+    // The explicit bare identity outranks a stale/foreign lane param.
+    expect(parseLoomSession('["claude","other"]', '["codex","literal"]')).toEqual({
+      kind: 'bare_id',
+      selection: { provider: null, sessionId: '["codex","literal"]' },
+    });
     expect(parseLoomSession('["claude"')).toEqual({
       kind: 'bare_id',
       selection: { provider: null, sessionId: '["claude"' },
@@ -112,6 +121,12 @@ describe('loomUrl', () => {
       kind: 'ambiguous',
       selection: { provider: null, sessionId: 'shared' },
       count: 2,
+    });
+    const literalId = row('codex', '["claude","shared"]');
+    expect(resolveLoomSession([...rows, literalId], parseLoomSession(null, literalId.session_id))).toEqual({
+      kind: 'lane',
+      laneId: JSON.stringify(['codex', literalId.session_id]),
+      row: literalId,
     });
     expect(resolve('elsewhere')).toEqual({
       kind: 'outside_page',

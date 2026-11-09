@@ -31,11 +31,24 @@ describe('session cross-workspace navigation', () => {
     renderPivots({ provider: null, sessionId: 'session.alpha.1' });
 
     const loom = screen.getByRole('link', { name: 'Open in Loom' });
-    expect(loom.getAttribute('href')).toBe('/loom?loomSession=session.alpha.1');
+    expect(loom.getAttribute('href')).toBe('/loom?loomBareSession=session.alpha.1');
     await user.click(loom);
     expect(screen.getByTestId('session-pivot-location').textContent).toBe(
-      '/loom?loomSession=session.alpha.1',
+      '/loom?loomBareSession=session.alpha.1',
     );
+  });
+
+  it('retains a tuple-shaped bare ID after real navigation', async () => {
+    const user = userEvent.setup();
+    const id = '["claude","other"]';
+    renderPivots({ provider: null, sessionId: id });
+    const link = screen.getByRole('link', { name: 'Open in Loom' });
+    const target = new URL(link.getAttribute('href')!, 'http://dashboard.test');
+    expect(target.searchParams.get('loomBareSession')).toBe(id);
+    expect(target.searchParams.has('loomSession')).toBe(false);
+    await user.click(link);
+    const location = screen.getByTestId('session-pivot-location').textContent!;
+    expect(new URL(location, 'http://dashboard.test').searchParams.get('loomBareSession')).toBe(id);
   });
 
   it('keeps an admitted project scope and a provider-qualified Loom identity', () => {
