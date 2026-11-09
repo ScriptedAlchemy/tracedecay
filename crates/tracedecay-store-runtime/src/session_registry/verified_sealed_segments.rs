@@ -68,6 +68,7 @@ pub(super) struct SealedSegmentProofV1<'v> {
     segments_root: PathBuf,
     prior: Option<Arc<VerifiedSegmentMap>>,
     proven: VerifiedSegmentMap,
+    has_new_fingerprints: bool,
 }
 
 impl VerifiedSealedSegmentsV1 {
@@ -86,6 +87,7 @@ impl VerifiedSealedSegmentsV1 {
             segments_root: segments_root.to_path_buf(),
             prior,
             proven: BTreeMap::new(),
+            has_new_fingerprints: false,
         }
     }
 }
@@ -126,6 +128,8 @@ impl SealedSegmentProofV1<'_> {
         fingerprint: Option<SealedSegmentFingerprintV1>,
     ) {
         if let Some(fingerprint) = fingerprint {
+            let prior = self.prior.as_ref().and_then(|prior| prior.get(digest));
+            self.has_new_fingerprints |= prior != Some(&fingerprint);
             self.proven.insert(digest.clone(), fingerprint);
         }
     }
@@ -133,6 +137,18 @@ impl SealedSegmentProofV1<'_> {
     /// Remember exactly this generation, but do not let a late proof replace
     /// a snapshot another successful proof has committed since we began.
     pub(super) fn commit(self) {
+        // Every reused entry equals its prior value. With no new fingerprints,
+        // equal cardinality proves the same map without another full scan.
+        // Keep that snapshot's identity: an unchanged overlapping proof must
+        // not make a genuinely changed successor lose its commit below.
+        if !self.has_new_fingerprints
+            && self
+                .prior
+                .as_ref()
+                .is_some_and(|prior| prior.len() == self.proven.len())
+        {
+            return;
+        }
         let mut roots = self
             .verified
             .roots
@@ -221,6 +237,7 @@ mod tests {
         let root = TempDir::new().unwrap();
         let (parent, parent_path) = write_segment(root.path(), b"[1]");
         let (successor, successor_path) = write_segment(root.path(), b"[2]");
+        let (abandoned, abandoned_path) = write_segment(root.path(), b"[3]");
         let verified = VerifiedSealedSegmentsV1::default();
         let mut first = verified.begin(root.path());
         authenticate(&mut first, &parent, &parent_path);
@@ -228,6 +245,7 @@ mod tests {
 
         let mut stale = verified.begin(root.path());
         assert!(stale.already_verified(&parent, 3, &parent_path));
+        authenticate(&mut stale, &abandoned, &abandoned_path);
         let mut sibling = verified.begin(root.path());
         assert!(
             sibling.already_verified(&parent, 3, &parent_path),
@@ -245,6 +263,69 @@ mod tests {
             !latest.already_verified(&parent, 3, &parent_path),
             "a stale proof must not resurrect segments pruned by a committed successor"
         );
+        assert!(!latest.already_verified(&abandoned, 3, &abandoned_path));
+    }
+
+    #[test]
+    fn unchanged_overlapping_proof_preserves_authenticated_successor() {
+        let root = TempDir::new().unwrap();
+        let (retained, retained_path) = write_segment(root.path(), b"[1]");
+        let (replaced, replaced_path) = write_segment(root.path(), b"[2]");
+        let (changed, changed_path) = write_segment(root.path(), b"[3]");
+        let verified = VerifiedSealedSegmentsV1::default();
+        let mut parent = verified.begin(root.path());
+        authenticate(&mut parent, &retained, &retained_path);
+        authenticate(&mut parent, &replaced, &replaced_path);
+        parent.commit();
+
+        let mut successor = verified.begin(root.path());
+        assert!(successor.already_verified(&retained, 3, &retained_path));
+        authenticate(&mut successor, &changed, &changed_path);
+
+        // A completed parent recheck must not invalidate the in-flight edit.
+        let mut unchanged = verified.begin(root.path());
+        assert!(unchanged.already_verified(&retained, 3, &retained_path));
+        assert!(unchanged.already_verified(&replaced, 3, &replaced_path));
+        unchanged.commit();
+        successor.commit();
+
+        let mut latest = verified.begin(root.path());
+        assert!(latest.already_verified(&retained, 3, &retained_path));
+        assert!(
+            latest.already_verified(&changed, 3, &changed_path),
+            "an unchanged overlapping proof must not discard authenticated edited source"
+        );
+        assert!(
+            !latest.already_verified(&replaced, 3, &replaced_path),
+            "equal segment counts must not hide a genuinely changed proof"
+        );
+    }
+
+    #[test]
+    fn pruning_without_new_fingerprints_still_replaces_the_snapshot() {
+        let root = TempDir::new().unwrap();
+        let (retained, retained_path) = write_segment(root.path(), b"[1]");
+        let (removed, removed_path) = write_segment(root.path(), b"[2]");
+        let verified = VerifiedSealedSegmentsV1::default();
+        let mut parent = verified.begin(root.path());
+        authenticate(&mut parent, &retained, &retained_path);
+        authenticate(&mut parent, &removed, &removed_path);
+        parent.commit();
+
+        let mut successor = verified.begin(root.path());
+        assert!(successor.already_verified(&retained, 3, &retained_path));
+        successor.commit();
+
+        let mut latest = verified.begin(root.path());
+        assert!(latest.already_verified(&retained, 3, &retained_path));
+        assert!(
+            !latest.already_verified(&removed, 3, &removed_path),
+            "a deletion-only successor must still prune obsolete authentication entries"
+        );
+        drop(latest);
+        verified.begin(root.path()).commit();
+        let mut empty = verified.begin(root.path());
+        assert!(!empty.already_verified(&retained, 3, &retained_path));
     }
 
     #[test]
