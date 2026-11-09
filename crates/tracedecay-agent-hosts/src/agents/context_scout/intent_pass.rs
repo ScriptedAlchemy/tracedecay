@@ -1133,6 +1133,21 @@ fn intent_decision_metadata(
             })
             .collect::<Vec<_>>()
     });
+    // Keep full server probabilities distinct from the policy's rounded
+    // permille receipts. Rounding is appropriate for threshold comparison,
+    // but discards calibration and near-threshold evidence.
+    let raw_model_probabilities = engine_outcome.answers().map(|values| {
+        values
+            .into_iter()
+            .map(|(intent, probability)| (intent.as_key().to_owned(), probability))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    });
+    let request_latency_micros = match engine_outcome {
+        EngineOutcomeV1::Asked(DecisionEngineOutcomeV1::Answered(answers)) => {
+            Some(answers.latency_micros)
+        }
+        _ => None,
+    };
     let selection = match decision {
         IntentDecisionV1::Candidates(candidates) => serde_json::json!({
             "kind": "candidates",
@@ -1167,6 +1182,8 @@ fn intent_decision_metadata(
             "reported_model": engine_outcome.reported_model(),
         })),
         "answers": answers,
+        "raw_model_probabilities": raw_model_probabilities,
+        "request_latency_micros": request_latency_micros,
         "facts": facts,
         "prompt_inferences": prompt_inferences,
         "decision": selection,
@@ -1299,6 +1316,8 @@ mod tool_signal_tests {
         assert_eq!(receipt["decision"]["best_probability_permille"], 170);
         assert_eq!(receipt["answers"][0]["probability_permille"], 170);
         assert_eq!(receipt["answers"][0]["threshold_permille"], 600);
+        assert_eq!(receipt["raw_model_probabilities"][Kind::Impact.as_key()], 0.17);
+        assert_eq!(receipt["request_latency_micros"], 1250);
         assert!(receipt["facts"].as_array().unwrap().is_empty());
         assert_eq!(receipt["prompt_inferences"].as_array().unwrap().len(), 1);
         assert!(!evidence.contains("Confidential transcript text"));
@@ -1322,6 +1341,8 @@ mod tool_signal_tests {
         let unknown: serde_json::Value = serde_json::from_str(&unavailable).unwrap();
         assert_eq!(unknown["decision"]["kind"], "no_signal");
         assert!(unknown["answers"].is_null());
+        assert!(unknown["raw_model_probabilities"].is_null());
+        assert!(unknown["request_latency_micros"].is_null());
         assert!(unknown["engine"].is_null());
 
         let bad_window = SessionWindowV1 {
