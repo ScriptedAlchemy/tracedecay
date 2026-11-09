@@ -1,5 +1,9 @@
+use crate::observation_projection::state::{
+    RetryRearmWindows, apply_rearm_projection_retry_candidates,
+};
 use crate::observation_projection::{RearmedProjectionRetries, rearm_queued_projection_retries};
 use crate::tests::harness::{RegisteredGlobalDbHarness, writer_telemetry};
+use tracedecay_runtime_core::db::engine::params;
 
 use super::{FAR_FUTURE_MICROS, queue_state, seed_queue};
 
@@ -116,4 +120,96 @@ async fn retry_rearm_resumes_committed_windows_after_failure_and_restart() {
         .await
         .unwrap();
     transaction.commit().await.unwrap();
+}
+
+/// A recovery can spend a long time between its original clock read and later
+/// candidate pages. Deadlines that matured meanwhile must not be rewritten:
+/// they are already eligible for ordinary projection without restart rearm.
+#[asupersync::test]
+async fn retry_rearm_skips_deadlines_that_mature_during_recovery() {
+    let harness = RegisteredGlobalDbHarness::open("rearm-midwalk-deadlines").await;
+    seed_queue(&harness, 4, 0).await;
+    let database = harness.registered.runtime_database();
+
+    // Model a recovery that started before deadlines at 1_500_000 micros.
+    // The actual runtime clock is later; this does not rely on sleeping.
+    let mut windows = RetryRearmWindows::new(database, 4, 1_000_000).await.unwrap();
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    assert_eq!(
+        transaction
+            .execute(
+                "UPDATE projection_queue SET next_retry_at_micros = 1500000
+                 WHERE observation_sequence IN (1, 2)",
+                (),
+            )
+            .await
+            .unwrap(),
+        2
+    );
+    transaction.commit().await.unwrap();
+
+    let before = writer_telemetry(&harness.registered).transactions;
+    let candidates = windows
+        .next()
+        .await
+        .unwrap()
+        .expect("two still-deferred observations remain");
+    let selected: Vec<(i64, String, i64, i64)> = serde_json::from_str(&candidates).unwrap();
+    assert_eq!(selected.len(), 2, "matured deadlines need no write window");
+    assert!(selected.iter().all(|item| item.2 == FAR_FUTURE_MICROS));
+    assert_eq!(
+        apply_rearm_projection_retry_candidates(
+            database,
+            &candidates,
+            tracedecay_contracts::clock::now_micros().0,
+            &windows.mount,
+        )
+        .await
+        .unwrap(),
+        2
+    );
+    assert!(windows.next().await.unwrap().is_none());
+    assert_eq!(
+        retry_deadlines(&harness).await,
+        vec![(1, 1_500_000), (2, 1_500_000), (3, 0), (4, 0)]
+    );
+    let after = writer_telemetry(&harness.registered).transactions;
+    assert_eq!(after.commands - before.commands, 1);
+
+    // If *all* rows mature after the recovery cursor was established,
+    // the reader must finish without even acquiring an empty writer lease.
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "UPDATE projection_queue SET next_retry_at_micros = ?1
+             WHERE observation_sequence IN (3, 4)",
+            params![FAR_FUTURE_MICROS],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    let mut expired = RetryRearmWindows::new(database, 4, 1_000_000).await.unwrap();
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "UPDATE projection_queue SET next_retry_at_micros = 1500000
+             WHERE observation_sequence IN (3, 4)",
+            (),
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let before_idle = writer_telemetry(&harness.registered).transactions;
+    assert!(expired.next().await.unwrap().is_none());
+    assert_eq!(writer_telemetry(&harness.registered).transactions, before_idle);
+    assert_eq!(
+        rearm_queued_projection_retries(database, 4).await.unwrap(),
+        RearmedProjectionRetries::default()
+    );
+    assert_eq!(writer_telemetry(&harness.registered).transactions, before_idle);
+    assert_eq!(
+        retry_deadlines(&harness).await,
+        vec![(1, 1_500_000), (2, 1_500_000), (3, 1_500_000), (4, 1_500_000)]
+    );
 }

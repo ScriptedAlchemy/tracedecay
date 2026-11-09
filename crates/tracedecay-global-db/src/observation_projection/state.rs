@@ -282,9 +282,13 @@ pub(crate) async fn rearm_queued_projection_retries(
     let mut windows = RetryRearmWindows::new(database, batch_rows, now).await?;
     let mut rearmed = RearmedProjectionRetries::default();
     while let Some(candidates) = windows.next().await? {
-        let rows =
-            apply_rearm_projection_retry_candidates(database, &candidates, now, &windows.mount)
-                .await?;
+        let rows = apply_rearm_projection_retry_candidates(
+            database,
+            &candidates,
+            tracedecay_contracts::clock::now_micros().0,
+            &windows.mount,
+        )
+        .await?;
         rearmed.rows += rows;
         if rows != 0 {
             rearmed.batches += 1;
@@ -409,6 +413,9 @@ impl<'a> RetryRearmWindows<'a> {
                 )
                 .await
                 .map_err(|error| storage(OPERATION, error))?;
+            // Deadlines can become due while a large history recovery runs.
+            // Projection can already consume them without any rearm write.
+            let page_now = tracedecay_contracts::clock::now_micros().0;
             let mut candidates = Vec::new();
             let mut last = None;
             while let Some(row) = rows
@@ -420,7 +427,7 @@ impl<'a> RetryRearmWindows<'a> {
                 let deadline: i64 = row.get(1).map_err(|error| storage(OPERATION, error))?;
                 let observation: Option<String> =
                     row.get(2).map_err(|error| storage(OPERATION, error))?;
-                if let Some(observation) = observation {
+                if deadline > page_now && let Some(observation) = observation {
                     let attempt: i64 = row.get(3).map_err(|error| storage(OPERATION, error))?;
                     candidates.push((rowid, observation, deadline, attempt));
                 }
