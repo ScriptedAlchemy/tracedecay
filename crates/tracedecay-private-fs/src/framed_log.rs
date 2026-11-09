@@ -491,7 +491,9 @@ fn remove_owned_temp(path: &Path) {
 pub mod sync_latency {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{Arc, Mutex, PoisonError, mpsc};
+    use std::sync::{Arc, Mutex, PoisonError};
+    #[cfg(test)]
+    use std::sync::mpsc;
     use std::time::Duration;
 
     struct Injection {
@@ -499,27 +501,31 @@ pub mod sync_latency {
         root: PathBuf,
         delay: Duration,
         syncs: Arc<AtomicU64>,
+        #[cfg(test)]
         pause: Option<Arc<SyncPauseSignal>>,
     }
 
     // A fixture can synchronize exactly at a real fsync, without wall-time
     // races, mock barriers, or changes to production file I/O.
+    #[cfg(test)]
     struct SyncPauseSignal {
         entered: mpsc::Sender<()>,
         resume: Mutex<mpsc::Receiver<()>>,
     }
 
-    pub struct SyncPause {
+    #[cfg(test)]
+    pub(super) struct SyncPause {
         entered: mpsc::Receiver<()>,
         resume: mpsc::Sender<()>,
     }
 
+    #[cfg(test)]
     impl SyncPause {
-        pub fn wait_for_sync(&self, timeout: Duration) -> bool {
+        pub(super) fn wait_for_sync(&self, timeout: Duration) -> bool {
             self.entered.recv_timeout(timeout).is_ok()
         }
 
-        pub fn resume(self) {
+        pub(super) fn resume(self) {
             let _ = self.resume.send(());
         }
     }
@@ -553,6 +559,7 @@ pub mod sync_latency {
     fn register(
         root: &Path,
         delay: Duration,
+        #[cfg(test)]
         pause: Option<Arc<SyncPauseSignal>>,
     ) -> SyncLatencyGuard {
         let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
@@ -565,6 +572,7 @@ pub mod sync_latency {
                 root: root.to_path_buf(),
                 delay,
                 syncs: Arc::clone(&syncs),
+                #[cfg(test)]
                 pause,
             });
         SyncLatencyGuard { id, syncs }
@@ -573,12 +581,20 @@ pub mod sync_latency {
     /// Delay every fsync of root or a path below it by delay.
     #[must_use]
     pub fn inject(root: &Path, delay: Duration) -> SyncLatencyGuard {
-        register(root, delay, None)
+        #[cfg(test)]
+        {
+            register(root, delay, None)
+        }
+        #[cfg(not(test))]
+        {
+            register(root, delay)
+        }
     }
 
     /// Pause one actual barrier under a private fixture root until released.
+    #[cfg(test)]
     #[must_use]
-    pub fn pause(root: &Path) -> (SyncLatencyGuard, SyncPause) {
+    pub(super) fn pause(root: &Path) -> (SyncLatencyGuard, SyncPause) {
         let (entered_sender, entered_receiver) = mpsc::channel();
         let (resume_sender, resume_receiver) = mpsc::channel();
         let signal = SyncPauseSignal {
@@ -595,22 +611,29 @@ pub mod sync_latency {
         )
     }
 
+    struct MatchedInjection {
+        delay: Duration,
+        syncs: Arc<AtomicU64>,
+        #[cfg(test)]
+        pause: Option<Arc<SyncPauseSignal>>,
+    }
+
     pub(super) fn before_sync(path: &Path) {
         let matched = INJECTIONS
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
             .find(|injection| path.starts_with(&injection.root))
-            .map(|injection| {
-                (
-                    injection.delay,
-                    Arc::clone(&injection.syncs),
-                    injection.pause.clone(),
-                )
+            .map(|injection| MatchedInjection {
+                delay: injection.delay,
+                syncs: Arc::clone(&injection.syncs),
+                #[cfg(test)]
+                pause: injection.pause.clone(),
             });
-        if let Some((delay, syncs, pause)) = matched {
-            syncs.fetch_add(1, Ordering::SeqCst);
-            if let Some(pause) = pause {
+        if let Some(matched) = matched {
+            matched.syncs.fetch_add(1, Ordering::SeqCst);
+            #[cfg(test)]
+            if let Some(pause) = matched.pause {
                 let _ = pause.entered.send(());
                 let _ = pause
                     .resume
@@ -618,7 +641,7 @@ pub mod sync_latency {
                     .unwrap_or_else(PoisonError::into_inner)
                     .recv();
             }
-            std::thread::sleep(delay);
+            std::thread::sleep(matched.delay);
         }
     }
 }

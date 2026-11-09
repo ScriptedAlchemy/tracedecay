@@ -428,12 +428,22 @@ fn durable_batch_checks_earlier_windows_after_the_last_barrier() {
         b"sealed segment 0"
     );
     let installed = fs::symlink_metadata(&first).expect("installed inode");
-    assert_eq!((installed.dev(), installed.ino()), (other.dev(), other.ino()));
+    assert_eq!(
+        (installed.dev(), installed.ino()),
+        (other.dev(), other.ino())
+    );
     assert_eq!(batch.synced.len(), DURABLE_BATCH_CONCURRENT_SYNCS);
     assert_eq!(batch.pending.len(), 1);
     assert_eq!(
-        batch.sync().expect_err("invalidated batch must keep refusing").kind(),
+        batch
+            .sync()
+            .expect_err("invalidated batch must keep refusing")
+            .kind(),
         ErrorKind::InvalidData
     );
-    assert_eq!(barriers.syncs(), 1, "failed retry must not issue another fsync");
+    assert_eq!(
+        barriers.syncs(),
+        1,
+        "failed retry must not issue another fsync"
+    );
 }
