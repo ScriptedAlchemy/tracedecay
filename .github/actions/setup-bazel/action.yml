@@ -1,7 +1,7 @@
 name: Set up Bazel
 description: >
-  Installs Bazel through the pinned bazelisk with its repository cache, and a
-  disk cache for hosted-only execution named by `cache-key`. Only master saves
+  Installs Bazel through the pinned bazelisk, refreshes its dependency cache, and
+  restores a disk cache for hosted-only execution named by `cache-key`. Only master saves
   automatically: PRs
   restore master's entry; explicit native Windows dispatches may also prime
   their branch's cache. Jobs with the same configuration and
@@ -23,7 +23,7 @@ inputs:
     description: Remote outputs to materialize; packaging jobs require toplevel.
     default: "minimal"
   cache-save:
-    description: Whether this setup may save Bazelisk and repository caches.
+    description: Whether master jobs may save Bazelisk and newly fetched dependencies.
     default: "true"
   windows-redirect-temp:
     description: Put Windows test temporary files on the runner workspace drive.
@@ -42,6 +42,16 @@ outputs:
   disk-cache-key:
     description: Run-specific save key returned by the cache restore action.
     value: ${{ steps.disk-cache.outputs.cache-primary-key }}
+
+  repository-cache-path:
+    description: Checksum-addressed dependency cache to publish after the build.
+    value: ${{ steps.disk-cache-config.outputs.repository-path }}
+  repository-cache-key:
+    description: Fresh save key; empty when this job cannot publish dependencies.
+    value: ${{ github.ref == 'refs/heads/master' && github.event_name != 'pull_request' && inputs.cache-save == 'true' && steps.repository-cache.outputs.cache-primary-key || '' }}
+  repository-cache-entries:
+    description: Restored entry count, used to avoid uploading an unchanged cache.
+    value: ${{ steps.repository-cache-state.outputs.entries }}
 
 runs:
   using: composite
@@ -127,7 +137,7 @@ runs:
 
     # Cache versions include the literal path. Keep setup-bazel's existing
     # directory and key prefix to restore previously compiled outputs.
-    - name: Resolve action cache location
+    - name: Resolve Bazel cache locations
       id: disk-cache-config
       shell: bash
       env:
@@ -143,6 +153,10 @@ runs:
         const path = process.platform === 'win32'
           ? `${windowsRoot}b-disk`
           : `${os.homedir().replace(/\\/g, '/')}/.cache/bazel-disk`;
+        const repositoryPath = windowsRoot
+          ? `${windowsRoot}b-repo`
+          : `${os.homedir().replace(/\\/g, '/')}/.cache/bazel-repo`;
+        const repositoryPrefix = `setup-bazel-1-${process.platform}-${os.arch()}-repository-`;
         const names = [process.env.CACHE_NAME, ...(process.env.EXTRA_RESTORE_KEYS || '')
           .split(',')
           .map((name) => name.trim())
@@ -151,7 +165,7 @@ runs:
           `setup-bazel-1-${process.platform}-${os.arch()}-disk-${name}-`);
         fs.appendFileSync(
           process.env.GITHUB_OUTPUT,
-          `path=${path}\noutput-base=${windowsRoot ? `${windowsRoot}b` : ''}\nprefix=${prefixes[0]}\nrestore-keys<<EOF\n${prefixes.join('\n')}\nEOF\n`,
+          `repository-path=${repositoryPath}\nrepository-prefix=${repositoryPrefix}\npath=${path}\noutput-base=${windowsRoot ? `${windowsRoot}b` : ''}\nprefix=${prefixes[0]}\nrestore-keys<<EOF\n${prefixes.join('\n')}\nEOF\n`,
         );
         JS
 
@@ -220,15 +234,41 @@ runs:
     - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
       with:
         bazelisk-cache: true
-        repository-cache: true
+        repository-cache: false
         disk-cache: false
         bazelrc: |
+          common --repository_cache=${{ steps.disk-cache-config.outputs.repository-path }}
           build --disk_cache=${{ steps.fleet.outputs.enabled != 'true' && steps.disk-cache-config.outputs.path || '' }}
           ${{ steps.linux-launchers.outputs.bazelrc }}
         cache-save: ${{ github.ref == 'refs/heads/master' && inputs.cache-save == 'true' }}
         # Windows build-script runfiles nest each vendored crate's sources
         # under its repository name twice; keep the output base short.
         output-base: ${{ steps.disk-cache-config.outputs.output-base }}
+
+    # Restore by manifest, then platform. Publishing uses a fresh key only
+    # when the caller fetched new blobs, so a partial snapshot can grow.
+    - name: Restore dependency cache
+      id: repository-cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.disk-cache-config.outputs.repository-path }}
+        key: ${{ steps.disk-cache-config.outputs.repository-prefix }}${{ hashFiles('MODULE.bazel', 'Cargo.lock', 'pnpm-lock.yaml', '.bazelversion') }}-run-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}-${{ inputs.cache-key }}
+        restore-keys: |
+          ${{ steps.disk-cache-config.outputs.repository-prefix }}${{ hashFiles('MODULE.bazel', 'Cargo.lock', 'pnpm-lock.yaml', '.bazelversion') }}-
+          ${{ steps.disk-cache-config.outputs.repository-prefix }}
+
+    - name: Measure restored dependency cache
+      id: repository-cache-state
+      shell: bash
+      env:
+        CACHE_PATH: ${{ steps.disk-cache-config.outputs.repository-path }}
+      run: |
+        node <<'JS'
+        const fs = require('node:fs');
+        const path = process.env.CACHE_PATH;
+        const entries = fs.existsSync(path) ? fs.readdirSync(path, { recursive: true }).length : 0;
+        fs.appendFileSync(process.env.GITHUB_OUTPUT, `entries=${entries}\n`);
+        JS
 
     - name: Map the shared Windows compiler path
       if: steps.fleet.outputs.enabled == 'true' && runner.os == 'Windows'
