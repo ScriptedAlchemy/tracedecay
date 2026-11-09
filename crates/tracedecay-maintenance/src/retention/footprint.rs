@@ -516,8 +516,8 @@ fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
                     .first()
                     .filter(|name| is_wal_family_root(name, inner.len() == 1))
                     .map(|first| {
-                    (format!("{store_key}/{first}"), ProfileFamilyV1::Wal)
-                })
+                        (format!("{store_key}/{first}"), ProfileFamilyV1::Wal)
+                    })
             });
         return Some(FootprintKeys {
             primary: (store_key, ProfileFamilyV1::ProjectStore),
@@ -1800,6 +1800,7 @@ mod tests {
         assert_eq!(unavailable, 1);
         assert_eq!(remaining, 10);
     }
+
     #[test]
     fn sqlite_wal_lookalike_directories_keep_independent_bounds() {
         let temp = tempfile::tempdir().expect("footprint fixture");
