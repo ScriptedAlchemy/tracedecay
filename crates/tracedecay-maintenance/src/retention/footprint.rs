@@ -467,6 +467,16 @@ fn is_wal(name: &str) -> bool {
     name.ends_with("-wal") || name.ends_with(".wal")
 }
 
+/// Only canonical graph containers and their recognized sidecars share a
+/// container bound. Unrelated suffixes must remain separate profile entries.
+fn graph_container_stem(name: &str) -> Option<&str> {
+    let stem = name
+        .strip_suffix(".verified")
+        .or_else(|| name.strip_suffix(".spill"))
+        .unwrap_or(name);
+    stem.ends_with(GRAPH_CONTAINER_SUFFIX).then_some(stem)
+}
+
 /// The footprint keys one profile-relative path belongs to. A WAL directory
 /// is one entry keyed by the directory; its segments sum into it.
 fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
@@ -491,11 +501,7 @@ fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
                 [name] => {
                     // Verified and spill sidecars consume the same container
                     // footprint as the primary .grafeo file.
-                    let stem = name
-                        .strip_suffix(".verified")
-                        .or_else(|| name.strip_suffix(".spill"))
-                        .unwrap_or(name);
-                    stem.ends_with(GRAPH_CONTAINER_SUFFIX).then(|| {
+                    graph_container_stem(name).map(|stem| {
                         (
                             format!("{store_key}/{stem}"),
                             ProfileFamilyV1::GraphContainer,
@@ -512,11 +518,8 @@ fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
     }
     let primary = if let Some(end) = components.iter().position(|name| is_wal(name)) {
         (components[..=end].join("/"), ProfileFamilyV1::Wal)
-    } else if let Some(stem) = first
-        .find(GRAPH_CONTAINER_SUFFIX)
-        .map(|at| &first[..at + GRAPH_CONTAINER_SUFFIX.len()])
-    {
-        // A top-level container and its sidecars (`.verified`, `.spill`).
+    } else if let Some(stem) = graph_container_stem(first) {
+        // A top-level container and only its recognized sidecars.
         (stem.to_owned(), ProfileFamilyV1::GraphContainer)
     } else if first == "global.db" || first.starts_with("global.db-") {
         ("global.db".to_owned(), ProfileFamilyV1::ProfileRegistry)
@@ -1211,6 +1214,60 @@ mod tests {
         let statement = finding.coverage().statement();
         assert!(statement.contains("WAL "), "{statement}");
         assert!(statement.contains("1 unreadable entries"), "{statement}");
+    }
+
+    #[test]
+    fn top_level_container_bound_excludes_unrelated_grafeo_suffixes() {
+        let temp = tempfile::tempdir().expect("footprint fixture");
+        let profile = temp.path().join("profile");
+        for (name, bytes) in [
+            ("user-sessions.grafeo", 5),
+            ("user-sessions.grafeo.verified", 7),
+            ("user-sessions.grafeo.spill", 11),
+            ("user-sessions.grafeo.notes", 30),
+            ("other.grafeo.metrics", 40),
+        ] {
+            sized(&profile.join(name), bytes);
+        }
+        let container_key = "user-sessions.grafeo";
+        let overrides = BTreeMap::from([(container_key.to_owned(), 24)]);
+        let footprint = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
+
+        assert_eq!(footprint.total_bytes, 93);
+        assert_eq!(entry(&footprint, container_key).bytes, 23);
+        assert_eq!(
+            entry(&footprint, container_key).family,
+            ProfileFamilyV1::GraphContainer
+        );
+        for (name, bytes) in [
+            ("user-sessions.grafeo.notes", 30),
+            ("other.grafeo.metrics", 40),
+        ] {
+            let unrelated = entry(&footprint, name);
+            assert_eq!(unrelated.family, ProfileFamilyV1::Other);
+            assert_eq!(unrelated.bytes, bytes);
+        }
+        assert_eq!(
+            footprint.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Complete
+        );
+        let observed = findings(&footprint);
+        assert_eq!(
+            observed[container_key].finding().state(),
+            DoctorEvidenceStateV1::HealthyCompleteCoverage,
+            "unowned files must not falsely trip the graph-container bound"
+        );
+
+        let over = census_profile_footprint(
+            &profile,
+            &BTreeMap::new(),
+            &BTreeMap::from([(container_key.to_owned(), 22)]),
+        );
+        assert_eq!(
+            findings(&over)[container_key].finding().state(),
+            DoctorEvidenceStateV1::Degraded,
+            "actual graph sidecar bytes must still trip their bound"
+        );
     }
 
     #[test]
