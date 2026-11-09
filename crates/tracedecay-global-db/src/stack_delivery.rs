@@ -183,6 +183,14 @@ pub(crate) async fn ensure_github_stack_delivery_schema(
                     observed_at_micros, project_id, signal_id
                 )
                 WHERE json_type(signal_json, '$.__tracedecay_retired_stack_sha256_v1') IS NULL;
+            -- Existing registered stores retain the original character-count
+            -- CHECK. CREATE TABLE IF NOT EXISTS cannot change its constraint.
+            CREATE TRIGGER IF NOT EXISTS github_stack_delivery_signals_byte_limit
+            BEFORE INSERT ON github_stack_delivery_signals
+            WHEN octet_length(NEW.signal_json) > 1048576
+            BEGIN
+                SELECT RAISE(ABORT, 'GitHub stack signal JSON exceeds 1 MiB');
+            END;
             DROP TRIGGER IF EXISTS github_stack_delivery_signals_immutable_update;
             CREATE TRIGGER github_stack_delivery_signals_immutable_update
             BEFORE UPDATE ON github_stack_delivery_signals

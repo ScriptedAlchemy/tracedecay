@@ -68,7 +68,10 @@ async fn registered_stack_signal_limit_counts_utf8_bytes_not_characters() {
         .await
         .expect_err("raw registered SQL must reject a payload over the UTF-8 byte limit")
         .to_string();
-    assert!(refusal.contains("CHECK constraint failed"), "{refusal}");
+    assert!(
+        refusal.contains("GitHub stack signal JSON exceeds 1 MiB"),
+        "{refusal}"
+    );
     drop(writer);
     assert!(
         harness
