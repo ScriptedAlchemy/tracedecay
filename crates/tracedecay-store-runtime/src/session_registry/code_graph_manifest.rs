@@ -1154,22 +1154,22 @@ fn verify_checked_seal_bundle(
     )
 }
 
-fn verify_checked_seal_bundle_with_evidence_barrier(
-    path: &std::path::Path,
-    segments_root: &std::path::Path,
-    expected_digest: &str,
-    verified: &VerifiedSealedSegmentsV1,
+/// Re-read an authenticated manifest without losing a deadline that expires
+/// during the prefix or full-content I/O, including on read failure.
+fn read_checked_seal_manifest_for_proof(
+    file: &mut File,
     check: &dyn Fn() -> Result<(), GraphDbError>,
-    evidence_barrier: impl FnOnce(),
-) -> Result<(), GraphDbError> {
-    let mut file = verify_checked_seal(path, expected_digest, check)?;
+) -> Result<Option<Vec<u8>>, GraphDbError> {
     let mut prefix = vec![0_u8; SEAL_READ_CHECK_BYTES];
     let read = file
         .seek(SeekFrom::Start(0))
-        .and_then(|_| file.read(&mut prefix))
-        .map_err(|error| GraphDbError::Corrupt {
-            message: format!("sealed generation manifest prefix read failed: {error}"),
-        })?;
+        .and_then(|_| file.read(&mut prefix));
+    // A scanned manifest read can finish after the deadline, even on I/O error.
+    // Prefer that typed interruption to a misleading corruption result.
+    (check)()?;
+    let read = read.map_err(|error| GraphDbError::Corrupt {
+        message: format!("sealed generation manifest prefix read failed: {error}"),
+    })?;
     prefix.truncate(read);
     let revision_key = b"\"format_revision\":";
     let revision = prefix
@@ -1187,14 +1187,31 @@ fn verify_checked_seal_bundle_with_evidence_barrier(
                 .ok()
         });
     if revision != Some(tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1) {
-        return (check)();
+        return (check)().map(|_| None);
     }
     let mut manifest = Vec::new();
-    file.seek(SeekFrom::Start(0))
-        .and_then(|_| file.read_to_end(&mut manifest))
-        .map_err(|error| GraphDbError::Corrupt {
-            message: format!("sealed generation manifest read failed: {error}"),
-        })?;
+    let read = file
+        .seek(SeekFrom::Start(0))
+        .and_then(|_| file.read_to_end(&mut manifest));
+    (check)()?;
+    read.map_err(|error| GraphDbError::Corrupt {
+        message: format!("sealed generation manifest read failed: {error}"),
+    })?;
+    Ok(Some(manifest))
+}
+
+fn verify_checked_seal_bundle_with_evidence_barrier(
+    path: &std::path::Path,
+    segments_root: &std::path::Path,
+    expected_digest: &str,
+    verified: &VerifiedSealedSegmentsV1,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+    evidence_barrier: impl FnOnce(),
+) -> Result<(), GraphDbError> {
+    let mut file = verify_checked_seal(path, expected_digest, check)?;
+    let Some(manifest) = read_checked_seal_manifest_for_proof(&mut file, check)? else {
+        return Ok(());
+    };
     let mut pinned_evidence = None;
     let mut evidence_barrier = Some(evidence_barrier);
     let mut interruption = None;
@@ -2538,6 +2555,43 @@ mod tests {
         ));
         assert_eq!(wrong_extent.open_attempts, 0);
         assert_eq!(SEGMENT_OPENS.with(|opens| opens.get()), 0);
+    }
+
+    #[test]
+    fn sealed_proof_manifest_reads_preserve_late_interruption_after_real_io() {
+        let fixture = partitioned_seal_fixture("proof-manifest-late-deadline");
+        let expected = std::fs::read(&fixture.pool_manifest).unwrap();
+        assert!(!expected.is_empty());
+        let mut file = std::fs::File::open(&fixture.pool_manifest).unwrap();
+        assert_eq!(
+            super::read_checked_seal_manifest_for_proof(&mut file, &|| Ok(()))
+                .unwrap()
+                .unwrap(),
+            expected
+        );
+
+        for interruption in [GraphDbError::Cancelled, GraphDbError::DeadlineExceeded] {
+            for late_probe in [0, 1] {
+                let mut file = std::fs::File::open(&fixture.pool_manifest).unwrap();
+                let probes = AtomicUsize::new(0);
+                let result = super::read_checked_seal_manifest_for_proof(&mut file, &|| {
+                    if probes.fetch_add(1, Ordering::SeqCst) == late_probe {
+                        Err(interruption.clone())
+                    } else {
+                        Ok(())
+                    }
+                });
+                assert_eq!(result.unwrap_err(), interruption);
+                assert_eq!(probes.load(Ordering::SeqCst), late_probe + 1);
+                let actual_bytes = file.stream_position().unwrap();
+                assert!(actual_bytes > 0, "interruption must follow actual manifest I/O");
+                if late_probe == 0 {
+                    assert!(actual_bytes <= SEAL_READ_CHECK_BYTES as u64);
+                } else {
+                    assert_eq!(actual_bytes, expected.len() as u64);
+                }
+            }
+        }
     }
 
     #[test]
