@@ -1355,12 +1355,15 @@ mod tool_signal_tests {
         assert_eq!(receipt["window"]["last_store_id"], 81);
         assert_eq!(receipt["window"]["message_count"], 1);
         assert!(receipt["window"]["window_digest"].is_string());
-        assert_eq!(receipt["window"]["selection_limits"], serde_json::json!({
-            "max_user_turns": 2,
-            "max_messages": 8,
-            "max_bytes": 4096,
-            "max_age_secs": 60,
-        }));
+        assert_eq!(
+            receipt["window"]["selection_limits"],
+            serde_json::json!({
+                "max_user_turns": 2,
+                "max_messages": 8,
+                "max_bytes": 4096,
+                "max_age_secs": 60,
+            })
+        );
         assert_eq!(receipt["render_state_limit_bytes"], 2048);
         assert_eq!(receipt["decision"]["kind"], "below_threshold");
         assert_eq!(receipt["decision"]["best_probability_permille"], 170);
