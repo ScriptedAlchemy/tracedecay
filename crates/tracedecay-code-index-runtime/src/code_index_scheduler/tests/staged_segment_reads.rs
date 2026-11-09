@@ -1056,6 +1056,151 @@ fn staged_segment_rejected_reads_preserve_full_cache_and_recency() {
     preparation.abort().expect("clean up staged cache fixture");
 }
 
+// A pathname may disappear after its metadata was validated but before the
+// first open. Exercise that real syscall boundary without depending on races
+// or the runner's permissions.
+#[cfg(target_os = "linux")]
+struct MoveStagedCandidateBeforeOpen {
+    source: PathBuf,
+    destination: PathBuf,
+    observed: Arc<AtomicUsize>,
+}
+
+#[cfg(target_os = "linux")]
+impl tracing::Subscriber for MoveStagedCandidateBeforeOpen {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        metadata.is_event()
+            && metadata.target() == "tracedecay::code_index"
+            && metadata
+                .fields()
+                .field("staged_segment_file_open_count")
+                .is_some()
+    }
+
+    fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+        Some(tracing::level_filters::LevelFilter::TRACE)
+    }
+
+    fn new_span(&self, _attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+    fn event(&self, _event: &tracing::Event<'_>) {
+        assert_eq!(
+            self.observed.fetch_add(1, Ordering::SeqCst),
+            0,
+            "the candidate must attempt one real pathname open"
+        );
+        std::fs::rename(&self.source, &self.destination)
+            .expect("move the candidate between metadata validation and File::open");
+    }
+
+    fn enter(&self, _span: &tracing::span::Id) {}
+
+    fn exit(&self, _span: &tracing::span::Id) {}
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn staged_failed_cold_open_preserves_eight_healthy_handles() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let source_root = TempDir::new().expect("source store");
+    let generation = source_generation(&fixture, source_root.path());
+    let target_root = TempDir::new().expect("target store");
+    let mut target = target_store(target_root.path(), &fixture);
+    let mut preparation = target
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare target");
+    let contents = (0..9)
+        .map(|index| format!("staged-open-race-{index}-bytes").into_bytes())
+        .collect::<Vec<_>>();
+    let digests = contents
+        .iter()
+        .map(|bytes| segment_digest(bytes))
+        .collect::<Vec<_>>();
+    for (digest, bytes) in digests.iter().zip(&contents) {
+        preparation
+            .write_segment(SealedGenerationSegmentPublicationV1::File { digest, bytes })
+            .expect("stage real nonempty segment");
+    }
+
+    let reader = preparation.segment_reader();
+    let mut read = Vec::new();
+    for index in 0..8 {
+        reader(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &digests[index],
+                size_bytes: contents[index].len() as u64,
+            },
+            &mut read,
+        )
+        .expect("admit real healthy descriptor");
+        assert_eq!(read, contents[index]);
+    }
+    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 8);
+    assert_eq!(pinned_handle_count(&preparation), 8);
+
+    let candidate = staged_path(&preparation, &digests[8]);
+    let moved = candidate.with_extension("moved-before-open");
+    let observed = Arc::new(AtomicUsize::new(0));
+    let injector = MoveStagedCandidateBeforeOpen {
+        source: candidate.clone(),
+        destination: moved.clone(),
+        observed: Arc::clone(&observed),
+    };
+    read.extend_from_slice(b"stale before the failed open");
+    let refused = tracing::subscriber::with_default(injector, || {
+        reader(
+            SealedGenerationSegmentReadV1::Whole {
+                digest: &digests[8],
+                size_bytes: contents[8].len() as u64,
+            },
+            &mut read,
+        )
+    });
+    assert!(matches!(refused, Err(CodeIndexProductionErrorV1::Contract(_))));
+    assert_eq!(observed.load(Ordering::SeqCst), 1);
+    assert!(read.is_empty(), "a failed first open cannot return stale bytes");
+    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 9);
+    assert_eq!(
+        pinned_handle_count(&preparation),
+        8,
+        "the failed open must not evict the oldest valid descriptor"
+    );
+
+    std::fs::rename(&moved, &candidate).expect("restore the same original inode");
+    reader(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &digests[0],
+            size_bytes: contents[0].len() as u64,
+        },
+        &mut read,
+    )
+    .expect("previous oldest handle must remain cached");
+    assert_eq!(read, contents[0]);
+    assert_eq!(
+        preparation.staged_segment_read_open_attempts_for_test(),
+        9,
+        "a failed admission must not cause a second endpoint-scanned open"
+    );
+    reader(
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &digests[8],
+            size_bytes: contents[8].len() as u64,
+        },
+        &mut read,
+    )
+    .expect("restored candidate must be readable");
+    assert_eq!(read, contents[8]);
+    assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 10);
+    assert_eq!(pinned_handle_count(&preparation), 8);
+    preparation.abort().expect("remove staged files");
+}
+
 #[test]
 fn staged_segment_publish_never_overwrites_a_concurrent_canonical_name() {
     let root = TempDir::new().expect("sealed segment race fixture");

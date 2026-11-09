@@ -996,11 +996,11 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                                         .to_owned(),
                                 ));
                             }
-                            // Admit the request and path before eviction, then
-                            // evict before opening to retain the descriptor bound.
-                            if files.pinned_segment_reads.len() == MAX_STAGED_SEGMENT_READ_HANDLES {
-                                files.pinned_segment_reads.pop_front();
-                            }
+                            // Authenticate the candidate before displacing a
+                            // healthy cached handle. A failed open must not
+                            // cause another endpoint-authorized open later.
+                            // Admission holds at most one transient descriptor
+                            // beyond the eight-entry retained cache.
                             let pinned =
                                 DaemonCodeIndexPublicationStoreV1::open_pinned_staged_segment(
                                     &path,
@@ -1024,6 +1024,9 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                                 files
                                     .observed_segment_identities
                                     .insert(path.clone(), pinned.identity.clone());
+                            }
+                            if files.pinned_segment_reads.len() == MAX_STAGED_SEGMENT_READ_HANDLES {
+                                files.pinned_segment_reads.pop_front();
                             }
                             files.pinned_segment_reads.push_back(pinned);
                         }
