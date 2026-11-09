@@ -44,6 +44,7 @@
 //! digest before the store serves a read.
 
 use std::collections::{BTreeMap, HashMap};
+use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -228,6 +229,9 @@ fn read_sealed_receipt_bytes(path: &Path) -> std::io::Result<Vec<u8>> {
 
 pub(crate) const SEALED_STORE_DATABASE_FILE: &str = "generation.grafeo";
 const SEALED_STORE_RECEIPT_FILE: &str = "sealed.json";
+/// Small, generation-bound deletion authority persisted before any staged rows.
+/// Unlike sealed.json, this is never evidence that a container is complete.
+const SEALED_STAGING_OWNER_FILE: &str = ".sealed-staging-owner-v1";
 /// Digest recorded only after a successful post-reopen proof. A `sealed.json`
 /// written before that proof is not release authority.
 const SEALED_STORE_CHECKED_FILE: &str = "sealed.checked";
@@ -716,6 +720,103 @@ fn sealed_staging_name(name: &str) -> bool {
     })
 }
 
+fn initial_sealed_staging_owner(
+    identity: &GraphGenerationManifestIdentity,
+    expected: &GraphRecoveredGenerationDigestV1,
+    physical_namespace: &str,
+) -> SealedStoreReceiptV1 {
+    // This receipt authorizes only abandoned-staging cleanup, never serving.
+    // The completed container receives a separate sealed.json after writing.
+    SealedStoreReceiptV1 {
+        version: SEALED_STORE_RECEIPT_VERSION,
+        form: SEALED_STORE_FORM_COMPACT.to_owned(),
+        namespace: identity.projection.namespace.as_str().to_owned(),
+        projection: identity.projection.projection.as_str().to_owned(),
+        generation: identity.generation.as_str().to_owned(),
+        physical_namespace: physical_namespace.to_owned(),
+        recovered_digest: expected.as_str().to_owned(),
+        entities: 0,
+        relations: 0,
+        graph_format: GraphFormatVersion::current().get(),
+        row_sum: None,
+        base: None,
+        source_generation: None,
+        watermark: None,
+    }
+}
+
+fn verified_staging_receipt(
+    name: &std::ffi::OsStr,
+    bytes: &[u8],
+) -> Option<SealedStoreReceiptV1> {
+    let name = name.to_str()?;
+    if !sealed_staging_name(name) {
+        return None;
+    }
+    let generation_hex = name.strip_prefix(".staging-")?;
+    let receipt = serde_json::from_slice::<SealedStoreReceiptV1>(bytes).ok()?;
+    let recognized_form = match receipt.form.as_str() {
+        SEALED_STORE_FORM_COMPACT => receipt.base.is_none(),
+        SEALED_STORE_FORM_LAYERED => receipt.base.is_some(),
+        _ => false,
+    };
+    (recognized_form
+        && receipt.version == SEALED_STORE_RECEIPT_VERSION
+        && receipt.graph_format > 0
+        && receipt.graph_format <= GraphFormatVersion::current().get()
+        && sealed_receipt_matches_generation_entry(&receipt, generation_hex)
+        && !receipt.recovered_digest.is_empty())
+    .then_some(receipt)
+}
+
+/// A failed builder must never recursively delete a substituted directory
+/// merely because its pathname is the deterministic staging name. The early
+/// owner marker covers unfinished builds; sealed.json covers the short window
+/// after final receipt publication and before installation.
+fn discard_failed_sealed_staging(
+    staging: &Path,
+    locator: &GenerationLocator,
+    expected_digest: &str,
+) {
+    let Some((root, name)) = staging.parent().zip(staging.file_name()) else {
+        return;
+    };
+    for marker in [SEALED_STAGING_OWNER_FILE, SEALED_STORE_RECEIPT_FILE] {
+        let result = tracedecay_private_fs::capability_dir::remove_receipted_child_directory_nofollow(
+            root,
+            name,
+            std::ffi::OsStr::new(marker),
+            MAX_SEALED_RECEIPT_BYTES,
+            |bytes| {
+                verified_staging_receipt(name, bytes).is_some_and(|receipt| {
+                    receipt.namespace == locator.projection.namespace.as_str()
+                        && receipt.projection == locator.projection.projection.as_str()
+                        && receipt.generation == locator.generation.as_str()
+                        && receipt.recovered_digest == expected_digest
+                })
+            },
+        );
+        match result {
+            Ok(_) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(
+                    event = "sealed_staging_cleanup_deferred",
+                    path = %staging.display(),
+                    %error,
+                    "unverified staging preserved instead of deleting an unknown directory"
+                );
+                return;
+            }
+        }
+    }
+    tracing::warn!(
+        event = "sealed_staging_cleanup_deferred",
+        path = %staging.display(),
+        "staging has no verified owner receipt; preserving unknown bytes"
+    );
+}
+
 /// Reclaims interrupted seals only when the bounded receipt from the same
 /// opened staging directory proves its exact generation identity. The staging
 /// filename alone is not deletion authority: a missing, malformed, oversized,
@@ -726,52 +827,33 @@ fn sealed_staging_name(name: &str) -> bool {
 /// so a pathname replacement cannot redirect deletion into a different tree.
 pub(crate) fn sweep_abandoned_sealed_staging(database_path: &Path) {
     let root = sealed_store_root(database_path);
-    let reclaimed = tracedecay_private_fs::capability_dir::remove_receipted_directories_nofollow(
-        &root,
-        std::ffi::OsStr::new(SEALED_STORE_RECEIPT_FILE),
-        MAX_SEALED_RECEIPT_BYTES,
-        |name, bytes| {
-            let Some(name) = name.to_str() else {
-                return false;
-            };
-            if !sealed_staging_name(name) {
-                return false;
-            }
-            let Some(generation_hex) = name.strip_prefix(".staging-") else {
-                return false;
-            };
-            let Ok(receipt) = serde_json::from_slice::<SealedStoreReceiptV1>(bytes) else {
-                return false;
-            };
-            // Reuse the same identity proof as obsolete-format retirement.
-            let recognized_form = match receipt.form.as_str() {
-                SEALED_STORE_FORM_COMPACT => receipt.base.is_none(),
-                SEALED_STORE_FORM_LAYERED => receipt.base.is_some(),
-                _ => false,
-            };
-            recognized_form
-                && receipt.version == SEALED_STORE_RECEIPT_VERSION
-                && receipt.graph_format > 0
-                && receipt.graph_format <= GraphFormatVersion::current().get()
-                && sealed_receipt_matches_generation_entry(&receipt, generation_hex)
-                && !receipt.recovered_digest.is_empty()
-        },
-    );
-    match reclaimed {
-        Ok(removed) if removed > 0 => tracing::info!(
-            event = "sealed_staging_swept",
-            root = %root.display(),
-            removed,
-            "removed receipt-verified staging from interrupted seals"
-        ),
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => tracing::warn!(
-            event = "sealed_staging_sweep_failed",
-            root = %root.display(),
-            %error,
-            "unverified abandoned staging stays for inspection"
-        ),
+    // A crash during row copying has no completed sealed.json yet, but it
+    // does have the initial owner marker. A crash just before installation
+    // can be reclaimed using either marker. Never sweep an unreceipted name.
+    for marker in [SEALED_STAGING_OWNER_FILE, SEALED_STORE_RECEIPT_FILE] {
+        let reclaimed = tracedecay_private_fs::capability_dir::remove_matching_receipted_directories_nofollow(
+            &root,
+            std::ffi::OsStr::new(marker),
+            MAX_SEALED_RECEIPT_BYTES,
+            |name| name.to_str().is_some_and(sealed_staging_name),
+            |name, bytes| verified_staging_receipt(name, bytes).is_some(),
+        );
+        match reclaimed {
+            Ok(removed) if removed > 0 => tracing::info!(
+                event = "sealed_staging_swept",
+                root = %root.display(),
+                removed,
+                "removed receipt-verified staging from interrupted seals"
+            ),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(
+                event = "sealed_staging_sweep_failed",
+                root = %root.display(),
+                %error,
+                "unverified abandoned staging stays for inspection"
+            ),
+        }
     }
 }
 
@@ -1963,19 +2045,46 @@ fn build_or_open_sealed_store(
     // create_dir is exclusive, so an occupied name fails closed.
     std::fs::create_dir(&staging)
         .map_err(|error| sealed_store_io_failure("staging directory create failed", error))?;
+    let owner = initial_sealed_staging_owner(identity, expected, physical_namespace.as_str());
+    let owner_bytes = serde_json::to_vec(&owner)
+        .map_err(|error| GraphDbError::unavailable(format!("staging owner encode: {error}")))?;
+    // Exclusive creation refuses a pre-existing marker. Flush before writing
+    // rows so a killed producer leaves verifiable deletion authority.
+    let marker_path = staging.join(SEALED_STAGING_OWNER_FILE);
+    let mut marker = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker_path)
+        .map_err(|error| sealed_store_io_failure("staging owner create failed", error))?;
+    marker
+        .write_all(&owner_bytes)
+        .and_then(|()| marker.sync_all())
+        .map_err(|error| sealed_store_io_failure("staging owner persist failed", error))?;
+    drop(marker);
     let receipt = stage_sealed_artifact(rows, identity, expected, &staging, check)
-        .inspect_err(|_| remove_sealed_directory(&staging))?;
+        .inspect_err(|_| discard_failed_sealed_staging(&staging, &locator, expected.as_str()))?;
     let encoded = serde_json::to_vec_pretty(&receipt)
-        .map_err(|error| GraphDbError::unavailable(format!("sealed receipt encode: {error}")))?;
-    std::fs::write(staging.join(SEALED_STORE_RECEIPT_FILE), encoded)
-        .inspect_err(|_| remove_sealed_directory(&staging))
-        .map_err(|error| sealed_store_io_failure("receipt write failed", error))?;
+        .map_err(|error| GraphDbError::unavailable(format!("sealed receipt encode: {error}")))
+        .inspect_err(|_| discard_failed_sealed_staging(&staging, &locator, expected.as_str()))?;
+    let mut receipt_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(staging.join(SEALED_STORE_RECEIPT_FILE))
+        .map_err(|error| sealed_store_io_failure("receipt create failed", error))
+        .inspect_err(|_| discard_failed_sealed_staging(&staging, &locator, expected.as_str()))?;
+    let receipt_write = receipt_file
+        .write_all(&encoded)
+        .and_then(|()| receipt_file.sync_all());
+    drop(receipt_file);
+    receipt_write
+        .map_err(|error| sealed_store_io_failure("receipt persist failed", error))
+        .inspect_err(|_| discard_failed_sealed_staging(&staging, &locator, expected.as_str()))?;
     let artifact_name = directory
         .file_name()
         .ok_or_else(|| GraphDbError::unavailable("sealed artifact name missing"))?;
     let install = install_child_directory_noreplace_nofollow(&root, staging_name, artifact_name);
     if let Err(error) = install {
-        remove_sealed_directory(&staging);
+        discard_failed_sealed_staging(&staging, &locator, expected.as_str());
         // A concurrent seal of the same generation may have installed the
         // directory first; adopting it below keeps this path idempotent.
         if !directory.exists() {
@@ -3780,6 +3889,135 @@ mod build_tests {
         .expect("clearing the unknown stage allows a verified seal");
         assert_eq!(store.recovered_digest(), expected.as_str());
         assert!(directory.join(SEALED_STORE_DATABASE_FILE).is_file());
+    }
+
+    /// Kill the real builder during row preparation, before sealed.json is
+    /// published. Its early receipt must let a later store-open sweep reclaim
+    /// the crashed stage without touching foreign staging data.
+    #[test]
+    fn crashed_seal_before_final_receipt_is_reclaimed_and_can_retry() {
+        const CHILD_ROOT: &str = "TRACEDECAY_TEST_CRASHED_SEAL_ROOT";
+        const CRASHED: i32 = 43;
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let database_path = std::path::PathBuf::from(root).join("source.grafeo");
+            let manifest = manifest(24, 12);
+            let identity = manifest.identity();
+            let expected = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
+            let exit_during_copy = || -> Result<(), GraphDbError> {
+                std::process::exit(CRASHED);
+            };
+            let _ = build_or_open_sealed_store(
+                SealedRowSource::Manifest(&manifest),
+                &identity,
+                &expected,
+                &database_path,
+                &exit_during_copy,
+            );
+            panic!("the row stream did not invoke its cancellation callback");
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(24, 12);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
+        let root = sealed_store_root(&database_path);
+        let directory = sealed_generation_directory(&root, &identity.physical_namespace().unwrap());
+        let staging = root.join(format!(
+            ".staging-{}",
+            directory.file_name().unwrap().to_str().unwrap()
+        ));
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(std::thread::current().name().unwrap())
+            .env(CHILD_ROOT, temp.path())
+            .output()
+            .unwrap();
+        assert_eq!(child.status.code(), Some(CRASHED), "{child:?}");
+        assert!(staging.join(SEALED_STAGING_OWNER_FILE).is_file());
+        assert!(!staging.join(SEALED_STORE_RECEIPT_FILE).exists());
+
+        let foreign = root.join(format!(".staging-{}", "0".repeat(64)));
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::write(foreign.join("sentinel"), b"foreign").unwrap();
+        sweep_abandoned_sealed_staging(&database_path);
+        assert!(
+            !staging.exists(),
+            "the crashed but proven stage must be reclaimed"
+        );
+        assert_eq!(
+            std::fs::read(foreign.join("sentinel")).unwrap(),
+            b"foreign"
+        );
+
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            &|| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(store.recovered_digest(), expected.as_str());
+        assert!(directory.join(SEALED_STORE_DATABASE_FILE).is_file());
+    }
+
+    /// The failed-builder cleanup must not delete a foreign replacement of a
+    /// staging pathname after the owner marker was written.
+    #[cfg(unix)]
+    #[test]
+    fn interrupted_seal_preserves_a_substituted_staging_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(24, 12);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
+        let root = sealed_store_root(&database_path);
+        let directory = sealed_generation_directory(&root, &identity.physical_namespace().unwrap());
+        let staging = root.join(format!(
+            ".staging-{}",
+            directory.file_name().unwrap().to_str().unwrap()
+        ));
+        let moved = root.join("original-stage");
+        let swapped = std::cell::Cell::new(false);
+        let interrupt = || {
+            if !swapped.replace(true) {
+                std::fs::rename(&staging, &moved).unwrap();
+                std::fs::create_dir(&staging).unwrap();
+                std::fs::write(staging.join("sentinel"), b"foreign replacement").unwrap();
+            }
+            Err(GraphDbError::Cancelled)
+        };
+        let result = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            &interrupt,
+        );
+        assert!(
+            matches!(&result, Err(GraphDbError::Cancelled)),
+            "{result:?}"
+        );
+        assert_eq!(
+            std::fs::read(staging.join("sentinel")).unwrap(),
+            b"foreign replacement",
+            "cleanup must not erase the substituted directory"
+        );
+        assert!(moved.join(SEALED_STAGING_OWNER_FILE).is_file());
+        assert!(!directory.exists());
+
+        std::fs::remove_dir_all(&staging).unwrap();
+        std::fs::remove_dir_all(&moved).unwrap();
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            &|| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(store.recovered_digest(), expected.as_str());
     }
 
     /// The sealed container is written once, complete, after every row has
