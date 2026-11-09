@@ -419,6 +419,14 @@ impl SealedGenerationStore {
                     failure.get_or_insert(error);
                 }
             }
+            // An earlier failed engine.close() may have consumed its handle
+            // and set Closed on the next attempt. Closed is idempotent only
+            // when the underlying reader is not poisoned.
+            if database.inner.poisoned.load(AtomicOrdering::Acquire) {
+                failure.get_or_insert_with(|| GraphDbError::DurabilityUncertain {
+                    message: "sealed reader physical close remains uncertain".to_owned(),
+                });
+            }
         }
         failure.map_or(Ok(()), Err)
     }
@@ -3949,6 +3957,41 @@ mod build_tests {
         store.database.close().unwrap();
         store.discard().unwrap();
         assert!(!directory.exists(), "a cleanly closed reader is reclaimable");
+    }
+
+    #[test]
+    fn retirement_does_not_erase_a_prior_uncertain_close() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(2, 1);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
+        let directory = store.directory.clone();
+        let container = directory.join(SEALED_STORE_DATABASE_FILE);
+        let receipt = directory.join(SEALED_STORE_RECEIPT_FILE);
+
+        // Reproduce the post-failure state of native engine.close(): its
+        // handle is gone, Closed will be returned on retry, but durability
+        // remains uncertain. The first patch must not mistake that for a
+        // previously successful close and destroy its sealed receipt.
+        store.database.inner.poisoned.store(true, Ordering::Release);
+        let first = store.database.close();
+        assert!(matches!(first, Err(GraphDbError::DurabilityUncertain { .. })));
+        let retry = store.discard();
+        assert!(
+            matches!(retry, Err(GraphDbError::DurabilityUncertain { .. })),
+            "a prior uncertain close must not become an unlink: {retry:?}"
+        );
+        assert!(container.is_file() && receipt.is_file());
     }
 
     #[cfg(unix)]
