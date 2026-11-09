@@ -1296,6 +1296,14 @@ fn append_project_report(
     remaining_entries: &mut usize,
     walk_control: &StorageReportWalkControl,
 ) -> tracedecay_domain::errors::Result<()> {
+    // Offline registry snapshots and live registry rows must obey the same
+    // path-segment authority as explicit project-scoped reports. Otherwise a
+    // corrupt project ID can escape projects/ and measure an unrelated tree.
+    tracedecay_runtime_core::storage::validate_project_id(project_id).map_err(|message| {
+        TraceDecayError::Config {
+            message: format!("invalid registered project id {project_id:?}: {message}"),
+        }
+    })?;
     let data_root = profile_root.join("projects").join(project_id);
     let code_index_root = data_root.join("code-index-v1");
     let code_index_store_root =
@@ -1974,6 +1982,58 @@ mod tests {
     #[cfg(unix)]
     use crate::retention::footprint::census_profile_footprint;
     use tracedecay_runtime_core::db::engine::TestConnection;
+
+    #[test]
+    fn registered_report_refuses_project_ids_that_escape_the_profile() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(profile.join("projects/proj_valid")).unwrap();
+        std::fs::write(outside.join("foreign"), [7u8; 16]).unwrap();
+        std::fs::write(profile.join("projects/proj_valid/local"), [3u8; 9]).unwrap();
+
+        let mut stores = Vec::new();
+        let mut retention = Vec::new();
+        let mut availability = Vec::new();
+        let mut budget = MAX_STORAGE_REPORT_WALK_ENTRIES;
+        for project_id in ["../../outside", "../outside", "nested/store", "..", ".", "", "bad\\name"] {
+            let error = append_project_report(
+                &profile,
+                project_id,
+                "/work/valid",
+                Err(RETENTION_PROTECTION_UNRESOLVED),
+                &mut stores,
+                &mut retention,
+                &mut availability,
+                false,
+                &mut budget,
+                &StorageReportWalkControl::default(),
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("invalid registered project id"),
+                "{project_id:?}: {error}"
+            );
+            assert!(stores.is_empty(), "foreign storage was adopted");
+            assert_eq!(budget, MAX_STORAGE_REPORT_WALK_ENTRIES);
+        }
+        assert_eq!(std::fs::read(outside.join("foreign")).unwrap(), [7u8; 16]);
+
+        let valid = build_project_storage_report(
+            &profile,
+            "proj_valid",
+            Path::new("/work/valid"),
+            Err(RETENTION_PROTECTION_UNRESOLVED),
+        )
+        .unwrap();
+        assert_eq!(valid.stores.len(), 1);
+        assert_eq!(valid.stores[0].total_bytes, 9);
+        assert_eq!(
+            valid.stores[0].size_coverage.state,
+            StorageReportSizeStateV1::Complete
+        );
+    }
 
     fn store(project_id: &str, total_bytes: u64) -> StoreSizeReportEntry {
         StoreSizeReportEntry {
