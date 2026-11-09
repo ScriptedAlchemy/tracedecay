@@ -200,13 +200,14 @@ pub enum StackCoordinatorErrorV1 {
 /// The latest observation and its open drift intervals must advance together.
 #[derive(Default)]
 struct ScopeObservationState {
+    policy: Option<GitHubStackedPullRequestPolicyV1>,
+    policy_changed_since_observation: bool,
     current: Option<GitHubStackObservationV1>,
     drift_intervals: Vec<DriftInterval>,
 }
 
 #[derive(Default)]
 pub struct DaemonGitHubStackCoordinatorV1 {
-    policies: Mutex<BTreeMap<ManifestDigest, GitHubStackedPullRequestPolicyV1>>,
     observation_states: Mutex<BTreeMap<ManifestDigest, ScopeObservationState>>,
     circuit_policies: Mutex<BTreeMap<ManifestDigest, StackCircuitPolicyV1>>,
     /// Held across the append so a duplicate debounced signal racing the
@@ -227,10 +228,16 @@ impl DaemonGitHubStackCoordinatorV1 {
         scope
             .validate()
             .map_err(|_| GitHubStackCoordinatorErrorV1::InvalidScope)?;
-        self.policies
+        let mut states = self
+            .observation_states
             .lock()
-            .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?
-            .insert(scope.scope_digest.clone(), policy);
+            .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?;
+        let state = states.entry(scope.scope_digest.clone()).or_default();
+        if state.policy != Some(policy) {
+            state.policy = Some(policy);
+            // Keep the timestamp fence, but retire the prior provider's snapshot.
+            state.policy_changed_since_observation = true;
+        }
         Ok(())
     }
 
@@ -238,12 +245,14 @@ impl DaemonGitHubStackCoordinatorV1 {
         &self,
         scope: &ResolvedScope,
     ) -> Result<bool, GitHubStackCoordinatorErrorV1> {
-        let policies = self
-            .policies
+        let states = self
+            .observation_states
             .lock()
             .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?;
         Ok(matches!(
-            policies.get(&scope.scope_digest),
+            states
+                .get(&scope.scope_digest)
+                .and_then(|state| state.policy),
             Some(GitHubStackedPullRequestPolicyV1::ProbePrivatePreview)
         ))
     }
@@ -705,9 +714,17 @@ impl DaemonGitHubStackCoordinatorV1 {
             .lock()
             .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?;
         let state = states.entry(scope.scope_digest.clone()).or_default();
+        let reads_enabled =
+            state.policy == Some(GitHubStackedPullRequestPolicyV1::ProbePrivatePreview);
+        let requires_provider =
+            capability.state != GitHubStackCapabilityStateV1::PrivatePreviewDisabled;
+        if reads_enabled != requires_provider {
+            return Err(GitHubStackCoordinatorErrorV1::InvalidProviderObservation);
+        }
         // An unavailable policy observation prepared before a real provider
         // result must not overwrite a newly published enabled/degraded result.
         if preserve_provider_state
+            && !state.policy_changed_since_observation
             && let Some(previous) = state.current.as_ref().filter(|observation| {
                 matches!(
                     observation.capability.state,
@@ -733,6 +750,7 @@ impl DaemonGitHubStackCoordinatorV1 {
         let previous = state
             .current
             .as_ref()
+            .filter(|_| !state.policy_changed_since_observation)
             .and_then(|observation| observation.snapshot.as_ref());
         let (transitions, drift_kinds) = stack_drift(previous, snapshot.as_ref());
         let drift_observations = transition::update_drift_intervals(
@@ -751,6 +769,7 @@ impl DaemonGitHubStackCoordinatorV1 {
             transitions,
             drift_observations,
         };
+        state.policy_changed_since_observation = false;
         state.current = Some(observation.clone());
         Ok(observation)
     }

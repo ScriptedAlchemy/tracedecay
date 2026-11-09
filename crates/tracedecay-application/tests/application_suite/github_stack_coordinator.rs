@@ -306,12 +306,35 @@ fn production_coordinator_materializes_all_four_states_and_exact_stack_anchors()
     coordinator
         .register_scope(&probed, GitHubStackedPullRequestPolicyV1::Disabled)
         .unwrap();
-    let disabled = coordinator
+    coordinator
+        .register_scope(
+            &probed,
+            GitHubStackedPullRequestPolicyV1::ProbePrivatePreview,
+        )
+        .unwrap();
+    let reenabled = coordinator
         .observe_policy(
             probed.clone(),
             ProviderId::new("provider.github").unwrap(),
             provider_source_binding(&probed, false),
             UtcMicros(6),
+        )
+        .unwrap();
+    assert_eq!(
+        reenabled.capability.state,
+        tracedecay_domain::GitHubStackCapabilityStateV1::Unavailable,
+        "reenabling the provider requires a fresh observation"
+    );
+    assert!(reenabled.snapshot.is_none());
+    coordinator
+        .register_scope(&probed, GitHubStackedPullRequestPolicyV1::Disabled)
+        .unwrap();
+    let disabled = coordinator
+        .observe_policy(
+            probed.clone(),
+            ProviderId::new("provider.github").unwrap(),
+            provider_source_binding(&probed, false),
+            UtcMicros(7),
         )
         .unwrap();
     assert_eq!(
