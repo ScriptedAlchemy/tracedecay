@@ -1178,6 +1178,80 @@ class QualificationTests(unittest.TestCase):
             )
             self.assertEqual(sample.read_bytes(), sample_bytes)
 
+    def test_qualified_sample_replaced_during_resume_refuses_completed_result(self):
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            (here / "dataset.json").write_bytes(self.dataset_bytes)
+            (here / "manifest.json").write_bytes(self.manifest_bytes)
+            (here / "server.json").write_text(json.dumps(self.server_config))
+            sample = here / "first-response.json"
+            args = [
+                "--url", self.endpoint, "--tag", "sample-race",
+                "--server-config", str(here / "server.json"),
+                "--qualification-manifest", str(here / "manifest.json"),
+                "--sample-out", str(sample), "B_noul_text",
+            ]
+            partial = here / "results" / "sample-race_B_noul_text.json.partial"
+            completed = here / "results" / "sample-race_B_noul_text.json"
+            calls = 0
+
+            def interrupt(url, body, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("interrupted after first sample")
+                return {
+                    "model": "self-reported-test-model",
+                    "answers": {key: {"type": "noul", "noul": 0.2}
+                                for key in body["questions"]},
+                }, 4.0
+
+            with patch.object(run_http, "HERE", str(here)), patch.object(
+                run_http, "post", side_effect=interrupt,
+            ):
+                with self.assertRaisesRegex(OSError, "interrupted after first sample"):
+                    run_http.main(args)
+            self.assertEqual(calls, 2)
+            original_sample = sample.read_bytes()
+            self.assertEqual(len(partial.read_text().splitlines()), 2)
+            self.assertFalse(completed.exists())
+
+            def replace_after_admission(url, body, **kwargs):
+                replacement = json.loads(original_sample)
+                replacement["response"]["answers"]["impact"]["noul"] = 0.95
+                alternate = here / "replacement.json"
+                alternate.write_text(json.dumps(replacement))
+                alternate.replace(sample)
+                return {
+                    "model": "self-reported-test-model",
+                    "answers": {key: {"type": "noul", "noul": 0.1}
+                                for key in body["questions"]},
+                }, 3.0
+
+            # The first sample passed admission before the second model call.
+            # Replacing it during that call must not certify a completed run.
+            with patch.object(run_http, "HERE", str(here)), patch.object(
+                run_http, "post", side_effect=replace_after_admission,
+            ) as post:
+                with self.assertRaisesRegex(ValueError, "sample changed during inference"):
+                    run_http.main(args)
+                self.assertEqual(post.call_count, 1)
+            self.assertFalse(completed.exists())
+            self.assertEqual(len(partial.read_text().splitlines()), 3)
+            self.assertNotEqual(sample.read_bytes(), original_sample)
+
+            # Restore exactly the recorded first response. A complete partial
+            # can then publish without replaying or inventing any model call.
+            sample.write_bytes(original_sample)
+            with patch.object(run_http, "HERE", str(here)), patch.object(
+                run_http, "post",
+            ) as post:
+                run_http.main(args)
+                post.assert_not_called()
+            self.assertTrue(completed.exists())
+            self.assertFalse(partial.exists())
+            self.assertEqual(len(json.loads(completed.read_text())["rows"]), 2)
+
     def test_runner_refuses_group_leakage_without_network_or_partial_output(self):
         with tempfile.TemporaryDirectory() as temp:
             here = Path(temp)

@@ -870,6 +870,22 @@ def main(argv=None):
             # Hold the partial writer lock through exclusive publication.
             # A second evaluator must not publish the same complete log first.
             # Failed publication retains the partial for an exact resume.
+            if qualification_sha is not None and args.sample_out:
+                # Preflight admission alone does not bind the sample for the
+                # duration of a resumed run: the sample path can be replaced
+                # while subsequent held-out HTTP calls are in flight. Recheck
+                # the original first response against the durable first row
+                # immediately before exposing a completed qualification.
+                response_sha, row_sha = validate_qualified_sample(
+                    args.sample_out, header["experiment_sha256"], requests,
+                )
+                first_row = done[next(iter(cases))]
+                if (first_row.get("sample_response_sha256") != response_sha
+                        or digest(first_row) != row_sha):
+                    raise ValueError(
+                        "qualified first-response sample changed during inference; "
+                        "refusing completed result"
+                    )
             publish_final_result(path, {
                 "config": name, "dataset_sha256": dataset_sha,
                 "noul_temperature": args.noul_temperature,
