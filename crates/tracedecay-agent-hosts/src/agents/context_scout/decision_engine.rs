@@ -21,6 +21,7 @@
 //! fall back to its non-model path.
 
 use std::collections::BTreeMap;
+use std::io::Read as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -32,6 +33,9 @@ use tracedecay_runtime_core::native_runtime;
 
 /// Path of the typed-question endpoint under the configured base URL.
 const SYSTEMONE_PATH: &str = "/v1/systemone";
+
+/// Bound decoded HTTP answer bytes before JSON parsing, matching qualified replay.
+const MAX_DECISION_RESPONSE_BYTES: usize = 1024 * 1024;
 
 /// Tolerance when checking a `score` against the rubric's last level index.
 const SCORE_EPSILON: f64 = 1e-6;
@@ -286,16 +290,33 @@ impl DecisionEngineClientV1 {
             tracing::debug!(status, "decision engine refused");
             return DecisionEngineOutcomeV1::Refused { status };
         }
-        let value = match response.body_mut().read_json::<Value>() {
+        // The server is independently configured and may return an unlimited
+        // response, including one without Content-Length. Never deserialize
+        // unbounded bytes from a transcript-bearing decision exchange.
+        let mut answer_bytes = Vec::new();
+        if let Err(error) = response
+            .body_mut()
+            .as_reader()
+            .take((MAX_DECISION_RESPONSE_BYTES + 1) as u64)
+            .read_to_end(&mut answer_bytes)
+        {
+            return if is_io_timeout(&error) {
+                tracing::debug!(%error, "decision engine timed out reading its answer");
+                DecisionEngineOutcomeV1::TimedOut
+            } else {
+                tracing::debug!(%error, "decision engine answer unreadable");
+                DecisionEngineOutcomeV1::Malformed
+            };
+        }
+        if answer_bytes.len() > MAX_DECISION_RESPONSE_BYTES {
+            tracing::debug!("decision engine answer exceeds the byte limit");
+            return DecisionEngineOutcomeV1::Malformed;
+        }
+        let value = match serde_json::from_slice::<Value>(&answer_bytes) {
             Ok(value) => value,
             Err(error) => {
-                return if is_timeout(&error) {
-                    tracing::debug!(%error, "decision engine timed out reading its answer");
-                    DecisionEngineOutcomeV1::TimedOut
-                } else {
-                    tracing::debug!(%error, "decision engine answer unreadable");
-                    DecisionEngineOutcomeV1::Malformed
-                };
+                tracing::debug!(%error, "decision engine answer is not JSON");
+                return DecisionEngineOutcomeV1::Malformed;
             }
         };
         let latency_micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
@@ -411,14 +432,16 @@ fn transport_failure(error: &ureq::Error) -> DecisionEngineOutcomeV1 {
 fn is_timeout(error: &ureq::Error) -> bool {
     match error {
         ureq::Error::Timeout(_) => true,
-        ureq::Error::Io(io) => {
-            matches!(
-                io.kind(),
-                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-            ) || io.to_string().to_ascii_lowercase().contains("timed out")
-        }
+        ureq::Error::Io(io) => is_io_timeout(io),
         other => other.to_string().to_ascii_lowercase().contains("timeout"),
     }
+}
+
+fn is_io_timeout(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    ) || error.to_string().to_ascii_lowercase().contains("timed out")
 }
 
 type ParsedAnswers = (BTreeMap<String, DecisionAnswerV1>, Option<String>);
@@ -660,7 +683,7 @@ pub mod test_server {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use std::io::Read as _;
+    use std::io::{BufRead as _, BufReader, Read as _, Write as _};
     use std::time::{Duration, Instant};
 
     use super::test_server::{
@@ -1129,6 +1152,71 @@ mod tests {
         client.ask_blocking(&request("0123456789 newest", vec![noul("q")]));
         let sent: Value = serde_json::from_str(&server.last_body.lock().unwrap()).unwrap();
         assert_eq!(sent["state"], "9 newest");
+    }
+
+    #[test]
+    fn response_byte_limit_accepts_exact_boundary_and_refuses_one_extra_byte() {
+        let valid = single_noul_body("q", 0.5);
+        assert!(valid.len() < MAX_DECISION_RESPONSE_BYTES);
+        let exact = format!(
+            "{valid}{}",
+            " ".repeat(MAX_DECISION_RESPONSE_BYTES - valid.len())
+        );
+        assert_eq!(exact.len(), MAX_DECISION_RESPONSE_BYTES);
+        let accepted = fake_decision_engine(200, &exact, Duration::ZERO);
+        let result = client(&accepted.url).ask_blocking(&request("state", vec![noul("q")]));
+        assert_eq!(answered(result).answers["q"], DecisionAnswerV1::Noul(0.5));
+        assert_eq!(accepted.requests.load(Ordering::SeqCst), 1);
+
+        let oversized = format!("{exact} ");
+        assert_eq!(oversized.len(), MAX_DECISION_RESPONSE_BYTES + 1);
+        let rejected = fake_decision_engine(200, &oversized, Duration::ZERO);
+        assert_eq!(
+            client(&rejected.url).ask_blocking(&request("state", vec![noul("q")])),
+            DecisionEngineOutcomeV1::Malformed
+        );
+        assert_eq!(rejected.requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn unknown_length_response_is_bounded_without_waiting_for_eof() {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let sender = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line
+                    .to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                {
+                    length = value.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            // Without a declared length or EOF, an unbounded parser would
+            // wait for the server and return TimedOut rather than Malformed.
+            let _ = socket.write_all(&vec![b' '; MAX_DECISION_RESPONSE_BYTES + 1]);
+            std::thread::sleep(Duration::from_millis(1500));
+        });
+        let mut settings = config(&url);
+        settings.timeout = Duration::from_secs(1);
+        let result = DecisionEngineClientV1::new(settings)
+            .unwrap()
+            .ask_blocking(&request("state", vec![noul("q")]));
+        assert_eq!(result, DecisionEngineOutcomeV1::Malformed);
+        sender.join().unwrap();
     }
 
     #[test]
