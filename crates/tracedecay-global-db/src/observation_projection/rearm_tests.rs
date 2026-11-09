@@ -581,6 +581,77 @@ async fn rearm_reader_snapshot_cannot_clear_a_new_retry_generation() {
 }
 
 #[asupersync::test]
+async fn retry_rearm_does_not_erase_a_live_retry_between_windows() {
+    let harness = RegisteredGlobalDbHarness::open("rearm-live-between-windows").await;
+    seed_queue(&harness, 2, 1).await;
+    let database = harness.registered.runtime_database();
+    let now = 1_000_000_i64;
+    let read = database
+        .read_connection()
+        .convergence_snapshot()
+        .await
+        .unwrap();
+    let frontier = retry_rearm_frontier(&read, now).await.unwrap().unwrap();
+
+    // The first old retry is rearmed, leaving a previously due row between
+    // it and the next old retry in canonical queue order.
+    assert_eq!(
+        rearm_projection_retry_batch(database, &read, 0, frontier, 1, now)
+            .await
+            .unwrap(),
+        Some((1, 1))
+    );
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    assert_eq!(
+        transaction
+            .execute(
+                "UPDATE projection_queue
+                 SET attempt_count = attempt_count + 1,
+                     next_retry_at_micros = ?1, last_error = 'fresh live retry'
+                 WHERE observation_sequence = 2",
+                params![FAR_FUTURE_MICROS],
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    transaction.commit().await.unwrap();
+
+    // A fresh per-page SELECT would see the new deadline at sequence 2 and
+    // illegally clear the current mount's backoff. The original snapshot must
+    // skip it, select the old sequence 3 and update only that row.
+    assert_eq!(
+        rearm_projection_retry_batch(database, &read, 1, frontier, 1, now)
+            .await
+            .unwrap(),
+        Some((3, 1))
+    );
+    drop(read);
+
+    let snapshot = harness.registered.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT observation_sequence, attempt_count, next_retry_at_micros, last_error
+             FROM projection_queue ORDER BY observation_sequence",
+            (),
+        )
+        .await
+        .unwrap();
+    for (sequence, attempts, deadline, error) in [
+        (1_i64, 3_i64, 0_i64, "recorded failure"),
+        (2, 4, FAR_FUTURE_MICROS, "fresh live retry"),
+        (3, 3, 0, "recorded failure"),
+    ] {
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<i64>(0).unwrap(), sequence);
+        assert_eq!(row.get::<i64>(1).unwrap(), attempts);
+        assert_eq!(row.get::<i64>(2).unwrap(), deadline);
+        assert_eq!(row.get::<String>(3).unwrap(), error);
+    }
+    assert!(rows.next().await.unwrap().is_none());
+}
+
+#[asupersync::test]
 async fn rearm_leaves_later_observations_with_reused_queue_rowids_deferred() {
     let harness = RegisteredGlobalDbHarness::open("rearm-reused-queue-tail").await;
     seed_queue(&harness, 4, 0).await;
@@ -595,12 +666,14 @@ async fn rearm_leaves_later_observations_with_reused_queue_rowids_deferred() {
         .await
         .unwrap();
     transaction.commit().await.unwrap();
-    let frontier = retry_rearm_frontier(&database.read_connection(), now)
+    let read = database
+        .read_connection()
+        .convergence_snapshot()
         .await
-        .unwrap()
         .unwrap();
+    let frontier = retry_rearm_frontier(&read, now).await.unwrap().unwrap();
     assert_eq!(
-        rearm_projection_retry_batch(database, 0, frontier, 1, now)
+        rearm_projection_retry_batch(database, &read, 0, frontier, 1, now)
             .await
             .unwrap(),
         Some((1, 1))
@@ -628,12 +701,13 @@ async fn rearm_leaves_later_observations_with_reused_queue_rowids_deferred() {
         .unwrap();
     transaction.commit().await.unwrap();
     assert_eq!(
-        rearm_projection_retry_batch(database, 1, frontier, 4, now)
+        rearm_projection_retry_batch(database, &read, 1, frontier, 4, now)
             .await
             .unwrap(),
-        Some((2, 1)),
+        Some((3, 1)),
         "only the original retry is inside the captured frontier"
     );
+    drop(read);
     let snapshot = harness.registered.read_snapshot().await.unwrap();
     let mut rows = snapshot
         .query(

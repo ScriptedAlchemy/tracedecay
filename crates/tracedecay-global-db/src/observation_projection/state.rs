@@ -269,10 +269,11 @@ pub(super) struct RetryRearmFrontier {
 /// The reader captures the queue frontier before taking any writer
 /// lease. Already-due, already-armed, and terminal-only queues need no writer
 /// transaction; expired deadlines remain eligible for ordinary projection.
-/// Each read window selects at most `batch_rows` eligible rows outside
-/// the writer lease. A short writer transaction conditionally updates their
-/// exact observed identities, so sparse inactive prefixes never hold the
-/// writer. Rows beyond the captured frontier are left for later recovery.
+/// A stable read snapshot selects at most `batch_rows` candidates per window
+/// without retaining a SQLite writer. It excludes retries created after this
+/// mount started recovery, even if their queue rowids predate its frontier.
+/// Short writer transactions conditionally update only unchanged identities.
+/// Rows beyond the captured frontier are left for later recovery.
 #[tracing::instrument(
     name = "global_db.observation_projection.rearm_retries",
     level = "trace",
@@ -290,13 +291,22 @@ pub(crate) async fn rearm_queued_projection_retries(
     }
     let mut rearmed = RearmedProjectionRetries::default();
     let now = tracedecay_contracts::clock::now_micros().0;
-    let Some(frontier) = retry_rearm_frontier(&database.read_connection(), now).await? else {
+    // Freeze the previous mount's retry eligibility before any re-arm write.
+    // A live reader on each page would accidentally re-arm a *new* retry that
+    // foreground projection schedules between recovery windows.
+    let snapshot = database
+        .read_connection()
+        .convergence_snapshot()
+        .await
+        .map_err(|error| storage("open projection retry recovery snapshot", error))?;
+    let Some(frontier) = retry_rearm_frontier(&snapshot, now).await? else {
         return Ok(rearmed);
     };
     let mut after_rowid = 0_i64;
     while after_rowid < frontier.last_rowid {
         let Some((batch_end, rows)) =
-            rearm_projection_retry_batch(database, after_rowid, frontier, batch_rows, now).await?
+            rearm_projection_retry_batch(database, &snapshot, after_rowid, frontier, batch_rows, now)
+                .await?
         else {
             break;
         };
@@ -319,13 +329,14 @@ pub(crate) async fn rearm_queued_projection_retries(
 )]
 pub(super) async fn rearm_projection_retry_batch(
     database: &Database,
+    snapshot: &impl QueryExecutor,
     after_rowid: i64,
     frontier: RetryRearmFrontier,
     batch_rows: i64,
     now_micros: i64,
 ) -> ProjectionStoreResult<Option<(i64, u64)>> {
     let Some((batch_end, candidates)) = read_rearm_projection_retry_candidates(
-        &database.read_connection(),
+        snapshot,
         after_rowid,
         frontier,
         batch_rows,
