@@ -86,6 +86,14 @@ pub enum DecisionAnswerV1 {
     Score(f64),
 }
 
+/// Byte-exact identity of the request prepared by the configured Rust client.
+/// Carries no transcript content, only the bytes and digest of the JSON body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecisionRequestCommitmentV1 {
+    pub wire_sha256: [u8; 32],
+    pub wire_bytes: usize,
+}
+
 /// Every answer of one successful exchange.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecisionAnswersV1 {
@@ -159,6 +167,14 @@ pub struct DecisionEngineIdentityV1 {
 pub trait DecisionEnginePortV1: Send + Sync {
     fn ask_blocking(&self, request: &DecisionRequestV1) -> DecisionEngineOutcomeV1;
     fn identity(&self) -> DecisionEngineIdentityV1;
+
+    /// Test doubles cannot claim a production HTTP wire commitment.
+    fn request_commitment(
+        &self,
+        _request: &DecisionRequestV1,
+    ) -> Option<DecisionRequestCommitmentV1> {
+        None
+    }
 }
 
 /// HTTP client for the decision-model API.
@@ -242,6 +258,23 @@ impl DecisionEngineClientV1 {
 
     pub fn identity(&self) -> DecisionEngineIdentityV1 {
         self.identity.clone()
+    }
+
+    /// Prepare the same serde_json body used by `send_json` without
+    /// retaining the model-visible state or making a second HTTP request.
+    pub fn request_commitment(
+        &self,
+        request: &DecisionRequestV1,
+    ) -> Option<DecisionRequestCommitmentV1> {
+        if !request_is_well_formed(request) {
+            return None;
+        }
+        let body = request_body(request, self.identity.model.as_deref(), self.max_state_bytes);
+        let wire = serde_json::to_vec(&body).ok()?;
+        Some(DecisionRequestCommitmentV1 {
+            wire_sha256: Sha256::digest(&wire).into(),
+            wire_bytes: wire.len(),
+        })
     }
 
     fn try_acquire(&self) -> Option<Permit> {
@@ -354,6 +387,13 @@ impl DecisionEnginePortV1 for DecisionEngineClientV1 {
 
     fn identity(&self) -> DecisionEngineIdentityV1 {
         Self::identity(self)
+    }
+
+    fn request_commitment(
+        &self,
+        request: &DecisionRequestV1,
+    ) -> Option<DecisionRequestCommitmentV1> {
+        Self::request_commitment(self, request)
     }
 }
 
@@ -807,6 +847,43 @@ mod tests {
             DecisionEngineClientV1::new(blank).unwrap().identity().model,
             None
         );
+    }
+
+    #[test]
+    fn the_prepared_request_commitment_matches_the_actual_utf8_wire() {
+        let server = fake_decision_engine(200, &single_noul_body("q", 0.5), Duration::ZERO);
+        let mut configured = config(&server.url);
+        configured.model = Some("kev-4b".to_owned());
+        configured.max_state_bytes = 9;
+        let client = DecisionEngineClientV1::new(configured.clone()).unwrap();
+        let original = request("old private context éé latest", vec![noul("q")]);
+        let commitment = client.request_commitment(&original).unwrap();
+        let _ = answered(client.ask_blocking(&original));
+        let actual = server.last_body.lock().unwrap().clone();
+        assert_eq!(server.requests.load(Ordering::SeqCst), 1);
+        assert_eq!(commitment.wire_bytes, actual.len());
+        assert_eq!(
+            commitment.wire_sha256,
+            <[u8; 32]>::from(Sha256::digest(actual.as_bytes()))
+        );
+        let sent: Value = serde_json::from_str(&actual).unwrap();
+        assert_eq!(sent["model"], "kev-4b");
+        assert_eq!(sent["state"], tail_on_char_boundary(&original.state, 9));
+        assert!(!actual.contains("old private context"));
+
+        configured.model = Some("different-model".to_owned());
+        let changed_model = DecisionEngineClientV1::new(configured).unwrap();
+        assert_ne!(changed_model.request_commitment(&original), Some(commitment));
+        let mut changed_question = original.clone();
+        changed_question.questions[0].instructions.push_str(" Be precise.");
+        assert_ne!(client.request_commitment(&changed_question), Some(commitment));
+        // The prefix intentionally discarded by the configured byte cap
+        // does not affect the sent request, but changed visible text does.
+        let alternate_prefix = request("different private context éé latest", vec![noul("q")]);
+        assert_eq!(client.request_commitment(&alternate_prefix), Some(commitment));
+        let changed_visible = request("old private context éé latest!", vec![noul("q")]);
+        assert_ne!(client.request_commitment(&changed_visible), Some(commitment));
+        assert!(client.request_commitment(&request("state", vec![])).is_none());
     }
 
     #[test]

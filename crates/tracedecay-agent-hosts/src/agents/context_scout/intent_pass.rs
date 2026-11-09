@@ -50,7 +50,7 @@ use super::address_registry::{
 };
 use super::decision_engine::{
     DecisionAnswerV1, DecisionEngineOutcomeV1, DecisionEnginePortV1, DecisionQuestionKindV1,
-    DecisionQuestionV1, DecisionRequestV1,
+    DecisionQuestionV1, DecisionRequestCommitmentV1, DecisionRequestV1,
 };
 use super::evidence::MAX_DECISION_ENGINE_MODEL_BYTES;
 use super::owner::{ContextScoutIntentSessionStateV1, ProjectContextScoutOwnerV1};
@@ -423,9 +423,9 @@ pub async fn run_context_scout_intent_pass(
     // Keep actual tool activity separate from prompt interpretation. Only an
     // unanswered intent may use the latter as its deterministic fallback.
     let (facts, prompt_inferences) = window_intent_signals(&window);
-    let engine_outcome = match ask_engine(&pass, settings, &window).await {
+    let (engine_outcome, request_commitment) = match ask_engine(&pass, settings, &window).await {
         EngineCallV1::Cancelled => return ContextScoutIntentPassOutcomeV1::Cancelled,
-        EngineCallV1::Finished(outcome) => outcome,
+        EngineCallV1::Finished(outcome, commitment) => (outcome, commitment),
     };
     let model_outcome = engine_outcome.model_outcome();
     let answers = engine_outcome.answers();
@@ -448,6 +448,7 @@ pub async fn run_context_scout_intent_pass(
         IntentDecisionEvidenceV1 {
             window: &window,
             engine_outcome: &engine_outcome,
+            request_commitment,
             facts: &facts,
             prompt_inferences: &prompt_inferences,
             decision: &decision,
@@ -668,7 +669,7 @@ async fn read_boundary_window(
 }
 
 enum EngineCallV1 {
-    Finished(EngineOutcomeV1),
+    Finished(EngineOutcomeV1, Option<DecisionRequestCommitmentV1>),
     Cancelled,
 }
 
@@ -736,10 +737,10 @@ async fn ask_engine(
     window: &SessionWindowV1,
 ) -> EngineCallV1 {
     if settings.questions.is_empty() {
-        return EngineCallV1::Finished(EngineOutcomeV1::NotRequested);
+        return EngineCallV1::Finished(EngineOutcomeV1::NotRequested, None);
     }
     let Some(engine) = pass.engine.clone() else {
-        return EngineCallV1::Finished(EngineOutcomeV1::Unavailable);
+        return EngineCallV1::Finished(EngineOutcomeV1::Unavailable, None);
     };
     let request = DecisionRequestV1 {
         state: render_window_state(
@@ -757,17 +758,21 @@ async fn ask_engine(
             })
             .collect(),
     };
+    let request_commitment = engine.request_commitment(&request);
     let asked = native_runtime::spawn_blocking(move || engine.ask_blocking(&request));
     tokio::select! {
         biased;
         () = pass.cancellation.cancelled() => EngineCallV1::Cancelled,
         answered = native_runtime::timeout_at(pass.deadline.instant(), asked) => {
-            EngineCallV1::Finished(match answered {
-                Ok(Ok(outcome)) => EngineOutcomeV1::Asked(outcome),
-                // A lost blocking worker reads as an unreachable engine.
-                Ok(Err(_)) => EngineOutcomeV1::Asked(DecisionEngineOutcomeV1::Unreachable),
-                Err(_) => EngineOutcomeV1::DeadlineExceeded,
-            })
+            EngineCallV1::Finished(
+                match answered {
+                    Ok(Ok(outcome)) => EngineOutcomeV1::Asked(outcome),
+                    // A lost blocking worker reads as an unreachable engine.
+                    Ok(Err(_)) => EngineOutcomeV1::Asked(DecisionEngineOutcomeV1::Unreachable),
+                    Err(_) => EngineOutcomeV1::DeadlineExceeded,
+                },
+                request_commitment,
+            )
         }
     }
 }
@@ -1045,6 +1050,7 @@ async fn record_withheld(
 struct IntentDecisionEvidenceV1<'a> {
     window: &'a SessionWindowV1,
     engine_outcome: &'a EngineOutcomeV1,
+    request_commitment: Option<DecisionRequestCommitmentV1>,
     facts: &'a [ContextScoutIntentKindV1],
     prompt_inferences: &'a [ContextScoutIntentKindV1],
     decision: &'a IntentDecisionV1,
@@ -1104,6 +1110,7 @@ fn intent_decision_metadata(
     let IntentDecisionEvidenceV1 {
         window,
         engine_outcome,
+        request_commitment,
         facts,
         prompt_inferences,
         decision,
@@ -1177,6 +1184,12 @@ fn intent_decision_metadata(
             },
             "settings_digest": settings_digest,
             "model_outcome": engine_outcome.model_outcome(),
+            // The byte-exact prepared request is not proof that the remote
+            // server received it, nor that an old window remains rehydratable.
+            "prepared_request": request_commitment.map(|commitment| serde_json::json!({
+                "sha256": hex::encode(commitment.wire_sha256),
+                "bytes": commitment.wire_bytes,
+            })),
             "engine": engine_identity.map(|identity| serde_json::json!({
                 "base_url_digest": hex::encode(identity.base_url_digest),
                 "configured_model": identity.model,
@@ -1259,7 +1272,10 @@ mod tool_signal_tests {
         use super::super::decision_engine::{
             DecisionAnswerV1, DecisionAnswersV1, DecisionEngineOutcomeV1,
         };
-        use super::{EngineOutcomeV1, IntentDecisionEvidenceV1, intent_decision_metadata};
+        use super::{
+            DecisionRequestCommitmentV1, EngineOutcomeV1, IntentDecisionEvidenceV1,
+            intent_decision_metadata,
+        };
 
         let window = SessionWindowV1 {
             messages: vec![message(
@@ -1298,6 +1314,10 @@ mod tool_signal_tests {
             &IntentDecisionEvidenceV1 {
                 window: &window,
                 engine_outcome: &engine,
+                request_commitment: Some(DecisionRequestCommitmentV1 {
+                    wire_sha256: [9; 32],
+                    wire_bytes: 512,
+                }),
                 facts: &[],
                 prompt_inferences: &[Kind::Impact],
                 decision: &negative,
@@ -1321,6 +1341,8 @@ mod tool_signal_tests {
             0.17
         );
         assert_eq!(receipt["request_latency_micros"], 1250);
+        assert_eq!(receipt["prepared_request"]["sha256"], hex::encode([9; 32]));
+        assert_eq!(receipt["prepared_request"]["bytes"], 512);
         assert!(receipt["facts"].as_array().unwrap().is_empty());
         assert_eq!(receipt["prompt_inferences"].as_array().unwrap().len(), 1);
         assert!(!evidence.contains("Confidential transcript text"));
@@ -1332,6 +1354,7 @@ mod tool_signal_tests {
             &IntentDecisionEvidenceV1 {
                 window: &window,
                 engine_outcome: &EngineOutcomeV1::Unavailable,
+                request_commitment: None,
                 facts: &[],
                 prompt_inferences: &[],
                 decision: &IntentDecisionV1::NoSignal,
@@ -1346,6 +1369,7 @@ mod tool_signal_tests {
         assert!(unknown["answers"].is_null());
         assert!(unknown["raw_model_probabilities"].is_null());
         assert!(unknown["request_latency_micros"].is_null());
+        assert!(unknown["prepared_request"].is_null());
         assert!(unknown["engine"].is_null());
 
         let bad_window = SessionWindowV1 {
@@ -1357,6 +1381,7 @@ mod tool_signal_tests {
                 &IntentDecisionEvidenceV1 {
                     window: &bad_window,
                     engine_outcome: &engine,
+                    request_commitment: None,
                     facts: &[],
                     prompt_inferences: &[],
                     decision: &negative,
