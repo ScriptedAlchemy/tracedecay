@@ -8,6 +8,10 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+#[cfg(unix)]
+use std::collections::BTreeSet;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -410,6 +414,9 @@ pub fn census_sqlite_temp_spill(
 ) -> Option<ProfileFootprintEntryV1> {
     let mut bytes = 0u64;
     let mut unavailable_entry_count = 0usize;
+    // Multiple descriptors may refer to one unlinked SQLite allocation.
+    #[cfg(unix)]
+    let mut observed_files = BTreeSet::new();
     for entry in std::fs::read_dir(fd_directory).ok()? {
         let fd = match entry {
             Ok(fd) => fd,
@@ -433,7 +440,13 @@ pub fn census_sqlite_temp_spill(
             .is_some_and(|name| name.starts_with("etilqs_") && name.ends_with(" (deleted)"));
         if unlinked_temp {
             match std::fs::metadata(fd.path()) {
-                Ok(metadata) => bytes = bytes.saturating_add(metadata.len()),
+                Ok(metadata) => {
+                    #[cfg(unix)]
+                    if !observed_files.insert((metadata.dev(), metadata.ino())) {
+                        continue;
+                    }
+                    bytes = bytes.saturating_add(metadata.len());
+                }
                 // A closed descriptor no longer consumes space.
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(_) => unavailable_entry_count = unavailable_entry_count.saturating_add(1),
@@ -728,12 +741,38 @@ mod tests {
             std::os::unix::fs::symlink(&target, fd_directory.join(fd)).expect("fd link");
         }
 
+        // Duplicated file descriptors must not double-count a physical inode.
+        std::os::unix::fs::symlink(
+            temporary.path().join("etilqs_5e598e639aa4c638 (deleted)"),
+            fd_directory.join("7"),
+        )
+        .expect("duplicated temp descriptor");
+
         let entry = census_sqlite_temp_spill(&fd_directory, &BTreeMap::new())
             .expect("a readable fd directory");
 
         assert_eq!(entry.key, SQLITE_TEMP_SPILL_KEY);
         assert_eq!(entry.bytes, 1_924 * MIB);
         assert_eq!(entry.bound_bytes, GIB);
+        let healthy_budget = BTreeMap::from([(SQLITE_TEMP_SPILL_KEY.to_owned(), 2 * GIB)]);
+        let healthy = census_sqlite_temp_spill(&fd_directory, &healthy_budget)
+            .expect("same unlinked SQLite allocations");
+        assert_eq!(healthy.bytes, 1_924 * MIB);
+        assert_eq!(healthy.bound_bytes, 2 * GIB);
+        let healthy_footprint = ProfileFootprintV1 {
+            entries: vec![healthy],
+            total_bytes: 0,
+            unavailable_entry_count: 0,
+            truncated: false,
+            total_bound_bytes: PROFILE_TOTAL_BOUND_BYTES,
+        };
+        assert_eq!(
+            findings(&healthy_footprint)[SQLITE_TEMP_SPILL_KEY]
+                .finding()
+                .state(),
+            DoctorEvidenceStateV1::HealthyCompleteCoverage,
+            "duplicate handles must not cause a false storage-pressure finding"
+        );
         let footprint = ProfileFootprintV1 {
             entries: vec![entry],
             total_bytes: 0,
