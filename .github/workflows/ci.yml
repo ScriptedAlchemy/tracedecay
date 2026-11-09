@@ -247,6 +247,7 @@ jobs:
       # Configure the output base and restore caches before the first Bazel
       # invocation so this job does not start two independent Bazel servers.
       - uses: ./.github/actions/setup-bazel
+        id: bazel
         with:
           cache-key: ci-format-linux
           tailscale-client-id: >-
@@ -331,6 +332,14 @@ jobs:
       - name: Check rusqlite stays inside storage owners
         run: python3 scripts/check-rusqlite-storage-boundary.py
 
+      - name: Save newly fetched Bazel dependencies
+        if: always() && !cancelled() && steps.bazel.outputs.repository-cache-key != ''
+        uses: ./.github/actions/setup-bazel/save
+        with:
+          path: ${{ steps.bazel.outputs.repository-cache-path }}
+          key: ${{ steps.bazel.outputs.repository-cache-key }}
+          restored-entries: ${{ steps.bazel.outputs.repository-cache-entries }}
+
       - name: Report final build disk usage
         if: ${{ always() && hashFiles('.github/actions/setup-bazel/report_disk.sh') != '' }}
         continue-on-error: true
@@ -406,6 +415,15 @@ jobs:
         with:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
           key: ${{ steps.bazel.outputs.disk-cache-key }}
+
+      - name: Save newly fetched Bazel dependencies
+
+        if: always() && !cancelled() && steps.bazel.outputs.repository-cache-key != ''
+        uses: ./.github/actions/setup-bazel/save
+        with:
+          path: ${{ steps.bazel.outputs.repository-cache-path }}
+          key: ${{ steps.bazel.outputs.repository-cache-key }}
+          restored-entries: ${{ steps.bazel.outputs.repository-cache-entries }}
 
       - name: Report final build disk usage
         if: ${{ always() && hashFiles('.github/actions/setup-bazel/report_disk.sh') != '' }}
@@ -615,6 +633,15 @@ jobs:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
           key: ${{ steps.bazel.outputs.disk-cache-key }}
 
+      - name: Save newly fetched Bazel dependencies
+
+        if: always() && !cancelled() && steps.bazel.outputs.repository-cache-key != ''
+        uses: ./.github/actions/setup-bazel/save
+        with:
+          path: ${{ steps.bazel.outputs.repository-cache-path }}
+          key: ${{ steps.bazel.outputs.repository-cache-key }}
+          restored-entries: ${{ steps.bazel.outputs.repository-cache-entries }}
+
       - name: Report final build disk usage
         if: ${{ always() && hashFiles('.github/actions/setup-bazel/report_disk.sh') != '' }}
         continue-on-error: true
@@ -770,6 +797,15 @@ jobs:
             exit 1
           fi
 
+      - name: Save newly fetched Bazel dependencies
+
+        if: always() && !cancelled() && steps.bazel.outputs.repository-cache-key != ''
+        uses: ./.github/actions/setup-bazel/save
+        with:
+          path: ${{ steps.bazel.outputs.repository-cache-path }}
+          key: ${{ steps.bazel.outputs.repository-cache-key }}
+          restored-entries: ${{ steps.bazel.outputs.repository-cache-entries }}
+
       - name: Report final build disk usage
         if: ${{ always() && hashFiles('.github/actions/setup-bazel/report_disk.sh') != '' }}
         continue-on-error: true
@@ -819,6 +855,15 @@ jobs:
         with:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
           key: ${{ steps.bazel.outputs.disk-cache-key }}
+
+      - name: Save newly fetched Bazel dependencies
+
+        if: always() && !cancelled() && steps.bazel.outputs.repository-cache-key != ''
+        uses: ./.github/actions/setup-bazel/save
+        with:
+          path: ${{ steps.bazel.outputs.repository-cache-path }}
+          key: ${{ steps.bazel.outputs.repository-cache-key }}
+          restored-entries: ${{ steps.bazel.outputs.repository-cache-entries }}
 
       - name: Report final build disk usage
         if: ${{ always() && hashFiles('.github/actions/setup-bazel/report_disk.sh') != '' }}
@@ -980,6 +1025,15 @@ jobs:
         with:
           path: ${{ steps.bazel.outputs.disk-cache-path }}
           key: ${{ steps.bazel.outputs.disk-cache-key }}
+
+      - name: Save newly fetched Bazel dependencies
+
+        if: always() && !cancelled() && steps.bazel.outputs.repository-cache-key != ''
+        uses: ./.github/actions/setup-bazel/save
+        with:
+          path: ${{ steps.bazel.outputs.repository-cache-path }}
+          key: ${{ steps.bazel.outputs.repository-cache-key }}
+          restored-entries: ${{ steps.bazel.outputs.repository-cache-entries }}
 
       - name: Report final build disk usage
         if: ${{ always() && hashFiles('.github/actions/setup-bazel/report_disk.sh') != '' }}
