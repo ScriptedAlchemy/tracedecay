@@ -11,13 +11,13 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tracedecay_contracts::doctor::{
     DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
     DoctorEvidenceReferenceV1, DoctorEvidenceStateV1, DoctorFindingFamilyV1, DoctorFindingV1,
     DoctorStorageFamilyReadV1, DoctorStorageFindingKindV1, DoctorStorageFindingV1,
     storage_family_read,
 };
+use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_global_db::registry_maintenance::{RootLivenessV1, probe_root};
 use tracedecay_runtime_core::text::format_bytes;
 
@@ -538,8 +538,7 @@ fn doctor_footprint_reference_key(key: &str) -> Cow<'_, str> {
     if DoctorEvidenceReferenceV1::new(key.to_owned()).is_ok() {
         return Cow::Borrowed(key);
     }
-    let digest = Sha256::digest(key.as_bytes());
-    Cow::Owned(format!("footprint/sha256:{digest:x}"))
+    Cow::Owned(format!("footprint/sha256:{}", sha256_hex(key.as_bytes())))
 }
 
 /// One `OverBudgetStore` finding per footprint entry plus one for the profile
@@ -1161,8 +1160,7 @@ mod tests {
 
         let observed = findings(&footprint);
         assert_eq!(observed.len(), footprint.entries.len() + 1);
-        let digest = Sha256::digest(wal.key.as_bytes());
-        let reference = format!("footprint/sha256:{digest:x}");
+        let reference = format!("footprint/sha256:{}", sha256_hex(wal.key.as_bytes()));
         let wal_finding = &observed[&reference];
         assert_eq!(
             wal_finding.finding().state(),
