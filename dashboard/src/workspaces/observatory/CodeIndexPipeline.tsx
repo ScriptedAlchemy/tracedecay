@@ -133,6 +133,11 @@ function CodeIndexReadinessList({
             </dd>
           </dl>
           <CodeIndexAttemptReading worktree={worktree} />
+          {worktree.parked ? (
+            <p className="mt-2 text-sm text-state-warning">
+              parked: {worktree.parked.reason} · {worktree.parked.remediation}
+            </p>
+          ) : null}
         </li>
       ))}
     </ul>
@@ -274,19 +279,30 @@ function CodeIndexBuildCard({ progress }: { progress: CodeIndexBuildProgressV1 }
 // Serving readiness can describe the previous generation while its successor
 // is still capturing sources, or while a lexical artifact is being restored.
 // Neither operation is required to have a committed build-progress report yet.
+/** One worktree's actual or admitted pending work, shared by both dashboard
+ * views. An inactive terminal park is not a one-second polling obligation. */
+export function worktreeHasActiveCodeIndexBuild(worktree: CodeIndexWorktreeFreshnessV1): boolean {
+  if (worktree.parked != null && !worktree.parked.retries_on_wake) return false;
+  if (worktree.progress?.blocked_reason === 'publication_authority_corrupt') return false;
+  return (
+    worktree.rebuild_in_flight ||
+    hasLiveWorktreeProgress(worktree) ||
+    worktree.staleness_state === 'verifying' ||
+    worktree.staleness_state === 'restoring' ||
+    (worktree.progress != null && worktree.progress.phase !== 'ready') ||
+    (worktree.latest_generation_id == null && worktree.staleness_state === 'indexing')
+  );
+}
+
 export function hasActiveCodeIndexBuild(
   result: EnvelopeResult<CodeIndexFreshnessPayloadV1> | undefined,
 ): boolean {
-  return (
-    result?.outcome === 'envelope' &&
-    (result.envelope.domain_state !== 'ready' ||
-      result.envelope.payload.worktrees.some(
-        (worktree) =>
-          worktree.rebuild_in_flight ||
-          hasLiveWorktreeProgress(worktree) ||
-          (worktree.progress != null && worktree.progress.phase !== 'ready'),
-      ))
-  );
+  if (result?.outcome !== 'envelope') return false;
+  const { domain_state, payload } = result.envelope;
+  if (payload.mount_failure) return false;
+  // A loading scope may not have enrolled its first worktree yet.
+  if (payload.worktrees.length === 0) return domain_state === 'loading';
+  return payload.worktrees.some(worktreeHasActiveCodeIndexBuild);
 }
 
 function useLatestCodeIndexProgress(

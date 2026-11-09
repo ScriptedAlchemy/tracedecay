@@ -250,3 +250,47 @@ describe('code-index progress transitions', () => {
     expect(hasActiveCodeIndexBuild(restored)).toBe(false);
   });
 });
+
+describe('code-index parked and recovered readers', () => {
+  it('renders the actual park refusal, idles polling, and clears it on recovery', () => {
+    const blocked = freshness({
+      rebuild_in_flight: true,
+      staleness_state: 'parked',
+      parked: {
+        reason: 'native graph publication authority unavailable',
+        remediation: 'restore the verified graph store',
+        parked_at_micros: OBSERVED_AT,
+        observed_passes: 2,
+        retries_on_wake: false,
+        blocked_reason: 'publication_authority_corrupt',
+      },
+    }, 'loading');
+    blocked.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(blocked.envelope.payload);
+    expect(hasActiveCodeIndexBuild(blocked)).toBe(false);
+    const view = render(<CodeIndexPipeline result={blocked} pending={false} scopeKey="project" />);
+    expect(screen.getByText(
+      'parked: native graph publication authority unavailable · restore the verified graph store',
+    )).toBeTruthy();
+
+    const recovered = freshness({ rebuild_in_flight: true, staleness_state: 'indexing' }, 'loading');
+    recovered.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(recovered.envelope.payload);
+    view.rerender(<CodeIndexPipeline result={recovered} pending={false} scopeKey="project" />);
+    expect(screen.queryByText(/parked: native graph publication authority unavailable/)).toBeNull();
+    expect(hasActiveCodeIndexBuild(recovered)).toBe(true);
+  });
+
+  it('distinguishes a cold indexing mount from an idle non-ready envelope', () => {
+    expect(hasActiveCodeIndexBuild(freshness({
+      latest_generation_id: null,
+      staleness_state: 'indexing',
+      rebuild_in_flight: false,
+    }, 'loading'))).toBe(true);
+    expect(hasActiveCodeIndexBuild(freshness({}, 'loading'))).toBe(false);
+    const failed = freshness({}, 'loading');
+    failed.envelope.payload.mount_failure = {
+      message: 'code-index scheduler mount failed',
+      remediation: 'retry the mount',
+    };
+    expect(hasActiveCodeIndexBuild(failed)).toBe(false);
+  });
+});

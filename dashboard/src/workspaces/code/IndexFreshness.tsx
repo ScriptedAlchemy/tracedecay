@@ -43,7 +43,7 @@ import {
   codeIndexPhaseLabel,
   codeIndexProgressPercentage,
   formatDurationMicros,
-  hasLiveWorktreeProgress,
+  worktreeHasActiveCodeIndexBuild,
   isCurrentOrNewerCodeIndexProgress,
 } from '../observatory/CodeIndexPipeline.tsx';
 import { formatBytes } from '../observatory/storageModel.ts';
@@ -316,24 +316,7 @@ function freshnessPollIntervalMs(
 
 function hasActiveBuild(result: EnvelopeResult<CodeIndexFreshnessPayloadV1> | undefined): boolean {
   if (result?.outcome !== 'envelope') return false;
-  return result.envelope.payload.worktrees.some(worktreeHasActiveBuild);
-}
-
-function worktreeHasActiveBuild(worktree: CodeIndexWorktreeFreshnessV1): boolean {
-  const initialIndexing =
-    worktree.latest_generation_id == null && worktree.staleness_state === 'indexing';
-  if (
-    !worktree.rebuild_in_flight &&
-    !hasLiveWorktreeProgress(worktree) &&
-    worktree.staleness_state !== 'verifying' &&
-    worktree.staleness_state !== 'restoring' &&
-    !initialIndexing
-  ) {
-    return false;
-  }
-  if (worktree.parked != null && !worktree.parked.retries_on_wake) return false;
-  if (worktree.progress?.blocked_reason === 'publication_authority_corrupt') return false;
-  return true;
+  return result.envelope.payload.worktrees.some(worktreeHasActiveCodeIndexBuild);
 }
 
 function allActiveBuildsQuiet(
@@ -342,7 +325,7 @@ function allActiveBuildsQuiet(
   if (result?.outcome !== 'envelope') return false;
   const observedAt = result.envelope.time.observation_time_micros;
   return result.envelope.payload.worktrees.every((worktree) => {
-    if (!worktreeHasActiveBuild(worktree)) return true;
+    if (!worktreeHasActiveCodeIndexBuild(worktree)) return true;
     const lastUpdates = [
       ...(worktree.preseal_attempt?.active ? [worktree.preseal_attempt.last_progress_micros] : []),
       ...(worktree.native_graph_progress?.active ? [worktree.native_graph_progress.last_progress_micros] : []),
