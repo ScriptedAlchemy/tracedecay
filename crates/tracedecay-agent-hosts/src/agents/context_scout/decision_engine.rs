@@ -41,7 +41,7 @@ const MAX_DECISION_RESPONSE_BYTES: usize = 1024 * 1024;
 const SCORE_EPSILON: f64 = 1e-6;
 
 /// Decision servers return a probability distribution, not independent scores.
-/// Allow a small rounding error when servers serialize decimal probabilities.
+/// Allow rounding error in the distribution total, not a conflicting chosen option.
 const CHOICE_EPSILON: f64 = 1e-3;
 
 /// What one question asks.
@@ -530,7 +530,7 @@ fn parse_answer(
             }
             let chosen = match answer.get("choice") {
                 None | Some(Value::Null) => None,
-                Some(value) => Some(label_text(value)?),
+                Some(value) => Some(value.as_str()?.to_owned()),
             };
             if chosen
                 .as_ref()
@@ -553,7 +553,7 @@ fn parse_answer(
                 let selected_probability = *probabilities.get(chosen)?;
                 if probabilities
                     .values()
-                    .any(|probability| *probability > selected_probability + CHOICE_EPSILON)
+                    .any(|probability| *probability > selected_probability)
                 {
                     return None;
                 }
@@ -606,15 +606,6 @@ fn unit_interval(value: &Value) -> Option<f64> {
     value
         .as_f64()
         .filter(|probability| (0.0..=1.0).contains(probability))
-}
-
-fn label_text(value: &Value) -> Option<String> {
-    match value {
-        Value::String(text) => Some(text.clone()),
-        Value::Number(number) => Some(number.to_string()),
-        Value::Bool(flag) => Some(flag.to_string()),
-        _ => None,
-    }
 }
 
 #[cfg(test)]
@@ -999,6 +990,52 @@ mod tests {
                 "{body}"
             );
         }
+    }
+
+    #[test]
+    fn choice_pick_requires_string_label_and_maximum_probability() {
+        // A server Boolean or number is not the caller's string option,
+        // even when stringifying it would happen to match an offered label.
+        // Similarly, a declared pick must be an actual maximum; the
+        // distribution-total rounding tolerance cannot excuse a wrong pick.
+        for answer in [
+            json!({"choice": true, "probs": {"true": 0.5, "1": 0.5}}),
+            json!({"choice": 1, "probs": {"true": 0.5, "1": 0.5}}),
+            json!({"choice": "true", "probs": {"true": 0.4997, "1": 0.5003}}),
+        ] {
+            let body = json!({"answers": {"route": answer}}).to_string();
+            let server = fake_decision_engine(200, &body, Duration::ZERO);
+            assert_eq!(
+                client(&server.url).ask_blocking(&request(
+                    "state",
+                    vec![choice("route", &["true", "1"])],
+                )),
+                DecisionEngineOutcomeV1::Malformed,
+                "{body}"
+            );
+        }
+
+        // A genuine string label remains admissible on an exact tie.
+        let body = json!({"answers": {"route": {
+            "choice": "true",
+            "probs": {"true": 0.5, "1": 0.5}
+        }}})
+        .to_string();
+        let server = fake_decision_engine(200, &body, Duration::ZERO);
+        let result = answered(client(&server.url).ask_blocking(&request(
+            "state",
+            vec![choice("route", &["true", "1"])],
+        )));
+        assert_eq!(
+            result.answers["route"],
+            DecisionAnswerV1::Choice {
+                chosen: Some("true".to_owned()),
+                probabilities: BTreeMap::from([
+                    ("1".to_owned(), 0.5),
+                    ("true".to_owned(), 0.5),
+                ]),
+            }
+        );
     }
 
     #[test]
