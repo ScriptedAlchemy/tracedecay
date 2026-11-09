@@ -303,6 +303,27 @@ fn temp_auto_vacuum_reclaims_pages_without_clearing_live_tables() {
         before > 1024,
         "fixture must allocate actual FILE TEMP pages: {before}"
     );
+    // Rollback must restore a dropped TEMP b-tree and every committed row.
+    // Reclaiming pages on a failed transaction would silently lose data.
+    connection
+        .execute_batch("BEGIN IMMEDIATE; DROP TABLE temp.disposable; ROLLBACK;")
+        .expect("undo a tentative TEMP reclamation");
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM temp.disposable", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        1024,
+        "rolled-back TEMP drop must preserve every committed row"
+    );
+    assert_eq!(
+        connection
+            .query_row("PRAGMA temp.page_count", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        before,
+        "rollback must restore the original TEMP page allocation"
+    );
     connection
         .execute_batch("DROP TABLE temp.disposable")
         .expect("drop disposable TEMP b-tree");
