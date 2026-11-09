@@ -34,6 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-bazel
+        id: bazel
         with:
           cache-key: dependency-helpers
           cache-save: ${{ inputs.offline != true }}
@@ -54,3 +55,11 @@ jobs:
             options+=(--repository_disable_download)
           fi
           bazel build "${options[@]}" "${targets[@]}"
+
+      - name: Save newly fetched Bazel dependencies
+        if: always() && !cancelled() && steps.bazel.outputs.repository-cache-key != ''
+        uses: ./.github/actions/setup-bazel/save
+        with:
+          path: ${{ steps.bazel.outputs.repository-cache-path }}
+          key: ${{ steps.bazel.outputs.repository-cache-key }}
+          restored-entries: ${{ steps.bazel.outputs.repository-cache-entries }}
