@@ -193,6 +193,9 @@ pub(crate) async fn ensure_github_stack_delivery_schema(
               OR OLD.watermark_id != NEW.watermark_id
               OR OLD.observed_at_micros != NEW.observed_at_micros
               OR json_type(OLD.signal_json, '$.__tracedecay_retired_stack_sha256_v1') IS NOT NULL
+              OR EXISTS (
+                  SELECT 1 FROM json_each(NEW.signal_json) LIMIT 1 OFFSET 1
+              )
               OR json_type(NEW.signal_json, '$.__tracedecay_retired_stack_sha256_v1') IS NOT 'text'
               OR length(json_extract(NEW.signal_json, '$.__tracedecay_retired_stack_sha256_v1')) != 64
               OR json_extract(NEW.signal_json, '$.__tracedecay_retired_stack_sha256_v1')

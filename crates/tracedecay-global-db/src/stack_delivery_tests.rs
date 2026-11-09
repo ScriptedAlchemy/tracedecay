@@ -350,6 +350,39 @@ async fn noncanonical_retirement_marker_cannot_reopen_an_expired_signal() {
         .acknowledge_github_stack_host_delivery(PROJECT_ID, &malformed.signal_id, RECIPIENT)
         .await
         .expect("settle second recipient");
+    // SQL and the reader must agree: a retirement marker has one member.
+    // A second field or a duplicate key is ambiguous, even if its hash is valid.
+    for ambiguous_marker in [
+        format!(r#"{{"__tracedecay_retired_stack_sha256_v1":"{digest}","other":"unexpected"}}"#),
+        format!(
+            r#"{{"__tracedecay_retired_stack_sha256_v1":"{digest}","__tracedecay_retired_stack_sha256_v1":"{digest}"}}"#
+        ),
+    ] {
+        let rejection = harness
+            .registered
+            .writer_connection()
+            .expect("registered ambiguous-marker writer")
+            .execute(
+                "UPDATE github_stack_delivery_signals SET signal_json = ?3
+                 WHERE project_id = ?1 AND signal_id = ?2",
+                params![PROJECT_ID, malformed.signal_id.as_str(), ambiguous_marker.as_str()],
+            )
+            .await
+            .expect_err("retirement must reject extra and duplicated JSON members")
+            .to_string();
+        assert!(
+            rejection.contains("GitHub stack delivery signals are immutable"),
+            "{rejection}"
+        );
+        assert_eq!(
+            harness
+                .registered
+                .github_stack_signal(PROJECT_ID, &malformed.signal_id)
+                .await
+                .expect("refused ambiguous retirement keeps the original"),
+            Some(malformed.clone())
+        );
+    }
     let invalid_marker = format!(
         r#"{{"__tracedecay_retired_stack_sha256_v1":"{}"}}"#,
         "g".repeat(64)
