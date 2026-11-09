@@ -336,7 +336,12 @@ function allActiveBuildsQuiet(
       ...(worktree.progress ? [worktree.progress.last_progress_micros] : []),
     ];
     return lastUpdates.length > 0 && lastUpdates.every(
-      (stamp)function useLatestBuildProgress(
+      (stamp) => stamp != null && observedAt - stamp >= QUIET_AFTER_SECONDS * 1_000_000,
+    );
+  });
+}
+
+function useLatestBuildProgress(
   result: EnvelopeResult<CodeIndexFreshnessPayloadV1>,
 ): ReadonlyMap<string, CodeIndexBuildProgress> {
   const [latestProgress, setLatestProgress] = useState<ReadonlyMap<string, CodeIndexBuildProgress>>(
@@ -374,12 +379,6 @@ function allActiveBuildsQuiet(
         [...next].every(([root, progress]) => rendered.get(root) === progress)
         ? rendered
         : next;
-    });
-  }, [result]);
-  return latestProgress;
-}
-
-      return changed ? next : rendered;
     });
   }, [result]);
   return latestProgress;
