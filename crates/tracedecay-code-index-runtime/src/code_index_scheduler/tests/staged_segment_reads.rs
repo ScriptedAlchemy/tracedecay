@@ -2406,3 +2406,157 @@ fn staged_evidence_pack_writer_authentication_avoids_extra_opens_and_refuses_rep
     );
     preparation.abort().expect("release failed preparation");
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn retained_history_reads_across_requests_share_one_segment_open_and_refuse_replacement() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained() -> u32 { 9 }\n")]);
+    let source_root = TempDir::new().expect("source store");
+    let generation = source_generation(&fixture, source_root.path());
+    let target_root = TempDir::new().expect("target store");
+    let mut publisher = target_store(target_root.path(), &fixture);
+    let mut preparation = publisher
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare generation");
+    let publication = generation
+        .stage_publication(&mut preparation)
+        .expect("stage production evidence");
+    let segment = CodeIndexPublishedGenerationV1::partitioned_segment_identities_from_reader(
+        publication.manifest_bytes().as_ref(),
+    )
+    .expect("sealed segment identities")
+    .expect("partitioned generation")
+    .into_iter()
+    .find(|identity| identity.size_bytes > 4)
+    .expect("nonempty real segment");
+    publisher
+        .commit(&mut preparation, &publication)
+        .expect("publish complete generation");
+    drop(preparation);
+    drop(publisher);
+
+    let cold = target_store(target_root.path(), &fixture);
+    let pointer = cold
+        .read_publication_pointer()
+        .expect("read installed pointer")
+        .expect("active generation");
+    let entry = pointer
+        .generation_index
+        .iter()
+        .find(|entry| entry.generation_id == pointer.generation_id)
+        .expect("indexed active generation");
+    let identity = DurableSealedCodeGenerationIdentityV1 {
+        locator: pointer.generation_file.clone(),
+        digest: ManifestDigest::new(pointer.state_digest.clone())
+            .expect("generation digest"),
+        size_bytes: entry.size_bytes,
+    };
+    let suffix = sha256_hex_suffix(segment.digest.as_str()).expect("segment digest");
+    let path = cold.segments_root.join(format!("segment-{suffix}.json"));
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        let _ = sender.send(event);
+    })
+    .expect("native observer");
+    watcher
+        .watch(&cold.segments_root, notify::RecursiveMode::NonRecursive)
+        .expect("watch real sealed segment directory");
+
+    let control = tracedecay_code_index::production::UninterruptibleCodeIndexControlV1;
+    let mut whole = Vec::new();
+    cold.read_retained_partitioned_segment(
+        &identity,
+        SealedGenerationSegmentReadV1::Whole {
+            digest: &segment.digest,
+            size_bytes: segment.size_bytes,
+        },
+        &mut whole,
+        &control,
+    )
+    .expect("first authenticated historical segment read");
+    assert_eq!(whole.len() as u64, segment.size_bytes);
+    assert_eq!(segment_digest(&whole), segment.digest);
+    assert!(whole.len() > 4);
+    let mut range = Vec::new();
+    for _ in 0..16 {
+        cold.read_retained_partitioned_segment(
+            &identity,
+            SealedGenerationSegmentReadV1::Range {
+                digest: &segment.digest,
+                size_bytes: segment.size_bytes,
+                offset: 1,
+                length: 3,
+            },
+            &mut range,
+            &control,
+        )
+        .expect("read historical page without reopening segment");
+        assert_eq!(range, whole[1..4]);
+    }
+    assert_eq!(
+        observed_named_opens(&receiver, &path),
+        1,
+        "one whole and sixteen historical reads must require one segment open"
+    );
+    drop(File::open(&path).expect("control pathname open"));
+    assert_eq!(
+        observed_named_opens(&receiver, &path),
+        1,
+        "kernel observer must count a separate real pathname open"
+    );
+
+    let peer = cold.clone();
+    peer.read_retained_partitioned_segment(
+        &identity,
+        SealedGenerationSegmentReadV1::Range {
+            digest: &segment.digest,
+            size_bytes: segment.size_bytes,
+            offset: 2,
+            length: 2,
+        },
+        &mut range,
+        &control,
+    )
+    .expect("a second store handle shares the bounded retained cache");
+    assert_eq!(range, whole[2..4]);
+    assert_eq!(
+        observed_named_opens(&receiver, &path),
+        0,
+        "a cloned publication store must not repeat the endpoint open"
+    );
+
+    let previous = target_root.path().join("retained-history-original-inode");
+    std::fs::rename(&path, &previous).expect("move disposable canonical inode");
+    std::fs::write(&path, &whole).expect("replace with identical bytes and another inode");
+    assert_ne!(
+        std::fs::metadata(&previous).expect("original metadata").ino(),
+        std::fs::metadata(&path).expect("replacement metadata").ino(),
+        "the test must substitute a different inode"
+    );
+    // Fixture replacement opens are not reader opens.
+    let _ = observed_named_opens(&receiver, &path);
+    range = vec![0x11, 0x22];
+    assert!(
+        peer.read_retained_partitioned_segment(
+            &identity,
+            SealedGenerationSegmentReadV1::Range {
+                digest: &segment.digest,
+                size_bytes: segment.size_bytes,
+                offset: 1,
+                length: 3,
+            },
+            &mut range,
+            &control,
+        )
+        .is_err(),
+        "a replaced pathname must not inherit a cached segment's identity"
+    );
+    assert_eq!(range, Vec::<u8>::new(), "failure reveals no previously read bytes");
+    assert_eq!(
+        observed_named_opens(&receiver, &path),
+        0,
+        "inode rejection does not need another endpoint-authorized open"
+    );
+    std::fs::remove_file(&path).expect("remove disposable replacement");
+    std::fs::rename(&previous, &path).expect("restore original inode");
+}

@@ -512,6 +512,10 @@ pub struct DaemonCodeIndexPublicationStoreV1 {
     expected_sanitizer_revision: SanitizerRevision,
     disposition: CodeIndexPublicationDispositionV1,
     pointer_memo: Arc<std::sync::Mutex<Option<PublicationPointerMemoV1>>>,
+    /// One bounded descriptor cache for retained page reads across requests.
+    /// Cloned stores share its identity checks; retirement discards it.
+    #[cfg(unix)]
+    retained_segment_reads: Arc<Mutex<VecDeque<PinnedPreparationSegmentV1>>>,
     undecoded_active_expectation: Option<UndecodedActivePublicationExpectationV1>,
     /// The canonical source-hint authority plus the exact pre-capture epoch
     /// used by a retained rebuild. Ordinary publication leaves this absent.
@@ -1570,6 +1574,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
             expected_sanitizer_revision,
             disposition: CodeIndexPublicationDispositionV1::Active,
             pointer_memo: Arc::new(Mutex::new(None)),
+            #[cfg(unix)]
+            retained_segment_reads: Arc::new(Mutex::new(VecDeque::new())),
             undecoded_active_expectation: None,
             reconcile_publication_fence: None,
             shutdown_signal: None,
@@ -2529,6 +2535,24 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 CodeIndexInterruptionV1::Cancelled,
             ));
         }
+        #[cfg(unix)]
+        let result = self
+            .retained_segment_reads
+            .lock()
+            .map_err(|_| {
+                CodeIndexProductionErrorV1::Contract(
+                    "retained generation segment reader cache was poisoned".to_owned(),
+                )
+            })
+            .and_then(|mut pinned| {
+                Self::read_cached_retained_segment(
+                    &self.segments_root,
+                    request,
+                    buffer,
+                    &mut pinned,
+                )
+            });
+        #[cfg(not(unix))]
         let result = self.read_partitioned_segment(request, buffer);
         // Endpoint authorization may block inside open(). A request that was
         // live before I/O must not return data after its deadline or cancel.
@@ -3962,6 +3986,14 @@ impl DaemonCodeIndexPublicationStoreV1 {
         let store_lock = try_acquire_code_generation_store_lock(store_root)
             .map_err(Self::unavailable)?
             .ok_or(CodeIndexPublicationStoreErrorV1::StoreLockContended)?;
+        // Do not let an old retained descriptor keep deleted segment bytes
+        // resident after this scope's reset, even when another store clone
+        // served the last page.
+        #[cfg(unix)]
+        self.retained_segment_reads
+            .lock()
+            .map_err(|_| Self::unavailable("retained segment read cache was poisoned"))?
+            .clear();
         let receipt = reset_code_index_scope_store(&store_lock).map_err(Self::unavailable)?;
         std::fs::create_dir_all(&self.generations_root).map_err(Self::unavailable)?;
         tracedecay_code_index_retention::code_index_generations::record_scope_root(
