@@ -22,7 +22,7 @@ use tracedecay_global_db::registry_maintenance::{RootLivenessV1, probe_root};
 use tracedecay_runtime_core::text::format_bytes;
 
 use super::storage_report::{
-    FullProfileSizeV1, GRAPH_CONTAINER_SUFFIX, ProfileTotalCoverageStateV1, StoreKindBytesV1,
+    FullProfileSizeV1, ProfileTotalCoverageStateV1, StoreKindBytesV1, graph_container_stem,
 };
 
 /// Entries a footprint walk visits before it stops and reports a floor.
@@ -467,16 +467,6 @@ fn is_wal(name: &str) -> bool {
     name.ends_with("-wal") || name.ends_with(".wal")
 }
 
-/// Only canonical graph containers and their recognized sidecars share a
-/// container bound. Unrelated suffixes must remain separate profile entries.
-fn graph_container_stem(name: &str) -> Option<&str> {
-    let stem = name
-        .strip_suffix(".verified")
-        .or_else(|| name.strip_suffix(".spill"))
-        .unwrap_or(name);
-    stem.ends_with(GRAPH_CONTAINER_SUFFIX).then_some(stem)
-}
-
 /// The footprint keys one profile-relative path belongs to. A WAL directory
 /// is one entry keyed by the directory; its segments sum into it.
 fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
@@ -497,18 +487,14 @@ fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
                     ProfileFamilyV1::Wal,
                 )
             })
-            .or_else(|| match inner {
-                [name] => {
-                    // Verified and spill sidecars consume the same container
-                    // footprint as the primary .grafeo file.
-                    graph_container_stem(name).map(|stem| {
-                        (
-                            format!("{store_key}/{stem}"),
-                            ProfileFamilyV1::GraphContainer,
-                        )
-                    })
-                }
-                _ => None,
+            .or_else(|| {
+                let (first, rest) = inner.split_first()?;
+                graph_container_stem(first, rest.is_empty()).map(|stem| {
+                    (
+                        format!("{store_key}/{stem}"),
+                        ProfileFamilyV1::GraphContainer,
+                    )
+                })
             });
         return Some(FootprintKeys {
             primary: (store_key, ProfileFamilyV1::ProjectStore),
@@ -518,7 +504,7 @@ fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
     }
     let primary = if let Some(end) = components.iter().position(|name| is_wal(name)) {
         (components[..=end].join("/"), ProfileFamilyV1::Wal)
-    } else if let Some(stem) = graph_container_stem(first) {
+    } else if let Some(stem) = graph_container_stem(first, components.len() == 1) {
         // A top-level container and only its recognized sidecars.
         (stem.to_owned(), ProfileFamilyV1::GraphContainer)
     } else if first == "global.db" || first.starts_with("global.db-") {
@@ -1223,9 +1209,10 @@ mod tests {
         for (name, bytes) in [
             ("user-sessions.grafeo", 5),
             ("user-sessions.grafeo.verified", 7),
-            ("user-sessions.grafeo.spill", 11),
+            ("user-sessions.grafeo.spill/scratch/inflight", 11),
             ("user-sessions.grafeo.notes", 30),
             ("other.grafeo.metrics", 40),
+            ("scratch.grafeo/unrelated", 13),
         ] {
             sized(&profile.join(name), bytes);
         }
@@ -1233,7 +1220,7 @@ mod tests {
         let overrides = BTreeMap::from([(container_key.to_owned(), 24)]);
         let footprint = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
 
-        assert_eq!(footprint.total_bytes, 93);
+        assert_eq!(footprint.total_bytes, 106);
         assert_eq!(entry(&footprint, container_key).bytes, 23);
         assert_eq!(
             entry(&footprint, container_key).family,
@@ -1242,6 +1229,7 @@ mod tests {
         for (name, bytes) in [
             ("user-sessions.grafeo.notes", 30),
             ("other.grafeo.metrics", 40),
+            ("scratch.grafeo", 13),
         ] {
             let unrelated = entry(&footprint, name);
             assert_eq!(unrelated.family, ProfileFamilyV1::Other);
@@ -1280,7 +1268,7 @@ mod tests {
             ("graph.grafeo.verified", 7),
             ("graph.grafeo.spill", 11),
             ("graph.grafeo.wal/segment", 13),
-            ("other.grafeo.spill", 17),
+            ("other.grafeo.spill/scratch/inflight", 17),
             ("not-a-graph.grafeo.tmp", 19),
         ] {
             sized(&profile.join(project).join(name), bytes);

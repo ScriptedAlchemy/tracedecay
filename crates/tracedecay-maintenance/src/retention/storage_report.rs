@@ -65,7 +65,7 @@ const CODE_GENERATIONS_DIRECTORY: &str = "code-generations-v1";
 const CODE_INDEX_DIRECTORY: &str = "code-index-v1";
 const SEALED_GRAPH_DIRECTORY: &str = "tracedecay.sealed";
 const GRAPH_REPLAY_POOL_DIRECTORY: &str = "tracedecay.graph-replay";
-pub(crate) const GRAPH_CONTAINER_SUFFIX: &str = ".grafeo";
+const GRAPH_CONTAINER_SUFFIX: &str = ".grafeo";
 pub(crate) const GRAPH_CONTAINER_WAL_SUFFIX: &str = ".grafeo.wal";
 /// Why a report without the daemon's scheduler authority cannot plan a
 /// retention dry run.
@@ -192,11 +192,22 @@ pub struct StoreKindBytesV1 {
     pub other: u64,
 }
 
+/// A container is a regular file at the store root. Its recognized sidecars
+/// can also be directories, whose descendants belong to the same container.
+pub(super) fn graph_container_stem(name: &str, is_leaf: bool) -> Option<&str> {
+    let stem = name
+        .strip_suffix(".verified")
+        .or_else(|| name.strip_suffix(".spill"))
+        .or_else(|| is_leaf.then_some(name))?;
+    stem.ends_with(GRAPH_CONTAINER_SUFFIX).then_some(stem)
+}
+
 impl StoreKindBytesV1 {
     pub(crate) fn add(&mut self, relative: &Path, bytes: u64) {
         let mut components = relative
             .components()
-            .map(|component| component.as_os_str().to_string_lossy());
+            .map(|component| component.as_os_str().to_string_lossy())
+            .peekable();
         let first = components.next().unwrap_or_default();
         let db_filename = tracedecay_runtime_core::config::DB_FILENAME;
         let family = if first == db_filename
@@ -210,9 +221,7 @@ impl StoreKindBytesV1 {
         } else if first == GRAPH_REPLAY_POOL_DIRECTORY {
             &mut self.graph_replay_pool
         } else if first.ends_with(GRAPH_CONTAINER_WAL_SUFFIX)
-            || first.ends_with(".grafeo.verified")
-            || first.ends_with(".grafeo.spill")
-            || (first.ends_with(GRAPH_CONTAINER_SUFFIX) && components.next().is_none())
+            || graph_container_stem(&first, components.peek().is_none()).is_some()
         {
             &mut self.graph_container
         } else if first == CODE_INDEX_DIRECTORY {
