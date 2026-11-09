@@ -520,9 +520,15 @@ fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
     } else if let Some(stem) = graph_container_stem(first, components.len() == 1) {
         // A top-level container and only its recognized sidecars.
         (stem.to_owned(), ProfileFamilyV1::GraphContainer)
-    } else if first == "global.db" || first.starts_with("global.db-") {
+    } else if matches!(
+        first.as_str(),
+        "global.db" | "global.db-shm" | "global.db-journal"
+    ) {
         ("global.db".to_owned(), ProfileFamilyV1::ProfileRegistry)
-    } else if first.starts_with("user-sessions.db") {
+    } else if matches!(
+        first.as_str(),
+        "user-sessions.db" | "user-sessions.db-shm" | "user-sessions.db-journal"
+    ) {
         ("user-sessions.db".to_owned(), ProfileFamilyV1::UserSessions)
     } else if first.starts_with("user-memory.") {
         ("user-memory".to_owned(), ProfileFamilyV1::UserMemory)
@@ -1355,6 +1361,71 @@ mod tests {
             DoctorEvidenceStateV1::HealthyCompleteCoverage,
             "WAL pressure remains its own bound, not double-charged to containers"
         );
+    }
+
+    #[test]
+    fn database_family_bounds_do_not_swallow_unrelated_suffix_files() {
+        let temp = tempfile::tempdir().expect("footprint fixture");
+        let profile = temp.path().join("profile");
+        for (name, bytes) in [
+            ("global.db", 5),
+            ("global.db-shm", 7),
+            ("global.db-journal", 11),
+            ("global.db-wal", 13),
+            ("global.db-mystery", 17),
+            ("user-sessions.db", 19),
+            ("user-sessions.db-shm", 23),
+            ("user-sessions.db-journal", 29),
+            ("user-sessions.db-wal", 31),
+            ("user-sessions.db-backup", 37),
+        ] {
+            sized(&profile.join(name), bytes);
+        }
+        let overrides = BTreeMap::from([
+            ("global.db".to_owned(), 23),
+            ("user-sessions.db".to_owned(), 71),
+            ("global.db-mystery".to_owned(), 16),
+            ("user-sessions.db-backup".to_owned(), 36),
+        ]);
+        let footprint = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
+        assert_eq!(footprint.total_bytes, 192);
+        assert_eq!(
+            footprint.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Complete
+        );
+
+        for (key, family, bytes) in [
+            ("global.db", ProfileFamilyV1::ProfileRegistry, 23),
+            ("user-sessions.db", ProfileFamilyV1::UserSessions, 71),
+            ("global.db-wal", ProfileFamilyV1::Wal, 13),
+            ("user-sessions.db-wal", ProfileFamilyV1::Wal, 31),
+            ("global.db-mystery", ProfileFamilyV1::Other, 17),
+            ("user-sessions.db-backup", ProfileFamilyV1::Other, 37),
+        ] {
+            let measured = entry(&footprint, key);
+            assert_eq!(measured.family, family, "{key}");
+            assert_eq!(measured.bytes, bytes, "{key}");
+        }
+        let observed = findings(&footprint);
+        for key in [
+            "global.db",
+            "user-sessions.db",
+            "global.db-wal",
+            "user-sessions.db-wal",
+        ] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::HealthyCompleteCoverage,
+                "{key} must not inherit unrelated suffix bytes"
+            );
+        }
+        for key in ["global.db-mystery", "user-sessions.db-backup"] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::Degraded,
+                "{key} must retain its own named bound"
+            );
+        }
     }
 
     #[test]
