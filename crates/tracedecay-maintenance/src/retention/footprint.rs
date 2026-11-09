@@ -480,6 +480,13 @@ fn is_wal(name: &str) -> bool {
     name.ends_with("-wal") || name.ends_with(".wal")
 }
 
+// SQLite WALs are regular root-level files. Only Grafeo WALs are
+// directories, so a similarly named incident tree must not inherit a WAL
+// budget or hide its own independently bounded footprint.
+fn is_wal_family_root(name: &str, is_file: bool) -> bool {
+    is_wal(name) && (is_file || name.ends_with(".grafeo.wal"))
+}
+
 /// The footprint keys one profile-relative path belongs to. A WAL directory
 /// is one entry keyed by the directory; its segments sum into it.
 fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
@@ -505,7 +512,10 @@ fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
                 })
             })
             .or_else(|| {
-                inner.first().filter(|name| is_wal(name)).map(|first| {
+                inner
+                    .first()
+                    .filter(|name| is_wal_family_root(name, inner.len() == 1))
+                    .map(|first| {
                     (format!("{store_key}/{first}"), ProfileFamilyV1::Wal)
                 })
             });
@@ -520,7 +530,7 @@ fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
     let primary = if let Some(stem) = graph_container_stem(first, components.len() == 1) {
         // Sidecar trees take precedence over WAL-looking scratch filenames.
         (stem.to_owned(), ProfileFamilyV1::GraphContainer)
-    } else if is_wal(first) {
+    } else if is_wal_family_root(first, components.len() == 1) {
         (first.clone(), ProfileFamilyV1::Wal)
     } else if components.len() == 1
         && matches!(
@@ -1789,5 +1799,84 @@ mod tests {
         assert_eq!(termination, WalkTerminationV1::Complete);
         assert_eq!(unavailable, 1);
         assert_eq!(remaining, 10);
+    }
+    #[test]
+    fn sqlite_wal_lookalike_directories_keep_independent_bounds() {
+        let temp = tempfile::tempdir().expect("footprint fixture");
+        let profile = temp.path().join("profile");
+        for (relative, bytes) in [
+            ("global.db", 5),
+            ("global.db-wal/incident.bin", 11),
+            ("scratch.wal/chunk", 13),
+            ("user-sessions.db-wal", 7),
+            ("projects/proj_wal/sessions.db-wal", 17),
+            ("projects/proj_wal/tracedecay.db-wal/incident.bin", 19),
+            ("projects/proj_wal/tracedecay.grafeo.wal/segment", 23),
+        ] {
+            sized(&profile.join(relative), bytes);
+        }
+        let overrides = BTreeMap::from([
+            ("global.db-wal".to_owned(), 10),
+            ("scratch.wal".to_owned(), 12),
+            ("projects/proj_wal".to_owned(), 58),
+            ("user-sessions.db-wal".to_owned(), 7),
+            ("projects/proj_wal/sessions.db-wal".to_owned(), 17),
+            ("projects/proj_wal/tracedecay.grafeo.wal".to_owned(), 23),
+            (PROFILE_TOTAL_KEY.to_owned(), 95),
+        ]);
+        let footprint = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
+        assert_eq!(footprint.total_bytes, 95);
+        assert_eq!(footprint.unavailable_entry_count, 0);
+        assert_eq!(footprint.entries.len(), 7);
+        assert_eq!(
+            footprint.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Complete
+        );
+        for (key, family, bytes) in [
+            ("global.db", ProfileFamilyV1::ProfileRegistry, 5),
+            ("global.db-wal", ProfileFamilyV1::Other, 11),
+            ("scratch.wal", ProfileFamilyV1::Other, 13),
+            ("user-sessions.db-wal", ProfileFamilyV1::Wal, 7),
+            ("projects/proj_wal", ProfileFamilyV1::ProjectStore, 59),
+            ("projects/proj_wal/sessions.db-wal", ProfileFamilyV1::Wal, 17),
+            (
+                "projects/proj_wal/tracedecay.grafeo.wal",
+                ProfileFamilyV1::Wal,
+                23,
+            ),
+        ] {
+            assert_eq!(entry(&footprint, key).family, family, "{key}");
+            assert_eq!(entry(&footprint, key).bytes, bytes, "{key}");
+        }
+        let kinds = entry(&footprint, "projects/proj_wal")
+            .kinds
+            .expect("production project-kind breakdown");
+        assert_eq!(kinds.sessions, 17);
+        assert_eq!(kinds.graph_container, 23);
+        assert_eq!(kinds.other, 19);
+        assert_eq!(kinds.total(), 59);
+
+        let observed = findings(&footprint);
+        assert_eq!(observed.len(), 8);
+        for key in ["global.db-wal", "scratch.wal", "projects/proj_wal"] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::Degraded,
+                "{key} must not evade its physical footprint bound"
+            );
+        }
+        for key in [
+            "global.db",
+            "user-sessions.db-wal",
+            "projects/proj_wal/sessions.db-wal",
+            "projects/proj_wal/tracedecay.grafeo.wal",
+            PROFILE_TOTAL_KEY,
+        ] {
+            assert_eq!(
+                observed[key].finding().state(),
+                DoctorEvidenceStateV1::HealthyCompleteCoverage,
+                "{key} must retain its real, independent bound"
+            );
+        }
     }
 }
