@@ -427,7 +427,9 @@ impl<'a> RetryRearmWindows<'a> {
                 let deadline: i64 = row.get(1).map_err(|error| storage(OPERATION, error))?;
                 let observation: Option<String> =
                     row.get(2).map_err(|error| storage(OPERATION, error))?;
-                if deadline > page_now && let Some(observation) = observation {
+                if deadline > page_now
+                    && let Some(observation) = observation
+                {
                     let attempt: i64 = row.get(3).map_err(|error| storage(OPERATION, error))?;
                     candidates.push((rowid, observation, deadline, attempt));
                 }
