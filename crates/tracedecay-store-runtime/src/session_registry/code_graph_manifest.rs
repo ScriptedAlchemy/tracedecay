@@ -1792,10 +1792,7 @@ mod tests {
         let mut output = [0xa5; 8];
         assert!(reader.read(&mut output).is_err());
         assert_eq!(probes.get(), 2, "the failure must be followed by a probe");
-        assert!(matches!(
-            reader.failure,
-            Some(GraphDbError::DeadlineExceeded)
-        ));
+        assert!(matches!(reader.failure, Some(GraphDbError::DeadlineExceeded)));
         assert_eq!(output, [0; 8], "failed reads must expose no stale bytes");
         assert_eq!(reader.bytes_read, 0);
     }
