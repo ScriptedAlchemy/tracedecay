@@ -774,31 +774,35 @@ pub(crate) fn sweep_abandoned_sealed_staging(database_path: &Path) {
 /// whose spill removes itself when it drops.
 pub(crate) fn sweep_abandoned_row_spills(database_path: &Path) {
     let root = sealed_store_root(database_path);
-    let Ok(entries) = std::fs::read_dir(&root) else {
-        return;
-    };
     let current_owner = row_spill_owner();
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        if let Some(proof) = AbandonedRowSpill::from_name(&name, current_owner) {
-            let path = entry.path();
-            if let Err(error) =
-                tracedecay_private_fs::capability_dir::remove_receipted_child_directory_nofollow(
-                    &root,
-                    &name,
-                    std::ffi::OsStr::new(ROW_SPILL_OWNER_RECEIPT_FILE),
-                    MAX_ROW_SPILL_OWNER_RECEIPT_BYTES,
-                    |bytes| proof.owns(bytes),
-                )
-            {
-                tracing::warn!(
-                    event = "graph_row_spill_sweep_failed",
-                    path = %path.display(),
-                    error = %error,
-                    "unverified abandoned graph row spill preserved for inspection"
-                );
-            }
-        }
+    // Enumerate, verify and unlink through one held sealed-root capability:
+    // a root rename between discovery and cleanup must not redirect deletion.
+    let result =
+        tracedecay_private_fs::capability_dir::remove_matching_receipted_directories_nofollow(
+            &root,
+            std::ffi::OsStr::new(ROW_SPILL_OWNER_RECEIPT_FILE),
+            MAX_ROW_SPILL_OWNER_RECEIPT_BYTES,
+            |name| AbandonedRowSpill::from_name(name, current_owner).is_some(),
+            |name, receipt| {
+                AbandonedRowSpill::from_name(name, current_owner)
+                    .is_some_and(|proof| proof.owns(receipt))
+            },
+        );
+    match result {
+        Ok(removed) if removed > 0 => tracing::info!(
+            event = "graph_row_spill_swept",
+            root = %root.display(),
+            removed,
+            "reclaimed receipt-verified abandoned graph row spills"
+        ),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => tracing::warn!(
+            event = "graph_row_spill_sweep_failed",
+            root = %root.display(),
+            %error,
+            "unverified abandoned graph row spills preserved for inspection"
+        ),
     }
 }
 

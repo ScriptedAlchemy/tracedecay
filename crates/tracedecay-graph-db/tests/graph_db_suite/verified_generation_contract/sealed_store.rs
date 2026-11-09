@@ -2490,6 +2490,12 @@ fn store_open_sweeps_row_spills_abandoned_by_another_process() {
     std::fs::write(&attachment, b"live peer attachment").unwrap();
     drop(registered);
 
+    // A different producer's name is not authority to reclaim foreign bytes.
+    // Even a well-shaped abandoned-spill entry with a wrong receipt survives
+    // store opening, while the authentic abandoned spill above was reclaimed.
+    std::fs::create_dir(&abandoned).unwrap();
+    std::fs::write(abandoned.join(".row-spill-owner-v1"), b"wrong owner").unwrap();
+    std::fs::write(abandoned.join("foreign"), b"preserve").unwrap();
     let foreign = ".rows-notes";
     std::fs::create_dir(root.join(foreign)).unwrap();
     std::fs::write(root.join(foreign).join("notes"), b"keep").unwrap();
@@ -2498,6 +2504,10 @@ fn store_open_sweeps_row_spills_abandoned_by_another_process() {
     assert_eq!(
         std::fs::read(root.join(foreign).join("notes")).unwrap(),
         b"keep"
+    );
+    assert_eq!(
+        std::fs::read(abandoned.join("foreign")).unwrap(),
+        b"preserve"
     );
     assert_eq!(std::fs::read(attachment).unwrap(), b"live peer attachment");
 }

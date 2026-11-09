@@ -324,6 +324,26 @@ pub fn remove_receipted_directories_nofollow(
     root_path: &Path,
     receipt_name: &OsStr,
     maximum: usize,
+    authorized: impl FnMut(&OsStr, &[u8]) -> bool,
+) -> io::Result<usize> {
+    remove_matching_receipted_directories_nofollow(
+        root_path,
+        receipt_name,
+        maximum,
+        |_| true,
+        authorized,
+    )
+}
+
+/// Scan and reclaim selected children beneath one held root. Filter names
+/// before receipt I/O so unrelated installed generations are not treated as
+/// abandoned staging or spills. Receipt verification and removal remain
+/// anchored to the same opened child, even if the root pathname changes.
+pub fn remove_matching_receipted_directories_nofollow(
+    root_path: &Path,
+    receipt_name: &OsStr,
+    maximum: usize,
+    mut candidate: impl FnMut(&OsStr) -> bool,
     mut authorized: impl FnMut(&OsStr, &[u8]) -> bool,
 ) -> io::Result<usize> {
     // Receipt names are always a single sibling: a slash-bearing name could
@@ -347,6 +367,9 @@ pub fn remove_receipted_directories_nofollow(
             continue;
         }
         let name = entry.file_name();
+        if !candidate(&name) {
+            continue;
+        }
         // Do not trust the DirEntry's former pathname kind after a rename.
         let child = match root.open_dir_nofollow(&name) {
             Ok(child) => child,
@@ -622,6 +645,50 @@ mod tests {
         assert_eq!(
             std::fs::read(external.path().join("sentinel")).expect("sentinel survives"),
             b"preserve"
+        );
+    }
+
+    /// Candidate filtering must not reopen a potentially substituted root:
+    /// only the receipted owned child goes away; unrelated and foreign trees survive.
+    #[cfg(unix)]
+    #[test]
+    fn filtered_receipt_sweep_holds_root_through_path_substitution() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("graph.sealed");
+        let displaced = temp.path().join("owned-displaced");
+        let foreign = temp.path().join("foreign");
+        std::fs::create_dir_all(root.join(".rows-old")).unwrap();
+        std::fs::create_dir_all(root.join("generation")).unwrap();
+        std::fs::create_dir_all(foreign.join(".rows-old")).unwrap();
+        std::fs::write(root.join(".rows-old/.owner"), b"verified").unwrap();
+        std::fs::write(root.join("generation/live"), b"live").unwrap();
+        std::fs::write(foreign.join(".rows-old/.owner"), b"verified").unwrap();
+        std::fs::write(foreign.join(".rows-old/sentinel"), b"foreign").unwrap();
+
+        let removed = remove_matching_receipted_directories_nofollow(
+            &root,
+            OsStr::new(".owner"),
+            512,
+            |name| name == OsStr::new(".rows-old"),
+            |name, receipt| {
+                assert_eq!(name, OsStr::new(".rows-old"));
+                assert_eq!(receipt, b"verified");
+                std::fs::rename(&root, &displaced).unwrap();
+                std::os::unix::fs::symlink(&foreign, &root).unwrap();
+                true
+            },
+        )
+        .unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(!displaced.join(".rows-old").exists());
+        assert_eq!(
+            std::fs::read(displaced.join("generation/live")).unwrap(),
+            b"live"
+        );
+        assert_eq!(
+            std::fs::read(foreign.join(".rows-old/sentinel")).unwrap(),
+            b"foreign"
         );
     }
 
