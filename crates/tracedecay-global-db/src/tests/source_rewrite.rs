@@ -380,10 +380,10 @@ async fn rewrite_completion_resumes_committed_pages_after_failure_and_restart() 
     );
 }
 
-/// Beginning the same in-progress layout again must not write retained records
-/// whose generation and accepted revival were already advanced. Each trigger
-/// makes a redundant physical UPDATE fail, while the next *real* generation
-/// transition must still advance both authorities.
+/// Beginning the same in-progress layout again must not rewrite retained
+/// records, accepted revivals, or the unchanged pending rewrite marker.
+/// SQL triggers reject every redundant UPDATE, while a real generation
+/// transition must still advance all three authorities.
 #[asupersync::test]
 async fn repeated_source_rewrite_begin_preserves_already_advanced_prefix() {
     let directory = TempDir::new().unwrap();
@@ -469,7 +469,12 @@ async fn repeated_source_rewrite_begin_preserves_already_advanced_prefix() {
              CREATE TRIGGER reject_unchanged_revival
              BEFORE UPDATE OF revival_generation ON projection_queue
              WHEN NEW.revival_generation IS OLD.revival_generation
-             BEGIN SELECT RAISE(ABORT, 'repeated accepted revival update'); END;",
+             BEGIN SELECT RAISE(ABORT, 'repeated accepted revival update'); END;
+             CREATE TRIGGER reject_unchanged_rewrite
+             BEFORE UPDATE ON observation_source_rewrites
+             WHEN NEW.generation IS OLD.generation
+               AND NEW.retained_through IS OLD.retained_through
+             BEGIN SELECT RAISE(ABORT, 'repeated pending rewrite update'); END;",
         )
         .await
         .unwrap();
@@ -513,6 +518,15 @@ async fn repeated_source_rewrite_begin_preserves_already_advanced_prefix() {
         )
         .await,
         1
+    );
+    assert_eq!(
+        table_count(
+            &writer,
+            "SELECT COUNT(*) FROM observation_source_rewrites WHERE generation = '3'"
+        )
+        .await,
+        1,
+        "a new source layout must still advance the pending rewrite"
     );
 }
 

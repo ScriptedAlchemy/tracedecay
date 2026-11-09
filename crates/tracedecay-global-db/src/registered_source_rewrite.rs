@@ -221,7 +221,9 @@ impl RegisteredGlobalDb {
                          ) VALUES (?1, ?2, ?3)
                          ON CONFLICT(source_key) DO UPDATE SET
                             generation = excluded.generation,
-                            retained_through = excluded.retained_through",
+                            retained_through = excluded.retained_through
+                         WHERE observation_source_rewrites.generation IS NOT excluded.generation
+                            OR observation_source_rewrites.retained_through IS NOT excluded.retained_through",
                         params![key.as_str(), generation.as_str(), retained_through],
                     )
                     .await
