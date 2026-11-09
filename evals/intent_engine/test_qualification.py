@@ -229,7 +229,8 @@ class QualificationTests(unittest.TestCase):
             ]
             calls = []
 
-            def native_answer(url, body):
+            def native_answer(url, body, *, timeout):
+                self.assertEqual(timeout, self.manifest["arm"]["timeout_ms"] / 1000)
                 index = len(calls)
                 calls.append(body)
                 case = self.dataset[index + 2]
