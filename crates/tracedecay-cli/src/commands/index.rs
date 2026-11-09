@@ -531,16 +531,18 @@ impl FirstGenerationWorkMarker {
             }
             return Some(Self::native_graph(graph));
         }
-        if let Some(progress) = &worktree.progress {
-            match progress.phase {
-                CodeIndexBuildPhaseV1::BulkCommit => return Some(Self::text(progress)),
-                CodeIndexBuildPhaseV1::SourceScan => {}
-                // Graph publication, relational preparation, index builds
-                // and verification lack work observations on this wire. Do
-                // not infer a writer stall from their phase labels alone.
-                _ => return None,
-            }
+        // A real text bulk commit may be concurrent with the scoped preseal
+        // guard and remains the authority while its committed cursor moves.
+        if let Some(progress) = worktree
+            .progress
+            .as_ref()
+            .filter(|progress| progress.phase == CodeIndexBuildPhaseV1::BulkCommit)
+        {
+            return Some(Self::text(progress));
         }
+        // A retained generation may still report Ready or a post-text phase
+        // while the successor actually captures or parses. Those old phase
+        // projections must not hide its independently owned attempt work.
         if let Some(attempt) = worktree.preseal_attempt.as_ref().filter(|a| a.active) {
             return Some(Self::Preseal {
                 owner: (
@@ -554,6 +556,8 @@ impl FirstGenerationWorkMarker {
                 last_work_micros: attempt.last_progress_micros,
             });
         }
+        // Absent a live attempt, uninstrumented post-text phases remain
+        // unknown, not evidence that a writer has stalled.
         worktree
             .progress
             .as_ref()
@@ -1012,7 +1016,8 @@ mod daemon_precondition_tests {
         CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
         CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1,
         CodeIndexBuildProgressV1, CodeIndexFreshnessLadderInputsV1, CodeIndexFreshnessLadderV1,
-        CodeIndexNativeGraphPhaseV1, CodeIndexReadinessTargetV1, CodeIndexReadinessV1,
+        CodeIndexNativeGraphPhaseV1, CodeIndexPresealWorkPhaseV1, CodeIndexReadinessTargetV1,
+        CodeIndexReadinessV1,
         CodeIndexReadinessWaitOutcomeV1, CodeIndexReadinessWaitReadV1, CodeIndexStalenessStateV1,
         CodeIndexWorktreeFreshnessV1,
     };
@@ -1193,6 +1198,96 @@ mod daemon_precondition_tests {
             },
         );
         result
+    }
+
+    #[test]
+    fn retained_text_phases_cannot_hide_active_successor_capture() {
+        for phase in [
+            CodeIndexBuildPhaseV1::Ready,
+            CodeIndexBuildPhaseV1::GraphPublication,
+            CodeIndexBuildPhaseV1::IndexBuild,
+            CodeIndexBuildPhaseV1::Verification,
+            CodeIndexBuildPhaseV1::RelationalPreparation,
+        ] {
+            let mut worktree = attempt(CodeIndexPresealWorkPhaseV1::Capture, 4, 7, 2);
+            worktree.latest_generation_id = Some("generation.prior.sealed".to_owned());
+            let mut retained = progress(6_136, None);
+            retained.phase = phase;
+            worktree.progress = Some(retained);
+            assert!(
+                matches!(
+                    super::FirstGenerationWorkMarker::of(Some(&worktree)),
+                    Some(super::FirstGenerationWorkMarker::Preseal {
+                        owner: (3, 5, 2),
+                        epoch: 4,
+                        completed: 7,
+                        last_work_micros: Some(700),
+                        ..
+                    })
+                ),
+                "successor capture must outrank prior text phase {phase:?}"
+            );
+        }
+
+        // A real bulk commit can overlap the scoped capture guard. Its
+        // advancing durable cursor must still take precedence.
+        let mut writing = attempt(CodeIndexPresealWorkPhaseV1::Capture, 4, 7, 2);
+        let mut committed = progress(24, None);
+        committed.phase = CodeIndexBuildPhaseV1::BulkCommit;
+        writing.progress = Some(committed);
+        assert!(matches!(
+            super::FirstGenerationWorkMarker::of(Some(&writing)),
+            Some(super::FirstGenerationWorkMarker::CommittedText { .. })
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_refuses_frozen_capture_even_when_old_generation_is_ready() {
+        let mut capture = attempt(CodeIndexPresealWorkPhaseV1::Capture, 4, 7, 2);
+        capture.latest_generation_id = Some("generation.prior.sealed".to_owned());
+        let mut retained = progress(6_136, None);
+        retained.phase = CodeIndexBuildPhaseV1::Ready;
+        capture.progress = Some(retained);
+        let (result, reads) = hold_over(
+            vec![
+                status(timed_out(), warming(capture.clone())),
+                status(timed_out(), warming(capture)),
+                ready_status(),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        assert_eq!(reads, 2, "frozen capture must refuse before a later ready");
+        let (code, reason) = refusal(result);
+        assert_eq!(code, CODE_INDEX_READINESS_WAIT_TIMED_OUT);
+        assert!(
+            reason.contains("no observed capture, parse, text, or native graph work"),
+            "{reason}"
+        );
+        assert!(reason.contains("capturing 7/50 items"), "{reason}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn successor_parse_progress_survives_old_ready_generation() {
+        let mut first = attempt(CodeIndexPresealWorkPhaseV1::Capture, 4, 7, 2);
+        first.latest_generation_id = Some("generation.prior.sealed".to_owned());
+        let mut retained = progress(6_136, None);
+        retained.phase = CodeIndexBuildPhaseV1::Ready;
+        first.progress = Some(retained);
+        let mut parsed = first.clone();
+        parsed.preseal_attempt =
+            attempt(CodeIndexPresealWorkPhaseV1::ParseEvidence, 5, 1, 2).preseal_attempt;
+        let (result, reads) = hold_over(
+            vec![
+                status(timed_out(), warming(first)),
+                status(timed_out(), warming(parsed)),
+                ready_status(),
+            ],
+            Duration::ZERO,
+        )
+        .await;
+        assert!(result.is_ok(), "new parse evidence is real work: {result:?}");
+        assert_eq!(reads, 3);
     }
 
     #[test]
