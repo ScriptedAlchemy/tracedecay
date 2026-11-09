@@ -1149,7 +1149,6 @@ mod tests {
         assert_eq!(remaining, 100 - 1 - 64 - 1 - 1);
     }
 
-
     #[cfg(unix)]
     #[test]
     fn unreadable_project_root_has_its_own_partial_finding() {
