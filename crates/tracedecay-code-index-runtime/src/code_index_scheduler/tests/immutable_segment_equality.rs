@@ -4,15 +4,17 @@ use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use tracedecay_domain::{ManifestDigest, sha256_hex_suffix};
 use tracing::level_filters::LevelFilter;
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Event, Metadata, Subscriber};
 
-use super::DaemonCodeIndexPublicationStoreV1;
+use super::{DaemonCodeIndexPublicationStoreV1, StagedGenerationSegmentsV1};
 
 struct ReplaceCanonicalDuringComparison {
     canonical: PathBuf,
@@ -111,4 +113,119 @@ fn canonical_deduplication_refuses_same_byte_path_replacement_during_read() {
             .expect("recovered exact original comparison"),
         "the original bytes still deduplicate after recovery"
     );
+}
+
+struct ReplacePendingBeforeComparison {
+    pending: PathBuf,
+    displaced: PathBuf,
+    replacement: PathBuf,
+    observed: Arc<AtomicUsize>,
+}
+
+impl Subscriber for ReplacePendingBeforeComparison {
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        metadata.is_span() && metadata.name() == "code_index.generation.compare_immutable_pathnames"
+    }
+
+    fn max_level_hint(&self) -> Option<LevelFilter> {
+        Some(LevelFilter::TRACE)
+    }
+
+    fn new_span(&self, _attributes: &Attributes<'_>) -> Id {
+        Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+    fn event(&self, _event: &Event<'_>) {}
+
+    fn enter(&self, _span: &Id) {
+        assert_eq!(
+            self.observed.fetch_add(1, Ordering::SeqCst),
+            0,
+            "a single canonical comparison must run"
+        );
+        // The publisher already checked the original staged inode. Substitute
+        // a second same-byte inode BEFORE the comparator samples metadata.
+        fs::rename(&self.pending, &self.displaced).expect("retain original staged inode");
+        fs::rename(&self.replacement, &self.pending).expect("replace staged pathname");
+    }
+
+    fn exit(&self, _span: &Id) {}
+}
+
+#[test]
+fn staged_deduplication_refuses_a_swapped_temporary_before_comparison() {
+    let root = TempDir::new().expect("isolated immutable publication fixture");
+    let segments = root.path().join("segments");
+    let temporary_root = root.path().join("staging");
+    fs::create_dir(&segments).expect("canonical segment directory");
+    fs::create_dir(&temporary_root).expect("staging directory");
+    let bytes = b"authenticated nonempty segment for canonical deduplication";
+    let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes))
+        .expect("content address");
+    let suffix = sha256_hex_suffix(digest.as_str()).expect("canonical hex suffix");
+    let canonical = segments.join(format!("segment-{suffix}.json"));
+    let mut staged = StagedGenerationSegmentsV1::new();
+    let already_read = AtomicU64::new(0);
+    DaemonCodeIndexPublicationStoreV1::stage_segment(
+        &segments,
+        &temporary_root,
+        &already_read,
+        &digest,
+        bytes,
+        &mut staged,
+    )
+    .expect("real stage with authenticated writer and durability admission");
+    let temporary = staged
+        .pending
+        .get(&canonical)
+        .expect("pending content-addressed segment")
+        .clone();
+    let original = fs::symlink_metadata(&temporary).expect("authenticated inode");
+    fs::write(&canonical, bytes).expect("concurrently named canonical bytes");
+    let replacement = temporary_root.join("replacement");
+    let displaced = temporary_root.join("original");
+    fs::write(&replacement, bytes).expect("same bytes in a second inode");
+    let changed = fs::symlink_metadata(&replacement).expect("replacement inode");
+    assert_ne!((original.dev(), original.ino()), (changed.dev(), changed.ino()));
+    assert_eq!(already_read.load(Ordering::Relaxed), 0);
+
+    let observed = Arc::new(AtomicUsize::new(0));
+    let swap = ReplacePendingBeforeComparison {
+        pending: temporary.clone(),
+        displaced: displaced.clone(),
+        replacement,
+        observed: Arc::clone(&observed),
+    };
+    let result = tracing::subscriber::with_default(swap, || staged.publish());
+    assert_eq!(observed.load(Ordering::SeqCst), 1);
+    let error = result.expect_err("a new staged inode cannot authorize deduplication");
+    assert!(
+        error
+            .to_string()
+            .contains("changed during canonical deduplication"),
+        "refuse the stale staging witness: {error}"
+    );
+    assert_eq!(fs::read(&canonical).expect("original canonical bytes"), bytes);
+    assert_eq!(fs::read(&temporary).expect("replacement bytes"), bytes);
+    assert_eq!(fs::read(&displaced).expect("original staged bytes"), bytes);
+    assert!(staged.pending.contains_key(&canonical));
+
+    fs::remove_file(&temporary).expect("remove substituted fixture");
+    fs::rename(&displaced, &temporary).expect("restore the authenticated inode");
+    // Rename changes ctime even when the original inode is restored. That
+    // original witness must remain invalid; only a fresh preparation may
+    // authenticate a new epoch of staged bytes.
+    let retry = staged.publish().expect_err("a changed witness cannot be reused");
+    assert!(
+        retry
+            .to_string()
+            .contains("changed during canonical deduplication"),
+        "the previous authentication must not become reusable: {retry}"
+    );
+    assert!(staged.pending.contains_key(&canonical));
+    assert_eq!(fs::read(&canonical).expect("canonical remains intact"), bytes);
 }

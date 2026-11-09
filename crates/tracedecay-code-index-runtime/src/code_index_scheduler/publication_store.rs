@@ -1117,11 +1117,35 @@ impl StagedGenerationSegmentsV1 {
         self.pending.contains_key(final_path)
     }
 
+    // A staged inode was authenticated before the collision read. The
+    // comparator proves two CURRENT pathnames match; it cannot prove that a
+    // staged pathname still names the original authenticated bytes.
+    fn validate_authenticated_temporary(
+        temporary: &Path,
+        authenticated: Option<&std::fs::Metadata>,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        #[cfg(unix)]
+        if let Some(original) = authenticated {
+            let current = temporary
+                .symlink_metadata()
+                .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
+            if !DaemonCodeIndexPublicationStoreV1::same_unix_segment_identity(original, &current) {
+                return Err(DaemonCodeIndexPublicationStoreV1::corruption(
+                    "staged sealed segment changed during canonical deduplication",
+                ));
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = (temporary, authenticated);
+        Ok(())
+    }
+
     // A concurrent publisher can create the final name after our missing-path
     // probe. Never replace an immutable content-addressed file in that gap.
     fn publish_missing_immutable_file(
         temporary: &Path,
         final_path: &Path,
+        authenticated_temporary: Option<&std::fs::Metadata>,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
         match tracedecay_private_fs::framed_log::rename_noreplace(temporary, final_path) {
             Ok(()) => Ok(()),
@@ -1136,6 +1160,7 @@ impl StagedGenerationSegmentsV1 {
                         "concurrently published immutable code-index file does not match its content address",
                     ));
                 }
+                Self::validate_authenticated_temporary(temporary, authenticated_temporary)?;
                 std::fs::remove_file(temporary)
                     .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)
             }
@@ -1162,23 +1187,14 @@ impl StagedGenerationSegmentsV1 {
             // Bind every pending pathname to the bytes authenticated during
             // staging before any immutable canonical name is published.
             #[cfg(unix)]
-            {
-                let original = self.authenticated_segments.get(&temporary).ok_or_else(|| {
-                    DaemonCodeIndexPublicationStoreV1::corruption(
-                        "staged sealed segment lacks its authenticated inode",
-                    )
-                })?;
-                let current = temporary
-                    .symlink_metadata()
-                    .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
-                if !DaemonCodeIndexPublicationStoreV1::same_unix_segment_identity(
-                    original, &current,
-                ) {
-                    return Err(DaemonCodeIndexPublicationStoreV1::corruption(
-                        "staged sealed segment changed before immutable publication",
-                    ));
-                }
-            }
+            let authenticated = Some(self.authenticated_segments.get(&temporary).ok_or_else(|| {
+                DaemonCodeIndexPublicationStoreV1::corruption(
+                    "staged sealed segment lacks its authenticated inode",
+                )
+            })?);
+            #[cfg(not(unix))]
+            let authenticated = None;
+            Self::validate_authenticated_temporary(&temporary, authenticated)?;
             match final_path.symlink_metadata() {
                 Ok(metadata) => {
                     if !metadata.file_type().is_file()
@@ -1188,11 +1204,19 @@ impl StagedGenerationSegmentsV1 {
                             "existing sealed segment does not match its content address",
                         ));
                     }
+                    // The equality read can observe a new, byte-identical
+                    // temporary inode after our pre-comparison witness check.
+                    // Never discard the authenticated staged copy on that basis.
+                    Self::validate_authenticated_temporary(&temporary, authenticated)?;
                     std::fs::remove_file(&temporary)
                         .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    Self::publish_missing_immutable_file(&temporary, &final_path)?;
+                    Self::publish_missing_immutable_file(
+                        &temporary,
+                        &final_path,
+                        authenticated,
+                    )?;
                 }
                 Err(error) => return Err(DaemonCodeIndexPublicationStoreV1::unavailable(error)),
             }
@@ -1973,10 +1997,18 @@ impl DaemonCodeIndexPublicationStoreV1 {
         final_path: &Path,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
         let temporary = temporary.into_temp_path();
-        StagedGenerationSegmentsV1::publish_missing_immutable_file(temporary.as_ref(), final_path)
+        StagedGenerationSegmentsV1::publish_missing_immutable_file(
+            temporary.as_ref(),
+            final_path,
+            None,
+        )
     }
 
     fn files_equal(left: &Path, right: &Path) -> Result<bool, CodeIndexPublicationStoreErrorV1> {
+        // Measure the endpoint-authorized pathname opens as well as the byte
+        // loop, which has its own narrower span below.
+        let _pathname_span =
+            tracing::trace_span!("code_index.generation.compare_immutable_pathnames").entered();
         let left_metadata = left.symlink_metadata().map_err(Self::unavailable)?;
         let right_metadata = right.symlink_metadata().map_err(Self::unavailable)?;
         if !left_metadata.file_type().is_file() || !right_metadata.file_type().is_file() {

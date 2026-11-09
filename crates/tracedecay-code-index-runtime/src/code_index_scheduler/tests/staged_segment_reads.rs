@@ -27,7 +27,7 @@ use tracedecay_domain::{ManifestDigest, ProjectId, SanitizerRevision, sha256_hex
 use super::{
     DaemonCodeIndexPreparationStateV1, DaemonCodeIndexPreparationV1,
     DaemonCodeIndexPublicationStoreV1, MAX_STAGED_SEGMENT_READ_HANDLES,
-    PREPARED_SEGMENT_DIGEST_OPENS, SharedCodeIndexBytePoolV1,
+    PREPARED_SEGMENT_DIGEST_OPENS, SharedCodeIndexBytePoolV1, StagedGenerationSegmentsV1,
 };
 use crate::code_index_scheduler::tests::GitFixture;
 use crate::code_index_scheduler::{CodeIndexReconcileOutcomeV1, CodeIndexWorktreeSchedulerV1};
@@ -1215,7 +1215,7 @@ fn staged_segment_publish_never_overwrites_a_concurrent_canonical_name() {
     std::fs::write(&canonical, original).expect("competing canonical bytes");
     std::fs::write(&temporary, changed).expect("staged bytes");
     assert!(
-        super::StagedGenerationSegmentsV1::publish_missing_immutable_file(&temporary, &canonical)
+        StagedGenerationSegmentsV1::publish_missing_immutable_file(&temporary, &canonical, None)
             .is_err(),
         "a race must refuse, not replace a different immutable segment"
     );
@@ -1231,7 +1231,7 @@ fn staged_segment_publish_never_overwrites_a_concurrent_canonical_name() {
     // When the competing publisher installed identical bytes, deduplication
     // may finish without another publication or destroying canonical bytes.
     std::fs::write(&temporary, original).expect("identical staged bytes");
-    super::StagedGenerationSegmentsV1::publish_missing_immutable_file(&temporary, &canonical)
+    StagedGenerationSegmentsV1::publish_missing_immutable_file(&temporary, &canonical, None)
         .expect("identical concurrent publication is safe to deduplicate");
     assert!(!temporary.exists());
     assert_eq!(
@@ -1241,7 +1241,7 @@ fn staged_segment_publish_never_overwrites_a_concurrent_canonical_name() {
 
     std::fs::remove_file(&canonical).expect("vacate canonical name");
     std::fs::write(&temporary, changed).expect("new staged segment");
-    super::StagedGenerationSegmentsV1::publish_missing_immutable_file(&temporary, &canonical)
+    StagedGenerationSegmentsV1::publish_missing_immutable_file(&temporary, &canonical, None)
         .expect("missing canonical name accepts one atomic publication");
     assert!(!temporary.exists());
     assert_eq!(
