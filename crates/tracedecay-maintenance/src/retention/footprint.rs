@@ -487,13 +487,22 @@ fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
                     ProfileFamilyV1::Wal,
                 )
             })
-            .or_else(|| {
-                (inner.len() == 1 && inner[0].ends_with(GRAPH_CONTAINER_SUFFIX)).then(|| {
-                    (
-                        format!("{store_key}/{}", inner[0]),
-                        ProfileFamilyV1::GraphContainer,
-                    )
-                })
+            .or_else(|| match inner {
+                [name] => {
+                    // Verified and spill sidecars consume the same container
+                    // footprint as the primary .grafeo file.
+                    let stem = name
+                        .strip_suffix(".verified")
+                        .or_else(|| name.strip_suffix(".spill"))
+                        .unwrap_or(name);
+                    stem.ends_with(GRAPH_CONTAINER_SUFFIX).then(|| {
+                        (
+                            format!("{store_key}/{stem}"),
+                            ProfileFamilyV1::GraphContainer,
+                        )
+                    })
+                }
+                _ => None,
             });
         return Some(FootprintKeys {
             primary: (store_key, ProfileFamilyV1::ProjectStore),
@@ -1202,6 +1211,66 @@ mod tests {
         let statement = finding.coverage().statement();
         assert!(statement.contains("WAL "), "{statement}");
         assert!(statement.contains("1 unreadable entries"), "{statement}");
+    }
+
+    #[test]
+    fn project_container_bound_includes_verified_and_spill_sidecars() {
+        let temp = tempfile::tempdir().expect("footprint fixture");
+        let profile = temp.path().join("profile");
+        let project = "projects/proj_sidecars";
+        for (name, bytes) in [
+            ("graph.grafeo", 5),
+            ("graph.grafeo.verified", 7),
+            ("graph.grafeo.spill", 11),
+            ("graph.grafeo.wal/segment", 13),
+            ("other.grafeo.spill", 17),
+            ("not-a-graph.grafeo.tmp", 19),
+        ] {
+            sized(&profile.join(project).join(name), bytes);
+        }
+        let container_key = format!("{project}/graph.grafeo");
+        let sibling_key = format!("{project}/other.grafeo");
+        let wal_key = format!("{project}/graph.grafeo.wal");
+        let overrides = BTreeMap::from([(container_key.clone(), 10), (sibling_key.clone(), 16)]);
+        let footprint = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
+        assert_eq!(footprint.total_bytes, 72);
+        assert_eq!(entry(&footprint, project).bytes, 72);
+        assert_eq!(
+            entry(&footprint, project)
+                .kinds
+                .expect("physical project-kind census")
+                .graph_container,
+            53
+        );
+        assert_eq!(
+            entry(&footprint, &container_key).family,
+            ProfileFamilyV1::GraphContainer
+        );
+        assert_eq!(entry(&footprint, &container_key).bytes, 23);
+        assert_eq!(entry(&footprint, &sibling_key).bytes, 17);
+        assert_eq!(entry(&footprint, &wal_key).family, ProfileFamilyV1::Wal);
+        assert_eq!(entry(&footprint, &wal_key).bytes, 13);
+        assert_eq!(
+            footprint.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Complete
+        );
+
+        let observed = findings(&footprint);
+        assert_eq!(
+            observed[&container_key].finding().state(),
+            DoctorEvidenceStateV1::Degraded,
+            "the former main-file-only overlay would falsely report healthy"
+        );
+        assert_eq!(
+            observed[&sibling_key].finding().state(),
+            DoctorEvidenceStateV1::Degraded,
+            "an orphaned spill still consumes a named container bound"
+        );
+        assert_eq!(
+            observed[&wal_key].finding().state(),
+            DoctorEvidenceStateV1::HealthyCompleteCoverage,
+            "WAL pressure remains its own bound, not double-charged to containers"
+        );
     }
 
     #[test]
