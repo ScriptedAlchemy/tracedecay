@@ -173,6 +173,12 @@ runs:
         sudo chmod 0440 /etc/sudoers.d/tailscale-ci-network
         sudo visudo -cf /etc/sudoers.d/tailscale-ci-network
 
+    - name: Read the hosted Mac's Ethernet resolver settings
+      id: macos-dns
+      if: runner.os == 'macOS' && inputs.tailscale-client-id != ''
+      shell: bash
+      run: python3 "$GITHUB_ACTION_PATH/macos_dns.py" read >> "$GITHUB_OUTPUT"
+
     - name: Connect to the private Bazel fleet
       id: tailscale
       if: inputs.tailscale-client-id != ''
@@ -186,6 +192,15 @@ runs:
         # Public dependency downloads keep the hosted runner's DNS resolver.
         args: --accept-dns=false
         ping: ubuntu-main
+
+    # The pinned Tailscale action explicitly reconfigures Ethernet when MagicDNS
+    # is enabled on macOS, even when tailscale up receives --accept-dns=false.
+    - name: Restore the hosted Mac's Ethernet resolver settings
+      if: always() && steps.macos-dns.outcome == 'success'
+      shell: bash
+      env:
+        ETHERNET_DNS: ${{ steps.macos-dns.outputs.settings }}
+      run: python3 "$GITHUB_ACTION_PATH/macos_dns.py" restore
 
     - name: Select private executor or hosted execution
       id: fleet
@@ -208,13 +223,23 @@ runs:
         fi
         python3 "$GITHUB_ACTION_PATH/configure_fleet.py"
 
+    - name: Stage hermetic launchers from the GitHub release API
+      id: linux-launchers
+      if: runner.environment == 'github-hosted' && runner.os == 'Linux' && runner.arch == 'X64'
+      shell: bash
+      run: |
+        distdir=$(mktemp -d "$RUNNER_TEMP/hermetic-launcher.XXXXXXXX")
+        bash "$GITHUB_ACTION_PATH/stage_linux_launchers.sh" "$distdir"
+        printf 'bazelrc=common --distdir=%s\n' "$distdir" >> "$GITHUB_OUTPUT"
+
     - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
       with:
         bazelisk-cache: true
         repository-cache: true
         disk-cache: false
-        bazelrc: >-
+        bazelrc: |
           build --disk_cache=${{ steps.fleet.outputs.enabled != 'true' && steps.disk-cache-config.outputs.path || '' }}
+          ${{ steps.linux-launchers.outputs.bazelrc }}
         cache-save: ${{ github.ref == 'refs/heads/master' && inputs.cache-save == 'true' }}
         # Windows build-script runfiles nest each vendored crate's sources
         # under its repository name twice; keep the output base short.
