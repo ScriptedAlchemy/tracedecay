@@ -422,6 +422,10 @@ struct PublicationPointerMemoV1 {
     size: u64,
     digest: String,
     pointer: DurablePublicationPointerV1,
+    // Retain the authenticated inode, not just its digest. An ordinary
+    // historical range read must not pay another endpoint-authorized open.
+    #[cfg(unix)]
+    file: Option<File>,
 }
 
 #[derive(Clone)]
@@ -2176,6 +2180,52 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
         let mtime = metadata.modified().ok();
         let size = metadata.len();
+        // Verify a cached pointer through its existing descriptor. Metadata
+        // witnesses both sides of the read, including same-byte inode swaps,
+        // while hashing the current bytes detects in-place changes even on
+        // filesystems with coarse timestamps. An atomic replacement misses
+        // this inode and falls through to the ordinary cold validation.
+        #[cfg(unix)]
+        {
+            let mut cached = self
+                .pointer_memo
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(entry) = cached.as_mut()
+                && let Some(file) = entry.file.as_mut()
+            {
+                let before = file.metadata().map_err(Self::map_pointer_io)?;
+                if Self::same_unix_segment_identity(&metadata, &before) {
+                    file.seek(SeekFrom::Start(0))
+                        .map_err(Self::map_pointer_io)?;
+                    let mut current = Vec::new();
+                    (&mut *file)
+                        .take(MAX_DURABLE_PUBLICATION_POINTER_BYTES + 1)
+                        .read_to_end(&mut current)
+                        .map_err(Self::map_pointer_io)?;
+                    let after = file.metadata().map_err(Self::map_pointer_io)?;
+                    let named_after = self
+                        .active_path
+                        .symlink_metadata()
+                        .map_err(Self::map_pointer_io)?;
+                    if !Self::same_unix_segment_identity(&before, &after)
+                        || !Self::same_unix_segment_identity(&before, &named_after)
+                    {
+                        return Err(Self::corruption(
+                            "active code-generation pointer changed during pinned validation",
+                        ));
+                    }
+                    if Self::state_digest(&current) != entry.digest {
+                        return Err(Self::corruption(
+                            "active code-generation pointer bytes changed while pinned",
+                        ));
+                    }
+                    entry.mtime = mtime;
+                    entry.size = size;
+                    return Ok(Some((entry.pointer.clone(), current)));
+                }
+            }
+        }
         // Size and mtime are hints, not identity. Text-artifact attach writes
         // a fixed-width pointer through another path, and a 1-second mtime
         // filesystem can leave both unchanged while the bytes move. The memo
@@ -2231,6 +2281,10 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 }
                 memo.mtime = mtime;
                 memo.size = size;
+                #[cfg(unix)]
+                {
+                    memo.file = Some(opened_pointer);
+                }
                 return Ok(Some((memo.pointer.clone(), bytes)));
             }
         }
@@ -2377,6 +2431,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 size,
                 digest,
                 pointer: pointer.clone(),
+                #[cfg(unix)]
+                file: Some(opened_pointer),
             });
         }
         Ok(Some((pointer, bytes)))
@@ -2429,6 +2485,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 size: metadata.len(),
                 digest: Self::state_digest(bytes),
                 pointer: pointer.clone(),
+                #[cfg(unix)]
+                file: persisted.try_clone().ok(),
             });
         } else {
             // Never preserve an older memo after an unverified replacement.

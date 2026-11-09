@@ -2436,10 +2436,24 @@ fn retained_history_reads_across_requests_share_one_segment_open_and_refuse_repl
     drop(publisher);
 
     let cold = target_store(target_root.path(), &fixture);
+    let (pointer_sender, pointer_receiver) = std::sync::mpsc::channel();
+    let mut pointer_watcher =
+        notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            let _ = pointer_sender.send(event);
+        })
+        .expect("native pointer open observer");
+    pointer_watcher
+        .watch(&cold.active_path, notify::RecursiveMode::NonRecursive)
+        .expect("watch the authenticated active pointer");
     let pointer = cold
         .read_publication_pointer()
         .expect("read installed pointer")
         .expect("active generation");
+    assert_eq!(
+        observed_pointer_opens(&pointer_receiver),
+        1,
+        "cold publication pointer authentication requires one kernel open"
+    );
     let entry = pointer
         .generation_index
         .iter()
@@ -2497,6 +2511,17 @@ fn retained_history_reads_across_requests_share_one_segment_open_and_refuse_repl
         1,
         "one whole and sixteen historical reads must require one segment open"
     );
+    assert_eq!(
+        observed_pointer_opens(&pointer_receiver),
+        0,
+        "17 historical reads must reuse the pointer's authenticated descriptor"
+    );
+    drop(File::open(&cold.active_path).expect("positive pointer pathname-open control"));
+    assert_eq!(
+        observed_pointer_opens(&pointer_receiver),
+        1,
+        "kernel observer must detect an independently opened pointer"
+    );
     drop(File::open(&path).expect("control pathname open"));
     assert_eq!(
         observed_named_opens(&receiver, &path),
@@ -2522,6 +2547,11 @@ fn retained_history_reads_across_requests_share_one_segment_open_and_refuse_repl
         observed_named_opens(&receiver, &path),
         0,
         "a cloned publication store must not repeat the endpoint open"
+    );
+    assert_eq!(
+        observed_pointer_opens(&pointer_receiver),
+        0,
+        "a clone must share the pinned publication pointer without another open"
     );
 
     let previous = target_root.path().join("retained-history-original-inode");
