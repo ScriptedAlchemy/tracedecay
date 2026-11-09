@@ -2584,7 +2584,10 @@ mod tests {
                 assert_eq!(result.unwrap_err(), interruption);
                 assert_eq!(probes.load(Ordering::SeqCst), late_probe + 1);
                 let actual_bytes = file.stream_position().unwrap();
-                assert!(actual_bytes > 0, "interruption must follow actual manifest I/O");
+                assert!(
+                    actual_bytes > 0,
+                    "interruption must follow actual manifest I/O"
+                );
                 if late_probe == 0 {
                     assert!(actual_bytes <= SEAL_READ_CHECK_BYTES as u64);
                 } else {
