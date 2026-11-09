@@ -366,8 +366,8 @@ impl InitializationDirectory {
             return Ok(None);
         };
         // A persistent inode number alone cannot distinguish inode reuse after
-        // process death. A filesystem with no kernel allocation generation can publish in
-        // the original process, but must preserve interrupted preparation.
+        // process death. A filesystem without allocation generations can publish
+        // in the original process, but must preserve interrupted preparation.
         if !prepared.has_durable_generations() {
             return Err(ambiguous(
                 "SQLite preparation has no durable file generation for recovery",
@@ -460,8 +460,18 @@ impl InitializationDirectory {
         capability_dir::sync_directory(&self.parent)
     }
 
+    fn require_released_receipt(directory: &Path) -> io::Result<()> {
+        if crate::storage::durable_directory_lock_has_data(directory)? {
+            return Err(ambiguous(
+                "SQLite preparation receipt requires writable reconciliation",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn verify_read_only_handoff(destination: &Path) -> io::Result<()> {
         let directory = Self::path(destination);
+        Self::require_released_receipt(&directory)?;
         let pin = match open_private_directory(&directory) {
             Ok(pin) => pin,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -480,35 +490,40 @@ impl InitializationDirectory {
                 ));
             }
         }
-        if crate::storage::durable_directory_lock_has_data(&directory)? {
-            return Err(ambiguous(
-                "SQLite preparation receipt requires writable reconciliation",
-            ));
-        }
         Ok(())
     }
 
     pub(super) fn recover_published(destination: &Path) -> io::Result<()> {
         let directory = Self::path(destination);
         if !present(&directory)? {
-            return Ok(());
+            return Self::require_released_receipt(&directory);
         }
         let mut stage = match Self::acquire(destination.to_owned(), false) {
             Ok(stage) => stage,
             Err(error) if error.kind() == io::ErrorKind::NotFound && !present(&directory)? => {
-                return Ok(());
+                return Self::require_released_receipt(&directory);
             }
             Err(error) => return Err(error),
         };
+        let mut pins = Vec::new();
         if let Some(prepared) = &stage.prepared {
-            if prepared.main.allocation.is_none() {
+            if !prepared.has_durable_generations() {
                 return Err(ambiguous(
                     "SQLite preparation has no durable file generation for recovery",
                 ));
             }
-            prepared
-                .main
-                .pin_at(&stage.parent, leaf(destination)?, false)?;
+            pins.push(
+                prepared
+                    .main
+                    .pin_at(&stage.parent, leaf(destination)?, false)?,
+            );
+            for (suffix, identity) in SIDECARS.into_iter().zip(&prepared.sidecars) {
+                pins.push(identity.pin_at(
+                    &stage.parent,
+                    leaf(&with_suffix(destination, suffix))?,
+                    true,
+                )?);
+            }
         }
         stage.retire()
     }
@@ -714,6 +729,55 @@ mod tests {
     }
 
     #[test]
+    fn publication_requires_its_original_directory_and_schema() {
+        let root = TempDir::new().unwrap();
+        let destination = root.path().join("sessions.db");
+        let mut stage = InitializationDirectory::begin(destination.clone()).unwrap();
+        let schema = stage.database();
+        seed(&schema, 7);
+        let identity = crate::db::sqlite_generation_identity(&schema).unwrap();
+        let files = owned_files(&stage);
+        let other = root.path().join("independent-directory");
+        create_private_directory(&other).unwrap();
+        let independent = other.join("schema.sqlite");
+        seed(&independent, 99);
+        let bytes = fs::read(&independent).unwrap();
+        stage.directory = other;
+        assert_eq!(
+            stage.publish(identity, files).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(!destination.exists());
+        for suffix in SIDECARS {
+            assert!(!with_suffix(&destination, suffix).exists());
+        }
+        assert_eq!(fs::read(&independent).unwrap(), bytes);
+        assert_eq!(read_value(&schema), 7);
+    }
+
+    #[test]
+    fn missing_stage_with_an_outstanding_receipt_denies_handoff_and_reset() {
+        let root = TempDir::new().unwrap();
+        let destination = root.path().join("sessions.db");
+        seed(&destination, 7);
+        let directory = InitializationDirectory::path(&destination);
+        let mut lease = crate::storage::try_lock_durable_directory(&directory).unwrap();
+        lease.write_all(b"unresolved preparation").unwrap();
+        drop(lease);
+        assert!(InitializationDirectory::verify_read_only_handoff(&destination).is_err());
+        assert!(InitializationDirectory::recover_published(&destination).is_err());
+        assert!(lock_offline_sqlite_family_for_reset(&destination).is_err());
+        assert!(!directory.exists());
+        let mut lease = crate::storage::try_lock_existing_durable_directory(&directory)
+            .unwrap()
+            .unwrap();
+        let mut receipt = String::new();
+        lease.read_to_string(&mut receipt).unwrap();
+        assert_eq!(receipt, "unresolved preparation");
+        assert_eq!(read_value(&destination), 7);
+    }
+
+    #[test]
     fn preparation_refuses_unclaimed_sidecar_handles_without_modifying_the_family() {
         let root = TempDir::new().unwrap();
         let destination = root.path().join("sessions.db");
@@ -738,7 +802,7 @@ mod tests {
     /// A competing process may rename the private directory despite the
     /// cooperative lease and install a symlink at the old path. Failed-start
     /// cleanup must preserve occupied entries in the pinned directory and never
-    /// the distinct valid SQLite database beneath that replacement symlink.
+    /// touch the distinct SQLite database beneath that replacement symlink.
     #[cfg(unix)]
     #[test]
     fn failed_initialization_cleanup_uses_pinned_directory_after_swap() {
