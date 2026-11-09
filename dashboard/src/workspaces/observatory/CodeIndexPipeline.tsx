@@ -205,11 +205,17 @@ export function CodeIndexAttemptReading({
             {graph.active ? 'Graph writer' : 'Graph milestones'}
           </dt>
           <dd className="text-right text-text-secondary">
-            {graph.phase?.replaceAll('_', ' ') ?? 'awaiting first update'} ·{' '}
-            {formatCount(graph.encoded_entities)} entities encoded ·{' '}
-            {formatCount(graph.encoded_relations)} relations encoded ·{' '}
-            {formatCount(graph.committed_stage_pages)} pages committed ·{' '}
-            {formatCount(graph.committed_compact_segments)} segments committed
+            {graph.last_progress_micros == null ? (
+              'awaiting first observed native graph work'
+            ) : (
+              <>
+                {graph.phase?.replaceAll('_', ' ') ?? 'work phase not reported'} ·{' '}
+                {formatCount(graph.encoded_entities)} entities encoded ·{' '}
+                {formatCount(graph.encoded_relations)} relations encoded ·{' '}
+                {formatCount(graph.committed_stage_pages)} pages committed ·{' '}
+                {formatCount(graph.committed_compact_segments)} segments committed
+              </>
+            )}
           </dd>
           {graphQuiet && (
             <>

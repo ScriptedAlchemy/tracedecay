@@ -149,6 +149,43 @@ describe('code-index activity polling', () => {
     expect(screen.queryByText('awaiting first observed preseal work')).toBeNull();
   });
 
+  it('does not treat a newly admitted native writer as encoded or committed work', () => {
+    // This is the exact admission shape from the real native graph slot begin:
+    // the producer has not observed any compact row or durable receipt.
+    const admitted: NonNullable<CodeIndexWorktreeFreshnessV1['native_graph_progress']> = {
+      generation_id: GENERATION, sealed_graph_digest: 'sha256:graph',
+      daemon_incarnation: 7, producer_incarnation: 9, attempt_sequence: 1,
+      progress_epoch: 1, phase: null,
+      encoded_entities: 0, total_entities: null,
+      encoded_relations: 0, total_relations: null,
+      committed_stage_pages: 0, committed_stage_mutations: 0, committed_stage_bytes: 0,
+      committed_compact_segments: 0, committed_compact_bytes: 0,
+      last_progress_micros: null, active: true,
+    };
+    const initial = freshness({ native_graph_progress: admitted }, 'loading');
+    initial.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(initial.envelope.payload);
+    const view = render(<CodeIndexPipeline result={initial} pending={false} scopeKey="project" />);
+    expect(screen.getByText('Graph writer')).toBeTruthy();
+    expect(screen.getByText('awaiting first observed native graph work')).toBeTruthy();
+    expect(screen.queryByText(/0 entities encoded/)).toBeNull();
+    expect(screen.queryByText(/0 pages committed/)).toBeNull();
+    expect(screen.queryByText(/no observed native graph work for/)).toBeNull();
+
+    const observed = freshness({
+      native_graph_progress: {
+        ...admitted, progress_epoch: 2, phase: 'compact_encoding',
+        encoded_entities: 3, total_entities: 10,
+        last_progress_micros: OBSERVED_AT,
+      },
+    }, 'loading');
+    observed.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(observed.envelope.payload);
+    view.rerender(<CodeIndexPipeline result={observed} pending={false} scopeKey="project" />);
+    expect(screen.getByText(
+      'compact encoding · 3 entities encoded · 0 relations encoded · 0 pages committed · 0 segments committed',
+    )).toBeTruthy();
+    expect(screen.queryByText('awaiting first observed native graph work')).toBeNull();
+  });
+
   it('shows pre-seal work before the first text page commits', () => {
     const result = freshness({ preseal_attempt: {
       daemon_incarnation: 1, producer_incarnation: 2, attempt_sequence: 3,

@@ -153,6 +153,27 @@ describe('Code index freshness', () => {
     )).toBeTruthy();
   });
 
+  it('does not report native graph encoding or durable pages before an actual writer callback', async () => {
+    renderFreshness('loading', {
+      worktrees: [{
+        ...worktree(),
+        native_graph_progress: {
+          generation_id: 'generation.4f21c9', sealed_graph_digest: 'sha256:graph',
+          daemon_incarnation: 7, producer_incarnation: 9, attempt_sequence: 1,
+          progress_epoch: 1, phase: null, active: true, last_progress_micros: null,
+          encoded_entities: 0, total_entities: null, encoded_relations: 0, total_relations: null,
+          committed_stage_pages: 0, committed_stage_mutations: 0, committed_stage_bytes: 0,
+          committed_compact_segments: 0, committed_compact_bytes: 0,
+        },
+      }],
+      note: 'live daemon scheduler state',
+    });
+    expect(await screen.findByText('awaiting first observed native graph work')).toBeTruthy();
+    expect(screen.queryByText(/0 entities encoded/)).toBeNull();
+    expect(screen.queryByText(/0 pages committed/)).toBeNull();
+    expect(screen.queryByText(/no observed native graph work for/)).toBeNull();
+  });
+
   it('does not present preseal admission as a measured capture', async () => {
     renderFreshness('loading', {
       worktrees: [{
