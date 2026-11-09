@@ -1187,8 +1187,8 @@ fn restart_recovery_adopts_or_discards_the_on_disk_artifact() {
     assert!(registered.close().unwrap());
     drop(registered);
 
-    // Tamper with the receipt: recovery must discard the artifact and serve
-    // from the staging database.
+    // Tamper with the receipt: recovery must refuse adoption and serve from
+    // staging, without deleting bytes that no longer prove our ownership.
     let root = sealed_store_root(temp.path());
     let mut tampered = None;
     for entry in std::fs::read_dir(&root).unwrap().map(Result::unwrap) {
@@ -1200,6 +1200,7 @@ fn restart_recovery_adopts_or_discards_the_on_disk_artifact() {
         }
     }
     let tampered = tampered.expect("the sealed artifact directory must exist");
+    let tampered_receipt = std::fs::read(tampered.join("sealed.json")).unwrap();
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let (control, probe) = control_and_probe();
     let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
@@ -1217,8 +1218,13 @@ fn restart_recovery_adopts_or_discards_the_on_disk_artifact() {
         "a tampered artifact must not be adopted"
     );
     assert!(
-        !tampered.exists(),
-        "a tampered artifact must be discarded from disk"
+        tampered.is_dir(),
+        "recovery must preserve an artifact with an unverified receipt"
+    );
+    assert_eq!(
+        std::fs::read(tampered.join("sealed.json")).unwrap(),
+        tampered_receipt,
+        "recovery must not modify the unverified receipt"
     );
     assert_snapshot_reads(&snapshot, &identity, "durable");
 }
