@@ -173,7 +173,16 @@ impl McpServer {
         tool_name: &str,
         net_saved_tokens: u64,
         raw_file_tokens: u64,
-    ) {
+    ) -> Option<tokio::sync::oneshot::Receiver<bool>> {
+        // The independently scheduled analytics writer may report positive
+        // savings only after this exact response's store transaction commits.
+        // A dropped task closes the channel and means refusal, not success.
+        let (commit_sender, commit_receiver) = if net_saved_tokens == 0 {
+            (None, None)
+        } else {
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            (Some(sender), Some(receiver))
+        };
         // An unreadable baseline suppresses only the approximate display cache.
         // It must not disable future durable deltas if that read failure clears.
         let persist = (net_saved_tokens != 0).then(|| {
@@ -201,6 +210,9 @@ impl McpServer {
             } else {
                 0
             };
+            if let Some(sender) = commit_sender {
+                let _ = sender.send(committed_saved_tokens == net_saved_tokens);
+            }
             // The monitor entry opens, locks, and mmaps a file; keep that
             // off the async workers.
             // A server without an owning profile has no monitor ring.
@@ -228,6 +240,7 @@ impl McpServer {
                 }
             }
         });
+        commit_receiver
     }
 
     /// Resolves once every savings-ledger write spawned so far has
@@ -553,7 +566,7 @@ mod tests {
             .expect("tool call should produce a response");
         server.ledger_writes_settled().await;
         let accounted = tokens_saved.load(Ordering::Acquire);
-        server.spawn_token_accounting_persist(
+        let _ = server.spawn_token_accounting_persist(
             server.cg_snapshot().await,
             &project_root,
             "tracedecay_search",
@@ -588,7 +601,7 @@ mod tests {
         )
         .await;
 
-        first.spawn_token_accounting_persist(
+        let _ = first.spawn_token_accounting_persist(
             first.cg_snapshot().await,
             &project_root,
             "tracedecay_search",
@@ -598,7 +611,7 @@ mod tests {
         first.ledger_writes_settled().await;
         // The second server was created with the same baseline before the
         // first credit. Its own completion must add to the committed total.
-        second.spawn_token_accounting_persist(
+        let _ = second.spawn_token_accounting_persist(
             second.cg_snapshot().await,
             &project_root,
             "tracedecay_search",
@@ -650,7 +663,7 @@ mod tests {
             .data_dir()
             .to_path_buf();
 
-        server.spawn_token_accounting_persist(
+        let _ = server.spawn_token_accounting_persist(
             server.cg_snapshot().await,
             &project_root,
             "tracedecay_search",
@@ -680,7 +693,7 @@ mod tests {
             .record_token_savings(u64::MAX - 7)
             .await
             .expect("seed a durable lifetime overflow boundary");
-        server.spawn_token_accounting_persist(
+        let _ = server.spawn_token_accounting_persist(
             server.cg_snapshot().await,
             &project_root,
             "tracedecay_search",
@@ -713,6 +726,136 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refused_counter_commit_never_credits_independent_savings_history() {
+        use tracedecay_mcp::tools::response_trailers::ToolTokenAccounting;
+        use tracedecay_runtime_core::db::engine::Executor as _;
+
+        let (cg, _project, authority) =
+            super::super::writer_test_support::init_indexed_repo().await;
+        let project_root = cg.project_root().to_path_buf();
+        let server = super::super::McpServer::new_with_context(
+            super::super::writer_test_support::registered_context(cg, &authority),
+        )
+        .await;
+        let accounting_db = server
+            .accounting_db
+            .as_ref()
+            .expect("registered accounting writer")
+            .clone();
+        let normal = ToolTokenAccounting {
+            raw_file_tokens: 20,
+            response_tokens: 13,
+        };
+        let result = tracedecay_mcp::ToolResult::new(json!({"content": []}), Vec::new());
+
+        let first_commit = server.spawn_token_accounting_persist(
+            server.cg_snapshot().await,
+            &project_root,
+            "tracedecay_search",
+            normal.net_saved_tokens(),
+            normal.raw_file_tokens,
+        );
+        server.spawn_success_analytics(
+            &project_root,
+            "tracedecay_search",
+            &json!("request.first"),
+            &json!({}),
+            &None,
+            true,
+            None,
+            normal,
+            &result,
+            None,
+            None,
+            first_commit,
+        );
+        server.ledger_writes_settled().await;
+        let project_key = project_root.to_str().expect("UTF-8 fixture project");
+        let history = accounting_db
+            .sum_savings(Some(project_key), 0)
+            .await
+            .expect("registered savings history");
+        assert_eq!(history.saved_tokens, 7);
+        assert_eq!(history.calls, 1);
+
+        // A real checked-add failure prevents the second response's positive
+        // durable credit. The independent analytics writer used to race ahead
+        // and persist that failed response as another saved-token event.
+        server
+            .cg_snapshot()
+            .await
+            .record_token_savings(u64::MAX - 7)
+            .await
+            .expect("seed canonical overflow boundary");
+        let refused = ToolTokenAccounting {
+            raw_file_tokens: 30,
+            response_tokens: 29,
+        };
+        let second_commit = server.spawn_token_accounting_persist(
+            server.cg_snapshot().await,
+            &project_root,
+            "tracedecay_search",
+            refused.net_saved_tokens(),
+            refused.raw_file_tokens,
+        );
+        server.spawn_success_analytics(
+            &project_root,
+            "tracedecay_search",
+            &json!("request.refused"),
+            &json!({}),
+            &None,
+            true,
+            None,
+            refused,
+            &result,
+            None,
+            None,
+            second_commit,
+        );
+        server.ledger_writes_settled().await;
+
+        let history = accounting_db
+            .sum_savings(Some(project_key), 0)
+            .await
+            .expect("savings history after refused commit");
+        assert_eq!(history.saved_tokens, 7, "failed commit cannot add savings");
+        assert_eq!(history.calls, 1, "failed commit cannot add a savings row");
+        assert_eq!(
+            server.cg_snapshot().await.get_tokens_saved().await.unwrap(),
+            u64::MAX,
+            "refused accounting cannot alter the canonical project counter"
+        );
+
+        // Cost and raw activity remain independently observable; their
+        // metadata must not claim a saving that failed its canonical commit.
+        let snapshot = accounting_db.read_snapshot().await.expect("analytics snapshot");
+        let mut rows = snapshot
+            .query(
+                "SELECT metadata_json FROM analytics_events
+                 WHERE event_kind = 'mcp_tool_call' AND tool_name = 'tracedecay_search'
+                 ORDER BY id",
+                (),
+            )
+            .await
+            .expect("registered analytics query");
+        let mut metadata = Vec::new();
+        while let Some(row) = rows.next().await.expect("analytics row") {
+            let encoded = row.get::<String>(0).expect("metadata JSON");
+            metadata.push(
+                serde_json::from_str::<serde_json::Value>(&encoded)
+                    .expect("valid analytics metadata"),
+            );
+        }
+        assert_eq!(metadata.len(), 2, "both tool activities remain visible");
+        assert_eq!(metadata[0]["tokens_saved"], json!(7));
+        assert_eq!(metadata[1]["tokens_saved"], json!(0));
+        assert_eq!(metadata[1]["savings_commit"], json!("refused"));
+        assert_eq!(metadata[1]["before_tokens"], json!(30));
+        assert_eq!(metadata[1]["after_tokens"], json!(29));
+        server.shutdown_background_tasks().await;
+    }
+
+    #[tokio::test]
     async fn a_failed_accounting_commit_does_not_advance_the_display_cache() {
         let (cg, _project, authority) =
             super::super::writer_test_support::init_indexed_repo().await;
@@ -722,7 +865,7 @@ mod tests {
             super::super::writer_test_support::registered_context(cg, &authority),
         )
         .await;
-        server.spawn_token_accounting_persist(
+        let _ = server.spawn_token_accounting_persist(
             server.cg_snapshot().await,
             &project_root,
             "tracedecay_search",

@@ -1057,21 +1057,21 @@ impl McpServer {
         cg: &Arc<TraceDecay>,
         tool_name: &str,
         result: &mut ToolResult,
-    ) -> ToolTokenAccounting {
+    ) -> (ToolTokenAccounting, Option<tokio::sync::oneshot::Receiver<bool>>) {
         // A result the shared renderer already accounted carries its figures
         // and footer; only persist them.
         let accounting = match result.token_accounting() {
             Some(accounting) => accounting,
             None => self.account_unrendered_result(cg, result).await,
         };
-        self.spawn_token_accounting_persist(
+        let commitment = self.spawn_token_accounting_persist(
             Arc::clone(cg),
             cg.project_root(),
             tool_name,
             accounting.net_saved_tokens(),
             accounting.raw_file_tokens,
         );
-        accounting
+        (accounting, commitment)
     }
 
     async fn account_unrendered_result(
@@ -1096,7 +1096,7 @@ impl McpServer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn spawn_success_analytics(
+    pub(super) fn spawn_success_analytics(
         &self,
         accounting_project_root: &Path,
         tool_name: &str,
@@ -1109,6 +1109,7 @@ impl McpServer {
         result: &ToolResult,
         connection_client_name: Option<&str>,
         connection_instance_id: Option<&str>,
+        commit_confirmation: Option<tokio::sync::oneshot::Receiver<bool>>,
     ) {
         let analytics_outcome = if tool_result_has_semantic_error(result) {
             "error"
@@ -1136,7 +1137,7 @@ impl McpServer {
             let failure_reason = (analytics_outcome == "error")
                 .then(|| semantic_failure_reason(result))
                 .flatten();
-            let analytics_event = mcp_tool_analytics_event(McpToolAnalyticsEvent {
+            let mut analytics_event = mcp_tool_analytics_event(McpToolAnalyticsEvent {
                 project_root: accounting_project_root,
                 session_id: analytics_session_id.clone(),
                 tool_name,
@@ -1155,7 +1156,34 @@ impl McpServer {
                 cost: result.cost().as_ref(),
             });
             self.spawn_observed_ledger_write(async move {
+                // Two independently scheduled writes may run in either order.
+                // Only the receipt for this response (not a project total
+                // sampled after another response) proves its durable credit.
+                let committed = match commit_confirmation {
+                    Some(receiver) => receiver.await.unwrap_or(false),
+                    None => net_saved_tokens == 0,
+                };
+                if !committed {
+                    // Keep the observed before/after activity and actual cost,
+                    // but never claim a positive saving in analytics or history.
+                    let Some(metadata_json) = analytics_event.metadata_json.as_mut() else {
+                        tracing::warn!("MCP analytics credit reconciliation lacked metadata");
+                        return;
+                    };
+                    let Ok(mut metadata) = serde_json::from_str::<Value>(metadata_json) else {
+                        tracing::warn!("MCP analytics credit reconciliation rejected metadata");
+                        return;
+                    };
+                    if !metadata.is_object() {
+                        tracing::warn!("MCP analytics credit reconciliation rejected a nonobject");
+                        return;
+                    }
+                    metadata["tokens_saved"] = json!(0);
+                    metadata["savings_commit"] = json!("refused");
+                    *metadata_json = metadata.to_string();
+                }
                 if let Some(registered) = savings_db
+                    && committed
                     && let Err(e) = registered
                         .try_record_savings(
                             &project_path_str,
@@ -1197,7 +1225,8 @@ impl McpServer {
         connection_client_name: Option<&str>,
         connection_instance_id: Option<&str>,
     ) {
-        let accounting = self.apply_token_accounting(cg, tool_name, result).await;
+        let (accounting, commit_confirmation) =
+            self.apply_token_accounting(cg, tool_name, result).await;
         self.spawn_success_analytics(
             accounting_project_root,
             tool_name,
@@ -1210,6 +1239,7 @@ impl McpServer {
             result,
             connection_client_name,
             connection_instance_id,
+            commit_confirmation,
         );
     }
 
