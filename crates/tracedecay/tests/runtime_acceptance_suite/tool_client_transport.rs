@@ -209,20 +209,22 @@ where
         )
         .expect("production project scope");
     let expected_project = canonical_existing_path(project);
+    let (ready_tx, ready_rx) = mpsc::channel();
     let (request_tx, request_rx) = mpsc::channel();
     let script = Arc::new(script);
-    let _ = std::fs::remove_file(&socket);
-    let authority = DaemonAuthority::acquire(
-        socket.parent().expect("socket parent"),
-        &DaemonEndpoint::Unix(socket.clone()),
-        env!("CARGO_PKG_VERSION"),
-    )
-    .expect("seed fake daemon authority");
-    let listener = UnixListener::bind(&socket).expect("bind fake daemon");
-    listener
-        .set_nonblocking(true)
-        .expect("nonblocking listener");
     let server = std::thread::spawn(move || {
+        let _ = std::fs::remove_file(&socket);
+        let authority = DaemonAuthority::acquire(
+            socket.parent().expect("socket parent"),
+            &DaemonEndpoint::Unix(socket.clone()),
+            env!("CARGO_PKG_VERSION"),
+        )
+        .expect("seed fake daemon authority");
+        let listener = UnixListener::bind(&socket).expect("bind fake daemon");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        ready_tx.send(()).expect("signal daemon ready");
         let accept_deadline = Instant::now() + ACCEPT_HANG_GUARD;
         let mut workers = Vec::new();
         while workers.len() < connections {
@@ -292,6 +294,9 @@ where
             worker.join().expect("join fake daemon worker");
         }
     });
+    ready_rx
+        .recv_timeout(LOCAL_TIMEOUT)
+        .expect("fake daemon ready");
     (request_rx, server)
 }
 
