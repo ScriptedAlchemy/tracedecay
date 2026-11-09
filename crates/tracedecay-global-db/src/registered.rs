@@ -222,10 +222,20 @@ impl RegisteredGlobalDbOwnerV1 {
         // introducing the same foreground work into daemon admission. Refused
         // authorities remain byte-preserving until their typed reset.
         if refused_authority.is_none() {
-            registered
+            // Physical reclamation is optional maintenance. Its failure must
+            // not deny clients access to a schema-admitted store under disk
+            // pressure; the next short-lived open can retry reclamation.
+            if let Err(error) = registered
                 .database
                 .run_incremental_vacuum(SHORT_LIVED_RECLAIM_PAGES)
-                .await?;
+                .await
+            {
+                tracing::warn!(
+                    error = %error,
+                    pages = SHORT_LIVED_RECLAIM_PAGES,
+                    "short-lived registered-store reclamation deferred after failure"
+                );
+            }
         }
         drop(registered);
         Ok(Self {
