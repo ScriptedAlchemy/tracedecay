@@ -387,27 +387,33 @@ fn directory_bytes_from_held_dir(
     counted: &mut std::collections::HashSet<(u64, u64)>,
 ) -> io::Result<u64> {
     let mut total = 0_u64;
-    let mut pending = vec![directory];
-    while let Some(directory) = pending.pop() {
-        for entry in directory.read_dir(".")? {
-            let entry = entry?;
-            let name = entry.file_name();
-            let metadata = directory.symlink_metadata(&name)?;
-            if metadata.is_dir() {
-                pending.push(directory.open_dir_nofollow(&name)?);
+    // Hold only the current ancestry chain. Opening every sibling before
+    // visiting any of them exhausted the process descriptor limit on wide
+    // verified generations and made the whole sealed census fail.
+    let mut pending = vec![(directory.read_dir(".")?, directory)];
+    while let Some((entries, parent)) = pending.last_mut() {
+        let Some(entry) = entries.next() else {
+            pending.pop();
+            continue;
+        };
+        let entry = entry?;
+        let name = entry.file_name();
+        let metadata = parent.symlink_metadata(&name)?;
+        if metadata.is_dir() {
+            let child = parent.open_dir_nofollow(&name)?;
+            pending.push((child.read_dir(".")?, child));
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use cap_std::fs::MetadataExt;
+            if metadata.nlink() > 1 && !counted.insert((metadata.dev(), metadata.ino())) {
                 continue;
             }
-            #[cfg(unix)]
-            {
-                use cap_std::fs::MetadataExt;
-                if metadata.nlink() > 1 && !counted.insert((metadata.dev(), metadata.ino())) {
-                    continue;
-                }
-            }
-            #[cfg(not(unix))]
-            let _ = &counted;
-            total = total.saturating_add(metadata.len());
         }
+        #[cfg(not(unix))]
+        let _ = &counted;
+        total = total.saturating_add(metadata.len());
     }
     Ok(total)
 }
@@ -783,6 +789,65 @@ mod tests {
 
     fn open(path: &std::path::Path) -> Dir {
         Dir::open_ambient_dir(path, ambient_authority()).expect("open test directory")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wide_verified_generation_census_stays_within_descriptor_budget() {
+        const CHILD: &str = "TRACEDECAY_WIDE_CENSUS_RLIMIT_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Resource limits are process-wide; isolate the reduced budget
+            // from concurrently executing tests in the parent libtest runner.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "capability_dir::tests::wide_verified_generation_census_stays_within_descriptor_budget",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "census under reduced descriptor budget failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "the child must execute the actual behavioral regression: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sealed");
+        let generation = root.join("generation");
+        std::fs::create_dir_all(&generation).unwrap();
+        std::fs::write(generation.join("sealed.json"), b"owned").unwrap();
+        for index in 0..128 {
+            let column = generation.join(format!("column-{index}"));
+            std::fs::create_dir(&column).unwrap();
+            std::fs::write(column.join("value"), b"x").unwrap();
+        }
+
+        // The old breadth-first handle stack needed >=128 live handles
+        // here; the corrected walk needs only the current three levels.
+        let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) }, 0);
+        limit.rlim_cur = limit.rlim_cur.min(64);
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+
+        let totals = census_receipted_directory_bytes(
+            &root,
+            false,
+            |_| ("sealed.json", 64),
+            |_, receipt| receipt == Some(b"owned".as_slice()),
+        )
+        .unwrap();
+        assert_eq!(totals.get(&true), Some(&(1, 133)));
+        assert_eq!(std::fs::read(generation.join("column-127/value")).unwrap(), b"x");
     }
 
     #[test]
