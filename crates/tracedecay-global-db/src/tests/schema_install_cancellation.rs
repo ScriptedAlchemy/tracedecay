@@ -1,4 +1,4 @@
-//! Daemon shutdown cancelling a registered store attach mid schema install.
+//! Cancellation of registered daemon admission after prospective schema publication.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -16,19 +16,16 @@ use tracedecay_runtime_core::db::{
 use super::harness::TEST_RUNTIME_NONCE;
 use crate::RegisteredGlobalDbOwnerV1;
 
-/// The operation a cancel reports once it rolled back an open schema
-/// transaction, rather than stopping before the transaction began.
-const INSTALL_ROLLBACK: &str = "roll back attached registered global schema";
-
-/// An existing profile-sessions store file with no schema objects, the shape
-/// daemon attach installs the full registered schema into.
-struct EmptyStore {
+/// A newly owned profile-sessions store. Prospective publication installs
+/// the schema before daemon admission; an unmarked existing SQLite file
+/// cannot be used as a freshly owned initialization fixture.
+struct RegisteredStore {
     path: PathBuf,
     _scope: DaemonDatabaseScope,
     _directory: TempDir,
 }
 
-impl EmptyStore {
+impl RegisteredStore {
     fn create() -> Self {
         crate::register_registered_schema_installer();
         let directory = tempfile::tempdir().unwrap();
@@ -42,12 +39,6 @@ impl EmptyStore {
         .unwrap();
         let path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        // Exercise an initialized SQLite database with no application schema.
-        // A zero-byte placeholder is an incomplete store, not an attachable DB.
-        rusqlite::Connection::open(&path)
-            .unwrap()
-            .execute_batch("PRAGMA user_version = 0")
-            .unwrap();
         Self {
             path,
             _scope: scope,
@@ -59,10 +50,15 @@ impl EmptyStore {
         let authority =
             DatabaseAuthority::for_owned_runtime(&self.path, "schema install cancellation test")
                 .unwrap();
+        let mode = if self.path.try_exists().unwrap() {
+            TestDatabaseRuntimeMode::Existing
+        } else {
+            TestDatabaseRuntimeMode::Initialize
+        };
         Database::publish_registered_daemon_test_runtime_with_retirement_control(
             &self.path,
             &authority,
-            TestDatabaseRuntimeMode::Existing,
+            mode,
             TestDatabaseRuntimeScope::ProfileSessions,
         )
         .await
@@ -115,9 +111,45 @@ impl EmptyStore {
     }
 }
 
+#[asupersync::test]
+async fn unpublished_existing_wal_is_refused_without_deleting_foreign_bytes() {
+    let store = RegisteredStore::create();
+    let raw = rusqlite::Connection::open(&store.path).unwrap();
+    raw.execute_batch("CREATE TABLE td_runtime_unpublished_probe(value INTEGER);")
+        .unwrap();
+    drop(raw);
+    let original_main = std::fs::read(&store.path).unwrap();
+    let wal = store.path.with_file_name(format!(
+        "{}-wal",
+        store.path.file_name().unwrap().to_string_lossy()
+    ));
+    let foreign_wal = b"unclaimed foreign WAL bytes";
+    std::fs::write(&wal, foreign_wal).unwrap();
+
+    let authority =
+        DatabaseAuthority::for_owned_runtime(&store.path, "unpublished sidecar admission").unwrap();
+    let attempted = Database::publish_registered_daemon_test_runtime_with_retirement_control(
+        &store.path,
+        &authority,
+        TestDatabaseRuntimeMode::Existing,
+        TestDatabaseRuntimeScope::ProfileSessions,
+    )
+    .await;
+    let error = match attempted {
+        Ok(_) => panic!("an unmarked SQLite namespace must not claim a foreign WAL"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("sidecar ownership is ambiguous"),
+        "unexpected refusal: {error}"
+    );
+    assert_eq!(std::fs::read(&store.path).unwrap(), original_main);
+    assert_eq!(std::fs::read(&wal).unwrap(), foreign_wal);
+}
+
 #[asupersync::test(flavor = "multi_thread")]
-async fn cancelled_daemon_attach_rolls_back_schema_and_reopens() {
-    let reference = EmptyStore::create();
+async fn cancelled_daemon_attach_preserves_published_schema_and_reopens() {
+    let reference = RegisteredStore::create();
     let (outcome, total_polls) = reference.attach_cancelled_at(usize::MAX).await;
     outcome.unwrap();
     let installed = reference.schema_objects().await;
@@ -128,13 +160,16 @@ async fn cancelled_daemon_attach_rolls_back_schema_and_reopens() {
 
     let stride = (total_polls / 20).max(1);
     let mut cancelled = Vec::new();
-    let mut rolled_back_installs = Vec::new();
     let mut completed = Vec::new();
-    for cancel_at in (1..total_polls).step_by(stride).chain([total_polls + 10]) {
-        let store = EmptyStore::create();
-        // Publishing the runtime installs its writer ledger before admission.
-        // Cancellation must preserve exactly that pre-admission schema.
+    for cancel_at in std::iter::once(1)
+        .chain((2..total_polls).step_by(stride))
+        .chain([total_polls + 10])
+    {
+        let store = RegisteredStore::create();
+        // Cancellation cannot modify the already-published schema or
+        // prevent the next admission from reopening the same family.
         let before_admission = store.schema_objects().await;
+        assert_eq!(before_admission, installed);
         let (outcome, _) = store.attach_cancelled_at(cancel_at).await;
         let objects = store.schema_objects().await;
         match outcome {
@@ -145,20 +180,14 @@ async fn cancelled_daemon_attach_rolls_back_schema_and_reopens() {
                 );
                 assert_eq!(
                     objects, before_admission,
-                    "cancel at poll {cancel_at}/{total_polls} must roll the install back"
+                    "cancel at poll {cancel_at}/{total_polls} must preserve the published schema"
                 );
-                if error
-                    .project_route_context()
-                    .is_some_and(|(_, _, detail)| detail.starts_with(INSTALL_ROLLBACK))
-                {
-                    rolled_back_installs.push(cancel_at);
-                }
                 cancelled.push(cancel_at);
             }
             Ok(()) => {
                 assert_eq!(
                     objects, installed,
-                    "an attach that commits before observing cancel at poll {cancel_at}/{total_polls} installs everything"
+                    "an admission completed before cancel at poll {cancel_at}/{total_polls} preserves the published schema"
                 );
                 completed.push(cancel_at);
             }
@@ -172,11 +201,6 @@ async fn cancelled_daemon_attach_rolls_back_schema_and_reopens() {
     assert!(
         cancelled.contains(&1),
         "a cancel before admission starts must stop it; cancelled at {cancelled:?}"
-    );
-    assert!(
-        !rolled_back_installs.is_empty(),
-        "a cancel inside the schema transaction must roll the install back; \
-         cancelled at {cancelled:?}, completed at {completed:?} of {total_polls} polls"
     );
     assert!(completed.contains(&(total_polls + 10)));
 }
