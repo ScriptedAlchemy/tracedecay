@@ -821,7 +821,11 @@ describe('Code index freshness', () => {
     await advanceTimers(1);
     await advanceTimers(0);
     expect(fetch).toHaveBeenCalledTimes(2);
-    expect(await screen.findByText('capture · 8 / 20 items')).toBeTruthy();
+    // Vitest's waitFor advances fake timers; Testing Library findByText stalls
+    // when the HTTP response is still decoding under the virtual clock.
+    await vi.waitFor(() => {
+      expect(screen.getByText('capture · 8 / 20 items')).toBeTruthy();
+    });
     await advanceTimers(1_001);
     await advanceTimers(0);
     expect(fetch).toHaveBeenCalledTimes(3);
