@@ -623,10 +623,15 @@ impl ExactSqlHandle {
             .clone()
             .ok_or(ExactSqlError::AuthorityMismatch)?;
         let (reply, response) = async_channel::bounded(1);
+        let cx = crate::native_runtime::cx().ok_or(ExactSqlError::WriterUnavailable)?;
+        // Schema publication is a serialized writer barrier, not an ordinary
+        // best-effort request. A busy bounded channel must not strand a
+        // prepared SQLite family when its existing work can still drain.
         self.writer
             .as_ref()
             .ok_or(ExactSqlError::WriterUnavailable)?
-            .try_send(WriterCommand::FinishInitialSchema { reply, authority })
+            .send(&cx, WriterCommand::FinishInitialSchema { reply, authority })
+            .await
             .map_err(map_writer_send_error)?;
         response
             .recv()
