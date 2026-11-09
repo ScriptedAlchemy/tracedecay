@@ -1893,18 +1893,33 @@ impl GraphDb {
         &self,
         locator: &GenerationLocator,
     ) -> Result<(), GraphDbError> {
-        let removed = self
+        let registered = self
             .inner
             .sealed_generations
-            .write()
+            .read()
             .map_err(|_| GraphDbError::unavailable("sealed generation registry lock poisoned"))?
-            .remove(locator);
-        if let Some(store) = removed {
-            return store.discard();
+            .get(locator)
+            .cloned();
+        if let Some(store) = registered {
+            // Keep the registered reader until its physical close AND sealed
+            // directory removal both succeed. A failed close may consume the
+            // native handle; dropping the registry entry would let the next
+            // tick take the disk-only path and unlink uncertain bytes.
+            store.discard()?;
+            let mut sealed = self.inner.sealed_generations.write().map_err(|_| {
+                GraphDbError::unavailable("sealed generation registry lock poisoned")
+            })?;
+            if sealed
+                .get(locator)
+                .is_some_and(|current| Arc::ptr_eq(current, &store))
+            {
+                sealed.remove(locator);
+            }
+            return Ok(());
         }
-        // A removed in-memory reader is not necessary for the artifact to
-        // exist on disk. Unlink by exact locator even after a prior failed
-        // retirement; a durable tombstone can then retry without the reader.
+        // The artifact may exist on disk without a resident reader, for
+        // example after reopening a store before generation activation.
+        // Only receipt-verified, exact-locator disk cleanup is authorized.
         let Some(reopen) = self.inner.reopen.as_ref() else {
             return Ok(());
         };
@@ -3933,7 +3948,10 @@ mod build_tests {
             matches!(refused, Err(GraphDbError::DurabilityUncertain { .. })),
             "retirement must surface the failed native close: {refused:?}"
         );
-        assert!(container.is_file(), "uncertain close must preserve sealed bytes");
+        assert!(
+            container.is_file(),
+            "uncertain close must preserve sealed bytes"
+        );
         assert!(receipt.is_file(), "retry must retain its ownership receipt");
     }
 
@@ -3956,7 +3974,10 @@ mod build_tests {
         let directory = store.directory.clone();
         store.database.close().unwrap();
         store.discard().unwrap();
-        assert!(!directory.exists(), "a cleanly closed reader is reclaimable");
+        assert!(
+            !directory.exists(),
+            "a cleanly closed reader is reclaimable"
+        );
     }
 
     #[test]
@@ -3981,17 +4002,112 @@ mod build_tests {
 
         // Reproduce the post-failure state of native engine.close(): its
         // handle is gone, Closed will be returned on retry, but durability
-        // remains uncertain. The first patch must not mistake that for a
+        // remains uncertain. Retirement must never mistake that state for a
         // previously successful close and destroy its sealed receipt.
         store.database.inner.poisoned.store(true, Ordering::Release);
         let first = store.database.close();
-        assert!(matches!(first, Err(GraphDbError::DurabilityUncertain { .. })));
+        assert!(matches!(
+            first,
+            Err(GraphDbError::DurabilityUncertain { .. })
+        ));
         let retry = store.discard();
         assert!(
             matches!(retry, Err(GraphDbError::DurabilityUncertain { .. })),
             "a prior uncertain close must not become an unlink: {retry:?}"
         );
         assert!(container.is_file() && receipt.is_file());
+    }
+
+    #[test]
+    fn retirement_retries_must_keep_a_reader_with_uncertain_close_registered() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(2, 1);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
+        let locator = crate::lease::GenerationLocator::new(
+            identity.projection.clone(),
+            identity.generation.clone(),
+        );
+        let parent = GraphDb::open(GraphDbOpenOptions {
+            location: GraphDbLocation::Memory,
+            expected_format: GraphFormatVersion::current(),
+            durability: GraphDurability::Memory,
+            cancellation: Arc::new(NeverCancelled),
+        })
+        .unwrap();
+        parent
+            .inner
+            .sealed_generations
+            .write()
+            .unwrap()
+            .insert(locator.clone(), Arc::clone(&store));
+
+        let container = store.directory.join(SEALED_STORE_DATABASE_FILE);
+        let receipt = store.directory.join(SEALED_STORE_RECEIPT_FILE);
+        let held_reader = Arc::clone(store.database());
+        store.database.inner.poisoned.store(true, Ordering::Release);
+        for attempt in 1..=2 {
+            let retirement = parent.retire_sealed_generation_store(&locator);
+            assert!(
+                matches!(&retirement, Err(GraphDbError::DurabilityUncertain { .. })),
+                "retirement attempt {attempt} must refuse uncertain close: {retirement:?}"
+            );
+            let registered = parent
+                .sealed_generation_reader(&locator)
+                .expect("failed close must preserve the registered reader");
+            assert!(Arc::ptr_eq(&registered, &store));
+            assert!(container.is_file() && receipt.is_file());
+        }
+        assert!(Arc::ptr_eq(&held_reader, store.database()));
+    }
+
+    #[test]
+    fn successful_retirement_uninstalls_the_reader_after_removing_artifact() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(2, 1);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
+        let locator = crate::lease::GenerationLocator::new(
+            identity.projection.clone(),
+            identity.generation.clone(),
+        );
+        let parent = GraphDb::open(GraphDbOpenOptions {
+            location: GraphDbLocation::Memory,
+            expected_format: GraphFormatVersion::current(),
+            durability: GraphDurability::Memory,
+            cancellation: Arc::new(NeverCancelled),
+        })
+        .unwrap();
+        parent
+            .inner
+            .sealed_generations
+            .write()
+            .unwrap()
+            .insert(locator.clone(), Arc::clone(&store));
+
+        parent.retire_sealed_generation_store(&locator).unwrap();
+        assert!(parent.sealed_generation_reader(&locator).is_none());
+        assert!(!store.directory.exists());
     }
 
     #[cfg(unix)]
