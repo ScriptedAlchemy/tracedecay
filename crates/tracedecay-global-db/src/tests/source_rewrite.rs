@@ -19,7 +19,7 @@ use tracedecay_store::{ProjectionSkipReason, ProjectionStoreError};
 use crate::ObservationSourcePresenceV1;
 use crate::tests::harness::{
     HostAdmissionScope, HostAdmissionTestRuntimeV1, RegisteredGlobalDbHarness,
-    seed_projected_messages,
+    seed_projected_messages, writer_telemetry,
 };
 
 /// More unoffered records than one keyset page *and* more than the engine's
@@ -319,4 +319,131 @@ async fn rewrite_completion_retires_projected_records_and_rolls_back_a_failed_at
         1,
         "retired records must request their session's temporal rebuild"
     );
+}
+
+/// Capturing one host page previously dispatched one SQLite statement per
+/// record, even for reoffers identical to the already durable generation.
+/// The JSON batch must preserve last-offer ordering, exact identity and
+/// rollback while reducing writer commands to bounded pages.
+#[asupersync::test]
+async fn source_presence_pages_are_atomic_and_unchanged_reoffers_do_not_write() {
+    const RECORDS: usize = 257;
+    let harness = RegisteredGlobalDbHarness::open("source-presence-batched").await;
+    let source = ObservationSourceIdentityV1::new(
+        SessionId::new("session.presence-batched").unwrap(),
+    )
+    .unwrap();
+    let scope = ObservationScopeV1::Profile;
+    let first = ObservationSourceGenerationV1::new(1).unwrap();
+    let second = ObservationSourceGenerationV1::new(2).unwrap();
+    let offered = (0..RECORDS)
+        .map(|index| ObservationSourcePresenceV1 {
+            observation_id: tracedecay_domain::CanonicalObservationIdV1::new(format!(
+                "sha256:{index:064x}"
+            ))
+            .unwrap(),
+            generation: first,
+            start_offset: index as u64,
+        })
+        .collect::<Vec<_>>();
+    let commands = || writer_telemetry(&harness.registered).transactions.commands;
+    let before = commands();
+    harness
+        .registered
+        .record_observation_source_presence(&source, &scope, &offered)
+        .await
+        .unwrap();
+    assert_eq!(
+        commands() - before,
+        3,
+        "257 real presence records must need three bounded writer statements, not 257"
+    );
+
+    // A SQLite trigger makes a redundant UPDATE observable and fatal, even
+    // if SQLite would have written unchanged column values.
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "CREATE TRIGGER forbid_identical_presence_reoffer
+             BEFORE UPDATE ON observation_source_presence
+             WHEN NEW.generation = OLD.generation
+                  AND NEW.start_offset = OLD.start_offset
+             BEGIN SELECT RAISE(ABORT, 'identical presence reoffer'); END",
+            (),
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    let before = commands();
+    harness
+        .registered
+        .record_observation_source_presence(&source, &scope, &offered)
+        .await
+        .unwrap();
+    assert_eq!(commands() - before, 3);
+
+    let mut replacement = offered
+        .iter()
+        .map(|record| ObservationSourcePresenceV1 {
+            observation_id: record.observation_id.clone(),
+            generation: second,
+            start_offset: record.start_offset,
+        })
+        .collect::<Vec<_>>();
+    replacement.last_mut().unwrap().start_offset = u64::MAX;
+    assert!(
+        harness
+            .registered
+            .record_observation_source_presence(&source, &scope, &replacement)
+            .await
+            .is_err(),
+        "a malformed final-page offset must roll back all preceding pages"
+    );
+
+    let key = serde_json::to_string(&(source.clone(), scope.clone())).unwrap();
+    let snapshot = harness.registered.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT COUNT(*), SUM(generation = '2')
+             FROM observation_source_presence WHERE source_key = ?1",
+            params![key.as_str()],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<i64>(0).unwrap(), RECORDS as i64);
+    assert_eq!(
+        row.get::<i64>(1).unwrap(),
+        0,
+        "the failing last page must not partially publish any generation changes"
+    );
+    drop(rows);
+    drop(snapshot);
+
+    replacement.last_mut().unwrap().start_offset = (RECORDS - 1) as u64;
+    // A duplicate in the final page must keep the last offer's offset rather
+    // than the first occurrence in an earlier page.
+    replacement.push(ObservationSourcePresenceV1 {
+        observation_id: replacement[0].observation_id.clone(),
+        generation: second,
+        start_offset: 10_000,
+    });
+    harness
+        .registered
+        .record_observation_source_presence(&source, &scope, &replacement)
+        .await
+        .unwrap();
+    let snapshot = harness.registered.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT generation, start_offset FROM observation_source_presence
+             WHERE source_key = ?1 AND observation_id = ?2",
+            params![key.as_str(), replacement[0].observation_id.as_str()],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<String>(0).unwrap(), "2");
+    assert_eq!(row.get::<i64>(1).unwrap(), 10_000);
+    assert!(rows.next().await.unwrap().is_none());
 }

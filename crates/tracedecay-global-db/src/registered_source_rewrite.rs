@@ -26,6 +26,10 @@ use super::registered::JobExit;
 /// which made rewrite completion fail deterministically for those sources.
 const UNOFFERED_RECORD_PAGE_SIZE: i64 = 1_000;
 
+/// One page is small enough for the SQLite JSON virtual table and writer
+/// deadline. The entire supplied presence batch still commits atomically.
+const SOURCE_PRESENCE_PAGE_ROWS: usize = 128;
+
 /// One record a source layout offered, under the identity admission derived.
 pub struct ObservationSourcePresenceV1 {
     pub observation_id: CanonicalObservationIdV1,
@@ -94,21 +98,34 @@ impl RegisteredGlobalDb {
             .await
             .map_err(|error| storage("begin source presence transaction", error))?;
         let recorded = async {
-            for record in records {
+            for chunk in records.chunks(SOURCE_PRESENCE_PAGE_ROWS) {
+                let page = chunk
+                    .iter()
+                    .map(|record| {
+                        Ok((
+                            record.observation_id.as_str(),
+                            record.generation.generation_id().to_string(),
+                            offset(record.start_offset)?,
+                        ))
+                    })
+                    .collect::<ProjectionStoreResult<Vec<_>>>()?;
+                let encoded = serde_json::to_string(&page)
+                    .map_err(|error| storage("encode source presence page", error))?;
                 transaction
                     .execute(
                         "INSERT INTO observation_source_presence (
                             source_key, observation_id, generation, start_offset
-                         ) VALUES (?1, ?2, ?3, ?4)
+                         )
+                         SELECT ?1, json_extract(value, '$[0]'),
+                                json_extract(value, '$[1]'), json_extract(value, '$[2]')
+                         FROM json_each(?2) AS input
+                         WHERE true ORDER BY CAST(input.key AS INTEGER)
                          ON CONFLICT(source_key, observation_id) DO UPDATE SET
                             generation = excluded.generation,
-                            start_offset = excluded.start_offset",
-                        params![
-                            key.as_str(),
-                            record.observation_id.as_str(),
-                            record.generation.generation_id().to_string(),
-                            offset(record.start_offset)?,
-                        ],
+                            start_offset = excluded.start_offset
+                         WHERE observation_source_presence.generation IS NOT excluded.generation
+                            OR observation_source_presence.start_offset IS NOT excluded.start_offset",
+                        params![key.as_str(), encoded.as_str()],
                     )
                     .await
                     .map_err(|error| storage("record source presence", error))?;
