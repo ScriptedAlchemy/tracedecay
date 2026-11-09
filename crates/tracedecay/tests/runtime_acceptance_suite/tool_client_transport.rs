@@ -390,10 +390,14 @@ fn generic_tool_accepts_slow_byte_stream() {
         &project,
         1,
         |mut stream, request, scope| {
+            // Pace each byte against one clock so scheduler delays do not
+            // accumulate across the entire response frame.
+            let mut send_at = Instant::now();
             for byte in response_bytes(&request, scope, "slow-ok") {
+                std::thread::sleep(send_at.saturating_duration_since(Instant::now()));
                 stream.write_all(&[byte]).expect("write slow byte");
                 stream.flush().expect("flush slow byte");
-                std::thread::sleep(Duration::from_millis(2));
+                send_at += Duration::from_millis(2);
             }
         },
     );
