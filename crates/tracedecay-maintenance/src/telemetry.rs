@@ -26,6 +26,8 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::tick::MaintenanceTickOutcome;
 
+#[cfg(test)]
+mod reclaim_tests;
 mod text_artifact_scans;
 use text_artifact_scans::TextArtifactScansV1;
 
@@ -1667,8 +1669,8 @@ mod registry_tests {
         assert!(registry.graph_replay_release_attempt_admitted(project));
         assert!(registry.graph_replay_release_attempt_admitted(project));
 
-        // Consecutive unhealthy attempts widen the skip window 1, 2, 4, and
-        // cap at GRAPH_REPLAY_RELEASE_BACKOFF_CAP_TICKS denied ticks.
+        // Consecutive unhealthy attempts open a bounded skip window:
+        // 1, 2, 4, and capped at GRAPH_REPLAY_RELEASE_BACKOFF_CAP_TICKS.
         for expected_skips in [1_usize, 2, 4, 8, 8] {
             registry.record_graph_replay_release_unhealthy(project);
             let mut denied = 0_usize;
