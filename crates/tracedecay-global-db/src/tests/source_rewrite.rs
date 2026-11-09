@@ -479,3 +479,112 @@ async fn source_presence_pages_are_atomic_and_unchanged_reoffers_do_not_write() 
     assert_eq!(row.get::<i64>(1).unwrap(), 10_000);
     assert!(rows.next().await.unwrap().is_none());
 }
+
+/// Once retirement has committed, a reoffered source can still carry old
+/// presence entries. Repeating their retirement must not perform an UPDATE
+/// and receipt read for every already-disposed observation. This exercises
+/// real projected records and the canonical disposition/queue authorities.
+#[asupersync::test]
+async fn rewrite_completion_skips_settled_records_without_revival() {
+    async fn completed_writer_statements(records: usize) -> u64 {
+        let directory = TempDir::new().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
+            .await
+            .unwrap();
+        let registered = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        let seeded = seed_projected_messages(&runtime, 0..records).await;
+        let source = ObservationSourceIdentityV1::for_provider(
+            ProviderId::new("codex").unwrap(),
+            SessionId::new("session.settled-rewrite").unwrap(),
+        )
+        .unwrap();
+        let scope = ObservationScopeV1::Profile;
+        let first = ObservationSourceGenerationV1::new(1).unwrap();
+        let second = ObservationSourceGenerationV1::new(2).unwrap();
+        let third = ObservationSourceGenerationV1::new(3).unwrap();
+        let offered = seeded
+            .iter()
+            .map(|(observation, _)| ObservationSourcePresenceV1 {
+                observation_id: observation.observation_id().clone(),
+                generation: first,
+                start_offset: observation.identity().position().start(),
+            })
+            .collect::<Vec<_>>();
+        registered
+            .record_observation_source_presence(&source, &scope, &offered)
+            .await
+            .unwrap();
+        registered
+            .begin_observation_source_rewrite(&source, &scope, first, second, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            registered
+                .complete_observation_source_rewrite(&source, &scope, second)
+                .await
+                .unwrap(),
+            records as u64
+        );
+
+        let replay = offered
+            .iter()
+            .map(|record| ObservationSourcePresenceV1 {
+                observation_id: record.observation_id.clone(),
+                generation: second,
+                start_offset: record.start_offset,
+            })
+            .collect::<Vec<_>>();
+        registered
+            .record_observation_source_presence(&source, &scope, &replay)
+            .await
+            .unwrap();
+        registered
+            .begin_observation_source_rewrite(&source, &scope, second, third, 0)
+            .await
+            .unwrap();
+
+        let statements = || writer_telemetry(&registered).sqlite_vm.statements;
+        let before = statements();
+        assert_eq!(
+            registered
+                .complete_observation_source_rewrite(&source, &scope, third)
+                .await
+                .unwrap(),
+            0,
+            "a previously retired observation must not be retired twice"
+        );
+        let writer_commands = statements() - before;
+        let snapshot = registered.read_snapshot().await.unwrap();
+        let key = serde_json::to_string(&(source.clone(), scope.clone())).unwrap();
+        let mut remaining = snapshot
+            .query(
+                "SELECT COUNT(*) FROM observation_source_presence WHERE source_key = ?1",
+                params![key.as_str()],
+            )
+            .await
+            .unwrap();
+        let row = remaining.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<i64>(0).unwrap(), 0);
+        drop(remaining);
+        let mut pending = snapshot
+            .query(
+                "SELECT COUNT(*) FROM observation_source_rewrites WHERE source_key = ?1",
+                params![key.as_str()],
+            )
+            .await
+            .unwrap();
+        let row = pending.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<i64>(0).unwrap(), 0);
+        writer_commands
+    }
+
+    let small = completed_writer_statements(8).await;
+    let large = completed_writer_statements(64).await;
+    assert!(small > 0);
+    assert_eq!(
+        large, small,
+        "eightfold more settled records must not create per-record writer commands"
+    );
+}

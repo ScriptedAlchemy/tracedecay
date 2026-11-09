@@ -14,7 +14,9 @@ use tracedecay_domain::{
     ObservationSourceIdentityV1,
 };
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
-use tracedecay_store::{ProjectionStoreError, ProjectionStoreResult};
+use tracedecay_store::{
+    ProjectionStoreError, ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION,
+};
 
 use super::RegisteredGlobalDb;
 use super::observation_projection::retire_source_record;
@@ -263,27 +265,45 @@ impl RegisteredGlobalDb {
                     return Err(JobExit::Rollback(0));
                 }
                 let mut retired = 0_u64;
-                // Keyset-paginate the unoffered ids instead of materializing the whole
-                // set in one statement: a single rewritten source can hold more
-                // unoffered records than the engine's per-query materialization cap,
-                // and one oversized read wedged every completion attempt forever.
-                // `retire_source_record` never touches `observation_source_presence`,
-                // so the ordered id cursor stays stable across pages; the settle
-                // deletes below remain the authoritative cleanup.
+                // Paginate only unoffered records that still require a
+                // retirement or have an accepted revival to cancel. An
+                // already-disposed record with no pending revival cannot
+                // produce another output change; invoking retirement for it
+                // issued redundant UPDATE/SELECT commands under the writer.
+                // Missing observations are still visited, preserving the
+                // unoffered keyset coverage test. The final DELETE removes
+                // every old presence row, including those skipped here.
+                // Retirement never mutates source presence, so the keyset is
+                // stable through the atomic transaction.
                 let mut after_observation_id = String::new();
                 loop {
                     let mut rows = transaction
                         .query(
-                            "SELECT observation_id FROM observation_source_presence
-                             WHERE source_key = ?1 AND generation <> ?2
-                               AND observation_id > ?3
-                             ORDER BY observation_id
+                            "SELECT presence.observation_id
+                             FROM observation_source_presence AS presence
+                             WHERE presence.source_key = ?1 AND presence.generation <> ?2
+                               AND presence.observation_id > ?3
+                               AND (
+                                   NOT EXISTS (
+                                       SELECT 1 FROM observation_projection_dispositions AS disposition
+                                       WHERE disposition.projector_version = ?5
+                                         AND disposition.observation_id = presence.observation_id
+                                   )
+                                   OR EXISTS (
+                                       SELECT 1 FROM projection_queue AS queued
+                                       WHERE queued.observation_id = presence.observation_id
+                                         AND (queued.revival_generation IS NOT NULL
+                                              OR queued.revival_start_offset IS NOT NULL)
+                                   )
+                               )
+                             ORDER BY presence.observation_id
                              LIMIT ?4",
                             params![
                                 key.as_str(),
                                 generation.as_str(),
                                 after_observation_id.as_str(),
-                                UNOFFERED_RECORD_PAGE_SIZE
+                                UNOFFERED_RECORD_PAGE_SIZE,
+                                SESSION_MESSAGE_PROJECTOR_VERSION
                             ],
                         )
                         .await
