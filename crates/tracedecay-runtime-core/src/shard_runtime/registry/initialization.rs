@@ -2,11 +2,13 @@
 //! clients. A process death before the no-replace rename leaves only disposable
 //! schema in the private work directory. Hard links identify the empty sidecar
 //! reservations if the process dies partway through claiming the destination.
-#[cfg(unix)]
-use std::{ffi::CString, os::fd::AsRawFd};
 use std::fs::{self, File};
 use std::io;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::{ffi::CString, os::fd::AsRawFd};
 
 use rusqlite::{Connection, OpenFlags};
 use tracedecay_private_fs::framed_log::{
@@ -285,7 +287,29 @@ impl InitializationDirectory {
         self.retire()
     }
 
+    fn verify_directory_name(&self) -> io::Result<()> {
+        let pinned = self
+            .directory_pin
+            .as_ref()
+            .ok_or_else(|| io::Error::other("SQLite staging directory is no longer pinned"))?;
+        let named = open_private_directory(&self.directory)?;
+        #[cfg(unix)]
+        let matches = same_unix_inode(&pinned.metadata()?, &named.metadata()?);
+        #[cfg(windows)]
+        let matches = same_windows_object(pinned, &named)?;
+        #[cfg(not(any(unix, windows)))]
+        let matches = false;
+        if !matches {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "SQLite staging directory no longer names the pinned directory",
+            ));
+        }
+        Ok(())
+    }
+
     fn retire(&mut self) -> io::Result<()> {
+        self.verify_directory_name()?;
         for entry in fs::read_dir(&self.directory)? {
             if entry?.file_name() != OWNER {
                 return Err(io::Error::new(
@@ -295,6 +319,9 @@ impl InitializationDirectory {
             }
         }
         self.remove_private_member(OWNER)?;
+        // rmdir is name-based. Refuse an already changed name as late as
+        // possible, while holding the lease and the original directory pin.
+        self.verify_directory_name()?;
         drop(self.directory_pin.take());
         fs::remove_dir(&self.directory)?;
         sync_parent_directory(&self.directory, SYNC)
@@ -398,23 +425,32 @@ fn empty_regular(path: &Path) -> io::Result<bool> {
     Ok(meta.is_file() && meta.len() == 0)
 }
 
+#[cfg(unix)]
+fn same_unix_inode(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(windows)]
+fn same_windows_object(left: &File, right: &File) -> io::Result<bool> {
+    let a = tracedecay_private_fs::windows_file::information(left)?;
+    let b = tracedecay_private_fs::windows_file::information(right)?;
+    Ok(a.volume_serial_number == b.volume_serial_number && a.file_index == b.file_index)
+}
+
 fn same_regular_file(left: &Path, right: &Path) -> io::Result<bool> {
     if !fs::symlink_metadata(left)?.is_file() || !fs::symlink_metadata(right)?.is_file() {
         return Ok(false);
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
-        let a = fs::symlink_metadata(left)?;
-        let b = fs::symlink_metadata(right)?;
-        Ok(a.dev() == b.dev() && a.ino() == b.ino())
+        Ok(same_unix_inode(
+            &fs::symlink_metadata(left)?,
+            &fs::symlink_metadata(right)?,
+        ))
     }
     #[cfg(windows)]
     {
-        use tracedecay_private_fs::windows_file::information;
-        let a = information(&File::open(left)?)?;
-        let b = information(&File::open(right)?)?;
-        Ok(a.volume_serial_number == b.volume_serial_number && a.file_index == b.file_index)
+        same_windows_object(&File::open(left)?, &File::open(right)?)
     }
     #[cfg(not(any(unix, windows)))]
     Err(io::Error::new(
@@ -517,7 +553,6 @@ mod tests {
         }
     }
 
-
     /// A competing process may rename the private directory despite the
     /// cooperative lease and install a symlink at the old path. Failed-start
     /// cleanup must only remove entries from our *pinned* directory and never
@@ -547,8 +582,16 @@ mod tests {
         let foreign_main = fs::read(&foreign_database).unwrap();
         fs::write(foreign.join("prepared.sqlite"), b"foreign prepared").unwrap();
         for suffix in ["-wal", "-shm", "-journal"] {
-            fs::write(with_suffix(&stage.database(), suffix), b"owned staging sidecar").unwrap();
-            fs::write(with_suffix(&foreign_database, suffix), format!("foreign {suffix}")).unwrap();
+            fs::write(
+                with_suffix(&stage.database(), suffix),
+                b"owned staging sidecar",
+            )
+            .unwrap();
+            fs::write(
+                with_suffix(&foreign_database, suffix),
+                format!("foreign {suffix}"),
+            )
+            .unwrap();
         }
 
         let (_, module) = module_path!().split_once("::").unwrap();
@@ -562,8 +605,7 @@ mod tests {
             .output()
             .unwrap();
         assert!(
-            output.status.success()
-                && String::from_utf8_lossy(&output.stdout).contains(COMPLETE),
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains(COMPLETE),
             "cross-process stage swap did not execute: {output:?}"
         );
 
@@ -584,6 +626,24 @@ mod tests {
             fs::read(foreign.join("prepared.sqlite")).unwrap(),
             b"foreign prepared"
         );
+    }
+
+    #[test]
+    fn retiring_a_directory_requires_its_own_pin() {
+        let root = TempDir::new().unwrap();
+        let destination = root.path().join("sessions.db");
+        let mut stage = InitializationDirectory::begin(destination).unwrap();
+        let other = root.path().join("another-empty-directory");
+        create_private_directory(&other).unwrap();
+        let original = std::mem::replace(&mut stage.directory, other.clone());
+        let error = stage.retire().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(other.is_dir());
+        assert!(original.join(OWNER).is_file());
+        stage.directory = original.clone();
+        drop(stage);
+        assert!(!original.exists());
+        assert!(other.is_dir());
     }
 
     #[test]
