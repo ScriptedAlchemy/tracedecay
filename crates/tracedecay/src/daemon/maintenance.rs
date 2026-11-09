@@ -387,6 +387,22 @@ fn record_canonical_body_gc_outcome(
                         ("roots_scanned", report.roots_scanned.to_string()),
                         ("bodies_scanned", report.bodies_scanned.to_string()),
                         (
+                            "bootstrap_frontier_before",
+                            report
+                                .bootstrap_frontier_before
+                                .as_deref()
+                                .unwrap_or("not_scanned")
+                                .to_owned(),
+                        ),
+                        (
+                            "bootstrap_frontier_after",
+                            report
+                                .bootstrap_frontier_after
+                                .as_deref()
+                                .unwrap_or("not_scanned")
+                                .to_owned(),
+                        ),
+                        (
                             "elapsed_ms",
                             report
                                 .elapsed_ms

@@ -565,6 +565,73 @@ async fn zero_delete_pages_discharge_distinct_candidates_and_quiesce() {
 }
 
 #[asupersync::test]
+async fn bootstrap_reports_each_committed_sql_frontier_without_claiming_collection() {
+    let store = Store::open().await;
+    let body = StoredCanonicalBody::pack(b"referenced bootstrap progress").unwrap();
+    insert_body(store.conn(), &body).await;
+    store
+        .conn()
+        .execute(
+            "INSERT INTO lcm_raw_messages(storage_kind, content, content_hash)
+             VALUES ('inline', NULL, ?1)",
+            params![body.content_hash.as_str()],
+        )
+        .await
+        .unwrap();
+    store
+        .conn()
+        .execute(
+            "INSERT INTO observations(observation_json) VALUES (?1)",
+            params![observation(&body.content_hash)],
+        )
+        .await
+        .unwrap();
+    store.install().await;
+
+    let frontiers = [
+        ("raw:0".to_owned(), "raw:1".to_owned()),
+        ("observations:0".to_owned(), "observations:1".to_owned()),
+        ("bodies:".to_owned(), format!("bodies:{}", body.content_hash)),
+    ];
+    for (phase, (before, after)) in frontiers.into_iter().enumerate() {
+        let report = store.tick(1).await;
+        assert_eq!(
+            report.bootstrap_frontier_before.as_deref(),
+            Some(before.as_str())
+        );
+        assert_eq!(
+            report.bootstrap_frontier_after.as_deref(),
+            Some(after.as_str())
+        );
+        let persisted = read_progress(store.conn()).await.unwrap();
+        let stored_after = match phase {
+            0 => format!("raw:{}", persisted.raw_through),
+            1 => format!("observations:{}", persisted.observations_through),
+            _ => format!("bodies:{}", persisted.bodies_after),
+        };
+        assert_eq!(stored_after, after, "reported cursor must be durable");
+        assert_eq!(report.roots_scanned + report.bodies_scanned, 1);
+        assert_eq!(report.bodies_deleted, 0);
+        assert_eq!(report.candidates_discharged, 0);
+        assert!(report.has_more);
+    }
+    let discharged = store.tick(1).await;
+    assert_eq!(discharged.candidates_discharged, 1);
+    assert_eq!(discharged.bodies_deleted, 0);
+    assert!(discharged.bootstrap_frontier_before.is_none());
+    assert!(discharged.bootstrap_frontier_after.is_none());
+    assert!(!discharged.has_more);
+    assert!(body_exists(store.conn(), &body.content_hash).await);
+    assert_eq!(
+        store.tick(1).await,
+        CanonicalBodyGcReport {
+            bootstrap_complete: true,
+            ..CanonicalBodyGcReport::default()
+        }
+    );
+}
+
+#[asupersync::test]
 async fn rewritten_bootstrap_checkpoint_refuses_commit_and_recovers_across_48_row_pages() {
     let store = Store::open().await;
     let shared = StoredCanonicalBody::pack(b"shared canonical body").unwrap();
@@ -630,10 +697,14 @@ async fn rewritten_bootstrap_checkpoint_refuses_commit_and_recovers_across_48_ro
         .unwrap();
     let first = store.tick(48).await;
     assert_eq!(first.roots_scanned, 48);
+    assert_eq!(first.bootstrap_frontier_before.as_deref(), Some("raw:0"));
+    assert_eq!(first.bootstrap_frontier_after.as_deref(), Some("raw:48"));
     assert!(first.has_more);
     assert_eq!(read_progress(store.conn()).await.unwrap().raw_through, 48);
     let second = store.tick(48).await;
     assert_eq!(second.roots_scanned, 4);
+    assert_eq!(second.bootstrap_frontier_before.as_deref(), Some("raw:48"));
+    assert_eq!(second.bootstrap_frontier_after.as_deref(), Some("raw:52"));
     assert_eq!(read_progress(store.conn()).await.unwrap().raw_through, 52);
     let (deleted, bytes) = drain(&store, 48).await;
     assert_eq!((deleted, bytes), (0, 0), "live bodies remain referenced");

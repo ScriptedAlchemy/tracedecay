@@ -31,6 +31,11 @@ pub struct CanonicalBodyGcReport {
     pub elapsed_ms: Option<u128>,
     /// Candidates discharged in the committed page, even if their body stays live.
     pub candidates_discharged: u64,
+    /// Phase-qualified SQL bootstrap cursor before the committed page.
+    /// The value is absent during candidate collection and idle ticks.
+    pub bootstrap_frontier_before: Option<String>,
+    /// The corresponding persisted cursor, verified in the same writer.
+    pub bootstrap_frontier_after: Option<String>,
     pub bodies_deleted: u64,
     /// Stored BLOB bytes deleted, including the effect of their existing
     /// compression. This is not database-file or filesystem space reclaimed.
@@ -162,19 +167,33 @@ async fn step(conn: &(impl Executor + ?Sized), max_rows: usize) -> Result<Canoni
     let mut report = CanonicalBodyGcReport::default();
     if !progress.complete() {
         let before = progress.clone();
-        if progress.raw_through < progress.raw_until {
+        let (frontier_before, frontier_after) = if progress.raw_through < progress.raw_until {
             report.roots_scanned = bootstrap_raw(conn, &mut progress, limit).await?;
+            (
+                format!("raw:{}", before.raw_through),
+                format!("raw:{}", progress.raw_through),
+            )
         } else if progress.observations_through < progress.observations_until {
             report.roots_scanned = bootstrap_observations(conn, &mut progress, limit).await?;
+            (
+                format!("observations:{}", before.observations_through),
+                format!("observations:{}", progress.observations_through),
+            )
         } else {
             report.bodies_scanned = bootstrap_bodies(conn, &mut progress, limit).await?;
-        }
+            (
+                format!("bodies:{}", before.bodies_after),
+                format!("bodies:{}", progress.bodies_after),
+            )
+        };
         if progress == before {
             return Err(integrity_error(
                 "canonical body ownership bootstrap page did not advance",
             ));
         }
         save_progress(conn, &progress).await?;
+        report.bootstrap_frontier_before = Some(frontier_before);
+        report.bootstrap_frontier_after = Some(frontier_after);
     } else {
         collect_candidates(conn, limit, &mut report).await?;
     }
