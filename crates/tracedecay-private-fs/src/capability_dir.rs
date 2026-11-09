@@ -339,6 +339,7 @@ pub fn remove_receipted_directories_nofollow(
 /// before receipt I/O so unrelated installed generations are not treated as
 /// abandoned staging or spills. Receipt verification and removal remain
 /// anchored to the same opened child, even if the root pathname changes.
+/// A failure on one entry is reported after its independent siblings are processed.
 pub fn remove_matching_receipted_directories_nofollow(
     root_path: &Path,
     receipt_name: &OsStr,
@@ -360,37 +361,50 @@ pub fn remove_matching_receipted_directories_nofollow(
         ));
     }
     let root = open_root_nofollow(root_path)?;
-    let mut removed = 0usize;
-    for entry in root.read_dir(".")? {
+    let outcomes = root.read_dir(".")?.map(|entry| -> io::Result<bool> {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
-            continue;
+            return Ok(false);
         }
         let name = entry.file_name();
         if !candidate(&name) {
-            continue;
+            return Ok(false);
         }
         // Do not trust the DirEntry's former pathname kind after a rename.
         let child = match root.open_dir_nofollow(&name) {
             Ok(child) => child,
             Err(error) => {
                 tracing::warn!(%error, entry = ?name, "sealed child could not be verified");
-                continue;
+                return Ok(false);
             }
         };
         let receipt = match read_bounded_child_receipt(&child, receipt_name, maximum) {
             Ok(receipt) => receipt,
             Err(error) => {
                 tracing::warn!(%error, entry = ?name, "unverified sealed receipt preserved");
-                continue;
+                return Ok(false);
             }
         };
-        if authorized(&name, &receipt) {
-            remove_open_dir_all_nofollow(child)?;
-            removed = removed.saturating_add(1);
+        if !authorized(&name, &receipt) {
+            return Ok(false);
+        }
+        remove_open_dir_all_nofollow(child).inspect_err(|error| {
+            tracing::warn!(%error, entry = ?name, "verified child directory could not be removed");
+        })?;
+        Ok(true)
+    });
+    let mut removed = 0;
+    let mut first_error = None;
+    for outcome in outcomes {
+        match outcome {
+            Ok(true) => removed += 1,
+            Ok(false) => {}
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
         }
     }
-    Ok(removed)
+    first_error.map_or(Ok(removed), Err)
 }
 
 #[cfg(unix)]
@@ -690,6 +704,38 @@ mod tests {
             std::fs::read(foreign.join(".rows-old/sentinel")).unwrap(),
             b"foreign"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_verified_unlink_still_reclaims_independent_siblings() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("graph.sealed");
+        for name in ["a", "b"] {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+            std::fs::write(root.join(name).join("owner"), name).unwrap();
+        }
+        let mut verified = Vec::new();
+        let error = remove_matching_receipted_directories_nofollow(
+            &root,
+            OsStr::new("owner"),
+            64,
+            |_| true,
+            |name, receipt| {
+                assert_eq!(name.as_encoded_bytes(), receipt);
+                if verified.is_empty() {
+                    // A concurrent cleanup wins after this child was verified.
+                    // Its now-unlinked capability cannot be removed a second time.
+                    std::fs::remove_dir_all(root.join(name)).unwrap();
+                }
+                verified.push(name.to_owned());
+                true
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{error}");
+        assert_eq!(verified.len(), 2);
+        assert!(!root.join(&verified[1]).exists());
     }
 
     /// A parent-path swap after receipt validation must not redirect cleanup:
