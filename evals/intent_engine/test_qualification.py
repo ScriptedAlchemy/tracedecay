@@ -406,6 +406,18 @@ class QualificationTests(unittest.TestCase):
                 self.questions, self.dataset_bytes,
             )
 
+    def test_qualified_scorer_refuses_impossible_normalized_legacy_counts(self):
+        result = self.signed_result()
+        # Remove the native source count but keep an otherwise self-consistent
+        # frozen experiment. Unknown provenance cannot excuse impossible math.
+        del result["rows"][0]["reported_state_tokens_dropped"]
+        result["rows"][0].update(state_tokens=3, dropped=4)
+        with self.assertRaisesRegex(ValueError, "normalized dropped tokens exceed original state"):
+            qualification.qualified_report(
+                result, self.manifest, self.manifest_sha,
+                self.questions, self.dataset_bytes,
+            )
+
     def test_boolean_truncation_without_counts_is_unknown(self):
         self.assertIsNone(run_http.dropped_state_tokens({"truncated": False}, {}))
         self.assertIsNone(run_http.dropped_state_tokens({"truncated": True}, {}))

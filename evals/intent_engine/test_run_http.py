@@ -501,6 +501,31 @@ class RunHttpTest(unittest.TestCase):
         self.assertEqual(self.partial.read_bytes(), before)
         self.assertFalse(self.output.exists())
 
+    def test_legacy_normalized_drops_cannot_exceed_original_on_resume(self):
+        self.interrupt()
+        header, row = self.partial.read_text().splitlines()
+        forged = json.loads(row)
+        # No source counters/flags: the normalized persisted row must still
+        # obey the basic nonnegative used-state invariant.
+        forged.update(state_tokens=3, dropped=4, input_tokens=12)
+        self.partial.write_text(header + "\n" + json.dumps(forged) + "\n")
+        bad_bytes = self.partial.read_bytes()
+        with patch.object(run_http, "post") as post:
+            with self.assertRaisesRegex(ValueError, "normalized dropped tokens exceed original state"):
+                self.run_main()
+            post.assert_not_called()
+        self.assertEqual(self.partial.read_bytes(), bad_bytes)
+        self.assertFalse(self.output.exists())
+
+        # A genuine interrupted prefix remains resumable after refusal.
+        self.partial.write_text(header + "\n" + row + "\n")
+        response, elapsed = self.response("", {"questions": run_http.noul_questions()})
+        with patch.object(run_http, "post", return_value=(response, elapsed)) as post:
+            self.run_main()
+            post.assert_called_once()
+        self.assertTrue(self.output.exists())
+        self.assertEqual(len(json.loads(self.output.read_text())["rows"]), 2)
+
     def test_missing_usage_survives_resume_and_scoring(self):
         response, elapsed = self.response("", {"questions": run_http.noul_questions()})
         response["usage"] = None

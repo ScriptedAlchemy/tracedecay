@@ -372,6 +372,11 @@ def validate_row_truncation(row):
     original = row.get("state_tokens")
     dropped = row.get("dropped")
     used = row.get("state_tokens_used")
+    # Even historical HTTP rows lacking native counters must not claim that
+    # more state tokens were dropped than existed. Otherwise an edited partial
+    # can pass resume validation with a negative inferred used-token count.
+    if type(original) is int and type(dropped) is int and dropped > original:
+        raise ValueError("inconsistent usage: normalized dropped tokens exceed original state")
     if used is None and type(original) is int and type(dropped) is int:
         used = original - dropped
     input_tokens = row.get("input_tokens")
