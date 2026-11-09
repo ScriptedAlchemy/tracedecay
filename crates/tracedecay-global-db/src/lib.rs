@@ -85,10 +85,10 @@ mod stack_delivery;
 mod store_registration;
 pub use schema_stages::ensure_registered_schema;
 pub use stack_delivery::{
-    GitHubStackDeliveryRecordV1, GitHubStackDeliveryStateV1, GitHubStackSignalAppendOutcomeV1,
-    GitHubStackSignalRecordV1, MAX_GITHUB_STACK_ACTIVE_PENDING_V1,
-    MAX_GITHUB_STACK_DELIVERY_BATCH_V1, MAX_GITHUB_STACK_RETIRE_BATCH_V1,
-    GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1,
+    GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1, GitHubStackDeliveryRecordV1,
+    GitHubStackDeliveryStateV1, GitHubStackSignalAppendOutcomeV1, GitHubStackSignalRecordV1,
+    MAX_GITHUB_STACK_ACTIVE_PENDING_V1, MAX_GITHUB_STACK_DELIVERY_BATCH_V1,
+    MAX_GITHUB_STACK_RETIRE_BATCH_V1,
 };
 
 /// Installs the canonical registered global/session schema installer into the

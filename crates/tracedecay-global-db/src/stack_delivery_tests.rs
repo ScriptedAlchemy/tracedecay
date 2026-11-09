@@ -207,10 +207,7 @@ async fn settling_a_recipient_promotes_only_its_oldest_deferred_row() {
     );
 }
 
-async fn stored_signal_payload_bytes(
-    harness: &RegisteredGlobalDbHarness,
-    signal_id: &str,
-) -> i64 {
+async fn stored_signal_payload_bytes(harness: &RegisteredGlobalDbHarness, signal_id: &str) -> i64 {
     use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
     let snapshot = harness
         .registered
@@ -352,7 +349,10 @@ async fn compaction_is_bounded_and_raw_sql_cannot_delete_unsettled_delivery() {
     let harness = RegisteredGlobalDbHarness::open("github-stack-bounded-retirement").await;
     let count = crate::MAX_GITHUB_STACK_RETIRE_BATCH_V1 + 3;
     for index in 0..count {
-        let record = signal(&format!("signal.github-stack-batch.{index}"), index as i64 + 1);
+        let record = signal(
+            &format!("signal.github-stack-batch.{index}"),
+            index as i64 + 1,
+        );
         harness
             .registered
             .append_github_stack_signal(record.clone(), vec![RECIPIENT.to_owned()])
@@ -414,7 +414,10 @@ async fn compaction_is_bounded_and_raw_sql_cannot_delete_unsettled_delivery() {
 #[asupersync::test]
 async fn terminal_retirement_cannot_be_accelerated_past_the_issued_window() {
     let harness = RegisteredGlobalDbHarness::open("github-stack-terminal-freshness").await;
-    let mut fresh = signal("signal.github-stack-fresh", tracedecay_contracts::now_micros().0);
+    let mut fresh = signal(
+        "signal.github-stack-fresh",
+        tracedecay_contracts::now_micros().0,
+    );
     fresh.signal_json = r#"{"recent":true}"#.to_owned();
     harness
         .registered
@@ -476,7 +479,10 @@ async fn failed_terminal_recipient_retirement_rolls_back_payload_compaction() {
         .retire_github_stack_terminal_payloads_before(11)
         .await
         .expect_err("recipient deletion must fail inside the transaction");
-    assert!(problem.contains("simulate interrupted retirement"), "{problem}");
+    assert!(
+        problem.contains("simulate interrupted retirement"),
+        "{problem}"
+    );
     assert_eq!(
         harness
             .registered
