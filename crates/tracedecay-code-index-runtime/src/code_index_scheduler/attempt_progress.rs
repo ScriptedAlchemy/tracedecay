@@ -120,13 +120,28 @@ impl CodeIndexBuildAttemptSlotStateV1 {
         }
     }
 
+    /// A reconcile's real work may remain visible during its own durable
+    /// publication handoff. Once its guard exits, the live status slot must
+    /// not reattribute that observation to a later source wake. The attempt
+    /// identity fence protects a newer guard from an older guard's drop.
+    fn retire(&mut self, identity: CodeIndexBuildAttemptIdentityV1) {
+        if self.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.daemon_incarnation == identity.daemon_incarnation
+                && snapshot.producer_incarnation == identity.producer_incarnation
+                && snapshot.attempt_sequence == identity.sequence
+        }) {
+            self.snapshot = None;
+        }
+    }
+
     pub(crate) fn snapshot(&self) -> Option<CodeIndexPresealAttemptProgressV1> {
         self.snapshot.clone()
     }
 }
 
 /// A stale or unwinding reconcile can never publish into its successor.
-/// Dropping this guard on every cancellation, retry, panic or return fences it.
+/// Dropping this guard on cancellation, retry, panic or return fences it and
+/// retires its reading; only a still-owned durable handoff retains the counts.
 pub(super) struct CodeIndexPresealAttemptGuardV1 {
     slot: CodeIndexBuildAttemptSlotV1,
     identity: CodeIndexBuildAttemptIdentityV1,
@@ -173,7 +188,7 @@ impl Drop for CodeIndexPresealAttemptGuardV1 {
         self.slot
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .finish(self.identity);
+            .retire(self.identity);
     }
 }
 
@@ -207,8 +222,68 @@ mod tests {
         control.observed_preseal_work(work(CodeIndexPresealWorkPhaseV1::ParseEvidence, 1, None));
         control.finish_preseal_observation();
         assert_eq!(slot.read().unwrap().snapshot().unwrap(), after);
+        // The completed reconcile no longer owns this progress. A later
+        // source hint must not make its old counts appear to be new work.
         drop(attempt);
-        assert_eq!(slot.read().unwrap().snapshot().unwrap(), after);
+        assert!(slot.read().unwrap().snapshot().is_none());
+    }
+
+
+    #[test]
+    fn completed_handoff_does_not_reappear_during_a_later_source_wake() {
+        let slot = Arc::new(RwLock::new(CodeIndexBuildAttemptSlotStateV1::default()));
+        let first = CodeIndexPresealAttemptGuardV1::begin(Arc::clone(&slot), 7, 11);
+        first.observer()(work(CodeIndexPresealWorkPhaseV1::Resolution, 7, None));
+        // A real preseal transition requires capture then parse before
+        // resolution. The first observed work must be an actual capture.
+        let initial = slot.read().unwrap().snapshot().unwrap();
+        assert_eq!(initial.completed_items, 0);
+        assert!(initial.last_progress_micros.is_none());
+
+        first.observer()(work(CodeIndexPresealWorkPhaseV1::Capture, 3, Some(3)));
+        first.observer()(work(CodeIndexPresealWorkPhaseV1::ParseEvidence, 3, Some(3)));
+        first.observer()(work(CodeIndexPresealWorkPhaseV1::Resolution, 7, None));
+        first.finisher()();
+        let during_handoff = slot.read().unwrap().snapshot().unwrap();
+        assert!(!during_handoff.active);
+        assert_eq!(during_handoff.completed_items, 7);
+        assert!(during_handoff.last_progress_micros.is_some());
+
+        // Source admission may begin before the next producer guard. This
+        // slot is the authoritative value copied into a freshness response.
+        drop(first);
+        assert!(slot.read().unwrap().snapshot().is_none());
+
+        let next = CodeIndexPresealAttemptGuardV1::begin(Arc::clone(&slot), 7, 11);
+        let admitted = slot.read().unwrap().snapshot().unwrap();
+        assert!(admitted.active);
+        assert_eq!(admitted.completed_items, 0);
+        assert!(admitted.last_progress_micros.is_none());
+        next.observer()(work(CodeIndexPresealWorkPhaseV1::Capture, 2, Some(4)));
+        let actual = slot.read().unwrap().snapshot().unwrap();
+        assert_eq!(actual.completed_items, 2);
+        assert!(actual.last_progress_micros.is_some());
+        assert!(actual.attempt_sequence > during_handoff.attempt_sequence);
+    }
+
+    #[test]
+    fn out_of_order_guard_drop_never_erases_a_newer_attempt() {
+        let slot = Arc::new(RwLock::new(CodeIndexBuildAttemptSlotStateV1::default()));
+        let first = CodeIndexPresealAttemptGuardV1::begin(Arc::clone(&slot), 3, 5);
+        let old_observer = first.observer();
+        old_observer(work(CodeIndexPresealWorkPhaseV1::Capture, 4, Some(4)));
+        first.finisher()();
+
+        let second = CodeIndexPresealAttemptGuardV1::begin(Arc::clone(&slot), 3, 5);
+        second.observer()(work(CodeIndexPresealWorkPhaseV1::Capture, 2, Some(6)));
+        let current = slot.read().unwrap().snapshot().unwrap();
+        assert!(current.active);
+        drop(first);
+        old_observer(work(CodeIndexPresealWorkPhaseV1::ParseEvidence, 2, Some(4)));
+        assert_eq!(slot.read().unwrap().snapshot().unwrap(), current);
+
+        drop(second);
+        assert!(slot.read().unwrap().snapshot().is_none());
     }
 
     fn work(
