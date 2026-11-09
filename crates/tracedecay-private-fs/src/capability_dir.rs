@@ -46,8 +46,19 @@ pub fn pin_parent(path: &std::path::Path) -> io::Result<Dir> {
 }
 
 pub fn open_regular_nofollow(directory: &Dir, name: &OsStr) -> io::Result<std::fs::File> {
+    open_regular(directory, name, false)
+}
+
+pub fn open_writable_regular_nofollow(directory: &Dir, name: &OsStr) -> io::Result<std::fs::File> {
+    open_regular(directory, name, true)
+}
+
+fn open_regular(directory: &Dir, name: &OsStr, writable: bool) -> io::Result<std::fs::File> {
     let mut options = OpenOptions::new();
-    options.read(true).follow(FollowSymlinks::No);
+    options
+        .read(true)
+        .write(writable)
+        .follow(FollowSymlinks::No);
     #[cfg(windows)]
     {
         use cap_std::fs::OpenOptionsExt;

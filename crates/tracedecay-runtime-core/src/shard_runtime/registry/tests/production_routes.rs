@@ -621,6 +621,147 @@ async fn cancelled_schema_publication_retries_with_the_final_store() {
 }
 
 #[asupersync::test]
+async fn stopped_schema_installation_resumes_committed_steps_in_a_new_process() {
+    use crate::ports::registered_schema;
+    use std::process::Command;
+    use tracedecay_domain::errors::TraceDecayError;
+
+    const PATH: &str = "TRACEDECAY_TEST_SCHEMA_RETRY_DATABASE";
+    const PHASE: &str = "TRACEDECAY_TEST_SCHEMA_RETRY_PHASE";
+    let Some(path) = std::env::var_os(PATH) else {
+        let name = format!(
+            "{}::stopped_schema_installation_resumes_committed_steps_in_a_new_process",
+            module_path!().split_once("::").unwrap().1
+        );
+        for first in ["cancel", "failure"] {
+            let root = TempDir::new().unwrap();
+            let path = root.path().canonicalize().unwrap().join("sessions.db");
+            for phase in [first, "resume"] {
+                let output = Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", &name, "--nocapture"])
+                    .env(PATH, &path)
+                    .env(PHASE, phase)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success()
+                        && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                    "{phase}: {} {}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            let residues = std::fs::read_dir(root.path())
+                .unwrap()
+                .filter_map(|entry| {
+                    let name = entry.unwrap().file_name();
+                    name.to_string_lossy()
+                        .starts_with(".tracedecay-schema-")
+                        .then_some(name)
+                })
+                .collect::<Vec<_>>();
+            assert!(residues.is_empty(), "{residues:?}");
+        }
+        return;
+    };
+    registered_schema::register(|installation| {
+        Box::pin(async move {
+            let phase = std::env::var(PHASE).unwrap();
+            if phase == "resume" {
+                installation.execute_batch("CREATE TABLE completed(value INTEGER); INSERT INTO completed SELECT value FROM saved;").await.unwrap();
+                Ok(())
+            } else {
+                installation
+                    .execute_batch(
+                        "CREATE TABLE saved(value INTEGER); INSERT INTO saved VALUES (17);",
+                    )
+                    .await
+                    .unwrap();
+                if phase == "cancel" {
+                    installation.cancellation().cancel();
+                    Err(TraceDecayError::store_open_cancelled("registered schema"))
+                } else {
+                    let error = installation
+                        .execute_batch("INSERT INTO missing_table VALUES (42);")
+                        .await
+                        .unwrap_err();
+                    Err(TraceDecayError::Database {
+                        operation: "incomplete registered schema".to_owned(),
+                        message: error.to_string(),
+                    })
+                }
+            }
+        })
+    });
+    let path = PathBuf::from(path);
+    let authority =
+        crate::db::DatabaseAuthority::acquire_test(&path, "retry registered schema").unwrap();
+    let shard = profile_shard();
+    let binding = StoreRuntimeBindingV1::new(
+        shard.clone(),
+        incarnation(),
+        StoreAuthorityEpochV1::new(1).unwrap(),
+    );
+    let verified = VerifiedStoreLocatorV1::new(
+        shard,
+        incarnation(),
+        canonical_store_locator_digest(&path).unwrap(),
+    );
+    let locator = RuntimeLocatorRecord::new(
+        StoreRuntimeKey::from_binding(&binding),
+        ResolvedStoreLocator::prospective(verified, path.clone()),
+    );
+    let published = LifecycleShardRuntimePublisher
+        .publish(ShardRuntimeBuildRequest::new(
+            binding,
+            locator,
+            StoreRuntimeOpenMode::Initialize,
+            StoreRuntimeAccessMode::ReadWrite,
+            Some(authority),
+            CancellationToken::new(),
+        ))
+        .await;
+    match std::env::var(PHASE).unwrap().as_str() {
+        "cancel" => assert!(
+            matches!(
+                published,
+                Err(StoreRuntimeRegistryFailure::OpenCancelled { .. })
+            ),
+            "{:?}",
+            published.err()
+        ),
+        "failure" => assert!(
+            matches!(published, Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed { ref message, .. }) if message.contains("missing_table")),
+            "{:?}",
+            published.err()
+        ),
+        "resume" => {
+            let runtime = published.unwrap();
+            let reader =
+                Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .unwrap();
+            assert_eq!(
+                reader
+                    .query_row("SELECT value FROM completed", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                17
+            );
+            assert_eq!(
+                reader
+                    .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                    .unwrap(),
+                "ok"
+            );
+            drop(runtime);
+            return;
+        }
+        phase => panic!("unexpected schema test phase {phase}"),
+    }
+    assert!(!path.exists());
+}
+
+#[asupersync::test]
 async fn remote_node_initialization_installs_only_the_final_registered_schema() {
     let root = TempDir::new().unwrap();
     let profile_path = root.path().join("profile.db");
