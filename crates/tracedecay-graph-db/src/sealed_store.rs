@@ -690,62 +690,64 @@ fn sealed_staging_name(name: &str) -> bool {
     })
 }
 
-/// Removes every `.staging-*` directory a seal left behind under the store's
-/// sealed root.
+/// Reclaims interrupted seals only when the bounded receipt from the same
+/// opened staging directory proves its exact generation identity. The staging
+/// filename alone is not deletion authority: a missing, malformed, oversized,
+/// or foreign receipt leaves the directory intact for inspection.
 ///
-/// A seal builds into `.staging-<digest>` and installs by rename, so a staging
-/// directory that survives to the next open of the same store belongs to a
-/// build the process never finished, a crash, a kill, or an OOM between
-/// container write and rename. Nothing reads it and the next seal of that
-/// generation starts over, so on the live profile these accumulated to 7.4 GB
-/// under one store. Run at open: the exclusive store lock means no seal of
-/// this store is in flight.
+/// Store open owns exclusive maintenance admission. Capability-relative
+/// traversal holds the root and child across verification and recursive removal,
+/// so a pathname replacement cannot redirect deletion into a different tree.
 pub(crate) fn sweep_abandoned_sealed_staging(database_path: &Path) {
     let root = sealed_store_root(database_path);
-    let entries = match std::fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
-        Err(error) => {
-            tracing::warn!(
-                event = "sealed_staging_sweep_unreadable",
-                root = %root.display(),
-                error = %error,
-                "sealed store root could not be enumerated; abandoned staging stays"
-            );
-            return;
-        }
-    };
-    let mut removed = 0usize;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if !sealed_staging_name(name) {
-            continue;
-        }
-        let path = entry.path();
-        match tracedecay_private_fs::capability_dir::remove_child_directory_nofollow(
-            &root,
-            &entry.file_name(),
-        ) {
-            Ok(true) => removed += 1,
-            Ok(false) => {}
-            Err(error) => tracing::warn!(
-                event = "sealed_staging_sweep_failed",
-                path = %path.display(),
-                error = %error,
-                "abandoned sealed staging directory could not be removed"
-            ),
-        }
-    }
-    if removed > 0 {
-        tracing::info!(
+    let reclaimed = tracedecay_private_fs::capability_dir::remove_receipted_directories_nofollow(
+        &root,
+        std::ffi::OsStr::new(SEALED_STORE_RECEIPT_FILE),
+        MAX_SEALED_RECEIPT_BYTES,
+        |name, bytes| {
+            let Some(name) = name.to_str() else {
+                return false;
+            };
+            if !sealed_staging_name(name) {
+                return false;
+            }
+            let Some(generation_hex) = name.strip_prefix(".staging-") else {
+                return false;
+            };
+            let Ok(receipt) = serde_json::from_slice::<SealedStoreReceiptV1>(bytes) else {
+                return false;
+            };
+            let recognized_form = match receipt.form.as_str() {
+                SEALED_STORE_FORM_COMPACT => receipt.base.is_none(),
+                SEALED_STORE_FORM_LAYERED => receipt.base.is_some(),
+                _ => false,
+            };
+            recognized_form
+                && receipt.version == SEALED_STORE_RECEIPT_VERSION
+                && receipt.graph_format > 0
+                && receipt.graph_format <= GraphFormatVersion::current().get()
+                && receipt.physical_namespace == format!("generation:{generation_hex}")
+                && !receipt.namespace.is_empty()
+                && !receipt.projection.is_empty()
+                && !receipt.generation.is_empty()
+                && !receipt.recovered_digest.is_empty()
+        },
+    );
+    match reclaimed {
+        Ok(removed) if removed > 0 => tracing::info!(
             event = "sealed_staging_swept",
             root = %root.display(),
             removed,
-            "removed abandoned sealed staging directories left by interrupted seals"
-        );
+            "removed receipt-verified staging from interrupted seals"
+        ),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => tracing::warn!(
+            event = "sealed_staging_sweep_failed",
+            root = %root.display(),
+            %error,
+            "unverified abandoned staging stays for inspection"
+        ),
     }
 }
 

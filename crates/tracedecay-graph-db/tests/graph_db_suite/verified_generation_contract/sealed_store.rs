@@ -1229,12 +1229,11 @@ fn restart_recovery_adopts_or_discards_the_on_disk_artifact() {
     assert_snapshot_reads(&snapshot, &identity, "durable");
 }
 
-/// A seal that died between container write and rename leaves
-/// `.staging-<digest>` under the sealed root. Nothing reads it, so the next
-/// open of the store removes every such directory while leaving installed
-/// artifacts untouched.
+/// A completed interrupted seal carries an exact generation receipt and is
+/// reclaimed when reopening the store. Unreceipted, mismatched, oversized and
+/// linked lookalikes must survive instead of being deleted by filename.
 #[test]
-fn reopening_the_store_sweeps_staging_left_by_an_interrupted_seal() {
+fn reopening_the_store_reclaims_only_receipted_staging() {
     let temp = TempDir::new().unwrap();
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
     let mut authority = RelationalAuthority::default();
@@ -1260,28 +1259,47 @@ fn reopening_the_store_sweeps_staging_left_by_an_interrupted_seal() {
     assert!(registered.close().unwrap());
     drop(registered);
 
-    // Two interrupted seals: one of a generation that never installed and one
-    // whose digest matches the installed artifact but was started again.
     let root = sealed_store_root(temp.path());
     let installed = std::fs::read_dir(&root)
         .unwrap()
         .map(Result::unwrap)
         .map(|entry| entry.path())
         .find(|path| path.join("sealed.json").is_file())
-        .expect("the sealed artifact directory must exist");
+        .expect("the installed sealed artifact directory must exist");
+    let receipt = std::fs::read(installed.join("sealed.json")).unwrap();
+    let installed_name = installed.file_name().unwrap().to_str().unwrap();
+    let verified = root.join(format!(".staging-{installed_name}"));
+    std::fs::create_dir(&verified).unwrap();
+    std::fs::copy(
+        installed.join("generation.grafeo"),
+        verified.join("generation.grafeo"),
+    )
+    .unwrap();
+    std::fs::write(verified.join("sealed.json"), &receipt).unwrap();
+
+    let unowned = root.join(format!(".staging-{}", "c".repeat(64)));
+    std::fs::create_dir(&unowned).unwrap();
+    std::fs::write(unowned.join("generation.grafeo"), b"foreign bytes").unwrap();
+    let mismatched = root.join(format!(".staging-{}", "d".repeat(64)));
+    std::fs::create_dir(&mismatched).unwrap();
+    std::fs::write(mismatched.join("sealed.json"), &receipt).unwrap();
+    std::fs::write(mismatched.join("sentinel"), b"wrong identity").unwrap();
+    let oversized = root.join(format!(".staging-{}", "e".repeat(64)));
+    std::fs::create_dir(&oversized).unwrap();
+    std::fs::write(oversized.join("sealed.json"), vec![b'x'; 128 * 1024]).unwrap();
+    std::fs::write(oversized.join("sentinel"), b"too large").unwrap();
     let unrelated = root.join(".staging-notes");
     std::fs::create_dir(&unrelated).unwrap();
     std::fs::write(unrelated.join("notes"), b"keep").unwrap();
-    let abandoned = [
-        root.join(format!(".staging-{}", "c".repeat(64))),
-        root.join(format!(
-            ".staging-{}",
-            installed.file_name().unwrap().to_str().unwrap()
-        )),
-    ];
-    for staging in &abandoned {
-        std::fs::create_dir_all(staging).unwrap();
-        std::fs::write(staging.join("generation.grafeo"), b"partial container").unwrap();
+
+    #[cfg(unix)]
+    let outside = TempDir::new().unwrap();
+    #[cfg(unix)]
+    let linked = root.join(format!(".staging-{}", "f".repeat(64)));
+    #[cfg(unix)]
+    {
+        std::fs::write(outside.path().join("sentinel"), b"outside").unwrap();
+        std::os::unix::fs::symlink(outside.path(), &linked).unwrap();
     }
 
     let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
@@ -1296,17 +1314,45 @@ fn reopening_the_store_sweeps_staging_left_by_an_interrupted_seal() {
             &record.publication.key.projection,
         )
         .unwrap();
+
+    assert!(!verified.exists(), "a verified abandoned seal must be reclaimed");
+    assert_eq!(
+        std::fs::read(unowned.join("generation.grafeo")).unwrap(),
+        b"foreign bytes",
+        "missing receipt is not deletion authority"
+    );
+    assert_eq!(
+        std::fs::read(mismatched.join("sealed.json")).unwrap(),
+        receipt,
+        "a receipt for a different generation cannot authorize cleanup"
+    );
+    assert_eq!(
+        std::fs::read(mismatched.join("sentinel")).unwrap(),
+        b"wrong identity"
+    );
+    assert_eq!(
+        std::fs::read(oversized.join("sentinel")).unwrap(),
+        b"too large",
+        "oversized receipts must be refused without recursive removal"
+    );
     assert_eq!(std::fs::read(unrelated.join("notes")).unwrap(), b"keep");
-    for staging in &abandoned {
+    #[cfg(unix)]
+    {
         assert!(
-            !staging.exists(),
-            "opening the store removes abandoned staging {}",
-            staging.display()
+            std::fs::symlink_metadata(&linked)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "a linked staging entry must not be followed or removed"
+        );
+        assert_eq!(
+            std::fs::read(outside.path().join("sentinel")).unwrap(),
+            b"outside"
         );
     }
     assert!(
         installed.join("sealed.json").is_file(),
-        "the installed sealed artifact is untouched by the sweep"
+        "the installed generation must remain untouched"
     );
     assert!(snapshot.serves_from_sealed_store());
     assert_snapshot_reads(&snapshot, &identity, "durable");
