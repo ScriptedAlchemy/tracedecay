@@ -39,8 +39,10 @@ export function SessionPivots({
   from: SessionWorkspace;
 }) {
   const scope = useScope((state) => state.scope);
+  // Loom resolves provider-less IDs without inventing a lane; ambiguous
+  // matches are reported rather than silently selecting another provider.
   const targets = (Object.keys(PIVOTS) as SessionWorkspace[]).filter(
-    (target) => target !== from && (target !== 'loom' || session.provider !== null),
+    (target) => target !== from,
   );
   return (
     <nav aria-label="Open this session in" className="flex flex-wrap gap-2">
