@@ -417,16 +417,16 @@ impl InitializationDirectory {
                 "SQLite preparation has no durable file generation for recovery",
             ));
         }
-        self.publish_prepared().map(Some)
+        self.publish_prepared(Vec::new()).map(Some)
     }
 
-    fn publish_prepared(&mut self) -> io::Result<u64> {
+    fn publish_prepared(&mut self, mut pins: Vec<File>) -> io::Result<u64> {
         let prepared = self
             .prepared
             .as_ref()
             .ok_or_else(|| ambiguous("SQLite preparation receipt is missing"))?;
         let stage = self.stage_cap()?;
-        let _pins = self.pin_members(&stage, prepared)?;
+        pins.extend(self.pin_members(&stage, prepared)?);
         for (suffix, identity) in SIDECARS.into_iter().zip(&prepared.sidecars) {
             let from = format!("reservation{suffix}");
             let to = with_suffix(&self.destination, suffix);
@@ -449,13 +449,17 @@ impl InitializationDirectory {
         capability_dir::sync_directory(&self.parent)?;
         prepared.pin_main(&self.parent, leaf(&self.destination)?)?;
         drop(stage);
+        // Read-only admission observes the receipt without taking the writer's
+        // lease. Close every raw main/SHM pin before clearing that receipt:
+        // a later close could release the new reader's process-wide POSIX locks.
+        drop(pins);
         self.retire()?;
         Ok(expected)
     }
 
     pub(super) fn publish(mut self, expected: u64, files: (File, [File; 3])) -> io::Result<()> {
-        let _creation_pins = self.prepare(expected, files)?;
-        self.publish_prepared().map(|_| ())
+        let pins = self.prepare(expected, files)?;
+        self.publish_prepared(Vec::from(pins)).map(|_| ())
     }
 
     fn verify_directory_name(&self) -> io::Result<()> {
@@ -478,7 +482,15 @@ impl InitializationDirectory {
         // The kernel refuses a file or a nonempty directory even if a new
         // entry appears after the read. No regular staging leaf is unlinked.
         self.parent.remove_dir(leaf(&self.directory)?)?;
-        capability_dir::sync_directory(&self.parent)
+        capability_dir::sync_directory(&self.parent)?;
+        if self.prepared.is_some() {
+            tracing::debug!(
+                name: "sqlite.initialization.handoff",
+                path = %self.destination.display(),
+                "completed SQLite initialization handed off"
+            );
+        }
+        Ok(())
     }
 
     fn require_released_receipt(directory: &Path) -> io::Result<()> {
@@ -547,6 +559,9 @@ impl InitializationDirectory {
                 )?);
             }
         }
+        // Recovery also reopens raw evidence descriptors. They must not outlive
+        // the receipt that excludes read-only attachments from the family.
+        drop(pins);
         stage.retire()
     }
 }
@@ -633,6 +648,9 @@ mod tests {
     use tracedecay_private_fs::create_private_file;
     use tracedecay_private_fs::framed_log::rename_noreplace;
 
+    #[cfg(all(unix, feature = "test-helpers"))]
+    mod handoff;
+
     fn seed(path: &Path, value: i64) {
         let db = Connection::open(path).unwrap();
         db.execute_batch("CREATE TABLE data(value INTEGER)")
@@ -695,7 +713,7 @@ mod tests {
         assert_ne!(fs::read(stage.database()).unwrap(), before);
         assert_eq!(read_value(&stage.database()), 99);
         assert_eq!(
-            stage.publish_prepared().unwrap_err().kind(),
+            stage.publish_prepared(Vec::new()).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
         assert!(!destination.exists());
