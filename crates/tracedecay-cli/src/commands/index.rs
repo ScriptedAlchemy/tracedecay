@@ -7,8 +7,8 @@ use tracedecay_project::project::TraceDecay;
 use tracedecay_contracts::code_index_freshness::{
     CODE_INDEX_READINESS_WAIT_TIMED_OUT, CODE_INDEX_READINESS_WAIT_UNAVAILABLE,
     CodeIndexBuildBlockedReasonV1, CodeIndexBuildPhaseV1, CodeIndexBuildProgressV1,
-    CodeIndexNativeGraphPhaseV1, CodeIndexPresealWorkPhaseV1, CodeIndexReadinessWaitOutcomeV1,
-    CodeIndexStalenessStateV1, CodeIndexWorktreeFreshnessV1,
+    CodeIndexNativeGraphPhaseV1, CodeIndexReadinessWaitOutcomeV1, CodeIndexStalenessStateV1,
+    CodeIndexWorktreeFreshnessV1,
 };
 use tracedecay_contracts::graph_tool::GraphToolResultV1;
 use tracedecay_contracts::retrieval::{
@@ -460,8 +460,8 @@ impl FirstGenerationStall {
                         progress.phase,
                         CodeIndexBuildPhaseV1::SourceScan | CodeIndexBuildPhaseV1::BulkCommit
                     );
-                let different_graph = active_graph
-                    .is_some_and(|graph| graph.generation_id != progress.generation_id);
+                let different_graph =
+                    active_graph.is_some_and(|graph| graph.generation_id != progress.generation_id);
                 if !retained_text && !different_graph {
                     return Some(Self::Blocked(reason));
                 }
@@ -2212,7 +2212,10 @@ mod daemon_precondition_tests {
             Duration::ZERO,
         )
         .await;
-        assert!(result.is_ok(), "old blocked generation must not refuse new work: {result:?}");
+        assert!(
+            result.is_ok(),
+            "old blocked generation must not refuse new work: {result:?}"
+        );
         assert_eq!(reads, 3, "only the actual ready receipt ends a moving wait");
     }
 
