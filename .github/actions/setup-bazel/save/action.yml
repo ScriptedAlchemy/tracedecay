@@ -10,19 +10,12 @@ inputs:
   restored-entries:
     description: Entry count returned by setup-bazel before the build.
     required: true
-  restored-key:
-    description: Previously restored snapshot, returned when no new files were fetched.
-    default: ""
-outputs:
-  key:
-    description: Published or already complete dependency snapshot.
-    value: ${{ steps.changed.outputs.changed == 'true' && inputs.key || inputs.restored-key }}
 runs:
   using: composite
   steps:
     - name: Check for newly fetched dependencies
       id: changed
-      if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request' && inputs.key != ''
+      if: always() && !cancelled() && github.ref == 'refs/heads/master' && github.event_name != 'pull_request' && inputs.key != '' && inputs.restored-entries != ''
       shell: bash
       env:
         CACHE_PATH: ${{ inputs.path }}
@@ -37,7 +30,7 @@ runs:
         fs.appendFileSync(process.env.GITHUB_OUTPUT, `changed=${changed}\n`);
         JS
     - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      if: steps.changed.outputs.changed == 'true'
+      if: always() && !cancelled() && steps.changed.outputs.changed == 'true'
       with:
         path: ${{ inputs.path }}
         key: ${{ inputs.key }}
