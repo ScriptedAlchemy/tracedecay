@@ -145,6 +145,18 @@ impl CodeIndexPresealAttemptGuardV1 {
         Self { slot, identity }
     }
 
+    /// The real publication handoff fences late or stale work callbacks.
+    /// This transition does not claim a completed source item.
+    pub(super) fn finisher(&self) -> Arc<dyn Fn() + Send + Sync> {
+        let slot = Arc::clone(&self.slot);
+        let identity = self.identity;
+        Arc::new(move || {
+            slot.write()
+                .unwrap_or_else(PoisonError::into_inner)
+                .finish(identity);
+        })
+    }
+
     pub(super) fn observer(&self) -> Arc<dyn Fn(CodeIndexPresealWorkV1) + Send + Sync> {
         let slot = Arc::clone(&self.slot);
         let identity = self.identity;
@@ -168,6 +180,37 @@ impl Drop for CodeIndexPresealAttemptGuardV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_application::code_index::DaemonCodeIndexControlV1;
+    use tracedecay_code_index::production::CodeIndexExecutionControlV1;
+
+    #[test]
+    fn durable_publication_handoff_retires_attempt_without_forging_work() {
+        let slot = Arc::new(RwLock::new(CodeIndexBuildAttemptSlotStateV1::default()));
+        let attempt = CodeIndexPresealAttemptGuardV1::begin(Arc::clone(&slot), 7, 11);
+        let control = DaemonCodeIndexControlV1::default()
+            .with_preseal_observer(attempt.observer())
+            .with_preseal_finisher(attempt.finisher());
+        control.observed_preseal_work(work(CodeIndexPresealWorkPhaseV1::Capture, 3, None));
+        let before = slot.read().unwrap().snapshot().unwrap();
+        assert!(before.active);
+        assert_eq!(before.completed_items, 3);
+        assert!(before.last_progress_micros.is_some());
+
+        // The guard remains alive during durable publication. Retiring it
+        // must not renew the work clock, and late callbacks are fenced.
+        control.finish_preseal_observation();
+        let after = slot.read().unwrap().snapshot().unwrap();
+        assert!(!after.active);
+        assert_eq!(after.completed_items, 3);
+        assert_eq!(after.last_progress_micros, before.last_progress_micros);
+        assert!(after.progress_epoch > before.progress_epoch);
+        control.observed_preseal_work(work(CodeIndexPresealWorkPhaseV1::ParseEvidence, 1, None));
+        control.finish_preseal_observation();
+        assert_eq!(slot.read().unwrap().snapshot().unwrap(), after);
+        drop(attempt);
+        assert_eq!(slot.read().unwrap().snapshot().unwrap(), after);
+    }
+
 
     fn work(
         phase: CodeIndexPresealWorkPhaseV1,

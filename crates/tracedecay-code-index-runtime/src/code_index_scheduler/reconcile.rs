@@ -1796,6 +1796,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             .publication
             .clone()
             .with_reconcile_publication_fence(Arc::clone(&self.hints), control.clone());
+        control.finish_preseal_observation();
         match store.commit(&mut pending.preparation, &pending.publication) {
             Ok(bytes) => {
                 let sealed =
@@ -2374,7 +2375,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         );
         let control = self
             .reconcile_control()
-            .with_preseal_observer(attempt.observer());
+            .with_preseal_observer(attempt.observer())
+            .with_preseal_finisher(attempt.finisher());
         let captured = self
             .capture_authoritative_snapshot_without_active_generation_reuse(Some(&control))
             .map_err(|error| prefer_resident_memory_refusal(&control, error))?;
@@ -2995,7 +2997,8 @@ impl CodeIndexWorktreeSchedulerV1 {
             );
             let control = self
                 .reconcile_control()
-                .with_preseal_observer(attempt.observer());
+                .with_preseal_observer(attempt.observer())
+                .with_preseal_finisher(attempt.finisher());
             // Every earlier attempt was cancelled by a newer source epoch. A
             // source that changes faster than a pass lasts would cancel this
             // one too, so it seals what it captured; the epoch that

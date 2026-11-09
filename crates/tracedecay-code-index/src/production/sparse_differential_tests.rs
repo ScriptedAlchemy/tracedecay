@@ -306,7 +306,7 @@ fn differential_counts(language: &str) -> DifferentialCounts {
 #[test]
 fn cold_resolution_index_publication_advances_actual_work_counts() {
     #[derive(Default)]
-    struct ResolutionWork(std::sync::Mutex<Vec<u64>>);
+    struct ResolutionWork(std::sync::Mutex<Vec<u64>>, std::sync::atomic::AtomicUsize);
 
     impl CodeIndexExecutionControlV1 for ResolutionWork {
         fn is_cancelled(&self) -> bool {
@@ -318,12 +318,25 @@ fn cold_resolution_index_publication_advances_actual_work_counts() {
         }
 
         fn observed_preseal_work(&self, work: CodeIndexPresealWorkV1) {
+            assert_eq!(
+                self.1.load(std::sync::atomic::Ordering::Acquire),
+                0,
+                "no pre-seal work may arrive after the durable handoff"
+            );
             if work.phase == CodeIndexPresealWorkPhaseV1::Resolution {
                 self.0
                     .lock()
                     .expect("resolution observations")
                     .push(work.completed_items);
             }
+        }
+
+        fn finish_preseal_observation(&self) {
+            assert_eq!(
+                self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel),
+                0,
+                "publication must finish its pre-seal attempt exactly once"
+            );
         }
     }
 
@@ -341,6 +354,11 @@ fn cold_resolution_index_publication_advances_actual_work_counts() {
     let published = owner
         .build_and_publish(fixture_request(&files, None, false, 1_500_000), &observer)
         .expect("real cold reference resolution");
+    assert_eq!(
+        observer.1.load(std::sync::atomic::Ordering::Acquire),
+        1,
+        "cold publication must retire pre-seal before the control is dropped"
+    );
     let manifest =
         super::partitioned_codec::parse_partitioned_manifest(published.manifest_bytes().as_ref())
             .expect("verified published index manifest");

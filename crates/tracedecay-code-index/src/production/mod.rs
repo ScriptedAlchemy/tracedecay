@@ -302,6 +302,10 @@ pub trait CodeIndexExecutionControlV1: Sync {
     /// Only a daemon-bound attempt has a progress owner. A benchmark,
     /// historical read or standalone extraction has none to update.
     fn observed_preseal_work(&self, _work: CodeIndexPresealWorkV1) {}
+
+    /// Construction has left capture, parsing and resolution for publication.
+    /// This ends pre-seal activity without inventing a completed work unit.
+    fn finish_preseal_observation(&self) {}
 }
 
 /// A control that never interrupts. Sealed seating uses it when the caller
@@ -2496,6 +2500,7 @@ where
                     Ok(sparse) => {
                         crate::observe::record_rebuild_state("increment");
                         lexical_page_source::checkpoint(control)?;
+                        control.finish_preseal_observation();
                         return self.publish(preparation, sparse);
                     }
                     Err(reason) => reason,
@@ -2523,6 +2528,7 @@ where
             control,
         )?;
         lexical_page_source::checkpoint(control)?;
+        control.finish_preseal_observation();
         self.publish(preparation, publication)
     }
 

@@ -1241,6 +1241,27 @@ mod daemon_precondition_tests {
         ));
     }
 
+    #[test]
+    fn retired_preseal_does_not_stall_slow_durable_publication() {
+        let now = Instant::now();
+        let mut window = super::FirstGenerationProgressWindow::new(Duration::from_secs(120));
+        let mut source = attempt(CodeIndexPresealWorkPhaseV1::Resolution, 6, 19, 2);
+        source.latest_generation_id = Some("generation.prior.sealed".to_owned());
+        let mut retained = progress(6_136, None);
+        retained.phase = CodeIndexBuildPhaseV1::Ready;
+        source.progress = Some(retained);
+        let marker = super::FirstGenerationWorkMarker::of(Some(&source));
+        assert!(marker.is_some());
+        assert!(!window.observe(marker, now));
+
+        // The scoped attempt was retired at the real publication handoff.
+        // An old Ready report is not successor work, even after 120 seconds.
+        source.preseal_attempt.as_mut().unwrap().active = false;
+        assert_eq!(super::FirstGenerationWorkMarker::of(Some(&source)), None);
+        assert!(!window.observe(None, now + Duration::from_secs(130)));
+        assert!(!window.observe(None, now + Duration::from_secs(260)));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn wait_refuses_frozen_capture_even_when_old_generation_is_ready() {
         let mut capture = attempt(CodeIndexPresealWorkPhaseV1::Capture, 4, 7, 2);
