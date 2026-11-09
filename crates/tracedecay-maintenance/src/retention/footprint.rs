@@ -495,7 +495,11 @@ fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
         .map(|component| component.as_os_str().to_string_lossy().into_owned())
         .collect::<Vec<_>>();
     let first = components.first()?;
-    if first == PROJECTS_DIRECTORY && components.len() >= 3 {
+    // A non-traversable project root (symlink, unreadable directory, or
+    // unexpected file) still belongs to that project's named finding.
+    // Otherwise its unavailable bytes appear under a generic `projects` key
+    // while the affected store disappears from Doctor altogether.
+    if first == PROJECTS_DIRECTORY && components.len() >= 2 {
         let store_key = format!("{PROJECTS_DIRECTORY}/{}", components[1]);
         let inner = &components[2..];
         // A container's verified/spill tree owns its descendants, even when
@@ -1143,6 +1147,66 @@ mod tests {
         assert_eq!(bytes, 12, "the outside store is not followed");
         assert_eq!(unavailable, 1, "the symlink is explicit unavailable data");
         assert_eq!(remaining, 100 - 1 - 64 - 1 - 1);
+    }
+
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_project_root_has_its_own_partial_finding() {
+        let temporary = tempfile::tempdir().expect("footprint fixture");
+        let profile = temporary.path().join("profile");
+        let foreign = temporary.path().join("foreign");
+        sized(&foreign.join("private"), 2 * GIB);
+        sized(&profile.join("projects/proj_live/tracedecay.db"), 11);
+        std::os::unix::fs::symlink(&foreign, profile.join("projects/proj_blocked"))
+            .expect("substituted project directory");
+
+        let registered_root = temporary.path().join("registered-checkout");
+        std::fs::create_dir(&registered_root).expect("registered root");
+        let registered = BTreeMap::from([(
+            "proj_blocked".to_owned(),
+            registered_root.display().to_string(),
+        )]);
+        let overrides = BTreeMap::from([
+            ("projects/proj_blocked".to_owned(), 1),
+            ("projects/proj_live".to_owned(), 11),
+            (PROFILE_TOTAL_KEY.to_owned(), 11),
+        ]);
+
+        let footprint = census_profile_footprint(&profile, &registered, &overrides);
+        assert_eq!(footprint.total_bytes, 11, "foreign bytes must not be counted");
+        assert_eq!(footprint.unavailable_entry_count, 1);
+        assert_eq!(footprint.entries.len(), 2, "no generic projects entry");
+        assert_eq!(
+            footprint.full_profile_size().state,
+            ProfileTotalCoverageStateV1::Partial
+        );
+        let blocked = entry(&footprint, "projects/proj_blocked");
+        assert_eq!(blocked.family, ProfileFamilyV1::ProjectStore);
+        assert_eq!(blocked.bytes, 0);
+        assert_eq!(blocked.unavailable_entry_count, 1);
+        assert_eq!(blocked.bound_bytes, 1);
+        assert_eq!(
+            blocked.project.as_ref().expect("registered project").state,
+            ProjectRootStateV1::Present
+        );
+        assert_eq!(entry(&footprint, "projects/proj_live").bytes, 11);
+
+        let observed = findings(&footprint);
+        assert_eq!(observed.len(), 3);
+        assert_eq!(
+            observed["projects/proj_blocked"].finding().state(),
+            DoctorEvidenceStateV1::Partial,
+            "an untraversable project store cannot be reported healthy or omitted"
+        );
+        assert_eq!(
+            observed["projects/proj_live"].finding().state(),
+            DoctorEvidenceStateV1::HealthyCompleteCoverage
+        );
+        assert_eq!(
+            observed[PROFILE_TOTAL_KEY].finding().state(),
+            DoctorEvidenceStateV1::Partial
+        );
     }
 
     #[test]
