@@ -549,6 +549,7 @@ impl McpServer {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use tracedecay_mcp::tools::response_trailers::ToolTokenAccounting;
     use tracedecay_mcp::transport::JsonRpcRequest;
 
     use super::*;
@@ -801,9 +802,6 @@ mod tests {
 
     #[tokio::test]
     async fn refused_counter_commit_never_credits_independent_savings_history() {
-        use tracedecay_mcp::tools::response_trailers::ToolTokenAccounting;
-        use tracedecay_runtime_core::db::engine::Executor as _;
-
         let (cg, _project, authority) =
             super::super::writer_test_support::init_indexed_repo().await;
         let project_root = cg.project_root().to_path_buf();
