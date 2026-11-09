@@ -75,6 +75,16 @@ case, endpoint hash, requested model, client calibration, and the
 serving declaration. A completed result retains the same identity and each row's
 request fingerprint. The endpoint itself is not copied into the identity.
 
+For qualified runs, an optional first-response sample is now bound to the
+exact experiment hash, case ID, and request digest (and original captured wire
+bytes when present). A new qualified run refuses an already occupied sample
+path before inference; an interrupted qualified run accepts its existing sample
+only when the identity and original request agree. This prevents a stale sample
+from appearing to describe a different held-out run. Samples remain
+self-recorded diagnostic data, **not remote response attestation**. Historical
+nonqualified sample behavior is unchanged. Old unbound samples are not
+silently migrated: use a new sample path.
+
 An interrupted run resumes only with matching identity. Changed questions,
 question order, renderer output, labels, subset contents, or serving settings
 refuse before any HTTP request or append. Headerless old logs, incomplete rows,

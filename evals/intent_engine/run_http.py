@@ -52,6 +52,40 @@ def request_bytes(body):
     return json.dumps(body, allow_nan=False).encode("utf-8")
 
 
+def validate_qualified_sample(path, experiment_sha, requests):
+    """Refuse a stale first-response sample during an exact qualified resume.
+
+    Raw samples are debugging evidence, not independent model attestation.
+    Still, a sample from another experiment must never silently accompany a
+    fresh or resumed frozen result. Verify its original request bytes as well
+    as the experiment fingerprint, without normalizing a Scout capture.
+    """
+    if os.path.islink(path) or not os.path.isfile(path):
+        raise ValueError("qualified sample path must be a regular file")
+    with open(path, "rb") as source:
+        sample = loads_unambiguous_json(source.read())
+    if not isinstance(sample, dict):
+        raise ValueError("qualified sample must be a JSON object")
+    case_id = sample.get("case_id")
+    original = requests.get(case_id) if isinstance(case_id, str) else None
+    if (original is None or sample.get("experiment_sha256") != experiment_sha
+            or sample.get("request_sha256") != original[1]):
+        raise ValueError("qualified sample disagrees with frozen experiment identity")
+    body = original[0]
+    if isinstance(body, bytes):
+        matches_request = (
+            sample.get("request_json") == body.decode("utf-8")
+            and sample.get("request") == loads_unambiguous_json(body)
+        )
+    else:
+        matches_request = (
+            "request_json" not in sample and sample.get("request") == body
+        )
+    if not matches_request:
+        raise ValueError("qualified sample request differs from frozen HTTP bytes")
+    noul_probabilities(sample.get("response"), sample["request"]["questions"])
+
+
 def publish_sample(path, serialized):
     """Publish a completely rendered sample without clobbering an existing one.
 
@@ -677,6 +711,12 @@ def main(argv=None):
             identity["timeout_ms"] = args.timeout_ms
         header = {"experiment": identity, "experiment_sha256": digest(identity)}
         partial_path = path + ".partial"
+        if qualification_sha is not None and args.sample_out and os.path.lexists(args.sample_out):
+            # A new experiment cannot inherit a previous tag's first-response
+            # evidence. An exact resume may retain only its own sample.
+            if not os.path.lexists(partial_path):
+                raise ValueError("qualified sample already exists for a new experiment; choose a new --sample-out")
+            validate_qualified_sample(args.sample_out, header["experiment_sha256"], requests)
         try:
             # Default umask 022 (or an explicit umask 000) must not expose
             # result labels, cases or response telemetry to other users.
@@ -770,6 +810,12 @@ def main(argv=None):
                     }
                     if isinstance(body, bytes):
                         sample["request_json"] = body.decode("utf-8")
+                    if qualification_sha is not None:
+                        sample.update({
+                            "experiment_sha256": header["experiment_sha256"],
+                            "case_id": case["id"],
+                            "request_sha256": request_sha,
+                        })
                     serialized_sample = json.dumps(sample, indent=1, allow_nan=False)
                     publish_sample(args.sample_out, serialized_sample)
                 partial.write(serialized_row + "\n")

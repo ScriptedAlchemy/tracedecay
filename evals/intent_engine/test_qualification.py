@@ -999,6 +999,101 @@ class QualificationTests(unittest.TestCase):
                 "holdout-positive", "holdout-negative"
             ])
 
+    def test_qualified_sample_is_bound_to_the_frozen_experiment_on_resume(self):
+        with tempfile.TemporaryDirectory() as temp:
+            here = Path(temp)
+            (here / "dataset.json").write_bytes(self.dataset_bytes)
+            (here / "manifest.json").write_bytes(self.manifest_bytes)
+            (here / "server.json").write_text(json.dumps(self.server_config))
+            sample = here / "first-response.json"
+            args = [
+                "--url", self.endpoint,
+                "--tag", "sample-provenance",
+                "--server-config", str(here / "server.json"),
+                "--qualification-manifest", str(here / "manifest.json"),
+                "--sample-out", str(sample),
+                "B_noul_text",
+            ]
+            calls = []
+
+            def answer(url, body, **kwargs):
+                calls.append(body)
+                if len(calls) == 2:
+                    raise OSError("interrupted before second response")
+                return {
+                    "model": "self-reported-test-model",
+                    "answers": {key: {"type": "noul", "noul": 0.2}
+                                for key in body["questions"]},
+                }, 4.0
+
+            partial = here / "results" / "sample-provenance_B_noul_text.json.partial"
+            final = here / "results" / "sample-provenance_B_noul_text.json"
+            with patch.object(run_http, "HERE", str(here)), patch.object(
+                run_http, "post", side_effect=answer
+            ):
+                with self.assertRaisesRegex(OSError, "interrupted before second response"):
+                    run_http.main(args)
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(partial.exists())
+            self.assertTrue(sample.exists())
+            self.assertFalse(final.exists())
+            sample_bytes = sample.read_bytes()
+            evidence = json.loads(sample_bytes)
+            header = json.loads(partial.read_text().splitlines()[0])
+            self.assertEqual(evidence["experiment_sha256"], header["experiment_sha256"])
+            self.assertEqual(evidence["case_id"], "holdout-positive")
+            self.assertEqual(
+                evidence["request_sha256"],
+                hashlib.sha256(run_http.request_bytes(calls[0])).hexdigest(),
+            )
+            partial_bytes = partial.read_bytes()
+            for field, replacement in (
+                ("experiment_sha256", "0" * 64),
+                ("request_sha256", "f" * 64),
+            ):
+                with self.subTest(field=field):
+                    forged = copy.deepcopy(evidence)
+                    forged[field] = replacement
+                    sample.write_text(json.dumps(forged))
+                    with patch.object(run_http, "HERE", str(here)), patch.object(
+                        run_http, "post"
+                    ) as post:
+                        with self.assertRaisesRegex(ValueError, "qualified sample disagrees"):
+                            run_http.main(args)
+                        post.assert_not_called()
+                    self.assertEqual(partial.read_bytes(), partial_bytes)
+                    self.assertFalse(final.exists())
+            sample.write_bytes(sample_bytes)
+            with patch.object(run_http, "HERE", str(here)), patch.object(
+                run_http, "post", side_effect=lambda url, body, **kw: (
+                    {"model": "self-reported-test-model",
+                     "answers": {key: {"type": "noul", "noul": 0.1}
+                                 for key in body["questions"]}},
+                    3.0,
+                )
+            ) as post:
+                run_http.main(args)
+                self.assertEqual(post.call_count, 1)
+            self.assertTrue(final.exists())
+            self.assertFalse(partial.exists())
+            self.assertEqual(sample.read_bytes(), sample_bytes)
+            self.assertEqual(len(json.loads(final.read_text())["rows"]), 2)
+
+            # A new tag cannot accidentally publish a stale raw response as
+            # evidence of a completely separate experiment.
+            new_args = args.copy()
+            new_args[new_args.index("sample-provenance")] = "other-experiment"
+            with patch.object(run_http, "HERE", str(here)), patch.object(
+                run_http, "post"
+            ) as post:
+                with self.assertRaisesRegex(ValueError, "qualified sample already exists"):
+                    run_http.main(new_args)
+                post.assert_not_called()
+            self.assertFalse(
+                (here / "results" / "other-experiment_B_noul_text.json.partial").exists()
+            )
+            self.assertEqual(sample.read_bytes(), sample_bytes)
+
     def test_runner_refuses_group_leakage_without_network_or_partial_output(self):
         with tempfile.TemporaryDirectory() as temp:
             here = Path(temp)
