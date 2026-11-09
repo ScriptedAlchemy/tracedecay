@@ -1039,6 +1039,9 @@ class QualificationTests(unittest.TestCase):
             self.assertFalse(final.exists())
             sample_bytes = sample.read_bytes()
             evidence = json.loads(sample_bytes)
+            first_row = json.loads(partial.read_text().splitlines()[1])
+            self.assertEqual(first_row["sample_response_sha256"], run_http.digest(evidence["response"]))
+            self.assertEqual(evidence["row_sha256"], run_http.digest(first_row))
             header = json.loads(partial.read_text().splitlines()[0])
             self.assertEqual(evidence["experiment_sha256"], header["experiment_sha256"])
             self.assertEqual(evidence["case_id"], "holdout-positive")
@@ -1063,6 +1066,75 @@ class QualificationTests(unittest.TestCase):
                         post.assert_not_called()
                     self.assertEqual(partial.read_bytes(), partial_bytes)
                     self.assertFalse(final.exists())
+            # Previously a valid Noul response from another call could be
+            # substituted under the correct request hash and accepted.
+            forged = copy.deepcopy(evidence)
+            forged["response"]["answers"]["impact"]["noul"] = 0.9
+            sample.write_text(json.dumps(forged))
+            with patch.object(run_http, "HERE", str(here)), patch.object(
+                run_http, "post"
+            ) as post:
+                with self.assertRaisesRegex(ValueError, "sample response or row disagrees"):
+                    run_http.main(args)
+                post.assert_not_called()
+            self.assertEqual(partial.read_bytes(), partial_bytes)
+
+            # An otherwise valid, rewritten result row must not describe a
+            # different original first-response sample.
+            sample.write_bytes(sample_bytes)
+            lines = partial.read_text().splitlines()
+            forged_row = json.loads(lines[1])
+            forged_row["ms"] = 5.0
+            lines[1] = json.dumps(forged_row)
+            partial.write_text("\n".join(lines) + "\n")
+            with patch.object(run_http, "HERE", str(here)), patch.object(
+                run_http, "post"
+            ) as post:
+                with self.assertRaisesRegex(ValueError, "sample response or row disagrees"):
+                    run_http.main(args)
+                post.assert_not_called()
+            partial.write_bytes(partial_bytes)
+
+            # A later case from the same frozen arm is not the first response.
+            forged = copy.deepcopy(evidence)
+            second = self.dataset[3]
+            second_request = {"state": run_http.STATES["B_noul_text"](second),
+                              "questions": self.questions}
+            forged["case_id"] = second["id"]
+            forged["request"] = second_request
+            forged["request_sha256"] = hashlib.sha256(
+                run_http.request_bytes(second_request)
+            ).hexdigest()
+            sample.write_text(json.dumps(forged))
+            with patch.object(run_http, "HERE", str(here)), patch.object(
+                run_http, "post"
+            ) as post:
+                with self.assertRaisesRegex(ValueError, "not the first held-out"):
+                    run_http.main(args)
+                post.assert_not_called()
+            self.assertEqual(partial.read_bytes(), partial_bytes)
+
+            # Refuse a deleted sample after a completed first row.
+            sample.unlink()
+            with patch.object(run_http, "HERE", str(here)), patch.object(
+                run_http, "post"
+            ) as post:
+                with self.assertRaisesRegex(ValueError, "sample is missing"):
+                    run_http.main(args)
+                post.assert_not_called()
+            self.assertEqual(partial.read_bytes(), partial_bytes)
+
+            # A sample published without a completed row is also insufficient
+            # to claim the first held-out call on resume.
+            sample.write_bytes(sample_bytes)
+            partial.write_text(partial_bytes.decode().splitlines()[0] + "\n")
+            with patch.object(run_http, "HERE", str(here)), patch.object(
+                run_http, "post"
+            ) as post:
+                with self.assertRaisesRegex(ValueError, "no completed first-response row"):
+                    run_http.main(args)
+                post.assert_not_called()
+            partial.write_bytes(partial_bytes)
             sample.write_bytes(sample_bytes)
             with patch.object(run_http, "HERE", str(here)), patch.object(
                 run_http, "post", side_effect=lambda url, body, **kw: (

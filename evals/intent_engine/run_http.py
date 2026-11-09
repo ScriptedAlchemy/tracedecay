@@ -67,6 +67,10 @@ def validate_qualified_sample(path, experiment_sha, requests):
     if not isinstance(sample, dict):
         raise ValueError("qualified sample must be a JSON object")
     case_id = sample.get("case_id")
+    # The first-response sample must be from the first frozen HTTP call,
+    # not merely from an arbitrary request in the same experiment.
+    if case_id != next(iter(requests)):
+        raise ValueError("qualified sample is not the first held-out response")
     original = requests.get(case_id) if isinstance(case_id, str) else None
     if (original is None or sample.get("experiment_sha256") != experiment_sha
             or sample.get("request_sha256") != original[1]):
@@ -84,9 +88,13 @@ def validate_qualified_sample(path, experiment_sha, requests):
     if not matches_request:
         raise ValueError("qualified sample request differs from frozen HTTP bytes")
     noul_probabilities(sample.get("response"), sample["request"]["questions"])
+    row_sha = sample.get("row_sha256")
+    if not isinstance(row_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", row_sha):
+        raise ValueError("qualified sample lacks the completed first-row commitment")
+    return digest(sample["response"]), row_sha
 
 
-def publish_sample(path, serialized):
+def publish_sample(path, serialized, refuse_existing=False):
     """Publish a completely rendered sample without clobbering an existing one.
 
     Same-directory staging avoids exposing a partial sample after a write error;
@@ -103,10 +111,11 @@ def publish_sample(path, serialized):
         try:
             os.link(staged, path)
         except FileExistsError:
-            # A dangling symlink occupies the pathname but exists() says
-            # false. Do not treat that unusable capture as already published.
-            if not os.path.isfile(path):
-                raise ValueError(f"sample path exists but is not a regular file: {path}")
+            # Qualified samples must never silently adopt an existing file
+            # that appeared after the preflight. Unqualified historical
+            # samples retain their original no-clobber behavior.
+            if refuse_existing or not os.path.isfile(path):
+                raise ValueError(f"sample path exists or was replaced during publication: {path}")
     finally:
         os.unlink(staged)
 
@@ -430,6 +439,11 @@ def serialize_result(row, questions, temperature):
         if row["probs"] != {key: calibrated(value, temperature) for key, value in raw.items()}:
             raise ValueError("calibrated probabilities disagree with raw probabilities")
     validate_row_truncation(row)
+    if "sample_response_sha256" in row and (
+        not isinstance(row["sample_response_sha256"], str)
+        or not re.fullmatch(r"[0-9a-f]{64}", row["sample_response_sha256"])
+    ):
+        raise ValueError("invalid first-response sample commitment")
     # json.loads accepts NaN/Infinity, including in extra nested fields. Reject
     # them while validating the partial log, not after opening the final file.
     return json.dumps(row, allow_nan=False)
@@ -711,12 +725,15 @@ def main(argv=None):
             identity["timeout_ms"] = args.timeout_ms
         header = {"experiment": identity, "experiment_sha256": digest(identity)}
         partial_path = path + ".partial"
+        admitted_sample = None
         if qualification_sha is not None and args.sample_out and os.path.lexists(args.sample_out):
             # A new experiment cannot inherit a previous tag's first-response
             # evidence. An exact resume may retain only its own sample.
             if not os.path.lexists(partial_path):
                 raise ValueError("qualified sample already exists for a new experiment; choose a new --sample-out")
-            validate_qualified_sample(args.sample_out, header["experiment_sha256"], requests)
+            admitted_sample = validate_qualified_sample(
+                args.sample_out, header["experiment_sha256"], requests,
+            )
         try:
             # Default umask 022 (or an explicit umask 000) must not expose
             # result labels, cases or response telemetry to other users.
@@ -741,6 +758,20 @@ def main(argv=None):
                 done = {}
             else:
                 done = resume_rows(partial, header, cases, requests, questions, args.noul_temperature)
+            if qualification_sha is not None and args.sample_out:
+                first_id = next(iter(cases))
+                if done and admitted_sample is None:
+                    raise ValueError("qualified first-response sample is missing for resumed evidence")
+                if admitted_sample is not None:
+                    if first_id not in done:
+                        # A crash between publishing the sample and appending
+                        # its row cannot be reconstructed as a completed call.
+                        raise ValueError("qualified sample has no completed first-response row; use a new tag")
+                    response_sha, row_sha = admitted_sample
+                    first_row = done[first_id]
+                    if (first_row.get("sample_response_sha256") != response_sha
+                            or digest(first_row) != row_sha):
+                        raise ValueError("qualified sample response or row disagrees with completed evidence")
             previous_model = next(
                 (row["observed_model"] for row in done.values()
                  if row.get("observed_model") is not None), None
@@ -799,11 +830,16 @@ def main(argv=None):
                 if args.noul_temperature is not None:
                     row["probs_raw"] = probs
                     row["probs"] = {key: calibrated(value, args.noul_temperature) for key, value in probs.items()}
+                if qualification_sha is not None and args.sample_out and index == 0:
+                    row["sample_response_sha256"] = digest(response)
                 # Refuse malformed row and raw-sample data before publishing
                 # either. A non-finite response must not leave a sample file
                 # that a later valid retry mistakes for a completed capture.
                 serialized_row = serialize_result(row, questions, args.noul_temperature)
-                if args.sample_out and not os.path.exists(args.sample_out):
+                if args.sample_out and (
+                    (qualification_sha is not None and index == 0)
+                    or (qualification_sha is None and not os.path.exists(args.sample_out))
+                ):
                     sample = {
                         "request": loads_unambiguous_json(body) if isinstance(body, bytes) else body,
                         "response": response,
@@ -815,9 +851,13 @@ def main(argv=None):
                             "experiment_sha256": header["experiment_sha256"],
                             "case_id": case["id"],
                             "request_sha256": request_sha,
+                            "row_sha256": digest(row),
                         })
                     serialized_sample = json.dumps(sample, indent=1, allow_nan=False)
-                    publish_sample(args.sample_out, serialized_sample)
+                    publish_sample(
+                        args.sample_out, serialized_sample,
+                        refuse_existing=qualification_sha is not None,
+                    )
                 partial.write(serialized_row + "\n")
                 partial.flush()
                 done[case["id"]] = row

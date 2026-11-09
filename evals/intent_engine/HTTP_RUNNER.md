@@ -79,9 +79,17 @@ For qualified runs, an optional first-response sample is now bound to the
 exact experiment hash, case ID, and request digest (and original captured wire
 bytes when present). A new qualified run refuses an already occupied sample
 path before inference; an interrupted qualified run accepts its existing sample
-only when the identity and original request agree. This prevents a stale sample
-from appearing to describe a different held-out run. Samples remain
-self-recorded diagnostic data, **not remote response attestation**. Historical
+only when the identity and original request agree. The sample must be from
+the **first** frozen held-out call; its complete raw response digest must
+match the first completed result row, and the sample commits to that complete
+row. Changed response probabilities, telemetry or row values, missing samples
+after a completed first row, and a sample with no completed first row all refuse
+without further inference or modifying the interrupted log. If the process
+crashes between first-sample publication and its row append, start a new tag;
+the original incomplete evidence is not silently reconstructed. A concurrent
+sample publication is refused instead of being silently adopted. These
+cross-checks prevent accidental stale or corrupted sample attribution, but
+operator-authored digests are **not remote response attestation**. Historical
 nonqualified sample behavior is unchanged. Old unbound samples are not
 silently migrated: use a new sample path.
 
