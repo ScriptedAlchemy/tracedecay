@@ -1173,7 +1173,10 @@ mod tests {
         ]);
 
         let footprint = census_profile_footprint(&profile, &registered, &overrides);
-        assert_eq!(footprint.total_bytes, 11, "foreign bytes must not be counted");
+        assert_eq!(
+            footprint.total_bytes, 11,
+            "foreign bytes must not be counted"
+        );
         assert_eq!(footprint.unavailable_entry_count, 1);
         assert_eq!(footprint.entries.len(), 2, "no generic projects entry");
         assert_eq!(
