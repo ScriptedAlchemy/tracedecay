@@ -210,8 +210,6 @@ impl StoreKindBytesV1 {
         } else if first == GRAPH_REPLAY_POOL_DIRECTORY {
             &mut self.graph_replay_pool
         } else if first.ends_with(GRAPH_CONTAINER_WAL_SUFFIX)
-            // The container's verified and spill sidecars consume the same
-            // graph-container budget; they are not miscellaneous store data.
             || first.ends_with(".grafeo.verified")
             || first.ends_with(".grafeo.spill")
             || (first.ends_with(GRAPH_CONTAINER_SUFFIX) && components.next().is_none())
