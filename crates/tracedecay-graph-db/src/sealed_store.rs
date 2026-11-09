@@ -793,10 +793,7 @@ fn initial_sealed_staging_owner(
     }
 }
 
-fn verified_staging_receipt(
-    name: &std::ffi::OsStr,
-    bytes: &[u8],
-) -> Option<SealedStagingOwnerV1> {
+fn verified_staging_receipt(name: &std::ffi::OsStr, bytes: &[u8]) -> Option<SealedStagingOwnerV1> {
     let name = name.to_str()?;
     if !sealed_staging_name(name) {
         return None;
@@ -3448,11 +3445,8 @@ mod receipt_budget_tests {
         let oldest = oldest.unwrap();
         std::os::unix::fs::symlink(&foreign, oldest.join("foreign")).unwrap();
         std::os::unix::fs::symlink(temp.path().join("missing"), oldest.join("dangling")).unwrap();
-        let census = census_sealed_store(
-            &database,
-            &BTreeSet::from(["generation:g69".to_owned()]),
-        )
-        .unwrap();
+        let census =
+            census_sealed_store(&database, &BTreeSet::from(["generation:g69".to_owned()])).unwrap();
         assert_eq!(census.head_count, 1);
         assert_eq!(census.superseded_count, 69);
         assert_eq!(census.unrecognized_count, 0);
@@ -3483,11 +3477,7 @@ mod receipt_budget_tests {
         let owned_name = physical.as_str().strip_prefix("generation:").unwrap();
         let owned = root.join(owned_name);
         std::fs::create_dir(&owned).unwrap();
-        let owned_receipt = receipt(
-            GraphFormatVersion::current().get(),
-            owned_name,
-            generation,
-        );
+        let owned_receipt = receipt(GraphFormatVersion::current().get(), owned_name, generation);
         std::fs::write(owned.join(SEALED_STORE_RECEIPT_FILE), &owned_receipt).unwrap();
         std::fs::write(owned.join(SEALED_STORE_DATABASE_FILE), b"owned payload").unwrap();
 
@@ -3506,11 +3496,8 @@ mod receipt_budget_tests {
             .set_len(5 * 1024 * 1024 * 1024)
             .unwrap();
 
-        let census = census_sealed_store(
-            &database,
-            &BTreeSet::from([generation.to_owned()]),
-        )
-        .unwrap();
+        let census =
+            census_sealed_store(&database, &BTreeSet::from([generation.to_owned()])).unwrap();
         assert_eq!(census.head_count, 1);
         assert_eq!(census.superseded_count, 0);
         assert_eq!(census.unrecognized_count, 1);
@@ -4089,8 +4076,7 @@ mod build_tests {
         let identity = manifest.identity();
         let expected = manifest.expected_recovered_digest(&|| Ok(())).unwrap();
         let root = sealed_store_root(&database_path);
-        let directory =
-            sealed_generation_directory(&root, &identity.physical_namespace().unwrap());
+        let directory = sealed_generation_directory(&root, &identity.physical_namespace().unwrap());
         let staging = root.join(format!(
             ".staging-{}",
             directory.file_name().unwrap().to_str().unwrap()
@@ -4116,7 +4102,10 @@ mod build_tests {
             &check,
         )
         .expect("live seal must finish after a store remount");
-        assert!(remounted.get(), "remount must run inside the row-copy callback");
+        assert!(
+            remounted.get(),
+            "remount must run inside the row-copy callback"
+        );
         assert!(directory.join(SEALED_STORE_DATABASE_FILE).is_file());
         assert_eq!(store.recovered_digest(), expected.as_str());
         assert!(!staging.exists());
@@ -4176,10 +4165,7 @@ mod build_tests {
             !staging.exists(),
             "the crashed but proven stage must be reclaimed"
         );
-        assert_eq!(
-            std::fs::read(foreign.join("sentinel")).unwrap(),
-            b"foreign"
-        );
+        assert_eq!(std::fs::read(foreign.join("sentinel")).unwrap(), b"foreign");
 
         let (store, _) = build_or_open_sealed_store(
             SealedRowSource::Manifest(&manifest),
