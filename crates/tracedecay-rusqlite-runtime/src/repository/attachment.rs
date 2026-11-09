@@ -137,22 +137,10 @@ impl RepositoryPhysicalAttachmentFactory {
         )
     }
 
-    #[tracing::instrument(name = "rusqlite.attachment.initialize", level = "trace", skip_all)]
-    pub fn initialize(
-        &self,
-        runtime: &RuntimeHandle,
-        binding: StoreRuntimeBindingV1,
-        locator: VerifiedStoreLocatorV1,
-        path: PathBuf,
-        admission: AdmissionConfigV1,
-    ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
-        self.start_reserved_initialization(runtime, binding, locator, path, admission, None)
-            .map_err(|failure| failure.error)
-    }
-
     /// Initialization owns its sole set of raw descriptors across the entire
     /// worker start. On a handled failure, only a fully released worker set
     /// can return those original reservations to the external publisher.
+    #[tracing::instrument(name = "rusqlite.attachment.initialize", level = "trace", skip_all)]
     pub fn start_reserved_initialization(
         &self,
         runtime: &RuntimeHandle,
@@ -1152,12 +1140,13 @@ mod tests {
         let path = directory.path().join("aborted.sqlite3");
         let binding = binding();
         let attachment = RepositoryPhysicalAttachmentFactory
-            .initialize(
+            .start_reserved_initialization(
                 &native_runtime(),
                 binding.clone(),
                 locator(&binding),
                 path.clone(),
                 AdmissionConfigV1::default(),
+                None,
             )
             .unwrap();
         let held_pin = attachment
@@ -1227,12 +1216,13 @@ mod tests {
         let path = directory.path().join("aborted.sqlite3");
         let binding = binding();
         let attachment = RepositoryPhysicalAttachmentFactory
-            .initialize(
+            .start_reserved_initialization(
                 &native_runtime(),
                 binding.clone(),
                 locator(&binding),
                 path.clone(),
                 AdmissionConfigV1::default(),
+                None,
             )
             .unwrap();
         let held_pin = attachment
@@ -1300,12 +1290,13 @@ mod tests {
         let path = directory.path().join("lost-initialization.sqlite3");
         let binding = binding();
         let attachment = RepositoryPhysicalAttachmentFactory
-            .initialize(
+            .start_reserved_initialization(
                 &native_runtime(),
                 binding.clone(),
                 locator(&binding),
                 path.clone(),
                 AdmissionConfigV1::default(),
+                None,
             )
             .unwrap();
         let held_pin = attachment
@@ -1399,18 +1390,22 @@ mod tests {
             let sentinel = format!("unowned {suffix} content");
             fs::write(&sidecar, sentinel.as_bytes()).unwrap();
 
-            let initialized = RepositoryPhysicalAttachmentFactory.initialize(
+            let initialized = RepositoryPhysicalAttachmentFactory.start_reserved_initialization(
                 &native_runtime(),
                 binding.clone(),
                 locator(&binding),
                 path.clone(),
                 AdmissionConfigV1::default(),
+                None,
             );
             assert!(matches!(
                 initialized,
-                Err(RepositoryAttachmentStartError::Identity(
-                    OpenedDatabaseFileError::Reserve
-                ))
+                Err(RepositoryInitializationStartFailure {
+                    error: RepositoryAttachmentStartError::Identity(
+                        OpenedDatabaseFileError::Reserve
+                    ),
+                    files: None,
+                })
             ));
             assert_eq!(fs::metadata(&path).unwrap().len(), 0);
             assert_eq!(fs::read(&sidecar).unwrap(), sentinel.as_bytes());
@@ -1805,12 +1800,13 @@ mod tests {
 
         let created_path = directory.path().join("created.sqlite3");
         let created = RepositoryPhysicalAttachmentFactory
-            .initialize(
+            .start_reserved_initialization(
                 &native_runtime(),
                 binding.clone(),
                 locator(&binding),
                 created_path.clone(),
                 AdmissionConfigV1::default(),
+                None,
             )
             .unwrap();
         assert!(
