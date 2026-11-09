@@ -445,11 +445,13 @@ pub async fn run_context_scout_intent_pass(
         &pass,
         settings,
         &provider_id,
-        &window,
-        &engine_outcome,
-        &facts,
-        &prompt_inferences,
-        &decision,
+        IntentDecisionEvidenceV1 {
+            window: &window,
+            engine_outcome: &engine_outcome,
+            facts: &facts,
+            prompt_inferences: &prompt_inferences,
+            decision: &decision,
+        },
     )
     .await;
     let selected = match decision {
@@ -1040,15 +1042,19 @@ async fn record_withheld(
 /// that survived selection and delivery. The transcript stays in its owning
 /// session store; the bounded analytics receipt can be used to locate and
 /// independently rehydrate the exact window for qualification.
+struct IntentDecisionEvidenceV1<'a> {
+    window: &'a SessionWindowV1,
+    engine_outcome: &'a EngineOutcomeV1,
+    facts: &'a [ContextScoutIntentKindV1],
+    prompt_inferences: &'a [ContextScoutIntentKindV1],
+    decision: &'a IntentDecisionV1,
+}
+
 async fn record_intent_decision(
     pass: &ContextScoutIntentPassV1<'_>,
     settings: &ContextScoutIntentSettingsV1,
     provider_id: &ProviderId,
-    window: &SessionWindowV1,
-    engine_outcome: &EngineOutcomeV1,
-    facts: &[ContextScoutIntentKindV1],
-    prompt_inferences: &[ContextScoutIntentKindV1],
-    decision: &IntentDecisionV1,
+    evidence: IntentDecisionEvidenceV1<'_>,
 ) {
     let Some(analytics) = pass.analytics.as_ref() else {
         return;
@@ -1061,14 +1067,10 @@ async fn record_intent_decision(
     };
     let engine_identity = pass.engine.as_ref().map(|engine| engine.identity());
     let Some(metadata_json) = intent_decision_metadata(
-        window,
+        &evidence,
         &settings_digest,
         &settings.questions,
-        engine_outcome,
         engine_identity.as_ref(),
-        facts,
-        prompt_inferences,
-        decision,
     ) else {
         return;
     };
@@ -1094,15 +1096,18 @@ async fn record_intent_decision(
 }
 
 fn intent_decision_metadata(
-    window: &SessionWindowV1,
+    evidence: &IntentDecisionEvidenceV1<'_>,
     settings_digest: &ManifestDigest,
     questions: &[tracedecay_domain::configuration::IntentQuestionSettingsV1],
-    engine_outcome: &EngineOutcomeV1,
     engine_identity: Option<&super::decision_engine::DecisionEngineIdentityV1>,
-    facts: &[ContextScoutIntentKindV1],
-    prompt_inferences: &[ContextScoutIntentKindV1],
-    decision: &IntentDecisionV1,
 ) -> Option<String> {
+    let IntentDecisionEvidenceV1 {
+        window,
+        engine_outcome,
+        facts,
+        prompt_inferences,
+        decision,
+    } = evidence;
     if window.messages.is_empty()
         || window.first_store_id <= 0
         || window.last_store_id < window.first_store_id
@@ -1235,7 +1240,7 @@ mod tool_signal_tests {
         use super::super::decision_engine::{
             DecisionAnswerV1, DecisionAnswersV1, DecisionEngineOutcomeV1,
         };
-        use super::{EngineOutcomeV1, intent_decision_metadata};
+        use super::{EngineOutcomeV1, IntentDecisionEvidenceV1, intent_decision_metadata};
 
         let window = SessionWindowV1 {
             messages: vec![message(
@@ -1273,14 +1278,16 @@ mod tool_signal_tests {
             },
         };
         let evidence = intent_decision_metadata(
-            &window,
+            &IntentDecisionEvidenceV1 {
+                window: &window,
+                engine_outcome: &engine,
+                facts: &[],
+                prompt_inferences: &[Kind::Impact],
+                decision: &negative,
+            },
             &settings_digest,
             &questions,
-            &engine,
             None,
-            &[],
-            &[Kind::Impact],
-            &negative,
         )
         .unwrap();
         let receipt: serde_json::Value = serde_json::from_str(&evidence).unwrap();
@@ -1300,14 +1307,16 @@ mod tool_signal_tests {
         // A transport failure is unknown, never relabeled as a negative model
         // prediction, even when deterministic policy finds no signal.
         let unavailable = intent_decision_metadata(
-            &window,
+            &IntentDecisionEvidenceV1 {
+                window: &window,
+                engine_outcome: &EngineOutcomeV1::Unavailable,
+                facts: &[],
+                prompt_inferences: &[],
+                decision: &IntentDecisionV1::NoSignal,
+            },
             &settings_digest,
             &questions,
-            &EngineOutcomeV1::Unavailable,
             None,
-            &[],
-            &[],
-            &IntentDecisionV1::NoSignal,
         )
         .unwrap();
         let unknown: serde_json::Value = serde_json::from_str(&unavailable).unwrap();
@@ -1320,14 +1329,16 @@ mod tool_signal_tests {
             ..window
         };
         assert!(intent_decision_metadata(
-            &bad_window,
+            &IntentDecisionEvidenceV1 {
+                window: &bad_window,
+                engine_outcome: &engine,
+                facts: &[],
+                prompt_inferences: &[],
+                decision: &negative,
+            },
             &settings_digest,
             &questions,
-            &engine,
             None,
-            &[],
-            &[],
-            &negative,
         )
         .is_none());
     }
