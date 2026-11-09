@@ -1,3 +1,5 @@
+mod restart;
+
 use serde_json::Value;
 use tracedecay_domain::{
     CanonicalObservationEnvelopeV1, ComponentVersion, DurableObservationV1, ObservationId,
