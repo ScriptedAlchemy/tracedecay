@@ -210,6 +210,45 @@ describe('Code index freshness', () => {
     expect(text).not.toContain('0 B/s');
   });
 
+  it('retires the previous sealed generation cursor when its successor has no text report', async () => {
+    vi.useFakeTimers();
+    const before = envelope('loading', {
+      worktrees: [{
+        ...worktree(),
+        latest_generation_id: 'generation.catchup.01',
+        rebuild_in_flight: true,
+        staleness_state: 'indexing',
+        progress: progress(),
+      }],
+      note: 'live daemon scheduler state',
+    });
+    const after = envelope('ready', {
+      worktrees: [{
+        ...worktree(),
+        latest_generation_id: 'generation.catchup.02',
+        rebuild_in_flight: false,
+        staleness_state: 'fresh',
+        progress: null,
+      }],
+      note: 'live daemon scheduler state',
+    });
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(before), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(after), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getAllByText('generation.catchup.01').length).toBeGreaterThan(0);
+    expect(screen.getByRole('progressbar', { name: 'Code progress' })).toBeTruthy();
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('generation.catchup.02')).toBeTruthy();
+    expect(screen.queryByText('generation.catchup.01')).toBeNull();
+    expect(screen.queryByRole('progressbar', { name: 'Code progress' })).toBeNull();
+  });
+
   it('accepts a later replacement generation after epoch restart and rejects its delayed predecessor', async () => {
     vi.useFakeTimers();
     const first = envelope('loading', {

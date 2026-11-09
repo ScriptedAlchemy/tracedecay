@@ -336,14 +336,20 @@ function useLatestCodeIndexProgress(
         const incoming = worktree.progress;
         const renderedProgress = current.get(worktree.worktree_root);
         if (!incoming) {
+          // A confirmed replacement seal makes the old text cursor stale.
+          // Retain only a transient missing sample for the same generation
+          // (or while no generation has sealed); neither is new work.
           if (
             renderedProgress &&
-            result.envelope.domain_state === 'ready' &&
-            worktree.latest_generation_id === renderedProgress.generation_id
+            (worktree.latest_generation_id == null ||
+              worktree.latest_generation_id === renderedProgress.generation_id) &&
+            !(
+              result.envelope.domain_state === 'ready' &&
+              worktree.latest_generation_id === renderedProgress.generation_id
+            )
           ) {
-            continue;
+            next.set(worktree.worktree_root, renderedProgress);
           }
-          if (renderedProgress) next.set(worktree.worktree_root, renderedProgress);
         } else if (
           !renderedProgress ||
           isCurrentOrNewerCodeIndexProgress(incoming, renderedProgress)

@@ -233,6 +233,38 @@ describe('code-index progress transitions', () => {
     expect(screen.queryByRole('progressbar')).toBeNull();
   });
 
+  it('discards a retired text cursor after a different generation seals', async () => {
+    const building = freshness({
+      progress: progress({ progress_epoch: 41 }),
+      rebuild_in_flight: true,
+    }, 'loading');
+    const view = render(<CodeIndexPipeline result={building} pending={false} scopeKey="project" />);
+    expect(await screen.findByText('bulk commit · 20.0%')).toBeTruthy();
+
+    // Missing an intermediate sample is not proof that the same writer
+    // finished. Keep the real last cursor while this generation is current.
+    view.rerender(<CodeIndexPipeline
+      result={freshness({ progress: null, rebuild_in_flight: true }, 'loading')}
+      pending={false}
+      scopeKey="project"
+    />);
+    expect(screen.getByText('bulk commit · 20.0%')).toBeTruthy();
+
+    // The daemon now reports a different *sealed* generation, with no text
+    // report. The preceding generation's committed counters must disappear.
+    view.rerender(<CodeIndexPipeline
+      result={freshness({
+        latest_generation_id: 'generation.successor',
+        progress: null,
+      })}
+      pending={false}
+      scopeKey="project"
+    />);
+    expect(await screen.findByText('no active code-index build')).toBeTruthy();
+    expect(screen.queryByText('bulk commit · 20.0%')).toBeNull();
+    expect(screen.queryByRole('progressbar')).toBeNull();
+  });
+
   it('keeps restore checks separate from build counters and stops polling after restoration', async () => {
     const restoring = freshness({ restore_progress: restoreProgress });
     const view = render(<CodeIndexPipeline result={restoring} pending={false} scopeKey="project" />);

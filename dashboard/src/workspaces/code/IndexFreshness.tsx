@@ -357,9 +357,13 @@ function useLatestBuildProgress(
         if (!incoming) {
           if (
             current &&
-            result.envelope.domain_state === 'ready' &&
-            worktree.latest_generation_id === current.generation_id
+            ((result.envelope.domain_state === 'ready' &&
+              worktree.latest_generation_id === current.generation_id) ||
+              (worktree.latest_generation_id != null &&
+                worktree.latest_generation_id !== current.generation_id))
           ) {
+            // The sealed successor is authoritative; do not display a
+            // previous generation's text cursor against its readiness.
             next.delete(worktree.worktree_root);
             changed = true;
           }
