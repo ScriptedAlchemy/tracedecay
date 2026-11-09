@@ -2447,8 +2447,7 @@ fn retained_history_reads_across_requests_share_one_segment_open_and_refuse_repl
         .expect("indexed active generation");
     let identity = DurableSealedCodeGenerationIdentityV1 {
         locator: pointer.generation_file.clone(),
-        digest: ManifestDigest::new(pointer.state_digest.clone())
-            .expect("generation digest"),
+        digest: ManifestDigest::new(pointer.state_digest.clone()).expect("generation digest"),
         size_bytes: entry.size_bytes,
     };
     let suffix = sha256_hex_suffix(segment.digest.as_str()).expect("segment digest");
@@ -2529,8 +2528,12 @@ fn retained_history_reads_across_requests_share_one_segment_open_and_refuse_repl
     std::fs::rename(&path, &previous).expect("move disposable canonical inode");
     std::fs::write(&path, &whole).expect("replace with identical bytes and another inode");
     assert_ne!(
-        std::fs::metadata(&previous).expect("original metadata").ino(),
-        std::fs::metadata(&path).expect("replacement metadata").ino(),
+        std::fs::metadata(&previous)
+            .expect("original metadata")
+            .ino(),
+        std::fs::metadata(&path)
+            .expect("replacement metadata")
+            .ino(),
         "the test must substitute a different inode"
     );
     // Fixture replacement opens are not reader opens.
@@ -2551,7 +2554,11 @@ fn retained_history_reads_across_requests_share_one_segment_open_and_refuse_repl
         .is_err(),
         "a replaced pathname must not inherit a cached segment's identity"
     );
-    assert_eq!(range, Vec::<u8>::new(), "failure reveals no previously read bytes");
+    assert_eq!(
+        range,
+        Vec::<u8>::new(),
+        "failure reveals no previously read bytes"
+    );
     assert_eq!(
         observed_named_opens(&receiver, &path),
         0,

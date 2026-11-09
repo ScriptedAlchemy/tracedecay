@@ -2165,21 +2165,18 @@ fn segment_mark_prefers_cancellation_before_disappeared_manifest_open() {
             true
         }
     };
-    let error = sweep_unreferenced_generation_segments(
-        store.path(),
-        None,
-        true,
-        &cancelled,
-        None,
-    )
-    .expect_err("cancellation after enumeration must prevent segment deletion");
+    let error = sweep_unreferenced_generation_segments(store.path(), None, true, &cancelled, None)
+        .expect_err("cancellation after enumeration must prevent segment deletion");
     assert!(matches!(error, CodeGenerationRetentionErrorV1::Cancelled));
     assert_eq!(
         calls.get(),
         2,
         "the pre-open cancellation check must run after enumerating the file"
     );
-    assert!(!manifest_path.exists(), "the withdrawal must actually occur");
+    assert!(
+        !manifest_path.exists(),
+        "the withdrawal must actually occur"
+    );
     assert_eq!(
         std::fs::read(&segment_path).expect("protected segment bytes"),
         segment_bytes,
