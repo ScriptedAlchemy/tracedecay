@@ -255,12 +255,18 @@ pub(crate) struct RearmedProjectionRetries {
     pub(crate) batches: u64,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RetryRearmFrontier {
+    last_rowid: i64,
+    last_sequence: i64,
+}
+
 /// A projection retry deadline paces re-attempts within the store mount that
 /// observed the failure. A fresh mount re-arms retryable deferred projections
 /// for immediate replay so recovery does not wait out a dead process's backoff.
 /// Attempt counts, last errors, and terminal collision deadlines persist.
 ///
-/// The reader captures the last still-deferred row before taking any writer
+/// The reader captures the queue frontier before taking any writer
 /// lease. Already-due, already-armed, and terminal-only queues need no writer
 /// transaction; expired deadlines remain eligible for ordinary projection.
 /// Each read window selects at most `batch_rows` eligible rows outside
@@ -284,15 +290,13 @@ pub(crate) async fn rearm_queued_projection_retries(
     }
     let mut rearmed = RearmedProjectionRetries::default();
     let now = tracedecay_contracts::clock::now_micros().0;
-    let Some(last_rowid) = last_deferred_retry_rowid(&database.read_connection(), now).await?
-    else {
+    let Some(frontier) = retry_rearm_frontier(&database.read_connection(), now).await? else {
         return Ok(rearmed);
     };
     let mut after_rowid = 0_i64;
-    while after_rowid < last_rowid {
+    while after_rowid < frontier.last_rowid {
         let Some((batch_end, rows)) =
-            rearm_projection_retry_batch(database, after_rowid, last_rowid, batch_rows, now)
-                .await?
+            rearm_projection_retry_batch(database, after_rowid, frontier, batch_rows, now).await?
         else {
             break;
         };
@@ -313,17 +317,17 @@ pub(crate) async fn rearm_queued_projection_retries(
     level = "trace",
     skip_all
 )]
-async fn rearm_projection_retry_batch(
+pub(super) async fn rearm_projection_retry_batch(
     database: &Database,
     after_rowid: i64,
-    last_rowid: i64,
+    frontier: RetryRearmFrontier,
     batch_rows: i64,
     now_micros: i64,
 ) -> ProjectionStoreResult<Option<(i64, u64)>> {
     let Some((batch_end, candidates)) = read_rearm_projection_retry_candidates(
         &database.read_connection(),
         after_rowid,
-        last_rowid,
+        frontier,
         batch_rows,
         now_micros,
     )
@@ -341,7 +345,7 @@ async fn rearm_projection_retry_batch(
 pub(super) async fn read_rearm_projection_retry_candidates(
     conn: &impl QueryExecutor,
     after_rowid: i64,
-    last_rowid: i64,
+    frontier: RetryRearmFrontier,
     batch_rows: i64,
     now_micros: i64,
 ) -> ProjectionStoreResult<Option<(i64, String)>> {
@@ -356,12 +360,18 @@ pub(super) async fn read_rearm_projection_retry_candidates(
              FROM (
                 SELECT rowid, observation_id, next_retry_at_micros, attempt_count
                 FROM projection_queue NOT INDEXED
-                WHERE rowid > ?1 AND rowid <= ?2
+                WHERE rowid > ?1 AND rowid <= ?2 AND observation_sequence <= ?5
                   AND next_retry_at_micros > ?4
                   AND next_retry_at_micros < 9223372036854775807
                 ORDER BY rowid LIMIT ?3
              )",
-            params![after_rowid, last_rowid, batch_rows, now_micros],
+            params![
+                after_rowid,
+                frontier.last_rowid,
+                batch_rows,
+                now_micros,
+                frontier.last_sequence
+            ],
         )
         .await
         .map_err(|error| storage(OPERATION, error))?;
@@ -425,17 +435,19 @@ pub(super) async fn apply_rearm_projection_retry_candidates(
     Ok(rows)
 }
 
-async fn last_deferred_retry_rowid(
+pub(super) async fn retry_rearm_frontier(
     conn: &impl QueryExecutor,
     now_micros: i64,
-) -> ProjectionStoreResult<Option<i64>> {
+) -> ProjectionStoreResult<Option<RetryRearmFrontier>> {
     const OPERATION: &str = "read projection retry frontier";
-    // The ceiling excludes terminal collisions. The clock excludes already-due rows.
-    // The deadline index also proves an empty range without walking the whole table.
+    // The deadline index covers the physical scan bound. SQLite can reuse its
+    // tail rowid after settlement, so also capture the highest canonical queue
+    // sequence from its unique index in the same snapshot.
     let mut rows = conn
         .query(
             // qpsg-exempt: the deadline index uses both the clock and the literal terminal ceiling.
-            "SELECT MAX(rowid) FROM projection_queue INDEXED BY idx_projection_queue_retry_deadline
+            "SELECT MAX(rowid), (SELECT MAX(observation_sequence) FROM projection_queue)
+             FROM projection_queue INDEXED BY idx_projection_queue_retry_deadline
              WHERE next_retry_at_micros > ?1 AND next_retry_at_micros < 9223372036854775807",
             params![now_micros],
         )
@@ -448,8 +460,16 @@ async fn last_deferred_retry_rowid(
     else {
         return Ok(None);
     };
-    row.get::<Option<i64>>(0)
-        .map_err(|error| storage(OPERATION, error))
+    let Some(last_rowid) = row
+        .get::<Option<i64>>(0)
+        .map_err(|error| storage(OPERATION, error))?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(RetryRearmFrontier {
+        last_rowid,
+        last_sequence: row.get(1).map_err(|error| storage(OPERATION, error))?,
+    }))
 }
 
 pub(super) async fn schedule_projection_retry(

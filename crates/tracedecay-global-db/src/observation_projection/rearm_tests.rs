@@ -12,6 +12,7 @@ use tracedecay_runtime_core::db::engine::params;
 
 use super::state::{
     apply_rearm_projection_retry_candidates, read_rearm_projection_retry_candidates,
+    rearm_projection_retry_batch, retry_rearm_frontier,
 };
 use super::{RearmedProjectionRetries, rearm_queued_projection_retries};
 use crate::tests::harness::{RegisteredGlobalDbHarness, writer_telemetry};
@@ -480,7 +481,10 @@ async fn sparse_retry_rearm_writer_work_is_bounded_by_updated_rows() {
             }
         );
         let after = writer_telemetry(&harness.registered);
-        assert_eq!(after.transactions.commands - before.transactions.commands, 1);
+        assert_eq!(
+            after.transactions.commands - before.transactions.commands,
+            1
+        );
         assert_eq!(queue_state(&harness).await.1, 0);
         after.sqlite_vm.vm_steps - before.sqlite_vm.vm_steps
     }
@@ -499,10 +503,17 @@ async fn rearm_reader_snapshot_cannot_clear_a_new_retry_generation() {
     let harness = RegisteredGlobalDbHarness::open("rearm-stale-candidates").await;
     seed_queue(&harness, 3, 0).await;
     let now = 1_000_000_i64;
+    let frontier = retry_rearm_frontier(
+        &harness.registered.runtime_database().read_connection(),
+        now,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let (last, candidates) = read_rearm_projection_retry_candidates(
         &harness.registered.runtime_database().read_connection(),
         0,
-        3,
+        frontier,
         3,
         now,
     )
@@ -558,17 +569,83 @@ async fn rearm_reader_snapshot_cannot_clear_a_new_retry_generation() {
         )
         .await
         .unwrap();
-    for (sequence, attempts, deadline) in [
-        (1_i64, 3_i64, 0_i64),
-        (2, 4, FAR_FUTURE_MICROS),
-        (3, 3, 1),
-    ] {
+    for (sequence, attempts, deadline) in
+        [(1_i64, 3_i64, 0_i64), (2, 4, FAR_FUTURE_MICROS), (3, 3, 1)]
+    {
         let row = rows.next().await.unwrap().unwrap();
         assert_eq!(row.get::<i64>(0).unwrap(), sequence);
         assert_eq!(row.get::<i64>(1).unwrap(), attempts);
         assert_eq!(row.get::<i64>(2).unwrap(), deadline);
     }
     assert!(rows.next().await.unwrap().is_none());
+}
+
+#[asupersync::test]
+async fn rearm_leaves_later_observations_with_reused_queue_rowids_deferred() {
+    let harness = RegisteredGlobalDbHarness::open("rearm-reused-queue-tail").await;
+    seed_queue(&harness, 4, 0).await;
+    let database = harness.registered.runtime_database();
+    let now = 1_000_000;
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "DELETE FROM projection_queue WHERE observation_sequence = 4",
+            (),
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    let frontier = retry_rearm_frontier(&database.read_connection(), now)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rearm_projection_retry_batch(database, 0, frontier, 1, now)
+            .await
+            .unwrap(),
+        Some((1, 1))
+    );
+
+    // A foreground pass settles the old tail. SQLite assigns its rowid to a
+    // newer observation, whose retry belongs to the current mount.
+    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "DELETE FROM projection_queue WHERE observation_sequence = 3",
+            (),
+        )
+        .await
+        .unwrap();
+    transaction
+        .execute(
+            "INSERT INTO projection_queue
+                 (observation_id, observation_sequence, attempt_count, next_retry_at_micros, last_error)
+             SELECT observation_id, sequence, 1, ?1, 'new retry'
+             FROM observations WHERE sequence = 4",
+            params![FAR_FUTURE_MICROS],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!(
+        rearm_projection_retry_batch(database, 1, frontier, 4, now)
+            .await
+            .unwrap(),
+        Some((2, 1)),
+        "only the original retry is inside the captured frontier"
+    );
+    let snapshot = harness.registered.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT rowid, next_retry_at_micros FROM projection_queue
+             WHERE observation_sequence = 4",
+            (),
+        )
+        .await
+        .unwrap();
+    let new = rows.next().await.unwrap().unwrap();
+    assert_eq!(new.get::<i64>(0).unwrap(), 3);
+    assert_eq!(new.get::<i64>(1).unwrap(), FAR_FUTURE_MICROS);
 }
 
 #[asupersync::test]
