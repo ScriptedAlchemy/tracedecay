@@ -2453,10 +2453,14 @@ fn spilled_rows_refuse_conflicting_repeats_and_dangling_endpoints() {
 fn store_open_sweeps_row_spills_abandoned_by_another_process() {
     let temp = TempDir::new().unwrap();
     let root = sealed_store_root(temp.path());
-    std::fs::create_dir_all(root.join(".rows-4194305-0")).unwrap();
-    std::fs::write(root.join(".rows-4194305-0/entities-0.run"), b"abandoned").unwrap();
-    let own = format!(".rows-{}-999999", std::process::id());
-    std::fs::create_dir_all(root.join(&own)).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    let abandoned = root.join(".rows-4194305-0");
+    let identity = projection("code", "store-open-spill");
+    let spill = GraphGenerationRowSpill::create(abandoned.clone(), identity.clone()).unwrap();
+    std::fs::write(abandoned.join("entities-0.run"), b"abandoned").unwrap();
+    std::mem::forget(spill); // Simulate a producer that exited before Drop.
+    let own = root.join(format!(".rows-{}-999999", std::process::id()));
+    let _live_spill = GraphGenerationRowSpill::create(own.clone(), identity).unwrap();
 
     let foreign = ".rows-notes";
     std::fs::create_dir(root.join(foreign)).unwrap();
@@ -2467,6 +2471,6 @@ fn store_open_sweeps_row_spills_abandoned_by_another_process() {
         std::fs::read(root.join(foreign).join("notes")).unwrap(),
         b"keep"
     );
-    assert!(root.join(own).is_dir());
-    assert!(!root.join(".rows-4194305-0").exists());
+    assert!(own.is_dir());
+    assert!(!abandoned.exists());
 }

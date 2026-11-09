@@ -82,11 +82,14 @@ impl SpillDirectory {
             .ok_or_else(|| GraphDbError::invalid("graph row spill directory has no entry name"))?;
         let receipt = row_spill_owner_receipt(name)
             .ok_or_else(|| GraphDbError::invalid("graph row spill directory name is invalid"))?;
-        std::fs::create_dir(&path).map_err(|error| spill_io("directory create", error))?;
-        // Exclusive marker creation refuses a substituted preexisting file.
-        // The marker is synced before row writes so crash recovery can verify
-        // this exact directory instead of deleting by its filename.
-        let marker = path.join(ROW_SPILL_OWNER_RECEIPT_FILE);
+        let parent = path
+            .parent()
+            .ok_or_else(|| GraphDbError::invalid("graph row spill directory has no parent"))?;
+        // Receipt failures must leave the requested name available to retry.
+        // Keep the partial marker private until the complete spill can be installed.
+        let mut staging =
+            tempfile::tempdir_in(parent).map_err(|error| spill_io("directory create", error))?;
+        let marker = staging.path().join(ROW_SPILL_OWNER_RECEIPT_FILE);
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -95,6 +98,10 @@ impl SpillDirectory {
         file.write_all(&receipt)
             .and_then(|()| file.sync_all())
             .map_err(|error| spill_io("owner marker persist", error))?;
+        drop(file);
+        tracedecay_private_fs::framed_log::rename_noreplace(staging.path(), &path)
+            .map_err(|error| spill_io("directory install", error))?;
+        staging.disable_cleanup(true);
         Ok(Self(path))
     }
 
@@ -1082,7 +1089,55 @@ impl GraphGenerationManifestIdentity {
 
 #[cfg(test)]
 mod owner_receipt_tests {
-    use super::{SpillDirectory, ROW_SPILL_OWNER_RECEIPT_FILE};
+    use super::{ROW_SPILL_OWNER_RECEIPT_FILE, SpillDirectory};
+
+    #[cfg(unix)]
+    #[test]
+    fn receipt_write_failure_leaves_no_spill_directory() {
+        const CHILD_ROOT: &str = "TRACEDECAY_TEST_LIMITED_SPILL_ROOT";
+        const WRITE_REFUSED: i32 = 42;
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let destination = std::path::PathBuf::from(root).join(".rows-1-0");
+            let error = SpillDirectory::create(destination)
+                .err()
+                .expect("zero file-size limit");
+            assert!(
+                error.to_string().contains("owner marker persist"),
+                "{error}"
+            );
+            std::process::exit(WRITE_REFUSED);
+        }
+
+        // Limit only the child process. Its directory creation succeeds and
+        // the real filesystem refuses the first receipt write with EFBIG.
+        let root = tempfile::tempdir().unwrap();
+        let child = std::process::Command::new("/bin/sh")
+            .args(["-c", r#"trap "" XFSZ && ulimit -f 0 && exec "$@""#, "sh"])
+            .arg(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(std::thread::current().name().unwrap())
+            .env(CHILD_ROOT, root.path())
+            .output()
+            .unwrap();
+        assert_eq!(child.status.code(), Some(WRITE_REFUSED), "{child:?}");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn occupied_spill_publication_preserves_destination_and_discards_staging() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join(".rows-1-0");
+        std::fs::create_dir(&destination).unwrap();
+        assert!(SpillDirectory::create(destination.clone()).is_err());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 0);
+
+        std::fs::remove_dir(&destination).unwrap();
+        let spill = SpillDirectory::create(destination.clone()).unwrap();
+        assert!(destination.join(ROW_SPILL_OWNER_RECEIPT_FILE).is_file());
+        drop(spill);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
 
     #[test]
     fn row_spill_recovery_reclaims_only_proven_owners_and_drop_is_fail_closed() {
@@ -1106,20 +1161,36 @@ mod owner_receipt_tests {
         std::mem::forget(interrupted);
 
         crate::sealed_store::sweep_abandoned_row_spills(&database);
-        assert!(!owned.exists(), "the completed, marker-bound spill is reclaimed");
-        assert_eq!(std::fs::read(unreceipted.join("foreign")).unwrap(), b"unowned");
+        assert!(
+            !owned.exists(),
+            "the completed, marker-bound spill is reclaimed"
+        );
+        assert_eq!(
+            std::fs::read(unreceipted.join("foreign")).unwrap(),
+            b"unowned"
+        );
         assert_eq!(std::fs::read(forged.join("foreign")).unwrap(), b"preserve");
 
         let active = root.join(format!(".rows-{}-4", std::process::id()));
         let spill = SpillDirectory::create(active.clone()).unwrap();
         drop(spill);
-        assert!(!active.exists(), "a current, proven spill cleans up on drop");
+        assert!(
+            !active.exists(),
+            "a current, proven spill cleans up on drop"
+        );
 
         let substituted = root.join(format!(".rows-{}-5", std::process::id()));
         let spill = SpillDirectory::create(substituted.clone()).unwrap();
         std::fs::write(substituted.join("foreign"), b"still here").unwrap();
-        std::fs::write(substituted.join(ROW_SPILL_OWNER_RECEIPT_FILE), b"substituted").unwrap();
+        std::fs::write(
+            substituted.join(ROW_SPILL_OWNER_RECEIPT_FILE),
+            b"substituted",
+        )
+        .unwrap();
         drop(spill);
-        assert_eq!(std::fs::read(substituted.join("foreign")).unwrap(), b"still here");
+        assert_eq!(
+            std::fs::read(substituted.join("foreign")).unwrap(),
+            b"still here"
+        );
     }
 }
