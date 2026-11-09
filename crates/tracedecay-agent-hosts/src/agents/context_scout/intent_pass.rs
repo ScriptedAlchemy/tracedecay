@@ -1076,6 +1076,8 @@ async fn record_intent_decision(
         &evidence,
         &settings_digest,
         &settings.questions,
+        &settings.window,
+        settings.engine.max_state_bytes,
         engine_identity.as_ref(),
     ) else {
         return;
@@ -1105,6 +1107,8 @@ fn intent_decision_metadata(
     evidence: &IntentDecisionEvidenceV1<'_>,
     settings_digest: &ManifestDigest,
     questions: &[tracedecay_domain::configuration::IntentQuestionSettingsV1],
+    window_settings: &tracedecay_domain::configuration::IntentWindowSettingsV1,
+    engine_max_state_bytes: u32,
     engine_identity: Option<&super::decision_engine::DecisionEngineIdentityV1>,
 ) -> Option<String> {
     let IntentDecisionEvidenceV1 {
@@ -1179,10 +1183,19 @@ fn intent_decision_metadata(
                 "first_store_id": window.first_store_id,
                 "last_store_id": window.last_store_id,
                 "message_count": window.messages.len(),
+                // Store the effective bounds, not only a digest of mutable
+                // settings: an exporter must reproduce the original selection.
+                "selection_limits": {
+                    "max_user_turns": window_settings.max_user_turns,
+                    "max_messages": window_settings.max_messages,
+                    "max_bytes": window_settings.max_bytes,
+                    "max_age_secs": window_settings.max_age_secs,
+                },
                 "window_digest": window_digest,
                 "newest_timestamp_micros": window.newest_timestamp_micros,
             },
             "settings_digest": settings_digest,
+            "render_state_limit_bytes": engine_max_state_bytes,
             "model_outcome": engine_outcome.model_outcome(),
             // The byte-exact prepared request is not proof that the remote
             // server received it, nor that an old window remains rehydratable.
@@ -1232,6 +1245,7 @@ mod tool_signal_tests {
 
     use tracedecay_domain::configuration::{
         ContextScoutIntentKindV1 as Kind, IntentDecisionSourceV1, IntentQuestionSettingsV1,
+        IntentWindowSettingsV1,
     };
     use tracedecay_policy::intent_decision::{
         IntentBestAnswerV1, IntentCandidateV1, IntentDecisionInputV1, IntentDecisionV1,
@@ -1290,6 +1304,13 @@ mod tool_signal_tests {
             freshness: SessionWindowFreshnessV1::Unknown,
         };
         let settings_digest = ManifestDigest::from_sha256_bytes(&[8; 32]).unwrap();
+        let window_settings = IntentWindowSettingsV1 {
+            max_user_turns: 2,
+            max_messages: 8,
+            max_bytes: 4096,
+            max_age_secs: 60,
+            freshen_budget_ms: 50,
+        };
         let questions = [IntentQuestionSettingsV1 {
             intent: Kind::Impact,
             instructions: "Does the request ask about impact?".to_owned(),
@@ -1324,6 +1345,8 @@ mod tool_signal_tests {
             },
             &settings_digest,
             &questions,
+            &window_settings,
+            2048,
             None,
         )
         .unwrap();
@@ -1332,6 +1355,13 @@ mod tool_signal_tests {
         assert_eq!(receipt["window"]["last_store_id"], 81);
         assert_eq!(receipt["window"]["message_count"], 1);
         assert!(receipt["window"]["window_digest"].is_string());
+        assert_eq!(receipt["window"]["selection_limits"], serde_json::json!({
+            "max_user_turns": 2,
+            "max_messages": 8,
+            "max_bytes": 4096,
+            "max_age_secs": 60,
+        }));
+        assert_eq!(receipt["render_state_limit_bytes"], 2048);
         assert_eq!(receipt["decision"]["kind"], "below_threshold");
         assert_eq!(receipt["decision"]["best_probability_permille"], 170);
         assert_eq!(receipt["answers"][0]["probability_permille"], 170);
@@ -1361,6 +1391,8 @@ mod tool_signal_tests {
             },
             &settings_digest,
             &questions,
+            &window_settings,
+            2048,
             None,
         )
         .unwrap();
@@ -1388,6 +1420,8 @@ mod tool_signal_tests {
                 },
                 &settings_digest,
                 &questions,
+                &window_settings,
+                2048,
                 None,
             )
             .is_none()
