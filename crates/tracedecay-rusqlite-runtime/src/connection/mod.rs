@@ -159,6 +159,21 @@ impl OpenedDatabaseFile {
         path: &Path,
         (main, sidecars): (File, [File; 3]),
     ) -> Result<Self, OpenedDatabaseFileError> {
+        #[cfg(windows)]
+        let main = {
+            // Returning to ordinary worker semantics denies main-file renames
+            // for the entire active SQLite attachment.
+            let worker_pin = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .open(path)
+                .map_err(|_| OpenedDatabaseFileError::Open)?;
+            if opened_file_identity(&worker_pin)? != opened_file_identity(&main)? {
+                return Err(OpenedDatabaseFileError::Replaced);
+            }
+            worker_pin
+        };
         let mut opened = Self::adopt(main)?;
         opened.verify_current_path(path)?;
         opened.created_sidecars = Some(Arc::new(Mutex::new(Some(sidecars))));

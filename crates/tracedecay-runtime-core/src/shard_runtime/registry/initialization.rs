@@ -814,6 +814,74 @@ mod tests {
     }
 
     #[test]
+    fn process_exit_during_interrupted_schema_transfer_preserves_or_restores_every_member() {
+        const DATABASE: &str = "TRACEDECAY_TEST_EXIT_DURING_RETRY_TRANSFER";
+        const MOVES: &str = "TRACEDECAY_TEST_RETRY_TRANSFER_MOVES";
+        if let Some(path) = std::env::var_os(DATABASE) {
+            let destination = PathBuf::from(path);
+            let mut stage = InitializationDirectory::begin(destination.clone()).unwrap();
+            seed(&stage.database(), 17);
+            let identity = crate::db::sqlite_generation_identity(&stage.database()).unwrap();
+            let files = owned_files(&stage);
+            stage.hold_interrupted(identity, [9; 32], files).unwrap();
+            let family = stage.prepared.as_ref().unwrap();
+            let recovery = family.retry.as_ref().unwrap().directory(&destination);
+            let moves: usize = std::env::var(MOVES).unwrap().parse().unwrap();
+            for name in STAGED_MEMBERS.iter().take(moves) {
+                rename_noreplace(&recovery.join(name), &stage.directory.join(name)).unwrap();
+            }
+            if moves > STAGED_MEMBERS.len() {
+                fs::remove_dir(&recovery).unwrap();
+            }
+            std::process::exit(73);
+        }
+        let test = format!(
+            "{}::process_exit_during_interrupted_schema_transfer_preserves_or_restores_every_member",
+            module_path!().split_once("::").unwrap().1
+        );
+        for moves in [1, 3, 4, 5] {
+            let root = TempDir::new().unwrap();
+            let destination = root.path().join("sessions.db");
+            let child = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test])
+                .env(DATABASE, &destination)
+                .env(MOVES, moves.to_string())
+                .output()
+                .unwrap();
+            assert_eq!(child.status.code(), Some(73), "{child:?}");
+            let mut stage = InitializationDirectory::begin(destination.clone()).unwrap();
+            let family = stage.prepared.as_ref().unwrap();
+            let supported = std::iter::once(&family.main)
+                .chain(&family.sidecars)
+                .take(moves)
+                .all(|leaf| leaf.allocation.is_some());
+            let recovery = family.retry.as_ref().unwrap().directory(&destination);
+            let before = STAGED_MEMBERS.map(|name| {
+                let in_stage = stage.directory.join(name);
+                let parked = recovery.join(name);
+                assert_ne!(in_stage.exists(), parked.exists());
+                if in_stage.exists() { in_stage } else { parked }
+            });
+            let bytes = before.each_ref().map(|file| fs::read(file).unwrap());
+            let result = stage.resume_interrupted([9; 32]);
+            if supported {
+                let pins = result.unwrap().unwrap();
+                for (name, contents) in STAGED_MEMBERS.into_iter().zip(bytes) {
+                    assert_eq!(fs::read(stage.directory.join(name)).unwrap(), contents);
+                }
+                drop(pins);
+                assert!(!recovery.exists());
+            } else {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+                for (file, contents) in before.iter().zip(bytes) {
+                    assert_eq!(fs::read(file).unwrap(), contents);
+                }
+            }
+            assert!(!destination.exists());
+        }
+    }
+
+    #[test]
     fn interrupted_install_requires_its_entire_recorded_family_before_restoring_any_member() {
         let root = TempDir::new().unwrap();
         let destination = root.path().join("sessions.db");

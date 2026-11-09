@@ -102,13 +102,18 @@ impl InitializationDirectory {
             main: main?,
             sidecars: [wal?, shm?, journal?],
         };
-        for file in &files {
+        let mut pins = Vec::new();
+        for (name, file) in STAGED_MEMBERS.into_iter().zip(&files) {
             file.sync_all()?;
+            pins.push(LeafIdentity::from_file(file)?.pin_at(&stage, name.as_ref(), false)?);
         }
+        // Windows keeps the live worker's main handle non-delete-sharing.
+        // Its successor pins are already open and match that original handle.
+        drop(files);
         self.record(family)?;
         create_private_directory(&recovery)?;
         let recovery = Dir::from_std_file(open_private_directory(&recovery)?);
-        for (name, original) in STAGED_MEMBERS.into_iter().zip(&files) {
+        for (name, original) in STAGED_MEMBERS.into_iter().zip(&pins) {
             capability_dir::rename_noreplace(&stage, name.as_ref(), &recovery, name.as_ref())?;
             LeafIdentity::from_file(original)?.pin_at(&recovery, name.as_ref(), false)?;
         }
@@ -132,7 +137,7 @@ impl InitializationDirectory {
                 "interrupted SQLite install belongs to a different store locator",
             ));
         }
-        self.require_empty()?;
+        self.verify_directory_name()?;
         for suffix in SIDECARS {
             if present_at(&self.parent, leaf(&with_suffix(&self.destination, suffix))?)? {
                 return Err(ambiguous(
@@ -148,11 +153,35 @@ impl InitializationDirectory {
             &family.sidecars[2],
         ];
         let recovery_path = retry.directory(&self.destination);
-        let recovery = Dir::from_std_file(open_private_directory(&recovery_path)?);
-        require_schema_members(&recovery)?;
-        let pin = |index: usize| -> io::Result<File> {
-            let name = STAGED_MEMBERS[index];
-            let file = capability_dir::open_writable_regular_nofollow(&recovery, name.as_ref())?;
+        require_schema_members(&stage)?;
+        let recovery = match open_private_directory(&recovery_path) {
+            Ok(pin) => Some(Dir::from_std_file(pin)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(directory) = &recovery {
+            require_schema_members(directory)?;
+        }
+        // After a crash a file may still occupy the active SQLite namespace.
+        // A byte digest cannot prove an allocation (all empty WALs hash alike).
+        // Only the sheltered name, or a kernel generation in the active stage,
+        // can authorize restoration. Inspect the whole family before moving it.
+        let pin = |index: usize| -> io::Result<(File, bool)> {
+            let name = STAGED_MEMBERS[index].as_ref();
+            let held = match &recovery {
+                Some(directory) if present_at(directory, name)? => Some(directory),
+                _ => None,
+            };
+            let (directory, move_back) = match (present_at(&stage, name)?, held) {
+                (false, Some(directory)) => (directory, true),
+                (true, None) if identities[index].allocation.is_some() => (&stage, false),
+                _ => {
+                    return Err(ambiguous(
+                        "SQLite recovery member is missing, duplicated, or lacks its allocation generation",
+                    ));
+                }
+            };
+            let file = capability_dir::open_writable_regular_nofollow(directory, name)?;
             if LeafIdentity::from_file(&file)? != *identities[index]
                 || digest(&file)? != retry.digests[index]
             {
@@ -160,21 +189,29 @@ impl InitializationDirectory {
                     "interrupted SQLite member no longer matches its held contents",
                 ));
             }
-            Ok(file)
+            Ok((file, move_back))
         };
         let files = [pin(0)?, pin(1)?, pin(2)?, pin(3)?];
-        for (index, source) in STAGED_MEMBERS.into_iter().enumerate() {
-            capability_dir::rename_noreplace(&recovery, source.as_ref(), &stage, source.as_ref())?;
-            identities[index].pin_at(&stage, source.as_ref(), false)?;
+        for (index, (_, move_back)) in files.iter().enumerate() {
+            let name = STAGED_MEMBERS[index].as_ref();
+            if *move_back {
+                let directory = recovery
+                    .as_ref()
+                    .ok_or_else(|| ambiguous("SQLite recovery directory disappeared"))?;
+                capability_dir::rename_noreplace(directory, name, &stage, name)?;
+            }
+            identities[index].pin_at(&stage, name, false)?;
         }
-        capability_dir::sync_directory(&recovery)?;
-        verify_named_directory(&recovery.into_std_file(), &recovery_path)?;
-        self.parent.remove_dir(leaf(&recovery_path)?)?;
+        if let Some(directory) = recovery {
+            capability_dir::sync_directory(&directory)?;
+            verify_named_directory(&directory.into_std_file(), &recovery_path)?;
+            self.parent.remove_dir(leaf(&recovery_path)?)?;
+        }
         capability_dir::sync_directory(&stage)?;
         capability_dir::sync_directory(&self.parent)?;
-        self.lease.set_len(0)?;
-        self.lease.sync_all()?;
-        self.prepared = None;
+        // Keep the receipt until the succeeding install replaces it. A crash
+        // after the empty directory was removed can still prove eligible files.
+        let files = files.map(|(file, _)| file);
         let [main, wal, shm, journal] = files;
         Ok(Some((main, [wal, shm, journal])))
     }
