@@ -143,6 +143,7 @@ jobs:
           cache_dependency_path: pnpm-lock.yaml
 
       - uses: ./.github/actions/setup-bazel
+        id: bazel
         if: steps.release.outputs.prs_created == 'true'
         with:
           cache-key: release-metadata-ubuntu-latest
@@ -177,6 +178,15 @@ jobs:
         run: scripts/check-release-drift.sh
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+      - name: Save newly fetched Bazel dependencies
+
+        if: always() && !cancelled() && steps.bazel.outputs.repository-cache-key != ''
+        uses: ./.github/actions/setup-bazel/save
+        with:
+          path: ${{ steps.bazel.outputs.repository-cache-path }}
+          key: ${{ steps.bazel.outputs.repository-cache-key }}
+          restored-entries: ${{ steps.bazel.outputs.repository-cache-entries }}
 
       - name: Report final build disk usage
         if: ${{ always() && hashFiles('.github/actions/setup-bazel/report_disk.sh') != '' }}

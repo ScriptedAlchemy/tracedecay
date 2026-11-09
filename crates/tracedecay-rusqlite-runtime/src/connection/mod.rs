@@ -262,7 +262,7 @@ impl OpenedDatabaseFile {
         // HAS_MOVED below still observes the SQLite handle's different inode.
         self.verify_current_path(canonical_path)?;
         #[cfg(unix)]
-        if sqlite_connection_has_moved(_connection)? {
+        if sqlite_connection_has_moved(_connection)?.unwrap_or(false) {
             return Err(OpenedDatabaseFileError::Replaced);
         }
         #[cfg(unix)]
@@ -416,7 +416,9 @@ fn metadata_identity(metadata: &std::fs::Metadata) -> u64 {
 }
 
 #[cfg(unix)]
-fn sqlite_connection_has_moved(connection: &Connection) -> Result<bool, OpenedDatabaseFileError> {
+fn sqlite_connection_has_moved(
+    connection: &Connection,
+) -> Result<Option<bool>, OpenedDatabaseFileError> {
     let database_name = CString::new("main").expect("static SQLite database name");
     let mut moved = 0_i32;
     // SAFETY: `connection` owns a live SQLite handle, `database_name` is a
@@ -431,10 +433,10 @@ fn sqlite_connection_has_moved(connection: &Connection) -> Result<bool, OpenedDa
         )
     };
     match result {
-        rusqlite::ffi::SQLITE_OK => Ok(moved != 0),
-        // VFS implementations predating HAS_MOVED report NOTFOUND. The
-        // pinned dev/inode check remains authoritative in that case.
-        rusqlite::ffi::SQLITE_NOTFOUND => Ok(false),
+        rusqlite::ffi::SQLITE_OK => Ok(Some(moved != 0)),
+        // Workers with a retained raw pin may use the pinned identity when
+        // HAS_MOVED is unsupported. Unpinned verified readers must refuse it.
+        rusqlite::ffi::SQLITE_NOTFOUND => Ok(None),
         _ => Err(OpenedDatabaseFileError::Inspect),
     }
 }
@@ -606,12 +608,13 @@ impl std::error::Error for VerifiedReaderError {
 /// Foreign-database reader bound to the physical file actually
 /// opened by SQLite rather than a later pathname observation.
 pub struct VerifiedReader {
-    // Keep the connection before the raw pin in declaration order: closing
-    // any raw descriptor on Unix can release another SQLite connection's
-    // process-wide record locks. SQLite must close its handle first.
     connection: Connection,
     canonical_path: PathBuf,
     file_identity: u64,
+    // On Unix a raw pin's eventual close would release POSIX record locks
+    // belonging to unrelated SQLite connections on the same inode. The
+    // SQLite handle itself retains the file; Windows keeps its pin.
+    #[cfg(not(unix))]
     _opened_file: OpenedDatabaseFile,
 }
 
@@ -632,8 +635,8 @@ impl VerifiedReader {
         self.file_identity
     }
 
-    /// The verified canonical pathname. It remains bound to this reader's
-    /// retained physical file until the SQLite connection is closed.
+    /// The verified canonical pathname, bound to the SQLite connection's
+    /// physical file until the connection is closed.
     pub fn canonical_path(&self) -> &Path {
         &self.canonical_path
     }
@@ -862,20 +865,54 @@ fn open_verified_reader(
     after_open: impl FnOnce(),
 ) -> Result<VerifiedReader, VerifiedReaderError> {
     let canonical_path = path.canonicalize().map_err(VerifiedReaderError::Resolve)?;
+    // Opening and later closing even a read-only raw descriptor on Unix
+    // releases POSIX record locks of other live SQLite connections to this
+    // inode. Observe the pathname without opening it and let SQLite own its
+    // only descriptor. Check identity on both sides of HAS_MOVED to reject
+    // a concurrent replacement, including a swap restored after open.
+    #[cfg(unix)]
+    let file_identity =
+        live_path_identity(&canonical_path).map_err(VerifiedReaderError::Identity)?;
+    #[cfg(unix)]
+    let open_path = canonical_path.clone();
+
+    #[cfg(not(unix))]
     let pinned = OpenedDatabaseFile::pin(&canonical_path).map_err(VerifiedReaderError::Identity)?;
+    #[cfg(not(unix))]
     let open_path = pinned
         .reader_open_path(&canonical_path)
         .map_err(VerifiedReaderError::Identity)?;
+    #[cfg(not(unix))]
+    let file_identity = pinned.identity();
+
     after_pin();
     let connection = open_reader(&open_path).map_err(VerifiedReaderError::Policy)?;
     after_open();
+
+    #[cfg(unix)]
+    {
+        let before = live_path_identity(&canonical_path).map_err(VerifiedReaderError::Identity)?;
+        let moved = sqlite_connection_has_moved(&connection)
+            .map_err(VerifiedReaderError::Identity)?
+            .ok_or(VerifiedReaderError::Identity(
+                OpenedDatabaseFileError::Inspect,
+            ))?;
+        let after = live_path_identity(&canonical_path).map_err(VerifiedReaderError::Identity)?;
+        if before != file_identity || moved || after != file_identity {
+            return Err(VerifiedReaderError::Identity(
+                OpenedDatabaseFileError::Replaced,
+            ));
+        }
+    }
+    #[cfg(not(unix))]
     pinned
         .verify_connection(&connection, &canonical_path)
         .map_err(VerifiedReaderError::Identity)?;
     Ok(VerifiedReader {
         connection,
         canonical_path,
-        file_identity: pinned.identity(),
+        file_identity,
+        #[cfg(not(unix))]
         _opened_file: pinned,
     })
 }
