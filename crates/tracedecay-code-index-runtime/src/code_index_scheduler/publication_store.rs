@@ -74,10 +74,6 @@ mod staged_segment_reads;
 #[path = "tests/immutable_segment_equality.rs"]
 mod immutable_segment_equality;
 
-#[cfg(all(test, target_os = "linux"))]
-#[path = "tests/durable_batch_snapshot.rs"]
-mod durable_batch_snapshot;
-
 const MAX_DURABLE_PUBLICATION_POINTER_BYTES: u64 = 512 * 1024;
 const DURABLE_GENERATION_IO_CHUNK_BYTES_V1: usize = 64 * 1024;
 

@@ -491,7 +491,7 @@ fn remove_owned_temp(path: &Path) {
 pub mod sync_latency {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{Arc, Mutex, PoisonError};
+    use std::sync::{Arc, Mutex, PoisonError, mpsc};
     use std::time::Duration;
 
     struct Injection {
@@ -499,6 +499,29 @@ pub mod sync_latency {
         root: PathBuf,
         delay: Duration,
         syncs: Arc<AtomicU64>,
+        pause: Option<Arc<SyncPauseSignal>>,
+    }
+
+    // A fixture can synchronize exactly at a real fsync, without wall-time
+    // races, mock barriers, or changes to production file I/O.
+    struct SyncPauseSignal {
+        entered: mpsc::Sender<()>,
+        resume: Mutex<mpsc::Receiver<()>>,
+    }
+
+    pub struct SyncPause {
+        entered: mpsc::Receiver<()>,
+        resume: mpsc::Sender<()>,
+    }
+
+    impl SyncPause {
+        pub fn wait_for_sync(&self, timeout: Duration) -> bool {
+            self.entered.recv_timeout(timeout).is_ok()
+        }
+
+        pub fn resume(self) {
+            let _ = self.resume.send(());
+        }
     }
 
     static INJECTIONS: Mutex<Vec<Injection>> = Mutex::new(Vec::new());
@@ -527,9 +550,11 @@ pub mod sync_latency {
         }
     }
 
-    /// Delay every fsync of `root` or a path below it by `delay`.
-    #[must_use]
-    pub fn inject(root: &Path, delay: Duration) -> SyncLatencyGuard {
+    fn register(
+        root: &Path,
+        delay: Duration,
+        pause: Option<Arc<SyncPauseSignal>>,
+    ) -> SyncLatencyGuard {
         let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
         let syncs = Arc::new(AtomicU64::new(0));
         INJECTIONS
@@ -540,8 +565,34 @@ pub mod sync_latency {
                 root: root.to_path_buf(),
                 delay,
                 syncs: Arc::clone(&syncs),
+                pause,
             });
         SyncLatencyGuard { id, syncs }
+    }
+
+    /// Delay every fsync of root or a path below it by delay.
+    #[must_use]
+    pub fn inject(root: &Path, delay: Duration) -> SyncLatencyGuard {
+        register(root, delay, None)
+    }
+
+    /// Pause one actual barrier under a private fixture root until released.
+    #[must_use]
+    pub fn pause(root: &Path) -> (SyncLatencyGuard, SyncPause) {
+        let (entered_sender, entered_receiver) = mpsc::channel();
+        let (resume_sender, resume_receiver) = mpsc::channel();
+        let signal = SyncPauseSignal {
+            entered: entered_sender,
+            resume: Mutex::new(resume_receiver),
+        };
+        let guard = register(root, Duration::ZERO, Some(Arc::new(signal)));
+        (
+            guard,
+            SyncPause {
+                entered: entered_receiver,
+                resume: resume_sender,
+            },
+        )
     }
 
     pub(super) fn before_sync(path: &Path) {
@@ -550,9 +601,23 @@ pub mod sync_latency {
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
             .find(|injection| path.starts_with(&injection.root))
-            .map(|injection| (injection.delay, Arc::clone(&injection.syncs)));
-        if let Some((delay, syncs)) = matched {
+            .map(|injection| {
+                (
+                    injection.delay,
+                    Arc::clone(&injection.syncs),
+                    injection.pause.clone(),
+                )
+            });
+        if let Some((delay, syncs, pause)) = matched {
             syncs.fetch_add(1, Ordering::SeqCst);
+            if let Some(pause) = pause {
+                let _ = pause.entered.send(());
+                let _ = pause
+                    .resume
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .recv();
+            }
             std::thread::sleep(delay);
         }
     }

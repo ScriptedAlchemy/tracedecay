@@ -378,3 +378,62 @@ fn durable_batch_failed_window_keeps_handles_and_does_not_admit_another_member()
         ErrorKind::NotFound
     );
 }
+
+#[cfg(feature = "test-helpers")]
+#[test]
+fn durable_batch_checks_earlier_windows_after_the_last_barrier() {
+    let root = tempfile::tempdir().expect("isolated durability root");
+    let mut batch = DurableFileBatch::new();
+    // 33 real writers: the first window has 32 completed fsyncs and the
+    // final window still owns its one descriptor.
+    for index in 0..=DURABLE_BATCH_CONCURRENT_SYNCS {
+        write_member(&mut batch, root.path(), index);
+    }
+    assert_eq!(batch.synced.len(), DURABLE_BATCH_CONCURRENT_SYNCS);
+    assert_eq!(batch.pending.len(), 1);
+    batch.sync().expect("original batch is valid");
+
+    let first = root.path().join("segment-0.tmp");
+    let original = fs::symlink_metadata(&first).expect("original inode");
+    let replacement = root.path().join("replacement.tmp");
+    fs::write(&replacement, b"sealed segment 0").expect("same-byte replacement");
+    let other = fs::symlink_metadata(&replacement).expect("replacement inode");
+    assert_ne!((original.dev(), original.ino()), (other.dev(), other.ino()));
+
+    // The existing fsync test fixture pauses at the actual barrier, so
+    // replacement happens after preflight but before fsync returns.
+    let (barriers, pause) = sync_latency::pause(root.path());
+    let result = std::thread::scope(|scope| {
+        let worker = scope.spawn(|| batch.sync());
+        let reached = pause.wait_for_sync(Duration::from_secs(10));
+        let replaced = if reached {
+            fs::rename(&replacement, &first)
+        } else {
+            Ok(())
+        };
+        pause.resume();
+        assert!(reached, "one real final-window barrier must be observed");
+        replaced.expect("replace earlier inode while final barrier is paused");
+        worker.join().expect("fsync worker")
+    });
+    assert_eq!(barriers.syncs(), 1, "one real fsync must have executed");
+    assert_eq!(
+        result
+            .expect_err("the changed earlier inode must never publish")
+            .kind(),
+        ErrorKind::InvalidData
+    );
+    assert_eq!(
+        fs::read(&first).expect("replacement remains intact"),
+        b"sealed segment 0"
+    );
+    let installed = fs::symlink_metadata(&first).expect("installed inode");
+    assert_eq!((installed.dev(), installed.ino()), (other.dev(), other.ino()));
+    assert_eq!(batch.synced.len(), DURABLE_BATCH_CONCURRENT_SYNCS);
+    assert_eq!(batch.pending.len(), 1);
+    assert_eq!(
+        batch.sync().expect_err("invalidated batch must keep refusing").kind(),
+        ErrorKind::InvalidData
+    );
+    assert_eq!(barriers.syncs(), 1, "failed retry must not issue another fsync");
+}
