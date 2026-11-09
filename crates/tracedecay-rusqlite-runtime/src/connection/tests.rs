@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, ErrorCode, config::DbConfig, limits::Limit};
+use rusqlite::{Connection, ErrorCode, config::DbConfig, ffi, limits::Limit};
 use tempfile::NamedTempFile;
 use tracedecay_store::WAL_SOFT_LIMIT_BYTES;
 
@@ -254,6 +254,27 @@ fn limits_and_authorizer_reject_oversized_or_unsafe_sql() {
     assert!(connection.prepare(&oversized).is_err());
 }
 
+fn temp_file_bytes(connection: &Connection) -> i64 {
+    let mut file: *mut ffi::sqlite3_file = std::ptr::null_mut();
+    let mut bytes = 0;
+    // The connection exclusively owns its TEMP pager. FILE_POINTER borrows
+    // the open VFS file, including on systems where its name was unlinked.
+    unsafe {
+        assert_eq!(
+            ffi::sqlite3_file_control(
+                connection.handle(),
+                c"temp".as_ptr(),
+                ffi::SQLITE_FCNTL_FILE_POINTER,
+                (&raw mut file).cast(),
+            ),
+            ffi::SQLITE_OK
+        );
+        let methods = file.as_ref().unwrap().pMethods.as_ref().unwrap();
+        assert_eq!(methods.xFileSize.unwrap()(file, &mut bytes), ffi::SQLITE_OK);
+    }
+    bytes
+}
+
 /// Reclaim the actual FILE-backed SQLite TEMP pager while leaving both the
 /// main database and an independent live TEMP table intact. Clearing temp_store
 /// would also free the file, but would silently delete the survivor's rows.
@@ -266,7 +287,7 @@ fn temp_auto_vacuum_reclaims_pages_without_clearing_live_tables() {
         .expect("select filesystem TEMP storage before connection policy");
     super::apply_pragmas(
         &connection,
-        ConnectionMode::Maintenance,
+        ConnectionMode::Writer,
         false,
         Durability::Normal,
     )
@@ -303,6 +324,11 @@ fn temp_auto_vacuum_reclaims_pages_without_clearing_live_tables() {
         before > 1024,
         "fixture must allocate actual FILE TEMP pages: {before}"
     );
+    let bytes_before = temp_file_bytes(&connection);
+    assert!(
+        bytes_before >= 8 * 1024 * 1024,
+        "TEMP data must spill to disk"
+    );
     // Rollback must restore a dropped TEMP b-tree and every committed row.
     // Reclaiming pages on a failed transaction would silently lose data.
     connection
@@ -327,6 +353,11 @@ fn temp_auto_vacuum_reclaims_pages_without_clearing_live_tables() {
     connection
         .execute_batch("DROP TABLE temp.disposable")
         .expect("drop disposable TEMP b-tree");
+    let bytes_after = temp_file_bytes(&connection);
+    assert!(
+        bytes_after > 0 && bytes_after * 8 < bytes_before,
+        "the still-open TEMP file must shrink: {bytes_before} -> {bytes_after}"
+    );
     let after: i64 = connection
         .query_row("PRAGMA temp.page_count", [], |row| row.get(0))
         .unwrap();
@@ -345,7 +376,8 @@ fn temp_auto_vacuum_reclaims_pages_without_clearing_live_tables() {
     );
     assert_eq!(
         connection
-            .query_row("SELECT value FROM main.items", [], |row| row.get::<_, i64>(0))
+            .query_row("SELECT value FROM main.items", [], |row| row
+                .get::<_, i64>(0))
             .unwrap(),
         1,
         "main database rows must survive"
@@ -364,7 +396,7 @@ fn temp_auto_vacuum_reclaims_pages_without_clearing_live_tables() {
     drop(connection);
 
     // Public opens must install the policy before the first TEMP allocation.
-    let reopened = open(file.path(), ConnectionMode::Maintenance).unwrap();
+    let reopened = open(file.path(), ConnectionMode::Writer).unwrap();
     assert_eq!(
         reopened
             .query_row("PRAGMA temp.auto_vacuum", [], |row| row.get::<_, i64>(0))
@@ -373,10 +405,39 @@ fn temp_auto_vacuum_reclaims_pages_without_clearing_live_tables() {
     );
     assert_eq!(
         reopened
-            .query_row("SELECT value FROM main.items", [], |row| row.get::<_, i64>(0))
+            .query_row("SELECT value FROM main.items", [], |row| row
+                .get::<_, i64>(0))
             .unwrap(),
         1
     );
+}
+
+#[test]
+fn maintenance_vacuum_preserves_each_stores_auto_vacuum_mode() {
+    let root = tempfile::tempdir().unwrap();
+    let main = root.path().join("main.db");
+    let attached = root.path().join("attached.db");
+    for (path, mode) in [(&main, "INCREMENTAL"), (&attached, "NONE")] {
+        let db = Connection::open(path).unwrap();
+        db.pragma_update(None, "auto_vacuum", mode).unwrap();
+        db.execute_batch("CREATE TABLE sample(value INTEGER); INSERT INTO sample VALUES(7)")
+            .unwrap();
+    }
+
+    let db = open(&main, ConnectionMode::Maintenance).unwrap();
+    db.execute("ATTACH ?1 AS auxiliary", [attached.to_str().unwrap()])
+        .unwrap();
+    db.execute_batch("VACUUM main; VACUUM auxiliary").unwrap();
+    drop(db);
+    for (path, expected) in [(&main, 2), (&attached, 0)] {
+        let db = Connection::open(path).unwrap();
+        assert_eq!(pragma_i64(&db, "auto_vacuum"), expected);
+        assert_eq!(
+            db.query_row("SELECT value FROM sample", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            7
+        );
+    }
 }
 
 #[test]
