@@ -3,6 +3,7 @@
 startup --windows_enable_symlinks
 
 common --enable_bzlmod
+common --downloader_config=scripts/bazel/downloader.cfg
 common --announce_rc
 common --show_progress_rate_limit=15
 # The shared fleet CAS uses size-based eviction, so it cannot guarantee
