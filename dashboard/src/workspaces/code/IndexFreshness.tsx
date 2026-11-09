@@ -334,15 +334,22 @@ function allActiveBuildsQuiet(
     const native = worktree.native_graph_progress;
     const presealActive = preseal?.active === true;
     const nativeActive = native?.active === true;
-    // A retained sealed predecessor's recent ready/phase-only text stamp is
-    // not work from a frozen successor. Measure the active typed attempts,
-    // plus independently receipted bulk text commits when they overlap.
+    // A prior Ready or graph-publication phase stamp is not new work from a
+    // frozen successor. Concurrent text construction can independently make
+    // real progress through durable commits, index building, and verification.
+    // The producer-owned progress epoch is advanced only for an observed
+    // boundary, not for repeated reads of the same phase.
     const text = worktree.progress;
-    const textCommitActive = text != null && text.phase === 'bulk_commit';
+    const concurrentTextWork =
+      text != null &&
+      text.progress_epoch > 0 &&
+      (text.phase === 'bulk_commit' ||
+        text.phase === 'index_build' ||
+        text.phase === 'verification');
     const lastUpdates = [
       ...(presealActive ? [preseal.last_progress_micros] : []),
       ...(nativeActive ? [native.last_progress_micros] : []),
-      ...(text && ((!presealActive && !nativeActive) || textCommitActive)
+      ...(text && ((!presealActive && !nativeActive) || concurrentTextWork)
         ? [text.last_progress_micros]
         : []),
     ];

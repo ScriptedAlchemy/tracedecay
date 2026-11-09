@@ -739,6 +739,52 @@ describe('Code index freshness', () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it.each(['index_build', 'verification'] as const)(
+    'polls real concurrent %s text boundaries while successor capture is quiet',
+    async (phase) => {
+      vi.useFakeTimers();
+      const reading = {
+        ...envelope('loading', {
+          worktrees: [{
+            ...worktree(),
+            staleness_state: 'indexing',
+            rebuild_in_flight: true,
+            progress: {
+              ...progress(),
+              generation_id: 'generation.4f21c9',
+              phase,
+              progress_epoch: 9,
+              last_progress_micros: NOW_MICROS + 600_000_000,
+            },
+            preseal_attempt: {
+              daemon_incarnation: 1,
+              producer_incarnation: 2,
+              attempt_sequence: 3,
+              progress_epoch: 4,
+              phase: 'capture',
+              completed_items: 7,
+              total_items: 20,
+              last_progress_micros: NOW_MICROS,
+              active: true,
+            },
+          }],
+          note: 'independent text artifact boundary during quiet successor capture',
+        }),
+        time: { valid_time_micros: null, observation_time_micros: NOW_MICROS + 600_000_000 },
+      };
+      const fetch = vi.fn(async () => new Response(JSON.stringify(reading), { status: 200 }));
+      vi.stubGlobal('fetch', fetch);
+      renderWith();
+
+      await advanceTimers(0);
+      expect(screen.getByText('capture · 7 / 20 items')).toBeTruthy();
+      expect(fetch).toHaveBeenCalledTimes(1);
+      await advanceTimers(1_001);
+      await advanceTimers(0);
+      expect(fetch).toHaveBeenCalledTimes(2);
+    },
+  );
+
   it('keeps polling each second when a moving worktree shares a query with a quiet one', async () => {
     vi.useFakeTimers();
     const result = {
