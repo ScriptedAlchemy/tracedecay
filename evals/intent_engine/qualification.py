@@ -573,6 +573,7 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes, c
     if has_sample_commitment:
         response_sha, row_sha = validate_qualified_sample(
             sample_path, result["experiment_sha256"], reconstructed_requests,
+            expected_row=first_row,
         )
         if (first_row["sample_response_sha256"] != response_sha
                 or sha256_json(first_row) != row_sha):

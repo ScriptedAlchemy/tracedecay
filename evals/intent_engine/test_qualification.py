@@ -722,6 +722,7 @@ class QualificationTests(unittest.TestCase):
                 key: {"type": "noul", "noul": value}
                 for key, value in first["probs"].items()
             },
+            "usage": {"input_tokens": 64, "state_tokens_dropped": 0},
         }
         first["sample_response_sha256"] = run_http.digest(response)
         sample = {
@@ -777,6 +778,62 @@ class QualificationTests(unittest.TestCase):
             without_commitment = self.signed_result()
             with self.assertRaisesRegex(ValueError, "must be provided together"):
                 score_sample(without_commitment)
+
+    def test_rehashed_first_sample_cannot_disagree_with_scored_prediction_or_usage(self):
+        # A sample's row_sha256 and a row's sample_response_sha256 are
+        # mutually rehashable. The original raw response must independently
+        # reproduce the frozen model observation, probabilities, and telemetry.
+        result = self.signed_result()
+        first = result["rows"][0]
+        request = {
+            "state": run_http.STATES["B_noul_text"](self.dataset[2]),
+            "questions": self.questions,
+        }
+        raw_response = {
+            "model": first["observed_model"],
+            "answers": {
+                key: {"type": "noul", "noul": value}
+                for key, value in first["probs"].items()
+            },
+            "usage": {"input_tokens": 64, "state_tokens_dropped": 0},
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "first-response.json"
+
+            def score_raw(response):
+                adjusted = copy.deepcopy(result)
+                adjusted_first = adjusted["rows"][0]
+                adjusted_first["sample_response_sha256"] = run_http.digest(response)
+                evidence = {
+                    "request": request,
+                    "response": response,
+                    "experiment_sha256": adjusted["experiment_sha256"],
+                    "case_id": adjusted_first["id"],
+                    "request_sha256": adjusted_first["request_sha256"],
+                    "row_sha256": run_http.digest(adjusted_first),
+                }
+                path.write_text(json.dumps(evidence), encoding="utf-8")
+                return qualification.qualified_report(
+                    adjusted, self.manifest, self.manifest_sha,
+                    self.questions, self.dataset_bytes, sample_path=str(path),
+                )
+
+            self.assertTrue(score_raw(raw_response)["qualified_against_frozen_tolerances"])
+            for corruption in ("probabilities", "model", "input_tokens", "dropped"):
+                with self.subTest(corruption=corruption):
+                    edited = copy.deepcopy(raw_response)
+                    if corruption == "probabilities":
+                        edited["answers"]["impact"]["noul"] = 0.01
+                    elif corruption == "model":
+                        edited["model"] = "different-checkpoint"
+                    elif corruption == "input_tokens":
+                        edited["usage"]["input_tokens"] = 1024
+                    else:
+                        edited["usage"]["state_tokens_dropped"] = 1
+                    # Rehash *both* directions; these records used to pass
+                    # despite contradicting the first response actually scored.
+                    with self.assertRaisesRegex(ValueError, "raw response disagrees"):
+                        score_raw(edited)
 
     def test_qualified_scorer_rejects_edited_choice_and_extra_none_evidence(self):
         # These edits previously passed the generic historical scorer. An

@@ -52,7 +52,7 @@ def request_bytes(body):
     return json.dumps(body, allow_nan=False).encode("utf-8")
 
 
-def validate_qualified_sample(path, experiment_sha, requests):
+def validate_qualified_sample(path, experiment_sha, requests, expected_row=None):
     """Refuse a stale first-response sample during an exact qualified resume.
 
     Raw samples are debugging evidence, not independent model attestation.
@@ -123,7 +123,46 @@ def validate_qualified_sample(path, experiment_sha, requests):
         )
     if not matches_request:
         raise ValueError("qualified sample request differs from frozen HTTP bytes")
-    noul_probabilities(sample.get("response"), sample["request"]["questions"])
+    raw_response = sample.get("response")
+    raw_probabilities = noul_probabilities(raw_response, sample["request"]["questions"])
+    if expected_row is not None:
+        # A response digest in the row and a row digest in the sample can both
+        # be rewritten together. Independently replay the raw response against
+        # the scored first row so such self-consistent edits cannot certify
+        # invented probabilities or favorable usage/cost telemetry.
+        usage = raw_response.get("usage") or {}
+        if not isinstance(usage, dict):
+            raise ValueError("qualified sample has invalid raw usage")
+        server_ms = raw_response.get("latency_ms")
+        if server_ms is None:
+            timing = raw_response.get("timing") or {}
+            if not isinstance(timing, dict):
+                raise ValueError("qualified sample has invalid raw timing")
+            server_ms = timing.get("inference_ms")
+        recorded_raw = expected_row.get("probs_raw", expected_row.get("probs"))
+        reconstructed = {
+            "observed_model": raw_response.get("model"),
+            "input_tokens": usage.get("input_tokens"),
+            "state_tokens": usage.get("state_tokens"),
+            "dropped": dropped_state_tokens(raw_response, usage),
+            "server_ms": server_ms,
+        }
+        optional = (
+            ("state_tokens_used", "state_tokens_used"),
+            ("state_tokens_dropped", "reported_state_tokens_dropped"),
+            ("truncated", "usage_truncated"),
+        )
+        if (
+            recorded_raw != raw_probabilities
+            or any(expected_row.get(key) != value for key, value in reconstructed.items())
+            or any((name in usage) != (stored in expected_row)
+                   or (name in usage and usage[name] != expected_row[stored])
+                   for name, stored in optional)
+            or ("truncated" in raw_response) != ("truncated" in expected_row)
+            or ("truncated" in raw_response
+                and raw_response["truncated"] != expected_row["truncated"])
+        ):
+            raise ValueError("qualified sample raw response disagrees with first scored row")
     row_sha = sample.get("row_sha256")
     if not isinstance(row_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", row_sha):
         raise ValueError("qualified sample lacks the completed first-row commitment")
@@ -825,6 +864,10 @@ def main(argv=None):
                         raise ValueError("qualified sample has no completed first-response row; use a new tag")
                     response_sha, row_sha = admitted_sample
                     first_row = done[first_id]
+                    validate_qualified_sample(
+                        args.sample_out, header["experiment_sha256"], requests,
+                        expected_row=first_row,
+                    )
                     if (first_row.get("sample_response_sha256") != response_sha
                             or digest(first_row) != row_sha):
                         raise ValueError("qualified sample response or row disagrees with completed evidence")
@@ -927,10 +970,11 @@ def main(argv=None):
                 # while subsequent held-out HTTP calls are in flight. Recheck
                 # the original first response against the durable first row
                 # immediately before exposing a completed qualification.
+                first_row = done[next(iter(cases))]
                 response_sha, row_sha = validate_qualified_sample(
                     args.sample_out, header["experiment_sha256"], requests,
+                    expected_row=first_row,
                 )
-                first_row = done[next(iter(cases))]
                 if (first_row.get("sample_response_sha256") != response_sha
                         or digest(first_row) != row_sha):
                     raise ValueError(
