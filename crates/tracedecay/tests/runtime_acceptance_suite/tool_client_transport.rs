@@ -575,7 +575,10 @@ fn generic_tool_json_preserves_large_result_while_daemon_waits() {
             Ok(()) => break,
             Err(RecvTimeoutError::Timeout) => {
                 assert!(
-                    child.try_wait().expect("poll CLI before daemon request").is_none(),
+                    child
+                        .try_wait()
+                        .expect("poll CLI before daemon request")
+                        .is_none(),
                     "CLI exited before the fake daemon received its request"
                 );
                 assert!(
