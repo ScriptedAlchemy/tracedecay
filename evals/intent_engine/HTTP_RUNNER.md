@@ -94,7 +94,14 @@ pathname substitution refuse qualification. These cross-checks prevent accidenta
 stale or corrupted sample attribution, but
 operator-authored digests are **not remote response attestation**. Historical
 nonqualified sample behavior is unchanged. Old unbound samples are not
-silently migrated: use a new sample path.
+silently migrated: use a new sample path. When a qualified result contains the
+first-row `sample_response_sha256` commitment, independent scoring requires
+`--sample-file /path/to/first-response.json`. The scorer reopens the original
+regular-file inode, reconstructs the frozen request and verifies experiment,
+response and complete first-row commitments before publishing a report. It
+rejects a sample with no matching first-row commitment, a missing required
+sample, or a forged commitment on a later row. Runs without a raw sample
+report `first_response_sample_checked: false`, not raw-response attestation.
 
 An interrupted run resumes only with matching identity. Changed questions,
 question order, renderer output, labels, subset contents, or serving settings

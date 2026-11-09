@@ -308,13 +308,13 @@ if __name__ == "__main__":
     here = os.path.dirname(os.path.abspath(__file__))
     if len(sys.argv) > 1:
         usage = ("usage: score.py [--qualified MANIFEST DATASET RESULT "
-                 "[--questions-file FILE] [--captured-requests FILE]]")
+                 "[--questions-file FILE] [--captured-requests FILE] [--sample-file FILE]]")
         if sys.argv[1] != "--qualified" or len(sys.argv) < 5 or len(sys.argv[5:]) % 2:
             raise ValueError(usage)
         options = {}
         for index in range(5, len(sys.argv), 2):
             flag = sys.argv[index]
-            if flag not in ("--questions-file", "--captured-requests") or flag in options:
+            if flag not in ("--questions-file", "--captured-requests", "--sample-file") or flag in options:
                 raise ValueError(usage)
             options[flag] = sys.argv[index + 1]
         from qualification import load_manifest, load_questions, loads_unambiguous_json, qualified_report
@@ -330,7 +330,8 @@ if __name__ == "__main__":
             with open(options["--captured-requests"], "rb") as source:
                 captured_requests_bytes = source.read()
         report = qualified_report(
-            result, manifest, manifest_sha, questions, dataset_bytes, captured_requests_bytes,
+            result, manifest, manifest_sha, questions, dataset_bytes,
+            captured_requests_bytes, options.get("--sample-file"),
         )
         publish_summary(os.path.join(here, "qualification_summary.json"), report)
         print(json.dumps(report, indent=2, allow_nan=False))

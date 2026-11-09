@@ -356,12 +356,12 @@ def holdout_decision_metrics(rows, thresholds):
     }
 
 
-def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes, captured_requests_bytes=None):
+def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes, captured_requests_bytes=None, sample_path=None):
     """Reproduce qualified predictions from the frozen original dataset."""
     from score import score_config
     from run_http import (
         STATES, has_numeric_truncation_receipt, request_bytes, validate_dataset,
-        validate_row_truncation,
+        validate_row_truncation, validate_qualified_sample,
     )
 
     if not isinstance(dataset_bytes, bytes):
@@ -460,6 +460,7 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes, c
             raise ValueError("qualification has an unsupported request renderer")
     case_map = {case["id"]: case for case in cases}
     request_sizes = []
+    reconstructed_requests = {}
     for row in rows:
         if captured is not None:
             rendered = captured[row["id"]]
@@ -480,6 +481,26 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes, c
                 or recorded_size != size):
             raise ValueError(f"qualification request byte count disagrees for {row['id']}")
         request_sizes.append(size)
+        reconstructed_requests[row["id"]] = (
+            rendered if captured is not None else body,
+            sha256_bytes(rendered),
+        )
+
+    # The runner checks raw first-response evidence on resume. Repeat that
+    # check independently before publishing a qualified scoring report.
+    if any("sample_response_sha256" in row for row in rows[1:]):
+        raise ValueError("qualification has a sample commitment outside the first held-out row")
+    first_row = rows[0]
+    has_sample_commitment = "sample_response_sha256" in first_row
+    if has_sample_commitment != (sample_path is not None):
+        raise ValueError("qualification first-response sample and row commitment must be provided together")
+    if has_sample_commitment:
+        response_sha, row_sha = validate_qualified_sample(
+            sample_path, result["experiment_sha256"], reconstructed_requests,
+        )
+        if (first_row["sample_response_sha256"] != response_sha
+                or sha256_json(first_row) != row_sha):
+            raise ValueError("qualification first-response sample response or row disagrees with completed evidence")
 
     if ("noul_temperature" not in experiment
             or experiment["noul_temperature"] != validated["noul_temperature"]):
@@ -547,6 +568,7 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes, c
         "experiment_sha256": result["experiment_sha256"],
         "qualification_manifest_sha256": manifest_sha,
         "reported_model": reported_model,
+        "first_response_sample_checked": has_sample_commitment,
         "cases": len(rows),
         "thresholds": validated["thresholds"],
         "tolerances": tolerances,

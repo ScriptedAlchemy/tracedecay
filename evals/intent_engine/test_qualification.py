@@ -585,6 +585,76 @@ class QualificationTests(unittest.TestCase):
             qualification.qualified_report(result, stricter, qualification.sha256_json(stricter), self.questions, self.dataset_bytes)
 
 
+    def test_independent_qualified_scoring_rechecks_first_response_sample(self):
+        result = self.signed_result()
+        first = result["rows"][0]
+        case = self.dataset[2]
+        request = {
+            "state": run_http.STATES["B_noul_text"](case),
+            "questions": self.questions,
+        }
+        response = {
+            "model": first["observed_model"],
+            "answers": {
+                key: {"type": "noul", "noul": value}
+                for key, value in first["probs"].items()
+            },
+        }
+        first["sample_response_sha256"] = run_http.digest(response)
+        sample = {
+            "request": request,
+            "response": response,
+            "experiment_sha256": result["experiment_sha256"],
+            "case_id": first["id"],
+            "request_sha256": first["request_sha256"],
+            "row_sha256": run_http.digest(first),
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "raw-first-response.json"
+            path.write_text(json.dumps(sample), encoding="utf-8")
+
+            def score_sample(value=result):
+                return qualification.qualified_report(
+                    value, self.manifest, self.manifest_sha, self.questions,
+                    self.dataset_bytes, sample_path=str(path),
+                )
+
+            report = score_sample()
+            self.assertTrue(report["qualified_against_frozen_tolerances"])
+            self.assertTrue(report["first_response_sample_checked"])
+            with self.assertRaisesRegex(ValueError, "must be provided together"):
+                qualification.qualified_report(
+                    result, self.manifest, self.manifest_sha,
+                    self.questions, self.dataset_bytes,
+                )
+
+            wrong = copy.deepcopy(sample)
+            wrong["response"]["answers"]["impact"]["noul"] = 0.31
+            path.write_text(json.dumps(wrong), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "response or row disagrees"):
+                score_sample()
+
+            wrong = copy.deepcopy(sample)
+            wrong["request"]["state"] += " Foreign transcript"
+            path.write_text(json.dumps(wrong), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "request differs"):
+                score_sample()
+
+            path.write_text(json.dumps(sample), encoding="utf-8")
+            altered_result = copy.deepcopy(result)
+            altered_result["rows"][0]["ms"] = 9
+            with self.assertRaisesRegex(ValueError, "response or row disagrees"):
+                score_sample(altered_result)
+
+            later_sample = copy.deepcopy(result)
+            later_sample["rows"][1]["sample_response_sha256"] = "f" * 64
+            with self.assertRaisesRegex(ValueError, "outside the first"):
+                score_sample(later_sample)
+
+            without_commitment = self.signed_result()
+            with self.assertRaisesRegex(ValueError, "must be provided together"):
+                score_sample(without_commitment)
+
     def test_qualified_scorer_rejects_edited_choice_and_extra_none_evidence(self):
         # These edits previously passed the generic historical scorer. An
         # independently scored Noul-only result must reject them even when
