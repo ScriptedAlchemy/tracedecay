@@ -438,6 +438,20 @@ pub async fn run_context_scout_intent_pass(
         action_fact_score_permille: settings.action_fact_score_permille,
         delivered: &session.delivered_intents,
     });
+    // Preserve every assessed window, including below-threshold and no-signal
+    // decisions that never produce a durable suggestion. This is a content-free
+    // provenance receipt, not a correctness label or a second transcript store.
+    record_intent_decision(
+        &pass,
+        settings,
+        &provider_id,
+        &window,
+        &engine_outcome,
+        &facts,
+        &prompt_inferences,
+        &decision,
+    )
+    .await;
     let selected = match decision {
         IntentDecisionV1::Candidates(candidates) if !candidates.is_empty() => candidates[0],
         IntentDecisionV1::Candidates(_)
@@ -1022,6 +1036,139 @@ async fn record_withheld(
     }
 }
 
+/// Records the outcome of every completed intent assessment, not just hints
+/// that survived selection and delivery. The transcript stays in its owning
+/// session store; the bounded analytics receipt can be used to locate and
+/// independently rehydrate the exact window for qualification.
+async fn record_intent_decision(
+    pass: &ContextScoutIntentPassV1<'_>,
+    settings: &ContextScoutIntentSettingsV1,
+    provider_id: &ProviderId,
+    window: &SessionWindowV1,
+    engine_outcome: &EngineOutcomeV1,
+    facts: &[ContextScoutIntentKindV1],
+    prompt_inferences: &[ContextScoutIntentKindV1],
+    decision: &IntentDecisionV1,
+) {
+    let Some(analytics) = pass.analytics.as_ref() else {
+        return;
+    };
+    let Some(envelope_id) = intent_envelope_id(pass.hook) else {
+        return;
+    };
+    let Ok(settings_digest) = settings.settings_digest() else {
+        return;
+    };
+    let engine_identity = pass.engine.as_ref().map(|engine| engine.identity());
+    let Some(metadata_json) = intent_decision_metadata(
+        window,
+        &settings_digest,
+        &settings.questions,
+        engine_outcome,
+        engine_identity.as_ref(),
+        facts,
+        prompt_inferences,
+        decision,
+    ) else {
+        return;
+    };
+    let event = AnalyticsEventInsert {
+        provider: intent_analytics_provider(provider_id),
+        project_id: analytics.project_key.to_owned(),
+        session_id: Some(pass.lifecycle.session_id.as_str().to_owned()),
+        timestamp: pass.observed_at.0.div_euclid(1_000_000),
+        event_kind: "intent_decision".to_owned(),
+        hook_name: None,
+        tool_name: None,
+        tool_category: None,
+        skill_name: None,
+        hint_category: None,
+        // Same admitted boundary identity as the later delivery/withholding.
+        hint_id: Some(hex::encode(envelope_id)),
+        outcome: None,
+        metadata_json: Some(metadata_json),
+    };
+    if let Err(error) = analytics.analytics.append_analytics_events(&[event]).await {
+        tracing::debug!(%error, "Context Scout intent decision receipt not recorded");
+    }
+}
+
+fn intent_decision_metadata(
+    window: &SessionWindowV1,
+    settings_digest: &ManifestDigest,
+    questions: &[tracedecay_domain::configuration::IntentQuestionSettingsV1],
+    engine_outcome: &EngineOutcomeV1,
+    engine_identity: Option<&super::decision_engine::DecisionEngineIdentityV1>,
+    facts: &[ContextScoutIntentKindV1],
+    prompt_inferences: &[ContextScoutIntentKindV1],
+    decision: &IntentDecisionV1,
+) -> Option<String> {
+    if window.messages.is_empty()
+        || window.first_store_id <= 0
+        || window.last_store_id < window.first_store_id
+    {
+        return None;
+    }
+    let window_digest = ManifestDigest::from_sha256_bytes(&window.window_digest).ok()?;
+    // An unavailable engine is not a negative answer. Preserve null rather
+    // than inventing ten zero probabilities for a missing response.
+    let answers = engine_outcome.answers().map(|reported| {
+        questions
+            .iter()
+            .filter_map(|question| {
+                let probability = reported
+                    .iter()
+                    .find(|(intent, _)| *intent == question.intent)?
+                    .1;
+                probability.is_finite().then(|| ContextScoutIntentAnswerV1 {
+                    intent: question.intent,
+                    probability_permille: probability_permille(probability),
+                    threshold_permille: question.threshold_permille,
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    let selection = match decision {
+        IntentDecisionV1::Candidates(candidates) => serde_json::json!({
+            "kind": "candidates",
+            "candidates": candidates.iter().map(|candidate| serde_json::json!({
+                "intent": candidate.intent,
+                "source": candidate.source,
+                "relevance": candidate.relevance,
+            })).collect::<Vec<_>>(),
+        }),
+        IntentDecisionV1::BelowThreshold { best } => serde_json::json!({
+            "kind": "below_threshold",
+            "best_intent": best.intent,
+            "best_probability_permille": best.probability_permille,
+        }),
+        IntentDecisionV1::NoSignal => serde_json::json!({"kind": "no_signal"}),
+    };
+    Some(serde_json::json!({
+        "source": "context_scout_intent_pass",
+        "route": "decision_engine",
+        "window": {
+            "first_store_id": window.first_store_id,
+            "last_store_id": window.last_store_id,
+            "message_count": window.messages.len(),
+            "window_digest": window_digest,
+            "newest_timestamp_micros": window.newest_timestamp_micros,
+        },
+        "settings_digest": settings_digest,
+        "model_outcome": engine_outcome.model_outcome(),
+        "engine": engine_identity.map(|identity| serde_json::json!({
+            "base_url_digest": hex::encode(identity.base_url_digest),
+            "configured_model": identity.model,
+            "reported_model": engine_outcome.reported_model(),
+        })),
+        "answers": answers,
+        "facts": facts,
+        "prompt_inferences": prompt_inferences,
+        "decision": selection,
+    })
+    .to_string())
+}
+
 fn receipt_model_is_valid(model: &str) -> bool {
     !model.trim().is_empty()
         && model.len() <= MAX_DECISION_ENGINE_MODEL_BYTES
@@ -1077,6 +1224,112 @@ mod tool_signal_tests {
             store_id: 1,
             timestamp_micros: None,
         }
+    }
+
+    #[test]
+    fn completed_intent_decisions_record_negative_windows_without_transcript_text() {
+        use std::collections::BTreeMap;
+
+        use tracedecay_domain::ManifestDigest;
+
+        use super::super::decision_engine::{
+            DecisionAnswerV1, DecisionAnswersV1, DecisionEngineOutcomeV1,
+        };
+        use super::{EngineOutcomeV1, intent_decision_metadata};
+
+        let window = SessionWindowV1 {
+            messages: vec![message(
+                SessionWindowRoleV1::User,
+                "Confidential transcript text must remain in its owning store",
+                None,
+            )],
+            first_store_id: 81,
+            last_store_id: 81,
+            newest_timestamp_micros: Some(1_234_000_000),
+            window_digest: [7; 32],
+            freshness: SessionWindowFreshnessV1::Unknown,
+        };
+        let settings_digest = ManifestDigest::from_sha256_bytes(&[8; 32]).unwrap();
+        let questions = [IntentQuestionSettingsV1 {
+            intent: Kind::Impact,
+            instructions: "Does the request ask about impact?".to_owned(),
+            threshold_permille: 600,
+            margin_permille: None,
+        }];
+        let engine = EngineOutcomeV1::Asked(DecisionEngineOutcomeV1::Answered(
+            DecisionAnswersV1 {
+                answers: BTreeMap::from([(
+                    Kind::Impact.as_key().to_owned(),
+                    DecisionAnswerV1::Noul(0.17),
+                )]),
+                model: Some("kev-4b".to_owned()),
+                latency_micros: 1250,
+            },
+        ));
+        let negative = IntentDecisionV1::BelowThreshold {
+            best: IntentBestAnswerV1 {
+                intent: Kind::Impact,
+                probability_permille: 170,
+            },
+        };
+        let evidence = intent_decision_metadata(
+            &window,
+            &settings_digest,
+            &questions,
+            &engine,
+            None,
+            &[],
+            &[Kind::Impact],
+            &negative,
+        )
+        .unwrap();
+        let receipt: serde_json::Value = serde_json::from_str(&evidence).unwrap();
+        assert_eq!(receipt["window"]["first_store_id"], 81);
+        assert_eq!(receipt["window"]["last_store_id"], 81);
+        assert_eq!(receipt["window"]["message_count"], 1);
+        assert!(receipt["window"]["window_digest"].is_string());
+        assert_eq!(receipt["decision"]["kind"], "below_threshold");
+        assert_eq!(receipt["decision"]["best_probability_permille"], 170);
+        assert_eq!(receipt["answers"][0]["probability_permille"], 170);
+        assert_eq!(receipt["answers"][0]["threshold_permille"], 600);
+        assert!(receipt["facts"].as_array().unwrap().is_empty());
+        assert_eq!(receipt["prompt_inferences"].as_array().unwrap().len(), 1);
+        assert!(!evidence.contains("Confidential transcript text"));
+        assert!(!evidence.contains("Does the request ask about impact?"));
+
+        // A transport failure is unknown, never relabeled as a negative model
+        // prediction, even when deterministic policy finds no signal.
+        let unavailable = intent_decision_metadata(
+            &window,
+            &settings_digest,
+            &questions,
+            &EngineOutcomeV1::Unavailable,
+            None,
+            &[],
+            &[],
+            &IntentDecisionV1::NoSignal,
+        )
+        .unwrap();
+        let unknown: serde_json::Value = serde_json::from_str(&unavailable).unwrap();
+        assert_eq!(unknown["decision"]["kind"], "no_signal");
+        assert!(unknown["answers"].is_null());
+        assert!(unknown["engine"].is_null());
+
+        let bad_window = SessionWindowV1 {
+            messages: Vec::new(),
+            ..window
+        };
+        assert!(intent_decision_metadata(
+            &bad_window,
+            &settings_digest,
+            &questions,
+            &engine,
+            None,
+            &[],
+            &[],
+            &negative,
+        )
+        .is_none());
     }
 
     #[test]
