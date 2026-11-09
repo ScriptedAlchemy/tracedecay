@@ -30,7 +30,7 @@ jobs:
   helpers:
     name: Cache launcher helpers
     outputs:
-      cache-key: ${{ steps.saved.outputs.key }}
+      cache-key: ${{ steps.bazel.outputs.launcher-cache-key }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -42,9 +42,11 @@ jobs:
         with:
           cache-key: dependency-helpers
           cache-save: ${{ inputs.offline != true }}
+          verify-launcher-cache: ${{ inputs.offline == true }}
 
       - &resolve-helpers
         name: Resolve launcher helpers for every supported platform
+        id: fetch
         run: |
           set -euo pipefail
           targets=()
@@ -59,20 +61,28 @@ jobs:
           fi
           bazel build "${options[@]}" "${targets[@]}"
 
-      - name: Save newly fetched Bazel dependencies
-        id: saved
-        if: always() && !cancelled() && steps.bazel.outputs.repository-cache-key != ''
+      # Only a successful build of every target establishes a complete archive.
+      # A warm workload cache can already contain every blob on the
+      # first run; the immutable helper key must still be published then.
+      - name: Publish complete launcher helpers
+        if: success() && github.ref == 'refs/heads/master' && inputs.offline != true && steps.bazel.outputs.launcher-cache-hit != 'true' && steps.bazel.outputs.launcher-cache-key != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.bazel.outputs.repository-cache-path }}
+          key: ${{ steps.bazel.outputs.launcher-cache-key }}
+
+      - name: Preserve partially fetched launcher dependencies
+        if: failure() && !cancelled() && steps.fetch.outcome == 'failure' && steps.bazel.outputs.repository-cache-key != ''
         uses: ./.github/actions/setup-bazel/save
         with:
           path: ${{ steps.bazel.outputs.repository-cache-path }}
           key: ${{ steps.bazel.outputs.repository-cache-key }}
           restored-entries: ${{ steps.bazel.outputs.repository-cache-entries }}
-          restored-key: ${{ steps.bazel.outputs.repository-cache-restored-key }}
 
   verify:
     name: Verify restored dependency cache
     needs: helpers
-    if: inputs.offline != true
+    if: inputs.offline != true && github.ref == 'refs/heads/master'
     permissions:
       contents: read
       actions: write
@@ -87,6 +97,7 @@ jobs:
           cache-key: dependency-helpers-verification
           repository-cache-key: ${{ needs.helpers.outputs.cache-key }}
           cache-save: "false"
+          verify-launcher-cache: "true"
       - *resolve-helpers
 
       - name: Retire incomplete legacy Linux cache snapshots
