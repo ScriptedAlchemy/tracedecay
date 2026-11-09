@@ -1174,21 +1174,24 @@ fn verify_checked_seal_bundle(
 
 /// Re-read an authenticated manifest without losing a deadline that expires
 /// during the prefix or full-content I/O, including on read failure.
-fn read_checked_seal_manifest_for_proof(
-    file: &mut File,
+fn read_checked_seal_manifest_for_proof<R: Read + Seek>(
+    file: &mut R,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<Option<Vec<u8>>, GraphDbError> {
-    let mut prefix = vec![0_u8; SEAL_READ_CHECK_BYTES];
-    let read = file
-        .seek(SeekFrom::Start(0))
-        .and_then(|_| file.read(&mut prefix));
+    // A successful file read may be short. Consume the entire bounded prefix
+    // so a partial read cannot make a new-format seal bypass component proof.
+    let mut prefix = Vec::new();
+    let read = file.seek(SeekFrom::Start(0)).and_then(|_| {
+        file.by_ref()
+            .take(SEAL_READ_CHECK_BYTES as u64)
+            .read_to_end(&mut prefix)
+    });
     // A scanned manifest read can finish after the deadline, even on I/O error.
     // Prefer that typed interruption to a misleading corruption result.
     (check)()?;
-    let read = read.map_err(|error| GraphDbError::Corrupt {
+    read.map_err(|error| GraphDbError::Corrupt {
         message: format!("sealed generation manifest prefix read failed: {error}"),
     })?;
-    prefix.truncate(read);
     let revision_key = b"\"format_revision\":";
     let revision = prefix
         .windows(revision_key.len())
@@ -2801,6 +2804,47 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Bound each individual OS read while still obtaining bytes from a real file.
+    /// The test proves that short successful reads cannot skip seal proof.
+    struct ThreeByteFileReader {
+        file: std::fs::File,
+        nonempty_reads: usize,
+    }
+
+    impl Read for ThreeByteFileReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let limit = buffer.len().min(3);
+            let read = self.file.read(&mut buffer[..limit])?;
+            if read != 0 {
+                self.nonempty_reads += 1;
+            }
+            Ok(read)
+        }
+    }
+
+    impl Seek for ThreeByteFileReader {
+        fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+            self.file.seek(position)
+        }
+    }
+
+    #[test]
+    fn sealed_proof_manifest_reads_all_short_chunks_from_real_file() {
+        let fixture = partitioned_seal_fixture("proof-manifest-short-reads");
+        let expected = std::fs::read(&fixture.pool_manifest).unwrap();
+        assert!(expected.len() > 3, "the manifest must need multiple reads");
+        let mut file = ThreeByteFileReader {
+            file: std::fs::File::open(&fixture.pool_manifest).unwrap(),
+            nonempty_reads: 0,
+        };
+        let proven = super::read_checked_seal_manifest_for_proof(&mut file, &|| Ok(()))
+            .unwrap()
+            .expect("a short read must not skip the sealed component proof");
+        assert_eq!(proven, expected, "the entire manifest must remain byte-exact");
+        assert!(file.nonempty_reads > 1, "the fixture must use multiple actual file reads");
+        assert_eq!(file.file.stream_position().unwrap(), expected.len() as u64);
     }
 
     #[test]
