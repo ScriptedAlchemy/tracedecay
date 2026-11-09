@@ -3185,6 +3185,13 @@ mod receipt_budget_tests {
                 "publishing a proof marker must refuse a foreign symlink"
             );
             assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign sentinel");
+            assert!(
+                std::fs::symlink_metadata(&marker)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "the foreign marker entry itself must survive"
+            );
         }
     }
 

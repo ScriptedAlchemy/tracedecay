@@ -245,6 +245,22 @@ fn atomic_replace_file_in_dir(
     filename: &OsStr,
     contents: &[u8],
 ) -> io::Result<()> {
+    // An accelerator may replace a regular cache file, but cannot take
+    // ownership of an unrelated symlink, directory, FIFO or device entry.
+    // Check relative to the held parent, never through an ambient pathname.
+    fn regular_or_missing(directory: &Dir, filename: &OsStr) -> io::Result<()> {
+        match directory.symlink_metadata(filename) {
+            Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+            Ok(_) => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "sealed proof destination is not a regular file",
+            )),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    regular_or_missing(directory, filename)?;
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
     let (temporary, mut file) = (0..8)
         .find_map(|_| {
@@ -272,6 +288,8 @@ fn atomic_replace_file_in_dir(
     let persisted = file.write_all(contents).and_then(|()| file.sync_all());
     drop(file);
     let result = persisted
+        // Recheck before publishing in case the entry changed during staging.
+        .and_then(|()| regular_or_missing(directory, filename))
         .and_then(|()| replace_file(directory, &temporary, filename))
         .and_then(|()| match sync_directory(directory) {
             Err(error) if error.kind() == io::ErrorKind::InvalidInput => Ok(()),
@@ -561,6 +579,54 @@ mod replacement_tests {
         assert_eq!(
             std::fs::read(moved.join("sealed.checked")).unwrap(),
             b"owned proof",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proof_publication_preserves_nonregular_marker_entries() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("sealed.checked");
+        let foreign = temp.path().join("foreign");
+        std::fs::write(&foreign, b"foreign").unwrap();
+        symlink(&foreign, &marker).unwrap();
+
+        assert_eq!(
+            atomic_replace_child_file_nofollow(temp.path(), OsStr::new("sealed.checked"), b"proof")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(
+            std::fs::symlink_metadata(&marker)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link itself, not merely its target, must survive"
+        );
+        assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign");
+
+        std::fs::remove_file(&marker).unwrap();
+        std::fs::create_dir(&marker).unwrap();
+        assert_eq!(
+            atomic_replace_child_file_nofollow(temp.path(), OsStr::new("sealed.checked"), b"proof")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(marker.is_dir());
+
+        std::fs::remove_dir(&marker).unwrap();
+        atomic_replace_child_file_nofollow(temp.path(), OsStr::new("sealed.checked"), b"proof")
+            .unwrap();
+        assert_eq!(std::fs::read(&marker).unwrap(), b"proof");
+        assert!(
+            std::fs::read_dir(temp.path())
+                .unwrap()
+                .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".sealed-proof-")),
+            "rejected publications must not leave staging files"
         );
     }
 
