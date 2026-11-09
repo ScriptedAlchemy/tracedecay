@@ -1603,6 +1603,116 @@ fn retirement_deletes_the_superseded_sealed_artifact() {
     );
 }
 
+/// A real sequence of five published sealed replay generations must retire
+/// all four superseded artifacts independently, not merely the oldest one.
+/// Each retirement goes through the same production registry API used by
+/// code-generation retention, and the newest reader stays usable throughout.
+#[test]
+fn five_sealed_replay_generations_retire_to_the_live_head() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new_mounted(temp.path()).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection("sealed-store:five-generation-retire", "code");
+    let mut prior_head = None;
+    let mut superseded = Vec::new();
+    let mut serving = None;
+
+    for (ordinal, digit) in (1..=5).zip(['1', '2', '3', '4', '5']) {
+        let generation = format!("five-retire-g{ordinal}");
+        let manifest = rich_manifest(
+            identity.clone(),
+            &generation,
+            &format!("marker-{ordinal}"),
+        );
+        let record = stage_sealed_manifest(
+            &mut authority,
+            &registered.binding,
+            &manifest,
+            &format!("publish:{generation}"),
+            prior_head.take(),
+            digit,
+        );
+        let commit = publish_sealed(
+            &registered,
+            temp.path(),
+            &mut authority,
+            &record,
+            &manifest,
+        );
+        prior_head = Some(commit.head.clone());
+        assert!(
+            receipt_for_generation(temp.path(), &generation).is_some(),
+            "each published generation must have its own sealed artifact"
+        );
+        if ordinal == 5 {
+            serving = Some(commit);
+        } else {
+            superseded.push((
+                generation,
+                manifest.identity(),
+                CodeGenerationId::new(format!(
+                    "code-generation.{}",
+                    manifest.generation.as_str()
+                ))
+                .unwrap(),
+                SealedGraphStateDigest::try_from(format!(
+                    "sha256:{}",
+                    digit.to_string().repeat(64)
+                ))
+                .unwrap(),
+            ));
+            drop(commit);
+        }
+    }
+
+    assert_eq!(superseded.len(), 4);
+    assert_eq!(
+        sealed_receipts(temp.path()).len(),
+        5,
+        "five distinct generations must exist before retirement"
+    );
+    let serving = serving.unwrap();
+    assert_snapshot_reads(&serving.snapshot, &identity, "marker-5");
+
+    let database = registered
+        .registry
+        .resolve(registration(registered.binding.clone(), temp.path()))
+        .unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    for (generation, manifest_identity, code_generation, sealed_digest) in superseded {
+        assert!(matches!(
+            registered
+                .registry
+                .retire_one_code_generation_replay(
+                    registration(registered.binding.clone(), temp.path()),
+                    &mut authority,
+                    &context,
+                    &code_generation,
+                    &sealed_digest,
+                )
+                .unwrap(),
+            GraphReplayCollectionOutcome::Retired(_)
+        ));
+        assert!(
+            receipt_for_generation(temp.path(), &generation).is_none(),
+            "retired generation {generation} must be absent from disk"
+        );
+        assert!(
+            !database.is_generation_sealed_only(&manifest_identity).unwrap(),
+            "retired generation {generation} must leave sealed-only state"
+        );
+        assert_snapshot_reads(&serving.snapshot, &identity, "marker-5");
+    }
+    assert_eq!(
+        sealed_receipts(temp.path()).len(),
+        1,
+        "only the live sealed generation should remain"
+    );
+    assert!(receipt_for_generation(temp.path(), "five-retire-g5").is_some());
+    assert_snapshot_reads(&serving.snapshot, &identity, "marker-5");
+}
+
 /// A live direct-sealed reader (recovered through
 /// `recover_verified_sealed_snapshot`, which bypasses the staging database's
 /// verified-generation state) must gate retirement of its generation exactly
