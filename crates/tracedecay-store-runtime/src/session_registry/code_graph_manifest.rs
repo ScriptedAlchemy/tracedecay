@@ -380,18 +380,26 @@ fn read_verified_seal_manifest(
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<Vec<u8>, GraphDbError> {
     (check)()?;
-    let path_metadata = path.symlink_metadata().map_err(|error| {
+    // Endpoint authorization can spend the caller's budget on metadata or
+    // open as well as reads. Recheck even when an OS operation fails.
+    let metadata = path.symlink_metadata();
+    (check)()?;
+    let path_metadata = metadata.map_err(|error| {
         GraphDbError::unavailable(format!(
             "sealed code generation is unavailable for replay: {error}"
         ))
     })?;
     let admitted_len = validate_sealed_generation_metadata(&path_metadata)?;
-    let mut file = File::open(path).map_err(|error| {
+    let opened = File::open(path);
+    (check)()?;
+    let mut file = opened.map_err(|error| {
         GraphDbError::unavailable(format!(
             "sealed code generation cannot be opened for replay: {error}"
         ))
     })?;
-    let opened_metadata = file.metadata().map_err(|error| GraphDbError::Corrupt {
+    let metadata = file.metadata();
+    (check)()?;
+    let opened_metadata = metadata.map_err(|error| GraphDbError::Corrupt {
         message: format!("sealed code generation metadata cannot be read: {error}"),
     })?;
     if !same_file_identity(&path_metadata, &opened_metadata) {
@@ -2082,6 +2090,36 @@ mod tests {
     }
 
     #[test]
+    fn sealed_manifest_metadata_denial_preserves_late_interruption() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("not-a-sealed-file");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("nonempty-evidence"), b"real directory contents").unwrap();
+        let digest = hex::encode(Sha256::digest(b"real directory contents"));
+
+        // A directory cannot impersonate a regular sealed generation.
+        assert!(read_verified_seal_manifest(&path, &digest, &|| Ok(())).is_err());
+        for interruption in [GraphDbError::Cancelled, GraphDbError::DeadlineExceeded] {
+            let probes = Cell::new(0_usize);
+            let result = read_verified_seal_manifest(&path, &digest, &|| {
+                let next = probes.get() + 1;
+                probes.set(next);
+                if next == 2 {
+                    Err(interruption.clone())
+                } else {
+                    Ok(())
+                }
+            });
+            assert_eq!(result.unwrap_err(), interruption);
+            assert_eq!(
+                probes.get(),
+                2,
+                "a real metadata probe must precede typed interruption"
+            );
+        }
+    }
+
+    #[test]
     fn sealed_manifest_read_preserves_late_interruption_over_corrupt_bytes() {
         let temp = TempDir::new().unwrap();
         let bytes = b"nonempty canonical seal manifest payload";
@@ -2104,7 +2142,7 @@ mod tests {
         for interruption in [GraphDbError::Cancelled, GraphDbError::DeadlineExceeded] {
             let probes = AtomicUsize::new(0);
             let error = read_verified_seal_manifest(&path, &wrong_digest, &|| {
-                if probes.fetch_add(1, Ordering::SeqCst) == 1 {
+                if probes.fetch_add(1, Ordering::SeqCst) == 4 {
                     Err(interruption.clone())
                 } else {
                     Ok(())
@@ -2114,7 +2152,7 @@ mod tests {
             assert_eq!(error, interruption);
             assert_eq!(
                 probes.load(Ordering::SeqCst),
-                2,
+                5,
                 "a nonzero real manifest read must finish before interruption is reported",
             );
         }
@@ -2149,7 +2187,7 @@ mod tests {
                 &pool,
                 &digest,
                 &|| {
-                    if probes.fetch_add(1, Ordering::SeqCst) >= 3 {
+                    if probes.fetch_add(1, Ordering::SeqCst) >= 9 {
                         Err(interruption.clone())
                     } else {
                         Ok(())
@@ -2161,7 +2199,7 @@ mod tests {
             assert_eq!(error, interruption);
             assert_eq!(
                 probes.load(Ordering::SeqCst),
-                4,
+                10,
                 "the retained copy must complete its real read before the late interruption",
             );
         }
