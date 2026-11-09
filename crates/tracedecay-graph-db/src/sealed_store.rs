@@ -591,13 +591,16 @@ pub fn census_sealed_store(
             continue;
         }
         let path = entry.path();
-        let bytes = directory_bytes(&path, &mut counted)?;
         let name = entry.file_name();
         if name.to_str().is_some_and(sealed_staging_name) {
+            let bytes = directory_bytes(&path, &mut counted)?;
             census.abandoned_staging_count += 1;
             census.abandoned_staging_bytes += bytes;
             continue;
         }
+        // Receipt existence is not sufficient: a copied receipt can name a
+        // verified head while residing in an unrelated physical directory.
+        // Classify unproven entries before walking or charging their contents.
         let receipt = read_sealed_receipt_bytes(&path.join(SEALED_STORE_RECEIPT_FILE))
             .ok()
             .and_then(|bytes| serde_json::from_slice::<SealedStoreReceiptV1>(&bytes).ok());
@@ -605,12 +608,32 @@ pub fn census_sealed_store(
             census.unrecognized_count += 1;
             continue;
         };
+        let Some(name) = name.to_str() else {
+            census.unrecognized_count += 1;
+            continue;
+        };
+        let form_valid = match receipt.form.as_str() {
+            SEALED_STORE_FORM_COMPACT => receipt.base.is_none(),
+            SEALED_STORE_FORM_LAYERED => receipt.base.is_some(),
+            _ => false,
+        };
+        if !form_valid
+            || receipt.version != SEALED_STORE_RECEIPT_VERSION
+            || receipt.graph_format == 0
+            || receipt.graph_format > GraphFormatVersion::current().get()
+            || receipt.recovered_digest.is_empty()
+            || !sealed_receipt_matches_generation_entry(&receipt, name)
+        {
+            census.unrecognized_count += 1;
+            continue;
+        }
+        let bytes = directory_bytes(&path, &mut counted)?;
         if head_generations.contains(&receipt.generation) {
             census.head_count += 1;
-            census.head_bytes += bytes;
+            census.head_bytes = census.head_bytes.saturating_add(bytes);
         } else {
             census.superseded_count += 1;
-            census.superseded_bytes += bytes;
+            census.superseded_bytes = census.superseded_bytes.saturating_add(bytes);
         }
     }
     Ok(census)
@@ -3370,17 +3393,26 @@ mod receipt_budget_tests {
         let root = sealed_store_root(&database);
         std::fs::create_dir_all(&root).unwrap();
         const FILE_BYTES: u64 = 220 * 1024 * 1024;
+        let mut oldest = None;
         for index in 0..70 {
-            let name = format!("{index:064x}");
-            let dir = root.join(&name);
+            let generation = format!("generation:g{index}");
+            let locator = GenerationLocator::new(
+                GraphProjectionIdentity::new(
+                    GraphNamespace::new("test").unwrap(),
+                    GraphProjectionId::new("code").unwrap(),
+                ),
+                crate::GraphGenerationId::new(generation.clone()).unwrap(),
+            );
+            let physical = locator.physical_namespace().unwrap();
+            let name = physical.as_str().strip_prefix("generation:").unwrap();
+            let dir = root.join(name);
+            if index == 0 {
+                oldest = Some(dir.clone());
+            }
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(
                 dir.join(SEALED_STORE_RECEIPT_FILE),
-                receipt(
-                    GraphFormatVersion::current().get(),
-                    &name,
-                    &format!("g{index}"),
-                ),
+                receipt(GraphFormatVersion::current().get(), name, &generation),
             )
             .unwrap();
             std::fs::File::create(dir.join(SEALED_STORE_DATABASE_FILE))
@@ -3396,10 +3428,14 @@ mod receipt_budget_tests {
             .unwrap()
             .set_len(20 * 1024 * 1024 * 1024)
             .unwrap();
-        let oldest = root.join("0".repeat(64));
+        let oldest = oldest.unwrap();
         std::os::unix::fs::symlink(&foreign, oldest.join("foreign")).unwrap();
         std::os::unix::fs::symlink(temp.path().join("missing"), oldest.join("dangling")).unwrap();
-        let census = census_sealed_store(&database, &BTreeSet::from(["g69".to_owned()])).unwrap();
+        let census = census_sealed_store(
+            &database,
+            &BTreeSet::from(["generation:g69".to_owned()]),
+        )
+        .unwrap();
         assert_eq!(census.head_count, 1);
         assert_eq!(census.superseded_count, 69);
         assert_eq!(census.unrecognized_count, 0);
@@ -3410,6 +3446,60 @@ mod receipt_budget_tests {
             "foreign link targets must not contribute to sealed generation bytes"
         );
     }
+
+    #[test]
+    fn census_does_not_classify_copied_or_foreign_receipts_as_live_heads() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("graph.grafeo");
+        let root = sealed_store_root(&database);
+        std::fs::create_dir_all(&root).unwrap();
+        let generation = "generation:head";
+        let locator = GenerationLocator::new(
+            GraphProjectionIdentity::new(
+                GraphNamespace::new("test").unwrap(),
+                GraphProjectionId::new("code").unwrap(),
+            ),
+            crate::GraphGenerationId::new(generation).unwrap(),
+        );
+        let physical = locator.physical_namespace().unwrap();
+        let owned_name = physical.as_str().strip_prefix("generation:").unwrap();
+        let owned = root.join(owned_name);
+        std::fs::create_dir(&owned).unwrap();
+        let owned_receipt = receipt(
+            GraphFormatVersion::current().get(),
+            owned_name,
+            generation,
+        );
+        std::fs::write(owned.join(SEALED_STORE_RECEIPT_FILE), &owned_receipt).unwrap();
+        std::fs::write(owned.join(SEALED_STORE_DATABASE_FILE), b"owned payload").unwrap();
+
+        // The foreign directory carries the *exact* valid head receipt, but
+        // its physical entry is not the one derived from the logical identity.
+        let foreign_name = if owned_name == "f".repeat(64) {
+            "e".repeat(64)
+        } else {
+            "f".repeat(64)
+        };
+        let foreign = root.join(foreign_name);
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::write(foreign.join(SEALED_STORE_RECEIPT_FILE), &owned_receipt).unwrap();
+        std::fs::File::create(foreign.join(SEALED_STORE_DATABASE_FILE))
+            .unwrap()
+            .set_len(5 * 1024 * 1024 * 1024)
+            .unwrap();
+
+        let census = census_sealed_store(
+            &database,
+            &BTreeSet::from([generation.to_owned()]),
+        )
+        .unwrap();
+        assert_eq!(census.head_count, 1);
+        assert_eq!(census.superseded_count, 0);
+        assert_eq!(census.unrecognized_count, 1);
+        assert_eq!(census.head_bytes, owned_receipt.len() as u64 + 13);
+        assert!(foreign.join(SEALED_STORE_DATABASE_FILE).exists());
+    }
+
 }
 
 #[cfg(test)]
