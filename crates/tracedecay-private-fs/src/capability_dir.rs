@@ -9,12 +9,12 @@
 use std::ffi::CString;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use cap_fs_ext::DirExt;
 #[cfg(not(windows))]
@@ -565,12 +565,10 @@ mod replacement_tests {
         std::fs::rename(&owned, &moved).unwrap();
         symlink(&foreign, &owned).unwrap();
 
-        assert!(atomic_replace_child_file_nofollow(
-            &owned,
-            OsStr::new("sealed.checked"),
-            b"new proof",
-        )
-        .is_err());
+        assert!(
+            atomic_replace_child_file_nofollow(&owned, OsStr::new("sealed.checked"), b"new proof",)
+                .is_err()
+        );
         atomic_replace_file_in_dir(&held, OsStr::new("sealed.checked"), b"owned proof").unwrap();
         assert_eq!(
             std::fs::read(foreign.join("sealed.checked")).unwrap(),

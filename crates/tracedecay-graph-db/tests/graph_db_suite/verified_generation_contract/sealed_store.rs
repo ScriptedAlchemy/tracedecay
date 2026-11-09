@@ -1619,11 +1619,7 @@ fn five_sealed_replay_generations_retire_to_the_live_head() {
 
     for (ordinal, digit) in (1..=5).zip(['1', '2', '3', '4', '5']) {
         let generation = format!("five-retire-g{ordinal}");
-        let manifest = rich_manifest(
-            identity.clone(),
-            &generation,
-            &format!("marker-{ordinal}"),
-        );
+        let manifest = rich_manifest(identity.clone(), &generation, &format!("marker-{ordinal}"));
         let record = stage_sealed_manifest(
             &mut authority,
             &registered.binding,
@@ -1632,13 +1628,7 @@ fn five_sealed_replay_generations_retire_to_the_live_head() {
             prior_head.take(),
             digit,
         );
-        let commit = publish_sealed(
-            &registered,
-            temp.path(),
-            &mut authority,
-            &record,
-            &manifest,
-        );
+        let commit = publish_sealed(&registered, temp.path(), &mut authority, &record, &manifest);
         prior_head = Some(commit.head.clone());
         assert!(
             receipt_for_generation(temp.path(), &generation).is_some(),
@@ -1650,11 +1640,8 @@ fn five_sealed_replay_generations_retire_to_the_live_head() {
             superseded.push((
                 generation,
                 manifest.identity(),
-                CodeGenerationId::new(format!(
-                    "code-generation.{}",
-                    manifest.generation.as_str()
-                ))
-                .unwrap(),
+                CodeGenerationId::new(format!("code-generation.{}", manifest.generation.as_str()))
+                    .unwrap(),
                 SealedGraphStateDigest::try_from(format!(
                     "sha256:{}",
                     digit.to_string().repeat(64)
@@ -1699,7 +1686,9 @@ fn five_sealed_replay_generations_retire_to_the_live_head() {
             "retired generation {generation} must be absent from disk"
         );
         assert!(
-            !database.is_generation_sealed_only(&manifest_identity).unwrap(),
+            !database
+                .is_generation_sealed_only(&manifest_identity)
+                .unwrap(),
             "retired generation {generation} must leave sealed-only state"
         );
         assert_snapshot_reads(&serving.snapshot, &identity, "marker-5");
