@@ -1689,14 +1689,36 @@ async fn maybe_run_global_retention(
     };
     let now_secs = tracedecay_runtime_core::tracedecay::current_timestamp();
     let global_config = global_table_retention_config(config);
-    let Some(retention) = administration
+    let Some((retention, stack_compaction)) = administration
         .try_with_writer(|| async {
-            tracedecay_maintenance::retention::prune_global_retention(
+            let retention = tracedecay_maintenance::retention::prune_global_retention(
                 database,
                 &global_config,
                 now_secs,
             )
-            .await
+            .await;
+            let cutoff_micros = now_secs
+                .saturating_sub(
+                    tracedecay_global_db::GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1 * 86_400,
+                )
+                .saturating_mul(1_000_000);
+            // Use the existing housekeeping cadence, yielding the registered
+            // writer between bounded slices. A large backlog continues next tick.
+            let stack_compaction = async {
+                let mut retired = 0usize;
+                for _ in 0..64 {
+                    let slice = database
+                        .retire_github_stack_terminal_payloads_before(cutoff_micros)
+                        .await?;
+                    retired = retired.saturating_add(slice);
+                    if slice < tracedecay_global_db::MAX_GITHUB_STACK_RETIRE_BATCH_V1 {
+                        break;
+                    }
+                }
+                Ok::<usize, String>(retired)
+            }
+            .await;
+            (retention, stack_compaction)
         })
         .await
     else {
@@ -1744,7 +1766,39 @@ async fn maybe_run_global_retention(
             );
         }
     }
-    reservation.finish(std::time::Instant::now(), succeeded);
+    let compacted_ok = match stack_compaction {
+        Ok(compacted) => {
+            if compacted > 0 {
+                log_daemon_event(
+                    "retention_prune",
+                    &[
+                        ("scope", "global".to_string()),
+                        ("table", "github_stack_delivery_signals".to_string()),
+                        ("signals", compacted.to_string()),
+                        (
+                            "window_days",
+                            tracedecay_global_db::GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1
+                                .to_string(),
+                        ),
+                    ],
+                );
+            }
+            true
+        }
+        Err(error) => {
+            log_daemon_event(
+                "retention_prune",
+                &[
+                    ("scope", "global".to_string()),
+                    ("table", "github_stack_delivery_signals".to_string()),
+                    ("outcome", "error".to_string()),
+                    ("failure", error),
+                ],
+            );
+            false
+        }
+    };
+    reservation.finish(std::time::Instant::now(), succeeded && compacted_ok);
 }
 
 #[cfg(test)]
