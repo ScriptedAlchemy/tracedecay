@@ -221,6 +221,26 @@ describe('Code index freshness', () => {
     expect(screen.getByText(/17 entities encoded/)).toBeTruthy();
   });
 
+  it('preserves recorded resolution work during the daemon publication handoff', async () => {
+    renderFreshness('loading', {
+      worktrees: [{
+        ...worktree(),
+        rebuild_in_flight: true,
+        preseal_attempt: {
+          daemon_incarnation: 1, producer_incarnation: 2, attempt_sequence: 3,
+          progress_epoch: 7, phase: 'resolution', completed_items: 7,
+          total_items: null, last_progress_micros: NOW_MICROS - 90_000_000,
+          active: false,
+        },
+      }],
+      note: 'live daemon scheduler state',
+    });
+    expect(await screen.findByText('Last observed preseal work')).toBeTruthy();
+    expect(screen.getByText('resolution · 7 items')).toBeTruthy();
+    expect(screen.queryByText('Before sealing')).toBeNull();
+    expect(screen.queryByText(/no observed preseal work for/)).toBeNull();
+  });
+
   it('renders bounded artifact restore progress separately from a rebuild', async () => {
     renderFreshness('loading', {
       worktrees: [

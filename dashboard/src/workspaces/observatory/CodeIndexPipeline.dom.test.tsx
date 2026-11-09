@@ -199,6 +199,31 @@ describe('code-index activity polling', () => {
     expect(screen.queryByText('no active code-index build')).toBeNull();
   });
 
+  it('keeps last observed preseal work visible through durable handoff without calling it active', () => {
+    const lastAttempt: NonNullable<CodeIndexWorktreeFreshnessV1['preseal_attempt']> = {
+      daemon_incarnation: 1, producer_incarnation: 2, attempt_sequence: 3,
+      progress_epoch: 7, phase: 'resolution', completed_items: 7,
+      total_items: null, last_progress_micros: OBSERVED_AT - 90_000_000, active: false,
+    };
+    const handoff = freshness({
+      rebuild_in_flight: true,
+      preseal_attempt: lastAttempt,
+    }, 'loading');
+    handoff.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(handoff.envelope.payload);
+    const view = render(<CodeIndexPipeline result={handoff} pending={false} scopeKey="project" />);
+    expect(screen.getByText('Last observed preseal work')).toBeTruthy();
+    expect(screen.getByText('resolution · 7 items')).toBeTruthy();
+    expect(screen.queryByText('Before sealing')).toBeNull();
+    expect(screen.queryByText(/no observed preseal work for/)).toBeNull();
+
+    // The recorded attempt becomes historical once the rebuild ends.
+    const settled = freshness({ rebuild_in_flight: false, preseal_attempt: lastAttempt });
+    settled.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(settled.envelope.payload);
+    view.rerender(<CodeIndexPipeline result={settled} pending={false} scopeKey="project" />);
+    expect(screen.queryByText('Last observed preseal work')).toBeNull();
+    expect(screen.queryByText('resolution · 7 items')).toBeNull();
+  });
+
   it('reports frozen writer clocks and clears warnings on real work or retirement', () => {
     const frozen = freshness({
       progress: progress({ phase: 'ready' }),

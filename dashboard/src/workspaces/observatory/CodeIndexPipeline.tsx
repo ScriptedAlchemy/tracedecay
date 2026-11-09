@@ -157,6 +157,12 @@ export function CodeIndexAttemptReading({
 }) {
   const attempt = worktree.preseal_attempt;
   const graph = worktree.native_graph_progress;
+  // Retiring the source observer at durable handoff must not erase its last
+  // authentic work. Show the retired reading only while the rebuild remains
+  // in flight; it does not represent an active writer or renew its work clock.
+  const showPreseal = attempt != null && (
+    attempt.active || (worktree.rebuild_in_flight && attempt.last_progress_micros != null)
+  );
   // Only the daemon's observation time and an actual producer work stamp
   // can establish inactivity. Reading status is not a progress heartbeat.
   const presealQuiet = attempt?.active
@@ -173,12 +179,14 @@ export function CodeIndexAttemptReading({
       (graph.committed_stage_pages > 0 || graph.committed_compact_segments > 0)
     )
   );
-  if (!attempt?.active && !showGraph) return null;
+  if (!showPreseal && !showGraph) return null;
   return (
     <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
-      {attempt?.active && (
+      {showPreseal && attempt && (
         <>
-          <dt className="text-text-muted">Before sealing</dt>
+          <dt className="text-text-muted">
+            {attempt.active ? 'Before sealing' : 'Last observed preseal work'}
+          </dt>
           <dd className="text-right text-text-secondary">
             {attempt.last_progress_micros == null ? (
               'awaiting first observed preseal work'
