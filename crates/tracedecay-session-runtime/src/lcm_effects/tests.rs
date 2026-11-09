@@ -17,6 +17,7 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
 #[cfg(unix)]
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
+use tracedecay_lcm::summary_convergence::{next_candidate, next_retry_at_ms};
 use tracedecay_lcm::{LcmRelationProjectionStatus, LcmSourceRef, LcmSummarizerMode};
 use tracedecay_runtime_core::db::engine::params;
 #[cfg(unix)]
@@ -2123,6 +2124,94 @@ async fn permanent_session_failure_does_not_starve_later_sessions_after_restart(
             .await
             .unwrap();
     assert!(third.sessions.is_empty(), "permanent work was reselected");
+}
+
+#[tokio::test]
+async fn failed_revision_invalidation_defers_the_same_dirty_input_until_retry() {
+    let harness = RegisteredGlobalDbHarness::open("lcm-invalidation-retry").await;
+    let db = &harness.registered;
+    let session_id = "failed-invalidation";
+    let root = db.db_path().parent().unwrap();
+    let mut raw = message(session_id, 1);
+    seed_session_messages(db, &session("cursor", session_id), &[raw.clone()]).await;
+    raw.text = "revised raw input".to_owned();
+    db.lcm_ingest_raw_message(root, &raw).await.unwrap();
+
+    // Fail the final deletion in the real invalidation transaction. The
+    // subsequent queue settlement must still be able to commit its backoff.
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch(
+            "CREATE TRIGGER refuse_dirty_completion BEFORE DELETE ON lcm_summary_convergence_dirty_raw
+             BEGIN SELECT RAISE(ABORT, 'dirty completion unavailable'); END;",
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let before_run_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let failed = crate::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+        .await
+        .unwrap();
+    assert_eq!(failed.sessions.len(), 1);
+    assert_eq!(
+        failed.sessions[0].disposition,
+        crate::lcm_summary_convergence::LcmSummaryConvergenceDisposition::Retryable {
+            reason: "storage_unavailable".to_owned(),
+        },
+    );
+    assert!(failed.next_retry_delay.is_some());
+    let snapshot = db.read_snapshot().await.unwrap();
+    let deadline = next_retry_at_ms(&snapshot).await.unwrap().unwrap();
+    assert!(
+        deadline > before_run_ms,
+        "persist a future deadline for this attempt"
+    );
+    assert!(
+        next_candidate(&snapshot, deadline - 1)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let due = next_candidate(&snapshot, deadline).await.unwrap().unwrap();
+    assert_eq!(due.session_id, session_id);
+    assert_eq!(due.failure_count, 1);
+    assert_eq!(due.stale_from_store_id, Some(due.newest_raw_store_id));
+    snapshot.commit().await.unwrap();
+
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch("DROP TRIGGER refuse_dirty_completion")
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    raw.text = "new revision wakes the parked session".to_owned();
+    db.lcm_ingest_raw_message(root, &raw).await.unwrap();
+    let recovered = crate::lcm_summary_convergence::run_summary_convergence_page(db.clone(), 1)
+        .await
+        .unwrap();
+    assert_eq!(recovered.sessions.len(), 1);
+    let snapshot = db.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT raw_revision_generation, stale_from_store_id,
+                    (SELECT COUNT(*) FROM lcm_summary_convergence_dirty_raw
+                     WHERE provider = 'cursor' AND session_id = ?1)
+             FROM lcm_summary_convergence_queue WHERE provider = 'cursor' AND session_id = ?1",
+            params![session_id],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert!(row.get::<i64>(0).unwrap() > due.raw_revision_generation);
+    assert_eq!(row.get::<Option<i64>>(1).unwrap(), None);
+    assert_eq!(row.get::<i64>(2).unwrap(), 0);
 }
 
 #[tokio::test]
