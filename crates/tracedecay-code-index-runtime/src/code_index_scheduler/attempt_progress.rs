@@ -228,7 +228,6 @@ mod tests {
         assert!(slot.read().unwrap().snapshot().is_none());
     }
 
-
     #[test]
     fn completed_handoff_does_not_reappear_during_a_later_source_wake() {
         let slot = Arc::new(RwLock::new(CodeIndexBuildAttemptSlotStateV1::default()));
