@@ -825,11 +825,11 @@ fn unfollowable_committed_source_links_are_absent_from_disk_capture() {
     );
 }
 
-/// A readable live symlink stays outside the worktree roster. The remaining
-/// files can still establish a current generation without naming the full HEAD tree.
+/// Publishing the link target bytes under both tracked paths must preserve
+/// the clean HEAD revision and avoid a redundant post-publication rebuild.
 #[cfg(unix)]
 #[test]
-fn committed_source_symlink_publishes_current_regular_files_only() {
+fn committed_source_symlink_publishes_a_current_clean_generation() {
     let fixture = GitFixture::new(&[
         ("src/lib.rs", "pub mod pricing;\n"),
         ("src/pricing.rs", "pub fn total() -> u64 { 1 }\n"),
@@ -851,14 +851,17 @@ fn committed_source_symlink_publishes_current_regular_files_only() {
     );
     let latest = scheduler.latest_complete().expect("published generation");
     let snapshot = latest.generation.snapshot();
-    assert!(snapshot.source_revision.is_none());
+    assert_eq!(
+        snapshot.source_revision.as_ref(),
+        scheduler.identity.head_commit()
+    );
     assert_eq!(
         snapshot
             .files
             .iter()
             .map(|file| file.logical_path.as_str())
             .collect::<Vec<_>>(),
-        ["src/lib.rs", "src/pricing.rs"]
+        ["src/lib.rs", "src/pricing.rs", "src/pricing_alias.rs"]
     );
 }
 
