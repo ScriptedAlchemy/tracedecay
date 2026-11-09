@@ -496,7 +496,7 @@ fn sealed_store_disabled() -> bool {
 }
 
 /// `/var/db/graph.grafeo` -> `/var/db/graph.sealed`.
-fn sealed_store_root(database_path: &Path) -> PathBuf {
+pub(crate) fn sealed_store_root(database_path: &Path) -> PathBuf {
     database_path.with_extension("sealed")
 }
 

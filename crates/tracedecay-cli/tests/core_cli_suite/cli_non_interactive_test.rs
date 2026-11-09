@@ -2647,7 +2647,19 @@ fn wipe_all_is_schema_independent_and_removes_every_profile_database_root() {
         let wal = PathBuf::from(wal);
         std::fs::create_dir(&wal).unwrap();
         std::fs::write(wal.join("segment"), b"graph wal").unwrap();
+        std::fs::write(path.with_extension("verified"), b"marker").unwrap();
+        for directory in [
+            path.with_extension("sealed"),
+            path.with_added_extension("spill"),
+        ] {
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::write(directory.join("member"), b"owned projection data").unwrap();
+        }
+        std::fs::write(path.with_added_extension("corruption-lock"), b"keep lock").unwrap();
     }
+    let unrelated = profile.join("user-sessions.spill");
+    std::fs::create_dir(&unrelated).unwrap();
+    std::fs::write(unrelated.join("member"), b"foreign directory").unwrap();
     let host_admission = profile.join(".user-sessions.db.host-admission");
     std::fs::create_dir(&host_admission).unwrap();
     std::fs::write(host_admission.join("pending"), b"admission spool").unwrap();
@@ -2669,6 +2681,46 @@ fn wipe_all_is_schema_independent_and_removes_every_profile_database_root() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"profile state").unwrap();
     }
+
+    let lease_path = profile.join(".user-memory.db.tracedecay-init.durable-directory.lock");
+    let initializer = tracedecay_private_fs::create_private_file(&lease_path).unwrap();
+    initializer.try_lock().unwrap();
+    let mut busy = tracedecay_command_without_daemon(home.path(), project.path());
+    busy.args(["wipe", "--all", "--yes"]);
+    let refused = run_with_timeout(busy, cli_timeout());
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("lock offline SQLite family"),
+        "{refused:?}"
+    );
+    for database in &database_paths {
+        assert!(database.is_file());
+    }
+    drop(initializer);
+
+    // A wrong-kind marker in the last top-level store must be discovered
+    // before even the earlier profile, remote or project data is touched.
+    let ambiguous = profile.join("user-memory.verified");
+    std::fs::remove_file(&ambiguous).unwrap();
+    std::fs::create_dir(&ambiguous).unwrap();
+    let mut refusal = tracedecay_command_without_daemon(home.path(), project.path());
+    refusal.args(["wipe", "--all", "--yes"]);
+    let refused = run_with_timeout(refusal, cli_timeout());
+    assert!(!refused.status.success(), "{refused:?}");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("unexpected file type") && stderr.contains("user-memory.verified"),
+        "{stderr}"
+    );
+    for database in &database_paths {
+        assert_eq!(
+            std::fs::read(database).unwrap(),
+            b"not a compatible SQLite schema"
+        );
+    }
+    assert!(ambiguous.is_dir());
+    std::fs::remove_dir(&ambiguous).unwrap();
+    std::fs::write(ambiguous, b"marker").unwrap();
 
     let mut command = tracedecay_command_without_daemon(home.path(), project.path());
     command.args(["wipe", "--all", "--yes"]);
@@ -2712,7 +2764,23 @@ fn wipe_all_is_schema_independent_and_removes_every_profile_database_root() {
         wal.push(".wal");
         assert_namespace_absent(&path, "wipe --all left a Grafeo store");
         assert_namespace_absent(&PathBuf::from(wal), "wipe --all left a Grafeo WAL");
+        for member in [
+            path.with_extension("verified"),
+            path.with_extension("sealed"),
+            path.with_added_extension("spill"),
+        ] {
+            assert_namespace_absent(&member, "wipe --all left graph data");
+        }
+        assert_eq!(
+            std::fs::read(path.with_added_extension("corruption-lock")).unwrap(),
+            b"keep lock"
+        );
     }
+    assert!(lease_path.is_file());
+    assert_eq!(
+        std::fs::read(unrelated.join("member")).unwrap(),
+        b"foreign directory"
+    );
     assert_namespace_absent(
         &host_admission,
         "wipe --all left the profile host-admission database companion",

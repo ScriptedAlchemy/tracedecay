@@ -5,7 +5,6 @@ use tracedecay_domain::errors::{ResettableStoreV1, Result, StoreResetRequiredV1,
 use tracedecay_global_db::profile_registry_maintenance::verify_store_path_absent;
 use tracedecay_hooks::{PROFILE_HOOK_ADMISSIONS_DIR, PROJECT_HOOK_ADMISSIONS_DIR};
 use tracedecay_runtime_core::config::{GLOBAL_DB_FILENAME, ProfileRoot};
-use tracedecay_runtime_core::shard_runtime::registry::lock_offline_sqlite_family_for_reset;
 use tracedecay_runtime_core::storage::{
     SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME, USER_SESSIONS_DB_FILENAME,
     profile_sharded_data_root, read_store_manifest, validate_project_id,
@@ -13,7 +12,7 @@ use tracedecay_runtime_core::storage::{
 
 use super::storage::{
     ProfileOfflineAuthority, RestoreWording, join_outcome_and_restore, remove_fixed_profile_path,
-    take_profile_offline,
+    remove_store_family, take_profile_offline,
 };
 
 const OPERATION: &str = "wipe --stale";
@@ -230,75 +229,6 @@ fn store_location(
     })
 }
 
-/// The offline lifecycle authority admits deletion of the stale store
-/// itself. Similar names, private initialization data and stable coordination
-/// locks are not members of its data family.
-fn remove_store_family(directory: &Path, database: &str) -> Result<usize> {
-    let _initialization =
-        lock_offline_sqlite_family_for_reset(&directory.join(database)).map_err(|error| {
-            TraceDecayError::Config {
-                message: format!("cannot reset SQLite family {database}: {error}"),
-            }
-        })?;
-    let mut members: Vec<(String, bool)> = ["", "-wal", "-shm", "-journal"]
-        .iter()
-        .map(|suffix| (format!("{database}{suffix}"), false))
-        .collect();
-    if database == SESSIONS_DB_FILENAME || database == USER_SESSIONS_DB_FILENAME {
-        let stem = database.strip_suffix(".db").unwrap_or(database);
-        let graph = format!("{stem}.grafeo");
-        members.extend([
-            // A graph container owns its verification marker beside it:
-            // sessions.grafeo -> sessions.verified (also user-sessions).
-            (format!("{stem}.verified"), false),
-            (format!("{graph}.wal"), true),
-            (graph, false),
-            (format!(".{database}.host-admission"), true),
-            (format!("{database}.delivery-settlement-spool-v1"), true),
-        ]);
-    }
-    // Validate all exact names before deleting the first file. The exclusive
-    // offline lease then excludes other cooperating profile writers.
-    for (name, is_directory) in &members {
-        let path = directory.join(name);
-        tracedecay_runtime_core::storage::reject_symlink_components(
-            &path,
-            "stale store reset member",
-        )
-        .map_err(|error| TraceDecayError::Config {
-            message: error.to_string(),
-        })?;
-        match std::fs::symlink_metadata(&path) {
-            Ok(metadata)
-                if (*is_directory && metadata.is_dir())
-                    || (!is_directory && metadata.is_file()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Ok(_) => {
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "unexpected file type for stale store reset member '{}'",
-                        path.display()
-                    ),
-                });
-            }
-            Err(error) => {
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "cannot inspect stale store reset member '{}': {error}",
-                        path.display()
-                    ),
-                });
-            }
-        }
-    }
-    let mut removed = 0;
-    for (name, _) in &members {
-        removed += usize::from(remove_fixed_profile_path(directory, name)?);
-        verify_store_path_absent(&directory.join(name))?;
-    }
-    Ok(removed)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +245,7 @@ mod tests {
             "sessions.verified",
             "user-sessions.verified",
             "tracedecay.verified",
+            "sessions.grafeo.corruption-lock",
             "tracedecay.db",
             "tracedecay.db-wal",
             "tracedecay.grafeo",
@@ -332,13 +263,17 @@ mod tests {
         for dir in [
             ".sessions.db.host-admission",
             "sessions.db.delivery-settlement-spool-v1",
+            "sessions.grafeo.wal",
+            "sessions.grafeo.spill",
+            "sessions.spill",
+            "sessions.sealed",
             "code-index-v1",
         ] {
             std::fs::create_dir(root.join(dir)).expect("create store directory");
             std::fs::write(root.join(dir).join("entry"), dir).expect("write store entry");
         }
 
-        assert_eq!(remove_store_family(root, "sessions.db").unwrap(), 7);
+        assert_eq!(remove_store_family(root, "sessions.db").unwrap(), 10);
         assert_eq!(remove_store_family(root, GLOBAL_DB_FILENAME).unwrap(), 3);
 
         let mut kept: Vec<String> = std::fs::read_dir(root)
@@ -352,6 +287,8 @@ mod tests {
                 ".sessions.db.notes",
                 "code-index-v1",
                 "profile-identity.json",
+                "sessions.grafeo.corruption-lock",
+                "sessions.spill",
                 "sessions.unrelated",
                 "store_manifest.json",
                 "tracedecay.db",
@@ -363,7 +300,6 @@ mod tests {
             ]
         );
     }
-
 
     #[test]
     fn profile_sessions_reset_removes_only_its_graph_verification_marker() {
@@ -378,10 +314,16 @@ mod tests {
             std::fs::write(root.join(name), name).unwrap();
         }
 
-        assert_eq!(remove_store_family(root, USER_SESSIONS_DB_FILENAME).unwrap(), 2);
+        assert_eq!(
+            remove_store_family(root, USER_SESSIONS_DB_FILENAME).unwrap(),
+            2
+        );
         assert!(!root.join("user-sessions.db").exists());
         assert!(!root.join("user-sessions.verified").exists());
-        assert_eq!(std::fs::read(root.join("sessions.db")).unwrap(), b"sessions.db");
+        assert_eq!(
+            std::fs::read(root.join("sessions.db")).unwrap(),
+            b"sessions.db"
+        );
         assert_eq!(
             std::fs::read(root.join("sessions.verified")).unwrap(),
             b"sessions.verified"

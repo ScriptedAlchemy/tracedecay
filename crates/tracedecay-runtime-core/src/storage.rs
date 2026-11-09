@@ -470,6 +470,7 @@ pub use profile_identity::{
     PROFILE_IDENTITY_RECORD_NAME, PROFILE_IDENTITY_SCHEMA_VERSION, ProfileIdentityRecordV1,
     read_existing_profile_identity_record,
 };
+pub use tracedecay_graph_db::graph_store_data_paths;
 
 #[cfg(all(test, unix))]
 use paths_and_io::open_lock_file;
