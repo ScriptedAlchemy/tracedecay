@@ -1,3 +1,4 @@
+use sha2::Digest;
 use tracedecay_runtime_core::db::engine::params;
 
 use crate::tests::harness::writer_telemetry;
@@ -230,6 +231,109 @@ async fn stored_signal_payload_bytes(harness: &RegisteredGlobalDbHarness, signal
         .expect("signal identity remains after retirement")
         .get::<i64>(0)
         .expect("decode stored payload bytes")
+}
+
+#[asupersync::test]
+async fn noncanonical_retirement_marker_cannot_reopen_an_expired_signal() {
+    let harness = RegisteredGlobalDbHarness::open("github-stack-retirement-marker-shape").await;
+    let record = signal("signal.github-stack-retirement-whitespace", 10);
+    harness
+        .registered
+        .append_github_stack_signal(record.clone(), vec![RECIPIENT.to_owned()])
+        .await
+        .expect("append a real signal");
+    harness
+        .registered
+        .acknowledge_github_stack_host_delivery(PROJECT_ID, &record.signal_id, RECIPIENT)
+        .await
+        .expect("settle the recipient");
+
+    // The installed SQL trigger accepts equivalent JSON with whitespace.
+    // The old byte-prefix decoder treated it as an unretired signal.
+    let digest = hex::encode(sha2::Sha256::digest(record.signal_json.as_bytes()));
+    let whitespace_marker = format!(
+        "{{\n  \"__tracedecay_retired_stack_sha256_v1\": \"{digest}\"\n}}"
+    );
+    let writer = harness
+        .registered
+        .writer_connection()
+        .expect("registered retirement-marker writer");
+    writer
+        .execute(
+            "UPDATE github_stack_delivery_signals SET signal_json = ?3
+             WHERE project_id = ?1 AND signal_id = ?2",
+            params![PROJECT_ID, record.signal_id.as_str(), whitespace_marker.as_str()],
+        )
+        .await
+        .expect("the terminal-only marker is allowed by SQLite");
+    drop(writer);
+    assert!(
+        harness
+            .registered
+            .github_stack_signal(PROJECT_ID, &record.signal_id)
+            .await
+            .expect("a retired marker must never expand as a signal")
+            .is_none(),
+        "whitespace in a legitimate retirement marker must not expose it"
+    );
+    assert!(matches!(
+        harness
+            .registered
+            .append_github_stack_signal(record.clone(), vec![RECIPIENT.to_owned()])
+            .await
+            .expect("the identical replay remains recognized"),
+        GitHubStackSignalAppendOutcomeV1::Replayed { .. }
+    ));
+    let mut conflict = record.clone();
+    conflict.signal_json = r#"{"different":true}"#.to_owned();
+    assert!(
+        harness
+            .registered
+            .append_github_stack_signal(conflict, vec![RECIPIENT.to_owned()])
+            .await
+            .expect_err("changed bytes must conflict with retained fingerprint")
+            .contains("identity conflict")
+    );
+
+    let malformed = signal("signal.github-stack-malformed-marker", 11);
+    harness
+        .registered
+        .append_github_stack_signal(malformed.clone(), vec![RECIPIENT.to_owned()])
+        .await
+        .expect("append a second signal");
+    harness
+        .registered
+        .acknowledge_github_stack_host_delivery(PROJECT_ID, &malformed.signal_id, RECIPIENT)
+        .await
+        .expect("settle second recipient");
+    let invalid_marker = format!(
+        r#"{{"__tracedecay_retired_stack_sha256_v1":"{}"}}"#,
+        "g".repeat(64)
+    );
+    let rejection = harness
+        .registered
+        .writer_connection()
+        .expect("registered malformed-marker writer")
+        .execute(
+            "UPDATE github_stack_delivery_signals SET signal_json = ?3
+             WHERE project_id = ?1 AND signal_id = ?2",
+            params![PROJECT_ID, malformed.signal_id.as_str(), invalid_marker.as_str()],
+        )
+        .await
+        .expect_err("the SQL guard must reject a non-hexadecimal fingerprint")
+        .to_string();
+    assert!(
+        rejection.contains("GitHub stack delivery signals are immutable"),
+        "{rejection}"
+    );
+    assert_eq!(
+        harness
+            .registered
+            .github_stack_signal(PROJECT_ID, &malformed.signal_id)
+            .await
+            .expect("refused invalid marker cannot alter the original"),
+        Some(malformed)
+    );
 }
 
 #[asupersync::test]

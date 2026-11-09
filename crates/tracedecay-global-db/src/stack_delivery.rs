@@ -195,6 +195,8 @@ pub(crate) async fn ensure_github_stack_delivery_schema(
               OR json_type(OLD.signal_json, '$.__tracedecay_retired_stack_sha256_v1') IS NOT NULL
               OR json_type(NEW.signal_json, '$.__tracedecay_retired_stack_sha256_v1') IS NOT 'text'
               OR length(json_extract(NEW.signal_json, '$.__tracedecay_retired_stack_sha256_v1')) != 64
+              OR json_extract(NEW.signal_json, '$.__tracedecay_retired_stack_sha256_v1')
+                  GLOB '*[^0-9a-f]*'
               OR EXISTS (
                   SELECT 1 FROM github_stack_delivery_recipients AS r
                   WHERE r.project_id = OLD.project_id
@@ -289,14 +291,33 @@ fn validate_signal(record: &GitHubStackSignalRecordV1) -> Result<(), String> {
 /// A compacted payload is only an identity fingerprint, never an expandable
 /// native signal. Keep the signal key to reject late replays without retaining
 /// a second copy of the native preview/terminal receipt.
-fn retired_payload_digest(json: &str) -> Option<&str> {
-    let prefix = r#"{"__tracedecay_retired_stack_sha256_v1":""#;
-    let digest = json.strip_prefix(prefix)?.strip_suffix(r#""}"#)?;
-    (digest.len() == 64
-        && digest
+/// Recognize any valid JSON representation of the retired identity. A
+/// noncanonical spacing choice must never turn a retired marker back into an
+/// expandable native signal; corrupt markers fail closed instead.
+fn retired_payload_digest(json: &str) -> Result<Option<String>, String> {
+    if !json.contains(RETIRED_PAYLOAD_KEY) {
+        return Ok(None);
+    }
+    let value: serde_json::Value = serde_json::from_str(json)
+        .map_err(|error| format!("decode GitHub stack retirement marker: {error}"))?;
+    let Some(object) = value.as_object() else {
+        return Ok(None);
+    };
+    let Some(marker) = object.get(RETIRED_PAYLOAD_KEY) else {
+        return Ok(None);
+    };
+    let digest = marker
+        .as_str()
+        .ok_or_else(|| "GitHub stack retirement marker is not a string".to_owned())?;
+    if object.len() != 1
+        || digest.len() != 64
+        || !digest
             .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
-    .then_some(digest)
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err("GitHub stack retirement marker is malformed".to_owned());
+    }
+    Ok(Some(digest.to_owned()))
 }
 
 fn matches_replayed_signal(
@@ -306,7 +327,7 @@ fn matches_replayed_signal(
     if existing == offered {
         return true;
     }
-    let Some(retired_hash) = retired_payload_digest(&existing.signal_json) else {
+    let Ok(Some(retired_hash)) = retired_payload_digest(&existing.signal_json) else {
         return false;
     };
     existing.project_id == offered.project_id
@@ -831,9 +852,13 @@ impl RegisteredGlobalDb {
             .read_snapshot()
             .await
             .map_err(|error| format!("begin GitHub stack signal lookup: {error}"))?;
-        Ok(lookup_signal(&snapshot, project_id, signal_id)
-            .await?
-            .filter(|signal| retired_payload_digest(&signal.signal_json).is_none()))
+        let Some(signal) = lookup_signal(&snapshot, project_id, signal_id).await? else {
+            return Ok(None);
+        };
+        if retired_payload_digest(&signal.signal_json)?.is_some() {
+            return Ok(None);
+        }
+        Ok(Some(signal))
     }
 
     /// Scan a bounded ordered window of old signal identities, and compact
