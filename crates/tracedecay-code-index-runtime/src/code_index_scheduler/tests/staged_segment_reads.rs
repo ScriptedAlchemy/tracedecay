@@ -756,7 +756,9 @@ fn cold_staged_whole_segment_read_rejects_same_inode_content_corruption() {
         "the digest refusal must follow one real pinned-file open"
     );
     assert!(output.is_empty(), "corrupt bytes must not escape");
-    preparation.abort().expect("abort corrupted staged generation");
+    preparation
+        .abort()
+        .expect("abort corrupted staged generation");
 }
 
 #[test]
