@@ -377,3 +377,71 @@ fn path_checks_keep_pinned_identity_and_reject_missing_or_replaced_files() {
         Err(OpenedDatabaseFileError::Replaced),
     );
 }
+
+/// Closing a verified read snapshot must not release another SQLite
+/// connection's process-wide POSIX locks. A second connection in this process
+/// cannot prove this: run the lock/journal contender in a separate process.
+#[test]
+fn verified_reader_release_preserves_independent_writer_exclusion() {
+    for journal in ["DELETE", "WAL"] {
+        for immutable in [false, true] {
+            let temp = TempDir::new().expect("tempdir");
+            let path = temp.path().join("sessions.db");
+            let writer = Connection::open(&path).expect("writer");
+            writer
+                .execute_batch(&format!(
+                    "PRAGMA journal_mode = {journal};
+                     CREATE TABLE sample(value INTEGER);
+                     INSERT INTO sample VALUES (1);"
+                ))
+                .expect("seed committed SQLite row");
+            if journal == "WAL" && immutable {
+                // Immutable readers cannot rely on uncheckpointed WAL content.
+                // Give this variant a proven, durable committed baseline;
+                // the ordinary WAL snapshot variant stays uncheckpointed.
+                writer
+                    .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                    .expect("checkpoint immutable reader baseline");
+            }
+            writer
+                .execute_batch("BEGIN IMMEDIATE; UPDATE sample SET value = 2;")
+                .expect("hold SQLite writer lock");
+            let operation = if journal == "WAL" { "journal" } else { "write" };
+            probe_external_connection(&path, operation, true);
+
+            let reader = if immutable {
+                super::open_verified_immutable_reader(&path)
+            } else {
+                super::open_verified_read_snapshot(&path)
+            }
+            .expect("verified read-only connection");
+            assert_eq!(reader.file_identity(), live_path_identity(&path).unwrap());
+            assert_eq!(
+                reader
+                    .connection()
+                    .query_row("SELECT value FROM sample", [], |row| row.get::<_, i64>(0)),
+                Ok(1),
+                "both verified reader policies must see committed rows, never the pending update"
+            );
+            probe_external_connection_expectation(&path, "read", "read:1");
+            drop(reader);
+            probe_external_connection(&path, operation, true);
+            // Reader destruction must not lose the writer's lock or
+            // prevent another process from reading the committed snapshot.
+            probe_external_connection_expectation(&path, "read", "read:1");
+
+            writer.execute_batch("COMMIT").expect("commit writer");
+            probe_external_connection_expectation(&path, "read", "read:2");
+            if journal == "WAL" {
+                probe_external_connection(&path, "journal", true);
+            } else {
+                probe_external_connection(&path, "write", false);
+            }
+            drop(writer);
+            if journal == "WAL" {
+                probe_external_connection(&path, "journal", false);
+            }
+            assert_committed_data(&path);
+        }
+    }
+}
