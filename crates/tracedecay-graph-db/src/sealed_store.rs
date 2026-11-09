@@ -408,13 +408,19 @@ impl SealedGenerationStore {
     }
 
     pub(crate) fn close(&self) -> Result<(), GraphDbError> {
-        let mut result = Ok(());
+        // Closing the same derived reader twice is harmless. A durability
+        // failure is not: preserve the first real close failure even when a
+        // later layered-base reader was already closed.
+        let mut failure = None;
         for database in self.engines() {
-            if let Err(error) = database.close() {
-                result = Err(error);
+            match database.close() {
+                Ok(()) | Err(GraphDbError::Closed) => {}
+                Err(error) => {
+                    failure.get_or_insert(error);
+                }
             }
         }
-        result
+        failure.map_or(Ok(()), Err)
     }
 
     pub(crate) fn hibernate_if_lazy(&self) -> Result<(), GraphDbError> {
@@ -507,7 +513,9 @@ impl SealedGenerationStore {
     /// unlink. A failed unlink remains a typed error for the durable cleanup
     /// owner to retry; a sealed-only live head never enters this path.
     fn discard(&self) -> Result<(), GraphDbError> {
-        let _ = self.close();
+        // An unconfirmed physical close cannot authorize unlinking the only
+        // durable sealed copy. Leave its receipt for a later retirement retry.
+        self.close()?;
         retire_sealed_directory_checked(
             &self.directory,
             &self.locator,
@@ -3879,6 +3887,68 @@ mod build_tests {
         .expect("clearing the unknown artifact allows a verified sealed build");
         assert_eq!(store.recovered_digest(), expected.as_str());
         assert!(directory.join(SEALED_STORE_DATABASE_FILE).is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retirement_keeps_sealed_bytes_when_reader_close_is_uncertain() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(2, 1);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
+        let directory = store.directory.clone();
+        let container = directory.join(SEALED_STORE_DATABASE_FILE);
+        let receipt = directory.join(SEALED_STORE_RECEIPT_FILE);
+        assert!(container.is_file() && receipt.is_file());
+
+        // Poison the real native reader's engine lock. Its physical close
+        // now returns DurabilityUncertain; the old discard ignored that error
+        // and removed the verified directory anyway on Unix.
+        let reader = Arc::clone(&store.database);
+        let poisoned = std::thread::spawn(move || {
+            let _guard = reader.inner.database.write().unwrap();
+            panic!("exercise uncertain sealed reader close");
+        });
+        assert!(poisoned.join().is_err());
+        let refused = store.discard();
+        assert!(
+            matches!(refused, Err(GraphDbError::DurabilityUncertain { .. })),
+            "retirement must surface the failed native close: {refused:?}"
+        );
+        assert!(container.is_file(), "uncertain close must preserve sealed bytes");
+        assert!(receipt.is_file(), "retry must retain its ownership receipt");
+    }
+
+    #[test]
+    fn retirement_accepts_an_already_closed_derived_reader() {
+        let check: &dyn Fn() -> Result<(), GraphDbError> = &|| Ok(());
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("source.grafeo");
+        let manifest = manifest(2, 1);
+        let identity = manifest.identity();
+        let expected = manifest.expected_recovered_digest(check).unwrap();
+        let (store, _) = build_or_open_sealed_store(
+            SealedRowSource::Manifest(&manifest),
+            &identity,
+            &expected,
+            &database_path,
+            check,
+        )
+        .unwrap();
+        let directory = store.directory.clone();
+        store.database.close().unwrap();
+        store.discard().unwrap();
+        assert!(!directory.exists(), "a cleanly closed reader is reclaimable");
     }
 
     #[cfg(unix)]
