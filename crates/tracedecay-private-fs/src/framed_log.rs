@@ -22,10 +22,6 @@ use windows_sys::Win32::Storage::FileSystem::{
 #[path = "framed_log_batch_tests.rs"]
 mod batch_tests;
 
-#[cfg(all(test, target_os = "linux", feature = "test-helpers"))]
-#[path = "framed_log_snapshot_tests.rs"]
-mod snapshot_tests;
-
 #[cfg(test)]
 thread_local! {
     static DIRECTORY_SYNC_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };

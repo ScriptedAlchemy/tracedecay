@@ -10,6 +10,7 @@ use std::sync::{
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_domain::{ManifestDigest, sha256_hex_suffix};
+use tracedecay_runtime_core::logging::set_tracing_capture;
 use tracing::level_filters::LevelFilter;
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Event, Metadata, Subscriber};
@@ -89,9 +90,10 @@ fn canonical_deduplication_refuses_same_byte_path_replacement_during_read() {
         replacement,
         observed: Arc::clone(&observed),
     };
-    let result = tracing::subscriber::with_default(swap, || {
+    let result = {
+        let _capture = set_tracing_capture(swap);
         DaemonCodeIndexPublicationStoreV1::files_equal(&canonical, &pending)
-    });
+    };
     assert_eq!(observed.load(Ordering::SeqCst), 1);
     let error = result.expect_err("a changed canonical name cannot authorize deduplication");
     assert!(
@@ -164,8 +166,8 @@ fn staged_deduplication_refuses_a_swapped_temporary_before_comparison() {
     fs::create_dir(&segments).expect("canonical segment directory");
     fs::create_dir(&temporary_root).expect("staging directory");
     let bytes = b"authenticated nonempty segment for canonical deduplication";
-    let digest = ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes))
-        .expect("content address");
+    let digest =
+        ManifestDigest::from_sha256_bytes(&Sha256::digest(bytes)).expect("content address");
     let suffix = sha256_hex_suffix(digest.as_str()).expect("canonical hex suffix");
     let canonical = segments.join(format!("segment-{suffix}.json"));
     let mut staged = StagedGenerationSegmentsV1::new();
@@ -190,7 +192,10 @@ fn staged_deduplication_refuses_a_swapped_temporary_before_comparison() {
     let displaced = temporary_root.join("original");
     fs::write(&replacement, bytes).expect("same bytes in a second inode");
     let changed = fs::symlink_metadata(&replacement).expect("replacement inode");
-    assert_ne!((original.dev(), original.ino()), (changed.dev(), changed.ino()));
+    assert_ne!(
+        (original.dev(), original.ino()),
+        (changed.dev(), changed.ino())
+    );
     assert_eq!(already_read.load(Ordering::Relaxed), 0);
 
     let observed = Arc::new(AtomicUsize::new(0));
@@ -200,7 +205,10 @@ fn staged_deduplication_refuses_a_swapped_temporary_before_comparison() {
         replacement,
         observed: Arc::clone(&observed),
     };
-    let result = tracing::subscriber::with_default(swap, || staged.publish());
+    let result = {
+        let _capture = set_tracing_capture(swap);
+        staged.publish()
+    };
     assert_eq!(observed.load(Ordering::SeqCst), 1);
     let error = result.expect_err("a new staged inode cannot authorize deduplication");
     assert!(
@@ -209,7 +217,10 @@ fn staged_deduplication_refuses_a_swapped_temporary_before_comparison() {
             .contains("changed during canonical deduplication"),
         "refuse the stale staging witness: {error}"
     );
-    assert_eq!(fs::read(&canonical).expect("original canonical bytes"), bytes);
+    assert_eq!(
+        fs::read(&canonical).expect("original canonical bytes"),
+        bytes
+    );
     assert_eq!(fs::read(&temporary).expect("replacement bytes"), bytes);
     assert_eq!(fs::read(&displaced).expect("original staged bytes"), bytes);
     assert!(staged.pending.contains_key(&canonical));
@@ -219,7 +230,9 @@ fn staged_deduplication_refuses_a_swapped_temporary_before_comparison() {
     // Rename changes ctime even when the original inode is restored. That
     // original witness must remain invalid; only a fresh preparation may
     // authenticate a new epoch of staged bytes.
-    let retry = staged.publish().expect_err("a changed witness cannot be reused");
+    let retry = staged
+        .publish()
+        .expect_err("a changed witness cannot be reused");
     assert!(
         retry
             .to_string()
@@ -227,5 +240,8 @@ fn staged_deduplication_refuses_a_swapped_temporary_before_comparison() {
         "the previous authentication must not become reusable: {retry}"
     );
     assert!(staged.pending.contains_key(&canonical));
-    assert_eq!(fs::read(&canonical).expect("canonical remains intact"), bytes);
+    assert_eq!(
+        fs::read(&canonical).expect("canonical remains intact"),
+        bytes
+    );
 }

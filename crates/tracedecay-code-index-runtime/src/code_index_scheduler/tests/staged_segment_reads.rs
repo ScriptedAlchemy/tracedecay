@@ -23,6 +23,7 @@ use tracedecay_code_index::production::{
 };
 use tracedecay_code_index_retention::code_index_generations::DurableSealedCodeGenerationIdentityV1;
 use tracedecay_domain::{ManifestDigest, ProjectId, SanitizerRevision, sha256_hex_suffix};
+use tracedecay_runtime_core::logging::set_tracing_capture;
 
 use super::{
     DaemonCodeIndexPreparationStateV1, DaemonCodeIndexPreparationV1,
@@ -309,14 +310,14 @@ fn staged_segment_cold_digest_mismatch_poison_survives_restoration() {
         Err(CodeIndexProductionErrorV1::Contract(detail))
             if detail.contains("identity was invalidated")
     ));
-    assert!(read.is_empty());
+    assert_eq!(read, Vec::<u8>::new());
     std::fs::write(&path, original).expect("restore exact original bytes");
     assert!(matches!(
         reader(request, &mut read),
         Err(CodeIndexProductionErrorV1::Contract(detail))
             if detail.contains("identity was invalidated")
     ));
-    assert!(read.is_empty());
+    assert_eq!(read, Vec::<u8>::new());
     assert_eq!(
         preparation.staged_segment_read_open_attempts_for_test(),
         opens_before + 1,
@@ -1153,7 +1154,8 @@ fn staged_failed_cold_open_preserves_eight_healthy_handles() {
         observed: Arc::clone(&observed),
     };
     read.extend_from_slice(b"stale before the failed open");
-    let refused = tracing::subscriber::with_default(injector, || {
+    let refused = {
+        let _capture = set_tracing_capture(injector);
         reader(
             SealedGenerationSegmentReadV1::Whole {
                 digest: &digests[8],
@@ -1161,10 +1163,16 @@ fn staged_failed_cold_open_preserves_eight_healthy_handles() {
             },
             &mut read,
         )
-    });
-    assert!(matches!(refused, Err(CodeIndexProductionErrorV1::Contract(_))));
+    };
+    assert!(matches!(
+        refused,
+        Err(CodeIndexProductionErrorV1::Contract(_))
+    ));
     assert_eq!(observed.load(Ordering::SeqCst), 1);
-    assert!(read.is_empty(), "a failed first open cannot return stale bytes");
+    assert!(
+        read.is_empty(),
+        "a failed first open cannot return stale bytes"
+    );
     assert_eq!(preparation.staged_segment_read_open_attempts_for_test(), 9);
     assert_eq!(
         pinned_handle_count(&preparation),

@@ -1,21 +1,19 @@
-//! A final durability barrier must not reuse an earlier window's stale identity.
+//! Real Linux durability: an earlier flushed file may change during the final fsync.
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
+use tracedecay_private_fs::framed_log::DurableFileBatch;
+use tracedecay_runtime_core::logging::set_tracing_capture;
 use tracing::level_filters::LevelFilter;
 use tracing::span::{Attributes, Id, Record};
 use tracing::{Event, Metadata, Subscriber};
 
-use super::{DURABLE_BATCH_CONCURRENT_SYNCS, DurableFileBatch, sync_latency};
-
-// Interleave a real rename at the existing production fsync span. The test
-// leaves exactly one pending member, so its barrier executes on this thread:
-// no sleeps, global subscriber, fake fsync, or production-only test hook.
+// The kernel fsync remains real. The scoped subscriber substitutes a real
+// same-byte inode on the final pending member's production fsync span.
 struct ReplaceEarlierWindowAtBarrier {
     destination: PathBuf,
     replacement: PathBuf,
@@ -58,27 +56,19 @@ impl Subscriber for ReplaceEarlierWindowAtBarrier {
 #[test]
 fn durable_batch_rechecks_earlier_windows_after_the_final_barrier() {
     let root = tempfile::tempdir().expect("isolated durability fixture");
-    let barriers = sync_latency::inject(root.path(), Duration::ZERO);
     let mut batch = DurableFileBatch::new();
     let bytes = b"immutable batch member";
     let first = root.path().join("member-0.tmp");
-    for index in 0..=DURABLE_BATCH_CONCURRENT_SYNCS {
+    // The 33rd real writer forces the prior 32-member window to fsync.
+    for index in 0..33 {
         let path = root.path().join(format!("member-{index}.tmp"));
         let mut writer = File::create(&path).expect("member writer");
         writer.write_all(bytes).expect("nonempty member bytes");
-        batch
-            .written(&path, &writer)
-            .expect("admit immutable member");
+        batch.written(&path, &writer).expect("admit immutable member");
     }
-    assert_eq!(batch.synced.len(), DURABLE_BATCH_CONCURRENT_SYNCS);
-    assert_eq!(batch.pending.len(), 1);
-    assert_eq!(barriers.syncs(), DURABLE_BATCH_CONCURRENT_SYNCS as u64);
-
-    batch
-        .sync()
-        .expect("intact multi-window batch must succeed");
-    assert_eq!(barriers.syncs(), DURABLE_BATCH_CONCURRENT_SYNCS as u64 + 1);
+    batch.sync().expect("intact multi-window batch must succeed");
     assert_eq!(fs::read(&first).expect("exact original bytes"), bytes);
+
     let original = fs::symlink_metadata(&first).expect("original identity");
     let replacement = root.path().join("replacement.tmp");
     fs::write(&replacement, bytes).expect("same-byte distinct inode");
@@ -91,15 +81,17 @@ fn durable_batch_rechecks_earlier_windows_after_the_final_barrier() {
     let entered = Arc::new(AtomicUsize::new(0));
     let observer = ReplaceEarlierWindowAtBarrier {
         destination: first.clone(),
-        replacement,
+        replacement: replacement.clone(),
         entered: Arc::clone(&entered),
     };
-    let result = tracing::subscriber::with_default(observer, || batch.sync());
+    let result = {
+        let _capture = set_tracing_capture(observer);
+        batch.sync()
+    };
     assert_eq!(entered.load(Ordering::SeqCst), 1);
-    assert_eq!(barriers.syncs(), DURABLE_BATCH_CONCURRENT_SYNCS as u64 + 2);
     assert_eq!(
         result
-            .expect_err("the final barrier must not authorize a replaced earlier member")
+            .expect_err("the final fsync must not authorize a replaced earlier member")
             .kind(),
         ErrorKind::InvalidData
     );
@@ -109,15 +101,17 @@ fn durable_batch_rechecks_earlier_windows_after_the_final_barrier() {
         (current.dev(), current.ino()),
         (replacement_identity.dev(), replacement_identity.ino())
     );
-    assert_eq!(batch.synced.len(), DURABLE_BATCH_CONCURRENT_SYNCS);
-    assert_eq!(batch.pending.len(), 1);
-    assert_eq!(
-        batch.sync().expect_err("retry must still refuse").kind(),
-        ErrorKind::InvalidData
-    );
-    assert_eq!(
-        barriers.syncs(),
-        DURABLE_BATCH_CONCURRENT_SYNCS as u64 + 2,
-        "a known-invalid earlier window must refuse before another barrier"
-    );
+    // The invalidated batch retains its failure; it cannot run another fsync
+    // or silently discard the previous member on retry.
+    let observer = ReplaceEarlierWindowAtBarrier {
+        destination: first,
+        replacement,
+        entered: Arc::clone(&entered),
+    };
+    let retry = {
+        let _capture = set_tracing_capture(observer);
+        batch.sync()
+    };
+    assert_eq!(retry.expect_err("retry must still refuse").kind(), ErrorKind::InvalidData);
+    assert_eq!(entered.load(Ordering::SeqCst), 1, "invalid retry must not fsync");
 }

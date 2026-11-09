@@ -74,6 +74,10 @@ mod staged_segment_reads;
 #[path = "tests/immutable_segment_equality.rs"]
 mod immutable_segment_equality;
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "tests/durable_batch_snapshot.rs"]
+mod durable_batch_snapshot;
+
 const MAX_DURABLE_PUBLICATION_POINTER_BYTES: u64 = 512 * 1024;
 const DURABLE_GENERATION_IO_CHUNK_BYTES_V1: usize = 64 * 1024;
 
@@ -1187,11 +1191,12 @@ impl StagedGenerationSegmentsV1 {
             // Bind every pending pathname to the bytes authenticated during
             // staging before any immutable canonical name is published.
             #[cfg(unix)]
-            let authenticated = Some(self.authenticated_segments.get(&temporary).ok_or_else(|| {
-                DaemonCodeIndexPublicationStoreV1::corruption(
-                    "staged sealed segment lacks its authenticated inode",
-                )
-            })?);
+            let authenticated =
+                Some(self.authenticated_segments.get(&temporary).ok_or_else(|| {
+                    DaemonCodeIndexPublicationStoreV1::corruption(
+                        "staged sealed segment lacks its authenticated inode",
+                    )
+                })?);
             #[cfg(not(unix))]
             let authenticated = None;
             Self::validate_authenticated_temporary(&temporary, authenticated)?;
@@ -1212,11 +1217,7 @@ impl StagedGenerationSegmentsV1 {
                         .map_err(DaemonCodeIndexPublicationStoreV1::unavailable)?;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    Self::publish_missing_immutable_file(
-                        &temporary,
-                        &final_path,
-                        authenticated,
-                    )?;
+                    Self::publish_missing_immutable_file(&temporary, &final_path, authenticated)?;
                 }
                 Err(error) => return Err(DaemonCodeIndexPublicationStoreV1::unavailable(error)),
             }
@@ -2041,7 +2042,9 @@ impl DaemonCodeIndexPublicationStoreV1 {
             let _span =
                 tracing::trace_span!("code_index.generation.compare_immutable_bytes").entered();
             loop {
-                let left_read = left_file.read(&mut left_buffer).map_err(Self::unavailable)?;
+                let left_read = left_file
+                    .read(&mut left_buffer)
+                    .map_err(Self::unavailable)?;
                 if left_read == 0 {
                     break right_file
                         .read(&mut right_buffer[..1])
