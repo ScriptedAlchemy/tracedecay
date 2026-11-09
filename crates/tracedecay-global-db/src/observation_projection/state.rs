@@ -1004,7 +1004,7 @@ fn output_authority_batch_sql() -> String {
             SELECT provenance.projector_version AS projector_version,
                    provenance.output_provider AS output_provider,
                    provenance.output_message_id AS output_message_id,
-                   MAX(message_created) AS projector_owned,
+                   MAX(provenance.message_created) AS projector_owned,
                    COUNT(*) AS owner_count
             FROM json_each(?2) AS requested
             CROSS JOIN observation_projection_provenance AS provenance
