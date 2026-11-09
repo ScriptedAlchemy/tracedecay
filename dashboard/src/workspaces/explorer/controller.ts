@@ -253,19 +253,19 @@ export function useExplorerController(): ExplorerController {
   const planner = useMutation({
     mutationFn: async (request: PlannerRequest) => {
       const result = await createPlannerQuery(request.scope, request.query);
-      if (result.outcome === 'envelope' && request.generation !== requestGeneration.current) {
-        // This executes even when React Query's mutation observer has unmounted.
-        void cancelPlannerQuery(request.scope, result.envelope.payload.run_id);
+      if (result.outcome === 'envelope') {
+        const run = result.envelope.payload;
+        const live = !runIsTerminal(run.state);
+        // Record ownership as soon as the daemon admits the request. The
+        // observer can unmount before React Query runs its success callbacks.
+        if (request.generation === requestGeneration.current) {
+          acceptedRun.current = live ? { id: run.run_id, scope: request.scope } : null;
+          setActiveRunId(run.run_id);
+        } else if (live) {
+          void cancelPlannerQuery(request.scope, run.run_id);
+        }
       }
       return result;
-    },
-    onSuccess: (result, request) => {
-      if (request.generation !== requestGeneration.current) return;
-      if (result.outcome === 'envelope') {
-        const id = result.envelope.payload.run_id;
-        acceptedRun.current = { id, scope: request.scope };
-        setActiveRunId(id);
-      }
     },
   });
   const activeRunIdForQuery = activeRunId ?? '';
