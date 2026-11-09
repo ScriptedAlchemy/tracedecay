@@ -95,6 +95,64 @@ class QualificationCliTests(unittest.TestCase):
         self.assertIn("original frozen Scout request capture", rejected.stderr)
         self.assertEqual((self.root / "qualification_summary.json").read_bytes(), frozen_report)
 
+    def test_raw_first_response_sample_is_checked_by_independent_cli(self):
+        result = self.fixture.signed_result()
+        first = result["rows"][0]
+        request = {
+            "state": fixtures.run_http.STATES["B_noul_text"](self.fixture.dataset[2]),
+            "questions": self.fixture.questions,
+        }
+        response = {
+            "model": first["observed_model"],
+            "answers": {
+                key: {"type": "noul", "noul": value}
+                for key, value in first["probs"].items()
+            },
+        }
+        first["sample_response_sha256"] = fixtures.run_http.digest(response)
+        sample = {
+            "request": request,
+            "response": response,
+            "experiment_sha256": result["experiment_sha256"],
+            "case_id": first["id"],
+            "request_sha256": first["request_sha256"],
+            "row_sha256": fixtures.run_http.digest(first),
+        }
+        (self.root / "result.json").write_text(json.dumps(result), encoding="utf-8")
+        sample_file = self.root / "sample.json"
+        sample_file.write_text(json.dumps(sample), encoding="utf-8")
+        argv = [
+            sys.executable, str(self.root / "score.py"), "--qualified",
+            str(self.root / "manifest.json"), str(self.root / "dataset.json"),
+            str(self.root / "result.json"),
+        ]
+        missing = subprocess.run(
+            argv, cwd=self.root, capture_output=True, text=True, timeout=30,
+        )
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("must be provided together", missing.stderr)
+        self.assertFalse((self.root / "qualification_summary.json").exists())
+
+        qualified = argv + ["--sample-file", str(sample_file)]
+        passing = subprocess.run(
+            qualified, cwd=self.root, capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(passing.returncode, 0, passing.stderr)
+        report = self.published_report(passing)
+        self.assertTrue(report["first_response_sample_checked"])
+        previous = (self.root / "qualification_summary.json").read_bytes()
+
+        altered = json.loads(sample_file.read_text(encoding="utf-8"))
+        altered["response"]["answers"]["impact"]["noul"] = 0.4
+        sample_file.write_text(json.dumps(altered), encoding="utf-8")
+        rejected = subprocess.run(
+            qualified, cwd=self.root, capture_output=True, text=True, timeout=30,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("response or row disagrees", rejected.stderr)
+        self.assertEqual(rejected.stdout, "")
+        self.assertEqual((self.root / "qualification_summary.json").read_bytes(), previous)
+
     def test_duplicate_result_keys_cannot_publish_a_passing_report(self):
         valid = self.fixture.signed_result()
         raw = json.dumps(valid, allow_nan=False)
