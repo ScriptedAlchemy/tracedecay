@@ -5,6 +5,7 @@ use tracedecay_domain::errors::{ResettableStoreV1, Result, StoreResetRequiredV1,
 use tracedecay_global_db::profile_registry_maintenance::verify_store_path_absent;
 use tracedecay_hooks::{PROFILE_HOOK_ADMISSIONS_DIR, PROJECT_HOOK_ADMISSIONS_DIR};
 use tracedecay_runtime_core::config::{GLOBAL_DB_FILENAME, ProfileRoot};
+use tracedecay_runtime_core::shard_runtime::registry::lock_offline_sqlite_family_for_reset;
 use tracedecay_runtime_core::storage::{
     SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME, USER_SESSIONS_DB_FILENAME,
     profile_sharded_data_root, read_store_manifest, validate_project_id,
@@ -189,7 +190,7 @@ fn print_project_registrations(profile_root: &Path) -> Result<()> {
 
 /// What a reset deletes inside a store's directory.
 enum StoreMembers {
-    /// A database and every entry named after it.
+    /// The SQLite family and its registered store artifacts.
     DatabaseFamily(&'static str),
     /// These exact directories.
     Directories(&'static [&'static str]),
@@ -229,28 +230,66 @@ fn store_location(
     })
 }
 
-/// Removes `database` and every entry named after it in `directory`: its
-/// SQLite sidecars and spools (`<name>.db…`), its host-admission directory
-/// (`.<name>.db…`), and its session relation graph (`<name>.grafeo…`).
+/// The offline lifecycle authority admits deletion of the stale store
+/// itself. Similar names, private initialization data and stable coordination
+/// locks are not members of its data family.
 fn remove_store_family(directory: &Path, database: &str) -> Result<usize> {
-    let stem = database.strip_suffix(".db").unwrap_or(database);
-    let owned_prefix = format!("{stem}.");
-    let hidden_prefix = format!(".{database}.");
-    let entries = std::fs::read_dir(directory).map_err(|error| TraceDecayError::Config {
-        message: format!("failed to list '{}': {error}", directory.display()),
-    })?;
-    let mut members = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|error| TraceDecayError::Config {
-            message: format!("failed to list '{}': {error}", directory.display()),
+    let _initialization =
+        lock_offline_sqlite_family_for_reset(&directory.join(database)).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!("cannot reset SQLite family {database}: {error}"),
+            }
         })?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with(&owned_prefix) || name.starts_with(&hidden_prefix) {
-            members.push(name);
+    let mut members: Vec<(String, bool)> = ["", "-wal", "-shm", "-journal"]
+        .iter()
+        .map(|suffix| (format!("{database}{suffix}"), false))
+        .collect();
+    if database == SESSIONS_DB_FILENAME || database == USER_SESSIONS_DB_FILENAME {
+        let stem = database.strip_suffix(".db").unwrap_or(database);
+        let graph = format!("{stem}.grafeo");
+        members.extend([
+            (format!("{graph}.wal"), true),
+            (graph, false),
+            (format!(".{database}.host-admission"), true),
+            (format!("{database}.delivery-settlement-spool-v1"), true),
+        ]);
+    }
+    // Validate all exact names before deleting the first file. The exclusive
+    // offline lease then excludes other cooperating profile writers.
+    for (name, is_directory) in &members {
+        let path = directory.join(name);
+        tracedecay_runtime_core::storage::reject_symlink_components(
+            &path,
+            "stale store reset member",
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: error.to_string(),
+        })?;
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata)
+                if (*is_directory && metadata.is_dir())
+                    || (!is_directory && metadata.is_file()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "unexpected file type for stale store reset member '{}'",
+                        path.display()
+                    ),
+                });
+            }
+            Err(error) => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "cannot inspect stale store reset member '{}': {error}",
+                        path.display()
+                    ),
+                });
+            }
         }
     }
     let mut removed = 0;
-    for name in &members {
+    for (name, _) in &members {
         removed += usize::from(remove_fixed_profile_path(directory, name)?);
         verify_store_path_absent(&directory.join(name))?;
     }
@@ -279,6 +318,8 @@ mod tests {
             "global.db-wal",
             "global.db-shm",
             "profile-identity.json",
+            "sessions.unrelated",
+            ".sessions.db.notes",
         ] {
             std::fs::write(root.join(file), file).expect("write store file");
         }
@@ -302,8 +343,10 @@ mod tests {
         assert_eq!(
             kept,
             [
+                ".sessions.db.notes",
                 "code-index-v1",
                 "profile-identity.json",
+                "sessions.unrelated",
                 "store_manifest.json",
                 "tracedecay.db",
                 "tracedecay.db-wal",
@@ -311,6 +354,19 @@ mod tests {
                 "user-sessions.db",
             ]
         );
+    }
+
+    #[test]
+    fn unexpected_sqlite_member_kind_preserves_the_whole_family() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        std::fs::write(root.join("sessions.db"), b"main").unwrap();
+        let foreign = root.join("sessions.db-wal");
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::write(foreign.join("entry"), b"keep").unwrap();
+        assert!(remove_store_family(root, "sessions.db").is_err());
+        assert_eq!(std::fs::read(root.join("sessions.db")).unwrap(), b"main");
+        assert_eq!(std::fs::read(foreign.join("entry")).unwrap(), b"keep");
     }
 
     #[test]

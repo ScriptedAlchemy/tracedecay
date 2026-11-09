@@ -15,6 +15,7 @@ mod close;
 mod destructive;
 mod graph;
 mod initialization;
+pub use initialization::lock_offline_sqlite_family_for_reset;
 mod leases;
 mod open;
 mod ports;

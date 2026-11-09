@@ -762,9 +762,7 @@ pub(super) fn open_lock_file(lock_path: &Path, private: bool) -> io::Result<fs::
     Ok(file)
 }
 
-/// Keep the coordination inode outside a disposable private directory so
-/// removal never splits contenders across two generations of the lock.
-pub(crate) fn try_lock_durable_directory(path: &Path) -> io::Result<FileLease> {
+fn private_directory_lock_path(path: &Path) -> io::Result<PathBuf> {
     let parent = path
         .parent()
         .ok_or_else(|| invalid_input("directory has no parent"))?;
@@ -773,9 +771,28 @@ pub(crate) fn try_lock_durable_directory(path: &Path) -> io::Result<FileLease> {
         .ok_or_else(|| invalid_input("directory has no name"))?;
     let lock_path = durable_directory_lock_path(&parent.canonicalize()?, name);
     reject_symlink_components(&lock_path, "durable private store directory lock")?;
-    let file = open_lock_file(&lock_path, true)?;
+    Ok(lock_path)
+}
+
+fn try_lock_directory_file(file: fs::File) -> io::Result<FileLease> {
     file.try_lock().map_err(io::Error::from)?;
     Ok(FileLease::held(file, SIDECAR_LEASE_LABEL))
+}
+
+/// Keep the coordination inode outside a disposable private directory so
+/// removal never splits contenders across two generations of the lock.
+pub(crate) fn try_lock_durable_directory(path: &Path) -> io::Result<FileLease> {
+    try_lock_directory_file(open_lock_file(&private_directory_lock_path(path)?, true)?)
+}
+
+/// Offline reset must preserve an existing lease inode and must not create
+/// a new one in a legacy store's namespace.
+pub(crate) fn try_lock_existing_durable_directory(path: &Path) -> io::Result<Option<FileLease>> {
+    match tracedecay_private_fs::open_private_file(&private_directory_lock_path(path)?) {
+        Ok(file) => try_lock_directory_file(file).map(Some),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 /// Non-blocking sidecar lock acquisition. Returns the held lock file on

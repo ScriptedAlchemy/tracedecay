@@ -25,6 +25,21 @@ const SIDECARS: [&str; 3] = ["-wal", "-shm", "-journal"];
 const OWNER: &str = "schema-installation.owner";
 const SYNC: DirectorySyncPolicy = DirectorySyncPolicy::TolerateUnsupported;
 
+/// Coordinates an authorized reset of an offline store with the existing
+/// initializer. A staged or ambiguous family must finish reconciliation
+/// before reset can discard any canonical members.
+pub fn lock_offline_sqlite_family_for_reset(destination: &Path) -> io::Result<Option<FileLease>> {
+    let staging = InitializationDirectory::path(destination);
+    let lease = crate::storage::try_lock_existing_durable_directory(&staging)?;
+    if present(&staging)? {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "SQLite initialization requires reconciliation before reset",
+        ));
+    }
+    Ok(lease)
+}
+
 pub(super) struct InitializationDirectory {
     destination: PathBuf,
     directory: PathBuf,
@@ -663,6 +678,33 @@ mod tests {
         drop(stage);
         assert!(!original.exists());
         assert!(other.is_dir());
+    }
+
+    #[test]
+    fn offline_reset_preserves_the_initialization_lease_and_refuses_unresolved_staging() {
+        let root = TempDir::new().unwrap();
+        let destination = root.path().join("sessions.db");
+        assert!(
+            lock_offline_sqlite_family_for_reset(&destination)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+        let publisher = InitializationDirectory::begin(destination.clone()).unwrap();
+        assert!(lock_offline_sqlite_family_for_reset(&destination).is_err());
+        drop(publisher);
+        let reset = lock_offline_sqlite_family_for_reset(&destination)
+            .unwrap()
+            .unwrap();
+        assert!(InitializationDirectory::begin(destination.clone()).is_err());
+        drop(reset);
+        let staging = InitializationDirectory::path(&destination);
+        create_private_directory(&staging).unwrap();
+        let unrelated = staging.join("operator-data");
+        fs::write(&unrelated, b"keep").unwrap();
+        assert!(InitializationDirectory::verify_read_only_handoff(&destination).is_err());
+        assert!(lock_offline_sqlite_family_for_reset(&destination).is_err());
+        assert_eq!(fs::read(unrelated).unwrap(), b"keep");
     }
 
     #[test]
