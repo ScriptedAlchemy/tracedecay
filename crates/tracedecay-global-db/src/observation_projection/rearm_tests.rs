@@ -509,7 +509,12 @@ async fn rearm_reader_snapshot_cannot_clear_a_new_retry_generation() {
 
     // The reader's window is now stale: a foreground owner schedules a new
     // generation for one row and another row has become due.
-    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    let transaction = harness
+        .registered
+        .runtime_database()
+        .begin_write_transaction("schedule projection retry")
+        .await
+        .unwrap();
     assert_eq!(
         transaction
             .execute(
@@ -601,7 +606,12 @@ async fn retry_rearm_does_not_erase_a_live_retry_between_windows() {
         .unwrap(),
         1
     );
-    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    let transaction = harness
+        .registered
+        .runtime_database()
+        .begin_write_transaction("schedule projection retry")
+        .await
+        .unwrap();
     schedule_projection_retry(
         &transaction,
         queued_observation(1).0.observation_id(),
@@ -681,7 +691,12 @@ async fn rearm_leaves_later_observations_with_reused_queue_rowids_deferred() {
 
     // A foreground pass settles the old tail. SQLite assigns its rowid to a
     // newer observation, whose retry belongs to the current mount.
-    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    let transaction = harness
+        .registered
+        .runtime_database()
+        .begin_write_transaction("schedule projection retry")
+        .await
+        .unwrap();
     transaction
         .execute(
             "DELETE FROM projection_queue WHERE observation_sequence = 3",
@@ -790,7 +805,12 @@ async fn retry_rearm_respects_mount_ownership_across_restart_and_existing_schema
     let windows = RetryRearmWindows::new(database, 1, 1_000_000)
         .await
         .unwrap();
-    let transaction = harness.registered.begin_write_transaction().await.unwrap();
+    let transaction = harness
+        .registered
+        .runtime_database()
+        .begin_write_transaction("schedule projection retry")
+        .await
+        .unwrap();
     schedule_projection_retry(
         &transaction,
         queued_observation(1).0.observation_id(),
@@ -827,7 +847,7 @@ async fn retry_rearm_respects_mount_ownership_across_restart_and_existing_schema
 
     let transaction = harness.registered.begin_write_transaction().await.unwrap();
     transaction
-        .execute("ALTER TABLE projection_queue DROP COLUMN retry_mount", ())
+        .execute("DROP TABLE projection_retry_owners", ())
         .await
         .unwrap();
     transaction
@@ -845,6 +865,51 @@ async fn retry_rearm_respects_mount_ownership_across_restart_and_existing_schema
             .unwrap()
             .rows,
         2
+    );
+}
+
+#[asupersync::test]
+async fn failed_rearm_owner_write_preserves_the_previous_retry() {
+    let harness = RegisteredGlobalDbHarness::open("rearm-owner-rollback").await;
+    seed_queue(&harness, 1, 0).await;
+    let database = harness.registered.runtime_database();
+    let windows = RetryRearmWindows::new(database, 1, 1_000_000)
+        .await
+        .unwrap();
+    let setup = harness.registered.begin_write_transaction().await.unwrap();
+    setup
+        .execute_batch(
+            "CREATE TRIGGER reject_retry_owner BEFORE INSERT ON projection_retry_owners
+        BEGIN SELECT RAISE(ABORT, 'retry owner refused'); END;",
+        )
+        .await
+        .unwrap();
+    setup.commit().await.unwrap();
+
+    {
+        let transaction = database
+            .begin_write_transaction("schedule projection retry")
+            .await
+            .unwrap();
+        let error = schedule_projection_retry(
+            &transaction,
+            queued_observation(0).0.observation_id(),
+            4,
+            FAR_FUTURE_MICROS - 1,
+            "new retry",
+            &windows.mount,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("retry owner refused"));
+    }
+    assert_eq!(queue_state(&harness).await, (1, 1, 1));
+    assert_eq!(
+        rearm_queued_projection_retries(database, 1)
+            .await
+            .unwrap()
+            .rows,
+        1
     );
 }
 

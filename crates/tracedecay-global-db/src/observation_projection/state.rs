@@ -16,8 +16,8 @@ use tracedecay_store::{
 use tracedecay_lcm::raw::{message_body_from_record_row, stored_message_record_select_columns};
 use tracedecay_lcm::retrieval_content::projected_content_hash;
 use tracedecay_lcm::{LcmError, LcmStorageKind};
-use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
+use tracedecay_runtime_core::db::{Database, DatabaseWriteTransaction};
 use tracedecay_sessions::runtime::shared::durable_project_path_key;
 #[cfg(windows)]
 use tracedecay_sessions::runtime::shared::path_identity_key;
@@ -382,13 +382,19 @@ impl<'a> RetryRearmWindows<'a> {
                 .query(
                     // qpsg-exempt: both arms seek the retry deadline index, bounded by the captured nonterminal upper key.
                     "SELECT rowid AS id, next_retry_at_micros AS deadline,
-                        CASE WHEN retry_mount IS NOT ?4 THEN observation_id END, attempt_count
+                        CASE WHEN NOT EXISTS (
+                            SELECT 1 FROM projection_retry_owners AS owner
+                            WHERE owner.observation_id = projection_queue.observation_id AND owner.mount = ?4
+                        ) THEN observation_id END, attempt_count
                  FROM projection_queue INDEXED BY idx_projection_queue_retry_deadline
                  WHERE next_retry_at_micros = ?1 AND rowid > ?2
                    AND (next_retry_at_micros, rowid) <= (?5, ?6)
                  UNION ALL
                  SELECT rowid, next_retry_at_micros,
-                        CASE WHEN retry_mount IS NOT ?4 THEN observation_id END, attempt_count
+                        CASE WHEN NOT EXISTS (
+                            SELECT 1 FROM projection_retry_owners AS owner
+                            WHERE owner.observation_id = projection_queue.observation_id AND owner.mount = ?4
+                        ) THEN observation_id END, attempt_count
                  FROM projection_queue INDEXED BY idx_projection_queue_retry_deadline
                  WHERE next_retry_at_micros > ?1 AND (next_retry_at_micros, rowid) <= (?5, ?6)
                  ORDER BY deadline, id LIMIT ?3",
@@ -453,7 +459,7 @@ pub(super) async fn apply_rearm_projection_retry_candidates(
         .execute(
             // qpsg-exempt: the candidate list contains exact rowid identities,
             // and the literal terminal bound protects a concurrent park.
-            "UPDATE projection_queue SET next_retry_at_micros = 0, retry_mount = NULL
+            "UPDATE projection_queue SET next_retry_at_micros = 0
              WHERE (rowid, observation_id, next_retry_at_micros, attempt_count) IN (
                  SELECT json_extract(value, '$[0]'),
                         json_extract(value, '$[1]'),
@@ -461,7 +467,10 @@ pub(super) async fn apply_rearm_projection_retry_candidates(
                         json_extract(value, '$[3]')
                  FROM json_each(?1)
              )
-               AND retry_mount IS NOT ?3
+               AND NOT EXISTS (
+                   SELECT 1 FROM projection_retry_owners AS owner
+                   WHERE owner.observation_id = projection_queue.observation_id AND owner.mount = ?3
+               )
                AND next_retry_at_micros > ?2
                AND next_retry_at_micros < 9223372036854775807",
             params![candidates, now_micros, mount],
@@ -483,7 +492,7 @@ pub(super) async fn apply_rearm_projection_retry_candidates(
 }
 
 pub(super) async fn schedule_projection_retry(
-    conn: &impl Executor,
+    conn: &DatabaseWriteTransaction<'_>,
     observation_id: &CanonicalObservationIdV1,
     attempt_count: u32,
     next_retry_at_micros: i64,
@@ -493,23 +502,29 @@ pub(super) async fn schedule_projection_retry(
     let updated = conn
         .execute(
             "UPDATE projection_queue
-             SET attempt_count = ?2, next_retry_at_micros = ?3, last_error = ?4, retry_mount = ?5
+             SET attempt_count = ?2, next_retry_at_micros = ?3, last_error = ?4
              WHERE observation_id = ?1",
             params![
                 observation_id.as_str(),
                 i64::from(attempt_count),
                 next_retry_at_micros,
                 last_error,
-                mount,
             ],
         )
         .await
         .map_err(|error| storage("schedule projection retry", error))?;
-    if updated == 1 {
-        Ok(())
-    } else {
-        Err(ProjectionStoreError::NotQueued)
+    if updated != 1 {
+        return Err(ProjectionStoreError::NotQueued);
     }
+    // Retry scheduling and ownership commit under the same queue writer.
+    conn.execute(
+        "INSERT INTO projection_retry_owners (observation_id, mount) VALUES (?1, ?2)
+         ON CONFLICT (observation_id) DO UPDATE SET mount = excluded.mount",
+        params![observation_id.as_str(), mount],
+    )
+    .await
+    .map_err(|error| storage("record projection retry owner", error))?;
+    Ok(())
 }
 
 pub(super) async fn consume_projection_queue_item(

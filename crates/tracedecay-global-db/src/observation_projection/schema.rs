@@ -19,6 +19,10 @@ const OBSERVATION_PROJECTION_SCHEMA_SQL: &str =
             FOREIGN KEY(observation_id) REFERENCES observations(observation_id),
             FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
         );
+        CREATE TABLE IF NOT EXISTS projection_retry_owners (
+            observation_id TEXT PRIMARY KEY NOT NULL REFERENCES projection_queue(observation_id) ON DELETE CASCADE,
+            mount TEXT NOT NULL
+        ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS observation_projection_checkpoints (
             projector_version TEXT PRIMARY KEY,
             last_sequence INTEGER NOT NULL CHECK(last_sequence >= 0)
@@ -375,7 +379,7 @@ pub(in super::super) async fn ensure_observation_projection_schema(
     // Existing queue shapes are immutable. A previous binary's queue cannot
     // be upgraded behind the registered schema contract: refuse before DDL.
     let queue_columns = projection_rebuild_column_names(conn, "projection_queue").await?;
-    if !queue_columns.is_empty() && !queue_columns.iter().any(|column| column == "retry_mount") {
+    if !queue_columns.is_empty() && !queue_columns.iter().any(|column| column == "attempt_count") {
         return Err(unsupported_projection_schema("projection_queue"));
     }
     conn.execute_batch(OBSERVATION_PROJECTION_SCHEMA_SQL)
@@ -640,16 +644,15 @@ mod tests {
         );
     }
 
-    /// Reopening a store with the preceding queue shape must refuse without
-    /// silently adding retry ownership or changing the original table.
+    /// A queue missing its retry counter must remain untouched on refusal.
     #[asupersync::test]
-    async fn prior_retry_queue_shape_is_refused_without_schema_mutation() {
+    async fn incompatible_retry_queue_is_refused_without_schema_mutation() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("global.db");
         drop(open_registered_schema(&path).await.unwrap());
 
         let conn = TestConnection::open(&path);
-        conn.execute_batch("ALTER TABLE projection_queue DROP COLUMN retry_mount")
+        conn.execute_batch("ALTER TABLE projection_queue DROP COLUMN attempt_count")
             .await
             .unwrap();
         drop(conn);
@@ -671,7 +674,7 @@ mod tests {
         let mut rows = conn
             .query(
                 "SELECT name FROM pragma_table_xinfo('projection_queue')
-                 WHERE name = 'retry_mount'",
+                 WHERE name = 'attempt_count'",
                 (),
             )
             .await

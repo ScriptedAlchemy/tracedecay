@@ -195,7 +195,6 @@ const OBSERVATION_AUTHORITY_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS sanit
             attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
             next_retry_at_micros INTEGER NOT NULL DEFAULT 0 CHECK(next_retry_at_micros >= 0),
             last_error TEXT,
-            retry_mount TEXT,
             revival_generation TEXT,
             revival_start_offset INTEGER CHECK(
                 (revival_generation IS NULL AND revival_start_offset IS NULL)
