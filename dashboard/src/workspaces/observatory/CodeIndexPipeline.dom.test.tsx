@@ -233,6 +233,35 @@ describe('code-index progress transitions', () => {
     expect(screen.queryByRole('progressbar')).toBeNull();
   });
 
+  it('does not resurrect text counters across a transport gap', async () => {
+    const building = freshness({
+      rebuild_in_flight: true,
+      progress: progress({ progress_epoch: 9 }),
+    }, 'loading');
+    building.envelope.payload = CodeIndexFreshnessPayloadV1Schema.parse(building.envelope.payload);
+    const view = render(<CodeIndexPipeline result={building} pending={false} scopeKey="project" />);
+    expect(await screen.findByText('bulk commit · 20.0%')).toBeTruthy();
+
+    // The transport gap invalidates the old progress receipt. A subsequent
+    // reading can name the same sealed generation without reporting new work.
+    view.rerender(<CodeIndexPipeline
+      result={{ outcome: 'transport', state: 'error' }}
+      pending={false}
+      scopeKey="project"
+    />);
+    expect(screen.queryByRole('progressbar')).toBeNull();
+
+    view.rerender(<CodeIndexPipeline
+      result={freshness({ rebuild_in_flight: true, progress: null }, 'loading')}
+      pending={false}
+      scopeKey="project"
+    />);
+    expect(await screen.findByText('code-index build in progress; progress not yet reported'))
+      .toBeTruthy();
+    expect(screen.queryByText('bulk commit · 20.0%')).toBeNull();
+    expect(screen.queryByRole('progressbar')).toBeNull();
+  });
+
   it('retires cached text when the daemon reports no sealed generation', async () => {
     const building = freshness({
       latest_generation_id: GENERATION,

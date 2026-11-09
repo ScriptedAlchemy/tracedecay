@@ -329,8 +329,10 @@ function useLatestCodeIndexProgress(
   }));
   useEffect(() => {
     if (result?.outcome !== 'envelope') {
+      // Disconnect invalidates the old observation even if a later response
+      // names the same generation without receipted work.
       setLatestProgress((rendered) =>
-        rendered.scopeKey === currentScopeKey
+        rendered.scopeKey === currentScopeKey && rendered.byWorktree.size === 0
           ? rendered
           : { scopeKey: currentScopeKey, byWorktree: new Map() },
       );
