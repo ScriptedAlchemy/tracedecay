@@ -77,67 +77,70 @@ fn queued_observation(index: i64) -> (DurableObservationV1, ObservationSourceCur
 /// eligible, interleaved so batches must skip due rows.
 async fn seed_queue(harness: &RegisteredGlobalDbHarness, deferred: i64, due: i64) {
     let transaction = harness.registered.begin_write_transaction().await.unwrap();
-    for index in 0..deferred + due {
-        let (observation, cursor) = queued_observation(index);
-        let receipt = observation.receipt();
-        transaction
-            .execute(
-                "INSERT INTO sanitization_receipts
-                 (receipt_id, sanitizer_version, payload_digest, receipt_json)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    receipt.receipt().receipt_id().as_str(),
-                    receipt.receipt().sanitizer_version().as_str(),
-                    observation.payload_reference().digest().as_str(),
-                    serde_json::to_string(receipt).unwrap()
-                ],
-            )
-            .await
-            .unwrap();
-        transaction
-            .execute(
-                "INSERT INTO observations
-                 (observation_id, payload_digest, receipt_id, observation_json,
-                  committed_cursor_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    observation.observation_id().as_str(),
-                    observation.payload_reference().digest().as_str(),
-                    receipt.receipt().receipt_id().as_str(),
-                    serde_json::to_string(&observation).unwrap(),
-                    serde_json::to_string(&cursor).unwrap()
-                ],
-            )
-            .await
-            .unwrap();
-        transaction
-            .execute(
-                "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
-                 VALUES (?1, ?2, ?3)",
-                params![
-                    serde_json::to_string(cursor.source()).unwrap(),
-                    serde_json::to_string(cursor.scope()).unwrap(),
-                    serde_json::to_string(&cursor).unwrap()
-                ],
-            )
-            .await
-            .unwrap();
-        let next_retry = if index % 2 == 1 && index / 2 < due {
-            0
-        } else {
-            FAR_FUTURE_MICROS
-        };
-        transaction
-            .execute(
-                "INSERT INTO projection_queue
-                 (observation_id, observation_sequence, attempt_count, next_retry_at_micros,
-                  last_error)
-                 SELECT observation_id, sequence, 3, ?2, 'recorded failure'
-                 FROM observations WHERE observation_id = ?1",
-                params![observation.observation_id().as_str(), next_retry],
-            )
-            .await
-            .unwrap();
+    // Fixture preparation must not dominate the recovery being measured with
+    // four asynchronous writer round-trips per observation. Keep every typed
+    // record and the atomic setup, but submit bounded, explicitly ordered pages.
+    for start in (0..deferred + due).step_by(128) {
+        let end = (start + 128).min(deferred + due);
+        let page = (start..end)
+            .map(|index| {
+                let (observation, cursor) = queued_observation(index);
+                let receipt = observation.receipt();
+                let next_retry = if index % 2 == 1 && index / 2 < due {
+                    0
+                } else {
+                    FAR_FUTURE_MICROS
+                };
+                serde_json::json!({
+                    "receipt_id": receipt.receipt().receipt_id().as_str(),
+                    "sanitizer_version": receipt.receipt().sanitizer_version().as_str(),
+                    "payload_digest": observation.payload_reference().digest().as_str(),
+                    "receipt_json": serde_json::to_string(receipt).unwrap(),
+                    "observation_id": observation.observation_id().as_str(),
+                    "observation_json": serde_json::to_string(&observation).unwrap(),
+                    "cursor_json": serde_json::to_string(&cursor).unwrap(),
+                    "source_json": serde_json::to_string(cursor.source()).unwrap(),
+                    "scope_json": serde_json::to_string(cursor.scope()).unwrap(),
+                    "next_retry": next_retry,
+                })
+            })
+            .collect::<Vec<_>>();
+        let expected_rows = u64::try_from(page.len()).unwrap();
+        let encoded = serde_json::to_string(&page).unwrap();
+        for sql in [
+            "INSERT INTO sanitization_receipts
+             (receipt_id, sanitizer_version, payload_digest, receipt_json)
+             SELECT json_extract(value, '$.receipt_id'),
+                    json_extract(value, '$.sanitizer_version'),
+                    json_extract(value, '$.payload_digest'), json_extract(value, '$.receipt_json')
+             FROM json_each(?1) ORDER BY CAST(key AS INTEGER)",
+            "INSERT INTO observations
+             (observation_id, payload_digest, receipt_id, observation_json, committed_cursor_json)
+             SELECT json_extract(value, '$.observation_id'), json_extract(value, '$.payload_digest'),
+                    json_extract(value, '$.receipt_id'), json_extract(value, '$.observation_json'),
+                    json_extract(value, '$.cursor_json')
+             FROM json_each(?1) ORDER BY CAST(key AS INTEGER)",
+            "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
+             SELECT json_extract(value, '$.source_json'), json_extract(value, '$.scope_json'),
+                    json_extract(value, '$.cursor_json')
+             FROM json_each(?1) ORDER BY CAST(key AS INTEGER)",
+            "INSERT INTO projection_queue
+             (observation_id, observation_sequence, attempt_count, next_retry_at_micros, last_error)
+             SELECT observation.observation_id, observation.sequence, 3,
+                    json_extract(input.value, '$.next_retry'), 'recorded failure'
+             FROM json_each(?1) AS input CROSS JOIN observations AS observation
+             WHERE observation.observation_id = json_extract(input.value, '$.observation_id')
+             ORDER BY CAST(input.key AS INTEGER)",
+        ] {
+            assert_eq!(
+                transaction
+                    .execute(sql, params![encoded.as_str()])
+                    .await
+                    .unwrap(),
+                expected_rows,
+                "every fixture page must preserve all receipt, observation, cursor and queue rows"
+            );
+        }
     }
     transaction.commit().await.unwrap();
 }
