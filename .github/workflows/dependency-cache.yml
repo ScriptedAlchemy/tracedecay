@@ -29,6 +29,8 @@ concurrency:
 jobs:
   helpers:
     name: Cache launcher helpers
+    outputs:
+      cache-key: ${{ steps.saved.outputs.key }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -58,12 +60,14 @@ jobs:
           bazel build "${options[@]}" "${targets[@]}"
 
       - name: Save newly fetched Bazel dependencies
+        id: saved
         if: always() && !cancelled() && steps.bazel.outputs.repository-cache-key != ''
         uses: ./.github/actions/setup-bazel/save
         with:
           path: ${{ steps.bazel.outputs.repository-cache-path }}
           key: ${{ steps.bazel.outputs.repository-cache-key }}
           restored-entries: ${{ steps.bazel.outputs.repository-cache-entries }}
+          restored-key: ${{ steps.bazel.outputs.repository-cache-restored-key }}
 
   verify:
     name: Verify restored dependency cache
@@ -81,6 +85,7 @@ jobs:
       - uses: ./.github/actions/setup-bazel
         with:
           cache-key: dependency-helpers-verification
+          repository-cache-key: ${{ needs.helpers.outputs.cache-key }}
           cache-save: "false"
       - *resolve-helpers
 
