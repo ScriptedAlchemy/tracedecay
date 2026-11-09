@@ -1210,15 +1210,21 @@ fn run_incremental_vacuum(
         .verify(RuntimeWriteAuthorityStage::BeforeCommit)
         .is_err()
     {
-        if let Err(error) = transaction.rollback() {
-            tracing::error!(
-                error = %error,
-                "SQLite vacuum rollback failed after write authority was revoked"
-            );
-        }
-        command.settle(Err(WriterActorError::AuthorityDenied {
-            stage: RuntimeWriteAuthorityStage::BeforeCommit,
-        }));
+        let failure = match transaction.rollback() {
+            Ok(()) => WriterActorError::AuthorityDenied {
+                stage: RuntimeWriteAuthorityStage::BeforeCommit,
+            },
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    "SQLite vacuum rollback failed after write authority was revoked"
+                );
+                WriterActorError::IncrementalVacuumFailed(format!(
+                    "rollback after write authority revocation failed: {error}"
+                ))
+            }
+        };
+        command.settle(Err(failure));
         return;
     }
     let result = transaction.commit().map_err(incremental_vacuum_error);
@@ -2189,6 +2195,58 @@ mod auxiliary_scheduling_tests {
                 stage: RuntimeWriteAuthorityStage::BeforeCommit
             })
         ));
+        assert!(connection.is_autocommit());
+        assert_eq!(vacuum_page_counts(&connection), before);
+    }
+
+    #[test]
+    fn incremental_vacuum_preserves_rollback_failure_after_revocation() {
+        let mut connection = vacuum_connection_with_free_pages();
+        let before = vacuum_page_counts(&connection);
+        let rollback_denied = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&rollback_denied);
+        // Deny SQLite's actual ROLLBACK statement, not a fabricated error
+        // passed into the writer. BEGIN and the vacuum itself remain allowed.
+        connection
+            .authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    rusqlite::hooks::AuthAction::Transaction {
+                        operation: rusqlite::hooks::TransactionOperation::Rollback
+                    }
+                ) {
+                    observed.store(true, Ordering::SeqCst);
+                    rusqlite::hooks::Authorization::Deny
+                } else {
+                    rusqlite::hooks::Authorization::Allow
+                }
+            }))
+            .unwrap();
+        let authority = Arc::new(RecordingAuthority {
+            stages: Arc::new(Mutex::new(Vec::new())),
+            deny_before_commit: true,
+        });
+        let (reply, mut response) = oneshot::channel();
+        run_incremental_vacuum(
+            &mut connection,
+            IncrementalVacuumCommand::new(8, authority, reply),
+        );
+
+        assert!(rollback_denied.load(Ordering::SeqCst));
+        assert!(matches!(
+            response.try_recv().unwrap(),
+            Err(WriterActorError::IncrementalVacuumFailed(message))
+                if message.contains("rollback") && message.contains("not authorized")
+        ));
+        // The failed rollback leaves a live transaction. Clear the test-only
+        // authorizer and recover it explicitly, then verify no data was lost.
+        assert!(!connection.is_autocommit());
+        connection
+            .authorizer(Some(|_: rusqlite::hooks::AuthContext<'_>| {
+                rusqlite::hooks::Authorization::Allow
+            }))
+            .unwrap();
+        connection.execute_batch("ROLLBACK").unwrap();
         assert!(connection.is_autocommit());
         assert_eq!(vacuum_page_counts(&connection), before);
     }
