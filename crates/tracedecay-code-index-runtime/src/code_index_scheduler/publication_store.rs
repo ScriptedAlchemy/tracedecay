@@ -1048,6 +1048,14 @@ impl CodeIndexPreparationPort for DaemonCodeIndexPreparationV1 {
                                 "staged sealed segment identity changed during read".to_owned(),
                             ));
                         }
+                        // A failed authenticated read (including a digest mismatch
+                        // without a metadata change) invalidates the preparation.
+                        // A retry must not reauthorize these staged bytes.
+                        if result.is_err() {
+                            buffer.clear();
+                            files.segment_reads_poisoned = true;
+                            files.pinned_segment_reads.clear();
+                        }
                         result
                     }
                 }

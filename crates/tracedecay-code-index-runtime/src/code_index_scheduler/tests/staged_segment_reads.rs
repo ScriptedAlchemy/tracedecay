@@ -249,6 +249,104 @@ fn staged_segment_range_reads_open_once_per_cached_file_and_revalidate_replaceme
 }
 
 #[test]
+fn staged_segment_cold_digest_mismatch_poison_survives_restoration() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let source_root = TempDir::new().expect("source store");
+    let generation = source_generation(&fixture, source_root.path());
+    let target_root = TempDir::new().expect("target store");
+    let mut target = target_store(target_root.path(), &fixture);
+    let mut preparation = target
+        .prepare(&generation.sealed_scope(), None)
+        .expect("prepare target");
+    let publication = generation
+        .stage_publication(&mut preparation)
+        .expect("stage real generation");
+
+    // An auxiliary segment outside the manifest can still invalidate the
+    // transaction. Corrupt it *before* the first pinned read, so all inode
+    // metadata stays unchanged during that read and only SHA-256 catches it.
+    let original = b"auxiliary sealed segment";
+    let digest = segment_digest(original);
+    preparation
+        .write_segment(SealedGenerationSegmentPublicationV1::File {
+            digest: &digest,
+            bytes: original,
+        })
+        .expect("stage auxiliary segment");
+    let path = staged_path(&preparation, &digest);
+    let corrupted = vec![b'X'; original.len()];
+    std::fs::write(&path, &corrupted).expect("corrupt the same staged inode");
+    assert_eq!(std::fs::read(&path).expect("corrupt bytes"), corrupted);
+
+    let reader = preparation.segment_reader();
+    let opens_before = preparation.staged_segment_read_open_attempts_for_test();
+    let request = SealedGenerationSegmentReadV1::Whole {
+        digest: &digest,
+        size_bytes: original.len() as u64,
+    };
+    let mut read = b"prior success sentinel".to_vec();
+    assert!(matches!(
+        reader(request, &mut read),
+        Err(CodeIndexProductionErrorV1::Contract(detail))
+            if detail.contains("content address")
+    ));
+    assert!(read.is_empty(), "corrupt bytes must not escape");
+    assert_eq!(
+        preparation.staged_segment_read_open_attempts_for_test(),
+        opens_before + 1,
+        "the checksum refusal must follow a real pathname open"
+    );
+    assert_eq!(
+        pinned_handle_count(&preparation),
+        0,
+        "a failed digest must invalidate the pinned cache even when metadata is stable"
+    );
+
+    // Neither retries nor restoration can make a poisoned transaction valid.
+    read.extend_from_slice(b"stale retry");
+    assert!(matches!(
+        reader(request, &mut read),
+        Err(CodeIndexProductionErrorV1::Contract(detail))
+            if detail.contains("identity was invalidated")
+    ));
+    assert!(read.is_empty());
+    std::fs::write(&path, original).expect("restore exact original bytes");
+    assert!(matches!(
+        reader(request, &mut read),
+        Err(CodeIndexProductionErrorV1::Contract(detail))
+            if detail.contains("identity was invalidated")
+    ));
+    assert!(read.is_empty());
+    assert_eq!(
+        preparation.staged_segment_read_open_attempts_for_test(),
+        opens_before + 1,
+        "poisoned reads must not cause another endpoint-scanned open"
+    );
+    assert!(matches!(
+        preparation.write_segment(SealedGenerationSegmentPublicationV1::File {
+            digest: &digest,
+            bytes: original,
+        }),
+        Err(CodeIndexPublicationStoreErrorV1::Unavailable(detail))
+            if detail.contains("identity was invalidated")
+    ));
+    assert!(matches!(
+        target.commit(&mut preparation, &publication),
+        Err(CodeIndexPublicationStoreErrorV1::Unavailable(detail))
+            if detail.contains("identity was invalidated")
+    ));
+    assert!(
+        target
+            .load_active_manifest()
+            .expect("active manifest probe")
+            .is_none(),
+        "a poisoned preparation must not publish its valid-looking manifest"
+    );
+    preparation.abort().expect("discard poisoned preparation");
+    assert!(!path.exists());
+}
+
+#[test]
 fn staged_segment_in_place_mutation_poison_survives_restoration_and_refuses_commit() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let source_root = TempDir::new().expect("source store");
