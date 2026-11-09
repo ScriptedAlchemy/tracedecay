@@ -2,6 +2,8 @@
 //! clients. A process death before the no-replace rename leaves only disposable
 //! schema in the private work directory. Hard links identify the empty sidecar
 //! reservations if the process dies partway through claiming the destination.
+#[cfg(unix)]
+use std::{ffi::CString, os::fd::AsRawFd};
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -116,10 +118,52 @@ impl InitializationDirectory {
         self.directory.join("transferred.sqlite")
     }
 
+    /// Teardown is relative to the directory capability acquired with the
+    /// initialization lease. A noncooperating process can rename the directory
+    /// and replace its pathname with a symlink; unlinking through that pathname
+    /// would otherwise delete unrelated database files outside our staging area.
+    fn remove_private_member(&self, member: &str) -> io::Result<()> {
+        if member.is_empty()
+            || member == "."
+            || member == ".."
+            || member.contains('/')
+            || member.contains('\\')
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid SQLite staging member",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            let name = CString::new(member)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid staging name"))?;
+            let directory = self
+                .directory_pin
+                .as_ref()
+                .ok_or_else(|| io::Error::other("SQLite staging directory is no longer pinned"))?;
+            // SAFETY: the directory descriptor remains open for this call,
+            // and name is a NUL-terminated, single-component filename.
+            let rc = unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) };
+            if rc == 0 {
+                return Ok(());
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::NotFound {
+                return Ok(());
+            }
+            Err(error)
+        }
+        #[cfg(not(unix))]
+        {
+            remove_if_present(&self.directory.join(member))
+        }
+    }
+
     fn discard_schema(&self) -> io::Result<()> {
-        remove_if_present(&self.prepared())?;
+        self.remove_private_member("prepared.sqlite")?;
         for suffix in ["-wal", "-shm", "-journal", ""] {
-            remove_if_present(&with_suffix(&self.database(), suffix))?;
+            self.remove_private_member(&format!("schema.sqlite{suffix}"))?;
         }
         Ok(())
     }
@@ -234,9 +278,9 @@ impl InitializationDirectory {
             ));
         }
         for suffix in SIDECARS {
-            remove_if_present(&self.witness(suffix))?;
+            self.remove_private_member(&format!("reservation{suffix}"))?;
         }
-        remove_if_present(&self.transferred())?;
+        self.remove_private_member("transferred.sqlite")?;
         sync_directory(&self.directory, SYNC)?;
         self.retire()
     }
@@ -250,7 +294,7 @@ impl InitializationDirectory {
                 ));
             }
         }
-        remove_if_present(&self.directory.join(OWNER))?;
+        self.remove_private_member(OWNER)?;
         drop(self.directory_pin.take());
         fs::remove_dir(&self.directory)?;
         sync_parent_directory(&self.directory, SYNC)
@@ -340,6 +384,7 @@ fn present(path: &Path) -> io::Result<bool> {
     }
 }
 
+#[cfg(any(test, not(unix)))]
 fn remove_if_present(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -381,6 +426,8 @@ fn same_regular_file(left: &Path, right: &Path) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
     use std::process::Command;
     use tempfile::TempDir;
 
@@ -468,6 +515,75 @@ mod tests {
             );
             assert!(!InitializationDirectory::path(&destination).exists());
         }
+    }
+
+
+    /// A competing process may rename the private directory despite the
+    /// cooperative lease and install a symlink at the old path. Failed-start
+    /// cleanup must only remove entries from our *pinned* directory and never
+    /// the distinct valid SQLite database beneath that replacement symlink.
+    #[cfg(unix)]
+    #[test]
+    fn failed_initialization_cleanup_uses_pinned_directory_after_swap() {
+        const SWAP_ROOT: &str = "TRACEDECAY_SQLITE_STAGE_SWAP_ROOT";
+        const COMPLETE: &str = "tracedecay-sqlite-stage-swap-complete";
+        if let Some(root) = std::env::var_os(SWAP_ROOT) {
+            let root = PathBuf::from(root);
+            let stage = root.join("sessions.db.tracedecay-init");
+            fs::rename(&stage, root.join("retired-stage")).unwrap();
+            symlink(root.join("foreign"), &stage).unwrap();
+            println!("{COMPLETE}");
+            return;
+        }
+
+        let root = TempDir::new().unwrap();
+        let destination = root.path().join("sessions.db");
+        let stage = InitializationDirectory::begin(destination).unwrap();
+        seed(&stage.database(), 7);
+        let foreign = root.path().join("foreign");
+        fs::create_dir(&foreign).unwrap();
+        let foreign_database = foreign.join("schema.sqlite");
+        seed(&foreign_database, 99);
+        let foreign_main = fs::read(&foreign_database).unwrap();
+        fs::write(foreign.join("prepared.sqlite"), b"foreign prepared").unwrap();
+        for suffix in ["-wal", "-shm", "-journal"] {
+            fs::write(with_suffix(&stage.database(), suffix), b"owned staging sidecar").unwrap();
+            fs::write(with_suffix(&foreign_database, suffix), format!("foreign {suffix}")).unwrap();
+        }
+
+        let (_, module) = module_path!().split_once("::").unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(format!(
+                "{module}::failed_initialization_cleanup_uses_pinned_directory_after_swap"
+            ))
+            .arg("--nocapture")
+            .env(SWAP_ROOT, root.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains(COMPLETE),
+            "cross-process stage swap did not execute: {output:?}"
+        );
+
+        // Dropping a failed schema initialization is the production cleanup
+        // caller. Its directory descriptor still points to retired-stage.
+        drop(stage);
+        let retired = root.path().join("retired-stage");
+        assert!(!retired.join("schema.sqlite").exists());
+        for suffix in ["-wal", "-shm", "-journal"] {
+            assert!(!with_suffix(&retired.join("schema.sqlite"), suffix).exists());
+            assert_eq!(
+                fs::read(with_suffix(&foreign_database, suffix)).unwrap(),
+                format!("foreign {suffix}").as_bytes()
+            );
+        }
+        assert_eq!(fs::read(&foreign_database).unwrap(), foreign_main);
+        assert_eq!(
+            fs::read(foreign.join("prepared.sqlite")).unwrap(),
+            b"foreign prepared"
+        );
     }
 
     #[test]
