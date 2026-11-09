@@ -3402,10 +3402,9 @@ mod build_tests {
             "a real staged row window must precede the cancellation"
         );
         assert!(
-            interrupted_work.iter().all(|event| matches!(
-                event,
-                GraphNativeWorkV1::CompactRowsEncoded { .. }
-            )),
+            interrupted_work
+                .iter()
+                .all(|event| matches!(event, GraphNativeWorkV1::CompactRowsEncoded { .. })),
             "failed compact copy cannot claim a verified segment or a new staging page"
         );
 
@@ -3450,10 +3449,9 @@ mod build_tests {
             })
         ));
         assert!(
-            completed.iter().all(|event| !matches!(
-                event,
-                GraphNativeWorkV1::StagePageApplied { .. }
-            )),
+            completed
+                .iter()
+                .all(|event| !matches!(event, GraphNativeWorkV1::StagePageApplied { .. })),
             "compact copies are non-durable until their verified segment is installed"
         );
         let _ = installed.database().close();
