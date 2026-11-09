@@ -240,15 +240,45 @@ class QualificationTests(unittest.TestCase):
     def test_single_selection_ties_follow_frozen_question_order(self):
         positive = {"labels": ["impact"], "probs": {"impact": 0.9, "call_graph": 0.9}}
         correct_first = qualification.holdout_decision_metrics(
-            [positive], {"impact": 0.6, "call_graph": 0.6}
+            [positive], {"impact": 0.6, "call_graph": 0.6}, ("impact", "call_graph"),
         )
         wrong_first = qualification.holdout_decision_metrics(
-            [positive], {"call_graph": 0.6, "impact": 0.6}
+            [positive], {"call_graph": 0.6, "impact": 0.6}, ("call_graph", "impact"),
         )
         self.assertEqual(correct_first["model_only_selected_positive_case_recall"], 1)
         self.assertEqual(wrong_first["model_only_selected_positive_case_recall"], 0)
         self.assertEqual(correct_first["unwanted_hint_rate"], 1)
         self.assertEqual(wrong_first["unwanted_hint_rate"], 1)
+
+    def test_threshold_manifest_key_order_cannot_change_scout_tie_selection(self):
+        # Production policy retains its configured question sequence on tied
+        # u16 relevance. The threshold object is an independent JSON map;
+        # changing only its key order must never turn a wrong first hint
+        # into a passing held-out positive case.
+        self.assertLess(
+            list(self.questions).index("call_graph"),
+            list(self.questions).index("impact"),
+        )
+        result = self.signed_result()
+        result["rows"][0]["probs"]["call_graph"] = 0.9
+        frozen = copy.deepcopy(self.manifest)
+        frozen["thresholds"] = dict(reversed(list(frozen["thresholds"].items())))
+        self.assertLess(
+            list(frozen["thresholds"]).index("impact"),
+            list(frozen["thresholds"]).index("call_graph"),
+        )
+        frozen["error_tolerances"]["max_unwanted_hint_rate"] = 1.0
+        manifest_sha = qualification.sha256_json(frozen)
+        result["experiment"]["qualification_manifest_sha256"] = manifest_sha
+        result["experiment_sha256"] = score.evidence_digest(result["experiment"])
+        report = qualification.qualified_report(
+            result, frozen, manifest_sha, self.questions, self.dataset_bytes,
+        )
+        self.assertEqual(
+            report["holdout_decisions"]["model_only_selected_positive_case_recall"], 0,
+        )
+        self.assertFalse(report["checks"]["positive_case_recall"])
+        self.assertFalse(report["qualified_against_frozen_tolerances"])
 
     def test_rust_permille_rounding_rejects_false_negative_case_pass(self):
         result = self.signed_result()
@@ -299,10 +329,10 @@ class QualificationTests(unittest.TestCase):
             qualification.runtime_probability_score(0.9000000001, 65_535),
         )
         correct = qualification.holdout_decision_metrics(
-            [row], {"impact": 0.6, "call_graph": 0.6},
+            [row], {"impact": 0.6, "call_graph": 0.6}, ("impact", "call_graph"),
         )
         wrong = qualification.holdout_decision_metrics(
-            [row], {"call_graph": 0.6, "impact": 0.6},
+            [row], {"call_graph": 0.6, "impact": 0.6}, ("call_graph", "impact"),
         )
         self.assertEqual(correct["model_only_selected_positive_case_recall"], 1)
         self.assertEqual(wrong["model_only_selected_positive_case_recall"], 0)

@@ -263,7 +263,8 @@ model-only pick** (ties follow frozen question order), not any-hit recall.
 The report retains any-hit recall and all-firing metrics separately. The
 qualification gates for negative-case false hints and selected positive-case
 recall emulate Scout's integer-permille threshold rounding and u16 relevance
-rounding (ties remain in frozen question order), rather than treating the
+rounding (ties follow the frozen question vocabulary order, **not** the
+threshold JSON object's key order), rather than treating the
 historical benchmark's floating-point threshold comparison as production.
 Thus a probability of 0.5996 meets Scout's 600-permille threshold, even though
 it is below the historical floating-point threshold of 0.6. The historical

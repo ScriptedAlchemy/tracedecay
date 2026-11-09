@@ -335,14 +335,18 @@ def runtime_probability_score(probability, scale):
     return math.floor(probability * scale + 0.5)
 
 
-def holdout_decision_metrics(rows, thresholds):
+def holdout_decision_metrics(rows, thresholds, question_order):
     """Measure all threshold hits separately from the single model-only pick.
 
     Scout delivers only the first candidate, not every above-threshold answer.
     Emulate its permille threshold and u16 relevance rounding, not the historical
-    floating-point benchmark comparison. Action facts, margins and delivery
-    suppression are still omitted; this cannot establish production parity.
+    floating-point benchmark comparison. Stable relevance ties must use the
+    frozen question sequence, never the independently serialized threshold map
+    order. Action facts, margins and delivery suppression are still omitted;
+    this cannot establish production parity.
     """
+    if len(question_order) != len(thresholds) or set(question_order) != set(thresholds):
+        raise ValueError("model-only selection requires the complete frozen question order")
     hinted = unwanted = missed_positive = positive = 0
     selected_correct_positive = selected_unwanted = none_negative = none_false_hint = 0
     for row in rows:
@@ -361,7 +365,7 @@ def holdout_decision_metrics(rows, thresholds):
         # Scout sorts on u16 relevance, not the raw f64. Distinct close
         # probabilities can quantize to a tie; retain frozen question order.
         selected = max(
-            (key for key in thresholds if key in fired),
+            (key for key in question_order if key in fired),
             key=lambda key: runtime_probability_score(row["probs"][key], 65_535),
             default=None,
         )
@@ -553,7 +557,7 @@ def qualified_report(result, manifest, manifest_sha, questions, dataset_bytes, c
     scores = score_config(result, fixed_t=validated["thresholds"], cats=tuple(questions))
     fixed = scores["fixed"]["all"]
     latency = scores["latency"]
-    decisions = holdout_decision_metrics(rows, validated["thresholds"])
+    decisions = holdout_decision_metrics(rows, validated["thresholds"], tuple(questions))
     tolerances = validated["error_tolerances"]
     # A JSON byte ceiling does not bound tokenizer-specific context usage.
     # An unknown or zero server-reported count is not proof of fitting inside
