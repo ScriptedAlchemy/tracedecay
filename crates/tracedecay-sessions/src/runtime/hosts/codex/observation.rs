@@ -45,6 +45,8 @@ use tracedecay_runtime_core::resident_memory::ProcessSharedMemoryReservationV1;
 #[cfg(test)]
 mod meta_cache_tests;
 #[cfg(test)]
+mod reoffer_tests;
+#[cfg(test)]
 mod retired_source_tests;
 #[cfg(test)]
 mod rollout_source_tests;
@@ -403,6 +405,11 @@ impl CodexObservationAdmission<'_> {
     /// Prepare this bounded page's context and scope decisions on the blocking
     /// pool. The page owns its reservation throughout preparation; only these
     /// decisions, not filesystem work, are used by frame callbacks and retries.
+    #[tracing::instrument(
+        name = "sessions.observation.codex.resolve_scope",
+        level = "trace",
+        skip_all
+    )]
     async fn resolve_scope(
         &self,
         matchers: &ProjectRootMatcherCache,
@@ -772,6 +779,7 @@ async fn admit_codex_jsonl_page(
     .with_max_new_bytes(max_new_bytes)
     .with_persisted_cursor_update(PersistedCursorUpdate::Replace)
     .with_lazy_shared_frame_preparation()
+    .with_skip_empty_initialization()
     .with_cancellation(cancellation.clone());
     if let Some(max_frames) = max_frames {
         request = request.with_max_frames(max_frames);

@@ -81,6 +81,7 @@ struct SeamSpyAdmission {
     /// strictly inside its range.
     peer_covers_advance_through: Mutex<Option<u64>>,
     rewrites: Mutex<Vec<RewriteCall>>,
+    rewrite_completion_failure: Mutex<Option<HostAdmissionOutcome>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1053,6 +1054,9 @@ impl HostAdmission for SeamSpyAdmission {
             .lock()
             .unwrap()
             .push(RewriteCall::Complete(generation));
+        if let Some(failure) = self.rewrite_completion_failure.lock().unwrap().take() {
+            return Box::pin(async move { Err(failure) });
+        }
         self.inner
             .complete_source_rewrite(source, scope, generation)
     }
@@ -1969,6 +1973,218 @@ async fn a_refusal_memo_cannot_authorize_uncovered_bytes_or_hide_an_in_place_rew
             Some(foreign)
         );
     }
+}
+
+/// Other providers may use their initializer to verify proof even with zero
+/// frames. Default behavior therefore continues invoking it and preserves a
+/// refusal before the pending-rewrite completion check.
+#[tokio::test]
+async fn unchanged_noop_does_not_skip_initialization_without_provider_opt_in() {
+    let (_temp, path, len) = rollout_fixture();
+    let spy = SeamSpyAdmission::default();
+    let first =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("initial admission");
+    assert_eq!(first.covered_through, len);
+    spy.rewrites.lock().unwrap().clear();
+    let original_cursor = stored_cursor(&spy).await;
+
+    let request = super::JsonlObservationAdmissionRequest::new(
+        "codex",
+        &path,
+        &spy,
+        crate::runtime::hosts::codex::codex_observation_source_v2(SESSION_ID).unwrap(),
+        ObservationScopeV1::Profile,
+        RetentionClass::new("test").unwrap(),
+    );
+    let mut initialized = false;
+    let error = super::admit_jsonl_observations(
+        request,
+        async |_| {
+            initialized = true;
+            Err::<(), TranscriptIngestError>(TranscriptIngestError::InvalidFrameState {
+                provider: "codex",
+            })
+        },
+        |(), _, _, _, _, _| panic!("empty page cannot normalize a frame"),
+    )
+    .await
+    .expect_err("without opt-in the initializer must still validate an empty page");
+    assert!(initialized);
+    assert!(matches!(
+        error,
+        TranscriptIngestError::InvalidFrameState { provider: "codex" }
+    ));
+    assert_eq!(stored_cursor(&spy).await, original_cursor);
+    assert!(spy.rewrites.lock().unwrap().is_empty());
+}
+
+/// An empty re-offer still requires a successful durable rewrite-completion
+/// check. A transient read failure must remain a typed block, not an empty
+/// success that incorrectly declares source convergence.
+#[tokio::test]
+async fn unchanged_codex_reoffer_propagates_rewrite_completion_failure() {
+    let (_temp, path, len) = rollout_fixture();
+    let spy = SeamSpyAdmission::default();
+    let initial =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("initial admission");
+    assert_eq!(initial.covered_through, len);
+    let cursor = stored_cursor(&spy).await.expect("committed source cursor");
+    let rows = spy.inner.observations().len();
+    let captures = spy.capture_count();
+    assert!(rows > 0, "the source must have real committed evidence");
+    spy.rewrites.lock().unwrap().clear();
+    *spy.rewrite_completion_failure.lock().unwrap() = Some(
+        HostAdmissionOutcome::retained_unavailable("projection_storage_retry_scheduled"),
+    );
+
+    let request = super::JsonlObservationAdmissionRequest::new(
+        "codex",
+        &path,
+        &spy,
+        crate::runtime::hosts::codex::codex_observation_source_v2(SESSION_ID).unwrap(),
+        ObservationScopeV1::Profile,
+        RetentionClass::new("test").unwrap(),
+    )
+    .with_persisted_cursor_update(super::PersistedCursorUpdate::Replace)
+    .with_skip_empty_initialization();
+    let error = super::admit_jsonl_observations(
+        request,
+        async |_| {
+            Err::<(), TranscriptIngestError>(TranscriptIngestError::InvalidFrameState {
+                provider: "codex",
+            })
+        },
+        |(), _, _, _, _, _| panic!("unchanged source cannot normalize frames"),
+    )
+    .await
+    .expect_err("failed durable rewrite check must not report convergence");
+    assert!(matches!(
+        error,
+        TranscriptIngestError::HostAdmission {
+            provider: "codex",
+            reason: "projection_storage_retry_scheduled",
+            retryable: true,
+            ..
+        }
+    ));
+    assert_eq!(stored_cursor(&spy).await, Some(cursor.clone()));
+    assert_eq!(spy.inner.observations().len(), rows);
+    assert_eq!(spy.capture_count(), captures);
+    assert_eq!(
+        spy.rewrites.lock().unwrap().as_slice(),
+        &[RewriteCall::Complete(cursor.generation())]
+    );
+
+    let retry =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("retry must recheck durable rewrite completion");
+    assert_eq!(retry.covered_through, len);
+    assert_eq!(retry.bytes_consumed, 0);
+    assert_eq!(retry.frames_persisted, 0);
+    assert_eq!(stored_cursor(&spy).await, Some(cursor.clone()));
+    assert_eq!(spy.inner.observations().len(), rows);
+    assert_eq!(
+        spy.rewrites.lock().unwrap().as_slice(),
+        &[
+            RewriteCall::Complete(cursor.generation()),
+            RewriteCall::Complete(cursor.generation()),
+        ]
+    );
+}
+
+/// A durable unchanged cursor must not pay for a second provider-scope
+/// initialization on every discovery re-offer. Rewrite completion remains
+/// authoritative even when no frames were read, and the next append must
+/// still admit through normal scope/provenance checks.
+#[tokio::test]
+async fn unchanged_codex_reoffers_skip_empty_initializer_but_complete_rewrites() {
+    let (_temp, path, len) = rollout_fixture();
+    let spy = SeamSpyAdmission::default();
+    let first =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("initial admission");
+    assert_eq!(first.covered_through, len);
+    let previous = stored_cursor(&spy).await.expect("durable cursor");
+    let original_rows = spy.inner.observations().len();
+    assert!(
+        original_rows > 0,
+        "the cold pass must admit actual evidence"
+    );
+    let original_captures = spy.capture_count();
+    spy.rewrites.lock().unwrap().clear();
+
+    for _ in 0..16 {
+        let request = super::JsonlObservationAdmissionRequest::new(
+            "codex",
+            &path,
+            &spy,
+            crate::runtime::hosts::codex::codex_observation_source_v2(SESSION_ID).unwrap(),
+            ObservationScopeV1::Profile,
+            RetentionClass::new("test").unwrap(),
+        )
+        .with_persisted_cursor_update(super::PersistedCursorUpdate::Replace)
+        .with_lazy_shared_frame_preparation()
+        .with_skip_empty_initialization();
+        let mut initialized = false;
+        let idle = super::admit_jsonl_observations(
+            request,
+            async |_| {
+                initialized = true;
+                Err::<(), TranscriptIngestError>(TranscriptIngestError::InvalidFrameState {
+                    provider: "codex",
+                })
+            },
+            |(), _, _, _, _, _| panic!("unchanged source must not normalize frames"),
+        )
+        .await
+        .expect("unchanged source must avoid the empty initializer");
+        assert!(!initialized, "zero-frame re-offer started scope resolution");
+        assert_eq!(idle.bytes_consumed, 0);
+        assert_eq!(idle.frames_persisted, 0);
+        assert_eq!(idle.covered_through, len);
+    }
+    {
+        let completions = spy.rewrites.lock().unwrap();
+        assert_eq!(
+            completions.len(),
+            16,
+            "no-op re-offers must still check durable rewrites"
+        );
+        assert!(completions.iter().all(|call| {
+            matches!(call, RewriteCall::Complete(generation) if *generation == previous.generation())
+        }));
+    }
+    assert_eq!(spy.inner.observations().len(), original_rows);
+    assert_eq!(spy.capture_count(), original_captures);
+    assert_eq!(stored_cursor(&spy).await, Some(previous));
+
+    let appended = json!({
+        "timestamp": "2026-01-01T00:00:02.000Z",
+        "type": "event_msg",
+        "payload": crate::runtime::hosts::codex::user_message_payload("newly appended evidence")
+    })
+    .to_string()
+        + "\n";
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(appended.as_bytes())
+        .unwrap();
+    spin_until_jsonl_change_settled(&path);
+    let resumed =
+        try_admit_codex_jsonl_observations_for_profile_with_admission(&path, None, &[], &spy, None)
+            .await
+            .expect("append must still take the real admission path");
+    assert_eq!(resumed.bytes_consumed, appended.len() as u64);
+    assert_eq!(resumed.frames_persisted, 1);
+    assert_eq!(spy.inner.observations().len(), original_rows + 1);
 }
 
 #[tokio::test]

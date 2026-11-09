@@ -4437,4 +4437,87 @@ mod tests {
                 .any(|family| family.contains("stopped at its entry budget"))
         );
     }
+
+    #[cfg(unix)]
+    #[asupersync::test]
+    async fn large_sealed_and_code_index_store_reports_invalid_pointer_as_unavailable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let profile = tmp.path().join("profile");
+        let data_root = profile.join("projects/proj_large");
+        let sealed_root = data_root.join(SEALED_GRAPH_DIRECTORY);
+        const MIB: u64 = 1024 * 1024;
+        const GIB: u64 = 1024 * MIB;
+        const SEALED_BYTES: u64 = 220 * MIB;
+
+        // This is a metadata-only fixture: 70 sparse sealed containers total
+        // about 15 GiB, plus a separate 15 GiB code-index family. No payloads
+        // are read, copied, or physically allocated during the report.
+        for number in 0..70 {
+            let generation = sealed_root.join(format!("{number:064x}"));
+            std::fs::create_dir_all(&generation).unwrap();
+            std::fs::File::create(generation.join("generation.grafeo"))
+                .unwrap()
+                .set_len(SEALED_BYTES)
+                .unwrap();
+        }
+        let canonical = Path::new("/repos/large");
+        let code_root =
+            scoped_code_index_store_root(&data_root.join(CODE_INDEX_DIRECTORY), canonical);
+        let segments = code_root.join("code-generation-segments-v1");
+        std::fs::create_dir_all(&segments).unwrap();
+        std::fs::File::create(segments.join("large-segments.bin"))
+            .unwrap()
+            .set_len(15 * GIB)
+            .unwrap();
+        let pointer = code_root.join("active-code-generation-v1.json");
+        std::fs::File::create(&pointer)
+            .unwrap()
+            .set_len(2 * MIB)
+            .unwrap();
+
+        // Exercise the same production project-report collector that invokes
+        // retention's active-pointer reader when a protection set is present.
+        let report =
+            build_project_storage_report(&profile, "proj_large", canonical, Ok(BTreeSet::new()))
+                .unwrap();
+        assert_eq!(report.stores.len(), 1);
+        assert_eq!(
+            report.stores[0].size_coverage.state,
+            StorageReportSizeStateV1::Complete
+        );
+        assert_eq!(report.stores[0].kinds.sealed_graph, 70 * SEALED_BYTES);
+        assert!(report.stores[0].kinds.generation_artifacts >= 15 * GIB);
+        assert_eq!(report.code_generation_retention.len(), 0);
+        assert_eq!(report.code_generation_retention_availability.len(), 1);
+        assert_eq!(
+            report.code_generation_retention_availability[0].state,
+            StorageReportAvailabilityState::Unavailable
+        );
+        assert_eq!(
+            report.code_generation_retention_availability[0]
+                .reason
+                .as_deref(),
+            Some("generation_retention_plan_unavailable")
+        );
+        assert_eq!(std::fs::metadata(pointer).unwrap().len(), 2 * MIB);
+
+        // The offline storage-report command follows the full profile census
+        // and registered-project sampling path, not just the targeted route.
+        // It must complete against both large sparse families with complete,
+        // truthful size coverage rather than expanding their file contents.
+        seed_global_db(&profile, &[("proj_large", "/repos/large")]).await;
+        let offline = build_storage_report(&profile).await.unwrap();
+        assert_eq!(offline.stores.len(), 1);
+        assert_eq!(offline.stores[0].kinds.sealed_graph, 70 * SEALED_BYTES);
+        assert!(offline.stores[0].kinds.generation_artifacts >= 15 * GIB);
+        assert_eq!(
+            offline.stores[0].size_coverage.state,
+            StorageReportSizeStateV1::Complete
+        );
+        assert_eq!(
+            offline.full_profile_size.as_ref().unwrap().state,
+            ProfileTotalCoverageStateV1::Complete
+        );
+        assert!(!offline.footprint.as_ref().unwrap().truncated);
+    }
 }
