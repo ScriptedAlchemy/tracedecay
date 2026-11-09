@@ -14,6 +14,7 @@ test-helpers = [
     "tracedecay-runtime-core/test-helpers",
     "tracedecay-session-temporal-store/test-helpers",
     "dep:rusqlite",
+    "dep:tempfile",
 ]
 
 [dependencies]
@@ -43,11 +44,16 @@ tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 tracedecay-sessions = { path = "../tracedecay-sessions" }
 tracedecay-store = { path = "../tracedecay-store" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query" }
-tempfile.workspace = true
+# Test-only harnesses in this crate build temporary stores. Optional and
+# activated by `test-helpers` (the only non-`cfg(test)` consumer is the
+# re-exported `tests::` harness); the crate's own `cfg(test)` builds resolve
+# it from dev-dependencies, so production builds never link it.
+tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true, features = ["async"] }
 rusqlite.workspace = true
+tempfile.workspace = true
 # Test-only helper surfaces this crate's test targets reach across crate
 # boundaries: engine fixtures, session normalizers, and temporal page requests.
 tracedecay-graph-db = { path = "../tracedecay-graph-db", features = ["test-helpers"] }

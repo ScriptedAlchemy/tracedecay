@@ -1,9 +1,6 @@
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 
-use asupersync::fs::{BufReader, File, Lines};
-use asupersync::io::AsyncWriteExt;
-use asupersync::stream::StreamExt;
 #[cfg(windows)]
 use std::path::{Component, Path, Prefix};
 
@@ -253,8 +250,8 @@ pub(super) async fn projection_retry_state(
 /// Queue rows one re-arm transaction touches.
 pub(crate) const REARM_PROJECTION_RETRY_BATCH_ROWS: i64 = 1_024;
 
-/// Keep at most this many bytes of candidate windows in memory. Overflow
-/// uses an anonymous file on the registered store's filesystem.
+/// Hard ceiling for frozen candidate windows. A larger recovery refuses
+/// before acquiring a writer rather than spilling unbounded data beside SQLite.
 const REARM_CANDIDATE_STAGE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -309,30 +306,19 @@ pub(crate) async fn rearm_queued_projection_retries(
 #[derive(Default)]
 pub(super) struct StagedRetryWindows {
     memory: std::vec::IntoIter<String>,
-    overflow: Option<Lines<File>>,
 }
 
 impl StagedRetryWindows {
     pub(super) async fn next(&mut self) -> ProjectionStoreResult<Option<String>> {
-        if let Some(page) = self.memory.next() {
-            return Ok(Some(page));
-        }
-        let Some(lines) = self.overflow.as_mut() else {
-            return Ok(None);
-        };
-        lines
-            .next()
-            .await
-            .transpose()
-            .map_err(|error| storage("read staged retry identities", error))
+        Ok(self.memory.next())
     }
 }
 
 /// The snapshot pins the WAL only during read-only candidate discovery and
 /// drops before any recovery writes. Scan the old queue in bounded pages
 /// without staging the inactive prefix or any observation payload.
-/// Overflow holds only the frozen identity tuples and is discarded on drop,
-/// including when discovery, checkpointing or a later writer fails.
+/// If frozen identities exceed the memory ceiling, refuse without spilling
+/// into the database filesystem or publishing a partially rearmed prefix.
 #[tracing::instrument(
     name = "global_db.observation_projection.stage_retry_rearm",
     level = "trace",
@@ -354,11 +340,10 @@ pub(super) async fn stage_rearm_projection_retry_candidates(
         return Ok(StagedRetryWindows::default());
     };
     let mut staged = Vec::new();
-    let mut overflow: Option<File> = None;
     let mut staged_bytes = 0_usize;
     let mut after_rowid = 0_i64;
     while after_rowid < last_rowid {
-        let Some((batch_end, mut candidates)) = read_rearm_projection_retry_candidates(
+        let Some((batch_end, candidates)) = read_rearm_projection_retry_candidates(
             &snapshot,
             after_rowid,
             last_rowid,
@@ -371,53 +356,23 @@ pub(super) async fn stage_rearm_projection_retry_candidates(
         };
         let page_bytes = candidates
             .capacity()
-            .saturating_add(std::mem::size_of::<String>());
-        if overflow.is_none() && page_bytes <= max_staged_bytes - staged_bytes {
-            staged_bytes += page_bytes;
-            staged.push(candidates);
-        } else {
-            let file = match &mut overflow {
-                Some(file) => file,
-                slot @ None => {
-                    let directory = database
-                        .database_path()
-                        .parent()
-                        .ok_or_else(|| {
-                            storage_message(
-                                OPERATION,
-                                "registered database has no containing directory",
-                            )
-                        })?
-                        .to_path_buf();
-                    let file = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-                        tempfile::tempfile_in(directory)
-                    })
-                    .await
-                    .map_err(|error| storage_message(OPERATION, error))?
-                    .map_err(|error| storage(OPERATION, error))?;
-                    slot.insert(File::from_std(file))
-                }
-            };
-            // json_group_array emits one compact JSON value, escaping embedded newlines.
-            candidates.push('\n');
-            file.write_all(candidates.as_bytes())
-                .await
-                .map_err(|error| storage(OPERATION, error))?;
+            .checked_add(std::mem::size_of::<String>())
+            .ok_or_else(|| storage_message(OPERATION, "retry candidate size overflow"))?;
+        staged_bytes = staged_bytes
+            .checked_add(page_bytes)
+            .ok_or_else(|| storage_message(OPERATION, "retry staging size overflow"))?;
+        if staged_bytes > max_staged_bytes {
+            return Err(storage_message(
+                OPERATION,
+                "frozen retry candidates exceed bounded memory capacity",
+            ));
         }
+        staged.push(candidates);
         after_rowid = batch_end;
     }
     drop(snapshot);
-    let overflow = if let Some(mut file) = overflow {
-        file.rewind()
-            .await
-            .map_err(|error| storage(OPERATION, error))?;
-        Some(BufReader::new(file).lines())
-    } else {
-        None
-    };
     Ok(StagedRetryWindows {
         memory: staged.into_iter(),
-        overflow,
     })
 }
 

@@ -767,28 +767,52 @@ async fn staged_retry_recovery_releases_wal_reader_before_writes() {
 }
 
 #[asupersync::test]
-async fn retry_candidate_overflow_rearms_every_window_without_a_writer_during_discovery() {
+async fn retry_candidate_memory_ceiling_refuses_without_writes_and_recovers() {
     let harness = RegisteredGlobalDbHarness::open("rearm-stage-memory-bound").await;
     seed_queue(&harness, 9, 0).await;
     let database = harness.registered.runtime_database();
-    let before = writer_telemetry(&harness.registered).transactions;
-    // Type and size of the canonical observation IDs make an eight-byte
-    // allowance too small even for the shortest window.
-    let mut staged = stage_rearm_projection_retry_candidates(database, 2, 1_000_000, 8)
+    let now = 1_000_000_i64;
+
+    // Permit exactly the first two-row window. The second window must
+    // refuse rather than spilling its frozen identities to the store disk.
+    let snapshot = harness.registered.read_snapshot().await.unwrap();
+    let frontier = retry_rearm_frontier(&snapshot, now).await.unwrap().unwrap();
+    let (end, first) = read_rearm_projection_retry_candidates(&snapshot, 0, frontier, 2, now)
         .await
+        .unwrap()
         .unwrap();
+    assert_eq!(end, 2);
+    let capacity = first.capacity() + std::mem::size_of::<String>();
+    drop(snapshot);
+
+    let before = writer_telemetry(&harness.registered).transactions;
+    assert!(
+        stage_rearm_projection_retry_candidates(database, 2, now, capacity)
+            .await
+            .is_err(),
+        "a second frozen page must refuse above capacity, never spill to disk",
+    );
     assert_eq!(writer_telemetry(&harness.registered).transactions, before);
     assert_eq!(queue_state(&harness).await, (9, 9, 9));
-    let mut rows = Vec::new();
-    while let Some(window) = staged.next().await.unwrap() {
-        rows.push(
-            apply_rearm_projection_retry_candidates(database, &window, 1_000_000)
-                .await
-                .unwrap(),
-        );
-    }
-    assert_eq!(rows, [2, 2, 2, 2, 1]);
+
+    // A failed read-only stage must release its WAL snapshot, so the ordinary
+    // production path can still rearm every deferred row in bounded writers.
+    assert_eq!(
+        rearm_queued_projection_retries(database, 2).await.unwrap(),
+        RearmedProjectionRetries {
+            rows: 9,
+            batches: 5,
+        }
+    );
+    let after = writer_telemetry(&harness.registered).transactions;
+    assert_eq!(after.commands - before.commands, 5);
     assert_eq!(queue_state(&harness).await, (9, 0, 9));
+    assert_eq!(
+        rearm_queued_projection_retries(database, 2).await.unwrap(),
+        RearmedProjectionRetries::default(),
+        "a repeat recovery must not reacquire the writer",
+    );
+    assert_eq!(writer_telemetry(&harness.registered).transactions, after);
 }
 
 #[asupersync::test]
