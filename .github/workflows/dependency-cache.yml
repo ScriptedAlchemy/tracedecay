@@ -1,0 +1,65 @@
+name: Bazel dependency cache
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - MODULE.bazel
+      - Cargo.lock
+      - pnpm-lock.yaml
+      - .bazelversion
+      - .bazelrc
+      - scripts/bazel/downloader.cfg
+      - .github/actions/setup-bazel/**
+      - .github/workflows/dependency-cache.yml
+  workflow_dispatch:
+    inputs:
+      offline:
+        description: Verify restored dependencies with Bazel downloads disabled
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bazel-dependency-cache-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  helpers:
+    name: Cache launcher helpers
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-bazel
+        id: bazel
+        with:
+          cache-key: dependency-helpers
+          cache-save: ${{ inputs.offline != true }}
+
+      - name: Fetch launcher helpers for every supported platform
+        env:
+          OFFLINE: ${{ inputs.offline == true }}
+        run: |
+          set -euo pipefail
+          targets=()
+          for stub in runfiles finalize; do
+            for platform in aarch64_linux aarch64_macos aarch64_windows s390x_linux x86_64_linux x86_64_macos x86_64_windows; do
+              targets+=("@@hermetic_launcher++non_module_dependencies+${stub}_stub_${platform}//file:file")
+            done
+          done
+          options=()
+          if [[ "$OFFLINE" == true ]]; then
+            options+=(--repository_disable_download)
+          fi
+          bazel build "${options[@]}" "${targets[@]}"
+
+      - name: Save newly fetched Bazel dependencies
+        if: always() && !cancelled() && steps.bazel.outputs.repository-cache-key != ''
+        uses: ./.github/actions/setup-bazel/save
+        with:
+          path: ${{ steps.bazel.outputs.repository-cache-path }}
+          key: ${{ steps.bazel.outputs.repository-cache-key }}
+          restored-entries: ${{ steps.bazel.outputs.repository-cache-entries }}
