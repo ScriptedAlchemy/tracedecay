@@ -365,7 +365,11 @@ async fn noncanonical_retirement_marker_cannot_reopen_an_expired_signal() {
             .execute(
                 "UPDATE github_stack_delivery_signals SET signal_json = ?3
                  WHERE project_id = ?1 AND signal_id = ?2",
-                params![PROJECT_ID, malformed.signal_id.as_str(), ambiguous_marker.as_str()],
+                params![
+                    PROJECT_ID,
+                    malformed.signal_id.as_str(),
+                    ambiguous_marker.as_str()
+                ],
             )
             .await
             .expect_err("retirement must reject extra and duplicated JSON members")
