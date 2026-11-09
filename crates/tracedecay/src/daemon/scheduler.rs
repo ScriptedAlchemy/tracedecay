@@ -1711,15 +1711,13 @@ async fn maybe_run_global_retention(
         return;
     };
     let cutoff_micros = now_secs
-        .saturating_sub(
-            tracedecay_global_db::GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1 * 86_400,
-        )
+        .saturating_sub(tracedecay_global_db::GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1 * 86_400)
         .saturating_mul(1_000_000);
     // A page has its own registered transaction. Release the daemon-wide
     // administration writer before admitting another page so an unrelated
     // store owner is never queued behind the entire retention backlog.
     let mut retired = 0usize;
-    let mut compaction_error = None;
+    let mut compacted_ok = true;
     for _ in 0..64 {
         let Some(page) = administration
             .try_with_writer(|| async {
@@ -1729,8 +1727,16 @@ async fn maybe_run_global_retention(
             })
             .await
         else {
-            compaction_error =
-                Some("writer admission unavailable during stack retirement".to_owned());
+            log_daemon_event(
+                "retention_prune",
+                &[
+                    ("scope", "global".to_string()),
+                    ("table", "github_stack_delivery_signals".to_string()),
+                    ("outcome", "deferred".to_string()),
+                    ("reason", "writer_admission_unavailable".to_string()),
+                ],
+            );
+            compacted_ok = false;
             break;
         };
         match page {
@@ -1741,14 +1747,21 @@ async fn maybe_run_global_retention(
                 }
             }
             Err(error) => {
-                compaction_error = Some(error);
+                log_daemon_event(
+                    "retention_prune",
+                    &[
+                        ("scope", "global".to_string()),
+                        ("table", "github_stack_delivery_signals".to_string()),
+                        ("outcome", "error".to_string()),
+                        ("failure", error),
+                    ],
+                );
+                compacted_ok = false;
                 break;
             }
         }
         tokio::task::yield_now().await;
     }
-    let stack_compaction: std::result::Result<usize, String> =
-        compaction_error.map_or(Ok(retired), Err);
     // An interrupted pass still reports the slices it committed; only the
     // cadence outcome distinguishes it from a complete drain.
     let (committed, succeeded) = match retention {
@@ -1783,38 +1796,20 @@ async fn maybe_run_global_retention(
             );
         }
     }
-    let compacted_ok = match stack_compaction {
-        Ok(compacted) => {
-            if compacted > 0 {
-                log_daemon_event(
-                    "retention_prune",
-                    &[
-                        ("scope", "global".to_string()),
-                        ("table", "github_stack_delivery_signals".to_string()),
-                        ("signals", compacted.to_string()),
-                        (
-                            "window_days",
-                            tracedecay_global_db::GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1
-                                .to_string(),
-                        ),
-                    ],
-                );
-            }
-            true
-        }
-        Err(error) => {
-            log_daemon_event(
-                "retention_prune",
-                &[
-                    ("scope", "global".to_string()),
-                    ("table", "github_stack_delivery_signals".to_string()),
-                    ("outcome", "error".to_string()),
-                    ("failure", error),
-                ],
-            );
-            false
-        }
-    };
+    if retired > 0 {
+        log_daemon_event(
+            "retention_prune",
+            &[
+                ("scope", "global".to_string()),
+                ("table", "github_stack_delivery_signals".to_string()),
+                ("signals", retired.to_string()),
+                (
+                    "window_days",
+                    tracedecay_global_db::GITHUB_STACK_TERMINAL_RETENTION_DAYS_V1.to_string(),
+                ),
+            ],
+        );
+    }
     reservation.finish(std::time::Instant::now(), succeeded && compacted_ok);
 }
 
@@ -1965,6 +1960,7 @@ mod global_retention_tests {
             .await
             .expect("settle old signal before retention");
 
+        seed_eligible_projected_message(database.as_ref()).await;
         let administration = StoreAdministration::default();
         // Stall the registered database writer so the maintenance task has
         // definitely acquired daemon-wide writer admission before its peer
@@ -1991,44 +1987,44 @@ mod global_retention_tests {
         .await
         .expect("retention acquired the daemon writer");
 
-        let (peer_tx, peer_rx) = tokio::sync::oneshot::channel();
-        let peer_administration = administration.clone();
-        let peer_database = database.clone();
-        let peer = tokio::spawn(async move {
-            peer_administration
-                .with_writer(|| async move {
-                    let still_expandable = peer_database
-                        .github_stack_signal(project_id, signal_id)
-                        .await
-                        .expect("read signal at peer admission")
-                        .is_some();
-                    peer_tx
-                        .send(still_expandable)
-                        .expect("report exact peer admission");
-                })
-                .await;
+        let peer = administration.with_writer(|| async {
+            maintenance.await.expect("join interrupted retention pass");
+            assert_eq!(deletion_receipt_count(database.as_ref()).await, 1);
+            assert!(
+                database
+                    .github_stack_signal(project_id, signal_id)
+                    .await
+                    .expect("read signal after deferred stack retirement")
+                    .is_some(),
+                "the first pass must yield the stack page to a waiting writer"
+            );
         });
+        tokio::pin!(peer);
+        assert!(
+            futures_util::poll!(&mut peer).is_pending(),
+            "the peer queues while maintenance owns the writer"
+        );
         held_database_writer
             .rollback()
             .await
             .expect("release registered database writer");
 
-        assert!(
-            tokio::time::timeout(Duration::from_secs(10), peer_rx)
-                .await
-                .expect("queued peer must acquire daemon writer")
-                .expect("peer must report signal state"),
-            "the peer writer must enter before stack retirement, not after 64 retained slices"
-        );
-        peer.await.expect("join competing daemon writer");
-        maintenance.await.expect("join retention maintenance");
+        tokio::time::timeout(Duration::from_secs(10), peer)
+            .await
+            .expect("the competing writer must enter and the deferred pass must finish");
+        maybe_run_global_retention(
+            &administration,
+            database.as_ref(),
+            &global_retention_config(),
+        )
+        .await;
         assert!(
             database
                 .github_stack_signal(project_id, signal_id)
                 .await
                 .expect("read terminal signal after maintenance")
                 .is_none(),
-            "the separate bounded page still retires the settled payload"
+            "the next uncontended pass must resume and retire the settled payload"
         );
     }
 
