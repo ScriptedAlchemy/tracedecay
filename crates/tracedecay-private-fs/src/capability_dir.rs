@@ -553,8 +553,7 @@ mod replacement_tests {
             b"new proof",
         )
         .is_err());
-        atomic_replace_file_in_dir(&held, OsStr::new("sealed.checked"), b"owned proof")
-            .unwrap();
+        atomic_replace_file_in_dir(&held, OsStr::new("sealed.checked"), b"owned proof").unwrap();
         assert_eq!(
             std::fs::read(foreign.join("sealed.checked")).unwrap(),
             b"foreign bytes",
@@ -564,7 +563,6 @@ mod replacement_tests {
             b"owned proof",
         );
     }
-
 
     #[test]
     fn replacement_publishes_complete_bytes_and_refuses_parent_traversal() {
