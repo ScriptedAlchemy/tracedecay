@@ -570,7 +570,7 @@ async fn stale_exact_duplicate_queue_item_is_consumed_before_later_observation()
 }
 
 #[tokio::test]
-async fn batched_projection_resumes_after_restart_without_replaying_parked_or_deferred_heads() {
+async fn batched_projection_rearms_the_deferred_head_after_the_durable_checkpoint() {
     let tmp = TempDir::new().unwrap();
     let database_path;
     let records = (0_u64..5)
@@ -659,29 +659,17 @@ async fn batched_projection_resumes_after_restart_without_replaying_parked_or_de
         let store = runtime
             .observation_store(HostAdmissionScope::Profile)
             .unwrap();
-        let parked = store
-            .project_queued_observations(32)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            parked.items.is_empty(),
-            "restart must not replay committed work"
+        // Fresh admission re-arms the previous mount's retry. Its first ready
+        // item must be sequence four, after the durable checkpoint.
+        assert_eq!(
+            store.next_queued_observation().await.unwrap().as_ref(),
+            Some(records[3].observation_id())
         );
-        assert!(parked.has_more, "restart must not skip the deferred head");
         assert_eq!(
             store.projection_checkpoint().await.unwrap().last_sequence(),
             3
         );
-
-        rusqlite::Connection::open(&database_path)
-            .unwrap()
-            .execute(
-                "UPDATE projection_queue SET next_retry_at_micros = 0
-                 WHERE observation_id = ?1",
-                rusqlite::params![records[3].observation_id().as_str()],
-            )
-            .unwrap();
+        assert_eq!(table_count(&tmp, "lcm_raw_messages").await, 3);
 
         let first = store.project_queued_observations(1).await.unwrap().unwrap();
         assert_eq!(
@@ -689,6 +677,10 @@ async fn batched_projection_resumes_after_restart_without_replaying_parked_or_de
             1,
             "one-item window must not overrun its bound"
         );
+        assert!(matches!(
+            first.items[0].outcome,
+            ProjectionPersistOutcome::Projected(_)
+        ));
         assert!(first.has_more);
         assert_eq!(
             store.projection_checkpoint().await.unwrap().last_sequence(),
@@ -762,7 +754,7 @@ async fn batched_projection_resumes_after_restart_without_replaying_parked_or_de
 }
 
 #[tokio::test]
-async fn deferred_only_reopened_queue_skips_writer_until_retry_is_due() {
+async fn reopened_queue_skips_writer_for_a_newly_deferred_head() {
     let tmp = TempDir::new().unwrap();
     let database_path;
     let first = observation(
@@ -816,8 +808,7 @@ async fn deferred_only_reopened_queue_skips_writer_until_retry_is_due() {
             .await
             .unwrap();
 
-        // Keep a terminal collision and a deferred sequence. Sequence three
-        // is due, but must not bypass the deferred sequence two across restart.
+        // Terminal collisions persist across fresh admission.
         let connection = rusqlite::Connection::open(&database_path).unwrap();
         connection
             .execute(
@@ -833,13 +824,6 @@ async fn deferred_only_reopened_queue_skips_writer_until_retry_is_due() {
                 rusqlite::params![first.observation_id().as_str(), i64::MAX],
             )
             .unwrap();
-        connection
-            .execute(
-                "UPDATE projection_queue SET next_retry_at_micros = ?2
-                 WHERE observation_id = ?1",
-                rusqlite::params![second.observation_id().as_str(), i64::MAX - 1],
-            )
-            .unwrap();
     }
 
     let runtime = profile_runtime(&tmp).await;
@@ -847,6 +831,17 @@ async fn deferred_only_reopened_queue_skips_writer_until_retry_is_due() {
         .observation_store(HostAdmissionScope::Profile)
         .unwrap();
     let writer = rusqlite::Connection::open(&database_path).unwrap();
+    // A retry deferred by this mount fences the already-due third row.
+    assert_eq!(
+        writer
+            .execute(
+                "UPDATE projection_queue SET next_retry_at_micros = ?2
+                 WHERE observation_id = ?1",
+                rusqlite::params![second.observation_id().as_str(), i64::MAX - 1],
+            )
+            .unwrap(),
+        1
+    );
     writer.execute_batch("BEGIN IMMEDIATE").unwrap();
     for _ in 0..2 {
         let deferred = tokio::time::timeout(
