@@ -47,6 +47,7 @@ pub fn lock_offline_sqlite_family_for_reset(destination: &Path) -> io::Result<Op
 struct PreparedFamily {
     runtime_identity: u64,
     main: LeafIdentity,
+    // Allocation identity alone cannot detect in-place content replacement.
     main_sha256: [u8; 32],
     sidecars: [LeafIdentity; 3],
 }
@@ -632,7 +633,8 @@ mod tests {
         stage.prepare(identity, files).unwrap();
 
         let (_, module) = module_path!().split_once("::").unwrap();
-        let test = format!("{module}::changed_prepared_sqlite_bytes_are_preserved_and_never_published");
+        let test =
+            format!("{module}::changed_prepared_sqlite_bytes_are_preserved_and_never_published");
         let child = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", &test])
             .env(CHILD, stage.database())
@@ -640,8 +642,10 @@ mod tests {
             .output()
             .unwrap();
         assert!(child.status.success(), "cross-process mutation failed: {child:?}");
-        assert!(LeafIdentity::from_file(&File::open(stage.database()).unwrap()).unwrap()
-            == stage.prepared.as_ref().unwrap().main);
+        assert!(
+            LeafIdentity::from_file(&File::open(stage.database()).unwrap()).unwrap()
+                == stage.prepared.as_ref().unwrap().main
+        );
         assert_ne!(fs::read(stage.database()).unwrap(), before);
         assert_eq!(read_value(&stage.database()), 99);
         assert_eq!(
