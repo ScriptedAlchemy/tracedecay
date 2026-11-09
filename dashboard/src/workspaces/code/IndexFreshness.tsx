@@ -330,10 +330,21 @@ function allActiveBuildsQuiet(
   const observedAt = result.envelope.time.observation_time_micros;
   return result.envelope.payload.worktrees.every((worktree) => {
     if (!worktreeHasActiveCodeIndexBuild(worktree)) return true;
+    const preseal = worktree.preseal_attempt;
+    const native = worktree.native_graph_progress;
+    const presealActive = preseal?.active === true;
+    const nativeActive = native?.active === true;
+    // A retained sealed predecessor's recent ready/phase-only text stamp is
+    // not work from a frozen successor. Measure the active typed attempts,
+    // plus independently receipted bulk text commits when they overlap.
+    const text = worktree.progress;
+    const textCommitActive = text != null && text.phase === 'bulk_commit';
     const lastUpdates = [
-      ...(worktree.preseal_attempt?.active ? [worktree.preseal_attempt.last_progress_micros] : []),
-      ...(worktree.native_graph_progress?.active ? [worktree.native_graph_progress.last_progress_micros] : []),
-      ...(worktree.progress ? [worktree.progress.last_progress_micros] : []),
+      ...(presealActive ? [preseal.last_progress_micros] : []),
+      ...(nativeActive ? [native.last_progress_micros] : []),
+      ...(text && ((!presealActive && !nativeActive) || textCommitActive)
+        ? [text.last_progress_micros]
+        : []),
     ];
     return lastUpdates.length > 0 && lastUpdates.every(
       (stamp) => stamp != null && observedAt - stamp >= QUIET_AFTER_SECONDS * 1_000_000,

@@ -626,6 +626,119 @@ describe('Code index freshness', () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
+  it('does not let a fresh sealed predecessor clock disguise a frozen capture successor', async () => {
+    vi.useFakeTimers();
+    const attempt = {
+      daemon_incarnation: 1,
+      producer_incarnation: 2,
+      attempt_sequence: 3,
+      progress_epoch: 4,
+      phase: 'capture',
+      completed_items: 7,
+      total_items: 20,
+      last_progress_micros: NOW_MICROS,
+      active: true,
+    };
+    const staleText = {
+      ...progress(),
+      generation_id: 'generation.4f21c9',
+      phase: 'ready',
+      last_progress_micros: NOW_MICROS + 600_000_000,
+    };
+    const frozen = {
+      ...envelope('loading', {
+        worktrees: [{
+          ...worktree(),
+          rebuild_in_flight: true,
+          staleness_state: 'indexing',
+          progress: staleText,
+          preseal_attempt: attempt,
+        }],
+        note: 'authentic independent active capture attempt',
+      }),
+      time: { valid_time_micros: null, observation_time_micros: NOW_MICROS + 600_000_000 },
+    };
+    const moving = {
+      ...envelope('loading', {
+        worktrees: [{
+          ...worktree(),
+          rebuild_in_flight: true,
+          staleness_state: 'indexing',
+          progress: staleText,
+          preseal_attempt: {
+            ...attempt,
+            progress_epoch: 5,
+            completed_items: 8,
+            last_progress_micros: NOW_MICROS + 604_000_000,
+          },
+        }],
+        note: 'authentic independent active capture attempt',
+      }),
+      time: { valid_time_micros: null, observation_time_micros: NOW_MICROS + 604_000_000 },
+    };
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(frozen), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(moving), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(moving), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(screen.getByText('capture · 7 / 20 items')).toBeTruthy();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1_001);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(2_998);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('capture · 8 / 20 items')).toBeTruthy();
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('still polls genuine concurrent text receipts while a preseal attempt is quiet', async () => {
+    vi.useFakeTimers();
+    const current = {
+      ...envelope('loading', {
+        worktrees: [{
+          ...worktree(),
+          rebuild_in_flight: true,
+          staleness_state: 'indexing',
+          progress: {
+            ...progress(),
+            phase: 'bulk_commit',
+            last_progress_micros: NOW_MICROS + 600_000_000,
+          },
+          preseal_attempt: {
+            daemon_incarnation: 1,
+            producer_incarnation: 2,
+            attempt_sequence: 3,
+            progress_epoch: 4,
+            phase: 'capture',
+            completed_items: 7,
+            total_items: 20,
+            last_progress_micros: NOW_MICROS,
+            active: true,
+          },
+        }],
+        note: 'concurrent durable text commit and preseal capture',
+      }),
+      time: { valid_time_micros: null, observation_time_micros: NOW_MICROS + 600_000_000 },
+    };
+    const fetch = vi.fn(async () => new Response(JSON.stringify(current), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    renderWith();
+
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await advanceTimers(1_001);
+    await advanceTimers(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps polling each second when a moving worktree shares a query with a quiet one', async () => {
     vi.useFakeTimers();
     const result = {
