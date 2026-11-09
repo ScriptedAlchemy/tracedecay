@@ -293,7 +293,12 @@ async fn read_only_open_mounts_readers_without_acquiring_a_writer() {
     let root = TempDir::new().unwrap();
     let resolver = Arc::new(FileResolver::default());
     resolver.push(seed_final_graph_db(&root, "profile.db").await);
-    resolver.push(seed_final_graph_db(&root, "project.db").await);
+    let database = seed_final_graph_db(&root, "project.db").await;
+    let leftover = database.with_file_name("project.db.tracedecay-init");
+    tracedecay_private_fs::create_private_directory(&leftover).unwrap();
+    let owner = leftover.join("schema-installation.owner");
+    drop(tracedecay_private_fs::create_private_file(&owner).unwrap());
+    resolver.push(database);
     let registry = StoreRuntimeRegistry::new(
         asupersync::runtime::Runtime::current_handle().unwrap(),
         resolver,
@@ -327,6 +332,13 @@ async fn read_only_open_mounts_readers_without_acquiring_a_writer() {
     assert!(!physical.writer_present);
     assert!(physical.reader_handles > 0);
     assert_health_route(&project, false).await;
+    assert!(owner.is_file());
+    assert!(
+        !root
+            .path()
+            .join(".project.db.tracedecay-init.durable-directory.lock")
+            .exists()
+    );
 }
 
 #[cfg(unix)]

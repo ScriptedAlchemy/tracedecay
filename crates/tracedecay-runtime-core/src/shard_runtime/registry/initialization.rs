@@ -327,9 +327,28 @@ impl InitializationDirectory {
         sync_parent_directory(&self.directory, SYNC)
     }
 
-    // The normal existing/read-only route does not need to open an admission
-    // lease or write to the filesystem. Only an interrupted publication with
-    // outstanding private files requires reconciliation.
+    /// A completed handoff can still have its empty directory and owner marker
+    /// after a process exit. Read-only callers need neither cleanup nor a lease.
+    /// Any other staged member requires writable reconciliation before attach.
+    pub(super) fn verify_read_only_handoff(destination: &Path) -> io::Result<()> {
+        let directory = Self::path(destination);
+        let _pin = match open_private_directory(&directory) {
+            Ok(pin) => pin,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        for entry in fs::read_dir(&directory)? {
+            let member = entry?;
+            if member.file_name() != OWNER || !empty_regular(&member.path())? {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "SQLite staging requires writable reconciliation before read-only attachment",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn recover_published(destination: &Path) -> io::Result<()> {
         let directory = Self::path(destination);
         if !present(&directory)? {

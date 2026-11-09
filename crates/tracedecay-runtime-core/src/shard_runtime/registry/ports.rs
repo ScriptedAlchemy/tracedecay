@@ -411,8 +411,16 @@ impl LifecycleShardRuntimeAttachment {
         admission: AdmissionConfigV1,
     ) -> Result<LifecyclePhysicalAttachment, StoreRuntimeRegistryFailure> {
         if staging.is_none() {
-            InitializationDirectory::recover_published(request.locator.path())
-                .map_err(|error| physical_failure("recover initialized SQLite family", error))?;
+            let path = request.locator.path();
+            match request.access {
+                StoreRuntimeAccessMode::ReadOnly => {
+                    InitializationDirectory::verify_read_only_handoff(path)
+                }
+                StoreRuntimeAccessMode::ReadWrite => {
+                    InitializationDirectory::recover_published(path)
+                }
+            }
+            .map_err(|error| physical_failure("verify initialized SQLite family", error))?;
         }
         let attachment = if let Some(stage) = &staging {
             self.repository.initialize(
