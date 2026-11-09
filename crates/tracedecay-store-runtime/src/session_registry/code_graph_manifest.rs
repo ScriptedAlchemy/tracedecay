@@ -216,9 +216,18 @@ impl Read for CheckedSealReader<'_> {
             return Err(self.retain_failure(error));
         }
         let read_len = buffer.len().min(SEAL_READ_CHECK_BYTES);
-        let read = match self.reader.read(&mut buffer[..read_len]) {
+        let read = self.reader.read(&mut buffer[..read_len]);
+        // A scanned read may return after the caller's deadline, including
+        // on an I/O failure. Do not classify that interruption as corruption
+        // or expose bytes read after the deadline.
+        if let Err(error) = (self.check)() {
+            buffer[..read_len].fill(0);
+            return Err(self.retain_failure(error));
+        }
+        let read = match read {
             Ok(read) => read,
             Err(error) => {
+                buffer[..read_len].fill(0);
                 let error = GraphDbError::Corrupt {
                     message: format!("sealed code generation replay read failed: {error}"),
                 };
@@ -1634,7 +1643,7 @@ fn classify_sealed_projection_build_error(error: CodeGraphProjectionError) -> Gr
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Seek, SeekFrom, Write};
+    use std::io::{Read, Seek, SeekFrom, Write};
     use std::path::Path;
     use std::process::Command;
     use std::sync::Arc;
@@ -1674,6 +1683,122 @@ mod tests {
     use tracedecay_code_index_runtime::code_index_scheduler::{
         CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
     };
+
+    #[test]
+    fn checked_seal_reader_refuses_late_interruption_after_nonzero_file_read() {
+        use std::cell::Cell;
+
+        let temporary = TempDir::new().expect("seal reader fixture");
+        let path = temporary.path().join("generation.json");
+        let expected = b"{\"format_revision\":1,\"pages\":[1]}";
+        std::fs::write(&path, expected).expect("write real sealed bytes");
+
+        for interruption in [GraphDbError::Cancelled, GraphDbError::DeadlineExceeded] {
+            let probes = Cell::new(0_usize);
+            let check = || {
+                let next = probes.get() + 1;
+                probes.set(next);
+                if next == 2 {
+                    Err(interruption.clone())
+                } else {
+                    Ok(())
+                }
+            };
+            let mut reader = super::CheckedSealReader {
+                reader: std::io::BufReader::with_capacity(
+                    SEAL_READ_CHECK_BYTES,
+                    std::fs::File::open(&path).expect("open sealed bytes"),
+                ),
+                check: &check,
+                bytes_read: 0,
+                digest: Sha256::new(),
+                failure: None,
+            };
+            let mut output = vec![0xa5; expected.len()];
+            assert!(
+                reader.read(&mut output).is_err(),
+                "interrupted read cannot return verified bytes"
+            );
+            assert_eq!(
+                reader.reader.stream_position().expect("actual file position"),
+                expected.len() as u64,
+                "the late probe must occur after real nonempty file I/O"
+            );
+            assert_eq!(probes.get(), 2, "one pre-read and one post-read probe");
+            assert_eq!(reader.bytes_read, 0, "interrupted bytes are not hashed");
+            assert!(
+                output.iter().all(|byte| *byte == 0),
+                "interrupted data must not escape through the caller buffer"
+            );
+            assert!(matches!(
+                (&reader.failure, &interruption),
+                (Some(GraphDbError::Cancelled), GraphDbError::Cancelled)
+                    | (Some(GraphDbError::DeadlineExceeded), GraphDbError::DeadlineExceeded)
+            ));
+        }
+
+        let check = || Ok(());
+        let mut reader = super::CheckedSealReader {
+            reader: std::io::BufReader::with_capacity(
+                SEAL_READ_CHECK_BYTES,
+                std::fs::File::open(&path).expect("reopen sealed bytes"),
+            ),
+            check: &check,
+            bytes_read: 0,
+            digest: Sha256::new(),
+            failure: None,
+        };
+        let mut output = vec![0; expected.len()];
+        assert_eq!(
+            reader.read(&mut output).expect("uninterrupted file read"),
+            expected.len()
+        );
+        assert_eq!(output, expected);
+        assert_eq!(reader.bytes_read, expected.len() as u64);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_seal_reader_preserves_late_deadline_after_real_io_failure() {
+        use std::cell::Cell;
+
+        let temporary = TempDir::new().expect("failed read fixture");
+        let mut direct = std::fs::File::open(temporary.path()).expect("open directory handle");
+        assert!(
+            direct.read(&mut [0_u8; 1]).is_err(),
+            "a directory read must actually fail on this platform"
+        );
+
+        let probes = Cell::new(0_usize);
+        let check = || {
+            let next = probes.get() + 1;
+            probes.set(next);
+            if next == 2 {
+                Err(GraphDbError::DeadlineExceeded)
+            } else {
+                Ok(())
+            }
+        };
+        let mut reader = super::CheckedSealReader {
+            reader: std::io::BufReader::with_capacity(
+                SEAL_READ_CHECK_BYTES,
+                std::fs::File::open(temporary.path()).expect("open second directory handle"),
+            ),
+            check: &check,
+            bytes_read: 0,
+            digest: Sha256::new(),
+            failure: None,
+        };
+        let mut output = [0xa5; 8];
+        assert!(reader.read(&mut output).is_err());
+        assert_eq!(probes.get(), 2, "the failure must be followed by a probe");
+        assert!(matches!(
+            reader.failure,
+            Some(GraphDbError::DeadlineExceeded)
+        ));
+        assert_eq!(output, [0; 8], "failed reads must expose no stale bytes");
+        assert_eq!(reader.bytes_read, 0);
+    }
 
     /// A fresh row spill for `owner`'s projection, removed with the spill.
     fn spill_for(owner: &GraphProjectionIdentityV1) -> GraphGenerationRowSpill {
