@@ -97,12 +97,19 @@ pub(super) async fn commit_token_savings(
     tokens_saved: Option<&AtomicU64>,
     sink: LedgerSink,
     delta: u64,
+    commit_sender: Option<tokio::sync::oneshot::Sender<bool>>,
 ) -> bool {
     match cg.record_token_savings(delta).await {
         Ok(committed_total) => {
             // Two completions may resume in reverse order after their commits.
             if let Some(tokens_saved) = tokens_saved {
                 tokens_saved.fetch_max(committed_total, Ordering::Relaxed);
+            }
+            // A successful project-store transaction is the response's durable
+            // credit. Release its receipt before the optional profile summary:
+            // that projection has a different writer gate and may stall or fail.
+            if let Some(sender) = commit_sender {
+                let _ = sender.send(true);
             }
             if let LedgerSink::Mounted(gdb) = sink
                 && let Err(error) = gdb
@@ -118,6 +125,9 @@ pub(super) async fn commit_token_savings(
             true
         }
         Err(error) => {
+            if let Some(sender) = commit_sender {
+                let _ = sender.send(false);
+            }
             tracing::warn!(
                 project_root = %cg.project_root().display(),
                 %error,
@@ -201,7 +211,14 @@ impl McpServer {
             // Preserve the activity's raw input size after failure, but never
             // credit a token delta that the project store could not commit.
             let committed_saved_tokens = if let Some((tokens_saved, sink)) = persist {
-                if commit_token_savings(&cg, tokens_saved.as_deref(), sink, net_saved_tokens).await
+                if commit_token_savings(
+                    &cg,
+                    tokens_saved.as_deref(),
+                    sink,
+                    net_saved_tokens,
+                    commit_sender,
+                )
+                .await
                 {
                     net_saved_tokens
                 } else {
@@ -210,9 +227,6 @@ impl McpServer {
             } else {
                 0
             };
-            if let Some(sender) = commit_sender {
-                let _ = sender.send(committed_saved_tokens == net_saved_tokens);
-            }
             // The monitor entry opens, locks, and mmaps a file; keep that
             // off the async workers.
             // A server without an owning profile has no monitor ring.
@@ -646,6 +660,66 @@ mod tests {
         let reopened = authority.reopen_project_graph(&project_root).await;
         assert_eq!(reopened.get_tokens_saved().await.unwrap(), 35);
         assert_eq!(reopened.get_local_counter().await.unwrap(), 35);
+    }
+
+    #[tokio::test]
+    async fn profile_projection_writer_cannot_hold_a_committed_response_receipt() {
+        let (cg, _project, authority) =
+            super::super::writer_test_support::init_indexed_repo().await;
+        let project_root = cg.project_root().to_path_buf();
+        let server = super::super::McpServer::new_with_context(
+            super::super::writer_test_support::registered_context(cg, &authority),
+        )
+        .await;
+        let accounting_db = server
+            .accounting_db
+            .as_ref()
+            .expect("registered profile projection")
+            .clone();
+
+        // Hold only the optional profile store's write gate. The canonical
+        // project store is independent and must still settle this response.
+        let held_projection = accounting_db
+            .begin_write_transaction()
+            .await
+            .expect("hold profile writer while project commit proceeds");
+        let receipt = server
+            .spawn_token_accounting_persist(
+                server.cg_snapshot().await,
+                &project_root,
+                "tracedecay_search",
+                7,
+                20,
+            )
+            .expect("nonzero savings need an explicit commit receipt");
+        let credited = tokio::time::timeout(Duration::from_secs(5), receipt)
+            .await
+            .expect("the project receipt cannot depend on the profile projection")
+            .expect("accepted accounting writer must settle the receipt");
+        assert!(credited, "the canonical project-store credit must commit");
+        assert_eq!(
+            server.cg_snapshot().await.get_tokens_saved().await.unwrap(),
+            7
+        );
+
+        held_projection
+            .rollback()
+            .await
+            .expect("release the held profile writer");
+        assert!(
+            server
+                .ledger_writes_settled_within(Duration::from_secs(10))
+                .await,
+            "the optional projection should finish after its writer is released"
+        );
+        assert_eq!(
+            accounting_db
+                .try_get_project_tokens(&project_root)
+                .await
+                .expect("committed profile projection"),
+            7
+        );
+        server.shutdown_background_tasks().await;
     }
 
     #[tokio::test]
