@@ -2174,8 +2174,12 @@ fn retained_generation_ranges_reuse_one_open_and_refuse_a_replaced_inode() {
     std::fs::rename(&path, &previous).expect("move original inode");
     std::fs::write(&path, &whole).expect("replace with identical bytes");
     assert_ne!(
-        std::fs::metadata(&path).expect("replacement metadata").ino(),
-        std::fs::metadata(&previous).expect("original metadata").ino(),
+        std::fs::metadata(&path)
+            .expect("replacement metadata")
+            .ino(),
+        std::fs::metadata(&previous)
+            .expect("original metadata")
+            .ino(),
         "replacement must use a distinct inode"
     );
     // Drain opens caused by writing the replacement, not by the reader.
@@ -2191,7 +2195,10 @@ fn retained_generation_ranges_reuse_one_open_and_refuse_a_replaced_inode() {
         ),
         Err(CodeIndexProductionErrorV1::Contract(_))
     ));
-    assert!(refused.is_empty(), "refused read must expose no stale bytes");
+    assert!(
+        refused.is_empty(),
+        "refused read must expose no stale bytes"
+    );
     assert_eq!(
         observed_named_opens(&receiver, &path),
         0,
