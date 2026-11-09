@@ -6,10 +6,12 @@
 //! That is why the ceiling is an entry count: a byte budget small enough to be
 //! cheap is smaller than one real graph container.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracedecay_contracts::doctor::{
     DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
     DoctorEvidenceReferenceV1, DoctorEvidenceStateV1, DoctorFindingFamilyV1, DoctorFindingV1,
@@ -530,6 +532,16 @@ fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
     })
 }
 
+/// Keep a stable evidence reference even for deeply nested filesystem names.
+/// The report retains the complete key; Doctor references have a smaller bound.
+fn doctor_footprint_reference_key(key: &str) -> Cow<'_, str> {
+    if DoctorEvidenceReferenceV1::new(key.to_owned()).is_ok() {
+        return Cow::Borrowed(key);
+    }
+    let digest = Sha256::digest(key.as_bytes());
+    Cow::Owned(format!("footprint/sha256:{digest:x}"))
+}
+
 /// One `OverBudgetStore` finding per footprint entry plus one for the profile
 /// total. A floor above its bound proves the overage, so an over-bound entry
 /// is degraded with complete coverage even when bytes went unread.
@@ -537,9 +549,15 @@ fn footprint_keys(relative: &Path) -> Option<FootprintKeys> {
 pub fn footprint_findings(footprint: &ProfileFootprintV1) -> DoctorStorageFamilyReadV1 {
     let mut findings = Vec::with_capacity(footprint.entries.len() + 1);
     for entry in &footprint.entries {
+        let evidence_key = doctor_footprint_reference_key(&entry.key);
+        let subject = if evidence_key.as_ref() == entry.key.as_str() {
+            entry_statement(entry)
+        } else {
+            format!("footprint entry {evidence_key} (full path in storage report)")
+        };
         let Some(finding) = bounded_finding(
-            &entry.key,
-            &entry_statement(entry),
+            evidence_key.as_ref(),
+            &subject,
             entry.bytes,
             entry.bound_bytes,
             entry.unavailable_entry_count > 0 || footprint.truncated,
@@ -1115,6 +1133,55 @@ mod tests {
         assert_eq!(termination, WalkTerminationV1::Cancelled);
         assert_eq!(visits.get(), 1);
         assert_eq!(remaining, 9);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deeply_nested_wal_cannot_hide_large_store_or_profile_findings() {
+        let temp = tempfile::tempdir().expect("footprint fixture");
+        let profile = temp.path().join("profile");
+        let mut directory = profile.join("projects/proj_deep");
+        for index in 0..6 {
+            directory.push(format!("shard_{index}_{}", "x".repeat(192)));
+        }
+        sized(&directory.join("sessions.wal"), 2 * GIB);
+        let overrides = BTreeMap::from([
+            ("projects/proj_deep".to_owned(), 1),
+            (PROFILE_TOTAL_KEY.to_owned(), 1),
+        ]);
+        let footprint = census_profile_footprint(&profile, &BTreeMap::new(), &overrides);
+        assert_eq!(footprint.total_bytes, 2 * GIB);
+        let wal = footprint
+            .entries
+            .iter()
+            .find(|entry| entry.family == ProfileFamilyV1::Wal)
+            .expect("named WAL footprint");
+        assert!(wal.key.len() > 1024, "fixture must exceed Doctor identity bound");
+        assert_eq!(wal.bytes, 2 * GIB);
+
+        let observed = findings(&footprint);
+        assert_eq!(observed.len(), footprint.entries.len() + 1);
+        let digest = Sha256::digest(wal.key.as_bytes());
+        let reference = format!("footprint/sha256:{digest:x}");
+        let wal_finding = &observed[&reference];
+        assert_eq!(
+            wal_finding.finding().state(),
+            DoctorEvidenceStateV1::Degraded
+        );
+        let statement = wal_finding.finding().coverage().statement();
+        assert!(statement.contains("full path in storage report"), "{statement}");
+        assert!(statement.contains(&format_bytes(2 * GIB)), "{statement}");
+        assert!(
+            statement.contains(&format_bytes(default_bound_bytes(ProfileFamilyV1::Wal))),
+            "{statement}"
+        );
+        for reference in ["projects/proj_deep", PROFILE_TOTAL_KEY] {
+            assert_eq!(
+                observed[reference].finding().state(),
+                DoctorEvidenceStateV1::Degraded,
+                "a long WAL identity must not suppress the other overages"
+            );
+        }
     }
 
     #[test]
