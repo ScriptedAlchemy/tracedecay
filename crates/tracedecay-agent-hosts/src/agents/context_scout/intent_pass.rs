@@ -1078,6 +1078,7 @@ async fn record_intent_decision(
         &settings.questions,
         &settings.window,
         settings.engine.max_state_bytes,
+        pass.observed_at.0,
         engine_identity.as_ref(),
     ) else {
         return;
@@ -1109,6 +1110,7 @@ fn intent_decision_metadata(
     questions: &[tracedecay_domain::configuration::IntentQuestionSettingsV1],
     window_settings: &tracedecay_domain::configuration::IntentWindowSettingsV1,
     engine_max_state_bytes: u32,
+    selection_observed_at_micros: i64,
     engine_identity: Option<&super::decision_engine::DecisionEngineIdentityV1>,
 ) -> Option<String> {
     let IntentDecisionEvidenceV1 {
@@ -1185,6 +1187,10 @@ fn intent_decision_metadata(
                 "message_count": window.messages.len(),
                 // Store the effective bounds, not only a digest of mutable
                 // settings: an exporter must reproduce the original selection.
+                // The age cutoff uses pass.observed_at in microseconds, not
+                // the rounded seconds recorded by analytics. Replaying with
+                // a different clock changes which turns pass the age limit.
+                "selection_observed_at_micros": selection_observed_at_micros,
                 "selection_limits": {
                     "max_user_turns": window_settings.max_user_turns,
                     "max_messages": window_settings.max_messages,
@@ -1331,22 +1337,34 @@ mod tool_signal_tests {
                 probability_permille: 170,
             },
         };
+        let decision_evidence = IntentDecisionEvidenceV1 {
+            window: &window,
+            engine_outcome: &engine,
+            request_commitment: Some(DecisionRequestCommitmentV1 {
+                wire_sha256: [9; 32],
+                wire_bytes: 512,
+            }),
+            facts: &[],
+            prompt_inferences: &[Kind::Impact],
+            decision: &negative,
+        };
         let evidence = intent_decision_metadata(
-            &IntentDecisionEvidenceV1 {
-                window: &window,
-                engine_outcome: &engine,
-                request_commitment: Some(DecisionRequestCommitmentV1 {
-                    wire_sha256: [9; 32],
-                    wire_bytes: 512,
-                }),
-                facts: &[],
-                prompt_inferences: &[Kind::Impact],
-                decision: &negative,
-            },
+            &decision_evidence,
             &settings_digest,
             &questions,
             &window_settings,
             2048,
+            1_234_567_891,
+            None,
+        )
+        .unwrap();
+        let later = intent_decision_metadata(
+            &decision_evidence,
+            &settings_digest,
+            &questions,
+            &window_settings,
+            2048,
+            1_234_567_892,
             None,
         )
         .unwrap();
@@ -1355,6 +1373,10 @@ mod tool_signal_tests {
         assert_eq!(receipt["window"]["last_store_id"], 81);
         assert_eq!(receipt["window"]["message_count"], 1);
         assert!(receipt["window"]["window_digest"].is_string());
+        assert_eq!(receipt["window"]["selection_observed_at_micros"], 1_234_567_891);
+        let later_receipt: serde_json::Value = serde_json::from_str(&later).unwrap();
+        assert_eq!(later_receipt["window"]["selection_observed_at_micros"], 1_234_567_892);
+        assert_ne!(evidence, later);
         assert_eq!(
             receipt["window"]["selection_limits"],
             serde_json::json!({
@@ -1396,6 +1418,7 @@ mod tool_signal_tests {
             &questions,
             &window_settings,
             2048,
+            1_234_567_891,
             None,
         )
         .unwrap();
@@ -1425,6 +1448,7 @@ mod tool_signal_tests {
                 &questions,
                 &window_settings,
                 2048,
+                1_234_567_891,
                 None,
             )
             .is_none()
